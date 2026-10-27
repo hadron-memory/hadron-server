@@ -412,7 +412,7 @@ describe('decided in the write transaction, bounded after it', () => {
     expect(await db.$queryRaw`SELECT 1 AS one`).toEqual([{ one: 1 }]);
   });
 
-  it('21 aliased creates in one worker request: all succeed, 20 warnings, ONE bounded read (shared lookup, no per-alias work)', async () => {
+  it('21 aliased creates in one worker request: all succeed, 20 warnings, one enrichment read plus one history write (no per-alias work)', async () => {
     await registerEntry(teamMemoryId, 'task.create.no-source', 'tasks:a');
     await node(teamMemoryId, 'tasks:a', { isRunnable: true });
     const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
@@ -428,7 +428,7 @@ describe('decided in the write transaction, bounded after it', () => {
     const warnings = res.body.singleResult.extensions?.warnings as { path: string; register?: { state: string } }[];
     expect(warnings).toHaveLength(MAX_WARNINGS_PER_RESPONSE);
     expect(warnings[0].register?.state).toBe('mapped');
-    expect(bounded).toHaveLength(1);
+    expect(bounded).toHaveLength(2); // one shared enrichment transaction plus one bounded history transaction
   });
 });
 

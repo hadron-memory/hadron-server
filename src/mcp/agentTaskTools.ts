@@ -27,7 +27,7 @@ import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
-import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
+import { flushTaskWarningHistory, renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
@@ -303,7 +303,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     const ctx = ctxOf();
     try {
       const t = await call(ctx);
-      return textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      const result = textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }
@@ -464,7 +466,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {

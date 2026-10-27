@@ -151,7 +151,7 @@ describe('agent-task tools: who acts', () => {
     const ev = text(await s.callTool('hadron_team_events', { appRef: app.id, taskId: id }));
     // #1709: the assigner asked for the session to close when done (explicit since #2249: the default is false), so finishing asks Anne to end it (cor:agt:050:10).
     expect(ev.split('\n').map((l) => /Z (task\.[a-z-]+)/.exec(l)?.[1])).toEqual([
-      'task.created', 'task.assigned', 'task.started', 'task.finished', 'task.session-end-requested',
+      'task.created', 'task.assigned', 'task.warning', 'task.started', 'task.finished', 'task.session-end-requested', 'task.warning',
     ]);
   });
 });
