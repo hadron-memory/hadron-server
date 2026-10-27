@@ -26,8 +26,10 @@
  * their first page by `node(id:)` follow-ups, within a per-call budget. A
  * page is returned whole or not at all: when a follow-up fails, or the
  * budget runs out on a page a fresh call could finish, the page is dropped
- * and the cursor stays at its start. Only a list longer than a whole call's
- * budget is cut, and that is `nested_truncated`, which retrying cannot fix.
+ * and the cursor stays at its start. The budget is shared by every issue on
+ * a page, so on a call's FIRST page, where a retry has no more budget, the
+ * issues it did not reach are cut instead: `nested_truncated`, which
+ * retrying cannot fix.
  */
 
 import type { PrismaClient } from '../generated/prisma/index.js';
@@ -222,7 +224,7 @@ export interface SnapshotIssue {
   url: string;
   parent: { repository: string; number: number } | null;
   subIssues: Array<{ repository: string; number: number }>;
-  /** A nested list was longer than one call can follow; retrying will not complete it. */
+  /** A nested list needed more follow-ups than the call had left; retrying will not complete it. */
   truncated?: true;
 }
 
@@ -310,14 +312,20 @@ const isRepoRef = (v: unknown): boolean =>
 const isTimelineItem = (v: unknown): boolean =>
   isObj(v) && typeof v.__typename === 'string' && isOptStr(v.createdAt);
 
-/** A connection is absent, or has a node list and a pageInfo that can be followed. */
+/**
+ * A connection has a node list and says whether it continues, with a cursor
+ * when it does. Anything less would read as a finished list.
+ */
 function isConn(v: unknown, node: (n: unknown) => boolean): boolean {
-  if (v === null || v === undefined) return true;
-  if (!isObj(v)) return false;
-  if (v.nodes !== null && v.nodes !== undefined && !(Array.isArray(v.nodes) && v.nodes.every(node))) return false;
-  if (v.pageInfo === null || v.pageInfo === undefined) return true;
-  if (!isObj(v.pageInfo)) return false;
-  return v.pageInfo.hasNextPage !== true || typeof v.pageInfo.endCursor === 'string';
+  return isObj(v) && Array.isArray(v.nodes) && v.nodes.every(node) && isPageInfo(v.pageInfo);
+}
+
+function isPageInfo(v: unknown): boolean {
+  return (
+    isObj(v) &&
+    typeof v.hasNextPage === 'boolean' &&
+    (!v.hasNextPage || typeof v.endCursor === 'string')
+  );
 }
 
 function isRawIssue(v: unknown): v is RawIssue {
@@ -394,20 +402,20 @@ async function fetchPage(token: string, args: GithubSnapshotArgs, after: string 
     typeof repo.url !== 'string' ||
     !isObj(repo.issues) ||
     !Array.isArray(repo.issues.nodes) ||
-    !repo.issues.nodes.every(isRawIssue)
+    !repo.issues.nodes.every(isRawIssue) ||
+    // A next page with no cursor to reach it would restart the listing.
+    !isPageInfo(repo.issues.pageInfo)
   ) {
     return { ok: false, reason: 'github_error' };
   }
-  const pageInfo = isObj(repo.issues.pageInfo) ? repo.issues.pageInfo : {};
-  const hasNextPage = pageInfo.hasNextPage === true;
-  // A next page with no cursor to reach it would restart the listing.
-  if (hasNextPage && typeof pageInfo.endCursor !== 'string') return { ok: false, reason: 'github_error' };
+  const pageInfo = repo.issues.pageInfo as { hasNextPage: boolean; endCursor?: string };
+  const hasNextPage = pageInfo.hasNextPage;
   return {
     ok: true,
     repository: { id: repo.id, nameWithOwner: repo.nameWithOwner, url: repo.url },
     issues: repo.issues.nodes,
     hasNextPage,
-    endCursor: hasNextPage ? (pageInfo.endCursor as string) : null,
+    endCursor: hasNextPage ? pageInfo.endCursor! : null,
   };
 }
 
@@ -448,12 +456,13 @@ async function completeNested(
     if (!isObj(node)) return 'github_error';
     for (const n of open) {
       const more = node[n.key];
-      // A list asked for must come back, or the loop would ask again forever.
-      if (!isObj(more) || !isConn(more, n.node)) return 'github_error';
+      // A list asked for must come back whole, or its open cursor is lost.
+      if (!isConn(more, n.node)) return 'github_error';
+      const next = more as { nodes: unknown[]; pageInfo: NonNullable<Conn<unknown>>['pageInfo'] };
       const conn = raw[n.key] as Conn<unknown>;
       const merged = {
-        nodes: [...(conn?.nodes ?? []), ...((more.nodes as unknown[] | null | undefined) ?? [])],
-        pageInfo: (more.pageInfo ?? null) as NonNullable<Conn<unknown>>['pageInfo'],
+        nodes: [...(conn?.nodes ?? []), ...next.nodes],
+        pageInfo: next.pageInfo,
       };
       (raw as unknown as Record<string, unknown>)[n.key] = merged;
     }

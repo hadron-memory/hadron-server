@@ -565,6 +565,22 @@ describe('github_issue_snapshot: never a partial result presented as whole (#248
     expect(def.description).toMatch(/nested_truncated[^.]*will not/);
   });
 
+  it('the follow-up budget is shared across a first page: issues past it are cut, the ones before it are whole (Glen P3)', async () => {
+    const def = snapshotTool();
+    const { GITHUB_SNAPSHOT_MAX_NESTED_PAGES } = await import('../../githubIssueSnapshot.js');
+    const n = GITHUB_SNAPSHOT_MAX_NESTED_PAGES + 1;
+    const open = (i: number) =>
+      issue(i, { labels: { nodes: [], pageInfo: { hasNextPage: true, endCursor: `L${i}` } } });
+    fake.pages.push(page(Array.from({ length: n }, (_, i) => open(i + 1))));
+    for (let i = 1; i < n; i++) fake.pages.push(nested({ labels: { nodes: [{ name: `l${i}` }], pageInfo: { hasNextPage: false } } }));
+    const run = await mintRun();
+    const out = (await def.execute(toolCtx(run), ARGS)) as Record<string, any>;
+    expect(out).toMatchObject({ complete: false, incompleteReason: 'nested_truncated', cursor: null });
+    expect(out.issues.filter((i: any) => i.truncated).map((i: any) => i.number)).toEqual([n]);
+    expect(out.issues[0].labels).toEqual(['l1']);
+    expect(fake.graphqlBodies).toHaveLength(n);
+  });
+
   it('when the follow-up budget runs out on a later page, that page is left for the next call, which reads it whole', async () => {
     const def = snapshotTool();
     const { GITHUB_SNAPSHOT_MAX_NESTED_PAGES } = await import('../../githubIssueSnapshot.js');
@@ -624,6 +640,9 @@ describe('github_issue_snapshot: never a partial result presented as whole (#248
     ['a parent without a repository', page([issue(2, { parent: { number: 1 } })])],
     ['a nested list with more pages but no cursor', page([issue(2, { labels: { nodes: [], pageInfo: { hasNextPage: true } } })])],
     ['an issue listing with more pages but no cursor', page([issue(2)], { hasNextPage: true, endCursor: null as never })],
+    ['an issue listing without pageInfo', page([issue(2)], null as never)],
+    ['an issue whose labels have no pageInfo', page([issue(2, { labels: { nodes: [{ name: 'x' }] } })])],
+    ['an issue with no timeline connection', page([issue(2, { timelineItems: null })])],
   ])('a malformed second page (%s) keeps page 1 and says github_error with the resume cursor (Glen P3)', async (_label, bad) => {
     const def = snapshotTool();
     fake.pages.push(page([issue(1)], { hasNextPage: true, endCursor: 'AFTER1' }));
@@ -638,6 +657,10 @@ describe('github_issue_snapshot: never a partial result presented as whole (#248
     ['no node', null],
     ['the asked-for list missing', {}],
     ['a null label in the list', { labels: { nodes: [null], pageInfo: { hasNextPage: false } } }],
+    ['an empty connection (Chip P2)', { labels: {} }],
+    ['a connection without nodes', { labels: { pageInfo: { hasNextPage: false } } }],
+    ['a connection without pageInfo', { labels: { nodes: [{ name: 'b' }] } }],
+    ['a pageInfo without hasNextPage', { labels: { nodes: [{ name: 'b' }], pageInfo: {} } }],
   ])('a malformed nested follow-up (%s) is a github_error that drops the page', async (_label, node) => {
     const def = snapshotTool();
     fake.pages.push(page([issue(1, { labels: { nodes: [], pageInfo: { hasNextPage: true, endCursor: 'L1' } } })]));
