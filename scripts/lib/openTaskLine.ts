@@ -32,47 +32,62 @@ export const OPEN_TASKS_QUERY =
 
 const OPEN_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'STARTED']);
 
-/** The number of open tasks the worker holds, or null when it cannot be established. Never throws. */
+/** Why a count is unknown: a closed set, so a diagnostic can never carry anything the read returned (#2630). */
+export type OpenTaskUnknown = 'refused' | 'malformed' | 'timeout' | 'page_cap';
+
+/**
+ * The number of open tasks the worker holds, or null when it cannot be established. Never throws. `onUnknown`, when
+ * given, is called ONCE with the closed reason when the answer is null for one of those four causes (an unbound
+ * worker or App reads nothing and reports nothing); it is handed nothing the read returned.
+ */
 export function countOpenTasks(
   run: OpenTaskRun, hadronCli: string, app: string, workerId: string,
   budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now, until?: number,
+  onUnknown?: (reason: OpenTaskUnknown) => void,
 ): number | null {
   if (!app || !workerId) return null;
+  const unknown = (reason: OpenTaskUnknown): null => {
+    try { onUnknown?.(reason); } catch { /* a diagnostic never changes the answer */ }
+    return null;
+  };
   // `until` is the caller's own absolute deadline (the ticker's pass end, on the pass clock): the count never runs past
   // it, so a read cannot start fresh 5 s just before the pass ends (#2613 LOCAL P2, delta).
   const deadline = Math.min(now() + budgetMs, until ?? Infinity);
   const ids = new Set<string>();
   for (let page = 0; page < OPEN_TASKS_MAX_PAGES; page++) {
     const left = deadline - now();
-    if (left <= 0) return null;
+    if (left <= 0) return unknown('timeout');
     let rows: unknown;
+    let res: { code: number; stdout: string };
     try {
-      const res = run([hadronCli, 'api', OPEN_TASKS_QUERY, '-F', `a=${app}`, '-F', `w=${workerId}`, '-F', `o=${page * OPEN_TASKS_PAGE}`], left);
-      // Checked AFTER the call too: a page that answered late is unknown, even a short final one.
-      if (now() > deadline) return null;
-      if (res.code !== 0) return null;
-      const body = JSON.parse(res.stdout);
-      if (body?.errors?.length || body?.error) return null;
-      rows = body?.data?.agentTasks;
-    } catch { return null; }
-    if (!Array.isArray(rows)) return null;
+      res = run([hadronCli, 'api', OPEN_TASKS_QUERY, '-F', `a=${app}`, '-F', `w=${workerId}`, '-F', `o=${page * OPEN_TASKS_PAGE}`], left);
+    } catch { return unknown('refused'); }
+    // Checked AFTER the call too: a page that answered late is unknown, even a short final one.
+    if (now() > deadline) return unknown('timeout');
+    if (res.code !== 0) return unknown('refused');
+    let body: any;
+    try { body = JSON.parse(res.stdout); } catch { return unknown('malformed'); }
+    if (body?.errors?.length || body?.error) return unknown('refused');
+    rows = body?.data?.agentTasks;
+    if (!Array.isArray(rows)) return unknown('malformed');
     for (const r of rows) {
-      if (typeof r?.id !== 'string' || !OPEN_STATUSES.has(r.status)) return null;
+      if (typeof r?.id !== 'string' || !OPEN_STATUSES.has(r.status)) return unknown('malformed');
       // A row that is not this worker's means the filter was not honored: nothing here can be trusted as a count.
-      if (r.assignee?.kind !== 'WORKER' || r.assignee?.id !== workerId) return null;
+      if (r.assignee?.kind !== 'WORKER' || r.assignee?.id !== workerId) return unknown('malformed');
       ids.add(r.id);
     }
     if (rows.length < OPEN_TASKS_PAGE) return ids.size;
   }
-  return null;
+  return unknown('page_cap');
 }
 
 /** The sentence appended to a wake, with its leading space; '' for zero or unknown. */
 export function openTaskLine(
   run: OpenTaskRun, hadronCli: string, app: string, workerId: string,
   budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now, until?: number,
+  onUnknown?: (reason: OpenTaskUnknown) => void,
 ): string {
-  const n = countOpenTasks(run, hadronCli, app, workerId, budgetMs, now, until);
+  const n = countOpenTasks(run, hadronCli, app, workerId, budgetMs, now, until, onUnknown);
   if (!n) return '';
   return ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
 }

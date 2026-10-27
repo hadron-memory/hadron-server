@@ -1986,6 +1986,24 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(rec.idleSince).toBeGreaterThan(Date.now() - 60_000);
   });
 
+  it('the idle-watch wake reads the open-task count before the final gates and never after them (#2630)', () => {
+    const c = mcfg([['w-ada', 'Ada', 'coordinator']]);
+    fake.terminal('ada');
+    fake.attention.workers = [];
+    fake.cursors.set('w-ada', 100);
+    fake.openTasks.set('w-ada', [{ id: 't1', status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } }]);
+    seedLiveness(c, { 'w-ada': { idleSince: Date.now() - AGO_21MIN, handle: 'term_ada' } });
+    poll(c);
+    expect(fake.sent[0][1]).toContain('You have 1 open task');
+    const verbs = fake.calls.map((a) => (a[1] === 'api' && a[2].includes('agentTasks(') ? 'count' : a.slice(1, 3).join(' ')));
+    const count = verbs.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(verbs.lastIndexOf('terminal wait')).toBeGreaterThan(count);
+    expect(verbs.lastIndexOf('terminal read')).toBeGreaterThan(count);
+    expect(verbs.indexOf('terminal send')).toBeGreaterThan(verbs.lastIndexOf('terminal read'));
+    expect(verbs.slice(count + 1, verbs.indexOf('terminal send')).includes('count')).toBe(false);
+  });
+
   it('a NON-flagged worker with the same idle + unread backlog gets nothing: liveness is opt-in per roster flag', () => {
     const c = mcfg([['w-eli', 'Eli', undefined]]);
     fake.terminal('eli');
@@ -2744,6 +2762,27 @@ describe('#2613 — the open-task line on every router wake', () => {
     expect(out.nudged).toEqual(['Eli']);
     expect(fake.sent[0][1]).toBe(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })));
     expect(fake.sent[0][1]).not.toMatch(/open task|none|\b0 /);
+  });
+
+  it('a refused count read logs ONE closed-reason line with the worker name and nothing the read returned (#2630)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasksFail = true;
+    poll(c);
+    const diag = logs.filter((l) => l.includes('open-task count unknown'));
+    expect(diag).toEqual(['orca-attention-router: Eli: open-task count unknown (refused); the wake goes without the line']);
+    expect(logs.join('\n')).not.toContain('tasks down');
+    expect(fake.sent).toHaveLength(1); // fail-open
+  });
+
+  it('a count or a zero logs no diagnostic (#2630)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', open('w-eli', 2));
+    poll(c);
+    expect(logs.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
   });
 
   it('pages: 201 open tasks read as 201, through two page reads', () => {
