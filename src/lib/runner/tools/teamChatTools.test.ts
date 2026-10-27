@@ -284,6 +284,15 @@ describe('bounds and paging (#2520 criterion 3)', () => {
     expect(p2.hasMore).toBe(false);
   });
 
+  it('#2544 measures the body cap in UTF-16 code units, not UTF-8 bytes', async () => {
+    await say(channel, '🧭'.repeat(20_000));
+    const out = await run_(toolCtx(await mintRun({ userId: member.id })));
+    expect(out.messages).toHaveLength(1);
+    expect(out.messages[0].body.length).toBe(32768);
+    expect(Buffer.byteLength(out.messages[0].body, 'utf8')).toBe(65536);
+    expect(out.messages[0].bodyTruncated).toBe(true);
+  });
+
   it('one message larger than the cap is still returned (cut, flagged) so paging never stalls', async () => {
     await say(channel, 'y'.repeat(TEAM_CHAT_READ_MAX_BODY_CHARS + 500));
     await say(channel, 'next');
