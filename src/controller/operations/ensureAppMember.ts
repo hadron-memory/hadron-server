@@ -27,7 +27,7 @@
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { getPrimaryAgentId } from '../../lib/appAgent.js';
-import { loadOfferedMemberRoles, lockOfferedMemberRoleRows } from '../../lib/memberRoles.js';
+import { lockAndLoadOfferedMemberRoles } from '../../lib/memberRoles.js';
 
 export class InvalidRoleError extends Error {
   constructor(role: string, allowed: string[]) {
@@ -101,9 +101,8 @@ export async function ensureAppMember(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('app-capacity'), hashtext(${appId}))`;
     }
     // #2171: the deciding role check, after the capacity lock and under the
-    // install-row and Agent-row fences (lockOfferedMemberRoleRows).
-    const lockedAgentIds = await lockOfferedMemberRoleRows(tx, appId);
-    const offered = await loadOfferedMemberRoles(tx, appId, lockedAgentIds);
+    // install-row and Agent-row fences, read together as one admission step.
+    const offered = await lockAndLoadOfferedMemberRoles(tx, appId);
     if (!offered.installed) throw new OrphanAppError(appId);
     if (!offered.roles.includes(role)) throw new InvalidRoleError(role, offered.roles);
     const existing = await tx.appMember.findUnique({
