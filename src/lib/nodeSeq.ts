@@ -23,7 +23,7 @@ import type { Prisma } from '../generated/prisma/index.js';
  * `hadron_get_next_node` uses to walk ordered children.
  * For automatic nested creates, call on the writing transaction AFTER its
  * existing ancestor locks; the parent key serializes read-max plus insert (#443).
- * Root callers retain their historical behavior and have no sibling lock.
+ * Root callers take K (`lockRootSiblings`) first (#443, root-only slice).
  *
  * Soft-deleted rows and the node itself are excluded (harmless on a fresh create,
  * correct when an upsert targets an existing loc).
@@ -62,6 +62,64 @@ export async function nextSiblingSeq(
   return max === null ? null : max + 1;
 }
 
-/** #443 scaffold (inert until the implementation commit): the root allocation lock helpers. */
-export async function lockRootSiblings(_tx: Prisma.TransactionClient, _memoryId: string): Promise<void> {}
-export async function reserveRootSeqLock(_tx: Prisma.TransactionClient, _memoryId: string): Promise<void> {}
+/**
+ * #443 (root-only slice) — the per-memory key K that serializes AUTOMATIC ROOT seq allocation: the in-transaction
+ * `max(seq)+1` read and the insert that consumes it. Root creates take no ancestor lock, so without K two of them read the
+ * same max and commit a duplicate seq.
+ *
+ * K is the single-`bigint` advisory form (`objsubid = 1`), which Postgres keeps disjoint from the two-`int4` form every
+ * loc/authority key uses (`objsubid = 2`), so no loc key can alias it. The value forces bit 63 = 0 and bit 62 = 1: a
+ * sign-extended `int4` single-key (`hashtext(...)`) has all of its top 33 bits equal, so K never equals one either. The
+ * remaining aliasing class is a 64-bit `hashtextextended` user that also root-creates; none is on a node-create path.
+ *
+ * PLACEMENT RULE: take K after every explicit lock the transaction takes and BEFORE its first write another K-holder's
+ * suffix could wait on, and hold it to the OUTER commit (xact lock). A K-holder then never waits on an uncommitted write of
+ * a K-waiter. Exactly three seams call it (a test greps for that): the GraphQL write core, the MCP create transaction and
+ * the reserve-citation seam, which pre-acquires K before it archives a tombstone (`reserveRootSeqLock`).
+ */
+const ROOT_SEQ_KEY = (memoryId: string) => `node-root-seq:${memoryId}`;
+
+async function takeRootSeqKey(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(
+    (hashtextextended(${ROOT_SEQ_KEY(memoryId)}, 0) | (1::bigint << 62)) & ~(1::bigint << 63))`;
+}
+
+/** Per-transaction state, keyed on the transaction object the seam hands every helper (one object per outer transaction). */
+const rootSeqState = new WeakMap<object, { memoryId: string; reserved: boolean }>();
+
+export class RootSeqAllocationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RootSeqAllocationError';
+  }
+}
+
+/**
+ * Take K for the root allocation about to happen in this transaction. Re-entrant at the database, but the transaction may
+ * allocate a root seq ONCE: a second allocation would take its pre-K locks after K, which the placement rule forbids, so it
+ * is refused (before any lock) and the transaction rolls back. A one-use reservation from `reserveRootSeqLock` for the same
+ * memory is consumed by the first allocation.
+ */
+export async function lockRootSiblings(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  const state = rootSeqState.get(tx);
+  if (state) {
+    if (state.reserved && state.memoryId === memoryId) {
+      state.reserved = false;
+      return;
+    }
+    throw new RootSeqAllocationError('A second root sibling allocation in one transaction is not supported');
+  }
+  await takeRootSeqKey(tx, memoryId);
+  rootSeqState.set(tx, { memoryId, reserved: false });
+}
+
+/**
+ * Pre-acquire K for the root allocation this transaction will make next, and record it as a one-use reservation. Used by the
+ * reserve-citation seam, which must hold K before it archives a tombstone's edges (uncommitted writes) and then enters the
+ * create core for its first and only root allocation.
+ */
+export async function reserveRootSeqLock(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  if (rootSeqState.has(tx)) throw new RootSeqAllocationError('A second root sibling allocation in one transaction is not supported');
+  await takeRootSeqKey(tx, memoryId);
+  rootSeqState.set(tx, { memoryId, reserved: true });
+}

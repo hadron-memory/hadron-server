@@ -177,6 +177,29 @@ describe('reserve seam and the one-use handoff #443', () => {
     expect([a, b].sort()).toEqual([2, 3]);
   }, 30000);
 
+  it('a ROOT reserve over a tombstone waits on K BEFORE it archives anything (K precedes the archive writes)', async () => {
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'spec2', name: 'spec2', seq: 5, deletedAt: new Date() } });
+    const holder = holdRootSibling(memoryId, 'r2', 2);
+    await holder.held;
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = (resolvers.Mutation as any).reserveSpecCitation(null, { memoryRef: memoryId, loc: 'spec2' }, ctx());
+      expect(await pollBlocked(memoryId)).toBe(true);
+      // Still blocked, and the tombstone is untouched: an archive write would hold its row (uncommitted, so a count cannot
+      // see it, but NOWAIT can feel it).
+      await db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${memoryId} AND loc = 'spec2' FOR UPDATE NOWAIT`;
+      });
+    } finally {
+      holder.release();
+      await holder.done;
+      await pending?.catch(() => {});
+    }
+    await pending;
+    expect(await db.node.count({ where: { memoryId, loc: { startsWith: 'spec2__deleted-' } } })).toBe(1);
+    expect(await seqOf('spec2')).toBe(3);
+  }, 40000);
+
   it('helper: a reservation is consumed exactly once; a second root allocation in one transaction is refused', async () => {
     await expect(db.$transaction(async (tx) => {
       await reserveRootSeqLock(tx, memoryId);

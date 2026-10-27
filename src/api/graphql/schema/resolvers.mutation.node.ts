@@ -118,7 +118,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { lockRootSiblings, nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
@@ -933,12 +933,8 @@ async function writeNodeCoreRaw(
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /
       // empty sibling list leaves seq null (nextSiblingSeq returns null).
-      // #443: roots retain the old behavior; nested allocation waits for the
-      // existing parent lock inside the writing transaction below.
-      const seqForCreate =
-        existing == null && input.seq == null && !input.loc.includes(':')
-          ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
-          : undefined;
+      // #443: BOTH root and nested allocation read in the writing transaction below,
+      // root under the per-memory key K, nested after the existing parent lock.
 
       // Update mode writes via `update`, not `upsert`: existence was verified
       // by the mode gate above, and with `name` now optional-on-update (D4)
@@ -1461,7 +1457,6 @@ async function writeNodeCoreRaw(
               createdBy,
               ...hashPayload,
               revisionContentHash: revisionStateHashRefreshMarker(),
-              ...(seqForCreate != null ? { seq: seqForCreate } : {}),
             } as Prisma.NodeUncheckedCreateInput,
             update: updatePayload,
             include,
@@ -1665,9 +1660,12 @@ async function writeNodeCoreRaw(
               await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
             // #443: the existing ancestor set includes the immediate parent.
-            // READ COMMITTED now sees the prior parent's holder commit.
-            const nestedSeq = existing == null && input.seq == null && input.loc.includes(':')
-              ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
+            // READ COMMITTED now sees the prior parent's holder commit. A ROOT has
+            // no parent lock: it takes K instead (held to commit), then reads.
+            const autoSeq = existing == null && input.seq == null;
+            const isRoot = !input.loc.includes(':');
+            if (autoSeq && isRoot) await lockRootSiblings(tx, input.memoryId);
+            const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },

@@ -36,6 +36,7 @@ import {
   specLevel,
 } from '../../../lib/specAllocation.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { reserveRootSeqLock } from '../../../lib/nodeSeq.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
@@ -135,6 +136,11 @@ export const specCorpusMutations = {
           ]);
           await lockAncestorsForCreate(tx, memoryId, loc, { op: 'create' });
           await authorizeAttempt();
+          // #443: a ROOT reserve takes the root-allocation key K here, after every explicit lock
+          // above and BEFORE the archive's uncommitted edge writes (a K-holder's own suffix inserts
+          // edges, so a K-waiter must hold none). writeNodeCore's root allocation consumes this
+          // one-use reservation.
+          if (!loc.includes(':')) await reserveRootSeqLock(tx, memoryId);
           await validateArchivePlan(tx, archivePlan);
           const tombstone = await tx.node.findFirst({
             where: { memoryId, loc, deletedAt: { not: null } },
