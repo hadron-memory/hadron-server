@@ -49,6 +49,25 @@ beforeEach(async () => {
 });
 
 describe('successful-field history', () => {
+  it.each([undefined, null])('a response with missing context (%s) is an unchanged no-op', async contextValue => {
+    const listener = await taskWarningsPlugin.requestDidStart!({} as never) as any;
+    const response = { body: { kind: 'single', singleResult: { errors: [{ message: 'synthetic request failure' }] } } };
+    const original = JSON.parse(JSON.stringify(response));
+    await expect(listener.willSendResponse({ contextValue, response })).resolves.toBeUndefined();
+    expect(response).toEqual(original);
+  });
+
+  it('history still records after optional enrichment has exhausted its request budget, without charging it', async () => {
+    const c = ctx();
+    c.taskWarningState = { spentMs: warnings.REQUEST_READ_BUDGET_MS + 50, gate: new Map(), registers: new Map(), team: new Map() };
+    const task = await runAsActor({ workerId: worker.id, agentId }, () => create(c));
+    expect(c.taskWarnings?.[0].warning.register).toBeUndefined();
+    await flush(c);
+    expect(await history()).toHaveLength(1);
+    expect((await history())[0]).toMatchObject({ taskId: task.id, actorWorkerId: worker.id, payload: { code: 'task.create.no-source' } });
+    expect(c.taskWarningState.spentMs).toBe(warnings.REQUEST_READ_BUDGET_MS + 50);
+  });
+
   it('records each alias, including beyond the response cap, with closed payload and null-worker attribution', async () => {
     const r = await graphql(`mutation { ${Array.from({ length: 23 }, (_, i) => field(`a${i}`)).join(' ')} }`);
     expect(r.errors).toBeUndefined();
@@ -212,6 +231,18 @@ describe('passive history with real SQL admission', () => {
     expect((await pendingTaskWakes(db, [worker.id], at(4))).size).toBe(0);
     expect(await db.workerDeliveryTaskEvent.count()).toBe(0);
   });
+  it('a worker-owner warning cannot reset the session-derived stall/activity clock; genuine session activity does', async () => {
+    const p = await rawTask();
+    await rawTask({ parentTaskId: p.id, ownerUserId: null, ownerWorkerId: worker.id, assigneeUserId: user.id, assignedAt: at(0), status: 'finished', startedAt: at(0), finishedAt: at(1), resultOutcome: 'done' });
+    const session = await db.session.create({ data: { id: generateId(), userId: user.id, appId: app.id, workerId: worker.id, agentId, startedAt: at(0), updatedAt: at(0) } });
+    const before = (await loadStallInputs(db, { id: p.id }, at(4)))[0].endedChildren[0].ownerActivityAt;
+    expect(before).toEqual(at(0));
+    await event(p.id, 'task.warning', { actorWorkerId: worker.id, actorUserId: user.id, actorAgentId: agentId, createdAt: at(2), payload: { code: 'task.finish.open-children' } });
+    expect((await loadStallInputs(db, { id: p.id }, at(4)))[0].endedChildren[0].ownerActivityAt).toEqual(before);
+    await db.session.update({ where: { id: session.id }, data: { updatedAt: at(3) } });
+    expect((await loadStallInputs(db, { id: p.id }, at(4)))[0].endedChildren[0].ownerActivityAt).toEqual(at(3));
+  });
+
   it('a human warning does not reset the person-owner stall clock, but a real task call does', async () => {
     const p = await rawTask();
     await rawTask({ parentTaskId: p.id, assigneeUserId: user.id, assignedAt: at(0), status: 'finished', startedAt: at(0), finishedAt: at(1), resultOutcome: 'done' });
