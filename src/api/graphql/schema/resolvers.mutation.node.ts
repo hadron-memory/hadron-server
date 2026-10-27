@@ -16,7 +16,7 @@ import {
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
-import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
@@ -2853,9 +2853,7 @@ export const nodeMutations = {
         // Channel had existed at selection time; no snapshot or update for
         // them may reach the Channel-owned address (#1298).
         const channelMemoryIds = [...new Set([...nodeById.values()].map((row) => row.memoryId))].sort();
-        for (const memoryId of channelMemoryIds) {
-          await lockMemoryForChannelChange(tx, memoryId);
-        }
+        await lockMemoriesForChannelChange(tx, channelMemoryIds);
         const newlyProtected = new Set<string>();
         const currentProtected = new Map<string, ProtectedLoc[]>();
         for (const row of scannedNodes) {
