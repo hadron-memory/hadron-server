@@ -2965,6 +2965,7 @@ export const typeDefs = `#graphql
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
     policy: JSON
     organizationId: String
+    "The owning Organization when the caller may read that Organization; an App read alone does not grant it."
     organization: Organization
     """
     SOFT-DEPRECATED convenience read: the FIRST installed Agent. An App

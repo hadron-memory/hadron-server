@@ -2781,7 +2781,9 @@ export function memoryWriteForbidden(): GraphQLError {
 
 export const MEMORY_INCLUDE = {
   // #2238: live rows only, matching ORG_INCLUDE.subscriptions.
-  subscriptions: { where: { deletedAt: null }, include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2557: the parent read authorized this Memory, but the non-null nested
+  // MemorySubscription.memory still needs its full row for GraphQL resolution.
+  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 export const AGENT_INCLUDE = {

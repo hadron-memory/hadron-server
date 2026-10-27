@@ -57,6 +57,11 @@ beforeEach(async () => {
 });
 
 describe('#2557 subscription parent paths', () => {
+  it('applies the same filter when Organization has no eager subscriptions', async () => {
+    const result = await resolvers.Organization.subscriptions({ id: customer }, {}, ctx('orgReader'));
+    expect(result.map(row => row.id)).toEqual([publicSubscription]);
+  });
+
   it.each(principals)('Organization.subscriptions filters by %s memory access without null bubbling', async principal => {
     const direct = await query(principal, 'query($ref: ID!) { memory(ref: $ref) { id } }', { ref: memory });
     const canRead = principal === 'reader' || principal === 'platformAdmin';
@@ -94,6 +99,8 @@ describe('#2557 subscription parent paths', () => {
         expect(hidden.errors).toHaveLength(1);
         if (principal === 'orgReader' || principal === 'outsider') {
           expect(hidden.errors?.[0]?.extensions?.code).toBe('NOT_FOUND');
+          const missing = await query(principal, `mutation($org: String!) { ${operation}(memoryRef: "vendor-2557:missing", orgRef: $org, role: READER) { memory { id } } }`, { org: customer });
+          expect(missing.errors?.[0]?.extensions?.code).toBe(hidden.errors?.[0]?.extensions?.code);
         }
         expect(hidden.data).toBeNull();
       }
@@ -116,6 +123,8 @@ describe('#2557 App.organization', () => {
     const owningOrg = await db.organization.findUniqueOrThrow({ where: { id: vendor } });
     const result = await resolvers.App.organization({ organizationId: vendor, organization: owningOrg }, {}, ctx(principal));
     expect(result?.id ?? null).toBe(principal === 'platformAdmin' ? vendor : null);
+    const lazy = await resolvers.App.organization({ organizationId: vendor }, {}, ctx(principal));
+    expect(lazy?.id ?? null).toBe(principal === 'platformAdmin' ? vendor : null);
     const direct = await query(principal, 'query($ref: ID!) { organization(ref: $ref) { id } }', { ref: vendor });
     expect(direct.data?.organization).toEqual(principal === 'platformAdmin' ? { id: vendor } : null);
   });
