@@ -133,3 +133,49 @@ describe('openTaskLine (#2613)', () => {
     expect(openTaskLine(() => ({ code: 1, stdout: '' }), 'hadron', 'app1', 'w1')).toBe('');
   });
 });
+
+describe('the failure diagnostic (#2630)', () => {
+  const SECRET = 'hdr_app_SECRETKEY-123 AT0.77 Fix the payroll bug';
+  const reasons = (run: (argv: string[], t?: number) => { code: number; stdout: string }, extra: { budget?: number; now?: () => number } = {}) => {
+    const seen: string[] = [];
+    const n = countOpenTasks(run, 'hadron', 'app1', 'w1', extra.budget, extra.now, undefined, (r) => seen.push(r));
+    return { n, seen };
+  };
+  const ok = (stdout: string, code = 0) => () => ({ code, stdout });
+
+  it('names a closed reason, once, for each way the read is unknown', () => {
+    expect(reasons(ok('', 1)).seen).toEqual(['refused']);
+    expect(reasons(ok('{"errors":[{"message":"x"}]}')).seen).toEqual(['refused']);
+    expect(reasons(ok('{"error":{"code":"x"}}')).seen).toEqual(['refused']);
+    expect(reasons(() => { throw new Error('spawn'); }).seen).toEqual(['refused']);
+    expect(reasons(ok('not json')).seen).toEqual(['malformed']);
+    expect(reasons(ok('{"data":{"agentTasks":{}}}')).seen).toEqual(['malformed']);
+    expect(reasons(ok(JSON.stringify({ data: { agentTasks: [row('a', 'w2')] } }))).seen).toEqual(['malformed']);
+    expect(reasons(server(rows(OPEN_TASKS_MAX_PAGES * OPEN_TASKS_PAGE)).run).seen).toEqual(['page_cap']);
+    let t = 0;
+    expect(reasons(() => { t += 6_000; return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(1) } }) }; }, { budget: 5_000, now: () => t }).seen).toEqual(['timeout']);
+    expect(reasons(server(rows(1)).run, { budget: 0 }).seen).toEqual(['timeout']);
+  });
+
+  it('says nothing for a count, for zero, or for an unbound worker or App', () => {
+    expect(reasons(server(rows(2)).run)).toEqual({ n: 2, seen: [] });
+    expect(reasons(server([]).run)).toEqual({ n: 0, seen: [] });
+    const seen: string[] = [];
+    expect(countOpenTasks(server(rows(1)).run, 'hadron', '', 'w1', undefined, undefined, undefined, (r) => seen.push(r))).toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  it('the reason is the only thing handed over: no stdout, stderr, argv, id or message reaches it', () => {
+    const calls: unknown[][] = [];
+    const run = () => ({ code: 1, stdout: JSON.stringify({ errors: [{ message: SECRET }] }), stderr: SECRET });
+    countOpenTasks(run, 'hadron', 'app1', 'w1', undefined, undefined, undefined, (...a) => calls.push(a));
+    expect(calls).toEqual([['refused']]);
+    expect(JSON.stringify(calls)).not.toContain('SECRET');
+  });
+
+  it('a throwing diagnostic never changes the answer or the wake, and the line stays empty', () => {
+    const boom = () => { throw new Error('log down'); };
+    expect(countOpenTasks(ok('', 1), 'hadron', 'app1', 'w1', undefined, undefined, undefined, boom)).toBeNull();
+    expect(openTaskLine(ok('', 1), 'hadron', 'app1', 'w1', undefined, undefined, undefined, boom)).toBe('');
+  });
+});

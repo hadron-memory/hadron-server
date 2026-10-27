@@ -132,4 +132,64 @@ describe('the open-task read the wake scripts send (#2613)', () => {
     expect((first.data?.agentTasks as unknown[]).length).toBe(200);
     expect((second.data?.agentTasks as unknown[]).length).toBe(1);
   });
+
+  it('replays the requests the helper itself generates, through the real server, over more than 200 rows (#2630)', async () => {
+    const seed = await M.createAgentTask({}, { input: { appRef: appX.id, title: 'seed' } }, userCtx());
+    const template = await db.agentTask.findUniqueOrThrow({ where: { id: seed.id } });
+    // The seed row stays: it is unassigned, so it is one more row the read must exclude.
+    let n = 100;
+    const bulk = (appId: string, worker: string | null, status: string, count: number) => Array.from({ length: count }, () => {
+      n += 1;
+      return {
+        ...template, id: generateId(), appId, title: `bulk ${n}`, handle: `AT0.${n}`, taskNumber: n, status,
+        assigneeWorkerId: worker, assignedAt: worker ? new Date() : null,
+        startedAt: status === 'started' || status === 'finished' ? new Date() : null, finishedAt: status === 'finished' ? new Date() : null,
+        cancelledAt: status === 'cancelled' ? new Date() : null, resultOutcome: status === 'finished' ? 'succeeded' : null,
+      };
+    });
+    const mine = [...bulk(appX.id, anne.id, 'pending', 250), ...bulk(appX.id, anne.id, 'started', 201)];
+    await db.agentTask.createMany({ data: [
+      ...mine,
+      ...bulk(appX.id, bert.id, 'started', 30), // another worker
+      ...bulk(appY.id, anne.id, 'started', 30), // another App
+      ...bulk(appX.id, anne.id, 'finished', 30), ...bulk(appX.id, anne.id, 'cancelled', 30), // terminal
+      ...bulk(appX.id, null, 'backlog', 30), // unassigned backlog
+    ] as any });
+
+    for (const ctx of [userCtx(), keyCtx()]) {
+      // The helper's runner is synchronous and the server is not: run the helper, serve each request it generated
+      // through the real server, and run it again until it never asks for an unserved page. Every request is parsed
+      // from the argv the helper built, never hand-written here.
+      const served = new Map<string, string>();
+      const requests: Array<{ query: string; vars: Record<string, string> }> = [];
+      let result: number | null = null;
+      for (let round = 0; round < 12 && result === null; round++) {
+        let missing: string[] | null = null;
+        result = countOpenTasks((argv) => {
+          const hit = served.get(argv.join('\u0000'));
+          if (hit === undefined) { missing ??= argv; return { code: 1, stdout: '' }; }
+          return { code: 0, stdout: hit };
+        }, 'hadron', appX.id, anne.id);
+        if (result === null && missing) {
+          const argv: string[] = missing;
+          const vars: Record<string, string> = {};
+          argv.forEach((a, i) => { if (argv[i - 1] === '-F') vars[a.slice(0, a.indexOf('='))] = a.slice(a.indexOf('=') + 1); });
+          requests.push({ query: argv[2], vars });
+          const res = await server.executeOperation(
+            { query: argv[2], variables: { a: vars.a, w: vars.w, o: Number(vars.o) } }, { contextValue: ctx });
+          if (res.body.kind !== 'single') throw new Error('unexpected');
+          served.set(argv.join('\u0000'), JSON.stringify(res.body.singleResult));
+        }
+      }
+      expect(requests.map((r) => r.vars.o)).toEqual(['0', '200', '400']); // page offsets, one request per page
+      expect(requests.every((r) => r.query === OPEN_TASKS_QUERY && r.vars.a === appX.id && r.vars.w === anne.id)).toBe(true);
+      const pages = [...served.values()].map((v) => JSON.parse(v).data.agentTasks as Array<{ id: string; status: string; assignee: { id: string } }>);
+      expect(pages.map((p) => p.length)).toEqual([200, 200, 51]);
+      const ids = pages.flat().map((r) => r.id);
+      expect(new Set(ids).size).toBe(451); // no row on two pages, none dropped
+      expect([...new Set(ids)].sort()).toEqual(mine.map((r) => r.id).sort()); // only anne's open rows in appX
+      expect(pages.flat().every((r) => (r.status === 'PENDING' || r.status === 'STARTED') && r.assignee.id === anne.id)).toBe(true);
+      expect(result).toBe(451);
+    }
+  });
 });
