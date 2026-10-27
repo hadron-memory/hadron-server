@@ -5,7 +5,7 @@ import { run, w2Line } from './activity.mjs';
 function fakeFetch(log, { failOn } = {}) {
   return async (url, init) => {
     const body = JSON.parse(init.body);
-    log.push(body.query.match(/mutation\s*\{?\s*(\w+)/)?.[1] ?? body.query.match(/(\w+)\(/)?.[1]);
+    log.push(body.query.match(/\)\s*\{\s*(\w+)\(/)?.[1]);
     if (failOn && body.query.includes(failOn)) return new Response(JSON.stringify({ errors: [{ message: 'boom https://x' }] }), { status: 200 });
     return new Response(JSON.stringify({ data: { ok: { id: 'x' } } }), { status: 200 });
   };

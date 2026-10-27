@@ -46,3 +46,13 @@ keep_logs_private() {
   ( umask 077; set -C; "$@" 2>&1 | tail -200 > "$dest" ) || true
   echo "failure logs kept privately ($(wc -l < "$dest" 2>/dev/null || echo 0) lines)" >&2
 }
+
+# purge_snapshots: heap snapshots hold real values, so they are deleted from the stack host and the deletion is verified.
+# SNAP_DIR is the container directory the server writes them to. Fails when any survives.
+SNAP_DIR=${SNAP_DIR:-/var/lib/hadron/graphs}
+purge_snapshots() {
+  declare -F app_exec >/dev/null || return 0
+  app_exec rm -f -- "$SNAP_DIR"/*.heapsnapshot 2>/dev/null || true
+  if app_exec sh -c "ls '$SNAP_DIR'/*.heapsnapshot" >/dev/null 2>&1; then echo "heap snapshot files survived the purge" >&2; return 1; fi
+  return 0
+}

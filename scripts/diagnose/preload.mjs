@@ -1,8 +1,8 @@
 // Loaded into the real server process via NODE_OPTIONS=--import (#2589). Samples counts and sizes only.
 import v8 from 'node:v8';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { reduceTransportState, sampleProcess, shouldAbort, assertSecretFree, safeNodeOptions, countTimeouts } from './sampler.mjs';
+import { reduceTransportState, sampleProcess, shouldAbort, assertSecretFree, safeNodeOptions, countTimeouts, snapshotLabel } from './sampler.mjs';
 
 if (/index\.ts$/.test(process.argv[1] ?? '') || process.argv.includes('src/index.ts')) {
   const out = process.env.DIAG_SAMPLES_PATH ?? '/tmp/diagnose-samples.jsonl';
@@ -27,13 +27,28 @@ if (/index\.ts$/.test(process.argv[1] ?? '') || process.argv.includes('src/index
     nodeFlags: safeNodeOptions(process.env.NODE_OPTIONS), preloadActive: true,
     exposeGc: typeof globalThis.gc === 'function',
     poolLimit: process.env.DB_POOL_CONNECTION_LIMIT || null, poolTimeoutS: process.env.DB_POOL_TIMEOUT_SECONDS || null,
-    sessionCap: process.env.MCP_MAX_SESSIONS_PER_PRINCIPAL || null,
-    // Not part of this slice; recorded so absence is never read as zero.
-    w2SyntheticActivity: 'not exercised', heapSnapshotReductions: 'not exercised' });
+    sessionCap: process.env.MCP_MAX_SESSIONS_PER_PRINCIPAL || null });
+
+  // #2598: the runner asks for a heap snapshot by creating <dir>/snap-<label>.trigger. The file stays on this stack host;
+  // only the runner-side reduction (counts and sizes) is ever published, and the runner deletes the files at teardown.
+  const snapDir = process.env.DIAG_SNAPSHOT_DIR;
+  const takeSnapshots = () => {
+    if (!snapDir) return;
+    for (const name of readdirSync(snapDir)) {
+      const label = snapshotLabel(name);
+      if (!label) continue;
+      rmSync(`${snapDir}/${name}`, { force: true });
+      const gc = typeof globalThis.gc === 'function' ? (globalThis.gc(), true) : 'not available';
+      const file = `${snapDir}/${label}.heapsnapshot`;
+      v8.writeHeapSnapshot(file);
+      line({ kind: 'snapshot', label, gc, bytes: statSync(file).size });
+    }
+  };
 
   let seam = null;
   const timer = setInterval(async () => {
     const t = Date.now() - started;
+    try { takeSnapshots(); } catch { line({ kind: 'snapshot', failed: true }); }
     const proc = sampleProcess();
     // tsx is not registered yet at preload time, so resolve the registry seam lazily.
     if (!seam) seam = await import('../../../src/mcp/server.ts').then((m) => m.mcpTransportStateForTests, () => null);

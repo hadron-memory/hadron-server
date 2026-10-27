@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { reduceTransportState, sampleProcess, NOT_SAMPLED, assertSecretFree, shouldAbort, coverageLine } from './sampler.mjs';
+import { reduceTransportState, sampleProcess, NOT_SAMPLED, assertSecretFree, shouldAbort, coverageLine, snapshotLabel } from './sampler.mjs';
 
 test('registry state is reduced to counts, no ids survive', () => {
   const out = reduceTransportState({
@@ -89,4 +89,9 @@ test('coverage markers become measured only for what ran; unrun fields stay not 
   const c = coverageLine({ w2: { embeddedNodes: 3, stallAlarms: 'not exercised', embedRequests: 2, tasksQueued: 1 }, heap: { snapshots: 3 } });
   assert.equal(c.heapSnapshotReductions, 'measured');
   assert.deepEqual(c.w2SyntheticActivity, { embed: 'measured', matcher: 'queued only', stall: 'not exercised' });
+});
+
+test('only well-formed snapshot trigger names yield a label; nothing can steer the path', () => {
+  assert.equal(snapshotLabel('snap-start.trigger'), 'start');
+  for (const bad of ['snap-../x.trigger', 'snap-A.trigger', 'snap-x.trigger.bak', 'diagnose-samples.jsonl', 'snap-.trigger', 'snap-' + 'a'.repeat(21) + '.trigger']) assert.equal(snapshotLabel(bad), null);
 });
