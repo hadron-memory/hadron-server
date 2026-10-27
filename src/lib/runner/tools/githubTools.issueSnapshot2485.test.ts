@@ -134,8 +134,8 @@ async function setFlowNodeData(data: Record<string, unknown>) {
 async function connectorMemory(source: string) {
   await db.memory.create({
     data: {
-      id: generateId(), organizationId: orgId, name: `m-${generateId().slice(0, 6)}`,
-      urn: `${ORG_URN}:m-${generateId().slice(0, 8)}`, class: 'knowledge', visibility: 'ORGANIZATION', source,
+      id: generateId(), organizationId: orgId, name: `m-${generateId()}`,
+      urn: `${ORG_URN}:m-${generateId()}`, class: 'knowledge', visibility: 'ORGANIZATION', source,
     },
   });
 }
@@ -340,6 +340,13 @@ describe('github_issue_snapshot: repository reach is the intersection (#2485 acc
     const run = await mintRun();
     const r = await refusal(def.execute(toolCtx(run), ARGS));
     expect(r.code).toBe('GITHUB_REPOSITORY_NOT_ALLOWED');
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('fails closed when the tool context does not name the executing flow node', async () => {
+    const def = snapshotTool();
+    const run = await mintRun();
+    await expect(def.execute({ ...toolCtx(run), nodeUrn: undefined }, ARGS)).rejects.toThrow(/executing flow node is unknown/);
     expect(fake.calls).toEqual([]);
   });
 
