@@ -6,7 +6,7 @@
  * keeps today's behavior. The discriminator is exact string equality, so each
  * near-miss is pinned to the unchanged 302.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
@@ -15,6 +15,30 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
+
+// Only the identity-provider boundary is synthetic. Login state, callback,
+// JWT cookie and the authorize/consent handlers run locally for real (#2625).
+const githubFixture = vi.hoisted(() => ({
+  exchangeCode: vi.fn(async () => 'synthetic-provider-token'),
+  fetchUser: vi.fn(async () => ({id: 2625001, login: 'prompt-callback', name: 'Synthetic callback', avatar_url: ''})),
+  checkOrgMembership: vi.fn(async () => true),
+}));
+vi.mock('../../auth/github.js', () => ({
+  ...githubFixture,
+  buildAuthUrl: (state: string) => `/synthetic/github?state=${encodeURIComponent(state)}`,
+}));
+const htmlValue = (value: string) => value.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const paramsOf = (params: URLSearchParams) => [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
+function expectLocalAuthorizeLink(href: string, original: string) {
+  expect(isServerLocalPath(href)).toBe(true);
+  const url = new URL(href, baseUrl);
+  expect(url.origin).toBe(baseUrl);
+  expect(url.pathname).toBe('/oauth/authorize');
+  expect(url.hash).toBe('');
+  const expected = new URLSearchParams(original);
+  expected.set('login_provider', 'email');
+  expect(paramsOf(url.searchParams)).toEqual(paramsOf(expected));
+}
 
 let server: Server;
 let baseUrl: string;
@@ -35,6 +59,7 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 beforeEach(async () => {
+  vi.clearAllMocks();
   await cleanDb(db);
   await db.oAuthClient.create({ data: { clientId, clientName: 'Claude Desktop', redirectUris: [REDIRECT] } });
 });
@@ -84,10 +109,54 @@ describe('sign-in prompt (no cookie, login_provider omitted, resource === origin
     const href = html.match(/<a href="([^"]+)">Use email instead<\/a>/)?.[1];
     expect(href).toBeDefined();
     const emailHref = href!.replace(/&amp;/g, '&');
-    expect(emailHref).toBe(`/oauth/authorize?${q}&login_provider=email`);
+    expectLocalAuthorizeLink(emailHref, q);
     const page = await fetch(`${baseUrl}${emailHref}`, { redirect: 'manual' });
     expect(page.status).toBe(200);
     expect(await page.text()).toContain('/oauth/authorize/email');
+  });
+});
+
+describe('#2625 local synthetic provider callback returns to consent', () => {
+  it.each([undefined, 'account mcp'])('preserves all authorize parameters through GitHub callback (scope=%s)', async scope => {
+    await db.user.create({data: {id: generateId(), handle: 'prompt-callback', githubUsername: 'prompt-callback', githubId: 2625001, roles: ['CONTRIBUTOR']}});
+    const q = query({scope, state: 'opaque &state=other?return_to=//evil.example/#fragment'});
+    const prompt = await get(q);
+    expect(prompt.status).toBe(200);
+    const html = await prompt.text();
+    const href = htmlValue(html.match(/<a [^>]*class="button"[^>]*href="([^"]+)"/)![1]);
+    const signIn = new URL(href, baseUrl);
+    // Omission is already GitHub: label and actual start route must agree.
+    expect(html).toContain('Continue with GitHub');
+    expect(signIn.origin).toBe(baseUrl);
+    expect(signIn.pathname).toBe('/auth/github');
+    const expectedReturn = `/oauth/authorize?${q}`;
+    expect(signIn.searchParams.get('return_to')).toBe(expectedReturn);
+    const start = await fetch(signIn, {redirect: 'manual'});
+    expect(start.status).toBe(302);
+    const syntheticProvider = new URL(start.headers.get('location')!, baseUrl);
+    expect(syntheticProvider.origin).toBe(baseUrl);
+    expect(syntheticProvider.pathname).toBe('/synthetic/github');
+    const callbackState = syntheticProvider.searchParams.get('state');
+    expect(callbackState).toBeTruthy();
+    const callback = await fetch(`${baseUrl}/auth/github/callback?${new URLSearchParams({code: 'synthetic-code', state: callbackState!})}`, {redirect: 'manual'});
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get('location')).toBe(expectedReturn);
+    expect(githubFixture.exchangeCode).toHaveBeenCalledExactlyOnceWith('synthetic-code');
+    expect(githubFixture.fetchUser).toHaveBeenCalledExactlyOnceWith('synthetic-provider-token');
+    const cookie = callback.headers.getSetCookie().find(c => c.startsWith('hadron_token='))?.split(';')[0];
+    expect(cookie).toBeTruthy();
+    const consent = await fetch(new URL(callback.headers.get('location')!, baseUrl), {redirect: 'manual', headers: {cookie: cookie!}});
+    expect(consent.status).toBe(200);
+    const consentHtml = await consent.text();
+    expect(consentHtml).toContain('Authorize Claude Desktop');
+    expect(consentHtml).toContain('value="approve"');
+    expect(consentHtml).not.toContain('Sign in to Hadron');
+    const hidden = Object.fromEntries([...consentHtml.matchAll(/<input type="hidden" name="([^"]+)"\s+value="([^"]*)"/g)].map(m => [m[1], htmlValue(m[2])]));
+    const original = new URLSearchParams(q);
+    for (const key of ['client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'resource']) expect(hidden[key], key).toBe(original.get(key));
+    expect(hidden.scope.split(' ').sort()).toEqual((scope ?? 'mcp').split(' ').sort());
+    expect(hidden._csrf).toBeTruthy();
+    expect(hidden.grant_proof).toBeTruthy();
   });
 });
 
@@ -100,7 +169,8 @@ describe('hostile request targets never yield a non-local link', () => {
     expect(href.startsWith('/auth/github?return_to=')).toBe(true);
     expect(new URL(href, 'http://x.invalid').searchParams.get('return_to')).toBe(`/oauth/authorize?${q}`);
     const email = html.match(/<a href="([^"]+)">Use email instead/)![1].replace(/&amp;/g, '&');
-    expect(email.startsWith('/oauth/authorize?')).toBe(true);
+    expectLocalAuthorizeLink(email, q);
+    expect(new URL(email, baseUrl).searchParams.get('state')).toBe(new URLSearchParams(q).get('state'));
   });
   it('an absolute-form request line addressed to another origin still renders only local links, and its return_to fails isServerLocalPath', async () => {
     const q = query();
