@@ -4,7 +4,6 @@ import {mkdtempSync, writeFileSync, readFileSync, symlinkSync, existsSync, readd
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {run} from './load.mjs';
 const here=dirname(fileURLToPath(import.meta.url));
 const shell=(body,dir,env={})=>spawnSync('bash',['-c',`set -euo pipefail; . '${here}/cleanup.sh'; ${body}`],{cwd:dir,env:{...process.env,...env},encoding:'utf8'});
 const scratch=()=>mkdtempSync(join(tmpdir(),'dorian-diag2619-'));
@@ -45,7 +44,7 @@ test.each(['abort','stale','empty'])('idle-tail %s cannot produce a successful f
   const lines=kind==='abort'?'{"kind":"sample","at":1000}\n{"kind":"abort","why":"rss"}':kind==='stale'?'{"kind":"sample","at":100}':'{"kind":"config"}';
   writeFileSync(join(dir,'source'),lines+'\n');
   const r=shell(`app_exec(){ cat source; }; finish_samples '${join(dir,'out')}' 2 1000`,dir);
-  expect(r.status).not.toBe(0);expect(readFileSync(join(dir,'out'),'utf8')).not.toContain('pg_activity');
+  expect(r.status).not.toBe(0);if (existsSync(join(dir,'out'))) expect(readFileSync(join(dir,'out'),'utf8')).not.toContain('pg_activity');
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
 test('fresh completed sample control passes the success path',()=>{
@@ -67,8 +66,13 @@ test('atomic same-name reservation refuses a concurrent holder without releasing
 });
 test('teardown ownership needs both state receipt and live instance marker',()=>{
  const dir=scratch();try{
-  const state=join(dir,'state');mkdirSync(state);writeFileSync(join(state,'backend'),'incus\n');writeFileSync(join(state,'diagnose-owner'),'mine\n');
+  const state=join(dir,'state');mkdirSync(state);const lock=state+'.diagnose-lock';mkdirSync(lock);writeFileSync(join(lock,'owner'),'mine');writeFileSync(join(state,'backend'),'incus\n');writeFileSync(join(state,'diagnose-owner'),'mine\n');
   writeFileSync(join(dir,'incus'),'#!/bin/sh\nif [ "$1" = list ]; then echo synthetic; else echo somebody-else; fi\n',{mode:0o755});
-  expect(shell(`DIAG_STATE='${state}'; DIAG_PROJECT=synthetic; DIAG_RUN_TOKEN=mine; stack_owned`,dir,{PATH:dir+':'+process.env.PATH}).status).not.toBe(0);
+  const check=()=>shell(`DIAG_STATE='${state}'; DIAG_LOCK='${lock}'; DIAG_PROJECT=synthetic; DIAG_RUN_TOKEN=mine; stack_owned`,dir,{PATH:dir+':'+process.env.PATH}).status;
+  expect(check()).not.toBe(0);
+  writeFileSync(join(dir,'incus'),'#!/bin/sh\nif [ "$1" = list ]; then echo synthetic; else echo mine; fi\n',{mode:0o755});
+  expect(check()).toBe(0);
+  writeFileSync(join(dir,'incus'),'#!/bin/sh\nexit 0\n',{mode:0o755});
+  expect(check()).not.toBe(0);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });

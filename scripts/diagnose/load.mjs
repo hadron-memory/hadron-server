@@ -19,13 +19,13 @@ async function initialize(base, key, fetchImpl) {
 
 export async function run({ base, key, workload, durationMs, signal, cap = 25, fetchImpl = fetch }) {
   const w = parseWorkload(workload, cap);
-  const counts = { ok: 0, capRefused: 0, other: 0, closeOk: 0, closeFailed: 0 };
-  const note = (s) => { if (s === 200) counts.ok++; else if (s === 429) counts.capRefused++; else counts.other++; };
+  const counts = { ok: 0, capRefused: 0, other: 0, closeOk: 0, closeFailed: 0, missingSession: 0 };
+  const note = ({status, sid}) => { if (status === 200) { counts.ok++; if (!sid) { counts.missingSession++; if (w.close) counts.closeFailed++; } } else if (status === 429) counts.capRefused++; else counts.other++; };
   const end = Date.now() + durationMs;
-  if (w.hold) for (let i = 0; i < w.hold; i++) note((await initialize(base, key, fetchImpl)).status);
+  if (w.hold) for (let i = 0; i < w.hold; i++) note(await initialize(base, key, fetchImpl));
   while (w.perMin && Date.now() < end && !signal?.aborted) {
     const { status, sid } = await initialize(base, key, fetchImpl);
-    note(status);
+    note({status, sid});
     if (w.close && sid) {
       // A close that did not happen leaves the session open, which would invalidate the closed-vs-churn comparison.
       const r = await fetchImpl(`${base}/mcp`, { method: 'DELETE', headers: { authorization: `Bearer ${key}`, 'mcp-session-id': sid } }).catch(() => null);
@@ -38,11 +38,18 @@ export async function run({ base, key, workload, durationMs, signal, cap = 25, f
   return counts;
 }
 
+// A refused request is data, not evidence that a workload ran successfully.
+export function workloadValid(workload, c) {
+  return c.other === 0 && c.missingSession === 0 && c.closeFailed === 0
+    && (workload === 'idle' || c.ok > 0)
+    && (workload !== 'closed' || (c.capRefused === 0 && c.closeOk === c.ok));
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }
   const counts = await run({ base, key, workload, durationMs: Number(durS) * 1000, cap: Number(process.env.DIAG_SESSION_CAP) || 25 });
   console.log(JSON.stringify({ kind: 'load', workload, ...counts }));
-  if (counts.closeFailed > 0) { console.error('closed workload: some DELETEs failed; the control is invalid'); process.exit(5); }
+  if (!workloadValid(workload, counts)) { console.error('workload failed acceptance; diagnosis is invalid'); process.exit(5); }
 }

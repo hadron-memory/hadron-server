@@ -50,7 +50,7 @@ test('an existing stack name is refused and the cleanup trap never runs', () => 
 });
 test('a fresh name is accepted', () => {
   const dir = mkdtempSync(join(tmpdir(), 'diag-own-'));
-  try { assert.equal(sh(`refuse_existing_stack '${join(dir, 'none')}' hadron-e2e-zz-not-real`, dir).status, 0); }
+  try { assert.equal(sh(`incus() { return 0; }; refuse_existing_stack '${join(dir, 'none')}' hadron-e2e-zz-not-real`, dir).status, 0); }
   finally { rmSync(dir, { recursive: true, force: true }); }
 });
 test('raw failure logs stay in a private file; stderr carries only a fixed line', () => {
