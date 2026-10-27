@@ -30,10 +30,10 @@ exec '${process.execPath}' "$@"\n`);
    *diagnose-samples.jsonl*) printf '{"kind":"sample","at":%s}\\n' "$(date +%s%3N)"; if [ "$MODE" = abort ]; then echo '{"kind":"abort","why":"rss"}'; fi;;
    *credentials.json*) echo synthetic-private-key;;
    *pg_stat_activity*) echo 2;;
-   *health*) [ "$MODE" != dead ]; ;;
+   *health*) while [ "$1" != app ]; do shift; done; shift; NODE_OPTIONS="--import $FIXTURE/health.mjs" "$@";;
   esac;;
  *) exit 8;;
-esac\n`.replace('[ "$MODE" != dead ]; ;;','[ "$MODE" != dead ];;'));
+esac\n`);
  writeFileSync(join(dir,'stack.sh'),`#!/bin/bash
 set -eu
 state="$XDG_STATE_HOME/hadron-e2e/hadron-e2e-fixture"
@@ -44,18 +44,19 @@ case "$1" in
  down) echo down >> "$FIXTURE/down"; rm -rf "$state"; rm "$FIXTURE/instance";;
  logs) echo private-log;;
 esac\n`,{mode:0o755});
+ writeFileSync(join(dir,'health.mjs'),"globalThis.fetch=async()=>{if(process.env.MODE==='dead')throw new Error('synthetic');return {ok:process.env.MODE!=='unhealthy'};};\n");
  const env={...process.env,FIXTURE:dir,MODE:mode,PATH:bin+':'+process.env.PATH,TMPDIR:dir,XDG_STATE_HOME:join(dir,'state'),DIAG_OUT:join(dir,'samples'),DIAG_IDLE_S:'0.01',E2E_BACKEND:'incus'};
  const args=[join(here,'run.sh'),'fixture','41001','41002','idle','1'];
  return {dir,env,args,run:()=>spawnSync('bash',args,{env,encoding:'utf8',timeout:10_000}),clean:()=>rmSync(dir,{recursive:true,force:true})};
 }
-test.each(['abort','dead'])('real runner refuses %s during idle tail and tears down its stack',mode=>{
+test.each(['abort','dead','unhealthy'])('real runner refuses %s during idle tail and tears down its stack',mode=>{
  const f=fixture(mode);try{const r=f.run();expect(r.status,r.stderr).not.toBe(0);expect(readFileSync(join(f.dir,'down'),'utf8')).toBe('down\n');}finally{f.clean();}
 });
 test('real runner success requires fresh samples and releases its reservation',()=>{
  const f=fixture('success');try{const r=f.run();expect(r.status,r.stderr).toBe(0);expect(readFileSync(join(f.dir,'samples'),'utf8')).toContain('pg_activity');expect(existsSync(join(f.dir,'state/hadron-e2e/hadron-e2e-fixture.diagnose-lock'))).toBe(false);}finally{f.clean();}
 });
 test('failed up without this run receipt never tears down existing state',()=>{
- const f=fixture('failed-up');try{const r=f.run();expect(r.status).toBe(23);expect(existsSync(join(f.dir,'down'))).toBe(false);expect(readFileSync(join(f.dir,'state/hadron-e2e/hadron-e2e-fixture/sentinel'),'utf8')).toBe('KEEP\n');}finally{f.clean();}
+ const f=fixture('failed-up');try{const r=f.run();expect(r.status).toBe(23);expect(existsSync(join(f.dir,'down'))).toBe(false);expect(r.stderr).toContain('inspect private state:');expect(readFileSync(join(f.dir,'state/hadron-e2e/hadron-e2e-fixture/sentinel'),'utf8')).toBe('KEEP\n');}finally{f.clean();}
 });
 test('failed inspection refuses before up or teardown',()=>{
  const f=fixture('list-failure');try{expect(f.run().status).toBe(2);expect(existsSync(join(f.dir,'instance'))).toBe(false);expect(existsSync(join(f.dir,'down'))).toBe(false);}finally{f.clean();}

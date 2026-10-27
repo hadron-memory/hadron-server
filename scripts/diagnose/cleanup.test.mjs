@@ -78,10 +78,10 @@ test('a failed sample read fails the success path and leaves no stale or pg_acti
   const dir = mkdtempSync(join(tmpdir(), 'diag-fin-'));
   try {
     const out = join(dir, 's.jsonl');
-    const r = sh(`app_exec() { return 1; }; finish_samples '${out}' 2`, dir);
+    const r = sh(`app_exec() { return 1; }; finish_samples '${out}' 2 1000`, dir);
     assert.notEqual(r.status, 0);
     assert(!existsSync(out));
-    const empty = sh(`app_exec() { :; }; finish_samples '${out}' 2`, dir);
+    const empty = sh(`app_exec() { :; }; finish_samples '${out}' 2 1000`, dir);
     assert.notEqual(empty.status, 0); assert(!existsSync(out));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -89,8 +89,8 @@ test('the success path appends the pg_activity control line after the samples', 
   const dir = mkdtempSync(join(tmpdir(), 'diag-fin-'));
   try {
     const out = join(dir, 's.jsonl');
-    const r = sh(`app_exec() { printf '{"kind":"sample"}\\n'; }; finish_samples '${out}' 7`, dir);
+    const r = sh(`app_exec() { printf '{"kind":"sample","at":1000}\\n'; }; finish_samples '${out}' 7 1000`, dir);
     assert.equal(r.status, 0);
-    assert.equal(readFileSync(out, 'utf8'), '{"kind":"sample"}\n{"kind":"pg_activity","connectionsAfterLoad":7}\n');
+    assert.equal(readFileSync(out, 'utf8'), '{"kind":"sample","at":1000}\n{"kind":"pg_activity","connectionsAfterLoad":7}\n');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -36,11 +36,17 @@ preserve_samples() {
 
 # finish_samples <dest> <connections>: the success path. Mandatory copy, then the pg_stat_activity control line.
 finish_samples() {
-  local dest=$1 conns=$2 complete
+  local dest=$1 conns=$2 expected=${3:?expected sample end required} complete token attempt
   complete=$(umask 077; mktemp "$(dirname -- "$dest")/.diagnose-finish-XXXXXXXX") || return 5
-  if copy_samples "$complete" && node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" "$complete" "${3:-}"; then
-    if printf '{"kind":"pg_activity","connectionsAfterLoad":%s}\n' "$conns" >> "$complete" && mv -fT -- "$complete" "$dest"; then return 0; fi
-  fi
+  # A live append can race cat. Retry bounded fresh copies; never discard a fragment
+  # that could be an abort record, and require positive validator execution evidence.
+  for attempt in 1 2 3; do
+    if copy_samples "$complete" && token=$(node "$(dirname -- "${BASH_SOURCE[0]}")/validate-samples.mjs" "$complete" "$expected") && [ "$token" = validated ]; then
+      if printf '{"kind":"pg_activity","connectionsAfterLoad":%s}\n' "$conns" >> "$complete" && mv -fT -- "$complete" "$dest"; then return 0; fi
+      break
+    fi
+    sleep .05
+  done
   rm -f -- "$complete"; return 5
 }
 
@@ -61,7 +67,7 @@ acquire_stack_reservation() {
   mkdir -p -- "$(dirname -- "$DIAG_STATE")" || return 1
   (umask 077; mkdir -- "$DIAG_LOCK") || { echo "diagnosis stack already reserved" >&2; return 1; }
   DIAG_RUN_TOKEN=$(node -e "process.stdout.write(require('crypto').randomUUID())") || { rmdir -- "$DIAG_LOCK"; return 1; }
-  printf '%s\n' "$DIAG_RUN_TOKEN" > "$DIAG_LOCK/owner"
+  if ! printf '%s\n' "$DIAG_RUN_TOKEN" > "$DIAG_LOCK/owner"; then rm -f -- "$DIAG_LOCK/owner"; rmdir -- "$DIAG_LOCK"; return 1; fi
   if ! refuse_existing_stack "$DIAG_STATE" "$DIAG_PROJECT"; then release_stack_reservation; return 1; fi
   export DIAG_RUN_TOKEN
 }

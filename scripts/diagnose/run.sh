@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
+# Linux/GNU tools required (Incus, mv -T, date +%s%3N).
 # #2589 diagnosis runner. Private e2e stack only; never touches production.
 # Stages a throwaway copy of HEAD with the diagnose overlay, so scripts/e2e stays unchanged in the PR.
 # usage: run.sh <worker> <api-port> <portal-port> <workload> [duration-s]
-# env: DIAG_OUT (samples file, default $TMPDIR/diagnose-<project>.jsonl so a failed run always keeps its samples; raw failure logs go to $DIAG_OUT.private.log, mode 0600), DIAG_IDLE_S (idle tail, default 300)
+# env: DIAG_OUT (default $TMPDIR/diagnose-<project>.jsonl), DIAG_IDLE_S (default 300).
+# Failed samples/logs are retained only with verified instance ownership; otherwise private state is left for inspection.
+# Raw failure logs go to $DIAG_OUT.private.log, mode 0600.
 set -euo pipefail
 worker=${1:?worker}; api=${2:?api port}; portal=${3:?portal port}; workload=${4:?workload}; dur=${5:-600}
 # Match stack.sh's name contract before deriving any reservation path.
@@ -27,10 +30,11 @@ down() {
     if [ "$rc" != 0 ]; then keep_logs_private "$DIAG_OUT.private.log" bash -c 'cd "$1" && scripts/e2e/stack.sh logs "$2"' _ "$stage/src" "$worker"; fi
     rm -- "$state/diagnose-owner"
     (cd "$stage/src" && scripts/e2e/stack.sh down "$worker") || cleanup_rc=5
-  elif [ "$rc" = 0 ]; then
-    echo "stack ownership lost; refusing teardown" >&2; cleanup_rc=5
+  else
+    echo "stack ownership unverified; refusing capture/teardown; inspect private state: $state (manual ownership check required)" >&2
+    if [ "$rc" = 0 ]; then cleanup_rc=5; fi
   fi
-  if [ -n "$stage" ]; then git -C "$root" worktree remove --force "$stage/src"; rm -rf -- "$stage"; fi
+  if [ -n "$stage" ]; then git -C "$root" worktree remove --force "$stage/src" || cleanup_rc=5; rm -rf -- "$stage"; fi
   release_stack_reservation || cleanup_rc=5
   if [ "$rc" = 0 ]; then rc=$cleanup_rc; fi
   exit "$rc"

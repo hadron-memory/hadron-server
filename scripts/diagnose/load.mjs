@@ -1,3 +1,5 @@
+import {realpathSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
 // Load driver for #2589. One principal (HADRON_DIAG_KEY from the env, never printed).
 // Workloads: churn (W1/W2: initialize with no Mcp-Session-Id, never closed), closed (C1: DELETE after),
 // idle (C2), held (C3: N sessions held open). Output is counts only.
@@ -45,7 +47,7 @@ export function workloadValid(workload, c) {
     && (workload !== 'closed' || (c.capRefused === 0 && c.closeOk === c.ok));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const [base, workload, durS] = process.argv.slice(2);
   const key = process.env.HADRON_DIAG_KEY;
   if (!key) { console.error('HADRON_DIAG_KEY is required'); process.exit(2); }

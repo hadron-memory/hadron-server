@@ -72,7 +72,18 @@ test('teardown ownership needs both state receipt and live instance marker',()=>
   expect(check()).not.toBe(0);
   writeFileSync(join(dir,'incus'),'#!/bin/sh\nif [ "$1" = list ]; then echo synthetic; else echo mine; fi\n',{mode:0o755});
   expect(check()).toBe(0);
+  writeFileSync(join(state,'diagnose-owner'),'foreign');expect(check()).not.toBe(0);writeFileSync(join(state,'diagnose-owner'),'mine');
+  writeFileSync(join(state,'backend'),'docker');expect(check()).not.toBe(0);writeFileSync(join(state,'backend'),'incus');
   writeFileSync(join(dir,'incus'),'#!/bin/sh\nexit 0\n',{mode:0o755});
   expect(check()).not.toBe(0);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+test('churn rejects initialize success without a usable session id',async()=>{
+ expect((await driver(200,null,'churn')).code).not.toBe(0);
+});
+test('a failed reservation owner write refuses and removes its own new lock',()=>{
+ const dir=scratch();try{
+  const state=join(dir,'state');const r=shell(`printf(){ return 1; }; incus(){ return 0; }; acquire_stack_reservation '${state}' synthetic`,dir);
+  expect(r.status).not.toBe(0);expect(existsSync(state+'.diagnose-lock')).toBe(false);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
