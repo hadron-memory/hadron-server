@@ -244,12 +244,22 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
     await expect(db.agentTask.update({ where: { id: (await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } })).id }, data: { status: 'pending' } })).rejects.toThrow(/stays in backlog/);
   });
 
-  it('naming AT0 as the parent is the same as naming none', async () => {
-    await mk(appX, 'seed', bob);
-    const t: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT0', title: 'under zero' } }, as(bob));
-    expect(handleOf(t)).toBe('AT0.2');
-    const viaId: any = await M.createAgentTask({}, { input: { appRef: appX.id, parentTaskId: t.parentTaskId, title: 'again' } }, as(bob));
-    expect(handleOf(viaId)).toBe('AT0.3');
+  it('naming AT0 as the parent is refused (by handle, by id, with an App, with project); a plain create takes the root path', async () => {
+    const first = await mk(appX, 'seed', bob);
+    const zero = await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } });
+    const before = await db.agentTask.count({ where: { appId: appX.id } });
+    for (const input of [
+      { parentTaskId: 'AT0', title: 'x' },
+      { parentTaskId: zero.id, title: 'x' },
+      { appRef: appX.id, parentTaskId: 'AT0', title: 'x' },
+      { parentTaskId: 'AT0', project: true, title: 'x' },
+    ]) {
+      await expect(M.createAgentTask({}, { input }, as(bob))).rejects.toThrow();
+    }
+    expect(await db.agentTask.count({ where: { appId: appX.id } })).toBe(before);
+    const plain: any = await M.createAgentTask({}, { input: { appRef: appX.id, title: 'plain' } }, as(bob));
+    expect(handleOf(plain)).toBe('AT0.2');
+    expect(handleOf(first)).toBe('AT0.1');
   });
 
   it('the matcher and the stall evaluator never see it (backlog only)', async () => {

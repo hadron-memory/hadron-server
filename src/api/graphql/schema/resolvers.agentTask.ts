@@ -1065,9 +1065,9 @@ export const agentTaskMutations = {
       if (!readable) throw notFound(parentId);
       ({ app, actor } = readable);
       parentTaskId = readable.task.id;
-      // #2553: AT0 is the implicit parent of a task with no project; naming it is the same as naming none. (Nobody is
-      // AT0's assignee, so it would otherwise refuse every creator.) The App is the one it belongs to.
-      if (readable.task.handle === PROJECT_ZERO_HANDLE) { parentId = null; parentTaskId = null; }
+      // #2553: AT0 is the implicit parent of a task with no project, never a parent a caller names: a plain create takes
+      // the ROOT gate and owner rules (this input names no parent), so naming AT0 would reach the child gate instead.
+      if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskId to make a task with no project.');
       // A parent in another App reads as not-found: no cross-App oracle (#1705).
       if (input.appRef) {
         let namedAppId: string | null = null;
