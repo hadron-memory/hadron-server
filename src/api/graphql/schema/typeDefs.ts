@@ -6140,7 +6140,7 @@ export const typeDefs = `#graphql
   enum MemoryValidationCheck {
     "An edge whose target node is missing OR soft-deleted. A hard-deleted target cannot occur - Edge.target is FK-enforced with onDelete: Cascade - so in practice this means a dangling edge to a tombstone."
     BROKEN_REF
-    "A node with no description, content, or abstract."
+    "A non-object node with no description, content, or abstract. Object nodes (objectType set) are data-only by design and never sparse (#2516)."
     SPARSE
     "The abstract no longer reflects current content (spec 032 FR-011)."
     STALE_ABSTRACT
