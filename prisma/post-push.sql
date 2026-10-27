@@ -663,6 +663,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2441: append-only automation adoption events.
 \ir automation-adoption-invariants.sql
 
+-- #2484: an App's prefix-scoped write grant for userless runs, and its append-only events.
+\ir app-memory-write-grant-invariants.sql
+
 -- #1705: agent task shape + the append-only team event stream. One source,
 -- shared verbatim with migration 20261008010000_agent_tasks (pinned by
 -- src/lib/agentTasks/invariants.test.ts).

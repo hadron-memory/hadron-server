@@ -9335,7 +9335,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Every successful answer opens with an `active memory:` line naming the memory selected on this connection, or `none` when none is set or it is no longer readable (#2515); it describes the connection, not any session row, and is not a guarantee of where a write lands. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
     SHAPE_HADRON_WHOAMI,
     async ({ limit, includeEnded, app, workerRef }) => {
       // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
@@ -9422,14 +9422,25 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (selectionProblem === 'ambiguous') {
         return { ...textResult('[ambiguous_ref] More than one match among your sessions. Specify an App or use an exact App/Worker ID or URN.'), isError: true as const };
       }
+      // #2515 — this connection's active-memory selection, re-authorized now
+      // through the same read gate hadron_set_active_memory uses. Read-only: a
+      // gone or unreadable selection answers `none` and is neither cleared nor
+      // replaced. A genuine infrastructure error propagates as a tool failure.
+      const activeMemoryLine = await (async () => {
+        const mem = activeMemoryUrn ? await resolveVisibleMemoryByUrn(auth, activeMemoryUrn, 'read') : null;
+        if (!mem) return 'active memory: none\n';
+        const named = await db.memory.findUnique({ where: { id: mem.id }, select: { name: true } });
+        return `active memory: ${safeEmitEntityUrnV2('memory', mem.urn)}${named?.name ? ` (${named.name})` : ''}\n`;
+      })();
       if (sessions.length === 0 && (app !== undefined || workerRef !== undefined)) {
-        return textResult('No matching session.');
+        return textResult(`${activeMemoryLine}No matching session.`);
       }
       if (sessions.length === 0) {
         return textResult(
-          includeEnded
+          activeMemoryLine +
+          (includeEnded
             ? 'You have no sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>") to work as a teammate.'
-            : 'You have no open sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>"); pass includeEnded to see recent ended ones.',
+            : 'You have no open sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>"); pass includeEnded to see recent ended ones.'),
         );
       }
 
@@ -9522,7 +9533,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : `${sessions.length} session(s):\n`;
 
       return textResult(
-        `${header}${lines.join('\n')}\n\n` +
+        `${activeMemoryLine}${header}${lines.join('\n')}\n\n` +
           // #1034: "session id" stays GENERAL here, because this list includes
           // unbound sessions whose own row says "working as: nobody" — calling
           // every id a worker session id would contradict the line above it and
@@ -11265,7 +11276,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_validate',
-    'Check a memory for broken edge references, sparse nodes, stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class), and property-schema conformance (#725 — a node whose objectType/properties violate the memory\'s declared schema; catches records written before the schema was defined/tightened, a non-destructive audit). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
+    'Check a memory for broken edge references, sparse nodes (non-object nodes with no description, content or abstract; object nodes are exempt, #2516), stale-abstract warnings (spec 032 FR-011 — abstract no longer reflects current content), embedding-failure flags (spec 033 — nodes with `embedding_failed_at` set; covers BOTH in-flight transient failures awaiting retry AND terminal failures, including the #206 encrypted-no-plaintext perma-fail class), and property-schema conformance (#725 — a node whose objectType/properties violate the memory\'s declared schema; catches records written before the schema was defined/tightened, a non-destructive audit). The memory URN MUST be fully qualified. On encrypted memories the stale-abstract check is skipped in v1 (hadron_validate does not decrypt; tracked by #206).',
     SHAPE_HADRON_VALIDATE,
     async ({ memoryUrn }) => {
       // Spec 022: qualification at the API boundary.

@@ -163,9 +163,15 @@ export async function validateMemoryNodes(
         });
       }
     }
+    // #725: normalizeObjectType so the audit matches write-seam semantics — a
+    // legacy blank objectType means "no collection", not an undeclared one.
+    // (Tombstone exclusion moved to the fetch itself in #884 — every check
+    // now sees live nodes only.)
+    const auditObjectType = normalizeObjectType(node.objectType);
     // Spec 031 FR-011: an abstract counts as legitimate content, so a node
-    // carrying only an abstract is NOT sparse.
-    if (!node.description && !node.content && !node.abstract) {
+    // carrying only an abstract is NOT sparse. #2516 (cor:api:020:03): an
+    // object node is never sparse — objects are data-only by design.
+    if (auditObjectType == null && !node.description && !node.content && !node.abstract) {
       record({
         kind: 'SPARSE',
         nodeId: node.id,
@@ -200,11 +206,6 @@ export async function validateMemoryNodes(
         detail: node.embeddingError?.trim() || 'unknown',
       });
     }
-    // #725: normalizeObjectType so the audit matches write-seam semantics — a
-    // legacy blank objectType means "no collection", not an undeclared one.
-    // (Tombstone exclusion moved to the fetch itself in #884 — every check
-    // now sees live nodes only.)
-    const auditObjectType = normalizeObjectType(node.objectType);
     if (conformanceSchema != null && auditObjectType != null) {
       try {
         validateNodeAgainstSchema(
