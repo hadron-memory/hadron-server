@@ -270,7 +270,8 @@ export async function updateNodeFromGitSync(
       update = rest;
     }
   }
-  const changes = diffNodeChanges(before, update);
+  // Compare the logical JSON value, not Prisma's persistence-only null sentinel.
+  const changes = diffNodeChanges(before, update.data === Prisma.DbNull ? { ...update, data: null } : update);
 
   if (changes.length > 0) {
     await createNodeRevision(

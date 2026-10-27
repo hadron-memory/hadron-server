@@ -132,3 +132,13 @@ it.each(['type: false', 'data: .nan', 'data: &cycle [*cycle]'])('refuses malform
   expect((await syncGraphFromGithub(graph)).error).toBeDefined();
   expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', data: payload });
 });
+
+it('does not mint a new revision on repeated imports of an explicit null payload', async () => {
+  writeFileSync(join(seed, 'kept.md'), '---\nname: Kept\ntype: data\ndata: null\n---\n'); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  const row = await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'kept' } });
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  const revisions = await db.nodeRevision.count({ where: { nodeId: row.id } });
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.nodeRevision.count({ where: { nodeId: row.id } })).toBe(revisions);
+});
