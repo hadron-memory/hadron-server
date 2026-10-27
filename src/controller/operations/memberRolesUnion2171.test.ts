@@ -157,7 +157,7 @@ describe('joinApp self-join with a union', () => {
 });
 
 describe('serialization: the deciding union is exactly the locked rows', () => {
-  it('ensureAppMember cannot admit a role from an install committed after its Agent fences (#2487)', async () => {
+  it('characterizes ensureAppMember admission from its locked Agent set after a later install (#2487)', async () => {
     // Finite capacity also exercises forwarding $executeRaw through the proxy.
     await mkAgent({ maxMembers: 5, memberRoles: ['owner'] }, { createdAt: t0 });
     const userId = await mkUser();
