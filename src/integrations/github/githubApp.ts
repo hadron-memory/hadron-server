@@ -96,7 +96,7 @@ export class ScopedMintError extends Error {
 }
 
 /**
- * Mint an installation token narrowed to `repositories` and exactly
+ * Mint an installation token narrowed to one repository and exactly
  * `permissions` (#2485, epic #2435 slice C).
  *
  * Same App, same installation as the sync credential, narrowed per call:
@@ -108,13 +108,16 @@ export class ScopedMintError extends Error {
  * The grant GitHub reports back is checked too: a token whose `permissions`
  * differ from the request in any key or level is discarded unused
  * (SCOPE_MISMATCH), so a wider credential can never leave this function.
+ * So is one whose `repositories` is not exactly `owner/name`: the request
+ * can only name the repository, which GitHub resolves inside the
+ * installation's own account, so a different owner shows up here.
  * The token is returned to the caller only; callers must not cache, log or
  * return it.
  */
 export async function mintScopedInstallationToken(
   installationId: number,
   credentials: GithubAppCredentials | undefined,
-  scope: { repositories: string[]; permissions: Record<string, 'read'> },
+  scope: { repository: { owner: string; name: string }; permissions: Record<string, 'read'> },
 ): Promise<string> {
   let jwt: string;
   try {
@@ -125,7 +128,7 @@ export async function mintScopedInstallationToken(
   let res: Response;
   try {
     res = await postAccessTokens(installationId, jwt, {
-      repositories: scope.repositories,
+      repositories: [scope.repository.name],
       permissions: scope.permissions,
     });
   } catch {
@@ -137,13 +140,17 @@ export async function mintScopedInstallationToken(
     const refused = res.status === 403 || res.status === 404 || res.status === 422;
     throw new ScopedMintError(refused ? 'REFUSED' : 'UNAVAILABLE', res.status);
   }
-  let data: { token?: unknown; permissions?: unknown };
+  let data: { token?: unknown; permissions?: unknown; repositories?: unknown };
   try {
     data = (await res.json()) as typeof data;
   } catch {
     throw new ScopedMintError('UNAVAILABLE', res.status);
   }
-  if (typeof data.token !== 'string' || !sameGrant(data.permissions, scope.permissions)) {
+  if (
+    typeof data.token !== 'string' ||
+    !sameGrant(data.permissions, scope.permissions) ||
+    !sameRepository(data.repositories, scope.repository)
+  ) {
     throw new ScopedMintError('SCOPE_MISMATCH');
   }
   return data.token;
@@ -156,6 +163,16 @@ function sameGrant(granted: unknown, requested: Record<string, string>): boolean
   const keys = Object.keys(g);
   if (keys.length !== Object.keys(requested).length) return false;
   return keys.every((k) => requested[k] === g[k]);
+}
+
+/** True when GitHub's reported repositories are exactly `owner/name`, ignoring case. */
+function sameRepository(granted: unknown, requested: { owner: string; name: string }): boolean {
+  if (!Array.isArray(granted) || granted.length !== 1) return false;
+  const fullName = (granted[0] as { full_name?: unknown } | null)?.full_name;
+  return (
+    typeof fullName === 'string' &&
+    fullName.toLowerCase() === `${requested.owner}/${requested.name}`.toLowerCase()
+  );
 }
 
 /**
