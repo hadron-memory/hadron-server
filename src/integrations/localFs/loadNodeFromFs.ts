@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'fs';
+import { validateNodeDataExtractionSpecs } from '../../lib/edge-conditions/reserved-names.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
@@ -40,6 +41,7 @@ interface NodeYaml {
   name: string;
   urn?: string;
   type?: string;
+  data?: unknown;
   /** YAML may carry any scalar here; only a non-blank string is read (#1348). */
   objectType?: unknown;
   description?: string;
@@ -84,6 +86,36 @@ interface NodeYaml {
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+/** #2556: omitted keys preserve stored values; explicit JSON null clears data. */
+function typedPayloadFromMeta(meta: NodeYaml): Pick<Partial<Node>, 'nodeType' | 'data'> {
+  const result: Pick<Partial<Node>, 'nodeType' | 'data'> = {};
+  // Gate6434957685: blank/foreign values are absent; link is the legacy isLink marker.
+  if (typeof meta.type === 'string' && meta.type.trim() !== '' && meta.type !== 'link') {
+    // cor:dmo:020:04: all other words are open vocabulary, retained exactly.
+    result.nodeType = meta.type;
+  }
+  if ('data' in meta) {
+    const active = new Set<object>();
+    const check = (value: unknown): void => {
+      if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+      if (typeof value === 'number' && Number.isFinite(value)) return;
+      if (typeof value !== 'object' || value === null || active.has(value)
+        || (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+        throw new Error('Node data must be finite, acyclic JSON');
+      }
+      active.add(value);
+      for (const child of Object.values(value)) check(child);
+      active.delete(value);
+    };
+    check(meta.data);
+    // Import is a write surface: share the API's reserved extraction namespace gate.
+    const extraction = validateNodeDataExtractionSpecs(meta.data);
+    if (!extraction.ok) throw new Error(extraction.error.message);
+    result.data = meta.data as Node['data'];
+  }
+  return result;
 }
 
 function placeholderFromMeta(meta: NodeYaml, source: string): { isPlaceholder: true } | Record<string, never> {
@@ -342,6 +374,7 @@ async function loadFrontmatterNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      ...typedPayloadFromMeta(meta),
       // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
       ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,
@@ -401,6 +434,7 @@ async function loadLegacyNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      ...typedPayloadFromMeta(meta),
       // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
       ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,
