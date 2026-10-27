@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { DECISION_FAMILY_WHERE } from '../lib/decisions/index.js';
+import { withSweepLock, type SweepLockResult } from '../lib/sweepLock.js';
 
 /**
  * Deletes expired anonymous memories. A memory is "anonymous" when it was
@@ -25,6 +26,15 @@ export async function cleanupAnonymousMemories(db: PrismaClient): Promise<number
 }
 
 /**
+ * One loop tick under the sweep lock (#445): a second server process running the
+ * same tick skips instead of issuing a duplicate delete. The delete is
+ * self-idempotent, so a lost lock only costs a redundant statement.
+ */
+export function runAnonymousCleanupTick(db: PrismaClient): Promise<SweepLockResult<number>> {
+  return withSweepLock('anonymous-memory-cleanup', () => cleanupAnonymousMemories(db));
+}
+
+/**
  * Starts a recurring cleanup loop. Returns a handle that can be cleared to
  * stop the loop (e.g. during tests or graceful shutdown).
  *
@@ -40,9 +50,9 @@ export function startAnonymousMemoryCleanupLoop(
 
   const run = async () => {
     try {
-      const count = await cleanupAnonymousMemories(db);
-      if (count > 0) {
-        console.log(`[cleanup] deleted ${count} expired anonymous memories`);
+      const result = await runAnonymousCleanupTick(db);
+      if (result.ran && result.value > 0) {
+        console.log(`[cleanup] deleted ${result.value} expired anonymous memories`);
       }
     } catch (err) {
       console.error('[cleanup] anonymous memory cleanup failed:', err);
