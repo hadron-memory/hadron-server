@@ -36,6 +36,8 @@ import { generateId } from '../lib/id.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { TEAM_CHAT_LOC } from '../api/graphql/schema/resolvers.teamChat.js';
+import { ensureChannelRow } from '../lib/channels.js';
+import { isChatSeqUniqueViolation } from '../lib/prismaErrors.js';
 
 const M = resolvers.Mutation as any;
 
@@ -144,6 +146,105 @@ beforeEach(async () => {
       id: generateId(), memoryId: legacyMem.id, loc: TEAM_CHAT_LOC,
       name: 'team', nodeType: 'chat', createdBy: admin.id, data: { messageCount: 3 },
     },
+  });
+});
+
+describe('#2622 — the seat findings (fix head)', () => {
+  // Riana §10 P2, reproduced at 049674ad: a chat root whose loc CONTAINS a
+  // `messages` segment folds its posts into an ANCESTOR's index identity while
+  // the allocator scans the root's own `<root>:messages:` prefix — the index
+  // then refuses posts the allocator cannot see colliding, forever (soft
+  // delete does not clear it; the constraint counts tombstones by design).
+  // The fix reserves the segment at the address boundary: no Channel may TAKE
+  // or ADOPT an address containing one, so the index's first-separator
+  // identity and the allocator's prefix can never disagree. The index itself
+  // is unchanged — first-separator identity stays the reader's prefix view.
+  it("refuses a Channel address containing a 'messages' segment (LOC_RESERVED_SEGMENT)", async () => {
+    await expectCode(
+      M.createChannel({}, { input: { memoryRef: legacyMem.urn, loc: 'ops:messages:alerts', name: 'alerts' } }, ctx(admin.id)),
+      'LOC_RESERVED_SEGMENT',
+    );
+  });
+
+  it("refuses ADOPTING an existing 'messages'-bearing root (ensureChannelRow — the backfill door)", async () => {
+    const rootId = generateId();
+    await db.node.create({
+      data: { id: rootId, memoryId: legacyMem.id, loc: 'foo:messages:bar', name: 'adopt me', nodeType: 'chat', createdBy: admin.id },
+    });
+    await expectCode(
+      ensureChannelRow(db, { rootId, memoryId: legacyMem.id, loc: 'foo:messages:bar', name: 'x', createdBy: admin.id }),
+      'LOC_RESERVED_SEGMENT',
+    );
+  });
+
+  it('clean sibling channels keep distinct seq spaces, and a planted seq does not deny posts (the merge shape, corrected)', async () => {
+    const alerts = await M.createChannel({}, { input: { memoryRef: legacyMem.urn, loc: 'ops:alerts', name: 'alerts' } }, ctx(admin.id));
+    await M.createChannel({}, { input: { memoryRef: legacyMem.urn, loc: 'ops:incidents', name: 'incidents' } }, ctx(admin.id));
+    // Equal numbers, same memory, different chats — legal (also Gene P3-2:
+    // the roots differ, so a wrongly-restrictive (memory_id, seq) key would
+    // have to refuse one of these).
+    await seedMessage(legacyMem.id, 1, { loc: 'ops:alerts:messages:001-a' });
+    await seedMessage(legacyMem.id, 1, { loc: 'ops:incidents:messages:001-b' });
+    // The allocator scans the whole `<root>:messages:` prefix, so the planted
+    // seq-1 row is ABSORBED, not collided with: the next real post to
+    // `ops:alerts` takes seq 2 and succeeds. This is the denial shape from
+    // the reproduced P2 — on 049674ad the same probe against an
+    // `ops:messages:alerts` Channel refused forever.
+    const posted = await M.createChannelMessage({}, { channelRef: alerts.id, body: 'no denial' }, ctx(admin.id));
+    expect(posted.seq).toBe(2);
+  });
+
+  // Gizelle LOCAL P2: the typed refusal must cover the REAL writers, not only
+  // the ones the first head inventoried. moveNode rebases a whole loc subtree
+  // through nodeSubtreeMove — a message landing on a colliding (chat, seq)
+  // there must surface as CHAT_MESSAGE_SEQ_CONFLICT, and the failed move must
+  // leave both addresses exactly as they were.
+  it('types the refusal for a MOVE that rebases a message into collision (and rolls back)', async () => {
+    await seedMessage(legacyMem.id, 1, { loc: 'chatA:messages:001-a' });
+    const moverId = await seedMessage(legacyMem.id, 1, { loc: 'chatB:messages:001-b' });
+    await expectCode(
+      M.moveNode({}, { sourceRef: moverId, targetUrn: `urn:node:${legacyMem.urn}:chatA:messages:001-c` }, ctx(admin.id)),
+      'CHAT_MESSAGE_SEQ_CONFLICT',
+    );
+    const mover = await db.node.findUniqueOrThrow({ where: { id: moverId } });
+    expect(mover.loc).toBe('chatB:messages:001-b');
+    expect(mover.seq).toBe(1);
+    expect(await db.node.findFirst({ where: { memoryId: legacyMem.id, loc: 'chatA:messages:001-c' } })).toBeNull();
+  });
+});
+
+describe('#2622 — the P2002 detector is exact (Gene P3-1)', () => {
+  // The real meta shape was probed on the per-worker clone: Prisma splits the
+  // expression index's key list on commas, so the column spelling of
+  // nodes_chat_message_seq_unique_idx is the 5-fragment array below. The
+  // detector accepts exactly that (or the index NAME); anything else a P2002
+  // could carry — a plain (memory_id, seq) pair, the node-loc unique, an
+  // unrelated error that merely MENTIONS the index — must not type as a chat
+  // conflict.
+  const p2002 = (target: unknown) =>
+    new Prisma.PrismaClientKnownRequestError('dup', {
+      code: 'P2002', clientVersion: '6.19.2', meta: { target },
+    } as never);
+
+  it('accepts the two real spellings: the index name, and the split_part target array', () => {
+    expect(isChatSeqUniqueViolation(p2002('nodes_chat_message_seq_unique_idx'))).toBe(true);
+    expect(isChatSeqUniqueViolation(
+      p2002(['memory_id', 'split_part(loc', `':messages:'::text`, '1)', 'seq']),
+    )).toBe(true);
+  });
+
+  it('refuses a generic (memory_id, seq) target and the node-loc unique', () => {
+    expect(isChatSeqUniqueViolation(p2002(['memory_id', 'seq']))).toBe(false);
+    expect(isChatSeqUniqueViolation(p2002(['loc', 'memory_id']))).toBe(false);
+  });
+
+  it('raw fallback requires unique-violation phrasing alongside the index name', () => {
+    expect(isChatSeqUniqueViolation(
+      new Error('relation "nodes_chat_message_seq_unique_idx" does not exist, skipping'),
+    )).toBe(false);
+    expect(isChatSeqUniqueViolation(
+      new Error('duplicate key value violates unique constraint "nodes_chat_message_seq_unique_idx"'),
+    )).toBe(true);
   });
 });
 

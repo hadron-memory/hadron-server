@@ -2197,7 +2197,10 @@ export const nodeMoveOps = {
       try {
         let relocated: MoveNodeSubtreeResult['moved'] = [];
         let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
-        const moved = await ctx.db.$transaction(
+        // #2622: a move rebases whole loc subtrees, so it is a chat-message
+        // writer like any other — the #992 conflict surfaces typed here, once,
+        // for every move caller (moveNode + the spec-corpus relocation).
+        const moved = await mapChatSeqConflict(() => ctx.db.$transaction(
           async (tx) => {
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
             await lockAgentDefinitionAuthority(tx, ctx.userId ?? null, [source.memoryId, destMemoryId]);
@@ -2243,7 +2246,7 @@ export const nodeMoveOps = {
           // A large subtree touches many rows; the default 5s interactive-txn
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
           { timeout: 120_000 },
-        );
+        ));
         // #1061 — a move is a write, recorded against the node's POST-move
         // address (the loc and, on a cross-memory move, the memory it now
         // lives in): that is where a reader of the usage series will look for

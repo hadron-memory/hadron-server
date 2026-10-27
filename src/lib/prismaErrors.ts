@@ -40,6 +40,21 @@ export function isNodeLocUniqueViolation(err: unknown): boolean {
 const CHAT_SEQ_UNIQUE_NAME = 'nodes_chat_message_seq_unique_idx';
 
 /**
+ * The index's target as Prisma actually reports it (#2622, Gene P3-1): Prisma
+ * splits the expression index's column list on commas, so the key
+ * `(memory_id, split_part(loc, ':messages:', 1), seq)` arrives as these five
+ * fragments — probed on a real P2002 from this index, not derived from
+ * Prisma's docs. Spelled out so the detector can demand it EXACTLY.
+ */
+const CHAT_SEQ_UNIQUE_TARGET = [
+  'memory_id', 'split_part(loc', `':messages:'::text`, '1)', 'seq',
+] as const;
+
+/** The refusal's human text, shared by the GraphQL mapping and the MCP refusal lines. */
+export const CHAT_SEQ_CONFLICT_MESSAGE =
+  'A chat message with this sequence number already exists in this chat.';
+
+/**
  * #992 (cor:agt:020:04): true only for a P2002 on the per-chat message-seq
  * partial unique index — a canonical `chat-message` row whose (memory,
  * loc-derived chat, seq) is already taken, live OR soft-deleted. Prisma names
@@ -49,11 +64,25 @@ const CHAT_SEQ_UNIQUE_NAME = 'nodes_chat_message_seq_unique_idx';
  */
 export function isChatSeqUniqueViolation(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-    const target = JSON.stringify(err.meta ?? {});
-    return target.includes(CHAT_SEQ_UNIQUE_NAME)
-      || (target.includes('memory_id') && target.includes('seq'));
+    const target = err.meta?.target;
+    // Name spelling: some paths report a raw-SQL index by name.
+    if (target === CHAT_SEQ_UNIQUE_NAME) return true;
+    // Column spelling: the exact five fragments above — a plain
+    // (memory_id, seq) pair is some OTHER unique and must not type as this
+    // one (#2622: breadth here turns an unrelated failure into a misleading
+    // CHAT_MESSAGE_SEQ_CONFLICT).
+    if (Array.isArray(target)) {
+      return target.length === CHAT_SEQ_UNIQUE_TARGET.length
+        && CHAT_SEQ_UNIQUE_TARGET.every((c, i) => target[i] === c);
+    }
+    return JSON.stringify(target ?? {}).includes(CHAT_SEQ_UNIQUE_NAME);
   }
-  return err instanceof Error && new RegExp(CHAT_SEQ_UNIQUE_NAME).test(err.message);
+  // Raw PostgreSQL fallback (an error that lost its Prisma class): the name
+  // alone is not enough — it must also read as a unique violation, so an
+  // unrelated failure that merely MENTIONS the index does not match.
+  return err instanceof Error
+    && err.message.includes(CHAT_SEQ_UNIQUE_NAME)
+    && /duplicate key value|unique constraint/i.test(err.message);
 }
 
 /**
@@ -63,7 +92,7 @@ export function isChatSeqUniqueViolation(err: unknown): boolean {
  */
 export function chatSeqConflictError(): GraphQLError {
   return new GraphQLError(
-    'A chat message with this sequence number already exists in this chat.',
+    CHAT_SEQ_CONFLICT_MESSAGE,
     { extensions: { code: 'CHAT_MESSAGE_SEQ_CONFLICT' } },
   );
 }
