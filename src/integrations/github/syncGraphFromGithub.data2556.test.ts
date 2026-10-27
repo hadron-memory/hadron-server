@@ -29,6 +29,7 @@ vi.mock('./execGit.js', () => ({
     ], { ...opts, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), stderr: '',
   })),
 }));
+import { pushMemoryToGit } from './pushMemoryToGit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
 const IDENT = { GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test' };
@@ -141,4 +142,20 @@ it('does not mint a new revision on repeated imports of an explicit null payload
   const revisions = await db.nodeRevision.count({ where: { nodeId: row.id } });
   expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
   expect(await db.nodeRevision.count({ where: { nodeId: row.id } })).toBe(revisions);
+});
+
+it('round-trips a whole memory through bulk push and a fresh database import', async () => {
+  writeFileSync(join(seed, '.gitkeep'), ''); commit();
+  for (const [loc, data] of [['datasets:first', payload], ['datasets:second', { ...payload, second: true }]] as const) {
+    await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc, name: loc, nodeType: 'data', data } });
+  }
+  const expected = await db.node.findMany({ where: { memoryId: graph.id }, orderBy: { loc: 'asc' }, select: { loc: true, nodeType: true, data: true, content: true } });
+  const exported = await pushMemoryToGit(graph.id);
+  expect(exported.error).toBeUndefined(); expect(exported.nodeCount).toBe(2);
+  const { id: oldId, ...fields } = graph;
+  await db.memory.delete({ where: { id: oldId } });
+  graph = await db.memory.create({ data: { id: generateId(), organizationId: fields.organizationId, name: fields.name, urn: fields.urn, class: 'knowledge', source: SOURCE }, include: { organization: true } });
+  expect(await db.node.count({ where: { memoryId: graph.id } })).toBe(0);
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findMany({ where: { memoryId: graph.id, loc: { startsWith: 'datasets:' } }, orderBy: { loc: 'asc' }, select: { loc: true, nodeType: true, data: true, content: true } })).toEqual(expected);
 });
