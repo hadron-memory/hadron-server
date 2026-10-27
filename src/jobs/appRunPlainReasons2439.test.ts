@@ -8,6 +8,12 @@ import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
 import { plainRunFailure } from '../lib/automation/plainReason.js';
+import { recordLlmUsage } from '../lib/metering/index.js';
+import type { Prisma } from '../generated/prisma/index.js';
+import { assertObjectType, buildASTSchema, parse } from 'graphql';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => { await cleanDb(db); });
@@ -165,6 +171,80 @@ describe('review fixes (#2492)', () => {
 });
 
 describe('per-run cost', () => {
+  it('documents every plain failure kind, including POLICY_DENIED (#2506)', () => {
+    const fields = assertObjectType(buildASTSchema(parse(typeDefs)).getType('AppRunFailureReason')).getFields();
+    const source = ts.createSourceFile('plainReason.ts',
+      readFileSync(new URL('../lib/automation/plainReason.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+    const declaration = source.statements.filter(ts.isTypeAliasDeclaration)
+      .find((statement) => statement.name.text === 'PlainRunFailureKind');
+    if (!declaration || !ts.isUnionTypeNode(declaration.type)) throw new Error('PlainRunFailureKind must be a literal union');
+    const kinds = declaration.type.types.map((member) => {
+      if (!ts.isLiteralTypeNode(member) || !ts.isStringLiteral(member.literal)) throw new Error('Expected a failure-kind string literal');
+      return member.literal.text;
+    });
+    expect(fields.kind.description?.match(/[A-Z][A-Z_]+/g)?.sort()).toEqual(kinds.sort());
+  });
+
+  it('rolls back an inserted usage event and updated counter on a mid-transaction fault (#2506)', async () => {
+    const f = await fixture();
+    const run = await f.run();
+    const transaction = db.$transaction.bind(db);
+    const fault = new Error('fault after event insert and counter update');
+    let insertedId: string | undefined;
+    let observedCost: bigint | null | undefined;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (
+      callback: (tx: Prisma.TransactionClient) => Promise<unknown>,
+    ) => transaction(async (tx) => callback(new Proxy(tx, { get(target, property) {
+      if (property !== 'appRun') return Reflect.get(target, property, target);
+      return new Proxy(tx.appRun, { get(model, member) {
+        if (member !== 'updateMany') return Reflect.get(model, member, model);
+        return async (...args: Parameters<typeof tx.appRun.updateMany>) => {
+          await tx.appRun.updateMany(...args);
+          insertedId = (await tx.usageEvent.findFirstOrThrow({ where: { appId: f.app.id, type: 'app-run' } })).id;
+          observedCost = (await tx.appRun.findUniqueOrThrow({ where: { id: run.id } })).costMicroCents;
+          throw fault;
+        };
+      } });
+    } })))) as never);
+    let recorded: Awaited<ReturnType<typeof recordLlmUsage>>;
+    try {
+      recorded = await recordLlmUsage(db, {
+        type: 'app-run', appId: f.app.id, appRunId: run.id,
+        provider: 'test', model: 'test', tokensIn: 1000, tokensOut: 500,
+      });
+    } finally { spy.mockRestore(); }
+    expect(insertedId).toBeDefined();
+    expect(observedCost).toBe(1_050_000n); // both writes really ran inside the transaction
+    expect(await db.usageEvent.findUnique({ where: { id: insertedId! } })).toBeNull();
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).costMicroCents).toBe(0n);
+    expect(recorded).toBeNull(); // metering stays fail-open
+  });
+
+  it('accumulates priced hops, ignores an unpriced hop and preserves spend when the run fails (#2506)', async () => {
+    const f = await fixture();
+    const run = await f.run();
+    f.llm.mockResolvedValueOnce({ text: 'one', tokensIn: 1000, tokensOut: 500, provider: 'test', model: 'test' })
+      .mockResolvedValueOnce({ text: 'two', tokensIn: 2000, tokensOut: 1000, provider: 'test', model: 'test' })
+      .mockResolvedValueOnce({ text: 'three', tokensIn: 10, tokensOut: 20, provider: 'unpriced', model: 'unpriced' });
+    const costs: Array<bigint | null> = [];
+    f.deps.selectNext = async () => {
+      costs.push((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).costMicroCents);
+      if (costs.length === 3) throw new Error('routing fails after the third hop was metered');
+      return { targetUrn: f.schedule.entryNodeUrn, edgeName: 'next', edgeId: generateId() };
+    };
+    expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
+    expect(f.llm).toHaveBeenCalledTimes(3);
+    expect(costs).toEqual([1_050_000n, 3_150_000n, 3_150_000n]);
+    const row = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(row.status).toBe('FAILED');
+    expect(row.costMicroCents).toBe(3_150_000n);
+    expect(row.tokensSpent).toBe(4530);
+    const events = await db.usageEvent.findMany({ where: { appId: f.app.id, type: 'app-run' } });
+    expect(events).toHaveLength(3);
+    expect(events.find((event) => event.model === 'unpriced')?.costMicroCents).toBeNull();
+    expect(events.reduce((sum, event) => sum + (event.costMicroCents ?? 0n), 0n)).toBe(row.costMicroCents);
+  });
+
   it('a finished run exposes spend, cost and budget; a run minted before the counter is unknown, not zero', async () => {
     const f = await fixture();
     const run = await f.run();

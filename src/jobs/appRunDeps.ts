@@ -225,10 +225,10 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         // requireMemoryWriteAccess applies — surfaced here, before any
         // write, as a plain message naming the destination and the next
         // step instead of the generic Forbidden.
-        if (!(await canWriteToMemory(db, ctx, targetMemory.id))) {
+        if (!(await canWriteToMemory(db, ctx, targetMemory.id, { destination: { loc: split.loc, verb: 'upsert' } }))) {
           throw new Error(
             `Output destination "${targetMemory.urn}" is not granted to this app — ` +
-              `grant the app read-write access to that memory, or change the flow's output destination.`,
+              `grant the app read-write access to that memory (or a write grant for this location), or change the flow's output destination.`,
           );
         }
         targetMemoryId = targetMemory.id;
