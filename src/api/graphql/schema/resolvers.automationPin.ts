@@ -11,6 +11,7 @@ import { boundWorkerId } from '../../../lib/bootPrompt.js';
 import { currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { AppNotFoundError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { withAuthorizedTx } from './authorizedTx.js';
@@ -127,6 +128,14 @@ function decodeCursor(after: string): [string, string, string] {
 }
 const MANUAL_OMISSION = [{ triggerKind: 'MANUAL' as const, reason: 'approved from the run that needs it' }];
 
+/** #2503: is the legacy row's stored entry gone for THIS caller: missing, or in a memory they cannot read. One answer for both, so the response never tells a missing node from an unreadable one (cor:api:140:03). */
+async function entryUnavailable(ctx: Context, entryNodeUrn: string): Promise<boolean> {
+  let id: string;
+  try { id = (await resolveNodeRef(ctx.db, entryNodeUrn)).id; }
+  catch (e) { if (e instanceof NodeNotFoundError) return true; throw e; }
+  const anchor = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
+  return !anchor || !await canReadMemory(ctx.db, ctx, anchor.memoryId);
+}
 /** #2503: no graph resolves, so there is no hash to approve, no flows and no depth; the stale URN is the only detail. */
 const staleEntryApproval = (entryNodeUrn: string) => ({
   state: 'UNADOPTED' as AdoptionState,
@@ -213,7 +222,8 @@ export const automationPinQueries = {
     catch (e) {
       // #2503: a legacy row (no stamped id, nothing to resolve by) whose stored URN is dead is UNADOPTED, with that
       // URN, which the row already stores, as the detail. Missing and unreadable are one answer (cor:api:140:03).
-      if (e instanceof NodeNotFoundError && !row.entryNodeId && !byStoredId) return staleEntryApproval(row.entryNodeUrn);
+      // Only the ENTRY decides it: an error from deeper in the graph is not "the entry is gone" and rethrows.
+      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn);
       throw e;
     }
     let state: AdoptionState = stored.state;

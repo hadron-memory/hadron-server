@@ -155,6 +155,24 @@ describe('#2438 entry keyed by node id', () => {
     expect(JSON.stringify(answer.depth)).not.toContain('renamed-entry');
   });
 
+  it('an UNREADABLE legacy entry answers exactly like a missing one', async () => {
+    const { f, input } = await legacyRenamedAndEdited();
+    const missing = await automationPinQueries.automationApproval({}, input, f.ctx);
+    // Back to a live entry at the stored URN, then take the caller's read access away (App membership stays).
+    await nodeMutations.moveNode({}, { sourceRef: f.entry.id, targetUrn: 'hrn:node:pin.test:flow:entry' }, f.ctx);
+    await db.orgMember.deleteMany({ where: { userId: f.user.id, organizationId: f.org.id } });
+    const unreadable = await automationPinQueries.automationApproval({}, input, f.ctx);
+    expect(unreadable).toEqual(missing);
+  });
+
+  it('an error from deeper in the graph is not answered as a dead entry', async () => {
+    const { f, input } = await legacyRenamedAndEdited();
+    await nodeMutations.moveNode({}, { sourceRef: f.entry.id, targetUrn: 'hrn:node:pin.test:flow:entry' }, f.ctx);
+    await db.node.update({ where: { id: f.next.id }, data: { deletedAt: new Date() } });
+    const answer = await automationPinQueries.automationApproval({}, input, f.ctx).catch(e => e);
+    expect(answer).not.toMatchObject({ state: 'UNADOPTED', hash: '' });
+  });
+
   it('re-adopting that legacy row with the current URN stamps the id and a v4 pin', async () => {
     const { f, input } = await legacyRenamedAndEdited();
     await appRunMutations.updateAgentSchedule({}, { id: f.schedule.id, input: { entryNodeUrn: 'hrn:node:pin.test:flow:renamed-entry' } }, f.ctx);
