@@ -6,6 +6,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -145,7 +146,7 @@ describe('updateAgent memberRoles: authority is re-checked in the deciding trans
     const edit = M.updateAgent({}, { ref: agentId, memberRoles: ['owner', 'x'] }, ctxFor(admin.id))
       .then(() => 'applied', (e: unknown) => e)
       .finally(() => { settled = true; });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitForLockWaiters(db);
     expect(settled).toBe(false);
     release();
     await revoker;

@@ -25,6 +25,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { waitForLockWaiters } from '../lockWait.js';
 import { generateId } from '../../lib/id.js';
 import { Client } from 'pg';
 
@@ -189,7 +190,8 @@ describe('POST /oauth/token — client collected mid-redemption (#155)', () => {
       await gc.query('BEGIN');
       await gc.query('SELECT client_id FROM oauth_clients WHERE client_id = $1 FOR UPDATE', [TEST_CLIENT_ID]);
       const pending = Promise.all([redeem(seed), redeem(seed)]);
-      await new Promise((r) => setTimeout(r, 400));
+      // Both redeemers are queued behind the held client row (n = 2), not assumed from a delay.
+      await waitForLockWaiters(db, 2);
       // Nothing may have been minted while the client row is held.
       expect(await db.userApiKey.count()).toBe(0);
       await gc.query(

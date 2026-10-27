@@ -6,6 +6,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { waitForLockWaiters } from '../../test/lockWait.js';
 import { generateId } from '../../lib/id.js';
 import { ensureAppMember, InvalidRoleError, OrphanAppError } from './ensureAppMember.js';
 import { joinApp, SelfJoinNotAllowedError } from './joinApp.js';
@@ -161,7 +162,7 @@ describe('serialization: the deciding union is exactly the locked rows', () => {
     await haveLocks;
     let editorDone = false;
     const editor = setRoles(a, ['owner']).then(() => { editorDone = true; });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitForLockWaiters(db);
     expect(editorDone).toBe(false);
     release();
     await admission;
@@ -184,7 +185,7 @@ describe('serialization: the deciding union is exactly the locked rows', () => {
     await haveLocks;
     let done = false;
     const uninstall = db.appAgent.delete({ where: { appId_agentId: { appId, agentId: a } } }).then(() => { done = true; });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitForLockWaiters(db);
     expect(done).toBe(false);
     release();
     await admission;
@@ -209,7 +210,7 @@ describe('serialization: the deciding union is exactly the locked rows', () => {
     const u = await mkUser();
     let settled = false;
     const admission = ensureAppMember(db, appId, u, 'guide').then(() => 'admitted', (e) => e).finally(() => { settled = true; });
-    await new Promise((r) => setTimeout(r, 400));
+    await waitForLockWaiters(db);
     expect(settled).toBe(false);
     release();
     await editor;
