@@ -43,6 +43,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { openTaskLine } from '../lib/openTaskLine.js';
 import { createHash } from 'node:crypto';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
@@ -85,7 +86,7 @@ const LARGE_GAP_SPAN = 400;
  * anything outside the walked bound stays unread — nothing is silently
  * acknowledged).
  */
-export function nudgeText(a: AttentionItem): string {
+export function nudgeText(a: AttentionItem, openTasks = ''): string {
   const where = [
     a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
     a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
@@ -110,7 +111,8 @@ export function nudgeText(a: AttentionItem): string {
       ` CLI: \`hadron team chat read --mentions-me --since ${since} --before ${bound} --limit 200\`, then follow each page's prevBefore BACKWARD to your first unread — beforeSeq selects the NEWEST page under the bound, so page down to the floor and stop at an empty or floor page; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\`, \`beforeSeq=${bound}\`, its mentions filter and limit 200, then re-call with \`beforeSeq\` = the smallest seq on your last page until the floor (MCP pages carry no prevBefore field).` +
       ` Then mark read through your OWN session at the highest seq actually delivered to you, never above #${a.lastSeq} (CLI: \`hadron team chat mark-read --through <that seq>\`; MCP: \`hadron_team_chat_mark_read\` — a mentions-filtered read never auto-marks).` +
       ' An incomplete walk marks NOTHING; anything outside the walked bound — messages arriving now included — stays unread. If no mention needs action, mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat.' +
-      ' (Orca attention router; counts as of send.)'
+      ' (Orca attention router; counts as of send.)' +
+      openTasks
     );
   }
   // Watermark-anchored read instruction (production lesson 2026-10-12, Eden's
@@ -126,7 +128,8 @@ export function nudgeText(a: AttentionItem): string {
     head +
     `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
-    'mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. (Orca attention router; counts as of send.)'
+    'mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. (Orca attention router; counts as of send.)' +
+    openTasks
   );
 }
 
@@ -141,13 +144,14 @@ export function nudgeText(a: AttentionItem): string {
  * send — and anchors an unfiltered catch-up from the watermark, mentions or
  * not. "Mark read" appears exactly once.
  */
-export function livenessNudgeText(cursor: number, head: number): string {
+export function livenessNudgeText(cursor: number, head: number, openTasks = ''): string {
   return 'Hadron team liveness check — the idle-watch rule for your roster flag, not a mention nudge: '
     + `the team chat has moved past your read watermark (your cursor #${cursor} < head #${head}). `
     + `Catch up: read team chat unfiltered with your own live session — CLI: \`hadron team chat read --since ${cursor} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${cursor}\` then the returned cursor — `
     + 'then mark read through your OWN session. '
     + 'If nothing needs action, end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. '
-    + '(Orca attention router; liveness nudge; cursor and head as of send.)';
+    + '(Orca attention router; liveness nudge; cursor and head as of send.)'
+    + openTasks;
 }
 
 const AGENT_IDENTITIES = new Set(['claude', 'codex']);
@@ -1545,6 +1549,9 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.dropped.push(entry.name);
         continue;
       }
+      // The open-task count is one more network read, so it is taken HERE, before the rechecks below, never between
+      // the last gate and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+      const openLine = openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker);
       // The recompute above is a network round trip (or several) that reopened
       // BOTH windows the gates had closed: the agent may have gone busy (#1490
       // steering hazard — a busy agent renders an EMPTY prompt box, so the
@@ -1573,7 +1580,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       mustOwn();
-      const [ok, how] = sendNudge(cfg, handle, nudgeText(now), run);
+      const [ok, how] = sendNudge(cfg, handle, nudgeText(now, openLine), run);
       if (!ok) {
         outcome.held[entry.name] = how;
         continue;
@@ -1749,6 +1756,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             outcome.livenessDropped.push(entry.name);
             continue;
           }
+          // Read before the rechecks, never between the last gate and the send (#2613 LOCAL P2-1).
+          const openLine = openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker);
           const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === sendHandle)?.lastOutputAt;
           const [idleAgain, againWhy] = provesIdle(cfg, sendHandle, sendDetail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
           if (!idleAgain) {
@@ -1763,7 +1772,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             continue;
           }
           mustOwn();
-          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead), run);
+          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead, openLine), run);
           if (!ok) {
             outcome.held[entry.name] = `liveness: ${how}`;
             continue; // a failed send holds the token; the clock stands — retried next poll
