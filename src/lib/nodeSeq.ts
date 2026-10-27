@@ -61,3 +61,7 @@ export async function nextSiblingSeq(
   }
   return max === null ? null : max + 1;
 }
+
+/** #443 scaffold (inert until the implementation commit): the root allocation lock helpers. */
+export async function lockRootSiblings(_tx: Prisma.TransactionClient, _memoryId: string): Promise<void> {}
+export async function reserveRootSeqLock(_tx: Prisma.TransactionClient, _memoryId: string): Promise<void> {}
