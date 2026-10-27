@@ -71,6 +71,7 @@ import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
@@ -996,7 +997,11 @@ async function postToChannelRoot(
   const messageId = generateId();
   const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
-  const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  // #992: the allocator holds the chat-root lock, so this cannot fire in
+  // normal operation — but if the per-chat seq unique is ever violated here
+  // (a bug, a repaired-back row), the caller sees the typed refusal, never a
+  // raw P2002.
+  const { seq, inserted: createdAt } = await mapChatSeqConflict(() => appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1171,7 +1176,7 @@ async function postToChannelRoot(
       });
     }
     return row.createdAt;
-  }, { asChannel: true });
+  }, { asChannel: true }));
 
   // #1061 — a chat message IS a node, so posting one is a write on the team's
   // shared chat memory. This was one of the largest blind spots in the old

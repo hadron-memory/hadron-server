@@ -133,6 +133,7 @@ import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
 } from '../../../lib/nodeMerge.js';
+import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
 import {
   type Context,
   getAccessibleMemoryIds,
@@ -4944,7 +4945,12 @@ export const nodeMutations = {
  * An ordinary memory costs one indexed select.
  */
 export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>): ReturnType<typeof writeNodeCoreRaw> {
-  const written = await writeNodeCoreRaw(...args);
+  // #992: a generic node write (create, clone, import, update, move — every
+  // door shares this core) that would place a `chat-message` row on a taken
+  // (chat, seq) answers the typed refusal here, never a raw P2002. The
+  // protected-loc gate already refuses channeled chat prefixes; this covers
+  // the unchanneled legacy prefixes the gate cannot see.
+  const written = await mapChatSeqConflict(() => writeNodeCoreRaw(...args));
   const ctx = args[1];
   if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
   return concealWriteBeyondRead(ctx, written as { memoryId: string }) as unknown as typeof written;

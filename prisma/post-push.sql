@@ -649,6 +649,12 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
   ON "nodes" ("message_channel_id", "seq", "loc" COLLATE "C")
   WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
 
+-- #992 (cor:agt:020:04): per-chat message-seq uniqueness for canonical
+-- chat-message rows (the preflight + partial unique index). One source,
+-- shared verbatim with the #992 migration (pinned by
+-- src/lib/chatSeqUnique.test.ts).
+\ir chat-seq-invariants.sql
+
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql

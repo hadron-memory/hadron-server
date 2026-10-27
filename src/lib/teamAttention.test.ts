@@ -6,7 +6,7 @@ import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, suspendChatSeqUniqueness } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { appendChatMessage } from './chatRoot.js';
@@ -244,7 +244,9 @@ describe('worker-owned ordinary reads', () => {
   it('a partial page ending inside a legacy duplicate seq stops one short (#1362 review)', async () => {
     await post('one');
     await post('two, first of a pre-#919 duplicate pair');
-    // The backfilled sibling: same seq, written outside the allocator.
+    // The backfilled sibling: same seq, written outside the allocator —
+    // plantable only with #992's constraint aside (see the helper).
+    await suspendChatSeqUniqueness(db);
     await db.node.create({
       data: {
         id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:002-dup`, name: '002-dup',
