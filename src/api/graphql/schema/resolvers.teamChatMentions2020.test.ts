@@ -370,12 +370,14 @@ describe('S3 filter audience and transport boundaries', () => {
   describe('teamHeadRef scope and history (#2592 review pins)', () => {
     const readAs = (ref: string, who = holderA) => Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: ref, limit: 0}, ctx(who.id));
     const refusalOf = async (run: () => Promise<unknown>) => { try { await run(); } catch (e: any) { return {message: e.message, extensions: e.extensions}; } return null; };
-    async function stampThenDissolve() {
+    async function stampThenDissolve(channelRef?: string) {
       vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
       const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
       const actor = {userId: manager.id, workerId: null, agentId: null};
       await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: rook.id, actor, setBy: 'app-manager'}));
-      const post = await humanSays(holderA.id, '@team.rook.all');
+      const post = channelRef
+        ? await teamChatMutations.createChannelMessage({}, {channelRef, body: '@team.rook.all', sessionRef: null}, ctx(manager.id))
+        : await humanSays(holderA.id, '@team.rook.all');
       expect(post.teamTags).toEqual([{headId: rook.id, label: '@team.rook'}]);
       // Reparenting keeps no history: rook now has no reports and is live, a head only by its stamp.
       await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: null, actor, setBy: 'app-manager'}));
@@ -405,6 +407,89 @@ describe('S3 filter audience and transport boundaries', () => {
       const missing = await refusalOf(() => readAs('no-such-worker'));
       expect(await refusalOf(() => Q.channelMessages({}, {channelRef: made.channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
       expect((await Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id))).total).toBe(1);
+    });
+    async function sealStampHistory() {
+      const key = generateDataKey();
+      sessionKeyCache.set('mr-2595', memory.id, key);
+      await db.memory.update({where: {id: memory.id}, data: {isEncrypted: true}});
+      for (const row of await db.node.findMany({where: {memoryId: memory.id, nodeType: 'chat-message'}})) {
+        const sealed = encryptNodeFieldsWithKey({content: row.content, data: row.data}, key);
+        await db.node.update({where: {id: row.id}, data: {content: sealed.content, data: sealed.data as never}});
+      }
+    }
+    it('H6: a retired ex-head reads its sealed stamp, but not an unstamped encrypted Channel (#2595)', async () => {
+      const post = await stampThenDissolve();
+      await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+      const other = await ensureChannelWithRoot(db, {memoryId: memory.id, loc: 'chats:unstamped', name: 'unstamped', createdBy: manager.id});
+      await sealStampHistory();
+      try {
+        const missing = await refusalOf(() => readAs('no-such-worker'));
+        expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+        const page = await Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id}, ctx(manager.id));
+        expect(page.total).toBe(1);
+        expect(page.items.map((m: any) => m.seq)).toEqual([post.seq]);
+        expect(await refusalOf(() => Q.channelMessages({}, {channelRef: other.channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
+      } finally { sessionKeyCache.evict('mr-2595'); }
+    });
+    it.each([false, true])('H8: a soft-deleted stamp never preserves a former head (encrypted=%s) (#2595)', async encrypted => {
+      const post = await stampThenDissolve();
+      await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+      if (encrypted) await sealStampHistory();
+      try {
+        expect(await readAs(rook.id)).toMatchObject({items: [], total: 1});
+        await db.node.update({where: {id: post.nodeId}, data: {deletedAt: new Date()}});
+        const missing = await refusalOf(() => readAs('no-such-worker'));
+        expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+        expect(await refusalOf(() => readAs(rook.id))).toEqual(missing);
+      } finally { if (encrypted) sessionKeyCache.evict('mr-2595'); }
+    });
+    it('H5b: the same Channel loc in another memory cannot supply a stamp (#2595)', async () => {
+      const otherMemory = await db.memory.create({data: {id: generateId(), organizationId: org.id, appId: app.id, urn: `${org.urn}:other-tags`, name: 'other tags', class: 'app'}});
+      const other = await ensureChannelWithRoot(db, {memoryId: otherMemory.id, loc: channel.loc, name: 'other', createdBy: manager.id});
+      const post = await stampThenDissolve(other.channel.id);
+      const missing = await refusalOf(() => readAs('no-such-worker'));
+      expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+      expect(await refusalOf(() => readAs(rook.id))).toEqual(missing);
+      const page = await Q.channelMessages({}, {channelRef: other.channel.id, teamHeadRef: rook.id}, ctx(manager.id));
+      expect(page.items.map((m: any) => m.seq)).toEqual([post.seq]);
+      expect(page.total).toBe(1);
+    });
+    it.each(['early', 'late', 'missing'] as const)('bounds encrypted stamp scan batches and keeps %s-stamp outcomes, even at limit 0 (#2595)', async position => {
+      await stampThenDissolve();
+      await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+      // Valid UUIDv7-shaped fixture ids bracket the real stamp deterministically.
+      // Seq and loc remain distinct; only id order controls this existence scan.
+      await db.node.createMany({data: Array.from({length: 205}, (_, i) => ({
+        id: `${position === 'early' ? 'ffffffffffff' : '000000000000'}70008000${i.toString(16).padStart(12, '0')}`,
+        memoryId: memory.id, messageChannelId: channel.id, loc: `${channel.loc}:messages:scan-${i}`,
+        name: `scan-${i}`, nodeType: 'chat-message', seq: i + 2, content: 'untagged fixture',
+        data: {authorUserId: manager.id, mentions: [], teamTagsVersion: 1, teamTags: [], teamHeadIds: []},
+      }))});
+      await sealStampHistory();
+      const spy = vi.spyOn(db.node, 'findMany');
+      const scans = () => spy.mock.calls.map(([args]) => args as any).filter(a => a?.where?.memoryId === memory.id && a.where.nodeType === 'chat-message' && !a.where.seq);
+      try {
+        for (const limit of [0, 1]) {
+          spy.mockClear();
+          if (position === 'missing') {
+            const missing = await refusalOf(() => readAs('no-such-worker'));
+            expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+            expect(await refusalOf(() => Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: liam.id, limit}, ctx(holderA.id)))).toEqual(missing);
+          } else {
+            const page = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, limit}, ctx(holderA.id));
+            expect(page.total).toBe(1);
+            expect(page.items).toHaveLength(limit);
+          }
+          const queries = scans();
+          expect(queries).toHaveLength(position === 'early' ? 1 : 3);
+          for (const q of queries) {
+            expect(q.take).toBe(100);
+            expect(q.orderBy).toEqual({id: 'asc'});
+            expect(q.where.deletedAt).toBeNull();
+          }
+          if (queries.length > 1) expect(queries[1].where.id.gt).toBeTruthy();
+        }
+      } finally { spy.mockRestore(); sessionKeyCache.evict('mr-2595'); }
     });
     it('a stamped former head reads from an encrypted Channel, where the stamp is sealed', async () => {
       await stampThenDissolve();
