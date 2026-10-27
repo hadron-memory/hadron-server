@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Client } from 'pg';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { waitForLockWaiters } from '../test/lockWait.js';
 import { generateId } from '../lib/id.js';
 import { gcOauthClients, OAUTH_CLIENT_GC_GRACE_MS } from './gcOauthClients.js';
 
@@ -101,7 +102,7 @@ describe('gcOauthClients (apply)', () => {
       await redeemer.query('BEGIN');
       await redeemer.query('SELECT client_id FROM oauth_clients WHERE client_id = $1 FOR UPDATE', [id]);
       const run = gcOauthClients(db, { now: NOW, apply: true });
-      await new Promise((r) => setTimeout(r, 300));
+      await waitForLockWaiters(db);
       await redeemer.query('UPDATE oauth_clients SET expires_at = $2 WHERE client_id = $1', [
         id, new Date(NOW.getTime() + 30 * DAY),
       ]);
