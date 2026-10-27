@@ -2478,17 +2478,31 @@ export const sessionMutations = {
 
     // ── Chat ownership mutations ────────────────────────────────────
 
+    /**
+     * Delete is connection MANAGEMENT: only an ADMIN of the owning org may do it
+     * (cor:dmo:080:04), never the owner or a delegated grant, so this does NOT
+     * reuse `requireEmailConnection`. A missing, already-deleted or not-yours
+     * connection gets the same typed FORBIDDEN as a non-ADMIN (#2593), before any
+     * write or provider teardown; a repeat delete answers as missing. Only the
+     * authorization failure maps to the denial: infrastructure errors stay errors.
+     */
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
+      const connection = await ctx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
+      if (!connection) throw authorizationDenied();
       await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
       await withAuthorizedTx(
         ctx,
         [{ kind: 'connection', id }, { kind: 'org', id: connection.organizationId }],
         (txCtx) => requireOrgRole(txCtx, connection.organizationId, 'ADMIN'),
-        (tx) => tx.exchangeConnection.update({
-          where: { id },
-          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-        }),
+        async (tx) => {
+          // Guarded on the live row: a delete that won the lock first leaves nothing to
+          // stamp, and this one answers as missing without a second teardown.
+          const { count } = await tx.exchangeConnection.updateMany({
+            where: { id, deletedAt: null },
+            data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+          });
+          if (count === 0) throw authorizationDenied();
+        },
         {
           lockMode: 'exclusive',
           afterLock: async (tx) => {
