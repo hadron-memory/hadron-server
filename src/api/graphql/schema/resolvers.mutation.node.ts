@@ -167,8 +167,8 @@ import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 
 /**
  * #2517 — writes one `NodeEdgeRemoval` per live edge that points INTO `targetIds` from a node outside
- * them, just before a hard delete cascades those edges away. Comment edges are skipped (their
- * threads go with the target, cor:dmo:110:04); INCLUDE edges are recorded and so are edges already soft-deleted (they left the live
+ * them, just before a hard delete cascades those edges away. Governed edges are skipped (comment
+ * threads go with the target, cor:dmo:110:04; derived INCLUDE edges are not recorded, cor:dmo:010:04) and so are edges already soft-deleted (they left the live
  * graph earlier). Runs inside the delete's transaction.
  */
 async function recordEdgeRemovals(tx: Prisma.TransactionClient, targetIds: string[], removedBy: string | null) {
@@ -176,8 +176,9 @@ async function recordEdgeRemovals(tx: Prisma.TransactionClient, targetIds: strin
     where: {
       targetId: { in: targetIds },
       sourceId: { notIn: targetIds },
-      // Comment edges go with their threads; an INCLUDE edge (#2040) is an ordinary content link and is recorded.
-      OR: [{ governedKind: null }, { governedKind: 'INCLUDE' }],
+      // Governed edges are skipped: comment edges go with their threads, and a derived INCLUDE edge (#2040) is
+      // not recorded (Vera, cor:dmo:010:04 Proposed: its tag stays in the source's content and reads as broken).
+      governedKind: null,
       deletedAt: null,
     },
     select: {

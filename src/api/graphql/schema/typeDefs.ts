@@ -2784,7 +2784,7 @@ export const typeDefs = `#graphql
     openThreads: Int!
   }
 
-  "#2517 — one edge a hard delete removed from this node (hrn:node:hadronmemory.com:specs:cor:dmo:010:04). The deleted target's address is shown only when you can read the memory it lived in."
+  "#2517 — one edge a hard delete removed from this node (hrn:node:hadronmemory.com:specs:cor:dmo:010:04). The deleted target's address (targetLoc) and the removed edge's loc, which is derived from it, are shown only when you can read the memory the target lived in. Entries are gated per entry by the memory the source was in when the edge was removed. A derived include edge is not recorded."
   type NodeEdgeRemoval {
     id: ID!
     "The removed edge's loc; null when the deleted target's memory is not one you can read (the loc is derived from the target's address)."

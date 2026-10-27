@@ -131,7 +131,7 @@ describe('#2517 — hard delete leaves a trace on the nodes that pointed at it',
     expect((await removals(source.id))[0]!.edgeLoc).toBe('src:to-b');
   });
 
-  it('records an INCLUDE-derived edge a hard delete cascades (only comment edges are skipped)', async () => {
+  it('does not record a derived INCLUDE edge (cor:dmo:010:04: the tag stays in the source content)', async () => {
     const source = await node('src');
     const target = await node('tgt');
     await db.edge.create({
@@ -140,7 +140,7 @@ describe('#2517 — hard delete leaves a trace on the nodes that pointed at it',
 
     await resolvers.Mutation.deleteNode({}, { nodeRef: target.id, hard: true }, ctx());
 
-    expect(await removals(source.id)).toHaveLength(1);
+    expect(await removals(source.id)).toEqual([]);
   });
 
   it('hides entries recorded in a memory the reader cannot read after the source moved', async () => {
@@ -164,5 +164,20 @@ describe('#2517 — hard delete leaves a trace on the nodes that pointed at it',
     )) as Array<Record<string, unknown>>;
     expect(asReader).toEqual([]);
     expect(await removals(source.id)).toHaveLength(1);
+  });
+
+  it('returns nothing to a caller who cannot read the source memory at all', async () => {
+    const orgC = await db.organization.create({ data: { id: generateId(), name: 'er-c', urn: 'er-c' } });
+    const outsider = await db.user.create({ data: { githubId: 25173, githubUsername: 'er-out', handle: 'er-out', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: orgC.id, userId: outsider.id, role: 'READER' } });
+    const source = await node('src');
+    const target = await node('tgt');
+    await edge('src:to-tgt', source.id, target.id);
+    await resolvers.Mutation.deleteNode({}, { nodeRef: target.id, hard: true }, ctx());
+
+    const asOutsider = await resolvers.Query.nodeEdgeRemovals(
+      {}, { nodeRef: source.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
+    );
+    expect(asOutsider).toEqual([]);
   });
 });
