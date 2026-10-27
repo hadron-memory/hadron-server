@@ -14,8 +14,8 @@ const row = (workerId: string, reportsTo: Row['reportsTo'], family: string | nul
 describe('#2489 groupComposition ordering', () => {
   it.each([false, true])('breaks lowercase-name ties by URN, with unassigned last (reverse insertion: %s)', (reverse) => {
     // Pure input intentionally allows a name tie that the database would reject.
-    const a = coordinator('a-coordinator', 'Alpha');
-    const z = coordinator('z-coordinator', 'alpha');
+    const a = coordinator('a-coordinator', 'alpha');
+    const z = coordinator('z-coordinator', 'Alpha');
     const aRows = [row('a-second', a), row('a-first', a)];
     const zRows = [row('z-second', z), row('z-first', z)];
     const input = [row('unassigned', null), ...(reverse ? [...zRows, ...aRows] : [...aRows, ...zRows])];
@@ -29,6 +29,13 @@ describe('#2489 groupComposition ordering', () => {
     expect(lanes.map((lane) => lane.workers.map(({ worker }) => worker.id))).toEqual([
       ['a-second', 'a-first'], ['z-second', 'z-first'], ['unassigned'],
     ]);
+  });
+
+  it.each([false, true])('orders names before URNs (reverse insertion: %s)', (reverse) => {
+    const alpha = row('alpha-worker', coordinator('z-coordinator', 'alpha'));
+    const zed = row('zed-worker', coordinator('a-coordinator', 'Zed'));
+    const lanes = groupComposition(reverse ? [zed, alpha] : [alpha, zed]);
+    expect(lanes.map((lane) => lane.coordinator?.name)).toEqual(['alpha', 'Zed']);
   });
 
   it.each([
