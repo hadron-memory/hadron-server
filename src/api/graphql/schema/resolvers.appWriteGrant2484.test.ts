@@ -357,6 +357,21 @@ describe('what a userless run of the App may write', () => {
     await create(run, team, `${PREFIX}:r2`);
   });
 
+  it('a node that already carries derived INCLUDE edges is not a grant write target: a plain-text update would delete them (LOCAL P2)', async () => {
+    const f = await fixture();
+    const team = await db.memory.create({ data: { name: 'team', urn: 'grant2484.test:team', class: 'app', appId: f.app.id, organizationId: f.org.id } as never });
+    await grant(f, team);
+    const plan = await db.node.create({ data: { memoryId: team.id, loc: 'secrets:plan', name: 'plan', content: 'secret' } });
+    const mine = await db.node.create({ data: { memoryId: team.id, loc: `${PREFIX}:r1`, name: 'r1', content: 'see {{> secrets:plan}}' } });
+    await db.edge.create({ data: { id: generateId(), memoryId: team.id, sourceId: mine.id, targetId: plan.id, loc: `includes:${mine.id}:${plan.id}`, name: 'includes', governedKind: 'INCLUDE' } });
+    await refused(update(f.runCtx(), team, `${PREFIX}:r1`));
+    expect(await db.edge.count({ where: { sourceId: mine.id, governedKind: 'INCLUDE' } })).toBe(1);
+    expect((await db.node.findUniqueOrThrow({ where: { id: mine.id } })).content).toBe('see {{> secrets:plan}}');
+    // a sibling without include edges is still an ordinary grant write
+    await create(f.runCtx(), team, `${PREFIX}:r2`);
+    await update(f.runCtx(), team, `${PREFIX}:r2`);
+  });
+
   it('CONTROL: a run with no grant still cannot write a personal or private memory', async () => {
     const f = await fixture();
     await refused(create(f.runCtx(), f.personal, `${PREFIX}:a`));

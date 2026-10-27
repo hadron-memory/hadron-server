@@ -156,6 +156,10 @@ export async function userlessRunHoldsWriteGrant(
   if (!app) return false;
   const memory = await db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: GRANT_MEMORY_SELECT });
   if (!memory || grantTargetRefusal(app, memory) !== null) return false;
+  // A node that carries derived INCLUDE edges is not a grant target: a write that replaces its content re-derives
+  // them, and deleting an edge to a node outside the prefix is an edge write the grant does not permit. The writing
+  // transaction holds this node's row, so the edges read here are the ones the write would replace.
+  if (await db.edge.findFirst({ where: { governedKind: 'INCLUDE', source: { memoryId, loc } }, select: { id: true } })) return false;
   if (!isStrictOwnerClass(memory.class)) return true;
 
   // Personal / private: the grant is the OWNER's delegation, made as a person who manages the App. It holds only
