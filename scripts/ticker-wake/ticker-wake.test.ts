@@ -83,6 +83,8 @@ interface Fake {
   openTasksError: boolean;
   /** #2613: the order of the open-task read, screen reads and sends. */
   order: string[];
+  /** #2613: runs when the open-task read is served (a test clock advances here). */
+  onCount: (() => void) | null;
 }
 
 let dir: string;
@@ -96,7 +98,7 @@ function fake(): Fake {
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
     tickers: [], subscribersError: null, extraTerminals: [], sessions: {}, sessionsError: null, sessionQueries: [],
-    alarms: {}, alarmError: null, alarmQueries: [], openTasks: {}, openTaskReads: [], openTasksError: false, order: [],
+    alarms: {}, alarmError: null, alarmQueries: [], openTasks: {}, openTaskReads: [], openTasksError: false, order: [], onCount: null,
   };
   const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
     items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
@@ -143,6 +145,7 @@ function fake(): Fake {
       }
       if (q.includes('agentTasks(')) {
         f.order.push('count');
+        f.onCount?.();
         f.openTaskReads.push([fArg(argv, 'a') as string, fArg(argv, 'w') as string, fArg(argv, 'o') as string]);
         if (f.openTasksError) return out({ errors: [{ message: 'tasks down', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
         const o = Number(fArg(argv, 'o'));
@@ -2774,5 +2777,26 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     expect(f.order.lastIndexOf('read')).toBeGreaterThan(count);
     expect(f.order.indexOf('send')).toBeGreaterThan(f.order.lastIndexOf('read'));
     expect(f.order.slice(count + 1, f.order.indexOf('send')).includes('count')).toBe(false);
+  });
+
+  it("the count shares the pass deadline: a read that ends past the pass end adds no line, and the wake is still sent plain", async () => {
+    const base = Date.now();
+    let t = 0;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    f.onCount = () => { t += 3_000; }; // the read itself takes 3 s; the pass has 2 s left
+    await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('inside the pass deadline the same read still counts', async () => {
+    const base = Date.now();
+    let t = 0;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    f.onCount = () => { t += 100; };
+    await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(2)));
   });
 });

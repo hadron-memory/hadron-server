@@ -35,10 +35,12 @@ const OPEN_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'STARTED']);
 /** The number of open tasks the worker holds, or null when it cannot be established. Never throws. */
 export function countOpenTasks(
   run: OpenTaskRun, hadronCli: string, app: string, workerId: string,
-  budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now,
+  budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now, until?: number,
 ): number | null {
   if (!app || !workerId) return null;
-  const deadline = now() + budgetMs;
+  // `until` is the caller's own absolute deadline (the ticker's pass end, on the pass clock): the count never runs past
+  // it, so a read cannot start fresh 5 s just before the pass ends (#2613 LOCAL P2, delta).
+  const deadline = Math.min(now() + budgetMs, until ?? Infinity);
   const ids = new Set<string>();
   for (let page = 0; page < OPEN_TASKS_MAX_PAGES; page++) {
     const left = deadline - now();
@@ -46,6 +48,8 @@ export function countOpenTasks(
     let rows: unknown;
     try {
       const res = run([hadronCli, 'api', OPEN_TASKS_QUERY, '-F', `a=${app}`, '-F', `w=${workerId}`, '-F', `o=${page * OPEN_TASKS_PAGE}`], left);
+      // Checked AFTER the call too: a page that answered late is unknown, even a short final one.
+      if (now() > deadline) return null;
       if (res.code !== 0) return null;
       const body = JSON.parse(res.stdout);
       if (body?.errors?.length || body?.error) return null;
@@ -66,9 +70,9 @@ export function countOpenTasks(
 /** The sentence appended to a wake, with its leading space; '' for zero or unknown. */
 export function openTaskLine(
   run: OpenTaskRun, hadronCli: string, app: string, workerId: string,
-  budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now,
+  budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now, until?: number,
 ): string {
-  const n = countOpenTasks(run, hadronCli, app, workerId, budgetMs, now);
+  const n = countOpenTasks(run, hadronCli, app, workerId, budgetMs, now, until);
   if (!n) return '';
   return ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
 }

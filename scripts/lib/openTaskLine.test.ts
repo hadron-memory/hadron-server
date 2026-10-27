@@ -98,6 +98,22 @@ describe('the count is time-bounded (#2613 LOCAL P2-2)', () => {
     expect(countOpenTasks(run, 'hadron', 'app1', 'w1', 5_000, () => t)).toBe(2);
   });
 
+  it('a late answer is unknown even when it is the short final page', () => {
+    let t = 0;
+    const run = () => { t += 6_000; return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(1) } }) }; };
+    expect(countOpenTasks(run, 'hadron', 'app1', 'w1', 5_000, () => t)).toBeNull();
+  });
+
+  it("never outlives the caller's own deadline: a read 2 ms before the pass ends is unknown, not a fresh 5 s", () => {
+    let t = 1_000;
+    const seen: Array<number | undefined> = [];
+    const run = (_a: string[], timeoutMs?: number) => { seen.push(timeoutMs); t += 5; return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(1) } }) }; };
+    expect(countOpenTasks(run, 'hadron', 'app1', 'w1', 5_000, () => t, 1_002)).toBeNull();
+    expect(seen).toEqual([2]); // handed the 2 ms the pass had left, not 5 s
+    t = 1_000;
+    expect(countOpenTasks(() => { t += 1; return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(1) } }) }; }, 'hadron', 'app1', 'w1', 5_000, () => t, 1_500)).toBe(1);
+  });
+
   it('a zero budget reads nothing', () => {
     const s = server(rows(3));
     expect(countOpenTasks(s.run, 'hadron', 'app1', 'w1', 0)).toBeNull();
