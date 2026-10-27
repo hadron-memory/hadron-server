@@ -2168,6 +2168,26 @@ export const nodeQueries = {
       });
     },
 
+    nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+      const scope = await nodeRevisionsScope(ctx, nodeRef);
+      if (!scope) return [];
+      // Each entry carries the memory it was recorded in: a source that later MOVED keeps no more history
+      // visible than nodeRevisions shows, so the memory gate is in the `where`, before `take`.
+      const rows = await ctx.db.nodeEdgeRemoval.findMany({
+        where: scope.accessible === null
+          ? { sourceId: scope.nodeId }
+          : { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit ?? 20,
+      });
+      // The deleted target's address is another node's identity, and the edge's own loc is derived from both
+      // endpoints: show neither where the target's memory is not readable.
+      return rows.map((r) => {
+        const readable = scope.canRead(r.targetMemoryId);
+        return { ...r, targetLoc: readable ? r.targetLoc : null, edgeLoc: readable ? r.edgeLoc : null };
+      });
+    },
+
     nodeRevisions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
       const scope = await nodeRevisionsScope(ctx, nodeRef);
       if (!scope) return [];
