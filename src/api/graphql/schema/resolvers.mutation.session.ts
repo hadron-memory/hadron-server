@@ -2479,12 +2479,21 @@ export const sessionMutations = {
     // ── Chat ownership mutations ────────────────────────────────────
 
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
+      // cor:dmo:080:04: management stays org-ADMIN; absent/deleted rows
+      // share its canonical denial without admitting owner/grant operation authority.
+      const connection = await ctx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
+      if (!connection) throw authorizationDenied();
       await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
       await withAuthorizedTx(
         ctx,
         [{ kind: 'connection', id }, { kind: 'org', id: connection.organizationId }],
-        (txCtx) => requireOrgRole(txCtx, connection.organizationId, 'ADMIN'),
+        async (txCtx) => {
+          // The connection fence/row lock may have waited for another delete.
+          // Recheck before writing so a second delete cannot repeat tool teardown.
+          const live = await txCtx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
+          if (!live || live.organizationId !== connection.organizationId) throw authorizationDenied();
+          await requireOrgRole(txCtx, live.organizationId, 'ADMIN');
+        },
         (tx) => tx.exchangeConnection.update({
           where: { id },
           data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },

@@ -20,6 +20,7 @@ import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../lib/emailClient.js', () => ({
   runEmailOperation: vi.fn(async () => ({ messages: [] })),
@@ -296,6 +297,43 @@ describe('#2593 delete connection uniform denial', () => {
     const denial = results.find(r => r.errors);
     expect(denial?.errors?.[0]).toMatchObject({message: 'Forbidden', extensions: {code: 'FORBIDDEN'}});
     expect(deleteToolConnection).toHaveBeenCalledTimes(1);
+  });
+  it.each(['deleted', 'revoked'] as const)('rechecks %s state after the connection row-lock wait', async state => {
+    let unlock!: () => void;
+    let locked!: () => void;
+    const release = new Promise<void>(r => {unlock = r;});
+    const acquired = new Promise<void>(r => {locked = r;});
+    const holder = db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${connectionId} FOR UPDATE`;
+      locked();
+      await release;
+      if (state === 'deleted') await tx.exchangeConnection.update({where: {id: connectionId}, data: {deletedAt: new Date('2026-01-01T00:00:00Z')}});
+      else await tx.orgMember.updateMany({where: {organizationId: orgId, userId: orgAdmin.id}, data: {deletedAt: new Date()}});
+    }, {timeout: 20_000});
+    await acquired;
+    const deletion = del(connectionId);
+    try {
+      await waitForLockWaitersOfType(db, 'transactionid', 1);
+      unlock();
+      await holder;
+      const result = await deletion;
+      expect(JSON.stringify(result)).toBe(JSON.stringify(await del(generateId())));
+      const row = await db.exchangeConnection.findUniqueOrThrow({where: {id: connectionId}});
+      expect(row.deletedAt).toEqual(state === 'deleted' ? new Date('2026-01-01T00:00:00Z') : null);
+      expect(deleteToolConnection).not.toHaveBeenCalled();
+    } finally { unlock(); await Promise.allSettled([holder, deletion]); }
+  });
+  it.each(['org-OWNER', 'platform-ADMIN', 'platform-OWNER'] as const)('preserves the %s live delete authority', async role => {
+    const extra: Partial<Context> = {};
+    if (role === 'org-OWNER') await db.orgMember.updateMany({where: {organizationId: orgId, userId: orgAdmin.id}, data: {role: 'OWNER'}});
+    else {
+      const platformRole = role === 'platform-ADMIN' ? 'ADMIN' : 'OWNER';
+      await db.user.update({where: {id: orgAdmin.id}, data: {roles: [platformRole]}});
+      await db.orgMember.deleteMany({where: {userId: orgAdmin.id}});
+      extra.roles = [platformRole];
+    }
+    expect((await del(connectionId, extra)).data?.deleteExchangeConnection).toBe(true);
+    expect(deleteToolConnection).toHaveBeenCalledExactlyOnceWith('ms-exchange', 'tool-conn-1');
   });
   it('database failures remain infrastructure errors rather than Forbidden', async () => {
     const failure = new Error('synthetic database outage');
