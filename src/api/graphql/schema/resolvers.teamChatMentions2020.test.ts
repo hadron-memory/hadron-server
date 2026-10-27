@@ -342,6 +342,31 @@ describe('S3 filter audience and transport boundaries', () => {
     await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, untagged: true, limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'BAD_USER_INPUT'}});
     await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: 'foreign-or-missing', limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
   });
+  it('refuses a non-head worker as teamHeadRef byte-identically; head, retired head and ex-head still read (#2592)', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+    const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+    const read = (ref: string) => Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: ref, limit: 0}, ctx(holderA.id));
+    const refusal = async (ref: string) => { try { await read(ref); } catch (e: any) { return {message: e.message, extensions: e.extensions}; } return null; };
+    const missing = await refusal('no-such-worker');
+    expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+    // Leaf in the App: no reports, never stamped.
+    expect(await refusal(liam.id)).toEqual(missing);
+    // Foreign-App worker id.
+    const fid = generateId();
+    const foreignAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Foreign', urn: `${org.urn}:foreign-agent-${fid}`, visibility: 'ORGANIZATION' } });
+    const foreignApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Foreign', urn: `${org.urn}:foreign-${fid}` } });
+    const foreign = await db.worker.create({data: {...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: foreignApp.id, agentId: foreignAgent.id, name: 'Foreign', slug: 'foreign', heldByUserId: holderA.id, heldAt: new Date()}, select: {id: true}});
+    expect(await refusal(foreign.id)).toEqual(missing);
+    // A head reads.
+    await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: rook.id, actor: {userId: manager.id, workerId: null, agentId: null}, setBy: 'app-manager'}));
+    expect(await read(rook.id)).toMatchObject({items: [], total: 0});
+    // A retired head whose report is still attached keeps working.
+    await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+    expect(await read(rook.id)).toMatchObject({items: [], total: 0});
+    await db.worker.update({where: {id: rook.id}, data: {retiredAt: null}});
+    // Mutual exclusivity and the metadata-forbidden refusal keep their order ahead of the head check.
+    await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: liam.id, untagged: true, limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'BAD_USER_INPUT'}});
+  });
   it('masks metadata and denies all tag/count probes on an authorized App-less Channel', async () => {
     vi.stubEnv('TEAM_TAGS_ENABLED','true');
     const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
