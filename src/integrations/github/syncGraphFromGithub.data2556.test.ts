@@ -38,7 +38,7 @@ let seed: string;
 let graph: MemoryWithOrg;
 const commit = () => { git(seed, 'add', '-A'); git(seed, 'commit', '--allow-empty', '-m', 'fixture'); git(seed, 'push', 'origin', 'main'); };
 const file = (loc: string, nodeType: string, data: Prisma.InputJsonValue = payload) => writeNodeFile(seed, {
-  id: generateId(), loc, name: loc, nodeType, data, content: null, tags: [], outgoingEdges: [],
+  id: generateId(), loc, name: loc, nodeType, data, content: null, tags: [], role: null, isRunnable: null, isPlaceholder: false, outgoingEdges: [],
 });
 
 beforeEach(async () => {
@@ -99,4 +99,36 @@ it('reads type and data through the legacy layout too', async () => {
   writeFileSync(join(legacy, '.node', 'node.yaml'), 'name: Legacy\ntype: data\ndata:\n  enabled: false\n');
   const { node } = await loadNodeFromFs(legacy, seed, 'synthetic/data2556');
   expect(node).toMatchObject({ nodeType: 'data', data: { enabled: false } });
+});
+
+it.each(['comment', 'compiled-boot-prompt'])('does not create or convert reserved type %s from a mirror', async (nodeType) => {
+  const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'existing', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
+  file('existing', nodeType); file('new', nodeType); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', data: payload });
+  expect(await db.node.findFirst({ where: { memoryId: graph.id, loc: 'new' } })).toBeNull();
+});
+
+it.each([false, 0, '', [], {}, null])('imports explicit JSON %j without losing its value', async (data) => {
+  writeFileSync(join(seed, 'value.md'), `---\nname: Value\ntype: data\ndata: ${JSON.stringify(data)}\n---\n`); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  const row = await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'value' } });
+  expect(row.nodeType).toBe('data'); expect(row.data).toEqual(data);
+});
+
+it('preserves independently omitted fields and applies explicit null on update', async () => {
+  const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'kept', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
+  writeFileSync(join(seed, 'kept.md'), '---\nname: Kept\ntype: record\n---\n'); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'record', data: payload });
+  writeFileSync(join(seed, 'kept.md'), '---\nname: Kept\ndata: null\n---\n'); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'record', data: null });
+});
+
+it.each(['type: false', 'data: .nan', 'data: &cycle [*cycle]'])('refuses malformed metadata without deleting a stored row (%s)', async (metadata) => {
+  const prior = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'kept', name: 'Kept', nodeType: 'data', data: payload, ownerRepo: 'synthetic/data2556' } });
+  writeFileSync(join(seed, 'kept.md'), `---\nname: Kept\n${metadata}\n---\n`); commit();
+  expect((await syncGraphFromGithub(graph)).error).toBeDefined();
+  expect(await db.node.findUniqueOrThrow({ where: { id: prior.id } })).toMatchObject({ nodeType: 'data', data: payload });
 });

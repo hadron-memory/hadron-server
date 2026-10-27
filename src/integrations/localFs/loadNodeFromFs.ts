@@ -40,6 +40,7 @@ interface NodeYaml {
   name: string;
   urn?: string;
   type?: string;
+  data?: unknown;
   /** YAML may carry any scalar here; only a non-blank string is read (#1348). */
   objectType?: unknown;
   description?: string;
@@ -84,6 +85,33 @@ interface NodeYaml {
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+/** #2556: omitted keys preserve stored values; explicit JSON null clears data. */
+function typedPayloadFromMeta(meta: NodeYaml): Pick<Partial<Node>, 'nodeType' | 'data'> {
+  const result: Pick<Partial<Node>, 'nodeType' | 'data'> = {};
+  if ('type' in meta) {
+    if (typeof meta.type !== 'string') throw new Error('Node type must be a string');
+    // cor:dmo:020:04: open vocabulary, preserved exactly rather than guessed.
+    result.nodeType = meta.type;
+  }
+  if ('data' in meta) {
+    const active = new Set<object>();
+    const check = (value: unknown): void => {
+      if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+      if (typeof value === 'number' && Number.isFinite(value)) return;
+      if (typeof value !== 'object' || value === null || active.has(value)
+        || (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+        throw new Error('Node data must be finite, acyclic JSON');
+      }
+      active.add(value);
+      for (const child of Object.values(value)) check(child);
+      active.delete(value);
+    };
+    check(meta.data);
+    result.data = meta.data as Node['data'];
+  }
+  return result;
 }
 
 function placeholderFromMeta(meta: NodeYaml, source: string): { isPlaceholder: true } | Record<string, never> {
@@ -342,6 +370,7 @@ async function loadFrontmatterNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      ...typedPayloadFromMeta(meta),
       // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
       ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,
@@ -401,6 +430,7 @@ async function loadLegacyNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      ...typedPayloadFromMeta(meta),
       // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
       ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,

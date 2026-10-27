@@ -861,6 +861,9 @@ const syncGraphFromGithubAsSystem = async (
         const update = {
           loc,
           name,
+          // #2556: spread only present keys; old mirrors must not clear either column.
+          ...('nodeType' in node ? { nodeType: node.nodeType } : {}),
+          ...('data' in node ? { data: node.data === null ? Prisma.DbNull : node.data as Prisma.InputJsonValue } : {}),
           alias: node.alias ?? null,
           isLink: node.isLink ?? false,
           description: node.description ?? null,
@@ -942,8 +945,8 @@ const syncGraphFromGithubAsSystem = async (
         // A present one is written only if the RESULTING record satisfies the
         // memory's property schema (#725: a structured record must satisfy its
         // collection — the invariant every GraphQL/MCP write enforces through
-        // validateNodeAgainstSchema). Sync restores neither `properties` nor
-        // `data`, so the record is judged with the properties the row already
+        // validateNodeAgainstSchema). Sync does not restore `properties`, so
+        // the record is judged with the properties the row already
         // has (none, for a new node). A violation does NOT fail the sync — one
         // bad file must not block the memory — and does not write a
         // nonconforming record either: the stored objectType is kept and the
@@ -995,10 +998,10 @@ const syncGraphFromGithubAsSystem = async (
         const refusesRole = async (prior: Node | null): Promise<boolean> => {
           // #1606 (cor:dmo:110:04) — git sync never writes a comment: a file
           // that lands on a comment's loc is skipped and the comment kept.
-          if (prior?.nodeType === COMMENT_NODE_TYPE) {
+          if (prior?.nodeType === COMMENT_NODE_TYPE || node.nodeType === COMMENT_NODE_TYPE) {
             reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_COMMENT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a comment, written only through the comment path`);
-            protectedRowIds.add(prior.id);
+            if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;
           }
@@ -1006,10 +1009,10 @@ const syncGraphFromGithubAsSystem = async (
           // a file landing on one is skipped and the node kept. A worker session's
           // sync that would create or change any boot-prompt node is refused whole
           // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
-          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || node.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
             reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_BOOT_PROMPT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a compiled boot prompt, written only by a compile`);
-            protectedRowIds.add(prior.id);
+            if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;
           }
