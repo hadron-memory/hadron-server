@@ -19,12 +19,13 @@ import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAg
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 
-/** The five checks. Mirrors the GraphQL MemoryValidationCheck enum. */
+/** The six checks. Mirrors the GraphQL MemoryValidationCheck enum. */
 export type ValidationKind =
   | 'BROKEN_REF'
   | 'SPARSE'
   | 'STALE_ABSTRACT'
   | 'EMBED_FAILED'
+  | 'GIT_MIRROR_FAILED'
   | 'SCHEMA';
 
 export interface ValidationFinding {
@@ -226,6 +227,28 @@ export async function validateMemoryNodes(
     }
   }
 
+  // #430: a Git-mirror attempt that did not land leaves a row (src/integrations/github/mirrorObligations.ts). From outside, a
+  // stale mirror looks like a healthy one until the repo-wins sync reverts the lost write. Fixed class and loc only: the row
+  // never holds exception text. An encrypted memory never syncs to Git (R206), so a row it left behind is not a finding.
+  if (!memory?.isEncrypted) {
+    const liveLocById = new Map(nodes.map((n) => [n.id, n.loc]));
+    const obligations = await db.gitMirrorObligation.findMany({
+      where: { memoryId },
+      orderBy: [{ nodeId: 'asc' }, { kind: 'asc' }, { removeLoc: 'asc' }],
+    });
+    for (const o of obligations) {
+      // A REMOVE row names the path still owed; a WRITE row needs the node to be live (#884: no finding on a tombstone).
+      const nodeLoc = o.kind === 'REMOVE' ? o.removeLoc : liveLocById.get(o.nodeId);
+      if (nodeLoc === undefined) continue;
+      record({
+        kind: 'GIT_MIRROR_FAILED',
+        nodeId: o.nodeId,
+        nodeLoc,
+        detail: `${o.kind === 'REMOVE' ? 'Git mirror removal of this path' : 'Git mirror write'} did not land (${o.errorClass}, ${o.attempts} attempt${o.attempts === 1 ? '' : 's'}); the repository may be stale`,
+      });
+    }
+  }
+
   return { nodesChecked: nodes.length, findings, totalFindings, skippedChecks };
 }
 
@@ -236,6 +259,7 @@ export function formatFindingLine(f: ValidationFinding, nodeUrn: string): string
     SPARSE: 'sparse',
     STALE_ABSTRACT: 'stale-abstract',
     EMBED_FAILED: 'embed-failed',
+    GIT_MIRROR_FAILED: 'git-mirror-failed',
     SCHEMA: 'schema',
   }[f.kind];
   switch (f.kind) {

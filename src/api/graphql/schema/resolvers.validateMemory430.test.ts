@@ -32,7 +32,7 @@ const obligation = (memoryId: string, nodeId: string, over: Record<string, unkno
   data: { memoryId, nodeId, kind: 'WRITE', removeLoc: '', state: 'FAILED', errorClass: 'PUSH_FAILED', attemptSeq: 1n, ...over } as never,
 });
 const validate = (memoryRef: string, c: Context = ctx(member.id)) => Q.validateMemory(null, { memoryRef }, c);
-const mirrorFindings = (r: { findings: Array<{ kind: string }> }) => r.findings.filter((f) => f.kind === 'GIT_MIRROR_FAILED');
+const mirrorFindings = (r: { findings: Array<{ kind: string; detail: string }> }) => r.findings.filter((f) => f.kind === 'GIT_MIRROR_FAILED');
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -82,10 +82,12 @@ describe('validateMemory — Git-mirror obligations (#430)', () => {
     await obligation(mem.id, mine.id);
     await obligation(other.id, theirs.id);
     expect(mirrorFindings(await validate(mem.id)).map((f: any) => f.nodeId)).toEqual([mine.id]);
-    const missing = await validate('no-such-memory-430').then(() => null, (e: any) => e);
+    const absent = generateId();
+    const missing = await validate(absent).then(() => null, (e: any) => e);
     const denied = await validate(mem.id, ctx(stranger.id)).then(() => null, (e: any) => e);
-    expect(missing).not.toBeNull();
-    expect(denied?.message).toBe(missing?.message);
+    expect(missing?.message).toMatch(/^MEMORY_NOT_FOUND/);
+    // Byte-identical apart from the ref each names: denied is the SAME answer as absent, never a different one.
+    expect(denied?.message.replace(mem.id, '<ref>')).toBe(missing?.message.replace(absent, '<ref>'));
     expect(denied?.extensions?.code).toBe(missing?.extensions?.code);
   });
 
