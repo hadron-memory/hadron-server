@@ -10,6 +10,7 @@ import { generateId } from '../../lib/id.js';
 import { ensureAppMember, InvalidRoleError, OrphanAppError } from './ensureAppMember.js';
 import { joinApp, SelfJoinNotAllowedError } from './joinApp.js';
 import { loadOfferedMemberRoles, lockOfferedMemberRoleRows } from '../../lib/memberRoles.js';
+import type { Prisma } from '../../generated/prisma/index.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -136,6 +137,30 @@ describe('joinApp self-join with a union', () => {
 });
 
 describe('serialization: the deciding union is exactly the locked rows', () => {
+  it('ensureAppMember cannot admit a role from an install committed after its Agent fences (#2487)', async () => {
+    await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner'] }, { createdAt: t0 });
+    const userId = await mkUser();
+    let installedAfterLock = false;
+    await db.$transaction(async (tx) => {
+      const observed = new Proxy(tx, { get(target, property, receiver) {
+        if (property !== '$queryRaw') return Reflect.get(target, property, receiver);
+        return async (sql: TemplateStringsArray, ...values: unknown[]) => {
+          const result = await tx.$queryRaw(sql, ...values);
+          if (/FROM agents WHERE id = ANY/.test(sql.join('')) && !installedAfterLock) {
+            // Another connection commits only after the deciding Agent set is locked.
+            await mkAgent({ maxMembers: 'unlimited', memberRoles: ['late'] }, { createdAt: t1 });
+            installedAfterLock = true;
+          }
+          return result;
+        };
+      } }) as Prisma.TransactionClient;
+      await expect(ensureAppMember(observed, appId, userId, 'late')).rejects.toBeInstanceOf(InvalidRoleError);
+      expect(installedAfterLock).toBe(true);
+      expect((await loadOfferedMemberRoles(db, appId)).roles).toEqual(['owner', 'late']);
+      expect(await tx.appMember.findUnique({ where: { appId_userId: { appId, userId } } })).toBeNull();
+    });
+  });
+
   it('an install committed AFTER the lock does not contribute to the deciding union (BLIND P2)', async () => {
     await mkAgent({ maxMembers: 'unlimited', memberRoles: ['owner'] }, { createdAt: t0 });
     await db.$transaction(async (tx) => {
