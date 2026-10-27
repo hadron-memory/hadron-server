@@ -94,7 +94,12 @@ describe('hadron_create_memory round-trip', () => {
     const selecting = serverFor('cm-selected');
     await selecting.callToolText('hadron_set_active_memory', { memoryUrn: other.urn });
     expect(await selectionOf('cm-selected')).toBe(other.id);
+    // The live (in-process) selection is what hadron_run_task defaults to, so
+    // probe it too: a volatile-only auto-select would persist nothing.
+    const runBefore = await selecting.callToolText('hadron_run_task', {});
+    expect(runBefore).toContain('already-selected');
     await selecting.callToolText('hadron_create_memory', { name: 'unselected', memoryClass: 'personal' });
+    expect(await selecting.callToolText('hadron_run_task', {})).toBe(runBefore);
     const row = await db.memory.findFirstOrThrow({ where: { name: 'unselected' } });
     expect(row.appId).toBeNull();
     expect(row.userMemoryOfAgentId).toBeNull();
