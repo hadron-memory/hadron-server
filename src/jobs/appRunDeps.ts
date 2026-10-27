@@ -189,7 +189,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       const haTools = await materializeHaRunTools(db, run, toolNames.filter(isHaRunToolName));
       return generateWithTools(resolved, req, [...tools, ...mcpTools, ...haTools], {
         onToolCall: opts.onToolCall,
-        toolCtx: { log: opts.log, db, run, principal: runContext(db, run) },
+        toolCtx: { log: opts.log, db, run, principal: runContext(db, run), nodeUrn: opts.nodeUrn },
       });
     },
 

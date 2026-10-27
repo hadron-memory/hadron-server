@@ -677,6 +677,8 @@ export interface RunExecutionDeps {
     opts: {
       onToolCall: (action: `tool.${string}`, cost: 0 | 1) => Promise<boolean>;
       log: (message: string) => void;
+      /** The flow node this hop executes (#2485). */
+      nodeUrn?: string;
     },
   ) => Promise<LlmToolLoopResult>;
   writeOutput: (run: AppRun, nodeUrn: string, text: string) => Promise<string | null>; // returns written node id/urn
@@ -950,6 +952,7 @@ async function executeAppRunInner(
                 return lastToolDenial === null;
               },
               log: (message) => hopLogs.push(message),
+              nodeUrn: cur,
             },
           );
           toolCalls = loopResult.toolCalls;

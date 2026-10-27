@@ -36,6 +36,7 @@ import { makeProdRunDeps, runContext } from './appRunDeps.js';
 import { resolveRunTools, hadronCreateNode, hadronUpdateNode, hadronReadNode } from '../lib/runner/tools/index.js';
 import { ToolDeniedError } from '../lib/llm/index.js';
 import type { AppRun } from '../generated/prisma/index.js';
+import { splitNodeUrn } from '../lib/urn.js';
 
 const ORG_URN = 'flow-int-org';
 const MEM_URN = `${ORG_URN}:flowmem`;
@@ -349,6 +350,24 @@ describe('3-node flow through production deps (§10)', () => {
     const trail = after.hops as Array<Record<string, unknown>>;
     expect(trail[1].toolCalls).toMatchObject([{ name: 'hadron_create_node', ok: true }]);
     expect(trail[1].logs).toEqual(['task node created']);
+  });
+
+  it('the tool loop is told which flow node the hop executes (#2485: node-scoped tool reach)', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { tools: ['hadron_log'] } as never },
+    });
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    const seen: Array<string | undefined> = [];
+    deps.llmTools = async (_r, _resolved, _req, _toolNames, opts) => {
+      seen.push(opts.nodeUrn);
+      return { text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test', toolCalls: [] };
+    };
+    expect(await executeAppRun(db, run.id, deps)).toBe('completed');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeDefined();
+    expect(splitNodeUrn(seen[0]!).loc).toBe('flow:act');
   });
 
   it('a policy chain lacking tool.hadron_create_node halts the tool call BEFORE the node exists (§7 fixture)', async () => {
