@@ -25,6 +25,8 @@
  * has exactly the authority it had before this existed.
  *
  * Concurrency (the gate's "revoked authority cannot commit a later write"): the
+ * App, memory and (for a personal/private target) owner rows are held `FOR SHARE`
+ * so a change to the authority a grant rests on serializes with the write, and the
  * covering grant row is read `FOR SHARE`, and a revocation UPDATEs that row, so
  * a revoke cannot return while a write that read the grant is still open, and a
  * write that starts after it sees the terminal `revokedAt`. The node write door
@@ -130,6 +132,12 @@ export async function userlessRunHoldsWriteGrant(
   if (!isUserlessRunPrincipal(auth)) return false;
   const appId = auth.appId!;
   const { loc } = destination;
+  // Hold the authority rows this decision rests on, App first (the order an App's delete cascade takes them), so a
+  // change to any of them either commits before this read and is seen, or waits for the write to finish: the App
+  // going away, the memory being encrypted, deleted or moving to another owner. The grant row alone cannot serialize
+  // those. Outside a transaction these are plain reads.
+  await db.$queryRaw`SELECT id FROM apps WHERE id = ${appId} FOR SHARE`;
+  await db.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
   const rows = await db.$queryRaw<Array<{ id: string; granted_by: string }>>`
     SELECT id, granted_by FROM app_memory_write_grants
     WHERE app_id = ${appId} AND memory_id = ${memoryId} AND revoked_at IS NULL
@@ -158,6 +166,7 @@ export async function ownerStillManagesApp(db: PrismaClient, userId: string, app
   if (app.organizationId) {
     await db.$queryRaw`SELECT user_id FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${userId} FOR SHARE`;
   }
+  await db.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR SHARE`;
   const user = await db.user.findFirst({ where: { id: userId, deletedAt: null }, select: { id: true, roles: true } });
   if (!user) return false;
   return managesApp({ db, userId: user.id, roles: user.roles }, app);

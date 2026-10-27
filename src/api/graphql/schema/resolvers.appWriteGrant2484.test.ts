@@ -351,6 +351,71 @@ describe('what a userless run of the App may write', () => {
   });
 });
 
+describe('an authority change serializes with a granted write (§10, both orderings)', () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  /** A node create through the real write door, held open in the caller's transaction until released. */
+  function holdWrite(run: unknown, memory: { id: string }, loc: string) {
+    let release!: () => void, entered!: () => void;
+    const hold = new Promise<void>(r => { release = r; });
+    const inside = new Promise<void>(r => { entered = r; });
+    const after: Array<() => void> = [];
+    const done = db.$transaction(async tx => {
+      await writeNodeCore({ memoryId: memory.id, loc, name: 'held', nodeType: 'record', content: 'x' } as never, run as never, 'create',
+        { transaction: { tx, pooledDb: db, afterCommit: (fn: () => void) => { after.push(fn); } } } as never);
+      entered();
+      await hold;
+    }, { timeout: 20000 }).then(() => after.forEach(fn => fn()));
+    return { release, done, inside: Promise.race([inside, done]) };
+  }
+  /** Writer first: the change must WAIT for the in-flight write, which commits. */
+  async function writerWins(f: F, memory: { id: string }, change: () => Promise<unknown>) {
+    const w = holdWrite(f.runCtx(), memory, `${PREFIX}:held`);
+    await w.inside;
+    let settled = false;
+    const changing = change().then(() => { settled = true; }, () => { settled = true; });
+    await sleep(400);
+    expect(settled).toBe(false);
+    w.release();
+    await w.done;
+    await changing;
+    // the write committed; a deleted memory takes it away afterwards, which is the change landing, not the write failing
+    if (await db.memory.findUnique({ where: { id: memory.id } })) expect(await db.node.count({ where: { memoryId: memory.id, loc: `${PREFIX}:held` } })).toBe(1);
+  }
+  /** Change first: it commits, and the next write is refused and leaves nothing. */
+  async function changeWins(f: F, memory: { id: string }, change: () => Promise<unknown>) {
+    await change();
+    await expect(create(f.runCtx(), memory, `${PREFIX}:after`)).rejects.toBeTruthy();
+    expect(await db.node.count({ where: { memoryId: memory.id } })).toBe(0);
+  }
+  const demoteOwner = (f: F) => async () => {
+    await db.appMember.delete({ where: { appId_userId: { appId: f.app.id, userId: f.mgr.id } } });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.mgr.id } }, data: { role: 'CONTRIBUTOR' } });
+  };
+  const cases: Array<[string, (f: F) => { id: string }, (f: F) => () => Promise<unknown>, boolean]> = [
+    ['the grant is revoked', f => f.dest, f => async () => revoke((await rows(f.app.id))[0].id, f.ctx), false],
+    ['the memory is encrypted', f => f.dest, f => () => db.memory.update({ where: { id: f.dest.id }, data: { isEncrypted: true } }), false],
+    ['the memory is deleted', f => f.dest, f => () => db.memory.delete({ where: { id: f.dest.id } }), false],
+    ['the App is soft-deleted', f => f.dest, f => () => db.app.update({ where: { id: f.app.id }, data: { deletedAt: new Date() } }), false],
+    ['the App is hard-deleted', f => f.dest, f => () => db.app.delete({ where: { id: f.app.id } }), false],
+    ['the owner stops managing the App (personal)', f => f.personal, demoteOwner, true],
+    ['the owner stops managing the App (private)', f => f.priv, demoteOwner, true],
+    ['the personal memory moves to another owner', f => f.personal, f => async () => {
+      const other = await db.user.create({ data: { handle: 'grant-newowner' } });
+      await db.memory.update({ where: { id: f.personal.id }, data: { userId: other.id } });
+    }, true],
+  ];
+  it.each(cases)('writer first: %s only after the in-flight write commits', async (_name, target, change) => {
+    const f = await fixture();
+    await grant(f, target(f));
+    await writerWins(f, target(f), change(f));
+  });
+  it.each(cases)('change first: after %s the next write is refused and writes nothing', async (_name, target, change) => {
+    const f = await fixture();
+    await grant(f, target(f));
+    await changeWins(f, target(f), change(f));
+  });
+});
+
 describe('listing', () => {
   it('lists the App\'s grants to a manager only, and hides a personal or private grant from a manager who is not its owner', async () => {
     const f = await fixture();
