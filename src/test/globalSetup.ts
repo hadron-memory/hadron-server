@@ -148,6 +148,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8'));
   // #1705 — agent task shape + append-only team events.
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
+  // #2553 — the per-App task number (needs agent_tasks and its counter table).
+  await client.query(readFileSync(new URL('../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8'));
   // #1706 — stall alarm episodes, alarm wakes, availability, stall windows.
   await client.query(readFileSync(new URL('../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8'));
   // #1707 — session model family, host registrations.

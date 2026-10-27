@@ -13184,6 +13184,8 @@ export const typeDefs = `#graphql
     event: TaskWakeEvent!
     "The task's title, for the nudge text."
     title: String!
+    "The task's handle, e.g. AT3.405: an alias for the id, printed first in the nudge (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
+    handle: String!
     "A stable label for the reason, e.g. TASK:<id>:assigned."
     ref: String!
     "S7 (#2023, R90) — on an assignment to a worker that was on standby: how many messages were held from it and passed by the delivered mark. Returned with this one event, so once."
@@ -13673,6 +13675,17 @@ export const typeDefs = `#graphql
   type AgentTask {
     id: ID!
     appId: ID!
+    """
+    The short handle of this task, for example "AT3.405": its project (AT3, a top-level task counted per App) and its
+    number within each parent down to it (hrn:node:hadronmemory.com:specs:cor:agt:050:01). "AT0" is the reserved
+    project "No project": a task made with no project is AT0.<n>. An alias for the id, which stays canonical; every
+    task operation that takes a task id also takes the handle. Immutable: parentage is fixed at creation. A person who
+    belongs to several Apps qualifies it as hrn:agenttask:<app-urn>:AT3.405, where the App URN is the App's urn.
+    The handle is not the number of any GitHub issue the task's source names.
+    """
+    handle: String!
+    "This task's own number inside its handle (the last segment), counted per parent. Permanent: never changed, never given to another task."
+    taskNumber: String!
     title: String!
     description: String
     "Opaque origin reference (an issue URL, a node URN). Not interpreted."
@@ -14375,6 +14388,8 @@ export const typeDefs = `#graphql
     "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
     appRef: ID
     parentTaskId: ID
+    "Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId."
+    project: Boolean
     title: String!
     description: String
     source: String

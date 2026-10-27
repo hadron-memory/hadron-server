@@ -3383,6 +3383,7 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  agentTaskCounters       AgentTaskCounter[]
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
   appGrants               AppGrant[]
@@ -5676,6 +5677,14 @@ model AutomationVersion {
 model AgentTask {
   id                   String    @id @default(cuid())
   appId                String    @map("app_id")
+  /// #2553: this task's own segment of its handle: the project number (counted per App) for a top-level row, else the
+  /// number counted within its parent. Assigned once at creation from `agent_task_counters`, never changed or reissued.
+  /// 0 is the reserved project `AT0` ("no project"). NOT NULL in the database (prisma/agent-task-number-invariants.sql,
+  /// which also fills it for any writer that leaves it out); optional here only so a writer need not state it.
+  taskNumber           BigInt?   @map("task_number")
+  /// #2553: the full dotted handle (`AT3.405.16`), composed once at creation from the parent's handle and never
+  /// recomputed: parentage is fixed at creation (a trigger refuses UPDATE of parent_task_id), so it always matches the tree.
+  handle               String?
   /// What is asked, in the team's own words. Never read by the platform.
   title                String
   description          String?
@@ -5726,6 +5735,8 @@ model AgentTask {
   app            App                 @relation(fields: [appId], references: [id], onDelete: Cascade)
   parent         AgentTask?          @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
   children       AgentTask[]         @relation("AgentTaskParent")
+  /// #2553: the counter of the numbers issued under this task.
+  childCounters  AgentTaskCounter[]
   ownerWorker    Worker?             @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
   ownerUser      User?               @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
   assigneeWorker Worker?             @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
@@ -5734,6 +5745,7 @@ model AgentTask {
   /// #2022 — times stop signals kept this task from being assigned.
   stopHolds      AgentTaskStopHold[]
 
+  @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
   @@index([ownerWorkerId])
@@ -5741,6 +5753,24 @@ model AgentTask {
   @@index([assigneeWorkerId])
   @@index([assigneeUserId])
   @@map("agent_tasks")
+}
+
+/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
+/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
+/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
+/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
+model AgentTaskCounter {
+  id           String  @id @default(cuid())
+  appId        String  @map("app_id")
+  parentTaskId String? @map("parent_task_id")
+  lastNumber   BigInt  @map("last_number")
+
+  app        App        @relation(fields: [appId], references: [id], onDelete: Cascade)
+  parentTask AgentTask? @relation(fields: [parentTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, parentTaskId])
+
+  @@map("agent_task_counters")
 }
 
 /// #1705 — one append-only record of something that happened in a team App's

@@ -159,7 +159,8 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
   ]);
   const flags = [T.queued(t as never) ? 'queued' : null, waiting ? 'waiting on child tasks' : null].filter(Boolean);
   const lines = [
-    `- ${t.title} (id: ${t.id})`,
+    // #2553: the handle first, then the id it is an alias for.
+    `- ${t.handle} ${t.title} (id: ${t.id})`,
     `  status: ${t.status}${flags.length ? ` (${flags.join(', ')})` : ''}`,
     `  owner: ${partyLabel(owner)} · assignee: ${partyLabel(assignee)}`,
   ];
@@ -195,9 +196,11 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
 export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const actor = (await E.actor(e as never, {}, ctx)) as Party;
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
+  // #2553: the handle first, then the id (one read: the event row carries only the id).
+  const handle = e.taskId ? (await ctx.db.agentTask.findUnique({ where: { id: e.taskId }, select: { handle: true } }))?.handle ?? null : null;
   const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
   const line = `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
-    `${e.taskId ? ` task ${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
+    `${e.taskId ? ` task ${handle ? `${handle} ` : ''}${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;
   if (!e.severity) return line;
   // #1706 — an alarm: its episode, who it has woken, and its acknowledgement.
@@ -249,7 +252,10 @@ const party = z.object({
   worker: z.string().optional().describe('A worker of the App: its id, URN or name.'),
   user: z.string().optional().describe('A person who participates in the App: user id or handle.'),
 }).describe('Exactly one of worker or user.');
-const taskId = z.string().describe('The task id.');
+const taskId = z.string().describe(
+  'The task id, or its handle: AT3.405 (a project, then the number within each parent; AT0.<n> is a task with no project). ' +
+    'A person who belongs to several Apps qualifies it: hrn:agenttask:<app-urn>:AT3.405. The handle is not a GitHub issue number.',
+);
 
 /**
  * Register the agent-task tools on one MCP server instance. `auth` is the
@@ -585,6 +591,7 @@ const availabilityFields = {
 const SHAPE_HADRON_TASK_CREATE = {
   appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
   parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
+  project: z.boolean().optional().describe('Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId.'),
   title: z.string().describe('What is asked, in the team\'s own words.'),
   description: z.string().optional(),
   source: z.string().optional().describe('Where the work came from: an issue URL, a node URN.'),
