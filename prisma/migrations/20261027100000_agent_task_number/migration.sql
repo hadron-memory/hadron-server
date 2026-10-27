@@ -182,11 +182,14 @@ DROP TRIGGER IF EXISTS trg_agent_tasks_number_immutable ON agent_tasks;
 CREATE TRIGGER trg_agent_tasks_number_immutable BEFORE UPDATE OF task_number, handle, parent_task_id, status ON agent_tasks
   FOR EACH ROW EXECUTE FUNCTION agent_tasks_number_immutable();
 
--- 0 is reserved: only the project AT0 (top level, handle AT0) may carry it. The handle is the dotted path.
+-- 0 is reserved: only the project AT0 (top level, handle AT0) may carry it. The handle is the dotted path, at most 16 levels and 64 characters
+-- (the parser's bounds, src/lib/agentTasks/handle.ts): the database refuses what the API could never resolve.
 ALTER TABLE agent_tasks DROP CONSTRAINT IF EXISTS chk_agent_tasks_handle;
 ALTER TABLE agent_tasks ADD CONSTRAINT chk_agent_tasks_handle CHECK (
   task_number >= 0 AND
   handle ~ '^AT(0|[1-9][0-9]*)(\.[1-9][0-9]*)*$' AND
+  length(handle) <= 64 AND
+  array_length(string_to_array(handle, '.'), 1) <= 16 AND
   (task_number > 0 OR (task_number = 0 AND parent_task_id IS NULL AND handle = 'AT0')) AND
   (parent_task_id IS NOT NULL OR handle = 'AT' || task_number) AND
   (parent_task_id IS NULL OR right(handle, length(task_number::text) + 1) = '.' || task_number)

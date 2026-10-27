@@ -166,6 +166,24 @@ describe('numbering', () => {
     expect(child.handle).toBe('AT8.1');
   });
 
+  it('the database itself refuses a handle past 64 characters or 16 levels, whoever writes it, and the counter does not move', async () => {
+    await mk(appX, 'a'); // AT0 exists
+    // Wide numbers reach 64 characters inside 16 levels: AT1000000000 is 12, each .1000000000 adds 11.
+    let parent = await db.agentTask.create({ data: { appId: appX.id, title: 'wide', ownerUserId: alice.id, taskNumber: 1000000000n, handle: 'AT1000000000' } });
+    for (let i = 0; i < 4; i += 1) {
+      parent = await db.agentTask.create({ data: { appId: appX.id, title: 'w', ownerUserId: alice.id, parentTaskId: parent.id, taskNumber: 1000000000n, handle: `${parent.handle!}.1000000000` } });
+    }
+    expect(parent.handle!.length).toBe(56);
+    await expect(db.agentTask.create({ data: { appId: appX.id, title: 'long', ownerUserId: alice.id, parentTaskId: parent.id, taskNumber: 1000000000n } })).rejects.toThrow(/chk_agent_tasks_handle/);
+    // Narrow numbers reach 17 levels inside 64 characters.
+    let deep = await db.agentTask.create({ data: { appId: appX.id, title: 'deep', ownerUserId: alice.id } });
+    for (let i = 1; i < 16; i += 1) {
+      deep = await db.agentTask.create({ data: { appId: appX.id, title: 'd', ownerUserId: alice.id, parentTaskId: deep.id } });
+    }
+    expect(deep.handle!.split('.').length).toBe(16);
+    await expect(db.agentTask.create({ data: { appId: appX.id, title: 'd17', ownerUserId: alice.id, parentTaskId: deep.id } })).rejects.toThrow(/chk_agent_tasks_handle/);
+  });
+
   it('the number is exposed as a string, so a bigint past 2^31 survives GraphQL', async () => {
     const t = await db.agentTask.create({ data: { appId: appX.id, title: 'big', ownerUserId: alice.id, taskNumber: 2147483648n, handle: 'AT2147483648' } });
     expect(await T.taskNumber!(t, {}, as(alice))).toBe('2147483648');
@@ -349,7 +367,7 @@ describe('the migration', () => {
     expect(migrationSql().endsWith(invariants())).toBe(true);
   });
 
-  it('refuses, naming the first offender and changing nothing, when a legacy chain would get a handle past 16 levels or 64 characters', async () => {
+  it('refuses, naming the first offender and changing nothing, when a legacy chain would get a handle past 16 levels (the 64-character arm shares the guard but is not separately pinned)', async () => {
     const backfill = migrationSql().slice(0, migrationSql().length - invariants().length);
     const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();
