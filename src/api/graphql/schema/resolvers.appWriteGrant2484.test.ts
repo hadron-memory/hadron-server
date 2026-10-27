@@ -74,6 +74,8 @@ const create = (ctx: unknown, memory: { id: string }, loc: string) =>
 const update = (ctx: unknown, memory: { id: string }, loc: string) =>
   writeNodeCore({ memoryId: memory.id, loc, content: 'changed' } as never, ctx as never, 'update');
 const refused = (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+/** Refused by some gate before the effect; the caller also asserts the state did not change. */
+const notDone = (p: Promise<unknown>) => expect(p).rejects.toBeTruthy();
 const rows = (appId: string) => db.appMemoryWriteGrant.findMany({ where: { appId }, orderBy: { createdAt: 'asc' } });
 const events = (appId: string) => db.appMemoryWriteGrantEvent.findMany({ where: { appId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 const nodes = (memoryId: string) => db.node.count({ where: { memoryId } });
@@ -190,8 +192,13 @@ describe('personal, private and encrypted targets', () => {
 
   it('refuses the owner when they do not manage the App being granted', async () => {
     const f = await fixture();
-    await refused(M.setAppMemoryWriteGrant({}, { appRef: f.otherApp.id, memoryRef: f.personal.id, prefix: PREFIX }, f.ctx));
-    expect(await rows(f.otherApp.id)).toHaveLength(0);
+    // An org ADMIN manages every App of the org, so the owner here is a plain member of the App, not a manager.
+    const plain = await db.user.create({ data: { handle: 'grant-plain' } });
+    await db.orgMember.create({ data: { userId: plain.id, organizationId: f.org.id, role: 'CONTRIBUTOR' } });
+    await db.appMember.create({ data: { appId: f.app.id, userId: plain.id, role: 'member' } });
+    const mine = await db.memory.create({ data: { name: 'plain-mine', urn: 'grant2484.test:plain-mine', class: 'personal', userId: plain.id, organizationId: f.org.id } as never });
+    await refused(M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: mine.id, prefix: PREFIX }, { db, userId: plain.id, roles: [] }));
+    expect(await rows(f.app.id)).toHaveLength(0);
   });
 
   it.each(['encrypted', 'encPersonal'] as const)('never grants on an encrypted memory (%s), for the owner and a platform admin alike', async kind => {
@@ -233,6 +240,16 @@ describe('what a userless run of the App may write', () => {
     await refused(create(run, f.dest, 'reports'));
     await refused(update(run, f.dest, 'reports:other'));
     expect(await nodes(f.dest.id)).toBe(3);
+  });
+
+  it('an update by node id cannot reach a node outside the prefix by naming a loc inside it', async () => {
+    const f = await fixture();
+    await grant(f, f.dest);
+    const outside = await db.node.create({ data: { memoryId: f.dest.id, loc: 'reports:other', name: 'other', content: 'keep' } });
+    // The write door's own moved-node guard stops it (NODE_WRITE_CONFLICT) before any write.
+    await expect(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:x`, content: 'overwritten' } as never, f.runCtx() as never, 'update', { targetNodeId: outside.id }))
+      .rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: outside.id } })).content).toBe('keep');
   });
 
   it('is matched on the destination AFTER writeTo expansion, through the real run write', async () => {
@@ -310,13 +327,18 @@ describe('what a userless run of the App may write', () => {
     const run = f.runCtx();
     const a = await create(run, f.dest, `${PREFIX}:a`) as { id: string };
     const outside = await db.node.create({ data: { memoryId: f.dest.id, loc: 'reports:other', name: 'other' } });
-    await refused(M.deleteNode({}, { id: a.id }, run));
-    await refused(M.createEdge({}, { sourceId: a.id, targetId: outside.id, name: 'x' }, run));
-    await refused(M.updateMemory({}, { ref: f.dest.id, input: { name: 'renamed' } }, run));
+    await notDone(M.deleteNode({}, { nodeRef: a.id }, run));
+    await notDone(M.createEdge({}, { sourceRef: a.id, targetRef: outside.id, name: 'x' }, run));
+    await notDone(M.updateMemory({}, { id: f.dest.id, name: 'renamed' }, run));
+    // inline edges ride the node write but reach past the prefix, so a write that carries any is not a grant write
+    await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [{ targetId: outside.id, name: 'x' }] } as never, run as never, 'create'));
+    await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [] } as never, run as never, 'create'));
+    expect(await db.node.findUnique({ where: { loc_memoryId: { loc: `${PREFIX}:b`, memoryId: f.dest.id } } })).toBeNull();
     const { STORE_TOOLS } = await import('../../../lib/runner/tools/storeTools.js');
     const row = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:dest:x', eventData: {} });
     await expect(STORE_TOOLS[0].execute({ db, run: row, principal: run, log: () => {} } as never, { urn: `hrn:node:grant2484.test:dest:${PREFIX}:file`, filename: 'a.md', content: 'x' })).rejects.toThrow(/not writable/i);
     expect(await db.node.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ deletedAt: null });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: f.dest.id } })).name).toBe('dest');
     expect(await db.edge.count({ where: { sourceId: a.id } })).toBe(0);
     expect(await db.asset.count({ where: { memoryId: f.dest.id } })).toBe(0);
   });

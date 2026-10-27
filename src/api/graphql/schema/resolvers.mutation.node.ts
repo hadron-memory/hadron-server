@@ -65,6 +65,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   validateLoc,
@@ -347,8 +348,14 @@ async function writeNodeCoreRaw(
       // memory without record-read access. Internal callers pass no
       // concealUnreadable and keep the bare denial.
       const conceal = opts?.concealUnreadable;
+      // #2484: the destination an App's write grant for its userless runs is judged against — this create or update, at
+      // this loc. Named only when the write carries no inline edges: a grant permits node create/update under a
+      // prefix and "no edges outside the prefix", and an `edges` list (even an empty one, which replaces the node's
+      // edges) reaches beyond it. Without a destination the grant arm never answers.
+      const grantDestination: WriteDestination | undefined =
+        input.edges === undefined ? { loc: input.loc, verb: mode } : undefined;
       const authorizeWrite = async (authCtx: Context) => {
-        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId);
+        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId, grantDestination);
         if (!conceal) {
           await gate();
         } else if (conceal.entity === 'node') {
