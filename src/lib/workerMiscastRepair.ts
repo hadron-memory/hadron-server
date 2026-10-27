@@ -56,13 +56,13 @@ async function encryptedHistoryMayReference(db: Reader, worker: { id: string }, 
 
 /**
  * #2024 (S8): the tickers casting generated for this worker that nothing has used since: live, owned by the worker,
- * never acknowledged by it, and subscribed to by no one else. They are the cast's own bookkeeping, not history, so
+ * never acknowledged by it, never edited since the cast (`edited_at`, #2429), and subscribed to by no one else. They are the cast's own bookkeeping, not history, so
  * they neither count as references nor stand in the way of removing a miscast worker (they are removed with it).
  */
 export async function pristineGeneratedTickerIds(db: Reader, workerId: string): Promise<string[]> {
   const rows = await db.$queryRaw<Array<{ id: string }>>`
     SELECT t.id FROM tickers t
-    WHERE t.generated_for_worker_id = ${workerId} AND t.owner_worker_id = ${workerId} AND t.deleted_at IS NULL
+    WHERE t.generated_for_worker_id = ${workerId} AND t.owner_worker_id = ${workerId} AND t.deleted_at IS NULL AND t.edited_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM worker_delivery_ticks d WHERE d.ticker_id = t.id)
       AND NOT EXISTS (SELECT 1 FROM ticker_subscriptions s WHERE s.ticker_id = t.id AND s.worker_id <> ${workerId})`;
   return rows.map((r) => r.id);

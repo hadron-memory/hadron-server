@@ -6140,6 +6140,10 @@ model Ticker {
   sourceTemplateId       String? @map("source_template_id")
   sourceTemplateRevision Int?    @map("source_template_revision")
   generatedForWorkerId   String? @map("generated_for_worker_id")
+  /// #2429 (cor:dmo:050:11): set by every accepted `updateTicker` on a GENERATED ticker, whatever the fields and even when
+  /// the values end up unchanged (it fails toward blocking). An edited generated ticker is no longer the cast's own
+  /// bookkeeping, so it counts as a reference and blocks the miscast repair. Soft-deletes are not edits.
+  editedAt               DateTime? @map("edited_at")
   createdAt         DateTime  @default(now()) @map("created_at")
   createdBy         String?   @map("created_by")
   createdByWorkerId String?   @map("created_by_worker_id")
