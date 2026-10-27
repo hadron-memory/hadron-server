@@ -2784,6 +2784,22 @@ export const typeDefs = `#graphql
     openThreads: Int!
   }
 
+  "#2517 — one edge a hard delete removed from this node (hrn:node:hadronmemory.com:specs:cor:dmo:010:04). The deleted target's address is shown only when you can read the memory it lived in."
+  type NodeEdgeRemoval {
+    id: ID!
+    edgeLoc: String!
+    edgeName: String
+    "Stable id of the deleted target; the row itself is gone."
+    targetId: ID!
+    "The deleted target's loc; null when its memory is not one you can read (a cross-memory edge)."
+    targetLoc: String
+    "TARGET_HARD_DELETED: the edge's target was hard-deleted."
+    reason: String!
+    "Who deleted: the same user, app or client id a soft delete stamps as deletedBy; null when unattributed."
+    removedBy: String
+    createdAt: DateTime!
+  }
+
   type NodeRevision {
     id: ID!
     "#1610 — the Worker behind the edit this snapshot records, beside editedBy (the user)."
@@ -8004,6 +8020,13 @@ export const typeDefs = `#graphql
     disclosure).
     """
     nodeRevisions(nodeRef: ID!, limit: Int): [NodeRevision!]!
+    """
+    #2517 — the audit entries a HARD delete left on this node when it removed edges the node held to the deleted
+    target, newest first (default 20). A separate record, never a NodeRevision: revisions stay snapshots of the node's
+    own fields. A soft delete keeps its edges and records nothing. Same read gate as nodeRevisions; a node you cannot
+    read returns an empty list. hrn:node:hadronmemory.com:specs:cor:dmo:010:04
+    """
+    nodeEdgeRemovals(nodeRef: ID!, limit: Int): [NodeEdgeRemoval!]!
     """
     #2212 - \`nodeRevisions\` as a page: the same access gate (a miss or an unreadable node is an empty page),
     with the snapshot-memory gate applied before counting, so \`total\` and the pages hold only snapshots you

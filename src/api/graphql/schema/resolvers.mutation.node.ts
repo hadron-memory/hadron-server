@@ -164,6 +164,44 @@ import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 
+
+/**
+ * #2517 — writes one `NodeEdgeRemoval` per live edge that points INTO `targetIds` from a node outside
+ * them, just before a hard delete cascades those edges away. Comment-governed edges are skipped (their
+ * threads go with the target, cor:dmo:110:04) and so are edges already soft-deleted (they left the live
+ * graph earlier). Runs inside the delete's transaction.
+ */
+async function recordEdgeRemovals(tx: Prisma.TransactionClient, targetIds: string[], removedBy: string | null) {
+  const edges = await tx.edge.findMany({
+    where: {
+      targetId: { in: targetIds },
+      sourceId: { notIn: targetIds },
+      governedKind: null,
+      deletedAt: null,
+    },
+    select: {
+      id: true, loc: true, name: true, targetId: true, sourceId: true,
+      source: { select: { memoryId: true } },
+      target: { select: { loc: true, memoryId: true } },
+    },
+  });
+  if (edges.length === 0) return;
+  await tx.nodeEdgeRemoval.createMany({
+    data: edges.map((e) => ({
+      sourceId: e.sourceId,
+      memoryId: e.source.memoryId,
+      edgeId: e.id,
+      edgeLoc: e.loc,
+      edgeName: e.name,
+      targetId: e.targetId,
+      targetMemoryId: e.target.memoryId,
+      targetLoc: e.target.loc,
+      reason: 'TARGET_HARD_DELETED',
+      removedBy,
+    })),
+  });
+}
+
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
  * comment's anchor or reply edge. Read on the transaction, after the gate.
@@ -3232,6 +3270,11 @@ export const nodeMutations = {
             for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
               await requireMemoryWriteAccess(ctx, other);
             }
+            // #2517 (cor:dmo:010:04, Proposed) — the FK cascade below removes each edge an outside node held
+            // to the deleted set without a word on that node. Record the removal on every such SOURCE, in this
+            // transaction, as its own audit entry (never a NodeRevision). Judged after every refusal above, so
+            // a refused delete leaves nothing. Edges whose source goes in the same delete need no trace.
+            await recordEdgeRemovals(tx, affectedIds, deletedBy);
             // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
             // cascade misses pending rows aimed at the deleted nodes — clean them
             // up explicitly (PR-189 pattern), in both node-keyed forms (#449).

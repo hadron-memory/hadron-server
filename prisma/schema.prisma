@@ -1423,6 +1423,7 @@ model Node {
   pendingEdges             PendingEdge[]
   usageEvents              UsageEvent[]
   revisions                NodeRevision[]
+  edgeRemovals             NodeEdgeRemoval[]
   /// #2046 (S9): the immutable provenance of each compiled revision of this node.
   compiledPromptRevisions  CompiledPromptRevision[]
   /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
@@ -6600,6 +6601,33 @@ model AgentCloneAudit {
 
   @@index([sourceAgentId])
   @@map("agent_clone_audits")
+}
+
+/// #2517, cor:dmo:010:04 (Proposed) — a separate audit entry, written on each SOURCE node, when a hard
+/// delete cascades an edge that node held to the deleted target. Deliberately NOT a NodeRevision (a
+/// node's revisions stay snapshots of its own fields). The source is a real FK (the trace dies with the
+/// source); the target is NOT one, since the target row is gone by the time anyone reads this.
+model NodeEdgeRemoval {
+  id             String   @id @default(cuid())
+  sourceId       String   @map("source_id")
+  /// The source's memory when the edge was removed (a node can later be moved).
+  memoryId       String   @map("memory_id")
+  edgeId         String   @map("edge_id")
+  edgeLoc        String   @map("edge_loc")
+  edgeName       String?  @map("edge_name")
+  targetId       String   @map("target_id")
+  targetMemoryId String   @map("target_memory_id")
+  targetLoc      String   @map("target_loc")
+  /// Why the edge went: today only `TARGET_HARD_DELETED`.
+  reason         String
+  /// Same value `Node.deletedBy` would carry (user, app or client id), null when unattributed.
+  removedBy      String?  @map("removed_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId, createdAt])
+  @@map("node_edge_removals")
 }
 
 /// #1667, cor:dmo:060:15 — append-only record of every successful per-asset

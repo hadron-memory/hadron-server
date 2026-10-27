@@ -103,4 +103,28 @@ describe('#2517 — hard delete leaves a trace on the nodes that pointed at it',
 
     expect(await db.nodeEdgeRemoval.count()).toBe(0);
   });
+
+  it('hides the deleted target loc from a reader who cannot read the target memory (cross-memory edge)', async () => {
+    const orgB = await db.organization.create({ data: { id: generateId(), name: 'er-b', urn: 'er-b' } });
+    const memB = await db.memory.create({
+      data: { id: generateId(), organizationId: orgB.id, urn: 'er-b:m', name: 'mb', class: 'knowledge' },
+      select: { id: true },
+    });
+    const reader = await db.user.create({ data: { githubId: 25171, githubUsername: 'er-reader', handle: 'er-reader', roles: ['READER'] } });
+    const orgA = await db.orgMember.findFirstOrThrow({ where: { userId: admin.id }, select: { organizationId: true } });
+    await db.orgMember.create({ data: { organizationId: orgA.organizationId, userId: reader.id, role: 'READER' } });
+    const source = await node('src');
+    const target = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'secret-tgt', name: 'secret-tgt' } });
+    await db.edge.create({ data: { id: generateId(), memoryId: mem.id, loc: 'src:to-b', sourceId: source.id, targetId: target.id, name: 'x' } });
+
+    await resolvers.Mutation.deleteNode({}, { nodeRef: target.id, hard: true, cascadeCrossMemoryEdges: true }, ctx());
+
+    const asReader = (await resolvers.Query.nodeEdgeRemovals(
+      {}, { nodeRef: source.id }, { db, roles: ['READER'], userId: reader.id } as Context,
+    )) as Array<Record<string, unknown>>;
+    expect(asReader).toHaveLength(1);
+    expect(asReader[0]!.targetLoc).toBeNull();
+    expect(asReader[0]!.targetId).toBe(target.id);
+    expect((await removals(source.id))[0]!.targetLoc).toBe('secret-tgt');
+  });
 });

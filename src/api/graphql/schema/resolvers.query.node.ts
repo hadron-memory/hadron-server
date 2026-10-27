@@ -2168,6 +2168,18 @@ export const nodeQueries = {
       });
     },
 
+    nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+      const scope = await nodeRevisionsScope(ctx, nodeRef);
+      if (!scope) return [];
+      const rows = await ctx.db.nodeEdgeRemoval.findMany({
+        where: { sourceId: scope.nodeId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit ?? 20,
+      });
+      // The deleted target's address is another node's identity: show it only where its memory is readable.
+      return rows.map((r) => ({ ...r, targetLoc: scope.canRead(r.targetMemoryId) ? r.targetLoc : null }));
+    },
+
     nodeRevisions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
       const scope = await nodeRevisionsScope(ctx, nodeRef);
       if (!scope) return [];
