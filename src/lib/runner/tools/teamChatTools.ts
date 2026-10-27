@@ -32,7 +32,21 @@ import type { RunToolDef } from './types.js';
 
 export const TEAM_CHAT_READ_DEFAULT_LIMIT = 20;
 export const TEAM_CHAT_READ_MAX_LIMIT = 50;
+/**
+ * Body cap per response, in UTF-16 code units: AT MOST this many. A cut never ends between the two halves of a
+ * surrogate pair, so a cut body may be one unit shorter (#2581).
+ */
 export const TEAM_CHAT_READ_MAX_BODY_CHARS = 32768;
+
+/**
+ * `body` cut to at most `room` code units without splitting a surrogate pair: a lone high surrogate is not
+ * well-formed text and becomes U+FFFD on a UTF-8 round trip (#2581). A stored body is always well-formed (Postgres
+ * refuses a lone surrogate), so a high surrogate before the cut always has its low half after it.
+ */
+function cutBody(body: string, room: number): string {
+  const unit = body.charCodeAt(room - 1);
+  return body.slice(0, unit >= 0xd800 && unit <= 0xdbff ? room - 1 : room);
+}
 
 function positiveInt(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
@@ -77,10 +91,11 @@ export const teamChatRead: RunToolDef = {
       const room = TEAM_CHAT_READ_MAX_BODY_CHARS - used;
       if (messages.length > 0 && m.body.length > room) break;
       const cut = m.body.length > room;
+      const body = cut ? cutBody(m.body, room) : m.body;
       messages.push({
         seq: m.seq,
         at: m.at,
-        body: cut ? m.body.slice(0, room) : m.body,
+        body,
         ...(cut ? { bodyTruncated: true } : {}),
         replyToSeq: m.replyToSeq,
         mentions: m.mentions,
@@ -90,7 +105,7 @@ export const teamChatRead: RunToolDef = {
         authorWorkerId: m.authorWorkerId,
         authorSystem: m.authorSystem,
       });
-      used += cut ? room : m.body.length;
+      used += body.length;
     }
     const nextSinceSeq = messages.length > 0 ? (messages[messages.length - 1]!.seq as number) : sinceSeq;
     ctx.log(`team_chat_read (${messages.length} messages)`);
