@@ -32,3 +32,14 @@ const SECRET_SHAPES = [/postgres(ql)?:\/\/[^\s"]*:[^\s"]*@/i, /hdr_[a-z]+_[A-Za-
 export function assertSecretFree(text) {
   for (const re of SECRET_SHAPES) if (re.test(text)) throw new Error('diagnose output refused: secret-shaped content');
 }
+
+// Only allowlisted numeric/boolean V8 flags are recorded; raw NODE_OPTIONS can carry URLs or paths (#2596 LOCAL P2).
+const SAFE_FLAG = /^--(max-old-space-size|max-semi-space-size|stack-size)=\d+$|^--(expose-gc|expose_gc)$/;
+export function safeNodeOptions(raw) {
+  return String(raw ?? '').split(/\s+/).filter((t) => SAFE_FLAG.test(t));
+}
+
+// Counts of Prisma pool timeout codes in a chunk of log text; the text itself is never kept.
+export function countTimeouts(text) {
+  return { P2024: (text.match(/P2024/g) ?? []).length, P2028: (text.match(/P2028/g) ?? []).length };
+}
