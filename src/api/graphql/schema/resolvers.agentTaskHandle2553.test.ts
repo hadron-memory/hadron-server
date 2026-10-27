@@ -262,6 +262,15 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
     expect(handleOf(first)).toBe('AT0.1');
   });
 
+  it('the stall owner chain stops below AT0: its fallback owner is not a parent owner', async () => {
+    const { ownerChain } = await import('../../../lib/agentTasks/stall.js');
+    const t: any = await mk(appX, 'rooted', bob);
+    const zero = await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } });
+    await db.agentTask.update({ where: { id: zero.id }, data: { ownerUserId: alice.id } });
+    const chain = await ownerChain(db, t.id);
+    expect(chain.filter((p: any) => !p.via).map((p: any) => p.userId)).toEqual([bob.id]);
+  });
+
   it('the matcher and the stall evaluator never see it (backlog only)', async () => {
     await mk(appX, 'a');
     const zero = await db.agentTask.findFirstOrThrow({ where: { appId: appX.id, handle: 'AT0' } });
