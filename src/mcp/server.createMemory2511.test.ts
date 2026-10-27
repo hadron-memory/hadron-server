@@ -81,13 +81,51 @@ describe('hadron_create_memory round-trip', () => {
   }
 
   it('does not select the new memory and creates no App-scoped memory', async () => {
-    const server = createTestableMcpServer(authFor(memberId));
-    await server.callToolText('hadron_create_memory', { name: 'unselected', memoryClass: 'personal' });
+    // Selection is observable as the persisted per-client row, so pin it before
+    // and after, with another memory already selected: creation must neither
+    // replace that selection nor select the newcomer when none was chosen.
+    const selectionOf = async (key: string) =>
+      (await db.mcpSessionState.findUnique({ where: { userId_clientKey: { userId: memberId, clientKey: key } } }))?.memoryId ?? null;
+    const serverFor = (key: string) => createTestableMcpServer(authFor(memberId), { clientKey: key });
+    const other = await db.memory.create({
+      data: { id: generateId(), name: 'already-selected', urn: `${orgId}:already-selected`, class: 'personal', userId: memberId, organizationId: orgId },
+    });
+
+    const selecting = serverFor('cm-selected');
+    await selecting.callToolText('hadron_set_active_memory', { memoryUrn: other.urn });
+    expect(await selectionOf('cm-selected')).toBe(other.id);
+    // The live (in-process) selection is what hadron_run_task defaults to, so
+    // probe it too: a volatile-only auto-select would persist nothing.
+    const runBefore = await selecting.callToolText('hadron_run_task', {});
+    expect(runBefore).toContain('already-selected');
+    await selecting.callToolText('hadron_create_memory', { name: 'unselected', memoryClass: 'personal' });
+    expect(await selecting.callToolText('hadron_run_task', {})).toBe(runBefore);
     const row = await db.memory.findFirstOrThrow({ where: { name: 'unselected' } });
     expect(row.appId).toBeNull();
     expect(row.userMemoryOfAgentId).toBeNull();
-    // Selection stays a separate, explicit step: no active memory was chosen.
-    expect(await server.callToolText('hadron_set_active_memory', { memoryUrn: row.urn })).toMatch(/Active memory set/);
+    expect(await selectionOf('cm-selected')).toBe(other.id);
+
+    // With nothing selected beforehand, creating still selects nothing.
+    const fresh = serverFor('cm-fresh');
+    expect(await selectionOf('cm-fresh')).toBeNull();
+    await fresh.callToolText('hadron_create_memory', { name: 'unselected-2', memoryClass: 'personal' });
+    expect(await selectionOf('cm-fresh')).toBeNull();
+    expect(await fresh.callToolText('hadron_set_active_memory', { memoryUrn: row.urn })).toMatch(/Active memory set/);
+    expect(await selectionOf('cm-fresh')).toBe(row.id);
+  });
+
+  it('a live CONTRIBUTOR creates org-anchored personal and private memories through the membership gate', async () => {
+    // Positive control: without it, every refusal pin below passes even if the
+    // gate refused every member.
+    for (const cls of ['personal', 'private'] as const) {
+      const text = await callAs(authFor(memberId), { org: orgUrn, memoryClass: cls, name: `anchored ${cls}` });
+      expect(text).toMatch(/Memory created/);
+      const row = await db.memory.findFirstOrThrow({ where: { name: `anchored ${cls}` } });
+      expect(row.class).toBe(cls);
+      expect(row.userId).toBe(memberId);
+      expect(row.organizationId).toBe(orgId);
+      expect(row.appId).toBeNull();
+    }
   });
 });
 
@@ -189,12 +227,16 @@ describe('refusal parity with the createMemory mutation', () => {
   }
 
   it('the tool exposes no owner argument: a personal memory is always the caller\'s', async () => {
+    // The unsupported owner arguments are ignored, not honored: creation
+    // succeeds and the row belongs to the caller. An unrelated failure fails here.
     const server = createTestableMcpServer(authFor(memberId));
-    await expect(server.callToolText('hadron_create_memory', {
+    const text = await server.callToolText('hadron_create_memory', {
       name: 'foreign', memoryClass: 'personal', userId: adminId, ownerUserId: adminId,
-    })).resolves.toBeTypeOf('string');
-    const row = await db.memory.findFirst({ where: { name: 'foreign' } });
-    if (row) expect(row.userId).toBe(memberId);
+    });
+    expect(text).toMatch(/Memory created/);
+    const row = await db.memory.findFirstOrThrow({ where: { name: 'foreign' } });
+    expect(row.userId).toBe(memberId);
+    expect(await db.memory.count({ where: { userId: adminId } })).toBe(0);
   });
 });
 
