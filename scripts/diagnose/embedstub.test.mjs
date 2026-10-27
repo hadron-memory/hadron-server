@@ -11,5 +11,5 @@ test('the stub answers the Ollama batch shape with one 768-d vector per input, d
   assert.notDeepEqual(vectorFor('a'), vectorFor('b'));
 });
 test('a malformed body is refused rather than answered with an empty batch', () => {
-  assert.throws(() => embedResponse({}));
+  assert.throws(() => embedResponse({}), /bad embed request/);
 });

@@ -2,25 +2,29 @@
 // product's own GraphQL API, on a disposable stack only. All rows are synthetic; the embedding endpoint is a local stub.
 // Output is counts only; server error text is never echoed (it can carry values).
 const APP = 'hrn:app:e2e-alpha:team';
-const MEMORY = 'hrn:mem:e2e-alpha:knowledge';
+const ORG = 'e2e-alpha';
 
 async function gql(base, key, fetchImpl, name, query, variables) {
   const res = await fetchImpl(`${base}/graphql`, { method: 'POST', body: JSON.stringify({ query, variables }),
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` } });
   const json = await res.json().catch(() => null);
   if (!res.ok || !json || json.errors) throw new Error(`W2 step failed: ${name}`);
-  return json.data;
+  return Object.values(json.data)[0];   // each step selects exactly one root field
 }
 
 export async function run({ base, key, nodes = 40, tasks = 5, fetchImpl = fetch }) {
   // A 1-minute unassignable window so a queued task with no live worker raises a stall alarm inside a short smoke.
   await gql(base, key, fetchImpl, 'setAgentTaskStallSchedule',
     'mutation($app: ID!) { setAgentTaskStallSchedule(appRef: $app, input: { assignmentMinutes: 1 }) { assignmentMinutes } }', { app: APP });
+  // The seeded memories are not vector-indexed (raw inserts), so the embed worker would have nothing to do: make our own.
+  const memory = await gql(base, key, fetchImpl, 'createMemory',
+    'mutation($orgId: ID!, $name: String!, $vectorIndexEnabled: Boolean) { createMemory(orgId: $orgId, name: $name, vectorIndexEnabled: $vectorIndexEnabled) { id } }',
+    { orgId: ORG, name: 'diag w2 synthetic', vectorIndexEnabled: true });
   let nodesCreated = 0, tasksQueued = 0;
   for (let i = 0; i < nodes; i++) {
     await gql(base, key, fetchImpl, 'createNode',
       'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }',
-      { input: { memoryId: MEMORY, loc: `diag:w2:${i}`, name: `diag w2 ${i}`, content: `Synthetic diagnosis fixture ${i}. ${'lorem ipsum '.repeat(40)}` } });
+      { input: { memoryId: memory.id, loc: `diag:w2:${i}`, name: `diag w2 ${i}`, content: `Synthetic diagnosis fixture ${i}. ${'lorem ipsum '.repeat(40)}` } });
     nodesCreated++;
   }
   for (let i = 0; i < tasks; i++) {

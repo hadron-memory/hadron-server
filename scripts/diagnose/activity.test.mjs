@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { run, w2Line } from './activity.mjs';
 
-function fakeFetch(log, { failOn } = {}) {
+function fakeFetch(log, { failOn, bodies = [] } = {}) {
   return async (url, init) => {
     const body = JSON.parse(init.body);
+    bodies.push(body);
     log.push(body.query.match(/\)\s*\{\s*(\w+)\(/)?.[1]);
     if (failOn && body.query.includes(failOn)) return new Response(JSON.stringify({ errors: [{ message: 'boom https://x' }] }), { status: 200 });
     return new Response(JSON.stringify({ data: { ok: { id: 'x' } } }), { status: 200 });
@@ -15,9 +16,18 @@ test('W2 sets the stall window, creates synthetic nodes and queues tasks, and co
   const log = [];
   const r = await run({ base: 'http://x', key: 'k', nodes: 3, tasks: 2, fetchImpl: fakeFetch(log) });
   assert.deepEqual(r, { stallWindowSet: true, nodesCreated: 3, tasksQueued: 2 });
-  assert.equal(log[0], 'setAgentTaskStallSchedule');
+  assert.deepEqual(log.slice(0, 2), ['setAgentTaskStallSchedule', 'createMemory']);
   assert.equal(log.filter((x) => x === 'createNode').length, 3);
   assert.equal(log.filter((x) => x === 'createAgentTask').length, 2);
+});
+
+test('the synthetic memory is vector-indexed and the nodes go into it, not into a seeded memory', async () => {
+  const bodies = [];
+  await run({ base: 'http://x', key: 'k', nodes: 1, tasks: 0, fetchImpl: fakeFetch([], { bodies }) });
+  const mem = bodies.find((b) => b.query.includes('createMemory'));
+  assert.equal(mem.variables.vectorIndexEnabled ?? mem.variables.input?.vectorIndexEnabled, true);
+  const node = bodies.find((b) => b.query.includes('createNode'));
+  assert.equal(node.variables.input.memoryId, 'x');   // the id the fake createMemory returned
 });
 
 test('a GraphQL error fails the activity and the thrown text carries no server message', async () => {
