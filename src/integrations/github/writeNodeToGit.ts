@@ -203,6 +203,9 @@ export async function writeNodeToGit(
       clientId,
       commitSubject: `Update node ${node.loc}`,
       logPrefix: '[writeNodeToGit]',
+      // #430: a failed attempt leaves this node's WRITE obligation. Every caller (the node.written event, edge-source
+      // announcements, recovery, merges, search-replace) reaches the repository through here, so none needs an edit.
+      obligations: [{ nodeId: node.id, kind: 'WRITE' }],
     },
     async ({ localPath, memoryUrn }) => {
       // The node.written subscriber supplies a loader. It must run AFTER the
