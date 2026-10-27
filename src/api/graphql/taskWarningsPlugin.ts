@@ -6,14 +6,13 @@
  */
 import type { ApolloServerPlugin } from '@apollo/server';
 import type { Context } from './schema/resolvers.helpers.js';
-import { shapeResponseWarnings } from './schema/resolvers.taskWarnings.js';
+import { flushTaskWarningHistory, shapeResponseWarnings } from './schema/resolvers.taskWarnings.js';
 
 export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
   async requestDidStart() {
     return {
       async willSendResponse(requestContext) {
         const collected = requestContext.contextValue?.taskWarnings;
-        if (!collected || collected.length === 0) return;
         const body = requestContext.response.body;
         if (body.kind !== 'single') return;
         const errored = new Set<string>();
@@ -21,7 +20,8 @@ export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
           const head = e.path?.[0];
           if (typeof head === 'string') errored.add(head);
         }
-        const warnings = shapeResponseWarnings(collected, errored);
+        await flushTaskWarningHistory(requestContext.contextValue, errored);
+        const warnings = shapeResponseWarnings(collected ?? [], errored);
         if (warnings.length === 0) return;
         body.singleResult.extensions = { ...body.singleResult.extensions, warnings };
       },

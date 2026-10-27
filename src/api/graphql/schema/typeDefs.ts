@@ -7659,6 +7659,7 @@ export const typeDefs = `#graphql
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
     after), not a continuation. limit defaults to 20 (cap 200).
+    task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.
     """
     agentTeamEvents(
       appRef: ID!

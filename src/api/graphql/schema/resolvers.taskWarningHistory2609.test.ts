@@ -12,6 +12,7 @@ import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
 import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { loadStallInputs } from '../../../lib/agentTasks/stall.js';
 import * as warnings from './resolvers.taskWarnings.js';
+import * as workerGate from './resolvers.worker.js';
 import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -75,7 +76,7 @@ describe('successful-field history', () => {
       const rows = await history();
       expect(await db.agentTask.count({ where: { appId: app.id, title: { in: ['Synthetic task', 'bad'] } } })).toBe(2);
       expect(rows).toHaveLength(1);
-      expect(rows[0].taskId).toBe((r.body as any).singleResult.data.ok.id);
+      expect(rows[0].taskId).toBe((await db.agentTask.findFirstOrThrow({ where: { appId: app.id, title: 'Synthetic task' } })).id);
     } finally { await s.stop(); }
   });
 
@@ -90,12 +91,37 @@ describe('successful-field history', () => {
     expect(rows[0]).toMatchObject({ actorUserId: user.id, actorWorkerId: worker.id, actorAgentId: agentId, actorRunId: null });
   });
 
+  it('the typed writer retains a run actor and rejects unapproved codes at runtime', async () => {
+    const task = await create(ctx(), { source: 'synthetic' });
+    const runId = generateId();
+    await db.$transaction(tx => appendTaskEvent(tx, { appId: app.id, taskId: task.id,
+      actor: { userId: null, workerId: null, agentId: null, runId }, event: { type: 'task.warning', code: 'task.create.no-source' } }));
+    expect((await history())[0]).toMatchObject({ actorRunId: runId, actorUserId: null, actorWorkerId: null, actorAgentId: null, payload: { code: 'task.create.no-source' } });
+    await expect(db.$transaction(tx => appendTaskEvent(tx, { appId: app.id, taskId: task.id,
+      actor: { userId: user.id, workerId: null, agentId: null }, event: { type: 'task.warning', code: 'task.assign.assignee-busy' as any } }))).rejects.toThrow('Unsupported task warning');
+    expect(await history()).toHaveLength(1);
+  });
+
   it('does not persist assignee-state codes, even when the caller can read them; no warning means no row', async () => {
     const c = ctx();
     const task = await create(c, { source: 'synthetic', assignee: undefined });
     await warnings.emitTaskWarnings(c, undefined, app.id, { taskId: task.id, codes: ['task.assign.assignee-busy', 'task.assign.assignee-paused', 'task.assign.assignee-unavailable'] } as any);
     await flush(c);
     expect(await history()).toEqual([]);
+  });
+
+  it('a synthetic denial of worker internals cannot leak assignee facts through the broader event read', async () => {
+    const deny = vi.spyOn(workerGate, 'maySeeWorkerInternals').mockResolvedValue(false);
+    try {
+      const c = ctx();
+      const task = await create(c, { source: 'synthetic' });
+      await warnings.emitTaskWarnings(c, undefined, app.id, { taskId: task.id,
+        codes: ['task.create.no-source', 'task.assign.assignee-busy', 'task.assign.assignee-unavailable', 'task.assign.assignee-paused'] } as any);
+      await flush(c);
+      expect(c.taskWarnings?.map(w => w.warning.code)).toEqual(['task.create.no-source']);
+      const rows = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.warning'] }, ctx());
+      expect(rows.map((r: any) => r.payload)).toEqual([{ code: 'task.create.no-source' }]);
+    } finally { deny.mockRestore(); }
   });
 
   it('keeps canonical App read gates and task filtering for history', async () => {
@@ -112,11 +138,13 @@ describe('successful-field history', () => {
     const real = db.$transaction.bind(db);
     let attempts = 0;
     const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
-      const wrapped = Object.create(tx);
-      wrapped.agentTeamEvent = { ...tx.agentTeamEvent, create: (args: any) => {
+      const delegate = tx.agentTeamEvent;
+      const eventModel = new Proxy({}, { get: (_, key) => key === 'create' ? createEvent : delegate[key] });
+      const wrapped = new Proxy({}, { get: (_, key) => key === 'agentTeamEvent' ? eventModel : tx[key] });
+      const createEvent = (args: any) => {
         if (args.data.type === 'task.warning') { attempts++; throw new Error('synthetic recording failure'); }
-        return tx.agentTeamEvent.create(args);
-      } };
+        return delegate.create(args);
+      };
       return fn(wrapped);
     }, options)) as any);
     try {
@@ -133,11 +161,13 @@ describe('successful-field history', () => {
     const real = db.$transaction.bind(db);
     let reached = false;
     const spy = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
-      const wrapped = Object.create(tx);
-      wrapped.agentTeamEvent = { ...tx.agentTeamEvent, create: async (args: any) => {
+      const delegate = tx.agentTeamEvent;
+      const eventModel = new Proxy({}, { get: (_, key) => key === 'create' ? createEvent : delegate[key] });
+      const wrapped = new Proxy({}, { get: (_, key) => key === 'agentTeamEvent' ? eventModel : tx[key] });
+      const createEvent = async (args: any) => {
         if (args.data.type === 'task.warning') { reached = true; await tx.$executeRawUnsafe('SELECT pg_sleep(4)'); }
-        return tx.agentTeamEvent.create(args);
-      } };
+        return delegate.create(args);
+      };
       return fn(wrapped);
     }, options)) as any);
     try {
