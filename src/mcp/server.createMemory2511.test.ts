@@ -17,6 +17,7 @@ let adminId: string;
 let memberId: string;
 let outsiderId: string;
 let appId: string;
+let revokedId: string;
 
 const ctxFor = (userId: string | undefined, extra: Partial<Context> = {}): Context =>
   ({ db, roles: [], userId, ...extra }) as Context;
@@ -41,7 +42,9 @@ beforeEach(async () => {
   const admin = await db.user.create({ data: { githubId: 25111, githubUsername: 'cm-admin' } });
   const member = await db.user.create({ data: { githubId: 25112, githubUsername: 'cm-member' } });
   const outsider = await db.user.create({ data: { githubId: 25113, githubUsername: 'cm-outsider' } });
-  adminId = admin.id; memberId = member.id; outsiderId = outsider.id;
+  const revoked = await db.user.create({ data: { githubId: 25114, githubUsername: 'cm-revoked' } });
+  adminId = admin.id; memberId = member.id; outsiderId = outsider.id; revokedId = revoked.id;
+  await db.orgMember.create({ data: { organizationId: orgId, userId: revokedId, role: 'CONTRIBUTOR', deletedAt: new Date() } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: adminId, role: 'ADMIN' } });
   await db.orgMember.create({ data: { organizationId: orgId, userId: memberId, role: 'CONTRIBUTOR' } });
   const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'A', urn: `${orgId}:a`, visibility: 'ORGANIZATION' } });
@@ -110,6 +113,21 @@ describe('refusal parity with the createMemory mutation', () => {
     {
       label: 'caller outside the org (personal)',
       principal: () => authFor(outsiderId), mutationCtx: () => ctxFor(outsiderId),
+      args: () => ({ org: orgUrn, memoryClass: 'personal' }),
+    },
+    {
+      label: 'revoked org membership (personal)',
+      principal: () => authFor(revokedId), mutationCtx: () => ctxFor(revokedId),
+      args: () => ({ org: orgUrn, memoryClass: 'personal' }),
+    },
+    {
+      label: 'revoked org membership (private)',
+      principal: () => authFor(revokedId), mutationCtx: () => ctxFor(revokedId),
+      args: () => ({ org: orgUrn, memoryClass: 'private' }),
+    },
+    {
+      label: 'platform ADMIN who is not an org member (personal): no admin bypass',
+      principal: () => ({ ...authFor(outsiderId), roles: ['ADMIN'] }), mutationCtx: () => ctxFor(outsiderId, { roles: ['ADMIN'] }),
       args: () => ({ org: orgUrn, memoryClass: 'personal' }),
     },
     {
