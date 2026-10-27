@@ -1021,6 +1021,7 @@ model Memory {
   config              MemoryConfig?
   /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
   appWriteGrants      AppMemoryWriteGrant[]
+  gitMirrorObligations GitMirrorObligation[]
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -5590,6 +5591,48 @@ model AppMemoryWriteGrantEvent {
   @@index([appId, createdAt])
   @@index([grantId])
   @@map("app_memory_write_grant_events")
+}
+
+/// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.
+/// One row per (memory, node, kind, remove_loc): a WRITE row per node, plus one REMOVE row per distinct old loc a move
+/// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
+/// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
+/// a memory that is not mirrored (no source, no org, encrypted, invalid source), delete it. `attempt_seq` comes from
+/// `git_mirror_attempt_seq`, taken INSIDE the per-memory checkout lock and settled before it releases, so a stale
+/// settle can never overwrite a newer one (src/integrations/github/mirrorObligations.ts). `error_class` is a fixed,
+/// CHECK-constrained set (git-mirror-obligation-invariants.sql); no exception text, URL or token is ever stored.
+/// This slice records only failures the process survives: no retry, no reconcile, no writer-side PENDING.
+model GitMirrorObligation {
+  memoryId      String                   @map("memory_id")
+  nodeId        String                   @map("node_id")
+  kind          GitMirrorObligationKind
+  removeLoc     String                   @default("") @map("remove_loc")
+  state         GitMirrorObligationState
+  errorClass    String                   @map("error_class")
+  attempts      Int                      @default(1)
+  attemptSeq    BigInt                   @map("attempt_seq")
+  lastAttemptAt DateTime                 @default(now()) @map("last_attempt_at")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, nodeId, kind, removeLoc])
+  @@index([memoryId, state])
+  @@map("git_mirror_obligations")
+}
+
+enum GitMirrorObligationKind {
+  WRITE
+  REMOVE
+
+  @@map("git_mirror_obligation_kind")
+}
+
+/// FAILED = a retryable failure; NOT_CLONED = the repository is configured but not cloned here yet.
+enum GitMirrorObligationState {
+  FAILED
+  NOT_CLONED
+
+  @@map("git_mirror_obligation_state")
 }
 
 model AutomationVersion {
