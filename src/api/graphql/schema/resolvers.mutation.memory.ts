@@ -637,6 +637,16 @@ export const memoryMutations = {
         // Owner is the authenticated caller (verified above); no org, no
         // membership to check. The memory is theirs outright.
       } else if (isUserOwned) {
+        // #2511: a personal/private memory belongs to a USER. An App-key caller
+        // has none, and `userId: undefined` below would drop the filter from the
+        // membership lookup, admitting any member of the org to a gate meant
+        // for the caller alone (the create then died on a CHECK constraint).
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Creating a personal/private memory requires an authenticated user (the creator is the owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
         // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
         // platform admin create a personal/private memory in an org they don't
         // belong to.

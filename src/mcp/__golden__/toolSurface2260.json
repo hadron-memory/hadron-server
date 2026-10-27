@@ -13,6 +13,10 @@
    "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
   ],
   [
+   "hadron_create_memory",
+   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+  ],
+  [
    "hadron_server_info",
    "bcea769d284f7a695aa0d8c04c83812b61dfd0c583cd917cd9a8e799dfc90485"
   ],
@@ -541,6 +545,10 @@
   [
    "hadron_set_active_memory",
    "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
+  ],
+  [
+   "hadron_create_memory",
+   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
   ],
   [
    "hadron_server_info",
@@ -1073,6 +1081,10 @@
    "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
   ],
   [
+   "hadron_create_memory",
+   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
+  ],
+  [
    "hadron_server_info",
    "bcea769d284f7a695aa0d8c04c83812b61dfd0c583cd917cd9a8e799dfc90485"
   ],
@@ -1585,6 +1597,10 @@
   [
    "hadron_set_active_memory",
    "fd7888b0b6fcfdc974e4de68d8fd998ea2f7618181f95e9faf39088b2828bccd"
+  ],
+  [
+   "hadron_create_memory",
+   "6a6dbcc360d0abc1b9526ca38e9c2fa094def0a0fbc6e0ac114bd88a250ff7be"
   ],
   [
    "hadron_server_info",
