@@ -2,9 +2,11 @@
  * #168 — server-hosted sign-in prompt for an MCP connector flow.
  *
  * Rendered by `GET /oauth/authorize` when the caller has no session, did not
- * choose a `login_provider`, and `resource` is exactly this server's `/mcp`
- * (see `isMcpConnectorFlow` in `oauth.ts`). It explains why a sign-in is needed
- * and offers a link that starts the normal GitHub flow and returns to the
+ * choose a `login_provider`, and `resource` is exactly this server's `/mcp`.
+ * The inline branch in `oauth.ts` requires `q.login_provider === undefined`
+ * and q.resource === `${origin}/mcp` with a trusted, non-null origin.
+ * An omitted provider defaults to `github`. The page explains why a sign-in
+ * is needed and offers a link that starts that GitHub flow and returns to the
  * same authorize URL, plus a secondary link to the same authorize URL with
  * `login_provider=email` (the existing email-entry page). A plain link, not a form: the target is a GET that
  * changes no state, so there is nothing for CSRF to protect.
