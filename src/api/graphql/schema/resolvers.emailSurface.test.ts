@@ -231,6 +231,85 @@ describe('connection management stays org-ADMIN', () => {
     expect(member.errors?.[0]?.message).toBe('Forbidden');
   });
 
+  describe('deleteExchangeConnection uniform denial (#2593, cor:dmo:080:04)', () => {
+    const DELETE = (id: string) => `mutation { deleteExchangeConnection(id: "${id}") }`;
+    const denial = (r: Awaited<ReturnType<typeof run>>) => r.errors?.map((e) => [e.message, e.extensions?.code]);
+
+    async function expectUntouched() {
+      const row = await db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      expect(vi.mocked(deleteToolConnection)).not.toHaveBeenCalled();
+      return row;
+    }
+
+    it('denies the connection owner who is not an org ADMIN: no write, no teardown', async () => {
+      const r = await run(DELETE(connectionId), { userId: owner.id, roles: ['READER'] });
+      expect(denial(r)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      expect((await expectUntouched()).deletedAt).toBeNull();
+    });
+
+    it('denies an App-key principal holding no org role', async () => {
+      const r = await run(DELETE(connectionId), { appId: 'app-1', roles: [] });
+      expect(denial(r)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      expect((await expectUntouched()).deletedAt).toBeNull();
+    });
+
+    it('answers an unknown id with the identical denial as a non-ADMIN', async () => {
+      const unknown = await run(DELETE(generateId()), { userId: orgAdmin.id, roles: ['READER'] });
+      const nonAdmin = await run(DELETE(connectionId), { userId: owner.id, roles: ['READER'] });
+      expect(denial(unknown)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      expect(denial(unknown)).toEqual(denial(nonAdmin));
+      expect(vi.mocked(deleteToolConnection)).not.toHaveBeenCalled();
+    });
+
+    it("answers another org's ADMIN with the same denial", async () => {
+      const other = await db.user.create({
+        data: { id: generateId(), handle: 'otheradmin', githubId: 9103, githubUsername: 'otheradmin', name: 'Other' },
+      });
+      const otherOrg = await db.organization.create({
+        data: { id: generateId(), name: 'Other Org', urn: 'otherorg.test', createdBy: other.id },
+      });
+      await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: other.id, role: 'ADMIN' } });
+      const r = await run(DELETE(connectionId), { userId: other.id, roles: ['READER'] });
+      expect(denial(r)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      expect((await expectUntouched()).deletedAt).toBeNull();
+    });
+
+    it('a repeat delete by an ADMIN is denied, leaves deletedAt unchanged and does not tear down again', async () => {
+      const first = await run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+      expect(first.errors).toBeUndefined();
+      const stamped = await db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
+
+      const again = await run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+      expect(denial(again)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      const after = await db.exchangeConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      expect(after.deletedAt).toEqual(stamped.deletedAt);
+      expect(after.deletedBy).toBe(stamped.deletedBy);
+      expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
+    });
+
+    it('two concurrent ADMIN deletes: exactly one succeeds and tears down once', async () => {
+      const [a, b] = await Promise.all([
+        run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] }),
+        run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] }),
+      ]);
+      const okCount = [a, b].filter((r) => !r.errors).length;
+      expect(okCount).toBe(1);
+      expect(denial([a, b].find((r) => r.errors)!)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
+    });
+
+    it('an infrastructure error stays an error, not a FORBIDDEN', async () => {
+      const spy = vi.spyOn(db.exchangeConnection, 'findFirst').mockRejectedValueOnce(new Error('db down'));
+      try {
+        const r = await run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+        expect(r.errors?.[0]?.extensions?.code).not.toBe('FORBIDDEN');
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it('deleteExchangeConnection soft-deletes and tears down the tool side', async () => {
     const r = await run(`mutation { deleteExchangeConnection(id: "${connectionId}") }`, {
       userId: orgAdmin.id,
