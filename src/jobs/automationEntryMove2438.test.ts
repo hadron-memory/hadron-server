@@ -132,6 +132,48 @@ describe('#2438 entry keyed by node id', () => {
     await expect(automationPinQueries.automationApproval({}, input, f.ctx)).resolves.toMatchObject({ state: 'CHANGED' });
   });
 
+  // #2503 (Holger 2026-10-27, narrow fix): a legacy row whose stored entry URN
+  // went stale, after an unrelated edit re-captured consent from it, answers
+  // UNADOPTED with the stale URN the row already stores, not NODE_NOT_FOUND.
+  const legacyRenamedAndEdited = async () => {
+    const f = await fixture();
+    const v3 = storedAutomationPin(await captureAutomationPin(db, f.app.id, f.user.id,
+      'hrn:node:pin.test:flow:entry', f.org.id, f.ctx, {}, { format: 'hadron-automation-pin-v3' }));
+    await db.agentSchedule.update({ where: { id: f.schedule.id }, data: { automationPin: v3 as never, entryNodeId: null } });
+    await renameEntry(f);
+    await appRunMutations.updateAgentSchedule({}, { id: f.schedule.id, input: { runAsSelf: true } }, f.ctx);
+    return { f, input: { triggerKind: 'SCHEDULE' as const, triggerRef: f.schedule.id } };
+  };
+
+  it('a legacy row with a dead stored URN answers UNADOPTED with the stale URN, not NODE_NOT_FOUND', async () => {
+    const { f, input } = await legacyRenamedAndEdited();
+    const answer = await automationPinQueries.automationApproval({}, input, f.ctx);
+    expect(answer.state).toBe('UNADOPTED');
+    expect(answer.hash).toBe('');
+    expect(JSON.stringify(answer.summary)).toContain('hrn:node:pin.test:flow:entry');
+    expect(JSON.stringify(answer.summary)).not.toContain('renamed-entry');
+    expect(JSON.stringify(answer.depth)).not.toContain('renamed-entry');
+  });
+
+  it('re-adopting that legacy row with the current URN stamps the id and a v4 pin', async () => {
+    const { f, input } = await legacyRenamedAndEdited();
+    await appRunMutations.updateAgentSchedule({}, { id: f.schedule.id, input: { entryNodeUrn: 'hrn:node:pin.test:flow:renamed-entry' } }, f.ctx);
+    const pin = await automationPinQueries.previewAutomation({}, input, f.ctx);
+    await automationPinMutations.reAdoptAutomation({}, { ...input, expectedHash: pin.hash }, f.ctx);
+    const row = await db.agentSchedule.findUniqueOrThrow({ where: { id: f.schedule.id } });
+    expect(row.entryNodeId).toBe(f.entry.id);
+    expect((row.automationPin as any).format).toBe('hadron-automation-pin-v4');
+    expect((await automationPinQueries.automationApproval({}, input, f.ctx)).state).toBe('ADOPTED');
+  });
+
+  it('a v4 row (stamped id) is unaffected: a deleted entry still errors as before, never UNADOPTED', async () => {
+    const f = await fixture();
+    await adopt(f);
+    await db.node.update({ where: { id: f.entry.id }, data: { deletedAt: new Date() } });
+    const input = { triggerKind: 'SCHEDULE' as const, triggerRef: f.schedule.id };
+    await expect(automationPinQueries.automationApproval({}, input, f.ctx)).rejects.toMatchObject({ name: 'NodeNotFoundError' });
+  });
+
   // #2497 LOCAL P3-1 (Brooks): the v4 run-to-pin identity check. A run whose
   // entry id points at ANOTHER node of the adopted graph would slip past the
   // flows-membership defense — this pin is the check's only witness.
