@@ -77,7 +77,7 @@ import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } f
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH } from '../../../lib/agentTasks/handle.js';
+import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH, MAX_HANDLE_LENGTH } from '../../../lib/agentTasks/handle.js';
 import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
@@ -954,11 +954,17 @@ async function insertTask(
         VALUES (replace(gen_random_uuid()::text, '-', ''), ${a.app.id}, NULL, 1)
         ON CONFLICT (app_id) WHERE parent_task_id IS NULL DO UPDATE SET last_number = agent_task_counters.last_number + 1
         RETURNING last_number`;
+  // cor:urn:010:01 (Vera, #40303): a handle is a URN leaf of at most 64 characters, so a create whose handle would be
+  // longer is refused like a too-deep one. Nothing is written: this transaction rolls back, counter increment included.
+  const handle = composeTaskHandle(parentHandle, counter!.last_number);
+  if (handle.length > MAX_HANDLE_LENGTH) {
+    throw taskError('TASK_TOO_DEEP', `A task handle is at most ${MAX_HANDLE_LENGTH} characters; create this task under a shallower parent.`, { taskId: parentId });
+  }
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
       taskNumber: counter!.last_number,
-      handle: composeTaskHandle(parentHandle, counter!.last_number),
+      handle,
       title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
       closeSessionWhenDone: a.closeSessionWhenDone,
       status: a.status ?? 'pending',

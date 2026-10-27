@@ -181,6 +181,20 @@ describe('numbering', () => {
     expect(e.extensions?.code).toBe('TASK_TOO_DEEP');
   });
 
+  it('a create whose handle would pass 64 characters is refused TASK_TOO_DEEP and writes nothing, counter included', async () => {
+    const mkRow = (parent: string | null, n: bigint, handle: string) => db.agentTask.create({ data: { appId: appX.id, title: handle, ownerUserId: bob.id, assigneeUserId: bob.id, assignedAt: new Date(), status: 'started', startedAt: new Date(), parentTaskId: parent, taskNumber: n, handle } });
+    await mk(appX, 'seed'); // AT0
+    let handle = 'AT1000';
+    let parent = await mkRow(null, 1000n, handle);
+    for (let i = 0; i < 5; i += 1) { handle += '.1234567890123'; parent = await mkRow(parent.id, 1234567890123n, handle); }
+    expect(parent.handle!.length).toBeGreaterThan(60);
+    const before = await db.agentTaskCounter.findMany({ where: { appId: appX.id }, orderBy: { id: 'asc' } });
+    const e = await refusal(M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'too long' } }, as(bob)));
+    expect(e.extensions?.code).toBe('TASK_TOO_DEEP');
+    expect(await db.agentTask.count({ where: { appId: appX.id, parentTaskId: parent.id } })).toBe(0);
+    expect(await db.agentTaskCounter.findMany({ where: { appId: appX.id }, orderBy: { id: 'asc' } })).toEqual(before);
+  });
+
   it('every task is created in the same transaction as its counter: creates under two parents and two Apps do not contend', async () => {
     const [pa, pb]: any[] = await Promise.all([project(appX, 'pa', alice, { assignee: { user: bob.id } }), project(appX, 'pb', alice, { assignee: { user: bob.id } })]);
     const made = await Promise.all([
