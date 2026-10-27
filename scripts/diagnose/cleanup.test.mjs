@@ -94,3 +94,16 @@ test('the success path appends the pg_activity control line after the samples', 
     assert.equal(readFileSync(out, 'utf8'), '{"kind":"sample"}\n{"kind":"pg_activity","connectionsAfterLoad":7}\n');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+test('heap snapshot files are deleted at teardown and a survivor fails the purge', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag-snap-'));
+  try {
+    writeFileSync(join(dir, 'start.heapsnapshot'), 'x'); writeFileSync(join(dir, 'keep.jsonl'), 'y');
+    const ok = sh(`SNAP_DIR='${dir}'; app_exec() { "$@"; }; purge_snapshots`, dir);
+    assert.equal(ok.status, 0);
+    assert(!existsSync(join(dir, 'start.heapsnapshot')) && existsSync(join(dir, 'keep.jsonl')));
+    writeFileSync(join(dir, 'end.heapsnapshot'), 'x');
+    // rm that silently does nothing: the purge must notice the file is still there.
+    const bad = sh(`SNAP_DIR='${dir}'; app_exec() { case "$1" in rm) return 0;; *) "$@";; esac; }; purge_snapshots`, dir);
+    assert.notEqual(bad.status, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

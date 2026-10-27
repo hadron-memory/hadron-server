@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { reduceTransportState, sampleProcess, NOT_SAMPLED, assertSecretFree, shouldAbort } from './sampler.mjs';
+import { reduceTransportState, sampleProcess, NOT_SAMPLED, assertSecretFree, shouldAbort, coverageLine } from './sampler.mjs';
 
 test('registry state is reduced to counts, no ids survive', () => {
   const out = reduceTransportState({
@@ -82,4 +82,11 @@ test('NODE_OPTIONS is reduced to allowlisted numeric/boolean flags; URLs and pat
 test('pool timeout codes are counted, the text is not kept', () => {
   assert.deepEqual(countTimeouts('x P2024 y P2028 z P2024'), { P2024: 2, P2028: 1 });
   assert.deepEqual(countTimeouts('nothing here'), { P2024: 0, P2028: 0 });
+});
+
+test('coverage markers become measured only for what ran; unrun fields stay not exercised', () => {
+  assert.deepEqual(coverageLine({ w2: null, heap: null }), { kind: 'coverage', w2SyntheticActivity: 'not exercised', heapSnapshotReductions: 'not exercised' });
+  const c = coverageLine({ w2: { embeddedNodes: 3, stallAlarms: 'not exercised', embedRequests: 2, tasksQueued: 1 }, heap: { snapshots: 3 } });
+  assert.equal(c.heapSnapshotReductions, 'measured');
+  assert.deepEqual(c.w2SyntheticActivity, { embed: 'measured', matcher: 'queued only', stall: 'not exercised' });
 });
