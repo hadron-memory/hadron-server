@@ -20,6 +20,7 @@ import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../lib/emailClient.js', () => ({
   runEmailOperation: vi.fn(async () => ({ messages: [] })),
@@ -288,22 +289,46 @@ describe('connection management stays org-ADMIN', () => {
       expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
     });
 
-    it('two concurrent ADMIN deletes: exactly one succeeds and tears down once', async () => {
-      const [a, b] = await Promise.all([
-        run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] }),
-        run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] }),
-      ]);
-      const okCount = [a, b].filter((r) => !r.errors).length;
-      expect(okCount).toBe(1);
-      expect(denial([a, b].find((r) => r.errors)!)).toEqual([['Forbidden', 'FORBIDDEN']]);
-      expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
+    it('two concurrent ADMIN deletes, both past the pre-checks and queued on the lock: exactly one succeeds, one teardown', async () => {
+      // A barrier, not scheduling luck: an outside tx holds the connection row, delete A takes the authority
+      // anchor and waits on that row (a transactionid waiter), and delete B waits on the anchor (an advisory
+      // waiter). Both therefore already passed findFirst and the pre-tx gate; only the in-tx guard can tell them apart.
+      let release!: () => void;
+      let held!: () => void;
+      const holdGate = new Promise<void>((resolve) => { release = resolve; });
+      const locked = new Promise<void>((resolve) => { held = resolve; });
+      const holder = db.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${connectionId} FOR UPDATE`;
+        held();
+        await holdGate;
+      }, { timeout: 20_000 });
+      await locked;
+      const a = run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+      try {
+        await waitForLockWaitersOfType(db, 'transactionid', 1);
+        const b = run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+        await waitForLockWaitersOfType(db, 'advisory', 1);
+        release();
+        await holder;
+        const results = await Promise.all([a, b]);
+        expect(results.filter((r) => !r.errors)).toHaveLength(1);
+        expect(denial(results.find((r) => r.errors)!)).toEqual([['Forbidden', 'FORBIDDEN']]);
+        expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
+      } finally {
+        release();
+        await Promise.allSettled([holder, a]);
+      }
     });
 
-    it('an infrastructure error stays an error, not a FORBIDDEN', async () => {
+    it('an infrastructure error stays an error, not a FORBIDDEN, and nothing is written or torn down', async () => {
       const spy = vi.spyOn(db.exchangeConnection, 'findFirst').mockRejectedValueOnce(new Error('db down'));
       try {
         const r = await run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
-        expect(r.errors?.[0]?.extensions?.code).not.toBe('FORBIDDEN');
+        // A success has no errors at all, so this fails on success and on a blanket FORBIDDEN alike.
+        expect(r.errors).toHaveLength(1);
+        expect(r.errors![0].extensions?.code).toBe('INTERNAL_SERVER_ERROR');
+        expect(r.errors![0].message).not.toBe('Forbidden');
+        expect((await expectUntouched()).deletedAt).toBeNull();
       } finally {
         spy.mockRestore();
       }
