@@ -7514,6 +7514,23 @@ export const typeDefs = `#graphql
     omitted: [AutomationApprovalOmission!]!
   }
 
+  "#2484: an App's write grant on one memory under one loc prefix, for the App's userless runs only. It permits node create and update at the prefix and its colon-boundary descendants, checked live at each write; never delete, edges, memory settings or stored files, and nothing for another App's run, a user-backed run, an App key or a worker. A revoked grant stays as a terminal row. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+  type AppMemoryWriteGrant {
+    id: ID!
+    appId: ID!
+    "The granted memory. Null when the grant is on someone's personal or private memory and the caller is not its owner."
+    memoryUrn: String
+    "The loc prefix: the loc itself and its colon-boundary descendants (reports:team-progress does not cover reports:team-progressX)."
+    prefix: String!
+    "The register line this grant cites. A citation only, never evidence that the line exists."
+    registerNodeUrn: String
+    "The person who set it."
+    grantedBy: String!
+    createdAt: DateTime!
+    revokedAt: DateTime
+    revokedBy: String
+  }
+
   type Query {
     "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
     recoveryNode(nodeRef: ID!): RecoveryNode
@@ -7527,6 +7544,8 @@ export const typeDefs = `#graphql
     automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
     "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
+    "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App, acting as themselves, may list them; a grant on a personal or private memory is listed to its owner alone. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false): [AppMemoryWriteGrant!]!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -9431,6 +9450,10 @@ export const typeDefs = `#graphql
     approveAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
     "#2441: decline. An adopted trigger is revoked, so its next run fails AUTOMATION_UNADOPTED (REVOKE event); with nothing adopted it changes no state (DECLINE event). A MANUAL origin deletes its consent row. Runs already started keep their snapshot."
     declineAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): Boolean!
+    "#2484: let an App's userless runs create or update a node in one memory under one loc prefix (required; no memory-wide grant). The caller is a person acting as themselves who manages the App and can write the memory. A shared memory must be one the App's own org or team space holds; a personal or private memory only by its owner, who must also manage the App; an encrypted memory is never grantable. Granting the same prefix again returns the live grant. One content-free event is recorded. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
+    "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, acting as themselves. The row stays with its end time; revoking a revoked grant changes nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    revokeAppMemoryWriteGrant(id: ID!): AppMemoryWriteGrant!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes

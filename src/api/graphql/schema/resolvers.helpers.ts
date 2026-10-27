@@ -71,6 +71,7 @@ import {
   AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
@@ -2623,8 +2624,11 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
  * 3. Users: app-class rows through the MCP shape/participation gate; other
  *    shared classes through their own membership, org, or subscription rules
+ *
+ * `destination` (#2484) is the node a create/update is about to write; it is what an App's write grant for its
+ * userless runs is judged against, and no other caller passes it.
  */
-export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
+export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, destination?: WriteDestination): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
   // shortcut applies only to non-strict org memories. A platform-admin USER
   // with an active App still cannot write another user's personal/private
@@ -2651,7 +2655,9 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     // A write always names its target: an explicit reference (#1503).
-    if (await canWriteToMemory(ctx.db, ctx, memoryId, EXPLICIT_REF)) return;
+    // #2484: only the node write door names a destination, which is what lets an App's prefix-scoped write grant
+    // answer for a userless run; every other write verb leaves it unset and never reaches that arm.
+    if (await canWriteToMemory(ctx.db, ctx, memoryId, destination ? { ...EXPLICIT_REF, destination } : EXPLICIT_REF)) return;
     throw memoryWriteForbidden();
   }
 
