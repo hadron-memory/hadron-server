@@ -13,9 +13,13 @@
  * stay safe if two runs overlap. Each caller needs its own overlap-safety
  * argument; there is deliberately no blanket wrapper over the other sweeps.
  *
- * Acquisition is non-blocking (`pg_try_advisory_lock`). If the lock session
- * cannot be opened or the lock query fails, the tick is logged and skipped
- * (fail-closed for a destructive sweep; the next tick retries).
+ * Acquisition is non-blocking (`pg_try_advisory_lock`) AND bounded in time: the
+ * connect and the lock/unlock queries each give up after `acquireTimeoutMs`, so a
+ * network that silently drops packets cannot leave a tick pending while later
+ * ticks pile up behind it. If the lock session cannot be opened or the lock query
+ * fails or times out, the tick is logged and skipped (fail-closed for a
+ * destructive sweep; the next tick retries). The limit covers only the lock
+ * session's own statements, never `fn`: a sweep may run as long as it needs.
  */
 
 import { createHash } from 'crypto';
@@ -32,8 +36,18 @@ export function sweepLockKey(name: string): string {
 
 export type SweepLockResult<T> = { ran: true; value: T } | { ran: false };
 
-export async function withSweepLock<T>(name: string, fn: () => Promise<T>): Promise<SweepLockResult<T>> {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+/** Default bound on opening the lock session and on each of its statements. */
+export const SWEEP_LOCK_ACQUIRE_TIMEOUT_MS = 5000;
+
+export async function withSweepLock<T>(
+  name: string, fn: () => Promise<T>, opts: { acquireTimeoutMs?: number } = {},
+): Promise<SweepLockResult<T>> {
+  const acquireTimeoutMs = opts.acquireTimeoutMs ?? SWEEP_LOCK_ACQUIRE_TIMEOUT_MS;
+  const client = new Client({
+    connectionString: process.env.DATABASE_URL,
+    connectionTimeoutMillis: acquireTimeoutMs,
+    query_timeout: acquireTimeoutMs,
+  });
   // An idle-connection error (database gone while fn runs) must not kill the
   // process as an uncaught EventEmitter error; the lock is dropped with it.
   client.on('error', (error) => {
@@ -58,7 +72,11 @@ export async function withSweepLock<T>(name: string, fn: () => Promise<T>): Prom
     } catch {
       // Session already gone: closing it released the lock.
     } finally {
-      await client.end().catch(() => {});
+      // `end()` waits on the socket; a dead one must not hold the tick open either.
+      await Promise.race([
+        client.end().catch(() => {}),
+        new Promise<void>((done) => setTimeout(done, acquireTimeoutMs).unref()),
+      ]);
     }
   }
 }
