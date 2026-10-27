@@ -1019,6 +1019,8 @@ model Memory {
   /// creation (there is no shared creation helper to hang that on —
   /// hadron-server findings:memory-creation-has-no-shared-helper).
   config              MemoryConfig?
+  /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
+  appWriteGrants      AppMemoryWriteGrant[]
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -3386,6 +3388,9 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   automationAdoptionEvents AutomationAdoptionEvent[]
+  /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
+  memoryWriteGrants       AppMemoryWriteGrant[]
+  memoryWriteGrantEvents  AppMemoryWriteGrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -5535,6 +5540,55 @@ model AutomationAdoptionEvent {
   @@index([appId, createdAt])
   @@index([triggerKind, triggerRef, createdAt])
   @@map("automation_adoption_events")
+}
+
+/// #2484 (cor:agt:010:01, epic #2435) — an App's write grant on ONE memory under ONE loc prefix, for its USERLESS
+/// runs only: the register-recorded grant the Open paragraph rules on. One row per (App, memory, prefix); the prefix
+/// is required and matches the loc itself and its `:`-boundary descendants only, judged on the destination after
+/// `writeTo` expansion, at write time (`src/lib/appWriteGrant.ts`). A row is never edited: it ends with a terminal
+/// `revokedAt` (trigger + CHECKs in app-memory-write-grant-invariants.sql, where the partial unique index also lives).
+/// `grantedBy` / `revokedBy` carry no FK on purpose: they are sealed history of who acted and must survive user
+/// erasure. `registerNodeUrn` is a citation of the register line, never evidence that the line exists.
+model AppMemoryWriteGrant {
+  id              String    @id @default(cuid())
+  appId           String    @map("app_id")
+  memoryId        String    @map("memory_id")
+  prefix          String
+  registerNodeUrn String?   @map("register_node_urn")
+  grantedBy       String    @map("granted_by")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  revokedAt       DateTime? @map("revoked_at")
+  revokedBy       String?   @map("revoked_by")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([memoryId])
+  @@map("app_memory_write_grants")
+}
+
+/// #2484 — append-only record of every grant and revocation of an App memory write grant: who, which App, which
+/// memory, which prefix, and nothing of any node's content. Written in the SAME transaction as the row change by
+/// `src/lib/appWriteGrant.ts` and nowhere else. The memory, grant and actor carry no FK on purpose: history must
+/// survive their deletion. The App FK cascades so a hard delete still works (the trigger lets a DELETE through once
+/// the App is gone).
+model AppMemoryWriteGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  memoryId    String   @map("memory_id")
+  grantId     String   @map("grant_id")
+  prefix      String
+  /// GRANT | REVOKE (CHECK in app-memory-write-grant-invariants.sql).
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([grantId])
+  @@map("app_memory_write_grant_events")
 }
 
 model AutomationVersion {
