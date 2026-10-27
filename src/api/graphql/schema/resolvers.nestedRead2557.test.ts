@@ -97,8 +97,17 @@ describe('#2557 subscription parent paths', () => {
         expect(hidden.data?.[operation]).toEqual({ id: subscription, memory: { id: memory } });
       } else {
         expect(hidden.errors).toHaveLength(1);
+        const hiddenMemory = principal === 'orgReader' || principal === 'outsider';
+        expect(hidden.errors?.[0]?.extensions?.code).toBe(hiddenMemory
+          ? 'NOT_FOUND'
+          : operation === 'createMemorySubscription' ? 'INTERNAL_SERVER_ERROR' : 'FORBIDDEN');
+        if (!hiddenMemory && operation === 'createMemorySubscription') {
+          // The existing PUBLIC-only check throws this plain Error. Pin its
+          // reason as well as its generic wire code, so an unrelated database
+          // fault cannot satisfy the refusal control.
+          expect(hidden.errors?.[0]?.message).toBe('Only public memories can be subscribed to by other organizations');
+        }
         if (principal === 'orgReader' || principal === 'outsider') {
-          expect(hidden.errors?.[0]?.extensions?.code).toBe('NOT_FOUND');
           const missing = await query(principal, `mutation($org: String!) { ${operation}(memoryRef: "vendor-2557:missing", orgRef: $org, role: READER) { memory { id } } }`, { org: customer });
           expect(missing.errors?.[0]?.extensions?.code).toBe(hidden.errors?.[0]?.extensions?.code);
         }
