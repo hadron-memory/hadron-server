@@ -150,6 +150,33 @@ describe('the read gate (#2520 criterion 1, matrix)', () => {
     }
   });
 
+  it('a run speaks for ONE App: an org-admin owner and a member of both Apps still get CHANNEL_NOT_FOUND for a personal Channel and another App\'s Channel (§10 P2)', async () => {
+    await db.appMember.create({ data: { appId: otherApp.id, userId: member.id, role: 'member' } });
+    await say(otherChannel, 'other app');
+    for (const userId of [manager.id, member.id]) {
+      const c = toolCtx(await mintRun({ userId }));
+      // The principal itself CAN read these through the plain Channel read; only the run's App bound refuses.
+      if (userId === manager.id) expect(await code(Q.channelMessages({}, { channelRef: personalChannel.id }, c.principal))).toBeUndefined();
+      if (userId === manager.id) expect(await code(Q.channelMessages({}, { channelRef: otherChannel.id }, c.principal))).toBeUndefined();
+      for (const ref of [personalChannel.id, otherChannel.id]) {
+        if (userId === member.id && ref === personalChannel.id) continue;
+        expect(await code(teamChatRead.execute(c, { channelRef: ref }))).toBe('CHANNEL_NOT_FOUND');
+      }
+    }
+    // The own App's Channel is still readable by the owner.
+    await say(channel, 'mine');
+    expect((await run_(toolCtx(await mintRun({ userId: manager.id })), { channelRef: channel.id })).messages.map((m) => m.body)).toEqual(['mine']);
+  });
+
+  it('the App is the run\'s, never an argument: appRef/appId args naming another App change nothing', async () => {
+    await say(channel, 'own');
+    await say(otherChannel, 'other');
+    const c = toolCtx(await mintRun({ userId: manager.id }));
+    for (const extra of [{ appRef: otherApp.id }, { appId: otherApp.id }]) {
+      expect((await run_(c, extra)).messages.map((m) => m.body)).toEqual(['own']);
+    }
+  });
+
   it('the host memory\'s own read gate holds on the App address: a pure App key narrowed to an end-user session gets the empty page, not the team space (#1169 shape)', async () => {
     await say(channel, 'team only');
     const endUser = await db.session.create({ data: { id: generateId(), appId: app.id, type: 'CHATBOT', startedAt: new Date() } as never });

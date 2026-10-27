@@ -6,6 +6,8 @@
  * `teamChatMessages` and `channelMessages` run, applied to the RUN'S principal (`ctx.principal`). Refusals pass through
  * unchanged and stay each surface's own: the App team chat answers no access FORBIDDEN and an unreadable host an empty
  * page; a named Channel that is missing, deleted or unreadable answers CHANNEL_NOT_FOUND, indistinguishably.
+ * A named Channel must also live in the RUN'S App team space (the one deliberate narrowing of the existing read): a run
+ * acts for one App, so a personal memory or another App's chat its user could read elsewhere is CHANNEL_NOT_FOUND too.
  *
  * A RUN IS NOT THE HUMAN READING. The tool goes through `readChatPageWithoutAdvancing`, which never calls
  * `maybeAdvanceOwnChannelRead`, never stamps a channel check and never records a binding miss; a principal that
@@ -39,8 +41,8 @@ function positiveInt(v: unknown): number | undefined {
 export const teamChatRead: RunToolDef = {
   name: 'team_chat_read',
   description:
-    'Read messages from this App\'s team chat, or from a named Channel the run may read, oldest first. ' +
-    'Optional "channelRef" names a Channel (id or chat root URN); without it the App\'s own team chat is read. ' +
+    'Read messages from this App\'s team chat, or from a named Channel in this App\'s team space, oldest first. ' +
+    'Optional "channelRef" names such a Channel (id or chat root URN); without it the App\'s own team chat is read. ' +
     '"sinceSeq" returns only messages after that seq (default: from the start) and "mentions" keeps messages that ' +
     'mention a user handle or a worker. The result carries "nextSinceSeq": pass it as "sinceSeq" to read the next ' +
     'page, and "hasMore" says whether anything follows. Reading does not mark anything read for anyone. ' +
@@ -65,7 +67,7 @@ export const teamChatRead: RunToolDef = {
     const appId = ctx.principal.appId ?? ctx.run.appId;
     const page = await readChatPageWithoutAdvancing(
       ctx.principal,
-      channelRef ? { channelRef } : { appRef: appId },
+      channelRef ? { channelRef, withinAppId: appId } : { appRef: appId },
       { sinceSeq, mentionsRef, limit },
     );
 

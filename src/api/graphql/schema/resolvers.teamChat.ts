@@ -1547,11 +1547,14 @@ export async function resolveTeamChatReadTarget(ctx: Context, appRef: string): P
  */
 export async function readChatPageWithoutAdvancing(
   ctx: Context,
-  address: { appRef: string } | { channelRef: string },
+  address: { appRef: string } | { channelRef: string; withinAppId: string },
   args: { sinceSeq?: number | null; mentionsRef?: string | null; limit?: number | null },
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
   if ('channelRef' in address) {
     const target = await resolveChannelTarget(ctx, address.channelRef, 'read');
+    // A run speaks for ONE App: a Channel outside that App's team space is no match, however much the
+    // run's user could read elsewhere (a personal memory, another App). Same answer as an unreadable one.
+    if (target.app?.id !== address.withinAppId) throw channelNotFound(address.channelRef);
     return readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
   }
   const target = await resolveTeamChatReadTarget(ctx, address.appRef);
