@@ -108,6 +108,8 @@ export const teamChatRead: RunToolDef = {
         authorSystem: m.authorSystem,
       });
       used += body.length;
+      // A cut message ends the page: a cut that stepped back off a pair leaves one unit of room (#2581).
+      if (cut) break;
     }
     const nextSinceSeq = messages.length > 0 ? (messages[messages.length - 1]!.seq as number) : sinceSeq;
     ctx.log(`team_chat_read (${messages.length} messages)`);

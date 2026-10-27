@@ -375,6 +375,16 @@ describe('a cut body never splits a surrogate pair (#2581)', () => {
     expect((await run_(c, { sinceSeq: 1 })).messages.map((m) => m.body)).toEqual(['next']);
   });
 
+  it('a cut that steps back leaves one unit of room, and a one-unit next message still waits for the next page', async () => {
+    await say(channel, 'a' + '🧭'.repeat(20_000));
+    await say(channel, 'x');
+    const c = toolCtx(await mintRun({ userId: member.id }));
+    const p1 = await run_(c);
+    expect(p1.messages[0].body.length).toBe(TEAM_CHAT_READ_MAX_BODY_CHARS - 1);
+    expect([p1.messages.length, p1.nextSinceSeq, p1.hasMore]).toEqual([1, 1, true]);
+    expect((await run_(c, { sinceSeq: 1 })).messages.map((m) => m.body)).toEqual(['x']);
+  });
+
   it('a cut on a pair boundary keeps every unit up to the cap', async () => {
     await say(channel, '🧭'.repeat(20_000));
     const p1 = await run_(toolCtx(await mintRun({ userId: member.id })));
