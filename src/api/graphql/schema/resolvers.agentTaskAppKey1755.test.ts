@@ -116,7 +116,7 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
       runAsActor({ workerId: anne.id, agentId }, () => M.createAgentTask({}, { input: { appRef: appX.id, title: 'nope' } }, keyCtx())),
       'APP_NOT_FOUND',
     );
-    expect(await db.agentTask.count()).toBe(1);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(1);
     expect(await db.agentTeamEvent.count()).toBe(before);
   });
 
@@ -178,11 +178,13 @@ describe('every task-domain write is refused for a key (#1785 cycle 1)', () => {
       taskId: t.id, id: t.id, appRef: appX.id, workerRef: anne.id, worker: anne.id, assignee: { worker: anne.id },
       input: { appRef: appX.id, taskId: t.id, title: 'x', name: 'x' }, result: { outcome: 'succeeded' },
     };
+    // #2553: the task number counters are part of "nothing is written"; their BigInts serialize as strings.
     const snapshot = async () => JSON.stringify([
       await db.agentTask.findMany({ orderBy: { id: 'asc' } }),
+      await db.agentTaskCounter.findMany({ orderBy: { id: 'asc' } }),
       await db.agentTeamEvent.count(),
       await db.worker.findMany({ orderBy: { id: 'asc' } }),
-    ]);
+    ], (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
     const before = await snapshot();
     for (const name of names) {
       await expect(M[name]({}, args, keyCtx()), name).rejects.toBeInstanceOf(Error);

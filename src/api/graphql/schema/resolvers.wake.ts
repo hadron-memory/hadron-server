@@ -157,7 +157,7 @@ export async function dueWakesFor(
         ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null,
         // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
         task: r.kind === 'TASK'
-          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, handle: r.handle, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
           : null,
         // #2022: a stop notice concerns the worker itself; whoever may read its wakes sees it.
         ...(r.kind === 'STOP'

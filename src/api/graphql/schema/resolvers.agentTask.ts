@@ -77,7 +77,8 @@ import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } f
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { parseTaskHandle, formatTaskHandle } from '../../../lib/agentTasks/handle.js';
+import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH } from '../../../lib/agentTasks/handle.js';
+import { ensureProjectZero, PROJECT_ZERO_HANDLE } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -409,7 +410,7 @@ export async function resolveTaskRef(ctx: Context, ref: unknown, inApp?: string)
     appId = inApp ?? (await bareHandleApp(ctx, ref));
   }
   if (!appId) return null;
-  const row = await ctx.db.agentTask.findUnique({ where: { appId_taskNumber: { appId, taskNumber: handle.number } }, select: { id: true } });
+  const row = await ctx.db.agentTask.findUnique({ where: { appId_handle: { appId, handle: handle.handle } }, select: { id: true } });
   return row?.id ?? null;
 }
 
@@ -816,6 +817,10 @@ async function mutateTask(
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskRef);
   if (!readable) throw notFound(taskRef);
+  // #2553: AT0 is the platform's own row; no operation changes it, and it reads as a task for every other purpose.
+  if (readable.task.handle === PROJECT_ZERO_HANDLE) {
+    throw taskError('TASK_PROJECT_ZERO_FIXED', 'AT0 ("No project") is the platform\'s reserved project; no operation changes it.', { taskId: taskRef });
+  }
   // #2553: the caller's spelling (an id or a handle) is echoed in refusals; every query below runs on the id.
   const taskId = readable.task.id;
   const { app, actor } = readable;
@@ -889,6 +894,8 @@ type CreateInput = {
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
   status?: string | null;
+  /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. */
+  project?: boolean | null;
 };
 
 /**
@@ -904,26 +911,51 @@ async function insertTask(
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
     /** #1754: a backlog task is parked, never queued (cor:agt:050:02). Default pending. */
     status?: 'backlog' | 'pending';
+    /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
+    project?: boolean;
   },
 ): Promise<{ id: string; queued: boolean }> {
   // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
   if (a.assignee?.workerId) await refuseStoppedAssignee(tx, a.app.id, a.assignee.workerId, new Date());
-  // #2553: the per-App number, from the App's own counter row (not the App row, which stays a SHARED authority
-  // anchor). Taken last: after the anchors, the stop fence, the graph and worker locks, immediately before the insert,
-  // and nothing is locked after it. The upsert is atomic, so two creates never read the same value. A rolled-back
-  // create rolls this back too, so only committed numbers are ever spent.
-  const [counter] = await tx.$queryRaw<Array<{ last_number: bigint }>>`
-    INSERT INTO agent_task_counters (app_id, last_number) VALUES (${a.app.id}, 1)
-    ON CONFLICT (app_id) DO UPDATE SET last_number = agent_task_counters.last_number + 1
-    RETURNING last_number`;
+  // #2553: the handle. A task with no project is a child of the App's reserved AT0 (`project` makes a top-level
+  // project instead); its number comes from its PARENT's counter row (the project counter for a project), not the App
+  // row (which stays a SHARED authority anchor) and not the parent task row (a read, since handles are immutable).
+  // LOCK ORDER: the counter row is taken after the anchors, the stop fence, the graph and worker locks and the
+  // caller's parent-task lock, immediately before the insert, and nothing is locked after it. The upsert is atomic, so
+  // two creates never read the same value. A rolled-back create rolls the counter back too, so only committed numbers
+  // are ever spent.
+  let parentId = a.parentId;
+  if (!parentId && !a.project) {
+    parentId = await ensureProjectZero(tx, a.app.id, a.owner);
+    if (!parentId) throw taskError('TASK_PROJECT_ZERO_MISSING', 'This App has no "No project" project yet and none could be made for it.');
+  }
+  let parentHandle: string | null = null;
+  if (parentId) {
+    parentHandle = (await tx.agentTask.findUnique({ where: { id: parentId }, select: { handle: true } }))?.handle ?? null;
+    if (parentHandle && handleDepth(parentHandle) >= MAX_HANDLE_DEPTH) {
+      throw taskError('TASK_TOO_DEEP', `Tasks nest at most ${MAX_HANDLE_DEPTH} levels deep, counting the project; create this task under a shallower parent.`, { taskId: parentId });
+    }
+  }
+  const [counter] = parentId
+    ? await tx.$queryRaw<Array<{ last_number: bigint }>>`
+        INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
+        VALUES (replace(gen_random_uuid()::text, '-', ''), ${a.app.id}, ${parentId}, 1)
+        ON CONFLICT (app_id, parent_task_id) DO UPDATE SET last_number = agent_task_counters.last_number + 1
+        RETURNING last_number`
+    : await tx.$queryRaw<Array<{ last_number: bigint }>>`
+        INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
+        VALUES (replace(gen_random_uuid()::text, '-', ''), ${a.app.id}, NULL, 1)
+        ON CONFLICT (app_id) WHERE parent_task_id IS NULL DO UPDATE SET last_number = agent_task_counters.last_number + 1
+        RETURNING last_number`;
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
       taskNumber: counter!.last_number,
+      handle: composeTaskHandle(parentHandle, counter!.last_number),
       title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
       closeSessionWhenDone: a.closeSessionWhenDone,
       status: a.status ?? 'pending',
-      parentTaskId: a.parentId,
+      parentTaskId: parentId,
       requirements: a.requirements ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
       ...partyColumns('assignee', a.assignee),
@@ -1022,7 +1054,8 @@ export const agentTaskMutations = {
    */
   createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     if (!input) throw badInput('input is required.');
-    const parentId = input.parentTaskId?.trim() || null;
+    let parentId = input.parentTaskId?.trim() || null;
+    if (input.project && parentId) throw badInput('A project is a top-level task: it takes no parentTaskId.');
     // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentId` stays the caller's spelling for echoes.
     let parentTaskId: string | null = null;
     let app: TaskApp;
@@ -1032,6 +1065,9 @@ export const agentTaskMutations = {
       if (!readable) throw notFound(parentId);
       ({ app, actor } = readable);
       parentTaskId = readable.task.id;
+      // #2553: AT0 is the implicit parent of a task with no project; naming it is the same as naming none. (Nobody is
+      // AT0's assignee, so it would otherwise refuse every creator.) The App is the one it belongs to.
+      if (readable.task.handle === PROJECT_ZERO_HANDLE) { parentId = null; parentTaskId = null; }
       // A parent in another App reads as not-found: no cross-App oracle (#1705).
       if (input.appRef) {
         let namedAppId: string | null = null;
@@ -1040,7 +1076,7 @@ export const agentTaskMutations = {
         } catch (e) {
           if (!(e instanceof AppNotFoundError)) throw e;
         }
-        if (namedAppId !== app.id) throw notFound(parentId);
+        if (namedAppId !== app.id) throw notFound(input.parentTaskId!.trim());
       }
     } else {
       if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
@@ -1096,7 +1132,7 @@ export const agentTaskMutations = {
       return { requirements, owner, assignee };
     };
 
-    const refused = parentId ? () => notFound(parentId) : () => appNotFound(input.appRef as string);
+    const refused = parentId ? () => notFound(parentId) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
     // #2198: advice decided inside the write transaction, filed after it commits.
     const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
     // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
@@ -1119,7 +1155,7 @@ export const agentTaskMutations = {
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       return insertTask(tx, {
-        app, parentId: parentTaskId, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
+        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
     }, { lockWorkerIds: [lockedAssignee] });
@@ -1521,14 +1557,20 @@ export const agentTaskQueries = {
       ...(statuses?.length ? { status: { in: statuses } } : {}),
       ...(args.tag ? { tags: { has: args.tag } } : {}),
       ...(args.parentTaskId ? { parentTaskId: (await resolveTaskRef(c, args.parentTaskId, app.id)) ?? args.parentTaskId } : {}),
-      ...(args.rootsOnly ? { parentTaskId: null } : {}),
       ...(args.queued ? { status: 'pending', assigneeWorkerId: null, assigneeUserId: null } : {}),
     };
+    // #2553: AT0 is the platform's bookkeeping row, not a task anyone works: a LIST never shows it (it still reads by
+    // id or handle, and `parentTaskId: AT0` lists the tasks that have no project). `rootsOnly` keeps meaning "the top
+    // of the tree a person sees": the projects and the tasks with no project (children of AT0), never AT0 itself.
+    const noZero: Prisma.AgentTaskWhereInput = { handle: { not: PROJECT_ZERO_HANDLE } };
+    const rootsWhere: Prisma.AgentTaskWhereInput = args.rootsOnly
+      ? { OR: [{ parentTaskId: null }, { parent: { handle: PROJECT_ZERO_HANDLE } }] }
+      : {};
     const ownerWhere = await partyFilter(c, app, args.owner, 'owner');
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
     const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
     return c.db.agentTask.findMany({
-      where: { AND: [where, ownerWhere, assigneeWhere, creatorWhere] },
+      where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
@@ -1628,7 +1670,7 @@ export async function partyView(ctx: Context, workerId: string | null, userId: s
 export const agentTaskFieldResolvers = {
   AgentTask: {
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
-    handle: (t: TaskRow) => formatTaskHandle(t.taskNumber!),
+    handle: (t: TaskRow) => t.handle!,
     taskNumber: (t: TaskRow) => Number(t.taskNumber),
     status: (t: TaskRow) => t.status.toUpperCase(),
     owner: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.ownerWorkerId, t.ownerUserId),

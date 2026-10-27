@@ -174,7 +174,7 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
     await expectCode(asWorker(anne, () => create(ctx(undefined, { appId: app.id }), {})), 'APP_NOT_FOUND');
     const t = await create(ctx(member.id), {});
     expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(undefined, { appId: app.id })))).toBeNull();
-    expect(await db.agentTask.count()).toBe(1);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(1);
   });
 
   it("a worker of another App is refused — even when its driver participates here", async () => {

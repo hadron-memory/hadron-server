@@ -131,7 +131,7 @@ describe('#2123 request-local session refusal', () => {
         targetWorkerId: workerId, setAt: new Date(), setByUserId: userId } });
       return call(connection, 'hadron_stop_signal_lift', { appRef: appId, id: signal.id, session: plain.id }, header);
     };
-    const count = () => kind === 'task' ? db.agentTask.count() : kind === 'ticker' ? db.ticker.count()
+    const count = () => kind === 'task' ? db.agentTask.count({ where: { handle: { not: 'AT0' } } }) : kind === 'ticker' ? db.ticker.count()
       : db.teamStopSignal.count({ where: { endedAt: { not: null } } });
     const allowed = await run('Control');
     expect(allowed.result?.isError).not.toBe(true);
