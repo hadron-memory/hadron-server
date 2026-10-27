@@ -78,7 +78,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { parseTaskHandle, composeTaskHandle, handleDepth, MAX_HANDLE_DEPTH } from '../../../lib/agentTasks/handle.js';
-import { ensureProjectZero, PROJECT_ZERO_HANDLE } from '../../../lib/agentTasks/projectZero.js';
+import { ensureProjectZero, PROJECT_ZERO_HANDLE, rootTaskWhere } from '../../../lib/agentTasks/projectZero.js';
 import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -1564,7 +1564,7 @@ export const agentTaskQueries = {
     // of the tree a person sees": the projects and the tasks with no project (children of AT0), never AT0 itself.
     const noZero: Prisma.AgentTaskWhereInput = { handle: { not: PROJECT_ZERO_HANDLE } };
     const rootsWhere: Prisma.AgentTaskWhereInput = args.rootsOnly
-      ? { OR: [{ parentTaskId: null }, { parent: { handle: PROJECT_ZERO_HANDLE } }] }
+      ? rootTaskWhere()
       : {};
     const ownerWhere = await partyFilter(c, app, args.owner, 'owner');
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');

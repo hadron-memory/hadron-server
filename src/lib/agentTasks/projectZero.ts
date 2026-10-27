@@ -36,3 +36,12 @@ export async function ensureProjectZero(
   });
   return (await tx.agentTask.findUnique({ where: { appId_handle: { appId, handle: PROJECT_ZERO_HANDLE } }, select: { id: true } }))?.id ?? null;
 }
+
+/**
+ * The ONE root predicate (rev 8 build assumption, pending Holger's ruling; carried to #2420 / docs#500): a root is the
+ * topmost task other than AT0, so a project (AT1..) and a task with no project (AT0.<n>, whose parent is AT0) both
+ * count. AT0 itself is never a root. A different ruling changes this function and nothing else.
+ */
+export function rootTaskWhere(): Prisma.AgentTaskWhereInput {
+  return { OR: [{ parentTaskId: null }, { parent: { handle: PROJECT_ZERO_HANDLE } }], handle: { not: PROJECT_ZERO_HANDLE } };
+}
