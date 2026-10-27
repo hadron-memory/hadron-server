@@ -15,7 +15,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
-import { lockRootSiblings, reserveRootSeqLock } from '../../../lib/nodeSeq.js';
+import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { assertRootAllocationAllowed, lockRootSiblings, reserveRootSeqLock } from '../../../lib/nodeSeq.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -216,6 +217,46 @@ describe('reserve seam and the one-use handoff #443', () => {
     expect(await waiterBlockedOnK(memoryId)).toBe(false);
   });
 
+  it('two CONCURRENT allocations on one transaction: the second is refused before it can take the key', async () => {
+    await expect(db.$transaction(async (tx) => {
+      const results = await Promise.allSettled([lockRootSiblings(tx, memoryId), lockRootSiblings(tx, memoryId)]);
+      expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+      throw new Error('done');
+    })).rejects.toThrow('done');
+    await expect(db.$transaction(async (tx) => {
+      await Promise.all([reserveRootSeqLock(tx, memoryId), reserveRootSeqLock(tx, memoryId)]);
+    })).rejects.toThrow(/second root/i);
+  });
+
+  it('state is shared by every wrapper over ONE transaction: a second allocation through a forwarding wrapper is refused', async () => {
+    const wrap = (t: object) => new Proxy(t, { get: (o, k) => { const v = (o as Record<PropertyKey, unknown>)[k]; return typeof v === 'function' ? v.bind(o) : v; } }) as typeof t;
+    await expect(db.$transaction(async (tx) => {
+      await lockRootSiblings(wrap(tx) as typeof tx, memoryId);
+      await lockRootSiblings(wrap(tx) as typeof tx, memoryId);
+    })).rejects.toThrow(/second root/i);
+    await expect(db.$transaction(async (tx) => {
+      await reserveRootSeqLock(wrap(tx) as typeof tx, memoryId);
+      await lockRootSiblings(wrap(tx) as typeof tx, memoryId);   // consumes the handoff made through another wrapper
+      await lockRootSiblings(wrap(tx) as typeof tx, memoryId);
+    })).rejects.toThrow(/second root/i);
+  });
+
+  it('assertRootAllocationAllowed refuses a second allocation WITHOUT taking any lock', async () => {
+    await db.$transaction(async (tx) => {
+      await lockRootSiblings(tx, memoryId);
+      const count = async () => (await tx.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*)::bigint AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()`)[0]!.n;
+      const before = await count();
+      await expect(assertRootAllocationAllowed(tx, memoryId)).rejects.toThrow(/second root/i);
+      expect(await count()).toBe(before);
+    });
+    await db.$transaction(async (tx) => {
+      await expect(assertRootAllocationAllowed(tx, memoryId)).resolves.toBeUndefined();
+      await reserveRootSeqLock(tx, memoryId);
+      await expect(assertRootAllocationAllowed(tx, memoryId)).resolves.toBeUndefined();   // a reservation is a handoff
+    });
+  });
+
   it('a reservation for another memory is not a handoff for this one', async () => {
     const other = await mkMemory('rootseq443o', false);
     await expect(db.$transaction(async (tx) => {
@@ -223,6 +264,42 @@ describe('reserve seam and the one-use handoff #443', () => {
       await lockRootSiblings(tx, memoryId);
     })).rejects.toThrow(/second root|reservation/i);
   });
+});
+
+describe('worker_reference_fences counterparty schedule #443', () => {
+  // The fence UPSERT (subject_id = the Worker id) runs in the post-K suffix whenever a written row names a NEW worker
+  // reference. Schedule: H holds the tuple (uncommitted, from a nested write); A holds K and waits on that tuple; B, a real
+  // root create, waits on K. B holds no tuple and no row A needs, so the chain drains when H commits: no cycle through K.
+  it('a K-holder waiting on a held fence tuple and a K-waiter behind it both complete, distinct seqs, no deadlock', async () => {
+    const M = resolvers.Mutation as any;
+    const org = await db.organization.findFirstOrThrow();
+    const agent = await M.createAgent({}, { orgId: org.id, name: 'Fence role' }, ctx());
+    const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Fence team', urn: `${org.urn}:team` } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Fence worker' }, ctx());
+
+    let release!: () => void, ready!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const held = new Promise<void>((r) => { ready = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.node.create({ data: { id: generateId(), memoryId, loc: 'h:x', name: 'h', createdByWorkerId: worker.id } });
+      ready();
+      await gate;
+    }, { timeout: 30000 });
+    await held;
+
+    const a = db.$transaction(async (tx) => {
+      await lockRootSiblings(tx, memoryId);
+      const seq = await nextSiblingSeq(tx, memoryId, 'a');
+      await tx.node.create({ data: { id: generateId(), memoryId, loc: 'a', name: 'a', seq, createdByWorkerId: worker.id } });
+    }, { timeout: 30000 });
+    expect(await pollBlocked(memoryId)).toBe(false);          // A holds K; nobody is waiting on it yet
+    const b = create('graphql', 'b');
+    expect(await pollBlocked(memoryId)).toBe(true);           // B waits on K behind A, which waits on the tuple
+    release();
+    await Promise.all([holder, a, b]);
+    expect([await seqOf('a'), await seqOf('b')].sort()).toEqual([2, 3]);
+  }, 40000);
 });
 
 describe('the key K #443', () => {
@@ -241,7 +318,7 @@ describe('the key K #443', () => {
       expect((k >> 62n) & 1n).toBe(1n);
     });
   });
-  it('is held to the OUTER commit and differs per memory', async () => {
+  it('differs per memory', async () => {
     const other = await mkMemory('rootseq443p', false);
     expect(await expectedKey(memoryId)).not.toBe(await expectedKey(other));
   });
@@ -268,5 +345,15 @@ describe('call-site pin #443', () => {
       'src/api/graphql/schema/resolvers.specCorpus.ts:reserveRootSeqLock',
       'src/mcp/server.ts:lockRootSiblings',
     ]);
+    // The refusal check runs BEFORE the seam's first own lock, on both write surfaces.
+    for (const f of ['src/api/graphql/schema/resolvers.mutation.node.ts', 'src/mcp/server.ts']) {
+      const text = readFileSync(join(process.cwd(), f), 'utf8');
+      expect(text.split('assertRootAllocationAllowed(tx').length - 1).toBe(1);
+    }
+    // K keys on the AUTHORITATIVE read, not the pre-transaction probe.
+    const gql = readFileSync(join(process.cwd(), 'src/api/graphql/schema/resolvers.mutation.node.ts'), 'utf8');
+    const mcp = readFileSync(join(process.cwd(), 'src/mcp/server.ts'), 'utf8');
+    expect(gql).toContain('const autoSeq = authoritative == null && input.seq == null;');
+    expect(mcp).toContain('const autoSeq = seq === undefined && pre == null;');
   });
 });

@@ -84,8 +84,12 @@ async function takeRootSeqKey(tx: Prisma.TransactionClient, memoryId: string): P
     (hashtextextended(${ROOT_SEQ_KEY(memoryId)}, 0) | (1::bigint << 62)) & ~(1::bigint << 63))`;
 }
 
-/** Per-transaction state, keyed on the transaction object the seam hands every helper (one object per outer transaction). */
-const rootSeqState = new WeakMap<object, { memoryId: string; reserved: boolean }>();
+/**
+ * Per-transaction state lives in a transaction-LOCAL setting, not a JS object, so every wrapper that forwards the same
+ * database transaction sees it, and the check-and-set is ONE statement, so two concurrent calls on a transaction cannot
+ * both read "no state". Values: '' none; '<memoryId>|1' reserved (one-use handoff); '<memoryId>|0' allocated.
+ */
+const STATE_SETTING = 'hadron.root_seq_state';
 
 export class RootSeqAllocationError extends Error {
   constructor(message: string) {
@@ -94,23 +98,45 @@ export class RootSeqAllocationError extends Error {
   }
 }
 
+const SECOND = 'A second root sibling allocation in one transaction is not supported';
+
+async function readState(tx: Prisma.TransactionClient): Promise<string> {
+  const rows = await tx.$queryRaw<Array<{ v: string }>>`SELECT coalesce(current_setting(${STATE_SETTING}, true), '') AS v`;
+  return rows[0]?.v ?? '';
+}
+
+/** Check-and-set in one statement; returns the PRIOR state. */
+async function swapState(tx: Prisma.TransactionClient, memoryId: string, reserve: boolean): Promise<string> {
+  const reserved = `${memoryId}|1`;
+  const taken = `${memoryId}|0`;
+  const rows = await tx.$queryRaw<Array<{ v: string }>>`
+    WITH prev AS (SELECT coalesce(current_setting(${STATE_SETTING}, true), '') AS v)
+    SELECT v, set_config(${STATE_SETTING},
+      CASE WHEN v = '' THEN ${reserve ? reserved : taken} WHEN v = ${reserved} AND NOT ${reserve} THEN ${taken} ELSE v END,
+      true) AS s FROM prev`;
+  return rows[0]?.v ?? '';
+}
+
+/**
+ * Refuse a second root allocation BEFORE the caller takes any lock of its own (the placement rule forbids a pre-K lock
+ * after K). Passes when nothing was allocated, or when a reservation for this memory is waiting to be consumed.
+ */
+export async function assertRootAllocationAllowed(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  const v = await readState(tx);
+  if (v !== '' && v !== `${memoryId}|1`) throw new RootSeqAllocationError(SECOND);
+}
+
 /**
  * Take K for the root allocation about to happen in this transaction. Re-entrant at the database, but the transaction may
  * allocate a root seq ONCE: a second allocation would take its pre-K locks after K, which the placement rule forbids, so it
- * is refused (before any lock) and the transaction rolls back. A one-use reservation from `reserveRootSeqLock` for the same
- * memory is consumed by the first allocation.
+ * is refused and the transaction rolls back. A one-use reservation from `reserveRootSeqLock` for the same memory is
+ * consumed by the first allocation.
  */
 export async function lockRootSiblings(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
-  const state = rootSeqState.get(tx);
-  if (state) {
-    if (state.reserved && state.memoryId === memoryId) {
-      state.reserved = false;
-      return;
-    }
-    throw new RootSeqAllocationError('A second root sibling allocation in one transaction is not supported');
-  }
+  const prev = await swapState(tx, memoryId, false);
+  if (prev === `${memoryId}|1`) return;
+  if (prev !== '') throw new RootSeqAllocationError(SECOND);
   await takeRootSeqKey(tx, memoryId);
-  rootSeqState.set(tx, { memoryId, reserved: false });
 }
 
 /**
@@ -119,7 +145,7 @@ export async function lockRootSiblings(tx: Prisma.TransactionClient, memoryId: s
  * create core for its first and only root allocation.
  */
 export async function reserveRootSeqLock(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
-  if (rootSeqState.has(tx)) throw new RootSeqAllocationError('A second root sibling allocation in one transaction is not supported');
+  const prev = await swapState(tx, memoryId, true);
+  if (prev !== '') throw new RootSeqAllocationError(SECOND);
   await takeRootSeqKey(tx, memoryId);
-  rootSeqState.set(tx, { memoryId, reserved: true });
 }

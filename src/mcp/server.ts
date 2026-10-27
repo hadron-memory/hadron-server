@@ -187,7 +187,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
 import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
-import { lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
+import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
@@ -6380,6 +6380,8 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          // #443: a second root allocation in one transaction is refused before ANY lock of its own is taken.
+          if (seq === undefined && !loc.includes(':')) await assertRootAllocationAllowed(tx, memoryId);
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
@@ -6452,7 +6454,9 @@ export function createMcpServerInstance(
           // #443: nested siblings already share the held immediate-parent key.
           // Allocate on this writing transaction only after that wait.
           // A ROOT has no parent key: it takes K (held to commit) before the read.
-          const autoSeq = seq === undefined && existing == null;
+          // Keyed on the AUTHORITATIVE read under the locks, not the stale pre-transaction probe: a row that appeared after
+          // the probe must not make this root take K after its FOR UPDATE and revision writes.
+          const autoSeq = seq === undefined && pre == null;
           if (autoSeq && !loc.includes(':')) await lockRootSiblings(tx, memoryId);
           const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({

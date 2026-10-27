@@ -118,7 +118,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { lockRootSiblings, nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
@@ -1466,6 +1466,8 @@ async function writeNodeCoreRaw(
           // under the transaction — a root-level Channel address was
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await inWriteTransaction(async (tx) => {
+            // #443: a second root allocation in one transaction is refused before ANY lock of its own is taken.
+            if (input.seq == null && !input.loc.includes(':')) await assertRootAllocationAllowed(tx, input.memoryId);
             await lockInlineEdgeMemories(tx);
             await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
@@ -1662,7 +1664,8 @@ async function writeNodeCoreRaw(
             // #443: the existing ancestor set includes the immediate parent.
             // READ COMMITTED now sees the prior parent's holder commit. A ROOT has
             // no parent lock: it takes K instead (held to commit), then reads.
-            const autoSeq = existing == null && input.seq == null;
+            // Keyed on the AUTHORITATIVE read under the locks, not the stale probe (see the MCP twin).
+            const autoSeq = authoritative == null && input.seq == null;
             const isRoot = !input.loc.includes(':');
             if (autoSeq && isRoot) await lockRootSiblings(tx, input.memoryId);
             const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
