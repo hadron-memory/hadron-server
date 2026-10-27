@@ -2787,7 +2787,8 @@ export const typeDefs = `#graphql
   "#2517 — one edge a hard delete removed from this node (hrn:node:hadronmemory.com:specs:cor:dmo:010:04). The deleted target's address is shown only when you can read the memory it lived in."
   type NodeEdgeRemoval {
     id: ID!
-    edgeLoc: String!
+    "The removed edge's loc; null when the deleted target's memory is not one you can read (the loc is derived from the target's address)."
+    edgeLoc: String
     edgeName: String
     "Stable id of the deleted target; the row itself is gone."
     targetId: ID!

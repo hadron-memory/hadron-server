@@ -124,7 +124,45 @@ describe('#2517 — hard delete leaves a trace on the nodes that pointed at it',
     )) as Array<Record<string, unknown>>;
     expect(asReader).toHaveLength(1);
     expect(asReader[0]!.targetLoc).toBeNull();
+    // The edge's own loc is derived from both endpoints, so it would leak the hidden target loc too.
+    expect(asReader[0]!.edgeLoc).toBeNull();
     expect(asReader[0]!.targetId).toBe(target.id);
     expect((await removals(source.id))[0]!.targetLoc).toBe('secret-tgt');
+    expect((await removals(source.id))[0]!.edgeLoc).toBe('src:to-b');
+  });
+
+  it('records an INCLUDE-derived edge a hard delete cascades (only comment edges are skipped)', async () => {
+    const source = await node('src');
+    const target = await node('tgt');
+    await db.edge.create({
+      data: { id: generateId(), memoryId: mem.id, loc: 'src:includes:tgt', sourceId: source.id, targetId: target.id, name: 'includes', governedKind: 'INCLUDE' },
+    });
+
+    await resolvers.Mutation.deleteNode({}, { nodeRef: target.id, hard: true }, ctx());
+
+    expect(await removals(source.id)).toHaveLength(1);
+  });
+
+  it('hides entries recorded in a memory the reader cannot read after the source moved', async () => {
+    const orgB = await db.organization.create({ data: { id: generateId(), name: 'er-b2', urn: 'er-b2' } });
+    const memB = await db.memory.create({
+      data: { id: generateId(), organizationId: orgB.id, urn: 'er-b2:m', name: 'mb2', class: 'knowledge' },
+      select: { id: true },
+    });
+    const reader = await db.user.create({ data: { githubId: 25172, githubUsername: 'er-reader2', handle: 'er-reader2', roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: orgB.id, userId: reader.id, role: 'READER' } });
+    const source = await node('src');
+    const target = await node('tgt');
+    await edge('src:to-tgt', source.id, target.id);
+
+    await resolvers.Mutation.deleteNode({}, { nodeRef: target.id, hard: true }, ctx());
+    // The source later moves into a memory the reader CAN read; the entry was recorded in the one they cannot.
+    await db.node.update({ where: { id: source.id }, data: { memoryId: memB.id } });
+
+    const asReader = (await resolvers.Query.nodeEdgeRemovals(
+      {}, { nodeRef: source.id }, { db, roles: ['READER'], userId: reader.id } as Context,
+    )) as Array<Record<string, unknown>>;
+    expect(asReader).toEqual([]);
+    expect(await removals(source.id)).toHaveLength(1);
   });
 });
