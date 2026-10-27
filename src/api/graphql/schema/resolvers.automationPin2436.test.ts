@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { storedAutomationPin } from '../../../lib/automation/pins.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -85,6 +86,64 @@ async function userOwnedFixture() {
 }
 
 describe('#2436 who may adopt an App-only trigger', () => {
+  for (const role of ['ADMIN', 'OWNER'] as const) {
+    const adopter = (f: Awaited<ReturnType<typeof orgFixture>>) => role === 'ADMIN' ? f.orgAdmin : f.orgOwner;
+
+    it(`#2499 an org ${role} previews without changing consent or recording an event`, async () => {
+      const f = await orgFixture();
+      const trigger = await f.appOnly('Preview flow');
+      const pin = await Q.previewAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: trigger.id }, f.ctx(adopter(f)));
+
+      expect(pin).toMatchObject({ format: 'hadron-automation-pin-v4', entryId: expect.any(String) });
+      expect(pin.hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(Object.values(pin.nodes)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ state: expect.objectContaining({ memoryId: f.memory.id, content: 'approved' }) }),
+      ]));
+      expect(await db.agentSchedule.findUniqueOrThrow({ where: { id: trigger.id } })).toEqual(trigger);
+      expect(await db.automationAdoptionEvent.count({ where: { appId: f.app.id } })).toBe(0);
+    });
+
+    it(`#2499 an org ${role} declines an unadopted trigger without changing it and records DECLINE`, async () => {
+      const f = await orgFixture();
+      const user = adopter(f);
+      const trigger = await f.appOnly('Decline flow');
+
+      expect(await M.declineAutomation({}, { triggerKind: 'SCHEDULE', triggerRef: trigger.id }, f.ctx(user))).toBe(true);
+
+      expect(await db.agentSchedule.findUniqueOrThrow({ where: { id: trigger.id } })).toEqual(trigger);
+      expect(await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id } })).toEqual([
+        expect.objectContaining({ action: 'DECLINE', actorUserId: user.id, appId: f.app.id,
+          organizationId: f.org.id, triggerKind: 'SCHEDULE', triggerRef: trigger.id, pinHash: null }),
+      ]);
+    });
+
+    it(`#2499 an org ${role} re-adopts changed automation using its returned hash and records the new consent`, async () => {
+      const f = await orgFixture();
+      const user = adopter(f);
+      const input = { triggerKind: 'SCHEDULE' as const, triggerRef: (await f.appOnly('Re-adopt flow')).id };
+      const original = await Q.previewAutomation({}, input, f.ctx(user));
+      expect(await M.approveAutomation({}, { ...input, expectedHash: original.hash }, f.ctx(user))).toBe(true);
+      await db.node.update({ where: { id: original.entryId }, data: { content: 'review this changed automation' } });
+      expect((await Q.automationApproval({}, input, f.ctx(user))).state).toBe('CHANGED');
+      const preview = await Q.previewAutomation({}, input, f.ctx(user));
+      expect(preview.hash).not.toBe(original.hash);
+      const before = await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id } });
+
+      expect(await M.reAdoptAutomation({}, { ...input, expectedHash: preview.hash }, f.ctx(user))).toBe(true);
+
+      const trigger = await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } });
+      expect(trigger.automationPin).toEqual(storedAutomationPin(preview));
+      expect(trigger).toMatchObject({ entryNodeId: preview.entryId, updatedBy: user.id });
+      expect((await Q.automationApproval({}, input, f.ctx(user))).state).toBe('ADOPTED');
+      const added = await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id, id: { notIn: before.map(e => e.id) } } });
+      expect(added).toEqual([
+        expect.objectContaining({ action: 'APPROVE', actorUserId: user.id, appId: f.app.id,
+          organizationId: f.org.id, triggerKind: 'SCHEDULE', triggerRef: input.triggerRef, pinHash: preview.hash }),
+      ]);
+      expect(await db.automationAdoptionEvent.count({ where: { appId: f.app.id } })).toBe(before.length + 1);
+    });
+  }
+
   it('an org ADMIN and an org OWNER adopt (positive arms of the today-rule)', async () => {
     const f = await orgFixture();
     const adopt = async (user: { id: string }, triggerRef: string) => {
