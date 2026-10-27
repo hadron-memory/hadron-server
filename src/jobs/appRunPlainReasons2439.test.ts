@@ -222,7 +222,7 @@ describe('per-run cost', () => {
     f.deps.selectNext = async () => {
       costs.push((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).costMicroCents);
       if (costs.length === 3) throw new Error('routing fails after the third hop was metered');
-      return { targetUrn: f.schedule.entryNodeUrn, edgeName: 'next' };
+      return { targetUrn: f.schedule.entryNodeUrn, edgeName: 'next', edgeId: generateId() };
     };
     expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
     expect(f.llm).toHaveBeenCalledTimes(3);
