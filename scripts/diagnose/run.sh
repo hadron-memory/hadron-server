@@ -16,14 +16,16 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}/hadron-e2e/$project"
 refuse_existing_stack "$state" "$project" || exit 2
 stage=$(mktemp -d); git -C "$root" worktree add --detach "$stage/src" HEAD >/dev/null
 down() {
-  rc=$?
+  local rc=$?
   # On success the samples were already copied and the pg_activity line appended; re-copying would overwrite it.
   [ "$rc" = 0 ] || preserve_samples "$DIAG_OUT"
   if [ "$rc" != 0 ]; then keep_logs_private "$DIAG_OUT.private.log" bash -c "cd '$stage/src' && scripts/e2e/stack.sh logs '$worker'"; fi
-  purge_snapshots || true
-  (cd "$stage/src" && scripts/e2e/stack.sh down "$worker") || true
+  # A purge or stack-down failure must not read as a clean run: raw snapshots may survive, so the status says so.
+  local final=0; teardown "$rc" || final=$?
   git -C "$root" worktree remove --force "$stage/src" || true; rm -rf "$stage"
+  exit "$final"
 }
+stack_down() { (cd "$stage/src" && scripts/e2e/stack.sh down "$worker"); }
 trap down EXIT
 reductions="$stage/reductions.jsonl"; : > "$reductions"
 mkdir "$stage/src/scripts/e2e/diagnose"

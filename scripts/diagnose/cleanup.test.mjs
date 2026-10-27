@@ -113,3 +113,29 @@ test('heap snapshot files are deleted at teardown and a survivor fails the purge
     assert.notEqual(blind.status, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// The REAL down() from run.sh, extracted, with only its collaborators stubbed.
+const runShDown = () => {
+  const src = readFileSync(fileURLToPath(new URL('./run.sh', import.meta.url)), 'utf8');
+  return src.slice(src.indexOf('down() {'), src.indexOf('\n}\n', src.indexOf('down() {')) + 3);
+};
+const trapRun = (purge, stackDown, body) => {
+  const dir = mkdtempSync(join(tmpdir(), 'diag-trap-'));
+  try {
+    const stubs = `preserve_samples() { :; }; keep_logs_private() { :; }; purge_snapshots() { ${purge}; }; stack_down() { ${stackDown}; }; stage='${dir}/stage'; root='${dir}'; worker=w; DIAG_OUT='${dir}/o'; mkdir -p "$stage"; ${runShDown()}\ntrap down EXIT; ${body}`;
+    return sh(stubs, dir);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+};
+test('run.sh EXIT trap: a clean run with clean teardown exits 0', () => {
+  assert.equal(trapRun('return 0', 'return 0', 'true').status, 0);
+});
+test('run.sh EXIT trap: a purge failure fails an otherwise successful run', () => {
+  assert.notEqual(trapRun('return 1', 'return 0', 'true').status, 0);
+});
+test('run.sh EXIT trap: purge and stack-down both failing still fails, and the stack-down is attempted', () => {
+  const r = trapRun('return 1', 'echo STACKDOWN-RAN >&2; return 1', 'true');
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /STACKDOWN-RAN/);
+});
+test('run.sh EXIT trap: a failed run keeps its own status', () => {
+  assert.equal(trapRun('return 1', 'return 1', '(exit 3)').status, 3);
+});

@@ -60,3 +60,16 @@ purge_snapshots() {
   if [ -n "$left" ]; then echo "heap snapshot files survived the purge" >&2; return 1; fi
   return 0
 }
+
+# teardown <run-status>: purge snapshots, then bring the stack down (stack_down is defined by the caller). Both always run;
+# either failing makes a successful run fail (70), and a failed run keeps its own status.
+teardown() {
+  local rc=$1 bad=0
+  purge_snapshots || bad=1
+  stack_down || bad=1
+  if [ "$bad" != 0 ]; then
+    echo "cleanup incomplete: heap snapshots or the stack may remain" >&2
+    [ "$rc" != 0 ] || rc=70
+  fi
+  return "$rc"
+}
