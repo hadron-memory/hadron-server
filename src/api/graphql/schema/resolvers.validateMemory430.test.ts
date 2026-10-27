@@ -80,7 +80,8 @@ describe('validateMemory — Git-mirror obligations (#430)', () => {
     const mine = await createDbNode(db, { loc: 'a', memoryId: mem.id, name: 'A', content: 'x' });
     const theirs = await createDbNode(db, { loc: 'b', memoryId: other.id, name: 'B', content: 'x' });
     await obligation(mem.id, mine.id);
-    await obligation(other.id, theirs.id);
+    // A REMOVE row needs no live node to surface, so only the memory scope can keep it out of this report.
+    await obligation(other.id, theirs.id, { kind: 'REMOVE', removeLoc: 'theirs:path' });
     expect(mirrorFindings(await validate(mem.id)).map((f: any) => f.nodeId)).toEqual([mine.id]);
     const absent = generateId();
     const missing = await validate(absent).then(() => null, (e: any) => e);
