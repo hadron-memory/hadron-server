@@ -12,6 +12,8 @@ import { recordLlmUsage } from '../lib/metering/index.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import { assertObjectType, buildASTSchema, parse } from 'graphql';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => { await cleanDb(db); });
@@ -171,10 +173,16 @@ describe('review fixes (#2492)', () => {
 describe('per-run cost', () => {
   it('documents every plain failure kind, including POLICY_DENIED (#2506)', () => {
     const fields = assertObjectType(buildASTSchema(parse(typeDefs)).getType('AppRunFailureReason')).getFields();
-    expect(fields.kind.description?.match(/[A-Z][A-Z_]+/g)?.sort()).toEqual([
-      'NOT_ADOPTED', 'MEMORY_UNREADABLE', 'CHANGED', 'OVER_BUDGET', 'POLICY_DENIED',
-      'NO_AI_CONFIG', 'TIMED_OUT', 'CANCELLED', 'OTHER',
-    ].sort());
+    const source = ts.createSourceFile('plainReason.ts',
+      readFileSync(new URL('../lib/automation/plainReason.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+    const declaration = source.statements.filter(ts.isTypeAliasDeclaration)
+      .find((statement) => statement.name.text === 'PlainRunFailureKind');
+    if (!declaration || !ts.isUnionTypeNode(declaration.type)) throw new Error('PlainRunFailureKind must be a literal union');
+    const kinds = declaration.type.types.map((member) => {
+      if (!ts.isLiteralTypeNode(member) || !ts.isStringLiteral(member.literal)) throw new Error('Expected a failure-kind string literal');
+      return member.literal.text;
+    });
+    expect(fields.kind.description?.match(/[A-Z][A-Z_]+/g)?.sort()).toEqual(kinds.sort());
   });
 
   it('rolls back an inserted usage event and updated counter on a mid-transaction fault (#2506)', async () => {
