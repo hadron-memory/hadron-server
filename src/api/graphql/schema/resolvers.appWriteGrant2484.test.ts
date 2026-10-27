@@ -449,6 +449,29 @@ describe('an authority change serializes with a granted write (§10, both orderi
   });
 });
 
+describe('a memory soft-deleted while a granted write waits on its row (§10 delta P3, A11)', () => {
+  it('refuses the write and writes nothing: only the grant arm\'s own deletedAt predicate sees it', async () => {
+    const f = await fixture();
+    await grant(f, f.dest);
+    let release!: () => void, locked!: () => void;
+    const hold = new Promise<void>(r => { release = r; });
+    const gotLock = new Promise<void>(r => { locked = r; });
+    // the soft-delete holds the memory row, uncommitted, so the door's earlier reads still see a live memory
+    const deleter = db.$transaction(async tx => {
+      await tx.memory.update({ where: { id: f.dest.id }, data: { deletedAt: new Date() } });
+      locked();
+      await hold;
+    }, { timeout: 20000 });
+    await gotLock;
+    const writing = create(f.runCtx(), f.dest, `${PREFIX}:x`).then(() => 'wrote', (e: unknown) => e);
+    await new Promise(r => setTimeout(r, 500));
+    release();
+    await deleter;
+    expect(await writing).not.toBe('wrote');
+    expect(await nodes(f.dest.id)).toBe(0);
+  });
+});
+
 describe('the grant is bound to its memory, its grantor and its audience (mutant gaps)', () => {
   const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
   it('a grant on one memory covers no other memory of the same org under the same prefix', async () => {
