@@ -11,7 +11,7 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 /** Script the claim outcome, recording argv before any simulated side effect. */
-function stage(codes: number[], whoamiExit = 0) {
+function stage(codes: number[], whoamiExit = 0, launchGrant?: string) {
   const root = mkdtempSync(join(tmpdir(), 'bruno-recovery2360-'));
   roots.push(root);
   const bin = join(root, 'bin'); mkdirSync(bin);
@@ -19,9 +19,11 @@ function stage(codes: number[], whoamiExit = 0) {
   const cwd = join(root, 'cwd'); mkdirSync(cwd);
   const emptyBin = join(root, 'empty-bin'); mkdirSync(emptyBin);
   const calls = join(root, 'calls'); writeFileSync(calls, '');
+  const grantStates = join(root, 'grant-states'); writeFileSync(grantStates, '');
   const remaining = join(root, 'codes'); writeFileSync(remaining, codes.join('\n') + '\n');
   writeFileSync(join(bin, 'hadron'), `#!/bin/bash
 printf '%s\\n' "$*" >> '${calls}'
+if [ -v HADRON_LAUNCH_GRANT ]; then echo present; else echo unset; fi >> '${grantStates}'
 if [ "$*" = 'team session whoami --check' ]; then echo 'whoami evidence'; exit ${whoamiExit}; fi
 if [ "$1 $2 $3" != 'team session start' ]; then exit 99; fi
 code=$(head -1 '${remaining}')
@@ -32,12 +34,14 @@ case "$code" in
   2) echo 'CHOOSE: candidate-a candidate-b';;
   4) echo 'NOTHING_TO_RESUME: claims expired';;
   5) echo 'RESUME_REFUSED';;
+  8) echo 'LAUNCH_GRANT_INVALID';;
   *) echo 'transport failure';;
 esac
 exit "$code"
 `);
   chmodSync(join(bin, 'hadron'), 0o755);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home };
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home,
+    ...(launchGrant === undefined ? {} : { HADRON_LAUNCH_GRANT: launchGrant }) };
   const run = (command: string, args: string[], path = env.PATH) => spawnSync(command, args, {
     encoding: 'utf8', input: '', timeout: 5000, cwd, env: { ...env, PATH: path },
   });
@@ -47,11 +51,40 @@ exit "$code"
     runDirect: (...args: string[]) => run(hook, ['--resume-unbound', ...args]),
     runWithoutCli: () => run('/bin/bash', [hook, '--resume-unbound', '--tool', 'codex'], emptyBin),
     home, cwd, env,
+    grantStates: () => readFileSync(grantStates, 'utf8').trim().split('\n').filter(Boolean),
     calls: () => readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean),
   };
 }
 
 describe('unbound shed recovery (#2360)', () => {
+  it.each(['run', 'runErrexit', 'runDirect'] as const)('#2482 removes launch-grant state from %s resume without changing the selector', (mode) => {
+    const s = stage([0], 0, 'synthetic-grant-not-a-credential');
+    const r = s[mode]('--tool', 'codex', '--session', 'human-picked');
+    expect(r.status, r.stderr).toBe(0);
+    expect(s.calls()).toEqual(['team session start --tool codex --session human-picked']);
+    expect(s.grantStates()).toEqual(['unset']);
+    expect(s.env.HADRON_LAUNCH_GRANT).toBe('synthetic-grant-not-a-credential');
+    expect(r.stdout + r.stderr).not.toContain('synthetic-grant-not-a-credential');
+    expect(readdirSync(s.home)).toEqual([]);
+    expect(readdirSync(s.cwd)).toEqual([]);
+  });
+
+  it.each(['run', 'runErrexit', 'runDirect'] as const)('#2482 launch-grant refusal8 is terminal under %s, without retry or alternate bind', (mode) => {
+    const s = stage([8, 0]);
+    const r = s[mode]('--tool', 'codex');
+    expect(r.status, r.stderr).toBe(8);
+    expect(r.stderr).toMatch(/STOP:.*8.*terminal.*launch.grant/i);
+    expect(r.stderr).toMatch(/ask the human/i);
+    expect(r.stderr).toMatch(/not.*retry/i);
+    expect(r.stderr).toMatch(/--as/);
+    expect(r.stderr).toMatch(/--force/);
+    expect(r.stderr).toMatch(/mint/i);
+    expect(r.stderr).not.toMatch(/transport\/server failure/);
+    expect(s.calls()).toEqual(['team session start --tool codex']);
+    expect(readdirSync(s.home)).toEqual([]);
+    expect(readdirSync(s.cwd)).toEqual([]);
+  });
+
   it('CHOOSE then expired claims stops at ask-human with zero --as invocations', () => {
     const s = stage([2, 4]);
     const choose = s.run('--tool', 'codex');
