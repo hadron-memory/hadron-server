@@ -12,10 +12,15 @@ const row = (workerId: string, reportsTo: Row['reportsTo'], family: string | nul
 });
 
 describe('#2489 groupComposition ordering', () => {
-  it.each([false, true])('breaks lowercase-name ties by URN, with unassigned last (reverse insertion: %s)', (reverse) => {
+  it.each([
+    { reverse: false, aName: 'alpha', zName: 'Alpha' },
+    { reverse: true, aName: 'alpha', zName: 'Alpha' },
+    { reverse: false, aName: 'Alpha', zName: 'alpha' },
+    { reverse: true, aName: 'Alpha', zName: 'alpha' },
+  ])('breaks lowercase-name ties by URN ($aName / $zName; reverse: $reverse)', ({ reverse, aName, zName }) => {
     // Pure input intentionally allows a name tie that the database would reject.
-    const a = coordinator('a-coordinator', 'alpha');
-    const z = coordinator('z-coordinator', 'Alpha');
+    const a = coordinator('a-coordinator', aName);
+    const z = coordinator('z-coordinator', zName);
     const aRows = [row('a-second', a), row('a-first', a)];
     const zRows = [row('z-second', z), row('z-first', z)];
     const input = [row('unassigned', null), ...(reverse ? [...zRows, ...aRows] : [...aRows, ...zRows])];
@@ -39,10 +44,10 @@ describe('#2489 groupComposition ordering', () => {
   });
 
   it.each([
-    [null, 'codex', 'claude', 'codex'],
-    ['codex', 'claude', null, 'codex'],
-    ['claude', null, 'codex', 'codex'],
-  ])('orders same-role family counts independently of insertion order (%j)', (...families) => {
+    { families: [null, 'codex', 'claude', 'codex'] },
+    { families: ['codex', 'claude', null, 'codex'] },
+    { families: ['claude', null, 'codex', 'codex'] },
+  ])('orders same-role family counts independently of insertion order ($families)', ({ families }) => {
     const lanes = groupComposition(families.map((family, i) => row(`worker-${i}`, null, family)));
     expect(lanes).toHaveLength(1);
     expect(lanes[0].countsByRoleFamily).toEqual([
