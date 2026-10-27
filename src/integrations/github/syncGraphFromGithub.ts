@@ -40,7 +40,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
-import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMemoriesForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
@@ -539,9 +539,7 @@ const syncGraphFromGithubAsSystem = async (
       // Hold every endpoint memory key in one stable order for the ENTIRE
       // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
       // preserves the cleanup-vs-resurrection serialization added earlier.
-      for (const memoryId of edgeEndpointMemoryIds) {
-        await lockMemoryForChannelChange(tx, memoryId);
-      }
+      await lockMemoriesForChannelChange(tx, edgeEndpointMemoryIds);
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
       // synced loc (deduped, in resolved-key order) up front so a concurrent non-recursive
