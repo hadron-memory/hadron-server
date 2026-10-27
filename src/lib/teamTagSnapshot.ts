@@ -13,10 +13,20 @@ export function reservedTeamPrefix(name: string, enabled = teamTagsEnabled()): b
 export function teamHeadInvalid(): GraphQLError {
   return new GraphQLError('Team broadcast target is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_HEAD_INVALID' } });
 }
+/** The one head predicate: a live worker with a live report. Stamping and the read filter both use it. */
+export function liveTeamHeadIds(workers: readonly TeamWorker[]): Set<string> {
+  const live = workers.filter(w => !w.retiredAt);
+  const liveIds = new Set(live.map(w => w.id));
+  return new Set(live.filter(w => w.reportsToWorkerId && liveIds.has(w.reportsToWorkerId)).map(w => w.reportsToWorkerId!));
+}
+/** Read side: stamps are post-time facts, so a worker that has ever had a report (retired or not) still names a head. */
+export function isReadableTeamHead(workers: readonly TeamWorker[], id: string): boolean {
+  return liveTeamHeadIds(workers).has(id) || workers.some(w => w.reportsToWorkerId === id);
+}
 export function buildTeamSnapshot(workers: readonly TeamWorker[], authorWorkerId: string | null, mentions: readonly string[]): TeamSnapshot {
   const live = workers.filter(w => !w.retiredAt);
   const byId = new Map(live.map(w => [w.id, w]));
-  const heads = new Set(live.filter(w => w.reportsToWorkerId && byId.has(w.reportsToWorkerId)).map(w => w.reportsToWorkerId!));
+  const heads = liveTeamHeadIds(workers);
   const nearest = (id: string | null): string | null => {
     const w = id ? byId.get(id) : null;
     if (!w) return null;

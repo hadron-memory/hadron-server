@@ -342,6 +342,85 @@ describe('S3 filter audience and transport boundaries', () => {
     await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, untagged: true, limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'BAD_USER_INPUT'}});
     await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: 'foreign-or-missing', limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
   });
+  it('refuses a non-head worker as teamHeadRef byte-identically; head, retired head and ex-head still read (#2592)', async () => {
+    vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+    const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+    const read = (ref: string) => Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: ref, limit: 0}, ctx(holderA.id));
+    const refusal = async (ref: string) => { try { await read(ref); } catch (e: any) { return {message: e.message, extensions: e.extensions}; } return null; };
+    const missing = await refusal('no-such-worker');
+    expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+    // Leaf in the App: no reports, never stamped.
+    expect(await refusal(liam.id)).toEqual(missing);
+    // Foreign-App worker id.
+    const fid = generateId();
+    const foreignAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Foreign', urn: `${org.urn}:foreign-agent-${fid}`, visibility: 'ORGANIZATION' } });
+    const foreignApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Foreign', urn: `${org.urn}:foreign-${fid}` } });
+    const foreign = await db.worker.create({data: {...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: foreignApp.id, agentId: foreignAgent.id, name: 'Foreign', slug: 'foreign', heldByUserId: holderA.id, heldAt: new Date()}, select: {id: true}});
+    expect(await refusal(foreign.id)).toEqual(missing);
+    // A head reads.
+    await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: rook.id, actor: {userId: manager.id, workerId: null, agentId: null}, setBy: 'app-manager'}));
+    expect(await read(rook.id)).toMatchObject({items: [], total: 0});
+    // A retired head whose report is still attached keeps working.
+    await db.worker.update({where: {id: rook.id}, data: {retiredAt: new Date()}});
+    expect(await read(rook.id)).toMatchObject({items: [], total: 0});
+    await db.worker.update({where: {id: rook.id}, data: {retiredAt: null}});
+    // Mutual exclusivity and the metadata-forbidden refusal keep their order ahead of the head check.
+    await expect(Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: liam.id, untagged: true, limit: 0}, ctx(holderA.id))).rejects.toMatchObject({extensions: {code: 'BAD_USER_INPUT'}});
+  });
+  describe('teamHeadRef scope and history (#2592 review pins)', () => {
+    const readAs = (ref: string, who = holderA) => Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: ref, limit: 0}, ctx(who.id));
+    const refusalOf = async (run: () => Promise<unknown>) => { try { await run(); } catch (e: any) { return {message: e.message, extensions: e.extensions}; } return null; };
+    async function stampThenDissolve() {
+      vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+      const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+      const actor = {userId: manager.id, workerId: null, agentId: null};
+      await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: rook.id, actor, setBy: 'app-manager'}));
+      const post = await humanSays(holderA.id, '@team.rook.all');
+      expect(post.teamTags).toEqual([{headId: rook.id, label: '@team.rook'}]);
+      // Reparenting keeps no history: rook now has no reports and is live, a head only by its stamp.
+      await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: null, actor, setBy: 'app-manager'}));
+      return post;
+    }
+    it('refuses another App\'s HEAD byte-identically (the App scope on the worker lookup)', async () => {
+      const fid = generateId();
+      const fAgent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Foreign', urn: `${org.urn}:foreign-agent-${fid}`, visibility: 'ORGANIZATION' } });
+      const fApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Foreign', urn: `${org.urn}:foreign-${fid}` } });
+      const mk = (slug: string) => db.worker.create({data: {...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: fApp.id, agentId: fAgent.id, name: slug, slug, heldByUserId: holderA.id, heldAt: new Date()}, select: {id: true}});
+      const fHead = await mk('fhead');
+      const fLeaf = await mk('fleaf');
+      await db.worker.update({where: {id: fLeaf.id}, data: {reportsToWorkerId: fHead.id}});
+      const missing = await refusalOf(() => readAs('no-such-worker'));
+      expect(missing).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+      expect(await refusalOf(() => readAs(fHead.id))).toEqual(missing);
+    });
+    it('a stamped former head still reads, and a leaf stays refused', async () => {
+      const post = await stampThenDissolve();
+      expect(await readAs(rook.id)).toMatchObject({items: [], total: 1});
+      expect(await refusalOf(() => readAs(liam.id))).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+      expect(post.seq).toBeGreaterThan(0);
+    });
+    it('the stamp scan is scoped to the read Channel', async () => {
+      await stampThenDissolve();
+      const made = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:other', name: 'other', createdBy: manager.id });
+      const missing = await refusalOf(() => readAs('no-such-worker'));
+      expect(await refusalOf(() => Q.channelMessages({}, {channelRef: made.channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id)))).toEqual(missing);
+      expect((await Q.channelMessages({}, {channelRef: channel.id, teamHeadRef: rook.id, limit: 0}, ctx(manager.id))).total).toBe(1);
+    });
+    it('a stamped former head reads from an encrypted Channel, where the stamp is sealed', async () => {
+      await stampThenDissolve();
+      const key = generateDataKey();
+      sessionKeyCache.set('mr-2020', memory.id, key);
+      await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
+      for (const m of await db.node.findMany({ where: { memoryId: memory.id, nodeType: 'chat-message' } })) {
+        const enc = encryptNodeFieldsWithKey({ content: m.content ?? null, data: (m.data ?? null) as unknown }, key);
+        await db.node.update({ where: { id: m.id }, data: { content: enc.content ?? null, data: enc.data as never } });
+      }
+      try {
+        expect(await readAs(rook.id)).toMatchObject({total: 1});
+        expect(await refusalOf(() => readAs(liam.id))).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
+      } finally { sessionKeyCache.evict('mr-2020'); }
+    });
+  });
   it('masks metadata and denies all tag/count probes on an authorized App-less Channel', async () => {
     vi.stubEnv('TEAM_TAGS_ENABLED','true');
     const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');

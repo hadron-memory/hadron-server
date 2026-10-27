@@ -1,4 +1,4 @@
-import { buildTeamSnapshot, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
+import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { requireWorkerReadAccess } from './resolvers.worker.js';
 // Team-chat operations — #939: createTeamChatMessage + teamChatMessages as
@@ -1287,6 +1287,17 @@ async function canReadTeamMetadata(ctx: Context, appId: string | null): Promise<
   try { await requireWorkerReadAccess(ctx, app); return true; } catch { return false; }
 }
 
+async function channelHoldsHeadStamp(ctx: Context, root: ChatRootRow, headId: string): Promise<boolean> {
+  const where: Prisma.NodeWhereInput = { memoryId: root.memoryId, loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) }, nodeType: 'chat-message', deletedAt: null };
+  const enc = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  if (!enc.isEncrypted) {
+    return !!(await ctx.db.node.findFirst({ where: { ...where, data: { path: ['teamHeadIds'], array_contains: [headId] } }, select: { id: true } }));
+  }
+  const urn = await hostMemoryUrn(ctx, root.memoryId);
+  const rows = await ctx.db.node.findMany({ where, select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true } });
+  return rows.some((r) => projectMessage(r, enc, urn, true).teamTags?.some(t => t.headId === headId));
+}
+
 async function readChannelRoot(
   ctx: Context,
   // #1196: null when the host memory belongs to no App. Used ONLY to resolve a
@@ -1306,9 +1317,12 @@ async function readChannelRoot(
   let selectedHead: string | null = null;
   if (teamHeadRef != null) {
     // The wire accepts stable IDs only, including authorized retired identities.
-    const head = await ctx.db.worker.findFirst({ where: { id: teamHeadRef, appId: appId! }, select: { id: true } });
-    if (!head) throw teamHeadInvalid();
-    selectedHead = head.id;
+    // A leaf or unknown id refuses the same way (byte-identical, App-scoped), through the write path's head predicate.
+    const workers = await ctx.db.worker.findMany({ where: { appId: appId! }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } });
+    // Reparenting keeps no history, so a head whose reports are gone is still one when this Channel holds a message stamped with it.
+    if (!workers.some(w => w.id === teamHeadRef)
+      || !(isReadableTeamHead(workers, teamHeadRef) || await channelHoldsHeadStamp(ctx, root, teamHeadRef))) throw teamHeadInvalid();
+    selectedHead = teamHeadRef;
   }
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
