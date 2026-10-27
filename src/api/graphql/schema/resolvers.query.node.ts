@@ -1,3 +1,4 @@
+import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
@@ -1013,8 +1014,7 @@ export const nodeQueries = {
       const f = filter ?? {};
 
       // ── (spec 049 scope handling lives in the wrapper at the end of core) ──
-      const finalLimit = limit ?? 20;
-      const off = offset ?? 0;
+      const { limit: finalLimit, offset: off } = normalizeFindNodesPaging(limit, offset);
       // #497 — optional absolute relevance floor. Applied to the ranked scores
       // before paging (a NaN guard so a bad arg is simply ignored, never throws).
       // Scores are NOT commensurable across modes, so the meaningful floor scale
