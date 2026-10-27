@@ -16,7 +16,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
 import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
-import { assertRootAllocationAllowed, lockRootSiblings, reserveRootSeqLock } from '../../../lib/nodeSeq.js';
+import { markNodeWrittenInTx, assertRootAllocationAllowed, lockRootSiblings, reserveRootSeqLock } from '../../../lib/nodeSeq.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -255,6 +255,29 @@ describe('reserve seam and the one-use handoff #443', () => {
       await reserveRootSeqLock(tx, memoryId);
       await expect(assertRootAllocationAllowed(tx, memoryId)).resolves.toBeUndefined();   // a reservation is a handoff
     });
+  });
+
+  it('a node write earlier in a SHARED transaction (tuple/lock pre-K) makes a later automatic root allocation refused', async () => {
+    await expect(db.$transaction(async (tx) => {
+      await markNodeWrittenInTx(tx);
+      await lockRootSiblings(tx, memoryId);
+    })).rejects.toThrow(/after another node write/i);
+    await expect(db.$transaction(async (tx) => {
+      await markNodeWrittenInTx(tx);
+      await reserveRootSeqLock(tx, memoryId);
+    })).rejects.toThrow(/after another node write/i);
+    await expect(db.$transaction(async (tx) => {
+      await markNodeWrittenInTx(tx);
+      await assertRootAllocationAllowed(tx, memoryId);
+    })).rejects.toThrow(/after another node write/i);
+    // Real seam, shared transaction: a nested decision-style create then a root create through the GraphQL write core.
+    const { writeNodeCore } = await import('./resolvers.mutation.node.js');
+    await expect(db.$transaction(async (tx) => {
+      const opts = { transaction: { tx, pooledDb: db, afterCommit: () => {} } } as never;
+      const c = { ...ctx(), db: tx } as Context;
+      await writeNodeCore({ memoryId, loc: 'n1:child', name: 'n1:child' } as never, c, 'create', opts);
+      await writeNodeCore({ memoryId, loc: 'rootafter', name: 'rootafter' } as never, c, 'create', opts);
+    })).rejects.toThrow(/after another node write/i);
   });
 
   it('a reservation for another memory is not a handoff for this one', async () => {

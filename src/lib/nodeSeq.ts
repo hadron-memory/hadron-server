@@ -98,6 +98,24 @@ export class RootSeqAllocationError extends Error {
   }
 }
 
+const WROTE_SETTING = 'hadron.node_written_in_tx';
+const AFTER_WRITE = 'A root sibling allocation after another node write in one transaction is not supported';
+
+/**
+ * Record that a node write already ran in a transaction a CALLER shares with the write core (`opts.transaction`). Such a
+ * write may have brought a worker-reference fence tuple, a row lock or a revision write in BEFORE K; the placement rule
+ * forbids that, so a later automatic root allocation in the same transaction is refused. (A transaction the seam opens for
+ * itself writes one node, so it never needs the mark.)
+ */
+export async function markNodeWrittenInTx(tx: Prisma.TransactionClient): Promise<void> {
+  await tx.$executeRaw`SELECT set_config(${WROTE_SETTING}, '1', true)`;
+}
+
+async function assertNoPriorNodeWrite(tx: Prisma.TransactionClient): Promise<void> {
+  const rows = await tx.$queryRaw<Array<{ v: string }>>`SELECT coalesce(current_setting(${WROTE_SETTING}, true), '') AS v`;
+  if ((rows[0]?.v ?? '') !== '') throw new RootSeqAllocationError(AFTER_WRITE);
+}
+
 const SECOND = 'A second root sibling allocation in one transaction is not supported';
 
 async function readState(tx: Prisma.TransactionClient): Promise<string> {
@@ -124,6 +142,7 @@ async function swapState(tx: Prisma.TransactionClient, memoryId: string, reserve
 export async function assertRootAllocationAllowed(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
   const v = await readState(tx);
   if (v !== '' && v !== `${memoryId}|1`) throw new RootSeqAllocationError(SECOND);
+  if (v === '') await assertNoPriorNodeWrite(tx);
 }
 
 /**
@@ -136,6 +155,7 @@ export async function lockRootSiblings(tx: Prisma.TransactionClient, memoryId: s
   const prev = await swapState(tx, memoryId, false);
   if (prev === `${memoryId}|1`) return;
   if (prev !== '') throw new RootSeqAllocationError(SECOND);
+  await assertNoPriorNodeWrite(tx);
   await takeRootSeqKey(tx, memoryId);
 }
 
@@ -147,5 +167,6 @@ export async function lockRootSiblings(tx: Prisma.TransactionClient, memoryId: s
 export async function reserveRootSeqLock(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
   const prev = await swapState(tx, memoryId, true);
   if (prev !== '') throw new RootSeqAllocationError(SECOND);
+  await assertNoPriorNodeWrite(tx);
   await takeRootSeqKey(tx, memoryId);
 }

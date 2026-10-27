@@ -118,7 +118,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { assertRootAllocationAllowed, lockRootSiblings, markNodeWrittenInTx, nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
@@ -1407,6 +1407,7 @@ async function writeNodeCoreRaw(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
+            if (opts?.transaction) await markNodeWrittenInTx(tx);   // #443: a shared transaction's later root allocation is refused
             return { conflict: false, node: await finalizeNodeWrite(tx, updated, currentForDiff.content ?? null) };
           });
           if (result.conflict) {
@@ -1706,6 +1707,7 @@ async function writeNodeCoreRaw(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
+            if (opts?.transaction) await markNodeWrittenInTx(tx);   // #443: see the update arm
             return finalizeNodeWrite(tx, upserted, storedForIncludes);
           });
         }
