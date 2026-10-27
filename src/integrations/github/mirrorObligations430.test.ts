@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { db } from '../db/client.js';
@@ -274,5 +274,13 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     await expect(insert({ kind: 'REMOVE', removeLoc: '' })).rejects.toThrow();
     await expect(insert({ kind: 'WRITE', removeLoc: 'old' })).rejects.toThrow();
     await expect(insert({ state: 'NOT_CLONED', errorClass: 'PUSH_FAILED' })).rejects.toThrow();
+  });
+
+  it('(k) the migration carries a byte-identical copy of the invariants file', () => {
+    const sql = readFileSync(new URL('../../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8');
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_obligations'));
+    expect(dir).toBeDefined();
+    const migration = readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8');
+    expect(migration.endsWith(sql)).toBe(true);
   });
 });
