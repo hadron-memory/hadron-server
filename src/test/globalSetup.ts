@@ -142,6 +142,8 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
   // #2441 — append-only automation adoption events.
   await client.query(readFileSync(new URL('../../prisma/automation-adoption-invariants.sql', import.meta.url), 'utf8'));
+  // #2484 — App memory write grants (shape, one live row, terminal revoke) and append-only events.
+  await client.query(readFileSync(new URL('../../prisma/app-memory-write-grant-invariants.sql', import.meta.url), 'utf8'));
   // #1705 — agent task shape + append-only team events.
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
   // #1706 — stall alarm episodes, alarm wakes, availability, stall windows.
