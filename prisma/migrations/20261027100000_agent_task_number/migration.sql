@@ -38,8 +38,7 @@ INSERT INTO agent_tasks (id, app_id, title, status, owner_user_id, owner_worker_
     LEFT JOIN LATERAL (
       SELECT t.owner_user_id, t.owner_worker_id FROM agent_tasks t WHERE t.app_id = a.id ORDER BY t.created_at, t.id LIMIT 1
     ) first_task ON true
-   WHERE a.deleted_at IS NULL
-     AND COALESCE(u_own.id, u_cr.id, first_task.owner_user_id, first_task.owner_worker_id) IS NOT NULL
+   WHERE COALESCE(u_own.id, u_cr.id, first_task.owner_user_id, first_task.owner_worker_id) IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM agent_tasks z WHERE z.app_id = a.id AND z.handle = 'AT0');
 
 -- Projects count from 1: the project counter starts at 0 for every App that has an AT0.
@@ -91,6 +90,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_task_counters_project_uniq
 CREATE OR REPLACE FUNCTION agent_tasks_assign_number() RETURNS trigger AS $$
 DECLARE
   parent_handle text;
+  expected text;
 BEGIN
   IF NEW.task_number IS NULL THEN
     IF NEW.parent_task_id IS NULL THEN
@@ -106,14 +106,31 @@ BEGIN
         DO UPDATE SET last_number = agent_task_counters.last_number + 1
         RETURNING last_number INTO NEW.task_number;
     END IF;
+  ELSE
+    -- An explicit number is spent too: the counter moves up to it, so the next allocation never repeats it.
+    IF NEW.parent_task_id IS NULL THEN
+      INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
+        VALUES (replace(gen_random_uuid()::text, '-', ''), NEW.app_id, NULL, NEW.task_number)
+        ON CONFLICT (app_id) WHERE parent_task_id IS NULL
+        DO UPDATE SET last_number = GREATEST(agent_task_counters.last_number, EXCLUDED.last_number);
+    ELSE
+      INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
+        VALUES (replace(gen_random_uuid()::text, '-', ''), NEW.app_id, NEW.parent_task_id, NEW.task_number)
+        ON CONFLICT (app_id, parent_task_id)
+        DO UPDATE SET last_number = GREATEST(agent_task_counters.last_number, EXCLUDED.last_number);
+    END IF;
+  END IF;
+  IF NEW.parent_task_id IS NULL THEN
+    expected := 'AT' || NEW.task_number;
+  ELSE
+    SELECT handle INTO parent_handle FROM agent_tasks WHERE id = NEW.parent_task_id;
+    expected := parent_handle || '.' || NEW.task_number;
   END IF;
   IF NEW.handle IS NULL THEN
-    IF NEW.parent_task_id IS NULL THEN
-      NEW.handle := 'AT' || NEW.task_number;
-    ELSE
-      SELECT handle INTO parent_handle FROM agent_tasks WHERE id = NEW.parent_task_id;
-      NEW.handle := parent_handle || '.' || NEW.task_number;
-    END IF;
+    NEW.handle := expected;
+  ELSIF expected IS NOT NULL AND NEW.handle <> expected THEN
+    -- An explicit handle is the dotted path of its real parent, never another tree's.
+    RAISE EXCEPTION 'agent_tasks.handle % does not match its parent and number (%)', NEW.handle, expected USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
 END;

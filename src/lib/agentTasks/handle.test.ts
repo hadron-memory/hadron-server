@@ -22,6 +22,13 @@ describe('parseTaskHandle (#2553)', () => {
     expect(parseTaskHandle(deep(MAX_HANDLE_DEPTH + 1))).toBeNull();
   });
 
+  it('a handle is a URN leaf of at most 64 characters (cor:urn:010:01): 64 parses, 65 and the 321-character maximum do not', () => {
+    const at = (len: number) => `AT${'1'.repeat(len - 3 * 20 - 2)}${'.1234567890123456789'.repeat(3)}`;
+    expect(parseTaskHandle(at(64))).not.toBeNull();
+    expect(parseTaskHandle(at(65))).toBeNull();
+    expect(parseTaskHandle(`AT${Array(16).fill('9223372036854775807').join('.')}`)).toBeNull();
+  });
+
   it('bounds each segment to a bigint the column holds', () => {
     expect(parseTaskHandle('AT9223372036854775807')).not.toBeNull();
     expect(parseTaskHandle('AT9223372036854775808')).toBeNull();

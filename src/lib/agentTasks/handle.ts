@@ -15,6 +15,8 @@
 const MAX_TASK_NUMBER = 9223372036854775807n;
 /** Deepest handle: a project plus this many nested levels. Bounds the walk and the stored text (16 segments of at most 19 digits). */
 export const MAX_HANDLE_DEPTH = 16;
+/** cor:urn:010:01: a handle is a URN leaf, so it is at most 64 characters like any atom. Longer is not a handle. */
+export const MAX_HANDLE_LENGTH = 64;
 const PROJECT = '(?:0|[1-9][0-9]{0,18})';
 const SEGMENT = '[1-9][0-9]{0,18}';
 const PATH = `AT${PROJECT}(?:\\.${SEGMENT})*`;
@@ -35,6 +37,7 @@ export function parseTaskHandle(ref: unknown): TaskHandle | null {
   const m = bare ?? QUALIFIED.exec(ref);
   if (!m) return null;
   const path = (bare ? m[1]! : m[2]!).toUpperCase();
+  if (path.length > MAX_HANDLE_LENGTH) return null;
   const segments = path.slice(2).split('.');
   if (segments.length > MAX_HANDLE_DEPTH) return null;
   if (segments.some((s) => BigInt(s) > MAX_TASK_NUMBER)) return null;

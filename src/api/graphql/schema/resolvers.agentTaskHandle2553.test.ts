@@ -92,7 +92,7 @@ describe('numbering', () => {
     const d1: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT1.1', title: 'd1' } }, as(bob));
     const other: any = await M.createAgentTask({}, { input: { parentTaskId: 'AT2', title: 'o1' } }, as(bob));
     expect([c1, c2, d1, other].map(handleOf)).toEqual(['AT1.1', 'AT1.2', 'AT1.1.1', 'AT2.1']);
-    expect(await T.taskNumber!(d1, {}, as(alice))).toBe(1);
+    expect(await T.taskNumber!(d1, {}, as(alice))).toBe('1');
     expect(d1.parentTaskId).toBe(c1.id);
     expect(await refusal(project(appX, 'x', alice, { parentTaskId: p1.id }))).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(handleOf(await project(appY, 'Y epic'))).toBe('AT1');
@@ -150,6 +150,25 @@ describe('numbering', () => {
     for (const block of update) expect(block).not.toMatch(/parentTaskId/);
     const ops = Object.keys(M).filter((n) => /agenttask/i.test(n));
     expect(ops.filter((n) => /(move|reparent|update|edit)/i.test(n))).toEqual([]);
+  });
+
+  it('an explicit number spends its counter: the next allocation never repeats it; an explicit handle must match its parent', async () => {
+    await mk(appX, 'a'); // AT0 exists
+    await db.agentTask.create({ data: { appId: appX.id, title: 'explicit', ownerUserId: alice.id, taskNumber: 7n, handle: 'AT7' } });
+    const next = await db.agentTask.create({ data: { appId: appX.id, title: 'auto', ownerUserId: alice.id } });
+    expect(next.handle).toBe('AT8');
+    const p1 = await db.agentTask.findUniqueOrThrow({ where: { appId_handle: { appId: appX.id, handle: 'AT7' } } });
+    const p2 = next;
+    const wrong = { appId: appX.id, title: 'wrong tree', ownerUserId: alice.id, parentTaskId: p1.id, taskNumber: 1n };
+    await expect(db.agentTask.create({ data: { ...wrong, handle: 'AT8.1' } })).rejects.toThrow(/does not match its parent/);
+    await expect(db.agentTask.create({ data: { ...wrong, handle: 'AT7.1' } })).resolves.toMatchObject({ handle: 'AT7.1' });
+    const child = await db.agentTask.create({ data: { appId: appX.id, title: 'auto child', ownerUserId: alice.id, parentTaskId: p2.id } });
+    expect(child.handle).toBe('AT8.1');
+  });
+
+  it('the number is exposed as a string, so a bigint past 2^31 survives GraphQL', async () => {
+    const t = await db.agentTask.create({ data: { appId: appX.id, title: 'big', ownerUserId: alice.id, taskNumber: 2147483648n, handle: 'AT2147483648' } });
+    expect(await T.taskNumber!(t, {}, as(alice))).toBe('2147483648');
   });
 
   it('depth is bounded: a task under a 16-deep path is refused with TASK_TOO_DEEP, the 16th level is allowed', async () => {
@@ -225,6 +244,12 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
     const roots = await Q.agentTasks({}, { appRef: appX.id, rootsOnly: true }, as(alice));
     expect(roots.map((r: any) => r.id).sort()).toEqual([t.id, pr.id].sort());
     expect(await Q.agentTasks({}, { appRef: appX.id, status: ['BACKLOG'] }, as(alice))).toEqual([]);
+  });
+
+  it('AT0 is not a tree root: agentTaskTree(AT0) is null, and a task with no project still roots its own subtree', async () => {
+    const t: any = await mk(appX, 'no project');
+    expect(await Q.agentTaskTree({}, { root: `hrn:agenttask:${appX.urn}:AT0` }, as(alice))).toBeNull();
+    expect((await Q.agentTaskTree({}, { root: t.id }, as(alice))).map((r: any) => r.id)).toEqual([t.id]);
   });
 
   it('every operation on AT0 is refused with TASK_PROJECT_ZERO_FIXED and leaves the row unchanged', async () => {
@@ -331,11 +356,13 @@ describe('the migration', () => {
       await ins('legacy-b2', appX.id, 'legacy-b', '2026-01-04T00:00:00Z');
       await ins('legacy-b11', appX.id, 'legacy-b1', '2026-01-05T00:00:00Z');
       await ins('legacy-y', appY.id, null, '2026-01-01T00:00:00Z');
+      await client.query(`UPDATE apps SET deleted_at = now() WHERE id = $1`, [appY.id]); // a soft-deleted App keeps its tasks and gets numbers too
+      await ins('legacy-y1', appY.id, 'legacy-y', '2026-01-02T00:00:00Z');
       await client.query(backfill);
       const read = async () => (await client.query(`SELECT id, handle, task_number::int AS n, (SELECT handle FROM agent_tasks p WHERE p.id = t.parent_task_id) AS parent FROM agent_tasks t WHERE app_id IN ($1, $2) ORDER BY app_id, handle`, [appX.id, appY.id])).rows;
       const once = await read();
       const byId = Object.fromEntries(once.map((r) => [r.id, r.handle]));
-      expect(byId).toMatchObject({ 'legacy-a': 'AT0.1', 'legacy-b': 'AT0.2', 'legacy-b1': 'AT0.2.1', 'legacy-b2': 'AT0.2.2', 'legacy-b11': 'AT0.2.1.1', 'legacy-y': 'AT0.1' });
+      expect(byId).toMatchObject({ 'legacy-a': 'AT0.1', 'legacy-b': 'AT0.2', 'legacy-b1': 'AT0.2.1', 'legacy-b2': 'AT0.2.2', 'legacy-b11': 'AT0.2.1.1', 'legacy-y': 'AT0.1', 'legacy-y1': 'AT0.1.1' });
       const tops = (await client.query(`SELECT handle FROM agent_tasks WHERE app_id = $1 AND parent_task_id IS NULL`, [appX.id])).rows;
       expect(tops).toEqual([{ handle: 'AT0' }]);
       const counters = (await client.query(

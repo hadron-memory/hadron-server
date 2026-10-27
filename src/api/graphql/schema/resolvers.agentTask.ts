@@ -337,7 +337,7 @@ export async function mayReadAppTasks(ctx: Context, appId: string): Promise<bool
   return (await resolveTaskActor(ctx, app)) !== null;
 }
 
-/** The Apps a person belongs to for tasks: those where the shared participation predicate admits them (bounded). */
+/** The Apps a person belongs to for tasks: those where the shared participation predicate admits them. Read in pages of this size. */
 const HANDLE_APP_CAP = 200;
 async function participatedAppIds(ctx: Context): Promise<string[]> {
   if (!ctx.userId) return [];
@@ -345,26 +345,32 @@ async function participatedAppIds(ctx: Context): Promise<string[]> {
     ctx.db.appMember.findMany({ where: { userId: ctx.userId }, select: { appId: true } }),
     ctx.db.orgMember.findMany({ where: { userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP }, select: { organizationId: true } }),
   ]);
-  const candidates = await ctx.db.app.findMany({
-    where: {
-      deletedAt: null,
-      OR: [
-        { ownerUserId: ctx.userId },
-        { id: { in: memberships.map((m) => m.appId) } },
-        { organizationId: { in: orgs.map((o) => o.organizationId) } },
-      ],
-    },
-    select: APP_SELECT,
-    orderBy: { id: 'asc' },
-    take: HANDLE_APP_CAP + 1,
-  });
-  // More than the cap is "several" without checking each: the refusal below needs only the count to exceed one.
+  const where: Prisma.AppWhereInput = {
+    deletedAt: null,
+    OR: [
+      { ownerUserId: ctx.userId },
+      { id: { in: memberships.map((m) => m.appId) } },
+      { organizationId: { in: orgs.map((o) => o.organizationId) } },
+    ],
+  };
+  // Pages of HANDLE_APP_CAP by id until a second admitted App is found or the candidates run out: the refusal below
+  // needs only to know the count exceeds one, so a later page can never be skipped into a wrong single answer.
   const admitted: string[] = [];
-  for (const app of candidates.slice(0, HANDLE_APP_CAP)) {
-    if (await resolveTaskActor(ctx, app)) admitted.push(app.id);
-    if (admitted.length > 1) break;
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await ctx.db.app.findMany({
+      where: cursor ? { AND: [where, { id: { gt: cursor } }] } : where,
+      select: APP_SELECT,
+      orderBy: { id: 'asc' },
+      take: HANDLE_APP_CAP,
+    });
+    for (const app of page) {
+      if (await resolveTaskActor(ctx, app)) admitted.push(app.id);
+      if (admitted.length > 1) return admitted;
+    }
+    if (page.length < HANDLE_APP_CAP) return admitted;
+    cursor = page[page.length - 1]!.id;
   }
-  return admitted;
 }
 
 /** The ONE App a BARE handle means for this caller: a key's own App, a worker session's App, else the one App a person belongs to. */
@@ -1584,6 +1590,8 @@ export const agentTaskQueries = {
    */
   agentTaskTree: async (_: unknown, { root }: { root: string }, ctx: Context) =>
     withReadableTask(ctx, root, async (c, readable) => {
+    // #2553: AT0 is the reserved "no project" bucket, never a tree root; its children are the roots (rootTaskWhere).
+    if (readable.task.handle === PROJECT_ZERO_HANDLE) return null;
     const rows = await c.db.$queryRaw<{ id: string; depth: number }[]>`
       WITH RECURSIVE tree AS (
         SELECT id, 0 AS depth FROM agent_tasks WHERE id = ${readable.task.id}
@@ -1672,7 +1680,7 @@ export const agentTaskFieldResolvers = {
   AgentTask: {
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
-    taskNumber: (t: TaskRow) => Number(t.taskNumber),
+    taskNumber: (t: TaskRow) => String(t.taskNumber),
     status: (t: TaskRow) => t.status.toUpperCase(),
     owner: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.ownerWorkerId, t.ownerUserId),
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),

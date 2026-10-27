@@ -13683,7 +13683,7 @@ export const typeDefs = `#graphql
     """
     handle: String!
     "This task's own number inside its handle (the last segment), counted per parent. Permanent: never changed, never given to another task."
-    taskNumber: Int!
+    taskNumber: String!
     title: String!
     description: String
     "Opaque origin reference (an issue URL, a node URN). Not interpreted."
