@@ -5,13 +5,13 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
-import { generateId } from '../../../lib/id.js';
-import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { OPEN_TASKS_QUERY, countOpenTasks } from '../../../../scripts/lib/openTaskLine.js';
-import { typeDefs } from './typeDefs.js';
-import { resolvers, type Context } from './resolvers.js';
+import { db } from '../../src/integrations/db/client.js';
+import { cleanDb } from '../../src/test/helpers.js';
+import { generateId } from '../../src/lib/id.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../src/lib/workerSignature.js';
+import { OPEN_TASKS_QUERY, countOpenTasks } from './openTaskLine.js';
+import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
+import { resolvers, type Context } from '../../src/api/graphql/schema/resolvers.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 const M = resolvers.Mutation as any;
