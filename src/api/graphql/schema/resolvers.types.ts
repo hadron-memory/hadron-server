@@ -20,7 +20,6 @@ import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
   getPrimaryAgent,
-  getPrimaryAgentId,
   isAgentInstalledAndLicensed,
   isGrantedAgentMemoryRole,
 } from '../../../lib/appAgent.js';
@@ -84,10 +83,8 @@ import {
   APP_INCLUDE,
   ORG_INCLUDE,
   listOrgExchangeConnections,
-  readPrimaryAgentIdFromEager,
   readPrimaryAgentRecordFromEager,
   readAllAgentRecordsFromEager,
-  readPrimaryAgentField,
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
@@ -253,6 +250,21 @@ export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
     throw error;
   }
+}
+
+/**
+ * #2640: the App's primary installed Agent as this caller may read it, or null (none installed, or withheld).
+ * Every App field that names the primary Agent (`agentId`, `installedAgentUrn`) goes through here so none can
+ * disclose what `agent` withholds.
+ */
+async function readablePrimaryAgent(
+  ctx: Context,
+  a: { id: string; appAgents?: unknown },
+): Promise<(NestedAgentRow & { urn?: string }) | null> {
+  const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & { urn?: string }) | null | undefined;
+  if (eager !== undefined) return readableNestedAgent(ctx, eager);
+  const agent = await getPrimaryAgent(ctx.db, a.id);
+  return readableNestedAgent(ctx, agent as (NestedAgentRow & { urn?: string }) | null);
 }
 
 /**
@@ -1616,7 +1628,8 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
+      // #2640: the URN names the primary Agent, so it answers as that Agent's own read does.
+      const agentUrn = (await readablePrimaryAgent(ctx, a))?.urn;
       if (!agentUrn) return null;
       // #697 Stage 2 / D10: an installed agent stays AUTHOR-ROOTED forever, so
       // its v2 URN is just the agent's own author-rooted URN — the v1
@@ -1642,15 +1655,13 @@ export const typeResolvers = {
     // value must include AGENT_INCLUDE — `appAgents` from APP_INCLUDE /
     // ORG_INCLUDE already does, and the fallback re-fetch via
     // `getPrimaryAgent({ include: AGENT_INCLUDE })` does too.
+    // #2640: `agentId` names the PRIMARY install's Agent, so it answers as that Agent's own read does: null for an
+    // Agent the caller cannot read (never the first READABLE install's id, never the raw id).
     agentId: async (
       a: { id: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
-    ): Promise<string | null> => {
-      const id = readPrimaryAgentIdFromEager(a);
-      if (id !== undefined) return id;
-      return getPrimaryAgentId(ctx.db, a.id);
-    },
+    ): Promise<string | null> => (await readablePrimaryAgent(ctx, a))?.id ?? null,
     agent: async (
       a: { id: string; appAgents?: unknown },
       _: unknown,
