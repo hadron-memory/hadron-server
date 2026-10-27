@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { reduceTransportState, sampleProcess, NOT_SAMPLED, assertSecretFree, shouldAbort } from './sampler.mjs';
 
 test('registry state is reduced to counts, no ids survive', () => {

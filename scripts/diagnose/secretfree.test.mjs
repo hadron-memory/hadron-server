@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { assertSecretFree } from './sampler.mjs';
 // Point DIAG_OUT_FILE at a produced samples file to grep real output; otherwise this checks the guard itself.
