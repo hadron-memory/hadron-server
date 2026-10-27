@@ -56,6 +56,7 @@ import {
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
+import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
 import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
@@ -986,6 +987,24 @@ function buildHandleAuthorizeGet(
           }),
         );
         return;
+      }
+      // #168 (Holger's scoped (b) ruling): an MCP connector flow that did not
+      // pick a provider gets an explanatory page instead of a silent bounce.
+      // EXACT string equality on both conditions: `login_provider` omitted
+      // (so the CLI's explicit/default flows stay one-click) and `resource`
+      // === `${origin}/mcp` (no normalizing, case-folding or prefix match).
+      // `getServerOrigin` null means no trustworthy origin: never prompt.
+      if (q.login_provider === undefined && typeof q.resource === 'string') {
+        const origin = getServerOrigin(req);
+        if (origin !== null && q.resource === `${origin}/mcp`) {
+          res.type('html').send(
+            renderTemplate(SIGNIN_PROMPT_TEMPLATE, {
+              clientName,
+              signInUrl: `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
+            }),
+          );
+          return;
+        }
       }
       // req.originalUrl is the path + query that hit Express
       // (e.g., `/oauth/authorize?client_id=…&state=…`). The
