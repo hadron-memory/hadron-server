@@ -101,6 +101,7 @@ const NODE_RELATIONS: Record<string, readonly string[]> = {
   PendingEdge: ['source'],
   NodeEmbedding: ['node'],
   NodeRevision: ['node'],
+  NodeEdgeRemoval: ['source'],
   NodeContentValidationReport: ['node'],
   Channel: ['chatRoot'],
   UsageEvent: ['node'],

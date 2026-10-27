@@ -72,6 +72,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryEdges",
   "Query.memoryNodes",
   "Query.myChats",
+  "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
   "Query.nodeUsage",
