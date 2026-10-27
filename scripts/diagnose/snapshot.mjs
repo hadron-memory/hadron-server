@@ -1,6 +1,6 @@
 // Heap snapshot reduction for #2598. A V8 snapshot is full of values (string contents, closure names), so only the
 // reduction ever leaves the private stack: per (type, constructor name) counts and self sizes, nothing else.
-const NAMED_TYPES = new Set(['object', 'array', 'native', 'hidden', 'regexp']);
+const NAMED_TYPES = new Set(['object', 'array', 'native', 'hidden']);
 const CTOR_NAME = /^[A-Za-z_$][A-Za-z0-9_$.<>() ]{0,80}$/;   // identifier-ish; no slashes, colons, quotes or '='
 const ROW_KEYS = ['count', 'name', 'selfSize', 'type'];
 
@@ -10,7 +10,7 @@ function label(type, name) {
   return CTOR_NAME.test(name) ? name : '(other)';
 }
 
-export function reduceSnapshot(snap, { top = 40 } = {}) {
+export function reduceSnapshot(snap, { top = 1000 } = {}) {
   const fields = snap.snapshot.meta.node_fields;
   const typeNames = snap.snapshot.meta.node_types[0];
   const stride = fields.length;
@@ -27,25 +27,30 @@ export function reduceSnapshot(snap, { top = 40 } = {}) {
     nodes++; selfSize += size;
   }
   // Rows whose type is not a named one carry the type as the label, so they publish as { type, name: '(type)' }.
-  const rows = [...acc.values()].sort((a, b) => b.selfSize - a.selfSize).slice(0, top);
-  return { totals: { nodes, selfSize }, rows };
+  // The cut is generous and recorded: a diff must know whether a group missing from a side is absent or just cut.
+  const all = [...acc.values()].sort((a, b) => b.selfSize - a.selfSize);
+  return { totals: { nodes, selfSize, rowsOmitted: Math.max(0, all.length - top) }, rows: all.slice(0, top) };
 }
 
+// Groups are compared over the union of both sides, so growth and releases both show. A group missing from a side whose
+// rows were cut (rowsOmitted > 0) is unknown, not zero, and is skipped rather than reported as growth or release.
 export function diffReductions(a, b, { top = 40 } = {}) {
   const k = (r) => `${r.type}\u0000${r.name}`;
-  const before = new Map(a.rows.map((r) => [k(r), r]));
+  const am = new Map(a.rows.map((r) => [k(r), r])), bm = new Map(b.rows.map((r) => [k(r), r]));
   const out = [];
-  for (const r of b.rows) {
-    const p = before.get(k(r));
-    out.push({ type: r.type, name: r.name, countDelta: r.count - (p?.count ?? 0), sizeDelta: r.selfSize - (p?.selfSize ?? 0) });
+  for (const key of new Set([...am.keys(), ...bm.keys()])) {
+    const p = am.get(key), n = bm.get(key);
+    if ((!p && a.totals.rowsOmitted > 0) || (!n && b.totals.rowsOmitted > 0)) continue;
+    const r = n ?? p;
+    out.push({ type: r.type, name: r.name, countDelta: (n?.count ?? 0) - (p?.count ?? 0), sizeDelta: (n?.selfSize ?? 0) - (p?.selfSize ?? 0) });
   }
-  return out.sort((x, y) => y.sizeDelta - x.sizeDelta).slice(0, top);
+  return out.sort((x, y) => Math.abs(y.sizeDelta) - Math.abs(x.sizeDelta)).slice(0, top);
 }
 
 const isNum = (n) => Number.isSafeInteger(n);
 // Refuses anything but constructor/type names and integers; run before every publish.
 export function assertReductionShape(r) {
-  if (!r?.totals || !isNum(r.totals.nodes) || !isNum(r.totals.selfSize)) throw new Error('reduction refused: bad totals');
+  if (!r?.totals || !isNum(r.totals.nodes) || !isNum(r.totals.selfSize) || !isNum(r.totals.rowsOmitted)) throw new Error('reduction refused: bad totals');
   for (const row of r.rows) {
     if (Object.keys(row).sort().join() !== ROW_KEYS.join()) throw new Error('reduction refused: unexpected row field');
     if (typeof row.type !== 'string' || !/^[a-z ]+$/.test(row.type)) throw new Error('reduction refused: bad type');

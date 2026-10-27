@@ -103,7 +103,13 @@ test('heap snapshot files are deleted at teardown and a survivor fails the purge
     assert(!existsSync(join(dir, 'start.heapsnapshot')) && existsSync(join(dir, 'keep.jsonl')));
     writeFileSync(join(dir, 'end.heapsnapshot'), 'x');
     // rm that silently does nothing: the purge must notice the file is still there.
-    const bad = sh(`SNAP_DIR='${dir}'; app_exec() { case "$1" in rm) return 0;; *) "$@";; esac; }; purge_snapshots`, dir);
+    const bad = sh(`SNAP_DIR='${dir}'; app_exec() { case "$3" in rm*) return 0;; *) "$@";; esac; }; purge_snapshots`, dir);
     assert.notEqual(bad.status, 0);
+    // an exec that fails outright is not "no files": the purge fails closed.
+    const dead = sh(`SNAP_DIR='${dir}'; app_exec() { return 1; }; purge_snapshots`, dir);
+    assert.notEqual(dead.status, 0);
+    // a failing verification listing after a successful rm also fails.
+    const blind = sh(`SNAP_DIR='${dir}'; app_exec() { case "$3" in find*) return 1;; *) "$@";; esac; }; purge_snapshots`, dir);
+    assert.notEqual(blind.status, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

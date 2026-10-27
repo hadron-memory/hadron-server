@@ -41,3 +41,19 @@ test('a diff reports count and size deltas, largest growth first', () => {
   const d = diffReductions(a, b);
   assert.deepEqual(d[0], { type: 'object', name: 'Map', countDelta: 1, sizeDelta: 900 });
 });
+
+test('a regexp node named by its source is published under its type label', () => {
+  const r = reduceSnapshot(snap([['regexp', 'Bearer abc123', 10]]));
+  assert(!JSON.stringify(r).includes('Bearer'));
+  assert.equal(r.rows[0].name, '(regexp)');
+});
+
+test('a diff reports releases and does not fabricate growth from rows a cut dropped', () => {
+  const a = reduceSnapshot(snap([['object', 'Big', 900], ['object', 'Gone', 500], ['object', 'Small', 10]]));
+  const b = reduceSnapshot(snap([['object', 'Big', 900], ['object', 'Small', 10]]));
+  assert.deepEqual(diffReductions(a, b)[0], { type: 'object', name: 'Gone', countDelta: -1, sizeDelta: -500 });
+  const cutA = reduceSnapshot(snap([['object', 'Big', 900], ['object', 'Small', 10]]), { top: 1 });
+  const fullB = reduceSnapshot(snap([['object', 'Big', 900], ['object', 'Small', 10]]));
+  assert.equal(cutA.totals.rowsOmitted, 1);
+  assert(!diffReductions(cutA, fullB).some((x) => x.name === 'Small'), 'Small was cut from A, not absent');
+});
