@@ -2769,4 +2769,20 @@ describe('#2613 — the open-task line on every router wake', () => {
     expect(tail('term_eli')).toBe(tail('term_gene'));
     expect(tail('term_eli')).toContain('You have 2 open tasks');
   });
+
+  it('reads the count BEFORE the final idle and composer rechecks, never between the last gate and the send (LOCAL P2-1)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', open('w-eli', 1));
+    poll(c);
+    const verbs = fake.calls.map((a) => (a[1] === 'api' && a[2].includes('agentTasks(') ? 'count' : a.slice(1, 3).join(' ')));
+    const count = verbs.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(verbs.lastIndexOf('terminal wait')).toBeGreaterThan(count); // the idle recheck follows the count
+    expect(verbs.lastIndexOf('terminal read')).toBeGreaterThan(count); // so does the composer recheck
+    expect(verbs.indexOf('terminal send')).toBeGreaterThan(verbs.lastIndexOf('terminal read'));
+    expect(verbs.slice(count + 1, verbs.indexOf('terminal send')).includes('count')).toBe(false);
+  });
 });
+

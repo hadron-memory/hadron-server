@@ -1549,6 +1549,9 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.dropped.push(entry.name);
         continue;
       }
+      // The open-task count is one more network read, so it is taken HERE, before the rechecks below, never between
+      // the last gate and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+      const openLine = openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker);
       // The recompute above is a network round trip (or several) that reopened
       // BOTH windows the gates had closed: the agent may have gone busy (#1490
       // steering hazard — a busy agent renders an EMPTY prompt box, so the
@@ -1577,7 +1580,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       mustOwn();
-      const [ok, how] = sendNudge(cfg, handle, nudgeText(now, openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker)), run);
+      const [ok, how] = sendNudge(cfg, handle, nudgeText(now, openLine), run);
       if (!ok) {
         outcome.held[entry.name] = how;
         continue;
@@ -1753,6 +1756,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             outcome.livenessDropped.push(entry.name);
             continue;
           }
+          // Read before the rechecks, never between the last gate and the send (#2613 LOCAL P2-1).
+          const openLine = openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker);
           const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === sendHandle)?.lastOutputAt;
           const [idleAgain, againWhy] = provesIdle(cfg, sendHandle, sendDetail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
           if (!idleAgain) {
@@ -1767,7 +1772,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             continue;
           }
           mustOwn();
-          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead, openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker)), run);
+          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead, openLine), run);
           if (!ok) {
             outcome.held[entry.name] = `liveness: ${how}`;
             continue; // a failed send holds the token; the clock stands — retried next poll

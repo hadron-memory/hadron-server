@@ -916,9 +916,12 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           t.rule = alarm.type;
         }
 
+        // The count is a network read, so it comes BEFORE the final gates: nothing slow sits between the last idle and
+        // composer proof and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+        const openLine = dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id);
         const unsafe = safeToType();
         if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id));
+        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...newWork])].sort();
         // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task

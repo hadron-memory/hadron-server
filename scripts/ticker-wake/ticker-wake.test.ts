@@ -81,6 +81,8 @@ interface Fake {
   openTasks: Record<string, unknown[]>;
   openTaskReads: string[][];
   openTasksError: boolean;
+  /** #2613: the order of the open-task read, screen reads and sends. */
+  order: string[];
 }
 
 let dir: string;
@@ -94,7 +96,7 @@ function fake(): Fake {
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
     tickers: [], subscribersError: null, extraTerminals: [], sessions: {}, sessionsError: null, sessionQueries: [],
-    alarms: {}, alarmError: null, alarmQueries: [], openTasks: {}, openTaskReads: [], openTasksError: false,
+    alarms: {}, alarmError: null, alarmQueries: [], openTasks: {}, openTaskReads: [], openTasksError: false, order: [],
   };
   const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
     items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
@@ -140,6 +142,7 @@ function fake(): Fake {
         return out({ data: { agentTeamEvents: all.slice(from, from + 200) } });
       }
       if (q.includes('agentTasks(')) {
+        f.order.push('count');
         f.openTaskReads.push([fArg(argv, 'a') as string, fArg(argv, 'w') as string, fArg(argv, 'o') as string]);
         if (f.openTasksError) return out({ errors: [{ message: 'tasks down', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
         const o = Number(fArg(argv, 'o'));
@@ -163,6 +166,7 @@ function fake(): Fake {
         return out({ ok: true, result: { hostScope: { hostIds: ['local'], omittedHostIds: [] }, terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
+      if (argv[2] === 'read') f.order.push('read');
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
       if (argv[2] === 'send' && !argv.includes('--text')) {
         f.enters.push(argv[argv.indexOf('--terminal') + 1]);
@@ -173,6 +177,7 @@ function fake(): Fake {
         return { code: 0, stdout: f.retryReply ? f.retryReply() : JSON.stringify(ACCEPTED_ONLY), stderr: '' };
       }
       if (argv[2] === 'send') {
+        f.order.push('send');
         f.sent.push(argv[argv.indexOf('--text') + 1]);
         if (f.sendReply) return { code: 0, stdout: f.sendReply(), stderr: '' };
         return out(CONFIRMED);
@@ -2757,5 +2762,17 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     await go({ dry: true });
     expect(f.sent).toEqual([]);
     expect(f.openTaskReads).toEqual([]);
+  });
+
+  it('reads the count BEFORE the final screen proofs, never between the last gate and the send (LOCAL P2-1)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const count = f.order.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(f.order.lastIndexOf('read')).toBeGreaterThan(count);
+    expect(f.order.indexOf('send')).toBeGreaterThan(f.order.lastIndexOf('read'));
+    expect(f.order.slice(count + 1, f.order.indexOf('send')).includes('count')).toBe(false);
   });
 });

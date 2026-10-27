@@ -79,6 +79,32 @@ describe('countOpenTasks (#2613)', () => {
   });
 });
 
+describe('the count is time-bounded (#2613 LOCAL P2-2)', () => {
+  it('hands each call only the time left and stops when the budget is spent: unknown, never partial', () => {
+    let t = 0;
+    const seen: Array<number | undefined> = [];
+    const run = (_argv: string[], timeoutMs?: number) => {
+      seen.push(timeoutMs);
+      t += 2_000; // every page takes two seconds
+      return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(200) } }) };
+    };
+    expect(countOpenTasks(run, 'hadron', 'app1', 'w1', 5_000, () => t)).toBeNull();
+    expect(seen).toEqual([5_000, 3_000, 1_000]); // a fourth page is never asked for
+  });
+
+  it('a call that finishes inside the budget still counts', () => {
+    let t = 0;
+    const run = () => { t += 100; return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(2) } }) }; };
+    expect(countOpenTasks(run, 'hadron', 'app1', 'w1', 5_000, () => t)).toBe(2);
+  });
+
+  it('a zero budget reads nothing', () => {
+    const s = server(rows(3));
+    expect(countOpenTasks(s.run, 'hadron', 'app1', 'w1', 0)).toBeNull();
+    expect(s.seen).toEqual([]);
+  });
+});
+
 describe('openTaskLine (#2613)', () => {
   const line = (all: unknown[]) => openTaskLine(server(all).run, 'hadron', 'app1', 'w1');
   it('names the count and the command, singular and plural', () => {

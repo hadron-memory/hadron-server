@@ -11,7 +11,15 @@
  * at all, so the wake still goes out and never claims "none". Zero also yields no line (quiet). The number is what
  * this read observed at send, not a snapshot atomic with a later `task mine`.
  */
-export interface OpenTaskRun { (argv: string[]): { code: number; stdout: string } }
+export interface OpenTaskRun { (argv: string[], timeoutMs?: number): { code: number; stdout: string } }
+
+/**
+ * The whole count's time budget, across every page (#2613 LOCAL P2-2). Each call is handed only the time left, so a
+ * slow gateway cannot stretch a wake by a call timeout per page; a spent budget is unknown, never a partial count.
+ * Callers read the count BEFORE their final idle and composer gates, so none of this time sits between the last gate
+ * and the send (#2613 LOCAL P2-1).
+ */
+export const OPEN_TASKS_BUDGET_MS = 5_000;
 
 /** The server's page cap for agentTasks (typeDefs: limit defaults to 20, cap 200). */
 export const OPEN_TASKS_PAGE = 200;
@@ -25,13 +33,19 @@ export const OPEN_TASKS_QUERY =
 const OPEN_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'STARTED']);
 
 /** The number of open tasks the worker holds, or null when it cannot be established. Never throws. */
-export function countOpenTasks(run: OpenTaskRun, hadronCli: string, app: string, workerId: string): number | null {
+export function countOpenTasks(
+  run: OpenTaskRun, hadronCli: string, app: string, workerId: string,
+  budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now,
+): number | null {
   if (!app || !workerId) return null;
+  const deadline = now() + budgetMs;
   const ids = new Set<string>();
   for (let page = 0; page < OPEN_TASKS_MAX_PAGES; page++) {
+    const left = deadline - now();
+    if (left <= 0) return null;
     let rows: unknown;
     try {
-      const res = run([hadronCli, 'api', OPEN_TASKS_QUERY, '-F', `a=${app}`, '-F', `w=${workerId}`, '-F', `o=${page * OPEN_TASKS_PAGE}`]);
+      const res = run([hadronCli, 'api', OPEN_TASKS_QUERY, '-F', `a=${app}`, '-F', `w=${workerId}`, '-F', `o=${page * OPEN_TASKS_PAGE}`], left);
       if (res.code !== 0) return null;
       const body = JSON.parse(res.stdout);
       if (body?.errors?.length || body?.error) return null;
@@ -50,8 +64,11 @@ export function countOpenTasks(run: OpenTaskRun, hadronCli: string, app: string,
 }
 
 /** The sentence appended to a wake, with its leading space; '' for zero or unknown. */
-export function openTaskLine(run: OpenTaskRun, hadronCli: string, app: string, workerId: string): string {
-  const n = countOpenTasks(run, hadronCli, app, workerId);
+export function openTaskLine(
+  run: OpenTaskRun, hadronCli: string, app: string, workerId: string,
+  budgetMs: number = OPEN_TASKS_BUDGET_MS, now: () => number = Date.now,
+): string {
+  const n = countOpenTasks(run, hadronCli, app, workerId, budgetMs, now);
   if (!n) return '';
   return ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
 }
