@@ -11166,7 +11166,7 @@ export const typeDefs = `#graphql
 
     Also refused with DECISION_CONTAINED (#1641) while the Agent's system memory holds a decision or a
     decision log: removing the memory would remove them, so the Agent is kept. Decision protection always applies.
-    Deletion may also be refused by minted-corpus permanence rules when those rules apply.
+    If this server requires minted content to be retained, its separate deletion restrictions also apply.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
