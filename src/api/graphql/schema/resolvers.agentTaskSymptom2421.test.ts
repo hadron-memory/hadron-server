@@ -3,6 +3,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { reportSymptomRanking, type SymptomResult } from './fixtures/agentTaskSymptomReport2665.js';
 import { taskSymptoms2421 } from './fixtures/agentTaskSymptoms2421.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../../lib/embedding/index.js';
 import { upsertAbstractVector, upsertChunkVectors } from '../../../services/embedding/vectors.js';
@@ -43,12 +44,13 @@ beforeEach(async () => {
 });
 const list = (args: Record<string, unknown> = {}) => Q.agentTaskList({}, { ref: child.id, ...args }, ctx);
 it('meets the fixed provisional 8/10 top-three symptom threshold', async () => {
-  let correct = 0;
+  const results: SymptomResult[] = [];
   for (const row of taskSymptoms2421) {
     const hits = await list({ symptom: row.symptom, limit: 99 });
     expect(hits.length).toBeLessThanOrEqual(3);
-    if (hits.some((h: any) => h.node.loc === row.loc)) correct++;
+    results.push({ symptom: row.symptom, expectedLoc: row.loc, hits });
   }
+  const correct = reportSymptomRanking(results);
   expect(correct).toBeGreaterThanOrEqual(8);
 });
 it('ranks only abstract-bearing runnable nodes in the effective chain, nearest once', async () => {
