@@ -43,3 +43,18 @@ export function safeNodeOptions(raw) {
 export function countTimeouts(text) {
   return { P2024: (text.match(/P2024/g) ?? []).length, P2028: (text.match(/P2028/g) ?? []).length };
 }
+
+// Coverage markers: a field is measured only for what actually ran; everything else stays 'not exercised', never zero.
+export function coverageLine({ w2, heap }) {
+  const NOT = 'not exercised';
+  const pos = (x) => Number.isSafeInteger(x) && x > 0;
+  return { kind: 'coverage',
+    w2SyntheticActivity: w2 ? { embed: pos(w2.embeddedNodes) ? 'measured' : NOT, matcher: pos(w2.tasksQueued) ? 'queued only' : NOT, stall: pos(w2.stallAlarms) ? 'measured' : NOT } : NOT,
+    heapSnapshotReductions: heap ? 'measured' : NOT };
+}
+
+// A snapshot request is a file named snap-<label>.trigger; the label is allowlisted so a filename can never steer the output path.
+export function snapshotLabel(name) {
+  const m = /^snap-([a-z0-9-]{1,20})\.trigger$/.exec(name);
+  return m ? m[1] : null;
+}

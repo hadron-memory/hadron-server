@@ -2744,6 +2744,24 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     expect(f.sent[0]).not.toMatch(/open task|You have \d/);
   });
 
+  it('a refused count read logs ONE closed-reason line with the worker name and nothing the read returned (#2630)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasksError = true;
+    await go();
+    const diag = lines.filter((l) => l.includes('open-task count unknown'));
+    expect(diag).toHaveLength(1);
+    expect(diag[0]).toMatch(/Ada: open-task count unknown \(refused\); the wake goes without the line$/);
+    expect(lines.join('\n')).not.toMatch(/tasks down|INTERNAL_SERVER_ERROR/);
+    expect(f.sent).toHaveLength(1); // fail-open
+  });
+
+  it('a count or a zero logs no diagnostic (#2630)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go();
+    expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
   it('a row that is not open or not this worker makes the count unknown; the wake is plain', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
     f.openTasks['w-ada'] = [...open('w-ada', 2), { id: 'x', status: 'CANCELLED', assignee: { kind: 'WORKER', id: 'w-ada' } }];

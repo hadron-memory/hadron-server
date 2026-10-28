@@ -26,6 +26,7 @@
 import type { GraphQLResolveInfo } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
+import { appendTaskEvent, eventActor, RECORDED_TASK_WARNING_CODES, type EventActor, type RecordedTaskWarningCode } from '../../../lib/agentTasks/events.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { findEffectiveNodeIdByLoc } from '../../../lib/effectiveSystemMemory.js';
 import { loadAvailabilityByFamily } from '../../../lib/agentTasks/availability.js';
@@ -115,6 +116,8 @@ export async function readAssigneeFacts(
 export type PendingWarnings = {
   /** Codes decided inside the write transaction (the assignee facts included: unavailable, busy, paused). */
   codes: TaskWarningCode[];
+  /** Internal association from the committed row, never an input field. */
+  taskId?: string;
 };
 
 /**
@@ -134,9 +137,9 @@ export const REQUEST_READ_BUDGET_MS = 2000;
 const isFactCode = (c: TaskWarningCode): boolean => ASSIGNEE_FACT_CODES.includes(c);
 
 /**
- * Run `fn` in ONE short read transaction: Postgres cancels any statement after {@link REGISTER_STATEMENT_TIMEOUT_MS}
+ * Run `fn` in ONE short transaction: Postgres cancels any statement after {@link REGISTER_STATEMENT_TIMEOUT_MS}
  * (`SET LOCAL`, so nothing runs on after we stop waiting and the connection returns to the pool), the transaction
- * itself is cut after `timeout`, and `deadline` (a wall-clock ms) lets `fn` stop between steps. Every database read
+ * itself is cut after `timeout`, and `deadline` (a wall-clock ms) lets `fn` stop between steps. All bounded database work
  * the warnings add after a commit goes through here: the privacy gate and the register alike.
  */
 export async function boundedRead<T>(
@@ -163,6 +166,17 @@ export async function emitTaskWarnings(
   pending: PendingWarnings,
 ): Promise<void> {
   try {
+    // History is the fired population, BEFORE response caps and optional register/gate enrichment.
+    if (pending.taskId) {
+      const history = (ctx.taskWarningHistory ??= []);
+      const path = warningPath(info);
+      const actor = { ...eventActor(ctx.userId) };
+      for (const code of RECORDED_TASK_WARNING_CODES) {
+        if (pending.codes.includes(code) && !history.some(h => h.path === path && h.code === code)) {
+          history.push({ appId, taskId: pending.taskId, path, code, actor });
+        }
+      }
+    }
     const filed = (ctx.taskWarnings ??= []);
     // Cap BEFORE work: a warning that cannot be sent costs nothing.
     if (filed.length >= MAX_WARNINGS_PER_RESPONSE) return;
@@ -199,6 +213,32 @@ export async function emitTaskWarnings(
     }
   } catch {
     // Advice must never fail a committed action.
+  }
+}
+
+/** Unenriched, closed history record, captured before a response cap or actor-scope exit. */
+export type TaskWarningHistory = { appId: string; taskId: string; path: string; code: RecordedTaskWarningCode; actor: EventActor };
+
+/**
+ * Consume once after field errors are known (GraphQL), or after the MCP result has been built. One bounded
+ * post-commit transaction: statement_timeout 300ms, 1000ms cooperative work deadline, 1500ms transaction timeout,
+ * 500ms pool wait. No retries, no detached write, and no response mutation. Partial history is allowed; a missing
+ * event is never proof that no warning fired. This independent write budget cannot truncate the fired population
+ * merely because optional response enrichment or its size cap was exhausted.
+ */
+export async function flushTaskWarningHistory(ctx: Context, erroredPaths: ReadonlySet<string> = new Set()): Promise<void> {
+  const pending = ctx.taskWarningHistory?.splice(0) ?? [];
+  const successful = pending.filter(h => !erroredPaths.has(h.path));
+  if (successful.length === 0) return;
+  try {
+    await boundedRead(ctx, async (tx, deadline) => {
+      for (const h of successful) {
+        if (Date.now() >= deadline) break;
+        await appendTaskEvent(tx, { appId: h.appId, taskId: h.taskId, actor: h.actor, event: { type: 'task.warning', code: h.code } });
+      }
+    });
+  } catch {
+    // The operation committed already. Neither recording failure nor timeout changes its result; never retry.
   }
 }
 

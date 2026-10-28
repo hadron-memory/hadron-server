@@ -35,7 +35,6 @@ import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicen
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
-  getPrimaryAgent,
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
@@ -146,6 +145,8 @@ export interface Context {
   /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
   taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
   /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  /** #2609: uncapped pending history, captured in the mutation actor scope; consumed once after result shaping. */
+  taskWarningHistory?: import('./resolvers.taskWarnings.js').TaskWarningHistory[];
   taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
@@ -2889,12 +2890,6 @@ export function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAg
   return rows[0] as EagerAppAgentRow | undefined;
 }
 
-export function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
-  if (parent.appAgents === undefined) return undefined;
-  const first = readPrimaryAppAgent(parent);
-  return first?.agent?.id ?? null;
-}
-
 export function readPrimaryAgentRecordFromEager(
   parent: { appAgents?: unknown },
 ): unknown | undefined {
@@ -2909,23 +2904,6 @@ export function readAllAgentRecordsFromEager(
   const rows = parent.appAgents;
   if (!Array.isArray(rows)) return undefined;
   return rows.map((r) => (r as EagerAppAgentRow).agent);
-}
-
-export async function readPrimaryAgentField(
-  parent: { id: string; appAgents?: unknown },
-  ctx: Context,
-  field: 'urn',
-): Promise<string | null> {
-  const first = readPrimaryAppAgent(parent);
-  if (first?.agent && typeof first.agent.urn === 'string') {
-    return first.agent.urn;
-  }
-  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
-  if (parent.appAgents === undefined) {
-    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
-    return primary?.[field] ?? null;
-  }
-  return null;
 }
 
 // ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────

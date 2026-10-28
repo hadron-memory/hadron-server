@@ -2990,6 +2990,12 @@ export const typeDefs = `#graphql
     which DROPPED the direct FK that 008-agent-installation had introduced) —
     see \`appAgents\` below for the real cardinality. Kept so single-Agent
     clients keep working; do not build new multi-Agent logic on it.
+
+    \`agentId\` and \`agent\` name the PRIMARY install's Agent and answer as that
+    Agent's own read does: both are null when the caller may not read it, even
+    when a later install is readable. Null is not proof that nothing is
+    installed; \`appAgents\` lists every install, an entry whose \`agent\` is null
+    being an installed Agent withheld from this caller.
     """
     agentId: ID
     agent: Agent
@@ -3006,7 +3012,8 @@ export const typeDefs = `#graphql
     (hrn:agent:<installing-org>::<app-slug>::<author-org>:<agent-slug>)
     is RETIRED — see #697 Stage 2 / D10 and emitInstalledAgentUrnV2. Returns
     null when the App has no installed Agent or the selected Agent's stored URN
-    cannot be emitted in grammar v2.
+    cannot be emitted in grammar v2, or when the caller may not read that Agent
+    (it answers as \`agent\` does).
     """
     installedAgentUrn: String
     trainingMode: Boolean!
@@ -3067,7 +3074,9 @@ export const typeDefs = `#graphql
     023-app-shape: convenience that returns every installed Agent
     (equivalent to App.appAgents.map(aa => aa.agent)). Previously was
     a soft-deprecated single-element synthesis; now returns the FULL
-    multi-Agent set per spec 023 US1.
+    multi-Agent set per spec 023 US1. Only the installed Agents this caller may
+    read: the list may be PARTIAL, an unreadable Agent is left out, and its length
+    is not the install count (use \`appAgents\`, one entry per install).
     """
     agents: [Agent!]!
     "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
@@ -7659,6 +7668,7 @@ export const typeDefs = `#graphql
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
     after), not a continuation. limit defaults to 20 (cap 200).
+    task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.
     """
     agentTeamEvents(
       appRef: ID!

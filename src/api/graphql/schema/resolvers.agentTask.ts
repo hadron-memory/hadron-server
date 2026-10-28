@@ -1178,7 +1178,7 @@ export const agentTaskMutations = {
     const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
-    await emitTaskWarnings(ctx, info, created.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
     return created;
   },
 
@@ -1248,7 +1248,7 @@ export const agentTaskMutations = {
     }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
-    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;
   },
 
@@ -1367,7 +1367,7 @@ export const agentTaskMutations = {
       });
     }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
     await launchAssignee(ctx.db, reassigned);
-    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn, taskId: reassigned.id });
     return reassigned;
   },
 
@@ -1456,7 +1456,7 @@ export const agentTaskMutations = {
     }, { assignee: true });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
-    await emitTaskWarnings(ctx, info, finished.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, finished.appId, { codes: warn, taskId: finished.id });
     return finished;
   },
 

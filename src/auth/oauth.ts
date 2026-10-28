@@ -57,6 +57,7 @@ import {
 } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
 import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
+import { redirectAnchor } from './redirectAnchor.js';
 import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
@@ -574,6 +575,7 @@ export function renderConsent(params: ConsentParams): string {
     resource: params.resource,
     clientId: params.clientId,
     redirectUri: params.redirectUri,
+    redirectAnchor: redirectAnchor(params.redirectUri),
     codeChallenge: params.codeChallenge,
     codeChallengeMethod: params.codeChallengeMethod,
     state: params.state,
@@ -1000,6 +1002,7 @@ function buildHandleAuthorizeGet(
           res.type('html').send(
             renderTemplate(SIGNIN_PROMPT_TEMPLATE, {
               clientName,
+              redirectAnchor: redirectAnchor(redirectUri),
               signInUrl: `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
               // Fixed local path + the original query: never derived from the
               // request target's origin (an absolute-form request line).
