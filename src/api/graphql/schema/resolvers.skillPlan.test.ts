@@ -350,6 +350,25 @@ describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)',
     const got = await plan({ intent: 'LINT' });
     expect(rule(got.entries[0])).toEqual([]);
   });
+
+  it('a successful include whose target holds a literal notice is not broken, directly or nested', async () => {
+    await mkNode('policies:leaf', { content: 'Leaf says [Include unavailable] on purpose.', isRunnable: false });
+    await mkNode('policies:mid', { content: 'Mid {{> policies:leaf}}', isRunnable: false });
+    await mkNode('tasks:direct', { properties: declaration({ name: 'skill-direct' }), content: '{{> policies:leaf}}' });
+    await mkNode('tasks:nested', { properties: declaration({ name: 'skill-nested' }), content: '{{> policies:mid}}' });
+    const got = await plan({ intent: 'LINT' });
+    expect(got.entries).toHaveLength(2);
+    expect(got.entries.flatMap(rule)).toEqual([]);
+  });
+
+  it('counts only the failed include when a literal-notice target and a missing one sit together', async () => {
+    await mkNode('policies:leaf', { content: 'Leaf says [Include unavailable].', isRunnable: false });
+    await mkNode('tasks:mixed', { properties: declaration(), content: '{{> policies:leaf}} and {{> missing-loc}}' });
+    const got = await plan({ intent: 'LINT' });
+    const found = rule(got.entries[0]);
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
+  });
 });
 
 describe('classes and bodies', () => {

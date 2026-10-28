@@ -10,17 +10,15 @@
 import { BROKEN_INCLUDE_NOTICE } from '../includes/spliceIncludes.js';
 import type { Finding } from './lint.js';
 
-const count = (text: string): number => text.split(BROKEN_INCLUDE_NOTICE).length - 1;
-
 /**
- * One warning when resolution put more notices into the exported body than the stored text already held (an
- * author's own literal notice is not a broken include). Never an error: the export still ships.
+ * One warning when the resolver reported includes it could not resolve. The count is the resolver's own
+ * (`SpliceOptions.broken`), never a search of the exported body: a successful target, or the author's own text,
+ * may contain the notice verbatim and is not a broken include. Never an error: the export still ships.
  */
 export function lintBrokenIncludes(
-  node: { urn: string; memoryUrn: string; content: string },
-  exportedBody: string,
+  node: { urn: string; memoryUrn: string },
+  broken: number,
 ): Finding | null {
-  const broken = count(exportedBody) - count(node.content);
   if (broken <= 0) return null;
   return {
     urn: node.urn,

@@ -919,10 +919,13 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
     // target reads as a stale file rather than an up-to-date one.
     const rowById = new Map(actionableRows.map((r) => [r.id, r]));
     const exportBodies = new Map<string, string>();
+    const brokenCounts = new Map<string, number>();
     for (const n of skillNodes) {
       const row = rowById.get(n._id);
       if (!row || lockedIds.has(n._id) || !row.content) continue;
-      exportBodies.set(n._id, (await resolveNodeContent(ctx, row, { mode: 'includes' })) ?? '');
+      const broken = { count: 0 };
+      exportBodies.set(n._id, (await resolveNodeContent(ctx, row, { mode: 'includes', broken })) ?? '');
+      brokenCounts.set(n._id, broken.count);
     }
     const bodyOf = (n: { _id: string; content: string }) => exportBodies.get(n._id) ?? n.content;
 
@@ -939,7 +942,7 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       // worse than silence.
       findingsById.set(n._id, lockedIds.has(n._id) ? [] : lintNode(n, host));
       // #2048 S11d (R9): the exporter's resolved body, which the pure rules above never see. A warning only.
-      const brokenIncludes = lockedIds.has(n._id) ? null : lintBrokenIncludes(n, bodyOf(n));
+      const brokenIncludes = lockedIds.has(n._id) ? null : lintBrokenIncludes(n, brokenCounts.get(n._id) ?? 0);
       if (brokenIncludes) findingsById.get(n._id)?.push(brokenIncludes);
     }
     // Per host: one name on a node's Claude and Codex declarations is by

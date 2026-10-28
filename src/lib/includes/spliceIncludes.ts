@@ -48,6 +48,12 @@ export interface SpliceOptions {
    * source text is judged on its own, before assembly. Unset leaves literal tags as written.
    */
   literalGuard?: string;
+  /**
+   * Incremented once for each include that resolved to the notice (missing, unreadable, cyclic, too deep, no
+   * qualifying revision). The resolver's own verdict, so a caller never has to infer failure by searching the
+   * spliced text for the notice, which a successful target may legitimately contain.
+   */
+  broken?: { count: number };
 }
 
 export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'urnAlias'>;
@@ -157,13 +163,18 @@ export async function selectIncludeRevision(
   return { revNo: target.revSeq, text: target.content ?? '' };
 }
 
+function unresolved(opts: SpliceOptions): string {
+  if (opts.broken) opts.broken.count += 1;
+  return BROKEN_INCLUDE_NOTICE;
+}
+
 async function expandTag(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   tag: IncludeTag, includerMemoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
   // `signed` is stored and ignored until the signing ceremony ships (cor:dmo:150:02,
   // Vera's D7): it serves as if absent, and `approved signed` as `approved`.
-  if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
+  if (level > MAX_RESOLVE_DEPTH) return unresolved(opts);
   let memoryId = includerMemoryId;
   let loc = tag.target;
   let targetId: string | undefined;
@@ -174,15 +185,15 @@ async function expandTag(
       memo.targetIdentityByUrn.set(tag.target, identity);
     }
     const resolved = await identity;
-    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return BROKEN_INCLUDE_NOTICE;
+    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return unresolved(opts);
     memoryId = resolved.memoryId;
     loc = resolved.loc;
     targetId = resolved.id;
   }
   const target = await lookupTarget(db, access, memo, memoryId, loc, targetId);
-  if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
+  if (!target || trail.has(target.id)) return unresolved(opts);
   const selected = await selectIncludeRevision(db, memo, target, tag.settings);
-  if (!selected) return BROKEN_INCLUDE_NOTICE;
+  if (!selected) return unresolved(opts);
   if (!tag.settings.approved && tag.settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
   return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
