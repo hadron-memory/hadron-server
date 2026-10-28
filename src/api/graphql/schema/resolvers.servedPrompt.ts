@@ -38,7 +38,7 @@ export function pageOf({ limit, offset }: PageArgs): { take: number; skip: numbe
 type ServedPromptRow = NonNullable<Awaited<ReturnType<Context['db']['servedPrompt']['findFirst']>>>;
 
 /** Records of one owner column, newest first, as a page. The caller has already authorized the owner. */
-async function recordsPage(ctx: Context, where: { sessionId: string } | { chatId: string } | { runId: string }, args: PageArgs) {
+async function recordsPage(ctx: Context, where: { sessionId: string } | { chatId: string; appId: string } | { runId: string }, args: PageArgs) {
   const { take, skip } = pageOf(args);
   const [items, total] = await Promise.all([
     take === 0 ? [] : ctx.db.servedPrompt.findMany({ where, orderBy: [{ servedAt: 'desc' }, { ordinal: 'desc' }], take, skip }),
@@ -89,9 +89,11 @@ export const servedPromptOwnerFields = {
   chatServedPrompts: async (c: { id: string }, args: PageArgs, ctx: Context) => {
     if (!bootPromptServingEnabled()) return EMPTY_PAGE;
     // The chat's App is the one its records name; a chat with no record has nothing to read.
-    const first = await ctx.db.servedPrompt.findFirst({ where: { chatId: c.id }, select: { appId: true } });
+    // The authorized App is the chat's FIRST record's (deterministic: lowest ordinal), and only records under THAT App are
+    // returned: authorizing one App's record must never hand over another App's rows for the same chat.
+    const first = await ctx.db.servedPrompt.findFirst({ where: { chatId: c.id }, orderBy: { ordinal: 'asc' }, select: { appId: true } });
     if (!first || !(await mayManageApp(ctx, first.appId))) return EMPTY_PAGE;
-    return recordsPage(ctx, { chatId: c.id }, args);
+    return recordsPage(ctx, { chatId: c.id, appId: first.appId }, args);
   },
 };
 
