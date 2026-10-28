@@ -127,7 +127,8 @@ export interface ServedPromptOwner {
   runId?: string;
   /** A chat records again when its served revision changes (R37); the next ordinal is the caller's to compute. */
   ordinal?: number;
-  appId: string;
+  /** Null only for a chat held in a memory no App owns. */
+  appId: string | null;
   agentId: string;
   workerId?: string | null;
 }

@@ -15,6 +15,14 @@ describe('served-prompt-invariants.sql (#2047)', () => {
     expect(migration.endsWith(source)).toBe(true);
   });
 
+  it('the chat-without-App migration carries a byte-identical copy of its invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/served-prompt-app-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261028130000_served_prompt_chat_without_app/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+    expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir served-prompt-app-invariants.sql');
+    expect(readFileSync(new URL('../../test/globalSetup.ts', import.meta.url), 'utf8')).toContain('served-prompt-app-invariants.sql');
+  });
+
   it('post-push.sql and the test template setup both include the invariants file', () => {
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     expect(post).toContain('\\ir served-prompt-invariants.sql');
@@ -69,6 +77,12 @@ describe('served-prompt-invariants.sql (#2047)', () => {
       await expect(bind()).resolves.toBeTruthy();
       await expect(run()).resolves.toBeTruthy();
       await expect(chat()).resolves.toBeTruthy();
+    });
+
+    it('lets only a chat be recorded under no App (Vera #42133)', async () => {
+      await expect(chat({ appId: null })).resolves.toBeTruthy();
+      await bad(bind({ appId: null }), /chk_served_prompts_app/);
+      await bad(run({ appId: null }), /chk_served_prompts_app/);
     });
 
     it('has exactly one owner, of the kind it says, and only a bind names a worker', async () => {

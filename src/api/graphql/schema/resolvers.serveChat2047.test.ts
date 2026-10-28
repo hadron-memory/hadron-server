@@ -120,4 +120,20 @@ describe('#2047 chat', () => {
     await db.node.update({ where: { id: node }, data: { deletedAt: new Date() } });
     expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'hi' }, ctx()))).toBe('BOOT_PROMPT_TARGET_DELETED');
   });
+
+  it('a chat held in a memory no App owns is served and recorded under no App; only a platform admin reads that record', async () => {
+    await db.appAgent.deleteMany({ where: { agentId: agent.id } });
+    await db.app.deleteMany({});
+    await compiled('Solo {{agent.name}}');
+    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    expect(start.systemMessage).toContain('Solo chat-agent');
+    const chatNode = await db.node.findFirstOrThrow({ where: { loc: start.chatId } });
+    const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id } });
+    expect(recs).toHaveLength(1);
+    expect(recs[0]!.appId).toBeNull();
+    const asAdmin = (roles: string[], extra: Partial<Context> = {}): Context => ({ db, roles: roles as never, userId: user.id, ...extra });
+    expect((await (resolvers as any).Chat.servedPrompts({ id: chatNode.id }, {}, asAdmin(['ADMIN']))).total).toBe(1);
+    expect(await (resolvers as any).Chat.servedPrompts({ id: chatNode.id }, {}, asAdmin(['READER']))).toEqual({ items: [], total: 0 });
+    expect(await (resolvers as any).Chat.servedPrompts({ id: chatNode.id }, {}, asAdmin(['ADMIN'], { impersonation: {} as never }))).toEqual({ items: [], total: 0 });
+  });
 });

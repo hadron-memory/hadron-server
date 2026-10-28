@@ -713,7 +713,7 @@ export const chatMutations = {
               },
             });
             // #2047: the chat's record, written with the chat so neither exists without the other (R37).
-            if (chatServed && chatAppId) {
+            if (chatServed) {
               await recordServedPrompt(tx, { kind: 'CHAT', chatId: chatNodeId, appId: chatAppId, agentId: resolvedAgentId }, chatServed.served, chatServed.variables);
             }
             // Create the messages parent (so the chat subtree is well-formed)
@@ -1095,11 +1095,11 @@ export const chatMutations = {
         if (agent && bootPromptServingEnabled()) {
           // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
           const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
-          if (memory?.appId) {
+          {
             const last = await ctx.db.servedPrompt.findFirst({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true } });
             if (!last || last.compiledNodeId !== chatServed.served.compiledNodeId || last.servedRevSeq !== chatServed.served.servedRevSeq) {
               try {
-                await recordServedPrompt(ctx.db, { kind: 'CHAT', chatId: chatNode.id, appId: memory.appId, agentId: agent.id, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
+                await recordServedPrompt(ctx.db, { kind: 'CHAT', chatId: chatNode.id, appId: memory?.appId ?? null, agentId: agent.id, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
               } catch (err) {
                 // A concurrent turn already recorded this change: (chat, ordinal) is unique, and that record stands.
                 if ((err as { code?: string }).code !== 'P2002') throw err;
