@@ -9,6 +9,7 @@ import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { convertBootPrompts } from './convert-boot-prompts.js';
 import { OPERATOR_CONVERSION_INFO, createOperatorConversionContext, isOperatorConversionContext } from '../lib/auth/operatorConversion.js';
+import { assertMayWriteBootPromptPointer, loadBootPromptPointerOwner } from '../lib/bootPromptPointer.js';
 import { requireMemoryWriteAccess } from '../api/graphql/schema/resolvers.helpers.js';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -284,7 +285,35 @@ describe('#2676 — the operator seam is narrow', () => {
     expect(isOperatorConversionContext(JSON.parse(JSON.stringify({ ...ctx, db: undefined })))).toBe(false);
     expect(isOperatorConversionContext({ db, userId: null, roles: [], clientId: OPERATOR_CONVERSION_INFO })).toBe(false);
     expect(isOperatorConversionContext({ operatorConversion: true, [Symbol('operatorConversion')]: true })).toBe(false);
+    expect(isOperatorConversionContext({ operatorConversion: true, [Symbol.for('operatorConversion')]: true })).toBe(false);
     expect(isOperatorConversionContext(null)).toBe(false);
+  });
+
+  it('the pointer gate itself refuses a plain user and admits only the operator Context', async () => {
+    const agent = await agentWith('gate', 'Agent text.');
+    const owner = (await loadBootPromptPointerOwner(db, { field: 'AGENT', agentId: agent.id }))!;
+    const plain = await db.user.create({ data: { id: generateId(), name: 'plain-gate' } });
+    const plainCtx = { db, userId: plain.id, roles: [], clientId: `user:${plain.id}` } as Context;
+    await expect(assertMayWriteBootPromptPointer(plainCtx, owner)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(assertMayWriteBootPromptPointer(createOperatorConversionContext(db), owner)).resolves.toBeUndefined();
+  });
+
+  it('the operator is refused a soft-deleted system memory', async () => {
+    const ctx = createOperatorConversionContext(db);
+    const gone = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'g', urn: 'cv-org:g-sys', organizationId: orgId, deletedAt: new Date() } });
+    await expect(requireMemoryWriteAccess(ctx, gone.id)).rejects.toThrow();
+  });
+
+  it('a failed row restores the source\'s earlier approval of record rather than clearing it', async () => {
+    const agent = await agentWith('restore', 'Agent text.');
+    const src = await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Boot prompt', role: 'boot-prompt', content: 'Agent text.' } });
+    const manager = await db.user.create({ data: { id: generateId(), name: 'earlier-approver' } });
+    await db.node.update({ where: { id: src.id }, data: { revSeq: 2, approvedRevNo: 1, approvedBy: manager.id, approvedAt: new Date(), approvalHash: 'earlier' } });
+    drift.on = true;
+    const report = await run();
+    drift.on = false;
+    expect(report.rows[0]).toMatchObject({ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' });
+    expect(await db.node.findUniqueOrThrow({ where: { id: src.id } })).toMatchObject({ approvedRevNo: 1, approvedBy: manager.id, approvalHash: 'earlier' });
   });
 
   it('the operator writes system memories only', async () => {

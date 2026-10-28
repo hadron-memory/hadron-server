@@ -150,8 +150,12 @@ async function sourceCompileApprove(
   // Judged before anything is approved: a node already at the compiled address that is not this exact compiled
   // text is ADDRESS_OCCUPIED, never a compile target (the compile would write over it).
   const reuse = await reusableNode(db, { memoryId: p.sourceMemoryId, loc: p.compiledLoc }, p.expected, true);
-  const approvedHere = !src.approved;
-  if (approvedHere) await approveAsOperator(db, src.id);
+  // What the source held before this run (an earlier revision's approval of record), to restore if the row fails.
+  const before = src.approved ? null : await db.node.findUniqueOrThrow({
+    where: { id: src.id },
+    select: { approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true },
+  });
+  if (!src.approved) await approveAsOperator(db, src.id);
   try {
     if (reuse?.approved) return reuse.id;
     let compiledId = reuse?.id ?? null;
@@ -163,17 +167,21 @@ async function sourceCompileApprove(
     await approveAsOperator(db, compiledId);
     return compiledId;
   } catch (e) {
-    // The compile needs the approved source, so it is approved first; a row that then fails leaves nothing approved.
-    if (approvedHere) await withdrawApproval(db, src.id);
+    // The compile needs the approved source, so it is approved first; a row that then fails leaves the source as it was.
+    if (before) await restoreApproval(db, src.id, before);
     throw e;
   }
 }
 
-/** Undo an approval this run just made (the failed row's source), restoring the not-approved state. */
-async function withdrawApproval(db: PrismaClient, nodeId: string): Promise<void> {
+/** Put back what the node held before this run's approval; only while that approval is still the operator's own. */
+async function restoreApproval(
+  db: PrismaClient,
+  nodeId: string,
+  before: { approvedRevNo: number | null; approvedBy: string | null; approvedByInfo: string | null; approvedAt: Date | null; approvalHash: string | null },
+): Promise<void> {
   await db.node.updateMany({
-    where: { id: nodeId },
-    data: { approvedRevNo: null, approvedBy: null, approvedByInfo: null, approvedAt: null, approvalHash: null },
+    where: { id: nodeId, approvedBy: null, approvedByInfo: OPERATOR_CONVERSION_INFO },
+    data: before,
   });
 }
 
