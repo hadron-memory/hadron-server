@@ -1851,6 +1851,11 @@ export const typeDefs = `#graphql
     """
     lapsesAt: DateTime
     events: [UsageEvent!]!
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this session was served at its bind. Readable by whoever may read the
+    worker's internals; an empty page for anyone else, and while boot-prompt serving is off.
+    """
+    servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
   }
 
   """
@@ -4737,6 +4742,65 @@ export const typeDefs = `#graphql
   memory; shared chats live in the App's app-class memory and are
   readable by every AppMember of that App.
   """
+  enum ServedPromptKind {
+    BIND
+    CHAT
+    RUN
+  }
+
+  enum ServedPromptPointerLevel {
+    WORKER
+    APP_AGENT
+    AGENT
+  }
+
+  """
+  #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: one entry of a served revision's provenance. Ids, revisions and hashes only: never a loc, a
+  title, a node or text, so reading provenance hands the caller no included part. pruned is true when that revision is
+  no longer retained.
+  """
+  type ServedPromptProvenanceEntry {
+    nodeId: ID!
+    revSeq: Int!
+    hash: String!
+    pruned: Boolean!
+  }
+
+  type ServedPromptProvenancePage {
+    items: [ServedPromptProvenanceEntry!]!
+    total: Int!
+  }
+
+  """
+  #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: what a bind, a chatbot chat or a headless run was given. Immutable platform data, never
+  editable and never exported. Names the compiled revision served by (compiledNodeId, servedRevSeq), the pointer level that
+  chose it, that revision's own provenance and the values the platform variables were filled with. No composed text.
+  """
+  type ServedPrompt {
+    id: ID!
+    kind: ServedPromptKind!
+    pointerLevel: ServedPromptPointerLevel!
+    compiledNodeId: ID!
+    "Node.revSeq of the revision served (never contentRevSeq)."
+    servedRevSeq: Int!
+    "The compile revision that owns the provenance."
+    provenanceRevSeq: Int!
+    compiledContentHash: String!
+    "1 for a bind or a run; a chat counts up each time its served revision changes."
+    ordinal: Int!
+    variables: JSON!
+    servedAt: DateTime!
+    "True when the served revision is no longer retained (neither current nor in history)."
+    pruned: Boolean!
+    "Provenance of the served revision, one page at a time (default 50, cap 200)."
+    provenance(limit: Int, offset: Int): ServedPromptProvenancePage!
+  }
+
+  type ServedPromptsPage {
+    items: [ServedPrompt!]!
+    total: Int!
+  }
+
   type Chat {
     id: ID!
     loc: String!
@@ -4757,6 +4821,12 @@ export const typeDefs = `#graphql
     shared chats in the list.
     """
     createdBy: ID
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this chat was served, once at its start and again whenever its served
+    revision changed. Readable only by whoever manages the App the chat runs in, never by its end user; everyone else
+    gets an empty page. Empty while boot-prompt serving is off.
+    """
+    servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
   }
 
   """
@@ -5096,6 +5166,11 @@ export const typeDefs = `#graphql
     "Retirement instant — a retired worker stops authoring and takes no new sessions; the name stays reserved."
     retiredAt: DateTime
     retiredBy: String
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's
+    internals; null for anyone else, when no session is open, and while boot-prompt serving is off.
+    """
+    servedPrompt: ServedPrompt
   }
 
   """
@@ -6155,6 +6230,11 @@ export const typeDefs = `#graphql
     this caller since the run. A null here is a normal, expected state.
     """
     entryNode: Node
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this run was served. Readable by whoever may read the run; null for anyone
+    else, and while boot-prompt serving is off.
+    """
+    servedPrompt: ServedPrompt
   }
 
   "One health check the validator runs (#819)."
