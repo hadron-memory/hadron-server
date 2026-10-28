@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { chatNodeByLocOrThrow, cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
@@ -68,6 +68,7 @@ afterEach(() => {
   else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
 });
 
+// loc-scope-ok: counts every chat in the fresh test database
 const chatNodes = () => db.node.count({ where: { loc: { startsWith: 'chats:' } } });
 
 describe('#2047 chat', () => {
@@ -89,7 +90,7 @@ describe('#2047 chat', () => {
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     expect(start.systemMessage).toContain('You are chat-agent.');
     expect(start.systemMessage).not.toContain('LEGACY');
-    const chatNode = await db.node.findFirstOrThrow({ where: { loc: start.chatId } });
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id } });
     expect(recs).toHaveLength(1);
     expect(recs[0]).toMatchObject({ kind: 'CHAT', ordinal: 1, appId: app.id, agentId: agent.id, pointerLevel: 'AGENT', servedRevSeq: 1 });
@@ -109,7 +110,7 @@ describe('#2047 chat', () => {
     const turn = await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'hi' }, ctx());
     expect(turn.systemMessage).toContain('v2 chat-agent');
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'again' }, ctx());
-    const chatNode = await db.node.findFirstOrThrow({ where: { loc: start.chatId } });
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'asc' } });
     expect(recs.map((r) => [r.ordinal, r.servedRevSeq])).toEqual([[1, 1], [2, 2]]);
   });
@@ -127,7 +128,7 @@ describe('#2047 chat', () => {
     await compiled('Solo {{agent.name}}');
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
     expect(start.systemMessage).toContain('Solo chat-agent');
-    const chatNode = await db.node.findFirstOrThrow({ where: { loc: start.chatId } });
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
     const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id } });
     expect(recs).toHaveLength(1);
     expect(recs[0]!.appId).toBeNull();
