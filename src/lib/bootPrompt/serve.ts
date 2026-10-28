@@ -15,6 +15,7 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { newestApprovedRevisionOf } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
+import { generateId } from '../id.js';
 import { bootPromptRefusal, type BootPromptSurface } from './refusal.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -116,4 +117,63 @@ async function provenanceRevisionAtOrBelow(db: Db, nodeId: string, revNo: number
     select: { compiledRevNo: true },
   });
   return row?.compiledRevNo ?? null;
+}
+
+export interface ServedPromptOwner {
+  kind: 'BIND' | 'CHAT' | 'RUN';
+  sessionId?: string;
+  chatId?: string;
+  runId?: string;
+  /** A chat records again when its served revision changes (R37); the next ordinal is the caller's to compute. */
+  ordinal?: number;
+  appId: string;
+  agentId: string;
+  workerId?: string | null;
+}
+
+/**
+ * Write the immutable record of what was served (cor:agt:040:03): the revision, the provenance copied from it now (so a
+ * recompile never rewrites it) and the variable values this serve filled. No composed text and no derived blocks. Call it
+ * in the transaction that creates the owner, so a bind that rolls back leaves no record and a record never outlives
+ * a failed bind.
+ */
+export async function recordServedPrompt(
+  db: Db,
+  owner: ServedPromptOwner,
+  served: ServedBootPrompt,
+  variables: Record<string, string>,
+): Promise<void> {
+  await db.servedPrompt.create({
+    data: {
+      id: generateId(),
+      kind: owner.kind,
+      sessionId: owner.sessionId ?? null,
+      chatId: owner.chatId ?? null,
+      runId: owner.runId ?? null,
+      ordinal: owner.ordinal ?? 1,
+      appId: owner.appId,
+      agentId: owner.agentId,
+      workerId: owner.workerId ?? null,
+      pointerLevel: served.pointerLevel,
+      compiledNodeId: served.compiledNodeId,
+      servedRevSeq: served.servedRevSeq,
+      provenanceRevSeq: served.provenanceRevSeq,
+      compiledContentHash: served.compiledContentHash,
+      provenance: served.provenance as unknown as Prisma.InputJsonValue,
+      variables: variables as unknown as Prisma.InputJsonValue,
+    },
+  });
+}
+
+/**
+ * The compiled text of a revision a session was already given (its record), so a session finishes under the revision it
+ * was bound with. The node's current revision has no history row; an older one does until it is pruned. `null` when the
+ * revision is gone: the caller refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED` (final, never a fall back to newer text).
+ */
+export async function readRecordedRevisionContent(db: Db, nodeId: string, revSeq: number): Promise<string | null> {
+  const live = await db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, content: true, deletedAt: true } });
+  if (!live || live.deletedAt) return null;
+  const snapshot = await db.nodeRevision.findFirst({ where: { nodeId, revNo: revSeq }, orderBy: { id: 'desc' }, select: { content: true } });
+  if (snapshot) return snapshot.content ?? '';
+  return live.revSeq === revSeq ? (live.content ?? '') : null;
 }

@@ -15,6 +15,9 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
+import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
+import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
+import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -2473,7 +2476,7 @@ export async function composeWorkerPrompt(
   ctx: Context,
   worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
   opts?: { llmModel?: string | null },
-): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null }> {
+): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null; refusal?: string | null }> {
   // Working-state path: the composed boot prompt embeds the agent's persona
   // template, which this loads WITHOUT the Agent read gate — so every caller
   // must sit behind the worker read gate itself (#983 review; see
@@ -2497,19 +2500,27 @@ export async function composeWorkerPrompt(
   if (agent?.ownerUserId != null && !(await mayReadUserOwnedAgentTemplate(ctx, worker.id, agent.ownerUserId))) {
     return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
   }
-  const template = agent?.systemPrompt ?? null;
   const role = worker.role ?? agent?.personaRole ?? '';
   // #2042 (cor:dmo:150:08): the platform variables, filled now, at this bind, from the worker being bound.
   const platform = await workerPlatformValues(ctx, worker, agent, role, opts?.llmModel);
-  // One pass over each authored text (blind review P2-1/P2-2): the override is boot-prompt text too.
-  const bound = template ? applyPlatformVariables(template, platform, { name: worker.name, role }) : null;
-  const override = worker.promptOverride ? applyPlatformVariables(worker.promptOverride, platform) : worker.promptOverride;
-  const authored = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
   // Spec 049 Phase 6: the register block is DERIVED data appended through the
   // one composition point (`renderDerivedBlocks`), never authored prompt text
   // — evaluated for the Worker's durable holder, so an admin reading another
   // Worker's briefing sees that Worker's standing, not the admin's.
   const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE' }));
+  // #2047 (S10): with serving ON the prompt is the pointed-to compiled node's approved revision, as-is; the retired
+  // `Agent.systemPrompt` and `Worker.promptOverride` are not read. A refusal reads as no briefing with its code, so a
+  // read never throws where a bind would have refused.
+  if (bootPromptServingEnabled()) {
+    const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform);
+    const text = served.text === null ? (derived || null) : !derived ? served.text : `${served.text}\n\n${derived}`;
+    return { text: served.text === null ? null : text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null, refusal: served.refusal };
+  }
+  const template = agent?.systemPrompt ?? null;
+  // One pass over each authored text (blind review P2-1/P2-2): the override is boot-prompt text too.
+  const bound = template ? applyPlatformVariables(template, platform, { name: worker.name, role }) : null;
+  const override = worker.promptOverride ? applyPlatformVariables(worker.promptOverride, platform) : worker.promptOverride;
+  const authored = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
   const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
   // #1090 review (Andi, P2): stamp the render time AFTER the text exists. A
   // clock read taken up front could predate a concurrent template edit that
@@ -2519,13 +2530,66 @@ export async function composeWorkerPrompt(
   return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
 }
 
+
+/**
+ * #2047 — the text a read of a worker's briefing shows with serving ON. A worker's own OPEN session finishes under the
+ * revision it was bound with (its record), so a recompile approved mid-session reaches the NEXT bind, never this one;
+ * a session whose recorded revision was deleted reads `BOOT_PROMPT_RECORDED_REVISION_DELETED` and nothing newer. With no
+ * record to hold it to (a preview, a worker not bound) the read resolves what a bind would be served now, and records nothing.
+ */
+async function readServedWorkerText(
+  ctx: Context,
+  worker: { id: string; appId: string; agentId: string },
+  agentName: string,
+  platform: PlatformVariableValues,
+): Promise<{ text: string | null; refusal: string | null }> {
+  const where = { surface: 'bind' as const, agentName };
+  try {
+    const recorded = ctx.sessionId
+      ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
+      : null;
+    if (recorded) {
+      const content = await readRecordedRevisionContent(ctx.db, recorded.compiledNodeId, recorded.servedRevSeq);
+      if (content === null) throw bootPromptRefusal('BOOT_PROMPT_RECORDED_REVISION_DELETED', where);
+      return { text: applyPlatformVariables(content, platform), refusal: null };
+    }
+    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
+    return { text: applyPlatformVariables(served.content, platform), refusal: null };
+  } catch (err) {
+    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+    if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
+    throw err;
+  }
+}
+
+/**
+ * #2047 — a bind's serve, run INSIDE the bind's transaction after the session row exists: resolve, refuse with the typed
+ * refusal (which rolls the whole bind back, so a refused bind leaves no session and no record), fill the platform
+ * variables from the worker being bound and write the immutable record. No-op with serving OFF.
+ */
+export async function serveBindInTransaction(
+  tx: Prisma.TransactionClient,
+  ctx: Context,
+  bind: { sessionId: string; workerId: string; appId: string; agentId: string; llmModel: string | null },
+): Promise<void> {
+  if (!bootPromptServingEnabled()) return;
+  const [worker, agent] = await Promise.all([
+    tx.worker.findUniqueOrThrow({ where: { id: bind.workerId } }),
+    tx.agent.findUniqueOrThrow({ where: { id: bind.agentId }, select: { name: true, urn: true, personaRole: true } }),
+  ]);
+  const served = await resolveServedBootPrompt(tx, { surface: 'bind', appId: bind.appId, agent: { id: bind.agentId, name: agent.name }, workerId: bind.workerId });
+  const role = worker.role ?? agent.personaRole ?? '';
+  const variables = await workerPlatformValues({ ...ctx, db: tx as never }, worker, agent, role, bind.llmModel);
+  await recordServedPrompt(tx, { kind: 'BIND', sessionId: bind.sessionId, appId: bind.appId, agentId: bind.agentId, workerId: bind.workerId }, served, { ...variables });
+}
+
 /**
  * #2042 — the values of the platform variables for a worker bind. Bottom-up: the worker's own value, else the Agent's.
  * Stored signature/trailer templates are pre-rendered without recursive expansion (#1602). The reports-to name rides the
  * worker-visibility gate the caller already passed (same App), and `session.llmModel` is the bind's session model:
  * passed in by the bind that just created the session, else the newest open session's.
  */
-async function workerPlatformValues(
+export async function workerPlatformValues(
   ctx: Context,
   worker: { id: string; slug?: string; appId: string; name: string; signature: string; trailer: string; reportsToWorkerId?: string | null },
   agent: { name: string; urn: string; personaRole: string | null } | null,
