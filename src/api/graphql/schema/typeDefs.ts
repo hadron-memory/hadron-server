@@ -7578,7 +7578,8 @@ export const typeDefs = `#graphql
     replacesNodeId: ID
     position: CompiledPromptTagPosition
     selection: CompiledPromptSelection!
-    pruned: Boolean!
+    "Null when the source or its retained snapshot is unreadable; otherwise whether revision text is absent."
+    pruned: Boolean
   }
 
   "One-based position of an include tag (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
@@ -7603,7 +7604,8 @@ export const typeDefs = `#graphql
     """
     Recorded source revisions for exactly revNo of a compiled boot prompt (hrn:node:hadronmemory.com:specs:cor:agt:040:12).
     Uses the compiled node's read gate; denied, missing, deleted or noncompiled nodes return null.
-    Provenance survives pruning; pruned marks absent revision text. No source text is returned.
+    Provenance survives pruning; pruned marks absent revision text. Source status is null when unreadable.
+    No source text is returned.
     Limit defaults to 20, clamps to 0..100; offset defaults to 0 and clamps negative values to 0.
     A missing or malformed provenance record is an integrity error, never an empty page.
     """

@@ -5,6 +5,7 @@ import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { buildNodeRevisionSnapshot, createNodeRevision } from '../../../lib/nodeRevisionSnapshot.js';
 import { withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -33,14 +34,21 @@ beforeEach(async () => {
   await record(2, 2);
 });
 
-async function record(revNo: number, count: number) {
+async function record(revNo: number, count: number, storedCount = count) {
   await db.compiledPromptRevision.create({ data: {
     compiledNodeId: nodeId, compiledRevNo: revNo, contentHash: sha256Hex('compiled'), targetKind: 'AGENT', targetAgentId: agentId,
-    occurrenceCount: count, provenance: { version: 1, occurrences: Array.from({ length: count }, (_, order) => ({
+    occurrenceCount: storedCount, provenance: { version: 1, occurrences: Array.from({ length: count }, (_, order) => ({
       order, depth: order ? 1 : 0, parent: order ? 0 : null, kind: order ? 'include' : 'source', nodeId: sourceId,
       revNo: 1, hash: sha256Hex('source text'), selection: { rev: null, approved: true, signed: false },
     })) },
   } });
+}
+
+async function saveHistory(id: string, memory: string, revNo: number) {
+  const node = await db.node.findUniqueOrThrow({ where: { id } });
+  await withCompileWrite(() => createNodeRevision(db, {
+    ...buildNodeRevisionSnapshot({ ...node, memoryId: memory }, {}), revNo,
+  }));
 }
 
 describe('compiledPromptProvenance', () => {
@@ -110,10 +118,10 @@ describe('compiledPromptProvenance', () => {
   });
 
   it('retained source history is not pruned, even after the source advances', async () => {
-    await db.nodeRevision.create({ data: { nodeId: sourceId, memoryId, loc: 'source', name: 'source', content: 'source text', revNo: 1 } });
+    await saveHistory(sourceId, memoryId, 1);
     await db.node.update({ where: { id: sourceId }, data: { revSeq: 2 } });
     expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0].pruned).toBe(false);
-    await db.nodeRevision.create({ data: { nodeId, memoryId, loc: 'boot:compiled', name: 'compiled', content: 'compiled', revNo: 1 } });
+    await saveHistory(nodeId, memoryId, 1);
     expect((await query({ nodeRef: nodeId, revNo: 1 }, ctx)).pruned).toBe(false);
   });
 
@@ -131,7 +139,13 @@ describe('compiledPromptProvenance', () => {
     const memory = await db.memory.create({ data: { name: 'foreign', urn: 'foreign:private-source', organizationId: org.id, class: 'knowledge' } });
     await db.node.update({ where: { id: sourceId }, data: { memoryId: memory.id } });
     expect(await resolvers.Query.node(null, { ref: sourceId }, ctx)).toBeNull();
-    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0]).toMatchObject({ nodeId: sourceId, revNo: 1, pruned: false });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0]).toMatchObject({ nodeId: sourceId, revNo: 1, pruned: null });
+    await db.node.update({ where: { id: sourceId }, data: { revSeq: 2 } });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0].pruned).toBeNull();
+    await db.node.update({ where: { id: sourceId }, data: { deletedAt: new Date() } });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0].pruned).toBeNull();
+    await db.node.delete({ where: { id: sourceId } });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0]).toMatchObject({ nodeId: sourceId, revNo: 1, pruned: null });
   });
 
   it('fails closed on malformed stored provenance rather than substituting another revision', async () => {
@@ -141,6 +155,37 @@ describe('compiledPromptProvenance', () => {
     } });
     await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { revSeq: 3 } }));
     await expect(query({ nodeRef: nodeId, revNo: 3 }, ctx)).rejects.toThrow(/valid provenance/i);
+  });
+
+
+  it('rejects a stale platform-admin role in the request context after DB demotion', async () => {
+    const user = await db.user.create({ data: { name: 'platform admin', roles: ['ADMIN'] } });
+    const stale = { db, userId: user.id, roles: ['ADMIN'] } as Context;
+    expect(await query({ nodeRef: nodeId, revNo: 2 }, stale)).not.toBeNull();
+    await db.user.update({ where: { id: user.id }, data: { roles: ['READER'] } });
+    expect(await query({ nodeRef: nodeId, revNo: 2 }, stale)).toBeNull();
+  });
+
+  it('denies a retained compiled snapshot from an unreadable historical memory', async () => {
+    const org = await db.organization.create({ data: { name: 'old owner', urn: 'old-owner' } });
+    const memory = await db.memory.create({ data: { name: 'old', urn: 'old-owner:old', organizationId: org.id, class: 'knowledge' } });
+    await saveHistory(nodeId, memory.id, 1);
+    expect(await query({ nodeRef: nodeId, revNo: 2 }, ctx)).not.toBeNull();
+    expect(await query({ nodeRef: nodeId, revNo: 1 }, ctx)).toBeNull();
+  });
+
+  it('conceals retention status for an unreadable historical source snapshot', async () => {
+    const org = await db.organization.create({ data: { name: 'source history owner', urn: 'source-history-owner' } });
+    const memory = await db.memory.create({ data: { name: 'old source', urn: 'source-history-owner:old', organizationId: org.id, class: 'knowledge' } });
+    await saveHistory(sourceId, memory.id, 1);
+    await db.node.update({ where: { id: sourceId }, data: { revSeq: 2 } });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0]).toMatchObject({ nodeId: sourceId, revNo: 1, pruned: null });
+  });
+
+  it('rejects a denormalized occurrence count that disagrees with the immutable array', async () => {
+    await record(3, 1, 9);
+    await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { revSeq: 3 } }));
+    await expect(query({ nodeRef: nodeId, revNo: 3 }, ctx)).rejects.toThrow(/count disagrees/i);
   });
 
 });

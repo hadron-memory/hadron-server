@@ -206,22 +206,39 @@ export const nodeQueries = {
       // Only the requested page's source revision identities are looked up. No source body or
       // related entity object is exposed; recorded IDs/hashes/settings are the compiled artifact.
       const ids = [...new Set(occurrences.map((o) => o.nodeId))];
+      const sourceScopes = new Map(await Promise.all(ids.map(async (id) =>
+        [id, await nodeRevisionsScope(fresh, id)] as const)));
+      const readableIds = ids.filter((id) => sourceScopes.get(id));
+      const readableOccurrences = occurrences.filter((o) => sourceScopes.get(o.nodeId));
       const [current, history] = await Promise.all([
-        tx.node.findMany({ where: { id: { in: ids } }, select: { id: true, revSeq: true } }),
-        occurrences.length ? tx.nodeRevision.findMany({
-          where: { OR: occurrences.map((o) => ({ nodeId: o.nodeId, revNo: o.revNo })) },
-          select: { nodeId: true, revNo: true },
+        tx.node.findMany({ where: { id: { in: readableIds } }, select: { id: true, revSeq: true } }),
+        readableOccurrences.length ? tx.nodeRevision.findMany({
+          where: { OR: readableOccurrences.map((o) => ({ nodeId: o.nodeId, revNo: o.revNo })) },
+          orderBy: { id: 'desc' },
+          select: { nodeId: true, revNo: true, memoryId: true },
         }) : Promise.resolve([]),
       ]);
       const currentRevs = new Map(current.map((n) => [n.id, n.revSeq]));
-      const retained = new Set(history.map((r) => `${r.nodeId}:${r.revNo}`));
+      const retained = new Map<string, typeof history[number]>();
+      for (const row of history) {
+        const key = `${row.nodeId}:${row.revNo}`;
+        if (!retained.has(key)) retained.set(key, row);
+      }
+      const pruningStatus = (o: typeof occurrences[number]) => {
+        const sourceScope = sourceScopes.get(o.nodeId);
+        if (!sourceScope) return null;
+        if (currentRevs.get(o.nodeId) === o.revNo) return false;
+        const snapshot = retained.get(`${o.nodeId}:${o.revNo}`);
+        if (snapshot?.memoryId && !sourceScope.canRead(snapshot.memoryId)) return null;
+        return !snapshot;
+      };
       const items = occurrences.map((o) => ({
         order: o.order, depth: o.depth, parent: o.parent, kind: o.kind,
         nodeId: o.nodeId, revNo: o.revNo, hash: o.hash,
         replacesNodeId: o.replacesNodeId ?? null,
         position: o.position ? { line: o.position.line, column: o.position.column } : null,
         selection: { rev: o.selection.rev, approved: o.selection.approved, signed: o.selection.signed },
-        pruned: currentRevs.get(o.nodeId) !== o.revNo && !retained.has(`${o.nodeId}:${o.revNo}`),
+        pruned: pruningStatus(o),
       }));
       return { nodeId: revision.nodeId, revNo: revision.revNo, contentHash: revision.contentHash,
         pruned: revision.pruned, version: revision.provenance.version,
