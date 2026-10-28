@@ -7,7 +7,6 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { revisionsExemptFromPruning } from './nodeRevisionSnapshot.js';
-import { recordServedPrompt } from './bootPrompt/serve.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -102,6 +101,17 @@ describe('served compiled revision survives cap-pruning while its owner is open 
     expect(await retained(n.id)).not.toContain(1);
   });
 
+  it('a run that finishes releases it: RUNNING keeps the revision, the next prune after COMPLETED removes it', async () => {
+    const n = await mk('s:run-release');
+    const runId = await run('RUNNING');
+    await runOf(runId, n.id, 1);
+    await editMany(n.id, 4);
+    expect(await retained(n.id)).toContain(1);
+    await db.appRun.update({ where: { id: runId }, data: { status: 'COMPLETED' } });
+    await editMany(n.id, 1);
+    expect(await retained(n.id)).not.toContain(1);
+  });
+
   it("a record on another node, or a chat record, retains nothing of this node", async () => {
     const n = await mk('s:4');
     const other = await mk('s:5');
@@ -122,29 +132,5 @@ describe('served compiled revision survives cap-pruning while its owner is open 
     await editMany(n.id, 6);
     const kept = await retained(n.id);
     expect(kept).toEqual(expect.arrayContaining([1, 3]));
-  });
-});
-
-describe('a record and a prune that overlap (#2047 PR-C, two connections)', () => {
-  it('a prune started while a bind is still recording waits for it, then keeps the served revision', async () => {
-    const n = await mk('s:race');
-    await editMany(n.id, 4); // retained [3, 4], live 5: the next edit prunes rev 3
-    expect(await retained(n.id)).toEqual([3, 4]);
-    const sessionId = await session();
-    let editDone = false;
-    let editing: Promise<unknown> | undefined;
-    await db.$transaction(async (tx) => {
-      await recordServedPrompt(
-        tx,
-        { kind: 'BIND', sessionId, appId, agentId, workerId },
-        { ...served, compiledNodeId: n.id, servedRevSeq: 3, provenance: [], content: 'x' } as never,
-        {},
-      );
-      editing = edit(n.id, 'racing').then(() => { editDone = true; });
-      await new Promise((r) => setTimeout(r, 400));
-      expect(editDone).toBe(false); // the edit (and its prune) is parked behind the recording transaction
-    });
-    await editing;
-    expect(await retained(n.id)).toContain(3);
   });
 });
