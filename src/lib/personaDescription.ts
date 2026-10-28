@@ -31,6 +31,11 @@ export interface PlatformVariableValues {
   'session.llmModel': string;
 }
 
+/** The closed set's keys, in one place for the audit (#2704). */
+export const PLATFORM_VARIABLE_KEYS = [
+  'worker.name', 'worker.role', 'agent.name', 'worker.reportsTo.name', 'worker.signature', 'worker.trailer', 'worker.url', 'session.llmModel',
+] as const satisfies readonly (keyof PlatformVariableValues)[];
+
 export function applyPlatformVariables(
   template: string,
   values: PlatformVariableValues,

@@ -1,0 +1,244 @@
+/**
+ * #2704 (S14 of #1772, ruling B7) — the audit and the migration of the legacy `{{name}}` / `{{role}}` boot-prompt
+ * tokens to `{{worker.name}}` / `{{worker.role}}`, run by an operator from a host shell.
+ *
+ * AUDIT (read-only, `auditBootPromptTokens`): every live prompt text that holds a legacy token, or any token outside
+ * the closed set (cor:dmo:150:08): `Agent.systemPrompt`, `Worker.promptOverride`, the boot-prompt source nodes and the
+ * compiled nodes. It reports ids and counts only, never prompt text and never the text of a token.
+ *
+ * MIGRATE (`migrateBootPromptVariables`, dry-run by default): for each converted source (#2676: an Agent's
+ * `boot:source`, a worker's `boot:workers:<id>:source`) that holds a legacy token, or whose SERVED compiled text (its
+ * approved revision) does, the run rewrites the source, approves it, recompiles it in place, and approves the compiled revision, as the
+ * same operator principal the conversion uses. The compiled text must equal the text SERVED today (the compiled node's
+ * approved revision) with the legacy tokens renamed, byte for byte, or the row FAILS with the compiled node's approved
+ * revision untouched (serving reads the approved revision, so a failed row changes nothing a worker sees).
+ *
+ * The one semantic difference, stated: legacy `{{role}}` binds the raw persona-role slug; `{{worker.role}}` binds the
+ * worker's OWN role, else the persona role (cor:dmo:150:08). The text differs only for a worker that holds its own
+ * role different from its Agent's persona role, so the report lists those worker ids per migrated source
+ * (`roleDifferences`). A worker without its own role, and every `{{name}}`, render the same. Compiled text served
+ * today leaves a legacy token literal (#2702), so the migrated text is the first one that binds.
+ *
+ * Idempotent: a source with no legacy token whose compiled node has none is not selected. A source already migrated by
+ * an earlier run that stopped before the compile is picked up by its compiled node still holding a token.
+ */
+import type { PrismaClient } from '../generated/prisma/index.js';
+import { GraphQLError } from 'graphql';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../lib/bootPrompt.js';
+import { readRecordedRevisionContent } from '../lib/bootPrompt/serve.js';
+import { createOperatorConversionContext } from '../lib/auth/operatorConversion.js';
+import { NodeApprovalRefusal } from '../lib/nodeApproval.js';
+import { PLATFORM_VARIABLE_KEYS } from '../lib/personaDescription.js';
+import { compileBootPrompt } from '../api/graphql/schema/compileBootPrompt.js';
+import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
+import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { AGENT_SOURCE_LOC, approveAsOperator } from './convert-boot-prompts.js';
+
+const TOKEN = /\{\{([^{}]*)\}\}/g;
+const LEGACY = /\{\{(name|role)\}\}/g;
+const WORKER_SOURCE_LOC = /^boot:workers:([^:]+):source$/;
+const CLOSED_SET: ReadonlySet<string> = new Set(PLATFORM_VARIABLE_KEYS);
+const hasText = (s: string | null | undefined): s is string => typeof s === 'string' && s.length > 0;
+
+/** The rename the migration makes, and the only edit it makes. */
+export const renameLegacyTokens = (text: string): string => text.replace(LEGACY, (_m, key: string) => `{{worker.${key}}}`);
+
+export type TokenSurface = 'AGENT_SYSTEM_PROMPT' | 'WORKER_PROMPT_OVERRIDE' | 'SOURCE_NODE' | 'COMPILED_NODE';
+export interface TokenAuditRow {
+  surface: TokenSurface;
+  id: string;
+  /** How many legacy `{{name}}` / `{{role}}` tokens the text holds. */
+  legacy: number;
+  /** How many tokens outside the closed set it holds (an include tag `{{> …}}` is not a variable). */
+  unknown: number;
+  /** For a column surface: whether the owner is served through a boot-prompt pointer, so the column is not read. */
+  pointerSet?: boolean;
+}
+export interface TokenAuditReport {
+  rows: TokenAuditRow[];
+  /** Rows holding a legacy token, by surface; a column whose owner has a pointer set is counted apart (it is not served). */
+  legacyBySurface: Record<TokenSurface, number>;
+  retiredColumnLegacy: number;
+  unknownBySurface: Record<TokenSurface, number>;
+  /** True when no live, SERVED text holds a legacy token: the legacy binding may then be deleted (step 3). */
+  legacyBindingRemovable: boolean;
+}
+
+function scan(text: string): { legacy: number; unknown: number } {
+  let legacy = 0;
+  let unknown = 0;
+  for (const m of text.matchAll(TOKEN)) {
+    const body = m[1];
+    if (body.trimStart().startsWith('>')) continue;
+    if (body === 'name' || body === 'role') legacy++;
+    else if (!CLOSED_SET.has(body)) unknown++;
+  }
+  return { legacy, unknown };
+}
+
+/** Read-only. Ids and counts only. */
+export async function auditBootPromptTokens(db: PrismaClient): Promise<TokenAuditReport> {
+  const rows: TokenAuditRow[] = [];
+  const push = (surface: TokenSurface, id: string, text: string | null, pointerSet?: boolean) => {
+    if (!hasText(text)) return;
+    const s = scan(text);
+    if (s.legacy || s.unknown) rows.push({ surface, id, ...s, ...(pointerSet === undefined ? {} : { pointerSet }) });
+  };
+  for (const a of await db.agent.findMany({ where: { deletedAt: null, systemPrompt: { not: null } }, select: { id: true, systemPrompt: true, bootPromptNodeId: true }, orderBy: { id: 'asc' } })) {
+    push('AGENT_SYSTEM_PROMPT', a.id, a.systemPrompt, a.bootPromptNodeId !== null);
+  }
+  for (const w of await db.worker.findMany({
+    where: { promptOverride: { not: null }, retiredAt: null, app: { deletedAt: null, uninstalledAt: null } },
+    select: { id: true, promptOverride: true, bootPromptNodeId: true }, orderBy: { id: 'asc' },
+  })) push('WORKER_PROMPT_OVERRIDE', w.id, w.promptOverride, w.bootPromptNodeId !== null);
+  for (const n of await db.node.findMany({ where: { role: 'boot-prompt', deletedAt: null }, select: { id: true, content: true, nodeType: true }, orderBy: { id: 'asc' } })) {
+    push(n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE ? 'COMPILED_NODE' : 'SOURCE_NODE', n.id, n.content);
+  }
+  const zero = (): Record<TokenSurface, number> => ({ AGENT_SYSTEM_PROMPT: 0, WORKER_PROMPT_OVERRIDE: 0, SOURCE_NODE: 0, COMPILED_NODE: 0 });
+  const legacyBySurface = zero();
+  const unknownBySurface = zero();
+  let retiredColumnLegacy = 0;
+  for (const r of rows) {
+    if (r.unknown) unknownBySurface[r.surface]++;
+    if (!r.legacy) continue;
+    if (r.pointerSet) retiredColumnLegacy++;
+    else legacyBySurface[r.surface]++;
+  }
+  return {
+    rows, legacyBySurface, retiredColumnLegacy, unknownBySurface,
+    legacyBindingRemovable: Object.values(legacyBySurface).every((n) => n === 0),
+  };
+}
+
+export type MigrationOutcome = 'migrated' | 'skipped' | 'failed';
+export interface MigrationRow {
+  kind: 'AGENT' | 'WORKER';
+  id: string;
+  outcome: MigrationOutcome;
+  /** Why a row was skipped or failed (a fixed phrase or a refusal code); never prompt text. */
+  reason?: string;
+}
+export interface RoleDifference {
+  /** The source's owner: an Agent id, or a worker id. */
+  sourceOwnerId: string;
+  /** Workers served by this source whose own role differs from the persona role: `{{role}}` renders differently. */
+  workerIds: string[];
+}
+export interface MigrationReport {
+  applied: boolean;
+  migrated: number;
+  skipped: number;
+  failed: number;
+  rows: MigrationRow[];
+  roleDifferences: RoleDifference[];
+}
+
+class RowFailure extends Error {}
+
+function reasonOf(e: unknown): string {
+  if (e instanceof RowFailure) return e.message;
+  if (e instanceof NodeApprovalRefusal) return e.code;
+  if (e instanceof GraphQLError) return String(e.extensions?.code ?? 'GRAPHQL_ERROR');
+  return 'UNEXPECTED_ERROR';
+}
+
+interface SourceRow { id: string; memoryId: string; loc: string; content: string | null; revSeq: number; approvedRevNo: number | null }
+
+/** The text a worker is served from this compiled node today: its approved revision. */
+async function servedText(db: PrismaClient, nodeId: string): Promise<{ text: string; approved: boolean; current: string } | null> {
+  const node = await db.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { content: true, revSeq: true, approvedRevNo: true, nodeType: true } });
+  if (!node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
+  if (node.approvedRevNo === null) return null;
+  const text = await readRecordedRevisionContent(db, nodeId, node.approvedRevNo);
+  return text === null ? null : { text, approved: node.approvedRevNo === node.revSeq, current: node.content ?? '' };
+}
+
+async function migrateSource(
+  ctx: Context,
+  p: { kind: 'AGENT' | 'WORKER'; ownerId: string; source: SourceRow; compiledNodeId: string; compile: Parameters<typeof compileBootPrompt>[1] },
+  apply: boolean,
+): Promise<MigrationRow> {
+  const db = ctx.db as PrismaClient;
+  const row = (outcome: MigrationOutcome, reason?: string): MigrationRow => ({ kind: p.kind, id: p.ownerId, outcome, ...(reason ? { reason } : {}) });
+  try {
+    const served = await servedText(db, p.compiledNodeId);
+    if (!served) throw new RowFailure('COMPILED_NOT_APPROVED');
+    const expected = renameLegacyTokens(served.text);
+    const wanted = renameLegacyTokens(p.source.content ?? '');
+    if (!apply) return row('migrated');
+    let source = p.source;
+    if (source.content !== wanted) {
+      await writeNodeCore({ memoryId: source.memoryId, loc: source.loc, content: wanted }, ctx, 'update', { targetNodeId: source.id });
+      const fresh = await db.node.findUniqueOrThrow({ where: { id: source.id }, select: { id: true, memoryId: true, loc: true, content: true, revSeq: true, approvedRevNo: true } });
+      if (fresh.content !== wanted) throw new RowFailure('SOURCE_TEXT_CHANGED_ON_WRITE');
+      source = fresh;
+    }
+    if (source.approvedRevNo !== source.revSeq) await approveAsOperator(db, source.id);
+    const compiled = await compileBootPrompt(ctx, p.compile, { setPointer: false });
+    if (compiled.node.id !== p.compiledNodeId) throw new RowFailure('COMPILED_NODE_CHANGED');
+    if (compiled.node.content !== expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
+    await approveAsOperator(db, compiled.node.id);
+    return row('migrated');
+  } catch (e) {
+    return row('failed', reasonOf(e));
+  }
+}
+
+/** Workers served by an Agent's or a worker's source whose own role differs from the persona role (`{{role}}` differs). */
+async function roleDifferenceWorkers(db: PrismaClient, owner: { kind: 'AGENT' | 'WORKER'; id: string }): Promise<string[]> {
+  const where = owner.kind === 'WORKER'
+    ? { id: owner.id }
+    : { agentId: owner.id, retiredAt: null, bootPromptNodeId: null };
+  const workers = await db.worker.findMany({ where, select: { id: true, role: true, agent: { select: { personaRole: true } } }, orderBy: { id: 'asc' } });
+  return workers.filter((w) => hasText(w.role) && w.role !== (w.agent.personaRole ?? '')).map((w) => w.id);
+}
+
+/**
+ * Run the migration. Agent sources first (a worker's source includes its Agent's), then worker sources. A failed row
+ * never stops the run. `apply` false previews: writes nothing, and reports the rows it would migrate.
+ */
+export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply?: boolean } = {}): Promise<MigrationReport> {
+  const apply = opts.apply === true;
+  const ctx = createOperatorConversionContext(db);
+  const rows: MigrationRow[] = [];
+  const roleDifferences: RoleDifference[] = [];
+  const select = { id: true, memoryId: true, loc: true, content: true, revSeq: true, approvedRevNo: true } as const;
+  const holdsLegacy = (t: string | null | undefined) => hasText(t) && scan(t).legacy > 0;
+
+  const agents = await db.agent.findMany({
+    where: { deletedAt: null, bootPromptNodeId: { not: null }, systemMemoryId: { not: null } },
+    select: { id: true, systemMemoryId: true, bootPromptNodeId: true }, orderBy: { id: 'asc' },
+  });
+  for (const agent of agents) {
+    const source = await db.node.findFirst({ where: { memoryId: agent.systemMemoryId!, loc: AGENT_SOURCE_LOC, role: 'boot-prompt', deletedAt: null }, select });
+    if (!source) continue;
+    if (!holdsLegacy(source.content) && !holdsLegacy((await servedText(db, agent.bootPromptNodeId!))?.text)) continue;
+    const r = await migrateSource(ctx, { kind: 'AGENT', ownerId: agent.id, source, compiledNodeId: agent.bootPromptNodeId!, compile: { kind: 'AGENT', agentId: agent.id } }, apply);
+    rows.push(r);
+    if (r.outcome === 'migrated') {
+      const workerIds = await roleDifferenceWorkers(db, { kind: 'AGENT', id: agent.id });
+      if (workerIds.length) roleDifferences.push({ sourceOwnerId: agent.id, workerIds });
+    }
+  }
+
+  const workers = await db.worker.findMany({
+    where: { bootPromptNodeId: { not: null }, retiredAt: null, app: { deletedAt: null, uninstalledAt: null } },
+    select: { id: true, bootPromptNodeId: true, appId: true, agentId: true }, orderBy: { id: 'asc' },
+  });
+  for (const worker of workers) {
+    // The worker's source lives in its App's install memory of the Agent (#2676), never looked up by loc alone.
+    const install = await db.memory.findFirst({ where: { appId: worker.appId, installOfAgentId: worker.agentId, isInstallMemory: true, deletedAt: null }, select: { id: true } });
+    if (!install) continue;
+    const source = await db.node.findFirst({ where: { memoryId: install.id, loc: `boot:workers:${worker.id}:source`, role: 'boot-prompt', deletedAt: null }, select });
+    if (!source || !WORKER_SOURCE_LOC.test(source.loc)) continue;
+    if (!holdsLegacy(source.content) && !holdsLegacy((await servedText(db, worker.bootPromptNodeId!))?.text)) continue;
+    const r = await migrateSource(ctx, { kind: 'WORKER', ownerId: worker.id, source, compiledNodeId: worker.bootPromptNodeId!, compile: { kind: 'WORKER', workerId: worker.id } }, apply);
+    rows.push(r);
+    if (r.outcome === 'migrated') {
+      const workerIds = await roleDifferenceWorkers(db, { kind: 'WORKER', id: worker.id });
+      if (workerIds.length) roleDifferences.push({ sourceOwnerId: worker.id, workerIds });
+    }
+  }
+  const count = (o: MigrationOutcome) => rows.filter((r) => r.outcome === o).length;
+  return { applied: apply, migrated: count('migrated'), skipped: count('skipped'), failed: count('failed'), rows, roleDifferences };
+}
