@@ -189,10 +189,37 @@ describe('compiledPromptProvenance', () => {
     expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0].pruned).toBeNull();
   });
 
-  it('the database rejects duplicate numbered source snapshots regardless of memory', async () => {
+  it.each(['source', 'compiled'])('the database rejects duplicate numbered %s snapshots across different memories', async (kind) => {
+    const id = kind === 'source' ? sourceId : nodeId;
+    const org = await db.organization.create({ data: { name: 'other snapshot owner', urn: 'other-snapshot-owner' } });
+    const memory = await db.memory.create({ data: { name: 'other', urn: 'other-snapshot-owner:other', organizationId: org.id, class: 'knowledge' } });
+    await saveHistory(id, memoryId, 1);
+    await expect(saveHistory(id, memory.id, 1)).rejects.toMatchObject({ code: 'P2002' });
+    expect(await db.nodeRevision.count({ where: { nodeId: id, revNo: 1 } })).toBe(1);
+  });
+
+  it.each([1, 2])('denies compiled revision %i when its retained snapshot has unknown memory', async (revNo) => {
+    await saveHistory(nodeId, memoryId, revNo);
+    await withCompileWrite(() => db.nodeRevision.updateMany({ where: { nodeId, revNo }, data: { memoryId: null } }));
+    expect(await query({ nodeRef: nodeId, revNo }, ctx)).toBeNull();
+  });
+
+  it('uses readable live source ownership for the current revision despite a legacy snapshot', async () => {
     await saveHistory(sourceId, memoryId, 1);
-    await expect(saveHistory(sourceId, memoryId, 1)).rejects.toMatchObject({ code: 'P2002' });
-    expect(await db.nodeRevision.count({ where: { nodeId: sourceId, revNo: 1 } })).toBe(1);
+    await db.nodeRevision.updateMany({ where: { nodeId: sourceId, revNo: 1 }, data: { memoryId: null } });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0].pruned).toBe(false);
+  });
+
+  it('does not substitute unnumbered legacy snapshots for an exact numbered revision', async () => {
+    await saveHistory(nodeId, memoryId, 1);
+    await saveHistory(sourceId, memoryId, 1);
+    await withCompileWrite(() => db.nodeRevision.updateMany({
+      where: { nodeId: { in: [nodeId, sourceId] } }, data: { revNo: null, memoryId: null },
+    }));
+    await db.node.update({ where: { id: sourceId }, data: { revSeq: 2 } });
+    const page = await query({ nodeRef: nodeId, revNo: 1 }, ctx);
+    expect(page).toMatchObject({ revNo: 1, pruned: true });
+    expect(page.items[0]).toMatchObject({ revNo: 1, pruned: true });
   });
 
   it('rejects a denormalized occurrence count that disagrees with the immutable array', async () => {
