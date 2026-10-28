@@ -1,3 +1,4 @@
+import { taskListDateTime } from '../lib/agentTasks/listDateTime.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #1705 — agent tasks on the MCP surface (cor:agt:050): create, assign,
@@ -652,12 +653,12 @@ const SHAPE_HADRON_TASK_LIST = {
   tagsAll: z.array(z.string()).optional().describe('Match every tag; empty does not narrow.'),
   source: z.string().optional().describe('Exact opaque source, not a prefix.'),
   overdue: z.boolean().optional().describe('True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks; not an alarm.'),
-  createdAfter: z.string().optional().describe('Inclusive creation-time lower bound (ISO date-time).'),
-  createdBefore: z.string().optional().describe('Inclusive creation-time upper bound (ISO date-time).'),
-  startedAfter: z.string().optional().describe('Inclusive start-time lower bound; null dates excluded.'),
-  startedBefore: z.string().optional().describe('Inclusive start-time upper bound; null dates excluded.'),
-  finishedAfter: z.string().optional().describe('Inclusive finish-time lower bound; null dates excluded.'),
-  finishedBefore: z.string().optional().describe('Inclusive finish-time upper bound; null dates excluded.'),
+  createdAfter: taskListDateTime.optional().describe('Inclusive creation-time lower bound (ISO date-time).'),
+  createdBefore: taskListDateTime.optional().describe('Inclusive creation-time upper bound (ISO date-time).'),
+  startedAfter: taskListDateTime.optional().describe('Inclusive start-time lower bound; null dates excluded.'),
+  startedBefore: taskListDateTime.optional().describe('Inclusive start-time upper bound; null dates excluded.'),
+  finishedAfter: taskListDateTime.optional().describe('Inclusive finish-time lower bound; null dates excluded.'),
+  finishedBefore: taskListDateTime.optional().describe('Inclusive finish-time upper bound; null dates excluded.'),
   parentTaskId: z.string().optional(),
   rootsOnly: z.boolean().optional(),
   queued: z.boolean().optional().describe('Only pending tasks with no assignee.'),

@@ -1,3 +1,4 @@
+import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // Agent tasks — #1705 (Task Management slice T1, epic #1704).
 //
 // A team App assigns its work as AgentTasks (cor:agt:050). Each task has one
@@ -1588,7 +1589,10 @@ export const agentTaskQueries = {
       for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
         const value = args[`${prefix}${suffix}`];
         if (value == null) continue;
-        const date = value instanceof Date ? value : new Date(String(value));
+        if (!(value instanceof Date) && !taskListDateTime.safeParse(value).success) {
+          throw badInput(`${prefix}${suffix} must be an ISO date-time with a timezone offset.`);
+        }
+        const date = value instanceof Date ? value : new Date(value as string);
         if (!Number.isFinite(date.getTime())) throw badInput(`${prefix}${suffix} is not a valid date-time.`);
         range[op] = date;
       }
