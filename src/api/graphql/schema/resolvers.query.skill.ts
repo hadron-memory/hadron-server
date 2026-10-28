@@ -45,6 +45,7 @@ import {
   type NodeFacts,
   type SkillNode,
 } from '../../../lib/skilldoc/index.js';
+import { lintBrokenIncludes } from '../../../lib/skilldoc/lintIncludes.js';
 
 /**
  * #1177 §3 — the seam: the server judges, the client does I/O.
@@ -937,6 +938,9 @@ async function planSkills(input: SkillPlanInput, ctx: Context, selectedRefs?: st
       // and a finding asserting something about a body nobody could read is
       // worse than silence.
       findingsById.set(n._id, lockedIds.has(n._id) ? [] : lintNode(n, host));
+      // #2048 S11d (R9): the exporter's resolved body, which the pure rules above never see. A warning only.
+      const brokenIncludes = lockedIds.has(n._id) ? null : lintBrokenIncludes(n, bodyOf(n));
+      if (brokenIncludes) findingsById.get(n._id)?.push(brokenIncludes);
     }
     // Per host: one name on a node's Claude and Codex declarations is by
     // design, and two nodes sharing a Codex name collide only for Codex.
