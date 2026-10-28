@@ -18,6 +18,12 @@ vi.mock('../lib/channelReadState.js', async (orig) => ({
   renderAttentionSection: vi.fn(async () => ({ text: attention.text, captured: [] })),
 }));
 
+const aiConfigFault = vi.hoisted(() => ({ error: null as Error | null }));
+vi.mock('../lib/aiConfig.js', async (orig) => {
+  const real = await orig<typeof import('../lib/aiConfig.js')>();
+  return { ...real, resolveAiConfigWithFallback: vi.fn(async (...a: Parameters<typeof real.resolveAiConfigWithFallback>) => { if (aiConfigFault.error) throw aiConfigFault.error; return real.resolveAiConfigWithFallback(...a); }) };
+});
+
 import { executeAppRun, mintAppRun, type RunExecutionDeps } from './appRuns.js';
 
 let orgId: string, appId: string, userId: string, agentId: string, memoryId: string;
@@ -55,6 +61,7 @@ async function compiledPointer(content: string) {
 beforeEach(async () => {
   vi.clearAllMocks();
   attention.text = '';
+  aiConfigFault.error = null;
   process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'run-org', urn: 'run-org' } })).id;
@@ -149,5 +156,21 @@ describe('#2047 run', () => {
     const { deps: d, llm } = deps();
     await executeAppRun(db, run.id, d);
     expect(llm.mock.calls[0]![1].system!.startsWith('Model=run-model-7.\n\n')).toBe(true);
+  });
+
+  it('the mint resolves the model through the trigger override (__aiConfigName), as resolveConfig does', async () => {
+    await db.aiServiceConfig.create({ data: { id: generateId(), name: 'default', organizationId: orgId, provider: 'anthropic', model: 'default-model' } });
+    await db.aiServiceConfig.create({ data: { id: generateId(), name: 'alt', organizationId: orgId, provider: 'anthropic', model: 'alt-model' } });
+    await compiledPointer('Model={{session.llmModel}}.');
+    const run = await mint({ userId, agentId, eventData: { __aiConfigName: 'alt' } });
+    expect((await db.servedPrompt.findFirstOrThrow({ where: { runId: run.id } })).variables).toMatchObject({ 'session.llmModel': 'alt-model' });
+  });
+
+  it('with no AI config the mint records an empty model (the run itself fails NO_AI_CONFIG); any other resolve failure is not swallowed', async () => {
+    await compiledPointer('Model={{session.llmModel}}.');
+    const run = await mint({ userId, agentId });
+    expect((await db.servedPrompt.findFirstOrThrow({ where: { runId: run.id } })).variables).toMatchObject({ 'session.llmModel': '' });
+    aiConfigFault.error = new Error('registry down');
+    expect(await code(mint({ userId, agentId }))).toBe('registry down');
   });
 });
