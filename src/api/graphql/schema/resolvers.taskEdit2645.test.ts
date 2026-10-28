@@ -5,10 +5,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { loadStallInputs, stallCandidates, effectiveWindows } from '../../../lib/agentTasks/stall.js';
+import { loadStallInputs, stallCandidates, effectiveWindows, raiseStallAlarm } from '../../../lib/agentTasks/stall.js';
 import { createMcpServerInstance } from '../../../mcp/server.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -92,14 +93,35 @@ describe('task edit #2645',()=>{
   await db.agentTask.update({where:{id:task.id},data:{assignedAt}});
   const before=(await loadStallInputs(db,{id:task.id},new Date()))[0];
   const old=stallCandidates(before,effectiveWindows(null),new Date()).find(c=>c.rule==='not-started')!;
+  const alarmId=await raiseStallAlarm(db,old,new Date());
+  expect(alarmId).toBeTruthy();
   await edit({startBy:new Date(Date.now()-1000)});
   const after=(await loadStallInputs(db,{id:task.id},new Date()))[0];
   const next=stallCandidates(after,effectiveWindows(null),new Date()).find(c=>c.rule==='not-started')!;
   expect(next.episodeStart.getTime()).toBeGreaterThan(old.episodeStart.getTime());
+  expect(await db.agentTeamEvent.findUnique({where:{id:alarmId!}})).toMatchObject({acknowledgedAt:null,type:'stall.not-started'});
   expect(next.dueAt.getTime()).toBe((after.task.startBy as Date).getTime());
   await edit({startBy:new Date(assignedAt.getTime()-1000)});
   const earlier=(await loadStallInputs(db,{id:task.id},new Date()))[0];
   expect(stallCandidates(earlier,effectiveWindows(null),new Date()).find(c=>c.rule==='not-started')!.dueAt.getTime()).toBe(assignedAt.getTime()+15*60_000);
+ });
+ it('never clears an assignment wake, and the edit event alone creates no wake',async()=>{
+  const at=(n:number)=>new Date(Date.now()-10_000+n*1000);
+  task=await db.agentTask.create({data:{appId:app.id,title:'Wake control',ownerWorkerId:worker.id,assigneeWorkerId:worker.id,assignedAt:at(1)}});
+  const assigned=await db.agentTeamEvent.create({data:{appId:app.id,taskId:task.id,type:'task.assigned',subjectWorkerId:worker.id,createdAt:at(1)}});
+  await runAsActor({workerId:worker.id,agentId:agent.id},()=>edit({title:'Passive edit'}));
+  const wakes=(await pendingTaskWakes(db,[worker.id],new Date())).get(worker.id) ?? [];
+  expect(wakes.map(w=>w.eventId)).toContain(assigned.id);
+  expect(wakes.map(w=>w.eventId)).not.toContain((await edited())[0].id);
+  expect(await db.workerDeliveryTaskEvent.count()).toBe(0);
+ });
+ it('does not clear a child-finished wake when its worker owner edits the parent',async()=>{
+  const at=(n:number)=>new Date(Date.now()-10_000+n*1000);
+  await db.agentTask.update({where:{id:task.id},data:{ownerUserId:null,ownerWorkerId:worker.id}});
+  const child=await db.agentTask.create({data:{appId:app.id,parentTaskId:task.id,title:'Child',ownerWorkerId:worker.id,assigneeUserId:assignee.id,status:'finished',assignedAt:at(0),startedAt:at(0),finishedAt:at(1),resultOutcome:'done'}});
+  const finished=await db.agentTeamEvent.create({data:{appId:app.id,taskId:child.id,type:'task.finished',createdAt:at(1)}});
+  await runAsActor({workerId:worker.id,agentId:agent.id},()=>edit({description:'Passive parent edit'}));
+  expect((await pendingTaskWakes(db,[worker.id],new Date())).get(worker.id)?.map(w=>w.eventId)).toContain(finished.id);
  });
  it('exposes the same patch through GraphQL and actual MCP SDK calls',async()=>{
   const apollo=new ApolloServer({typeDefs,resolvers});
@@ -112,8 +134,11 @@ describe('task edit #2645',()=>{
   const server=createMcpServerInstance({userId:owner.id,roles:['READER'],clientId:`user:${owner.id}`} as any,()=>undefined,{kind:'multi-app'});
   const client=new Client({name:'task-edit',version:'1'});const [a,b]=InMemoryTransport.createLinkedPair();await server.connect(b);await client.connect(a);
   try {
-   const response=await client.callTool({name:'hadron_task_update',arguments:{taskId:task.id,title:'SDK',session:session.id}});
+   const response=await client.callTool({name:'hadron_task_update',arguments:{taskId:task.id,input:{title:'SDK'},session:session.id}});
    expect(response.isError).not.toBe(true);expect((await db.agentTask.findUniqueOrThrow({where:{id:task.id}})).title).toBe('SDK');
+   const forbidden=await client.callTool({name:'hadron_task_update',arguments:{taskId:task.id,input:{source:'forbidden'},session:session.id}});
+   expect(forbidden.isError).toBe(true);
+   expect((await db.agentTask.findUniqueOrThrow({where:{id:task.id}})).source).toBe('fixed-source');
   } finally {await client.close();await server.close();}
  });
 });

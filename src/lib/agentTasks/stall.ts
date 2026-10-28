@@ -155,6 +155,8 @@ export type StallInputs = {
    * the pre-#1754 episode start.
    */
   queuedAt: Date | null;
+  /** #2645: changing startBy creates a new not-started episode, without changing assignment/progress clocks. */
+  startByEditedAt?: Date | null;
   /**
    * #2022 (R68; the Proposed stop-signal exceptions to cor:agt:050:13-:17): when a `pause` or `halt` covered each
    * worker these rules read (the assignee, and each ended child's owner), from the coverage ledger. Time inside them
@@ -214,7 +216,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
     ...children.map((c) => c.ownerWorkerId),
   ].filter((w): w is string => !!w))];
   const ownerUserIds = [...new Set(children.map((c) => c.ownerUserId).filter((u): u is string => !!u))];
-  const [progress, queued, activity, userCalls] = await Promise.all([
+  const [progress, queued, activity, userCalls, startByEdits] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
@@ -239,11 +241,17 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
         _max: { createdAt: true },
       })
       : Promise.resolve([]),
+    db.agentTeamEvent.groupBy({
+      by: ['taskId'],
+      where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['startBy'] } },
+      _max: { createdAt: true },
+    }),
   ]);
   const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
+  const editedBy = new Map(startByEdits.map(e => [e.taskId, e._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -273,6 +281,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       lastProgressAt: progressBy.get(task.id) ?? null,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
       queuedAt: queuedBy.get(task.id) ?? null,
+      startByEditedAt: editedBy.get(task.id) ?? null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
@@ -394,7 +403,7 @@ export function stallCandidates(
       : plus(task.assignedAt, windows.notStartedMinutes);
     // #2022: a `pause` or `halt` on the assignee holds the clock, startBy's included (Vera's receipt §5).
     const stopped = stopOf(inputs, task.assigneeWorkerId);
-    add('not-started', task.assignedAt, countedDueAt(task.assignedAt, deadline.getTime() - task.assignedAt.getTime(), stopped), {}, stopped);
+    add('not-started', latest(task.assignedAt, inputs.startByEditedAt) as Date, countedDueAt(task.assignedAt, deadline.getTime() - task.assignedAt.getTime(), stopped), {}, stopped);
   }
 
   // cor:agt:050:15 — started, not waiting on children, no assignee activity.
