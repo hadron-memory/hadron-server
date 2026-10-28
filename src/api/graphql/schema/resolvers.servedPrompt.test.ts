@@ -98,6 +98,22 @@ describe('served-prompt record reads (#2047)', () => {
     expect(await chatPage(outsiderU)).toEqual({ items: [], total: 0 });
   });
 
+  it("authorizing the chat's App never returns another App's record of the same chat (#2112 local P2)", async () => {
+    const other = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Other', urn: `other-${generateId().slice(0, 6)}` } });
+    const agentId = (await db.servedPrompt.findFirstOrThrow({ where: { chatId: chatNodeId } })).agentId;
+    await db.servedPrompt.create({
+      data: { kind: 'CHAT', chatId: chatNodeId, ordinal: 4, appId: other.id, agentId, pointerLevel: 'AGENT', compiledNodeId, servedRevSeq: 3, provenanceRevSeq: 2, compiledContentHash: 'h' } as never,
+    });
+    const page = await chatPage(ownerU);
+    expect(page.total).toBe(3);
+    expect(page.items.every((r: { appId: string }) => r.appId === appId)).toBe(true);
+  });
+
+  it("a deleted App's chat records read as empty even to its manager", async () => {
+    await db.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+    expect(await chatPage(ownerU)).toEqual({ items: [], total: 0 });
+  });
+
   it('a chat with no record reads as an empty page, whoever asks', async () => {
     expect(await R.Chat.servedPrompts({ id: generateId() }, {}, ctxFor(ownerU))).toEqual({ items: [], total: 0 });
   });
