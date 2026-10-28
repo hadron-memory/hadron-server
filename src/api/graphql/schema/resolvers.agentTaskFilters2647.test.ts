@@ -1,0 +1,90 @@
+import { beforeEach, expect, it, vi } from 'vitest';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { resolvers, type Context } from './resolvers.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { createMcpServerInstance } from '../../../mcp/server.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { AuthContext } from '../../../middleware/auth.js';
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+let appId: string, userId: string, outsiderId: string;
+const day = (n: number) => new Date(`2026-01-${String(n).padStart(2, '0')}T00:00:00Z`);
+const ctx = (): Context => ({ db, userId, roles: ['READER'] });
+const list = (args = {}, context = ctx()) => (resolvers.Query as any).agentTasks(null, { appRef: appId, ...args }, context);
+const titles = (rows: any[]) => rows.map(row => row.title);
+async function task(title: string, extra: Record<string, unknown> = {}) {
+  return db.agentTask.create({ data: { appId, ownerUserId: userId, title, createdAt: day(1), ...extra } as any });
+}
+beforeEach(async () => {
+  await cleanDb(db);
+  const org = await db.organization.create({ data: { name: 'Filters', urn: 'filters2647.example' } });
+  userId = (await db.user.create({ data: { handle: 'filters2647-member' } })).id;
+  outsiderId = (await db.user.create({ data: { handle: 'filters2647-outsider' } })).id;
+  appId = (await db.app.create({ data: { organizationId: org.id, name: 'Filters', urn: 'filters2647.example:app' } })).id;
+  await db.appMember.create({ data: { appId, userId, role: 'member' } });
+  await task('both', { tags: ['red', 'blue'], source: 'issue:exact', createdAt: day(3) });
+  await task('red', { tags: ['red'], source: 'issue:exact-more', createdAt: day(2) });
+  await task('none');
+});
+it('applies any/all tags and exact opaque source together before paging', async () => {
+  expect(titles(await list({ tagsAny: ['blue', 'green'] }))).toEqual(['both']);
+  expect(titles(await list({ tagsAll: ['red', 'blue'] }))).toEqual(['both']);
+  expect(titles(await list({ tagsAny: ['red'], tagsAll: ['blue'], source: 'issue:exact' }))).toEqual(['both']);
+  expect(await list({ source: 'issue:' })).toEqual([]);
+  expect(await list({ tagsAny: ['green'], tagsAll: ['blue'] })).toEqual([]);
+  expect(titles(await list({ tagsAny: ['red'], limit: 1, offset: 1 }))).toEqual(['red']);
+  expect(await list({ tagsAny: ['red'], offset: 9 })).toEqual([]);
+  expect(await list({ tagsAny: [], tagsAll: [] })).toEqual(await list());
+});
+it.each(['created', 'started', 'finished'])('inclusive %s ranges exclude null dates and AND both bounds', async field => {
+  if (field !== 'created') {
+    for (const [title, n] of [['started-row', 4], ['finished-row', 5]] as const) await task(title, {
+      status: field === 'finished' ? 'finished' : 'started', assigneeUserId: userId, assignedAt: day(n), startedAt: day(n),
+      ...(field === 'finished' ? { finishedAt: day(n), resultOutcome: 'succeeded' } : {}),
+    });
+  }
+  const n = field === 'created' ? 2 : 4;
+  const rows = await list({ [`${field}After`]: day(n), [`${field}Before`]: day(n) });
+  expect(titles(rows)).toEqual([field === 'created' ? 'red' : 'started-row']);
+  expect(await list({ [`${field}After`]: day(8), [`${field}Before`]: day(9) })).toEqual([]);
+});
+it('overdue is strictly past database now, never backlog, started or ended', async () => {
+  await db.$transaction(async tx => {
+    const [{ now }] = await tx.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
+    for (const [title, status, time] of [['past', 'pending', -1000], ['exact', 'pending', 0], ['future', 'pending', 1000], ['parked', 'backlog', -1000]] as const)
+      await tx.agentTask.create({ data: { appId, ownerUserId: userId, title, status, startBy: new Date(now.getTime() + time) } });
+    const c = { ...ctx(), db: tx } as unknown as Context;
+    expect(titles(await list({ overdue: true }, c))).toEqual(['past']);
+    const notOverdue = titles(await list({ overdue: false }, c));
+    expect(notOverdue).toEqual(expect.arrayContaining(['exact', 'future', 'parked', 'none']));
+    expect(notOverdue).not.toContain('past');
+    expect(await list({ overdue: true, status: ['BACKLOG'] }, c)).toEqual([]);
+  });
+});
+it('preserves APP_NOT_FOUND for every filter combination before validation', async () => {
+  for (const args of [{}, { tagsAll: ['red'], source: 'issue:exact', overdue: true, createdAfter: day(1) }])
+    await expect(list(args, { db, userId: outsiderId, roles: ['READER'] })).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+});
+it('retains default order and the 200 cap after filtering', async () => {
+  await db.agentTask.createMany({ data: Array.from({ length: 205 }, (_, i) => ({ appId, ownerUserId: userId, title: `cap-${i}`, tags: ['cap'] })) });
+  expect(await list({ tagsAll: ['cap'], limit: 999 })).toHaveLength(200);
+  expect(await list({ tagsAll: ['cap'] })).toHaveLength(20);
+  expect(await list({ tagsAll: ['cap'], limit: 999, offset: 200 })).toHaveLength(5);
+});
+it('exposes the filters in executable GraphQL and real MCP argument parsing', async () => {
+  const api = new ApolloServer<Context>({ typeDefs, resolvers });
+  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
+  const client = new Client({ name: 'filters2647', version: '1' });
+  const [local, remote] = InMemoryTransport.createLinkedPair();
+  await server.connect(remote); await client.connect(local);
+  try {
+    const result = await api.executeOperation({ query: `query($app:ID!){agentTasks(appRef:$app,tagsAny:["red"],tagsAll:["blue"],source:"issue:exact",createdAfter:"2026-01-03T00:00:00Z",createdBefore:"2026-01-03T00:00:00Z"){title}}`, variables: { app: appId } }, { contextValue: ctx() });
+    expect(result.body.kind).toBe('single');
+    if (result.body.kind === 'single') { expect(result.body.singleResult.errors).toBeUndefined(); expect(result.body.singleResult.data).toEqual({ agentTasks: [{ title: 'both' }] }); }
+    const response = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, tagsAny: ['red'], tagsAll: ['blue'], source: 'issue:exact', createdAfter: day(3).toISOString(), createdBefore: day(3).toISOString() } });
+    const text = (response.content as any[]).map(item => item.text).join('\n');
+    expect(text).toContain('both'); expect(text).not.toContain('title: red'); expect(text).not.toContain('title: none');
+  } finally { await client.close(); await server.close(); await api.stop(); }
+});
