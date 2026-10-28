@@ -32,6 +32,7 @@ ${SHARED_STYLE}
   <main>
     <h1>Sign in to Hadron</h1>
     <p><strong>{{clientName}}</strong> is asking to connect to your Hadron account.</p>
+    <p class="muted">Returns to: <code>{{redirectAnchor}}</code></p>
     <p>You need to sign in to Hadron first. After you sign in, you&#39;ll come back to review and approve the connection.</p>
     <a class="button" href="{{signInUrl}}">Continue with GitHub</a>
     <p class="muted">No GitHub account? <a href="{{emailUrl}}">Use email instead</a></p>
