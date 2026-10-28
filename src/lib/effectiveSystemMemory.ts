@@ -203,7 +203,10 @@ export async function findEffectiveNodeIdByLoc(
   db: Db,
   memoryId: string,
   loc: string,
+  options: { inheritRoot?: boolean } = {},
 ): Promise<{ id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null> {
+  // A memory-less child starts at its first contributing base; that root is inherited too.
+  const inheritRoot = options.inheritRoot ?? false;
   const chain = await systemMemoryChain(db, memoryId);
   const links = chain.length > 0 ? chain : [{ agentId: '', agentUrn: '', memoryId }];
   const memIds = links.map((l) => l.memoryId);
@@ -212,8 +215,8 @@ export async function findEffectiveNodeIdByLoc(
     FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
     JOIN nodes n ON n.memory_id = c.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
-      AND (c.pos = 1 OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
-      AND (c.pos = 1 OR n.node_type <> ${COMMENT_NODE_TYPE})
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY c.pos LIMIT 1`;
   const hit = rows[0];
   if (!hit) return null;
