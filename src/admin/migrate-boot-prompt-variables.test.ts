@@ -5,6 +5,7 @@ import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../test/helpers.j
 import { generateId } from '../lib/id.js';
 import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
+import { applyPlatformVariables } from '../lib/personaDescription.js';
 import { convertBootPrompts } from './convert-boot-prompts.js';
 import { auditBootPromptTokens, migrateBootPromptVariables, renameLegacyTokens } from './migrate-boot-prompt-variables.js';
 
@@ -164,15 +165,11 @@ describe('#2704 — migration', () => {
     expect((await compiledOf('agent', agent.id)).content).toBe('Hi {{worker.name}}');
   });
 
-  it('lists the workers whose own role differs from the persona role (the one rendered difference)', async () => {
-    const agent = await agentWith('coord', 'Role: {{role}}', 'coordinator');
-    const app = await appWith('mg-app', agent.id);
-    await workerOf(app.id, agent.id, 'same', null, null);
-    await workerOf(app.id, agent.id, 'alike', null, 'coordinator');
-    const own = await workerOf(app.id, agent.id, 'own', null, 'reviewer');
-    await convert();
-    const report = await migrate();
-    expect(report.roleDifferences).toEqual([{ sourceOwnerId: agent.id, workerIds: [own.id] }]);
+  it('renames tokens without changing the rendered text, for a worker whose own role differs from the persona role', () => {
+    const vars = { 'worker.name': 'Ada', 'worker.role': 'reviewer', 'agent.name': 'Coord', 'worker.reportsTo.name': '', 'worker.signature': '', 'worker.trailer': '', 'worker.url': '', 'session.llmModel': '' };
+    const before = 'I am {{name}}, a {{role}}.';
+    const legacy = { name: vars['worker.name'], role: vars['worker.role'] };
+    expect(applyPlatformVariables(renameLegacyTokens(before), vars)).toBe(applyPlatformVariables(before, vars, legacy));
   });
 
   it('leaves an unconverted Agent and a source with no legacy token alone', async () => {

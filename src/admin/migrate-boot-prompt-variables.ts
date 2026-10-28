@@ -13,10 +13,8 @@
  * approved revision) with the legacy tokens renamed, byte for byte, or the row FAILS with the compiled node's approved
  * revision untouched (serving reads the approved revision, so a failed row changes nothing a worker sees).
  *
- * The one semantic difference, stated: legacy `{{role}}` binds the raw persona-role slug; `{{worker.role}}` binds the
- * worker's OWN role, else the persona role (cor:dmo:150:08). The text differs only for a worker that holds its own
- * role different from its Agent's persona role, so the report lists those worker ids per migrated source
- * (`roleDifferences`). A worker without its own role, and every `{{name}}`, render the same. Compiled text served
+ * The rename changes no rendered text: every path already binds legacy `{{role}}` to the same value as `{{worker.role}}`
+ * (the worker's own role, else the persona role) and `{{name}}` to `{{worker.name}}` (cor:dmo:150:08). Compiled text served
  * today leaves a legacy token literal (#2702), so the migrated text is the first one that binds.
  *
  * Idempotent: a source with no legacy token whose compiled node has none is not selected. A source already migrated by
@@ -118,19 +116,12 @@ export interface MigrationRow {
   /** Why a row was skipped or failed (a fixed phrase or a refusal code); never prompt text. */
   reason?: string;
 }
-export interface RoleDifference {
-  /** The source's owner: an Agent id, or a worker id. */
-  sourceOwnerId: string;
-  /** Workers served by this source whose own role differs from the persona role: `{{role}}` renders differently. */
-  workerIds: string[];
-}
 export interface MigrationReport {
   applied: boolean;
   migrated: number;
   skipped: number;
   failed: number;
   rows: MigrationRow[];
-  roleDifferences: RoleDifference[];
 }
 
 class RowFailure extends Error {}
@@ -184,15 +175,6 @@ async function migrateSource(
   }
 }
 
-/** Workers served by an Agent's or a worker's source whose own role differs from the persona role (`{{role}}` differs). */
-async function roleDifferenceWorkers(db: PrismaClient, owner: { kind: 'AGENT' | 'WORKER'; id: string }): Promise<string[]> {
-  const where = owner.kind === 'WORKER'
-    ? { id: owner.id }
-    : { agentId: owner.id, retiredAt: null, bootPromptNodeId: null };
-  const workers = await db.worker.findMany({ where, select: { id: true, role: true, agent: { select: { personaRole: true } } }, orderBy: { id: 'asc' } });
-  return workers.filter((w) => hasText(w.role) && w.role !== (w.agent.personaRole ?? '')).map((w) => w.id);
-}
-
 /**
  * Run the migration. Agent sources first (a worker's source includes its Agent's), then worker sources. A failed row
  * never stops the run. `apply` false previews: writes nothing, and reports the rows it would migrate.
@@ -201,7 +183,6 @@ export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply
   const apply = opts.apply === true;
   const ctx = createOperatorConversionContext(db);
   const rows: MigrationRow[] = [];
-  const roleDifferences: RoleDifference[] = [];
   const select = { id: true, memoryId: true, loc: true, content: true, revSeq: true, approvedRevNo: true } as const;
   const holdsLegacy = (t: string | null | undefined) => hasText(t) && scan(t).legacy > 0;
 
@@ -215,10 +196,6 @@ export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply
     if (!holdsLegacy(source.content) && !holdsLegacy((await servedText(db, agent.bootPromptNodeId!))?.text)) continue;
     const r = await migrateSource(ctx, { kind: 'AGENT', ownerId: agent.id, source, compiledNodeId: agent.bootPromptNodeId!, compile: { kind: 'AGENT', agentId: agent.id } }, apply);
     rows.push(r);
-    if (r.outcome === 'migrated') {
-      const workerIds = await roleDifferenceWorkers(db, { kind: 'AGENT', id: agent.id });
-      if (workerIds.length) roleDifferences.push({ sourceOwnerId: agent.id, workerIds });
-    }
   }
 
   const workers = await db.worker.findMany({
@@ -234,11 +211,7 @@ export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply
     if (!holdsLegacy(source.content) && !holdsLegacy((await servedText(db, worker.bootPromptNodeId!))?.text)) continue;
     const r = await migrateSource(ctx, { kind: 'WORKER', ownerId: worker.id, source, compiledNodeId: worker.bootPromptNodeId!, compile: { kind: 'WORKER', workerId: worker.id } }, apply);
     rows.push(r);
-    if (r.outcome === 'migrated') {
-      const workerIds = await roleDifferenceWorkers(db, { kind: 'WORKER', id: worker.id });
-      if (workerIds.length) roleDifferences.push({ sourceOwnerId: worker.id, workerIds });
-    }
   }
   const count = (o: MigrationOutcome) => rows.filter((r) => r.outcome === o).length;
-  return { applied: apply, migrated: count('migrated'), skipped: count('skipped'), failed: count('failed'), rows, roleDifferences };
+  return { applied: apply, migrated: count('migrated'), skipped: count('skipped'), failed: count('failed'), rows };
 }
