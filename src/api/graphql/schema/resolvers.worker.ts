@@ -57,7 +57,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPlatformVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, legacyFromValues, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -2569,7 +2569,7 @@ async function readServedWorkerText(
       // The values the bind filled, not today's: a session finishes under the briefing it was given (a rename or a new
       // reports-to must not rewrite it). Today's values fill only a variable the record does not hold.
       const values = { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues;
-      return { text: applyPlatformVariables(content, values), refusal: null };
+      return { text: applyPlatformVariables(content, values, legacyFromValues(values)), refusal: null };
     }
     // An open session of THIS worker with no record began before serving was activated. It is never silently upgraded to
     // the current revision (Attach v3 §5): it reads no prompt and a typed notice until it rebinds.
@@ -2578,7 +2578,7 @@ async function readServedWorkerText(
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
-    return { text: applyPlatformVariables(served.content, platform), refusal: null };
+    return { text: applyPlatformVariables(served.content, platform, legacyFromValues(platform)), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
