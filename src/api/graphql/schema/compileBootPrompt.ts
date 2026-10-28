@@ -54,6 +54,8 @@ export type CompileTargetInput =
 export interface CompileBootPromptOptions {
   /** Agent and worker compiles only: false leaves the pointer alone. An App compile always sets it. */
   setPointer?: boolean;
+  /** The one-time conversion only: refuse (ADDRESS_OCCUPIED) when ANY node is already at the compiled address, judged inside the deciding transaction under the locks; never overwrite. No request path sets it. */
+  createOnly?: boolean;
   /** The whole operation's budget in ms across the initial attempt and its owner-drift retries. Default 30s (6258672877). */
   budgetMs?: number;
   /** Deterministic test seams (barriers at the boundaries); no request path passes these. */
@@ -370,11 +372,21 @@ async function decide(
       }
     }
 
+    // #2047 PR-C (§10 #2698): the pointer owner's locks come BEFORE the compiled node is written. A bind takes the worker
+    // assignment lock and the worker row, then share-locks the compiled node (resolveServedBootPrompt); taking them in the
+    // other order here, node first, is a lock-order cycle. One order everywhere: assignment lock, worker row, node.
+    const setPointer = target.kind === 'APP_AGENT' || options.setPointer !== false;
+    const pointerOwner = setPointer ? await loadBootPromptPointerOwner(tx, ptr(target), { lockForWrite: true }) : null;
+    if (setPointer && !pointerOwner) throw compileNotPermitted();
+
     // 4. The compiled node: a new revision every compile, even when the text is unchanged.
     const existing = await tx.node.findFirst({
       where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null },
       select: { id: true, nodeType: true },
     });
+    if (existing && options.createOnly) {
+      throw new GraphQLError('The compiled boot prompt address is occupied.', { extensions: { code: 'ADDRESS_OCCUPIED' } });
+    }
     if (existing && existing.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) {
       throw new GraphQLError('The compiled boot prompt address is occupied by another node.', { extensions: { code: 'CONFLICT' } });
     }
@@ -423,11 +435,8 @@ async function decide(
     });
 
     // 5. The pointer. An App compile always sets it; an Agent or worker compile unless the caller opted out.
-    const setPointer = target.kind === 'APP_AGENT' || options.setPointer !== false;
     if (setPointer) {
-      const owner = await loadBootPromptPointerOwner(tx, ptr(target), { lockForWrite: true });
-      if (!owner) throw compileNotPermitted();
-      await setBootPromptPointer(tx, txCtx, owner, node.id, (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx));
+      await setBootPromptPointer(tx, txCtx, pointerOwner!, node.id, (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx));
     }
 
     return {

@@ -40,7 +40,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
+import { serveBindInTransaction, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -1484,6 +1484,10 @@ export const sessionMutations = {
         },
         include: SESSION_INCLUDE,
         });
+        // #2047 (S10): serve the boot prompt in the bind's own transaction. A refusal rolls the whole bind back.
+        if (workerId && appId && agentId) {
+          await serveBindInTransaction(tx, ctx, { sessionId: created.id, workerId, appId, agentId, llmModel: input.llmModel ?? null });
+        }
         // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
         // whole bind rolls back.
         if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
