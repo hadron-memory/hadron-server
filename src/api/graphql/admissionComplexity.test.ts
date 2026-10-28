@@ -22,6 +22,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
   "AppKey.hostUses",
   "Chat.servedPrompts",
+  "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.collectHostOperations",
   "Node.lintWarnings",
   "Node.signingRequests",
@@ -102,10 +103,12 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.users",
   "Query.validateMemory",
   "Query.workers",
+  "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
   "ServedPrompt.provenance",
   "Session.servedPrompts",
   "Ticker.subscribers",
   "User.sharedOrganizations",
+  "Worker.promptLintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Worker.signatureLint"
 ];
 const servers: Server[] = [];

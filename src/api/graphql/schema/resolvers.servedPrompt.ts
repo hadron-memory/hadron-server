@@ -12,6 +12,7 @@
  * a node object or text, so reading it hands the caller no included part. Lists are cor:api:120:04 pages: `{items, total}`,
  * default 50, cap 200; provenance has its own page. With serving OFF (the BOOT_PROMPT_SERVE_ENABLED gate) every field is empty.
  */
+import { lintCompiledRevision } from '../../../lib/compiledBootPromptLint.js';
 import { isPlatformAdmin, type Context } from './resolvers.helpers.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -120,6 +121,8 @@ async function liveRevisionKeys(ctx: Context, keys: Array<{ nodeId: string; revS
 /** Field resolvers of the `ServedPrompt` type itself. The row reached here was already authorized by its owner field. */
 export const servedPromptTypeResolvers = {
   ServedPrompt: {
+    currentLint: (rec: ServedPromptRow, args: { first?: number | null; after?: string | null }, ctx: Context) =>
+      lintCompiledRevision(ctx, rec.compiledNodeId, rec.provenanceRevSeq, args),
     /** The served revision is no longer retained: neither the node's current revision nor a history row. */
     pruned: async (rec: ServedPromptRow, _args: unknown, ctx: Context) => {
       const live = await liveRevisionKeys(ctx, [{ nodeId: rec.compiledNodeId, revSeq: rec.servedRevSeq }]);
