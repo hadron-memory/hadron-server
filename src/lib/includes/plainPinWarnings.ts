@@ -24,7 +24,7 @@ export async function plainPinWarnings(
   // read at this later point. Reuse the shared gate with all request caches dropped.
   ctx = withoutRequestCaches(ctx);
   // Advice cannot make an otherwise legal write require the reader role.
-  if (!ctx.roles.some(r => ['OWNER', 'ADMIN', 'CONTRIBUTOR', 'READER'].includes(r))) return [];
+  if (!ctx.roles?.some(r => ['OWNER', 'ADMIN', 'CONTRIBUTOR', 'READER'].includes(r))) return [];
   let tags;
   try { tags = parseIncludeTags(content); }
   catch (error) { if (error instanceof IncludeSyntaxError) return []; throw error; }

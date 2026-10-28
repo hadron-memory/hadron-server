@@ -188,3 +188,7 @@ it('a late owner callback cannot file warnings into a later request reusing its 
   expect(warnings.includePinWarningsFor(c, result)).toBeNull();
   expect(await warnings.responseIncludePinWarnings(c, new Set())).toEqual([]);
 });
+
+it('an optional absent role list yields no advice instead of throwing', async () => {
+  expect(await warnings.plainPinWarnings({ ...ctx(), roles: undefined }, { memoryId }, '{{> target rev=1}}')).toEqual([]);
+});
