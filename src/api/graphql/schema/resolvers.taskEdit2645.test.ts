@@ -50,7 +50,7 @@ describe('task edit #2645',()=>{
   await edit({description:'',tags:[],requirements:null,startBy:null,closeSessionWhenDone:false});
   expect(await db.agentTask.findUniqueOrThrow({where:{id:task.id}})).toMatchObject({title:'Original',description:null,tags:[],requirements:null,startBy:null,source:'fixed-source',closeSessionWhenDone:false});
  });
- it.each([{title:''},{title:null},{source:'new'},{status:'finished'},{owner:{user:'other'}},{attributes:{secret:true}}])('refuses invalid or forbidden patch %j atomically',async input=>{
+ it.each([{title:''},{title:null},{source:'new'},{status:'finished'},{parentTaskId:'other'},{owner:{user:'other'}},{attributes:{secret:true}}])('refuses invalid or forbidden patch %j atomically',async input=>{
   await expect(edit(input)).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
   expect((await db.agentTask.findUniqueOrThrow({where:{id:task.id}})).title).toBe('Original');expect(await edited()).toHaveLength(0);
  });
