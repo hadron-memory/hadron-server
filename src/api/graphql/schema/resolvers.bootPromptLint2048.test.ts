@@ -16,6 +16,11 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { lintSourceWarnings, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
 import { typeDefs } from './typeDefs.js';
+import { generateDataKey } from '../../../lib/crypto.js';
+import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
+import { withCompileWrite } from '../../../lib/bootPrompt.js';
+import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -321,4 +326,70 @@ describe('#2048 S11a replace-text lints every changed boot source or says it did
     const all = await callMountedTool('hadron_replace_text', { nodeUrns: ordinary.map(n => `hrn:node:${memoryUrn}:${n.loc}`), fields: ['content'], oldText: 'REPLACE_ME', newText: 'DONE', dryRun: false });
     expect(all).toContain('Lint warnings not checked for 1 of 101 changed node(s)');
   }, 60_000); // 121 seeded nodes and two mounted MCP sessions: well past the 5s default on a CI runner
+});
+
+
+describe('#2048 S11b carried source-lint P3s', () => {
+  it('a readable unrelated node cannot authorize the id-based projection of a hidden source', async () => {
+    const own = await source('{{> part signed}}');
+    const hidden = await db.node.create({ data: { memoryId: foreignMemoryId, loc: 'hidden-source', name: 'secret', content: '{{> absent signed}}', role: 'boot-prompt' } });
+    expect(await lintWarningPageForNodeId(ctx(), own.id)).not.toBeNull();
+    expect(await lintWarningPageForNodeId(ctx(), hidden.id)).toBeNull();
+  });
+  it('opens encrypted source and target only with the memory key; unavailable is distinct from empty', async () => {
+    const key = generateDataKey();
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
+    const part = await db.node.create({ data: { memoryId, loc: 'encrypted-part', name: 'part', ...encryptNodeFieldsWithKey({ content: 'private part' }, key) } });
+    const prompt = await db.node.create({ data: { memoryId, loc: 'encrypted-source', name: 'source', role: 'boot-prompt', ...encryptNodeFieldsWithKey({ content: '{{> encrypted-part signed}}' }, key) } });
+    expect(await lintWarningPageForNodeId(ctx(), prompt.id)).toBeNull();
+    sessionKeyCache.set('lint2048-encrypted', memoryId, key);
+    try {
+      const got = await lintWarningPageForNodeId(ctx(), prompt.id);
+      expect(got).toMatchObject({ total: 1, items: [{ kind: 'SIGNING_NOT_CHECKED', targetUrn: `hrn:node:${memoryUrn}:encrypted-part` }] });
+      expect(JSON.stringify(got)).not.toContain('private part');
+      expect(part.content).not.toBe('private part');
+    } finally { sessionKeyCache.evict('lint2048-encrypted'); }
+  });
+});
+
+
+describe('#2048 S11b transport and ambiguity controls', () => {
+  it('collapses an ambiguous historical include into the same broken warning as a missing include', async () => {
+    const one = await target('one'), two = await target('two');
+    await db.urnAlias.createMany({ data: [one, two].map(n => ({ entityType: 'NODE' as const, entityId: n.id, reason: 'RENAME' as const, urn: 'old-lint:memory:part' })) });
+    const ambiguous = await source('{{> hrn:node:old-lint:memory:part}}');
+    const missing = await source('{{> hrn:node:old-lint:memory:absent}}', 'missing');
+    expect(await lintWarningPageForNodeId(ctx(), ambiguous.id)).toEqual(await lintWarningPageForNodeId(ctx(), missing.id));
+    expect(await lintWarningPageForNodeId(ctx(), ambiguous.id)).toMatchObject({ total: 1, items: [{ kind: 'BROKEN_INCLUDE' }] });
+  });
+  it('mounted node and worker reads render compiled/recorded lint, not live root tags', async () => {
+    const previous = process.env.BOOT_PROMPT_SERVE_ENABLED;
+    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+    try {
+      const root = await source('no tags');
+      const agent = await db.agent.findFirstOrThrow({ where: { systemMemoryId: memoryId } });
+      const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', role: 'boot-prompt', nodeType: 'compiled-boot-prompt', content: 'expanded' } }));
+      await db.compiledPromptRevision.create({ data: { compiledNodeId: compiled.id, compiledRevNo: 1, targetKind: 'AGENT', targetAgentId: agent.id,
+        contentHash: sha256Hex('expanded'), occurrenceCount: 1, provenance: { version: 1, occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: 1,
+          hash: sha256Hex('no tags'), selection: { rev: null, approved: false, signed: false } }] } } });
+      await db.node.update({ where: { id: root.id }, data: { content: 'new root', revSeq: 2 } });
+      const app = await db.app.create({ data: { name: 'lint team', urn: 'lint-team', organizationId: memory.organizationId } });
+      await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+      const worker = await db.worker.create({ data: { name: 'Lint', slug: 'lint', agentId: agent.id, appId: app.id, signature: '{{worker.url}}', trailer: '{{worker.url}}' } });
+      const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER' } });
+      await db.servedPrompt.create({ data: { id: generateId(), kind: 'BIND', sessionId: session.id, appId: app.id, workerId: worker.id, agentId: agent.id, pointerLevel: 'AGENT', compiledNodeId: compiled.id,
+        servedRevSeq: 1, provenanceRevSeq: 1, compiledContentHash: sha256Hex('expanded'), provenance: [], variables: {} } });
+      const text = await callMountedTool('hadron_get_node', { urn: `hrn:node:${memoryUrn}:boot:compiled` });
+      expect(text).toContain('[RECOMPILE_AVAILABLE]');
+      // No current pointer is needed to lint an immutable record of the open session.
+      const got = await (resolvers as any).Worker.promptLintWarnings(worker, {}, { db, userId, roles: [] });
+      expect(got).toMatchObject({ items: [{ kind: 'RECOMPILE_AVAILABLE' }] });
+      const workerText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+      expect(workerText).toContain('Served prompt lint (compile revision 1)');
+      expect(workerText).toContain('[RECOMPILE_AVAILABLE]');
+    } finally {
+      if (previous === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED; else process.env.BOOT_PROMPT_SERVE_ENABLED = previous;
+    }
+  });
 });

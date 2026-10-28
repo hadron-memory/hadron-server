@@ -16,7 +16,7 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // needs no Team Agent at all.
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
-import { lintWarningPageForNodeId, renderLintWarnings } from '../../../lib/bootPromptLint.js';
+import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
@@ -2603,17 +2603,17 @@ export async function describeServedWorker(
   try {
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
     line = `\nServed boot prompt: ${served.pointerLevel} pointer, compiled node ${served.compiledNodeId}, revision ${served.servedRevSeq} (provenance from compile revision ${served.provenanceRevSeq}).`;
-    const root = served.provenance[0]?.nodeId;
-    if (root) line += renderLintWarnings(await lintWarningPageForNodeId(ctx, root));
+    line += '\nCurrent prompt lint (compile revision ' + served.provenanceRevSeq + '):' + renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, served.compiledNodeId, served.provenanceRevSeq));
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
     line = `\nServed boot prompt: NOT SERVEABLE — ${code}. A bind would be refused.`;
   }
-  const recorded = ctx.sessionId
-    ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' }, select: { servedRevSeq: true, pointerLevel: true } })
-    : null;
-  if (recorded) line += `\nThis session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
+  const recorded = await servedPromptOwnerFields.workerServedPrompt(worker, {}, ctx);
+  if (recorded) {
+    line += `\nThis session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
+    line += `\nServed prompt lint (compile revision ${recorded.provenanceRevSeq}):` + renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, recorded.compiledNodeId, recorded.provenanceRevSeq));
+  }
   return line;
 }
 
@@ -2865,6 +2865,10 @@ export const workerFieldResolvers = {
   Worker: {
     /** #2047: the record of the open session, self-authorized (worker internals). */
     servedPrompt: servedPromptOwnerFields.workerServedPrompt,
+    promptLintWarnings: async (w: { id: string; appId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) => {
+      const rec = await servedPromptOwnerFields.workerServedPrompt(w, {}, ctx);
+      return rec ? (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, rec.compiledNodeId, rec.provenanceRevSeq, args) : null;
+    },
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
      * `Worker.app`, this never returns an App object (and therefore cannot hand

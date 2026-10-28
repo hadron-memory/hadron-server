@@ -41,7 +41,7 @@ describe('S11b compiled lint', () => {
       expect(String(type.getFields()[field]?.type)).toBe('LintWarningPage');
     }
   });
-  it('computes from provenance without live include tags, and clears on recompile', async () => {
+  it('computes from provenance without live include tags', async () => {
     expect(await page()).toMatchObject({ total: 0, items: [] });
     await newerSource();
     expect(await page()).toMatchObject({ items: [{ kind: 'RECOMPILE_AVAILABLE' }], total: 1 });
@@ -67,4 +67,105 @@ describe('S11b compiled lint', () => {
     // Current compile pins revision 1, which is now pruned: it may warn, but must not claim a recompile selects newer.
     expect((await page())?.items.some(x => x.kind === 'RECOMPILE_AVAILABLE')).toBe(false);
   });
+  it('conceals compiled content from a non-reader while a compiler gets only generic availability', async () => {
+    await newerSource();
+    const foreign = await db.organization.create({ data: { name: 'private', urn: 'private-lint' } });
+    const hidden = await db.memory.create({ data: { name: 'hidden', urn: 'private-lint:system', class: 'system', organizationId: foreign.id } });
+    await db.agent.create({ data: { name: 'hidden', urn: 'private-lint:agent', organizationId: foreign.id, systemMemoryId: hidden.id } });
+    await withCompileWrite(() => db.node.update({ where: { id: compiledId }, data: { memoryId: hidden.id } }));
+    const got = await page();
+    expect(got).toMatchObject({ total: 1, items: [{ kind: 'RECOMPILE_AVAILABLE', position: 0, targetUrn: null, newerRevision: null }] });
+    expect(JSON.stringify(got)).not.toContain('compiled-lint:system');
+    const outsider = await db.user.create({ data: { name: 'outsider' } });
+    expect(await lintWarningPageForNodeId({ ...ctx, userId: outsider.id }, compiledId)).toBeNull();
+  });
+  it('a readable compiled node does not grant compile authority to its reader', async () => {
+    await newerSource();
+    const org = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: org.organizationId!, userId: ctx.userId! } }, data: { role: 'READER' } });
+    await db.agent.update({ where: { id: agentId }, data: { visibility: 'ORGANIZATION' } });
+    const publicMemory = await db.memory.create({ data: { name: 'public artifact', urn: 'public-artifact', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.organizationId } });
+    await withCompileWrite(() => db.node.update({ where: { id: compiledId }, data: { memoryId: publicMemory.id } }));
+    expect(await page()).toMatchObject({ total: 1, items: [{ kind: 'BROKEN_INCLUDE' }] });
+  });
+  it('keeps a pinned revision while reporting its newer approved revision', async () => {
+    await newerSource();
+    await (resolvers.Mutation as any).approveNode(null, { nodeRef: sourceId }, ctx);
+    await withCompileWrite(() => db.node.update({ where: { id: compiledId }, data: { revSeq: 2 } }));
+    await record(2, 1);
+    const got = await page();
+    expect(got?.items).toContainEqual(expect.objectContaining({ kind: 'PINNED_NEWER_APPROVED', pinnedRevision: 1, newerRevision: 3 }));
+    expect(got?.items.some(x => x.kind === 'RECOMPILE_AVAILABLE')).toBe(false);
+  });
+  it('pages a bounded list deterministically and clamps over-cap requests', async () => {
+    await db.node.update({ where: { id: sourceId }, data: { deletedAt: new Date() } });
+    await withCompileWrite(() => db.node.update({ where: { id: compiledId }, data: { revSeq: 2 } }));
+    const occurrences = Array.from({ length: 103 }, (_, order) => ({ order, depth: order ? 1 : 0, parent: order ? 0 : null,
+      kind: order ? 'include' : 'source', nodeId: sourceId, revNo: 1, hash: sha256Hex('source'), selection: { rev: null, approved: false, signed: false } }));
+    await db.compiledPromptRevision.create({ data: { compiledNodeId: compiledId, compiledRevNo: 2, targetKind: 'AGENT', targetAgentId: agentId,
+      contentHash: sha256Hex('expanded text without tags'), occurrenceCount: 103, provenance: { version: 1, occurrences } } });
+    const first = await lintWarningPageForNodeId(ctx, compiledId, { first: 999 });
+    expect(first).toMatchObject({ total: 103 });
+    expect(first?.items).toHaveLength(100);
+    const last = await lintWarningPageForNodeId(ctx, compiledId, { after: first?.nextCursor });
+    expect(last?.items.map(x => x.position)).toEqual([100, 101, 102]);
+    expect(last?.nextCursor).toBeNull();
+  });
+
+  it('approval payload and later compiled read use the same compile provenance after an approval revision', async () => {
+    await newerSource();
+    const receipt = await (resolvers.Mutation as any).approveNode(null, { nodeRef: compiledId }, ctx);
+    const field = (resolvers as any).NodeApprovalReceipt.lintWarnings;
+    const got = await field(receipt, {}, ctx);
+    expect(got).toMatchObject({ items: [{ kind: 'RECOMPILE_AVAILABLE' }] });
+    expect(got).toEqual(await page());
+  });
+
+  it('real App compile exposes neutral override lint on its result and later node read; full URNs bypass overlays', async () => {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const app = await db.app.create({ data: { name: 'override app', urn: 'compiled-lint:app', organizationId: memory.organizationId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId } });
+    await db.appMember.create({ data: { appId: app.id, userId: ctx.userId!, role: 'owner' } });
+    const install = await db.memory.create({ data: { name: 'install', urn: 'compiled-lint:install', class: 'system', organizationId: memory.organizationId,
+      appId: app.id, installOfAgentId: agentId, isInstallMemory: true } });
+    await db.node.create({ data: { memoryId, loc: 'policies:conduct', name: 'conduct', content: 'original' } });
+    await db.node.create({ data: { memoryId: install.id, loc: 'policies:conduct', name: 'conduct', content: 'replacement' } });
+    await db.node.update({ where: { id: sourceId }, data: { content: '{{> policies:conduct}}' } });
+    const result = await (resolvers.Mutation as any).compileAppAgentBootPrompt(null, { appRef: app.id, agentRef: agentId }, ctx);
+    expect(result.node.content).toBe('replacement');
+    const field = (resolvers as any).CompiledBootPrompt.lintWarnings;
+    const got = await field(result, {}, ctx);
+    expect(got?.items).toContainEqual(expect.objectContaining({ kind: 'POLICY_OVERRIDE', overriddenNodeLoc: 'policies:conduct', text: 'This App overrides Agent node policies:conduct.' }));
+    expect(got).toEqual(await lintWarningPageForNodeId(ctx, result.node.id));
+    await db.node.update({ where: { id: sourceId }, data: { content: '{{> hrn:node:compiled-lint:system:policies:conduct}}' } });
+    const next = await (resolvers.Mutation as any).compileAppAgentBootPrompt(null, { appRef: app.id, agentRef: agentId }, ctx);
+    expect(next.node.content).toBe('original');
+    expect((await field(next, {}, ctx))?.items.some((x: any) => x.kind === 'POLICY_OVERRIDE')).toBe(false);
+  });
+
+  it('serializes hidden and missing provenance targets identically, with no target state or signing detail', async () => {
+    const foreign = await db.organization.create({ data: { name: 'foreign', urn: 'foreign-parts' } });
+    const hiddenMemory = await db.memory.create({ data: { name: 'hidden', urn: 'foreign-parts:system', class: 'system', organizationId: foreign.id } });
+    await db.agent.create({ data: { name: 'hidden', urn: 'foreign-parts:agent', organizationId: foreign.id, systemMemoryId: hiddenMemory.id } });
+    await db.node.update({ where: { id: sourceId }, data: { memoryId: hiddenMemory.id } });
+    const hidden = await page();
+    expect(hidden).toMatchObject({ items: [{ kind: 'BROKEN_INCLUDE', position: 0, targetUrn: null, pinnedRevision: null, newerRevision: null, overriddenNodeLoc: null }] });
+    await db.node.delete({ where: { id: sourceId } });
+    expect(await page()).toEqual(hidden);
+  });
+  it('does not change a committed artifact when a later lint read faults', async () => {
+    const before = await db.node.findUniqueOrThrow({ where: { id: compiledId } });
+    const faulted = { ...ctx, db: { ...db, compiledPromptRevision: { ...db.compiledPromptRevision, findUnique: async () => { throw new Error('synthetic provenance read fault'); } } } } as unknown as Context;
+    const got = await (resolvers as any).CompiledBootPrompt.lintWarnings({ node: { id: compiledId }, revNo: 1 }, {}, faulted);
+    expect(got).toBeNull();
+    expect(await db.node.findUniqueOrThrow({ where: { id: compiledId } })).toEqual(before);
+    expect(await db.compiledPromptRevision.count({ where: { compiledNodeId: compiledId } })).toBe(1);
+  });
+  it('missing normalized settings are unavailable rather than reconstructed from current source text', async () => {
+    await withCompileWrite(() => db.node.update({ where: { id: compiledId }, data: { revSeq: 2 } }));
+    await db.compiledPromptRevision.create({ data: { compiledNodeId: compiledId, compiledRevNo: 2, targetKind: 'AGENT', targetAgentId: agentId,
+      contentHash: sha256Hex('expanded text without tags'), occurrenceCount: 1, provenance: { version: 1, occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: sourceId, revNo: 1, hash: sha256Hex('source') }] } } });
+    expect(await page()).toBeNull();
+  });
+
 });
