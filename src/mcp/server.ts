@@ -247,7 +247,7 @@ const REPLACE_LINT_MAX_NODES = 100;
 import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
@@ -8967,7 +8967,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the stamps describe the text printed below (one agent read — no
         // parallel lookup that could race a template edit).
         const briefing = worker
-          ? await composeWorkerPrompt(mcpCtx, worker, { llmModel: session.llmModel })
+          ? await composeWorkerPrompt({ ...mcpCtx, sessionId: session.id }, worker, { llmModel: session.llmModel }) // the session being returned, so its record (not the current approval) is read
           : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
         const prompt = briefing.text;
         // #1029: the previous stint's handoff, delivered with the briefing
@@ -10902,7 +10902,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
                 `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
                 `\n\n${prompt}`
-              : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+              : briefing.refusal
+                ? `\n(No boot briefing: the boot prompt cannot be served — ${briefing.refusal}.)`
+                : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+            (await describeServedWorker(ctx, worker)) +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {

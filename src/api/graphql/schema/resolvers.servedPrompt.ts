@@ -12,7 +12,7 @@
  * a node object or text, so reading it hands the caller no included part. Lists are cor:api:120:04 pages: `{items, total}`,
  * default 50, cap 200; provenance has its own page. With serving OFF (the BOOT_PROMPT_SERVE_ENABLED gate) every field is empty.
  */
-import type { Context } from './resolvers.helpers.js';
+import { isPlatformAdmin, type Context } from './resolvers.helpers.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { canReadAppRun } from './resolvers.appRun.js';
@@ -38,7 +38,7 @@ export function pageOf({ limit, offset }: PageArgs): { take: number; skip: numbe
 type ServedPromptRow = NonNullable<Awaited<ReturnType<Context['db']['servedPrompt']['findFirst']>>>;
 
 /** Records of one owner column, newest first, as a page. The caller has already authorized the owner. */
-async function recordsPage(ctx: Context, where: { sessionId: string } | { chatId: string; appId: string } | { runId: string }, args: PageArgs) {
+async function recordsPage(ctx: Context, where: { sessionId: string } | { chatId: string; appId: string | null } | { runId: string }, args: PageArgs) {
   const { take, skip } = pageOf(args);
   const [items, total] = await Promise.all([
     take === 0 ? [] : ctx.db.servedPrompt.findMany({ where, orderBy: [{ servedAt: 'desc' }, { ordinal: 'desc' }], take, skip }),
@@ -92,7 +92,10 @@ export const servedPromptOwnerFields = {
     // The authorized App is the chat's FIRST record's (deterministic: lowest ordinal), and only records under THAT App are
     // returned: authorizing one App's record must never hand over another App's rows for the same chat.
     const first = await ctx.db.servedPrompt.findFirst({ where: { chatId: c.id }, orderBy: { ordinal: 'asc' }, select: { appId: true } });
-    if (!first || !(await mayManageApp(ctx, first.appId))) return EMPTY_PAGE;
+    if (!first) return EMPTY_PAGE;
+    // A chat held in a memory no App owns is recorded under no App (Vera #42133): there is no App whose manager reads it, so
+    // until Holger rules who does, only a platform admin (never an impersonation) reads it.
+    if (first.appId === null ? ctx.impersonation || !isPlatformAdmin(ctx) : !(await mayManageApp(ctx, first.appId))) return EMPTY_PAGE;
     return recordsPage(ctx, { chatId: c.id, appId: first.appId }, args);
   },
 };

@@ -6744,7 +6744,8 @@ model ServedPrompt {
   runId               String?                  @map("run_id")
   /// 1 for a bind or a run; a chat records again when its served revision changes (R37), counting up.
   ordinal             Int                      @default(1)
-  appId               String                   @map("app_id")
+  /// Null only for a chat held in a memory no App owns (chk_served_prompts_app, prisma/served-prompt-app-invariants.sql).
+  appId               String?                  @map("app_id")
   agentId             String                   @map("agent_id")
   workerId            String?                  @map("worker_id")
   pointerLevel        ServedPromptPointerLevel @map("pointer_level")
