@@ -916,6 +916,10 @@ export const typeResolvers = {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
   },
+  CompiledBootPrompt: {
+    lintWarnings: (r: { node: { id: string }; revNo: number }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
+      import('../../../lib/compiledBootPromptLint.js').then(m => m.lintCompiledRevision(ctx, r.node.id, r.revNo, args)),
+  },
   NodeApprovalReceipt: {
     /** #2048 — the same warnings as Node.lintWarnings, for the node just approved; approving never blocked on them. */
     lintWarnings: (r: { nodeId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
