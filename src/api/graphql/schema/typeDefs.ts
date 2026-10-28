@@ -7872,6 +7872,8 @@ export const typeDefs = `#graphql
     One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
     """
     teamComposition(appRef: ID!): TeamComposition!
+    "Experimental register role picker: all readable workers tied at the nearest task depth, paged. Never assigns or routes."
+    registerRoleCandidates(appRef: ID!, code: String!, limit: Int = 20, offset: Int = 0): RegisterRoleCandidatePage!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -14368,6 +14370,24 @@ export const typeDefs = `#graphql
     id: ID!
     title: String!
     status: AgentTaskStatus!
+  }
+
+  "Experimental action register role-picking projection. No routing or assignment."
+  type RegisterRoleCandidatePage {
+    appId: ID!
+    code: String!
+    taskLoc: String
+    depth: Int
+    "Total nearest-depth ties, independent of the requested page."
+    total: Int!
+    candidates: [RegisterRoleCandidate!]!
+  }
+  type RegisterRoleCandidate {
+    worker: AgentTaskParty!
+    role: String
+    "Own Agent is zero; each base link adds one."
+    depth: Int!
+    taskUrn: String!
   }
 
   "#2061 — active roster workers grouped by their direct reportsTo claim."
