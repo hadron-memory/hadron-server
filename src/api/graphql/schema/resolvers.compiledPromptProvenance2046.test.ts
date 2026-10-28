@@ -182,6 +182,19 @@ describe('compiledPromptProvenance', () => {
     expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0]).toMatchObject({ nodeId: sourceId, revNo: 1, pruned: null });
   });
 
+  it('conceals source retention when a legacy snapshot has no memory identity', async () => {
+    await saveHistory(sourceId, memoryId, 1);
+    await db.nodeRevision.updateMany({ where: { nodeId: sourceId, revNo: 1 }, data: { memoryId: null } });
+    await db.node.update({ where: { id: sourceId }, data: { revSeq: 2 } });
+    expect((await query({ nodeRef: nodeId, revNo: 2 }, ctx)).items[0].pruned).toBeNull();
+  });
+
+  it('the database rejects duplicate numbered source snapshots regardless of memory', async () => {
+    await saveHistory(sourceId, memoryId, 1);
+    await expect(saveHistory(sourceId, memoryId, 1)).rejects.toMatchObject({ code: 'P2002' });
+    expect(await db.nodeRevision.count({ where: { nodeId: sourceId, revNo: 1 } })).toBe(1);
+  });
+
   it('rejects a denormalized occurrence count that disagrees with the immutable array', async () => {
     await record(3, 1, 9);
     await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { revSeq: 3 } }));
