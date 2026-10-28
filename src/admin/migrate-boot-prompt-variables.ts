@@ -27,7 +27,7 @@ import { readRecordedRevisionContent } from '../lib/bootPrompt/serve.js';
 import { createOperatorConversionContext, OPERATOR_CONVERSION_INFO } from '../lib/auth/operatorConversion.js';
 import { approveNodeInTransaction, NodeApprovalRefusal } from '../lib/nodeApproval.js';
 import { PLATFORM_VARIABLE_KEYS } from '../lib/personaDescription.js';
-import { compileBootPrompt } from '../api/graphql/schema/compileBootPrompt.js';
+import { compileBootPrompt, previewBootPromptText } from '../api/graphql/schema/compileBootPrompt.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { AGENT_SOURCE_LOC } from './convert-boot-prompts.js';
@@ -184,15 +184,14 @@ async function migrateSource(
     const expected = renameLegacyTokens(served.text);
     const wanted = renameLegacyTokens(p.source.content ?? '');
     if (!apply) {
-      // Read-only: an Agent source with no include tag compiles to its own text, so a source that no longer
-      // matches the served text renamed is a row apply would refuse. Anything else cannot be judged without
-      // writing, and is only a candidate.
-      if (p.kind === 'AGENT' && !p.source.content?.includes('{{>') && wanted !== expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
+      // Read-only: assemble what the compile would produce from the source as it stands (nothing is written) and
+      // compare it, renamed, with the served text, byte for byte, as apply does after its write.
+      if (renameLegacyTokens(await previewBootPromptText(ctx, p.compile)) !== expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
       return row('candidate');
     }
     let source = p.source;
     if (source.content !== wanted) {
-      await writeNodeCore({ memoryId: source.memoryId, loc: source.loc, content: wanted }, ctx, 'update', { targetNodeId: source.id });
+      await writeNodeCore({ memoryId: source.memoryId, loc: source.loc, content: wanted }, ctx, 'update', { targetNodeId: source.id, guardRevSeq: source.revSeq });
       const fresh = await db.node.findUniqueOrThrow({ where: { id: source.id }, select: { id: true, memoryId: true, loc: true, content: true, revSeq: true, approvedRevNo: true } });
       if (fresh.content !== wanted) throw new RowFailure('SOURCE_TEXT_CHANGED_ON_WRITE');
       source = fresh;

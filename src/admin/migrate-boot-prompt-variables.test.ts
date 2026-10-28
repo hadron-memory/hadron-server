@@ -178,10 +178,48 @@ describe('#2704 — migration', () => {
     const agent = await agentWith('coord', 'Hi {{name}}');
     await convert();
     const mem = agent.systemMemoryId!;
-    await db.node.updateMany({ where: { memoryId: mem, loc: 'boot:source' }, data: { content: 'Hi {{name}} and more' } });
+    await db.node.updateMany({ where: { memoryId: mem, loc: 'boot:source' }, data: { content: 'Hi {{name}} and more', revSeq: { increment: 1 } } });
     const preview = await migrate(false);
     expect(preview).toMatchObject({ migrated: 0, candidates: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' }] });
-    expect(await migrate()).toMatchObject({ migrated: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' }] });
+    expect(await migrate()).toMatchObject({ migrated: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'NODE_WRITE_CONFLICT' }] });
+  });
+
+  it('a dry run byte-compares a worker row too: a worker source that drifted fails as apply would', async () => {
+    const agent = await agentWith('coord', 'Agent {{name}}');
+    const app = await appWith('mg-app', agent.id);
+    const w = await workerOf(app.id, agent.id, 'iris', 'Override {{role}}');
+    await convert();
+    expect(await migrate(false)).toMatchObject({ migrated: 0, candidates: 2, failed: 0 });
+    const install = await db.memory.findFirstOrThrow({ where: { appId: app.id, installOfAgentId: agent.id, isInstallMemory: true } });
+    await db.node.updateMany({ where: { memoryId: install.id, loc: `boot:workers:${w.id}:source` }, data: { content: 'Override {{role}} and more', revSeq: { increment: 1 } } });
+    const preview = await migrate(false);
+    expect(preview).toMatchObject({ applied: false, migrated: 0, candidates: 1, failed: 1 });
+    expect(preview.rows.find((r) => r.kind === 'WORKER')).toMatchObject({ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' });
+    expect(await migrate()).toMatchObject({ failed: 1 });
+  });
+
+  it('refuses to overwrite a source edited between the read and the write', async () => {
+    const agent = await agentWith('coord', 'Hi {{name}}');
+    await convert();
+    const find = db.node.findFirst.bind(db.node) as (...a: unknown[]) => Promise<unknown>;
+    let raced = false;
+    const spy = vi.spyOn(db.node, 'findFirst').mockImplementation(((...a: unknown[]) => {
+      const r = find(...a);
+      const sel = (a[0] as { select?: { nodeType?: boolean } })?.select;
+      if (!raced && sel?.nodeType) {
+        raced = true;
+        return r.then(async (v) => {
+          await db.node.updateMany({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' }, data: { content: 'Hi {{name}} edited', revSeq: { increment: 1 } } });
+          return v;
+        });
+      }
+      return r;
+    }) as never);
+    const report = await migrate();
+    spy.mockRestore();
+    expect(raced).toBe(true);
+    expect(report).toMatchObject({ migrated: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'NODE_WRITE_CONFLICT' }] });
+    expect((await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' } })).content).toBe('Hi {{name}} edited');
   });
 
   it('reports a converted Agent whose source is gone while its served text still holds a legacy token', async () => {

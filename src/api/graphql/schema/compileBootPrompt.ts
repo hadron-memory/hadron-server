@@ -56,6 +56,8 @@ export interface CompileBootPromptOptions {
   setPointer?: boolean;
   /** The one-time conversion only: refuse (ADDRESS_OCCUPIED) when ANY node is already at the compiled address, judged inside the deciding transaction under the locks; never overwrite. No request path sets it. */
   createOnly?: boolean;
+  /** The one-time conversion's dry run only: assemble the text under the same gate and locks, write nothing (the transaction rolls back), and throw `BootCompilePreview` carrying the text. No request path sets it. */
+  previewOnly?: boolean;
   /** The whole operation's budget in ms across the initial attempt and its owner-drift retries. Default 30s (6258672877). */
   budgetMs?: number;
   /** Deterministic test seams (barriers at the boundaries); no request path passes these. */
@@ -65,6 +67,11 @@ export interface CompileBootPromptOptions {
     /** Inside the fence, after every lock is held, immediately before the source is selected and the assembler runs. */
     beforeAssemble?: (tx: Tx) => Promise<void>;
   };
+}
+
+/** Thrown out of a `previewOnly` compile with the text it would have written; the rollback leaves nothing behind. */
+export class BootCompilePreview extends Error {
+  constructor(readonly text: string) { super('boot prompt preview'); }
 }
 
 /** One 30-second budget for the whole compile, not per attempt (Xavier 6258672877). */
@@ -359,6 +366,8 @@ async function decide(
       callerCanRead: (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx),
     });
 
+    if (options.previewOnly) throw new BootCompilePreview(plan.text);
+
     // Missing same-organisation grants are provisioned here, in the deciding transaction.
     if (recipient.kind === 'org') {
       for (const grant of plan.grants) {
@@ -449,6 +458,17 @@ async function decide(
     try { effect(); } catch (e) { console.error('[compileBootPrompt] a post-commit effect failed:', e instanceof Error ? e.message : e); }
   }
   return result;
+}
+
+/** The text a compile would write now, assembled under the compile's own gate, locks and budget; nothing is written. */
+export async function previewBootPromptText(ctx: Context, target: CompileTargetInput): Promise<string> {
+  try {
+    await compileBootPrompt(ctx, target, { previewOnly: true, setPointer: false });
+  } catch (e) {
+    if (e instanceof BootCompilePreview) return e.text;
+    throw e;
+  }
+  throw new Error('previewOnly compile returned without a preview');
 }
 
 export { BootCompileRefusal };
