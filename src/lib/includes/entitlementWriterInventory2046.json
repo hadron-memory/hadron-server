@@ -60,9 +60,9 @@
   "reason": "deleteWorker: whole SERIALIZABLE transaction runs in withAccountFenceTransaction: fence first, then the epoch UPDATE proving the snapshot fresh (Xylon CHECKED #30580; pinned in accountFence2046.test.ts)"
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.update": {
-  "count": 1,
-  "status": "excluded",
-  "reason": "lazy provisioning of Worker.memoryId (resolvers.worker.ts ~702): the compile's worker read selects only id/agentId (bootPromptPointer.ts), never memoryId"
+  "count": 2,
+  "status": "fenced",
+  "reason": "changeWorkerAgent fenced (agentId and the boot-prompt pointer, #2458; `fence: true` before the anchors). The other writes Worker.memoryId lazily (resolvers.worker.ts ~702): the compile's worker read selects only id/agentId (bootPromptPointer.ts), never memoryId"
  },
  "src/api/graphql/schema/resolvers.worker.ts :: worker.updateMany": {
   "count": 4,
@@ -118,6 +118,16 @@
   "count": 1,
   "status": "fenced",
   "reason": "writeAgentBase runs inside setAgentBase fence"
+ },
+ "src/lib/agentClone/cloneAgent.ts :: agent.create": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "a brand-new cloned Agent has no prior compile source or entitlement; its system memory is the fresh copy made in the same transaction, so no earlier compile can have read the new id (same class as createAgentCore's create)"
+ },
+ "src/lib/agentClone/cloneAgent.ts :: agent.delete": {
+  "count": 1,
+  "status": "excluded",
+  "reason": "hard-delete of a SOFT-DELETED tombstone at the reclaimed URN (claimUrn, as createAgentCore does); a tombstone holds no entitlement and a Worker's agent FK is Restrict, so a casting's agent cannot be removed here"
  },
  "src/lib/bootPromptPointer.ts :: agent.update": {
   "count": 1,

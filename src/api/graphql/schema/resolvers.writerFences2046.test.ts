@@ -132,6 +132,14 @@ describe('#2046 S9-3 worker retirement and the S8 pointer writers enter the fenc
     await expectFenceFirst(() => M.retireWorker({}, { workerRef: f.worker.id }, ctxOf(f.a.id)), retired);
   });
 
+  it('changeWorkerAgent', async () => {
+    const f = await fixture();
+    const other = await db.agent.create({ data: { id: generateId(), name: 'Other', urn: 'wf-org:other', organizationId: orgId, personaRole: 'other-role' } });
+    await createDbAppAgent(db, f.app.id, other.id);
+    const changed = async () => (await db.worker.findUniqueOrThrow({ where: { id: f.worker.id } })).agentId === other.id;
+    await expectFenceFirst(() => M.changeWorkerAgent({}, { workerRef: f.worker.id, agentRef: other.id }, ctxOf(f.a.id)), changed);
+  });
+
   it('setAgentBootPrompt', async () => {
     const f = await fixture();
     const set = async () => (await db.agent.findUniqueOrThrow({ where: { id: f.agent.id } })).bootPromptNodeId === f.agentNode.id;

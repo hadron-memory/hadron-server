@@ -1880,7 +1880,8 @@ export const workerMutations = {
         clearedBootPromptNodeId: locked.boot_prompt_node_id,
       });
       return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    }, { afterLock: async (tx) => { await lockAppTickers(tx, app.id); } });
+    // #2046 S9-3: agentId and the boot-prompt pointer are what the compile reads, so the include-history fence comes first.
+    }, { fence: true, afterLock: async (tx) => { await lockAppTickers(tx, app.id); } });
   },
 
   /** #1162 / cor:dmo:050:11: only an unreferenced, released miscast is removable. */
