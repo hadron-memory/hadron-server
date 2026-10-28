@@ -47,6 +47,7 @@ export async function lintCompiledRevision(
     type Row = Awaited<ReturnType<typeof ctx.db.node.findMany<{ select: typeof select }>>>[number];
     const visible = new Map<string, Row>(), selectable = new Map<string, Row>();
     for (let i = 0; i < ids.length; i += BATCH) {
+      // Assembly rejects encrypted memories even with a key (assemble.ts, 6258629173); lint uses that same admissibility.
       const where = { id: { in: ids.slice(i, i + BATCH) }, memory: { deletedAt: null, isEncrypted: false } };
       // The manager's exception computes ONLY a generic availability bit; no hidden identity, position or count escapes.
       const rows = await ctx.db.node.findMany({ where: manager ? where : { AND: [access, where] }, select });
@@ -91,9 +92,8 @@ export async function lintCompiledRevision(
       if (readable && shown && occurrence.kind === 'replacement' && revision.target.kind !== 'AGENT' &&
           shown.memory.isInstallMemory && shown.memory.appId === revision.target.appId) {
         const replaced = occurrence.replacesNodeId ? visible.get(occurrence.replacesNodeId) : null;
-        if (!replaced) warnings.push(warning('BROKEN_INCLUDE', position, 'This include cannot be resolved.'));
-        else warnings.push(warning('POLICY_OVERRIDE', position, `This App overrides Agent node ${replaced.loc}.`,
-          { targetUrn: urn, overriddenNodeLoc: replaced.loc }));
+        warnings.push(warning('POLICY_OVERRIDE', position, replaced ? `This App overrides Agent node ${replaced.loc}.` : 'This App overrides an Agent node.',
+          { targetUrn: urn, overriddenNodeLoc: replaced?.loc ?? null }));
       }
       if (readable && shown && settings.signed) warnings.push(warning('SIGNING_NOT_CHECKED', position,
         'The "signed" setting is not checked yet: signing has not shipped, so this include is served as if it were not signed.', { targetUrn: urn }));

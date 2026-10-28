@@ -388,6 +388,15 @@ describe('#2048 S11b transport and ambiguity controls', () => {
       const workerText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
       expect(workerText).toContain('Served prompt lint (compile revision 1)');
       expect(workerText).toContain('[RECOMPILE_AVAILABLE]');
+      expect(workerText).toContain("The worker's open session was served revision 1");
+      await db.node.update({ where: { id: root.id }, data: { content: 'no tags', revSeq: 1 } });
+      const cleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+      expect(cleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
+      await (resolvers.Mutation as any).approveNode(null, { nodeRef: compiled.id }, { db, userId, roles: [] });
+      await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: compiled.id, bootPromptUrn: `hrn:node:${memoryUrn}:boot:compiled` } });
+      const bothCleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+      expect(bothCleanText).toContain('Current prompt lint (compile revision 1):\nNo lint warnings.');
+      expect(bothCleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
     } finally {
       if (previous === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED; else process.env.BOOT_PROMPT_SERVE_ENABLED = previous;
     }

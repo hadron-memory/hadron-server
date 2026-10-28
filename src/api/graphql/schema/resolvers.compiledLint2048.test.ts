@@ -1,10 +1,11 @@
 /** #2048 S11b: real revision-owned provenance, public fields and caller-sensitive lint. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, isObjectType } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
+import * as pointerGate from '../../../lib/bootPromptPointer.js';
 import { lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -137,6 +138,17 @@ describe('S11b compiled lint', () => {
     const got = await field(result, {}, ctx);
     expect(got?.items).toContainEqual(expect.objectContaining({ kind: 'POLICY_OVERRIDE', overriddenNodeLoc: 'policies:conduct', text: 'This App overrides Agent node policies:conduct.' }));
     expect(got).toEqual(await lintWarningPageForNodeId(ctx, result.node.id));
+    const worker = await db.worker.create({ data: { name: 'Lint', slug: 'lint', appId: app.id, agentId, signature: '{{worker.url}}', trailer: '{{worker.url}}' } });
+    await db.node.create({ data: { memoryId: install.id, loc: `boot:workers:${worker.id}:source`, name: 'worker source', role: 'boot-prompt', content: '{{> policies:conduct}}' } });
+    const workerCompile = await (resolvers.Mutation as any).compileWorkerBootPrompt(null, { workerRef: worker.id }, ctx);
+    expect((await field(workerCompile, {}, ctx))?.items).toContainEqual(expect.objectContaining({ kind: 'POLICY_OVERRIDE', overriddenNodeLoc: 'policies:conduct' }));
+    const foreign = await db.organization.create({ data: { name: 'hidden original', urn: 'hidden-original' } });
+    const hiddenMemory = await db.memory.create({ data: { name: 'hidden original', urn: 'hidden-original:system', class: 'system', organizationId: foreign.id } });
+    await db.agent.create({ data: { name: 'hidden original', urn: 'hidden-original:agent', organizationId: foreign.id, systemMemoryId: hiddenMemory.id } });
+    const original = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'policies:conduct', memoryId } } });
+    await db.node.update({ where: { id: original.id }, data: { memoryId: hiddenMemory.id } });
+    expect((await field(result, {}, ctx))?.items).toContainEqual(expect.objectContaining({ kind: 'POLICY_OVERRIDE', overriddenNodeLoc: null, text: 'This App overrides an Agent node.' }));
+    await db.node.update({ where: { id: original.id }, data: { memoryId } });
     await db.node.update({ where: { id: sourceId }, data: { content: '{{> hrn:node:compiled-lint:system:policies:conduct}}' } });
     const next = await (resolvers.Mutation as any).compileAppAgentBootPrompt(null, { appRef: app.id, agentRef: agentId }, ctx);
     expect(next.node.content).toBe('original');
@@ -155,11 +167,28 @@ describe('S11b compiled lint', () => {
   });
   it('does not change a committed artifact when a later lint read faults', async () => {
     const before = await db.node.findUniqueOrThrow({ where: { id: compiledId } });
-    const faulted = { ...ctx, db: { ...db, compiledPromptRevision: { ...db.compiledPromptRevision, findUnique: async () => { throw new Error('synthetic provenance read fault'); } } } } as unknown as Context;
-    const got = await (resolvers as any).CompiledBootPrompt.lintWarnings({ node: { id: compiledId }, revNo: 1 }, {}, faulted);
-    expect(got).toBeNull();
+    expect(await page()).toMatchObject({ total: 0 });
+    const fault = vi.spyOn(db.compiledPromptRevision, 'findUnique').mockRejectedValueOnce(new Error('synthetic provenance read fault'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const got = await (resolvers as any).CompiledBootPrompt.lintWarnings({ node: { id: compiledId }, revNo: 1 }, {}, ctx);
+      expect(got).toBeNull();
+      expect(fault).toHaveBeenCalledOnce();
+      expect(logged).toHaveBeenCalledWith('[bootPromptLint] compiled warnings unavailable:', 'synthetic provenance read fault');
+    } finally { fault.mockRestore(); logged.mockRestore(); }
     expect(await db.node.findUniqueOrThrow({ where: { id: compiledId } })).toEqual(before);
     expect(await db.compiledPromptRevision.count({ where: { compiledNodeId: compiledId } })).toBe(1);
+  });
+  it('returns unavailable on an unexpected compile-authority fault, even for a compiled reader', async () => {
+    expect(await page()).toMatchObject({ total: 0 });
+    const fault = vi.spyOn(pointerGate, 'assertMayWriteBootPromptPointer').mockRejectedValueOnce(new Error('synthetic compile-authority fault'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await page()).toBeNull();
+      expect(fault).toHaveBeenCalledOnce();
+      expect(logged).toHaveBeenCalledWith('[bootPromptLint] compiled warnings unavailable:', 'synthetic compile-authority fault');
+    } finally { fault.mockRestore(); logged.mockRestore(); }
+    expect(await page()).toMatchObject({ total: 0 });
   });
   it('missing normalized settings are unavailable rather than reconstructed from current source text', async () => {
     await withCompileWrite(() => db.node.update({ where: { id: compiledId }, data: { revSeq: 2 } }));

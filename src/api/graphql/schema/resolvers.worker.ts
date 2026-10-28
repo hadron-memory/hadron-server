@@ -2589,7 +2589,7 @@ async function readServedWorkerText(
 /**
  * #2047 — what a worker would be served now, as the text `hadron_get_worker` prints: the pointer level that decides, the
  * revision served and the lint state of its root source, or the refusal a bind would get. Also the revision recorded for
- * the caller's own open session when it differs (a session finishes under the revision it was bound with). Empty with
+ * the worker's latest open session (a session finishes under the revision it was bound with). Empty with
  * serving OFF. Behind the worker read gate; ids only, never a loc or text beyond what `Worker.servedPrompt` already shows.
  */
 export async function describeServedWorker(
@@ -2603,7 +2603,7 @@ export async function describeServedWorker(
   try {
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
     line = `\nServed boot prompt: ${served.pointerLevel} pointer, compiled node ${served.compiledNodeId}, revision ${served.servedRevSeq} (provenance from compile revision ${served.provenanceRevSeq}).`;
-    line += '\nCurrent prompt lint (compile revision ' + served.provenanceRevSeq + '):' + renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, served.compiledNodeId, served.provenanceRevSeq));
+    line += '\nCurrent prompt lint (compile revision ' + served.provenanceRevSeq + '):' + (renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, served.compiledNodeId, served.provenanceRevSeq)) || '\nNo lint warnings.');
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
@@ -2611,8 +2611,8 @@ export async function describeServedWorker(
   }
   const recorded = await servedPromptOwnerFields.workerServedPrompt(worker, {}, ctx);
   if (recorded) {
-    line += `\nThis session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
-    line += `\nServed prompt lint (compile revision ${recorded.provenanceRevSeq}):` + renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, recorded.compiledNodeId, recorded.provenanceRevSeq));
+    line += `\nThe worker's open session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
+    line += `\nServed prompt lint (compile revision ${recorded.provenanceRevSeq}):` + (renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, recorded.compiledNodeId, recorded.provenanceRevSeq)) || '\nNo lint warnings.');
   }
   return line;
 }
