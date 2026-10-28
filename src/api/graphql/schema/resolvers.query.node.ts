@@ -41,6 +41,8 @@ import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
   parseUrnInput,
+  parseUrnV2,
+  composeUrnV2,
   validateUrnType,
   splitNodeUrn,
 } from '../../../lib/urn.js';
@@ -86,7 +88,7 @@ import {
   loadMemoryUrn,
   CONTENT_RAW_DEFAULT,
 } from './resolvers.helpers.js';
-import { getAppMemoryAccess, filterReadableMemoryIds } from '../../../mcp/access-control.js';
+import { getAppMemoryAccess, filterReadableMemoryIds, canReadMemory } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import {
@@ -539,6 +541,77 @@ export const nodeQueries = {
             return null;
           }
           return { kind: 'agent', id };
+        }
+        case 'action': {
+          // #2610 — hrn:action:<root>:<agent-slug>:<code> (cor:urn:010:01,
+          // Proposed). The root + slug name the ONE Agent whose system memory
+          // holds the entry at `register:<code>`; the leaf is the code, 1:1
+          // with that register node — a computed SECOND address, whose node URN
+          // keeps resolving through the `node` arm above. The URN names the
+          // entry in one Agent on purpose: no nearest-first fallthrough of the
+          // Agent's extends chain here (a child Agent's override entry
+          // addresses under its own slug; chain resolution stays with the
+          // code-lookup surface), so `hrn:action:…:child:<code>` with no entry
+          // in the child's own memory names nothing.
+          let agentId: string;
+          let code: string;
+          try {
+            const parsed = parseUrnV2(baseUrn); // fixed 'action' arity: [agent-slug, code]
+            [code] = parsed.segments.slice(1);
+            ({ id: agentId } = await resolveAgentRef(
+              ctx.db,
+              composeUrnV2('agent', parsed.root, parsed.segments[0]!),
+            ));
+          } catch {
+            // Malformed leaf (charset/length/arity) or an unknown/renamed-away
+            // agent — both name nothing (uniform refusal).
+            return null;
+          }
+          const agent = await ctx.db.agent.findUnique({
+            where: { id: agentId },
+            select: { organizationId: true, visibility: true, ownerUserId: true, systemMemoryId: true },
+          });
+          if (!agent?.systemMemoryId) return null;
+          // The `agent` arm's gate, verbatim: PUBLIC resolves for anyone
+          // (#551), otherwise owner-or-org-membership.
+          if (agent.visibility !== 'PUBLIC' && !(await isOwnerOrOrgMember(ctx, agent))) {
+            return null;
+          }
+          // The system memory's RECORD gate — a PUBLIC agent whose system
+          // memory this caller cannot read still names nothing here.
+          if (!(await canReadMemory(ctx.db, ctx, agent.systemMemoryId))) return null;
+          // The entry itself: `register:<code>` in THAT memory, delegated to
+          // the node-ref resolver so the live lookup, the rename alias heal
+          // (cor:urn:030:01 — an old code never stops resolving) and ambiguity
+          // concealment are the SAME implementation the `node` arm uses rather
+          // than a bespoke loc query that can drift.
+          const memUrn = await loadMemoryUrn(ctx, agent.systemMemoryId);
+          if (!memUrn) return null;
+          let entryId: string;
+          try {
+            ({ id: entryId } = await resolveNodeRefForCaller(
+              ctx,
+              emitNodeUrnV2(memUrn, `register:${code}`),
+            ));
+          } catch (error) {
+            // A globally-ambiguous historical address stays a loud refusal,
+            // exactly as the `node` arm treats it.
+            if (error instanceof AmbiguousLegacyUrnError) throw error;
+            return null;
+          }
+          const entry = await ctx.db.node.findUnique({
+            where: { id: entryId },
+            select: { memoryId: true },
+          });
+          if (!entry) return null;
+          // The `node` arm's content gate on the memory the entry actually
+          // lives in (an alias heal can cross memories): allow-list when the
+          // caller's access is not unrestricted.
+          const access = await memoryAccessFilter(ctx);
+          if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
+            if (!(access.memoryId.in as string[]).includes(entry.memoryId)) return null;
+          }
+          return { kind: 'action', id: entryId, memoryId: agent.systemMemoryId };
         }
         case 'app': {
           let id: string;

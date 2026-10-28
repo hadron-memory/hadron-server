@@ -4,6 +4,7 @@
 # (bcrypt node-gyp native build, prisma engine fetch + client generate, esbuild).
 allowBuilds:
   '@apollo/protobufjs': true
+  '@hadron-memory/urn-lib-js': true
   '@prisma/client': true
   '@prisma/engines': true
   bcrypt: true

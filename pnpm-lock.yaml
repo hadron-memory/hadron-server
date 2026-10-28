@@ -36,8 +36,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@hadron-memory/urn-lib-js':
-        specifier: 0.0.17
-        version: 0.0.17
+        specifier: github:hadron-memory/urn-lib-js#v0.0.18
+        version: https://codeload.github.com/hadron-memory/urn-lib-js/tar.gz/d0afc6fe237ff1f241d5c7d00e8703c0e6527715
       '@modelcontextprotocol/sdk':
         specifier: ^1.27.1
         version: 1.27.1(zod@4.3.6)
@@ -736,8 +736,9 @@ packages:
   '@hadron-memory/access-control@0.3.0':
     resolution: {integrity: sha512-rEMpsY2emeckMtrFpj9uPzJQgApnDHF+pBrNczrGmI6GYo6roahYGvPxtohtSuQzi9MSQXP3Pjnzy71WZrDzVw==}
 
-  '@hadron-memory/urn-lib-js@0.0.17':
-    resolution: {integrity: sha512-VI6wScJpaYDJwiyO5U2DSsqNOVnYrmLAT+8wQWseuNBpBBxvkkvyXzLUihHx3X9SY5PrmIZB13oy1HtlnudUEA==}
+  '@hadron-memory/urn-lib-js@https://codeload.github.com/hadron-memory/urn-lib-js/tar.gz/d0afc6fe237ff1f241d5c7d00e8703c0e6527715':
+    resolution: {gitHosted: true, integrity: sha512-8PLFkwNUG2Rm0SnMH+7ABMpikq8P9ERx2b4rIoCHBLxqDVnYPflPUFgdymfuG0oY44iQGteaFIw1mH7ocKyE8A==, tarball: https://codeload.github.com/hadron-memory/urn-lib-js/tar.gz/d0afc6fe237ff1f241d5c7d00e8703c0e6527715}
+    version: 0.0.18
 
   '@hexagon/base64@1.1.28':
     resolution: {integrity: sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw==}
@@ -832,6 +833,7 @@ packages:
   '@opentelemetry/sdk-trace-base@2.10.0':
     resolution: {integrity: sha512-GuYQQT7QD2EeO8lcZLRQzcbOyhqAzL+6WWTKTU9mSUBYBazkEDl+VrQcXQhbB08OWM9anD1aHleVadzulpOaUQ==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
@@ -3950,7 +3952,7 @@ snapshots:
 
   '@hadron-memory/access-control@0.3.0': {}
 
-  '@hadron-memory/urn-lib-js@0.0.17': {}
+  '@hadron-memory/urn-lib-js@https://codeload.github.com/hadron-memory/urn-lib-js/tar.gz/d0afc6fe237ff1f241d5c7d00e8703c0e6527715': {}
 
   '@hexagon/base64@1.1.28': {}
 
