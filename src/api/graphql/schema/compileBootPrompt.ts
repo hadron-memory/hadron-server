@@ -54,6 +54,8 @@ export type CompileTargetInput =
 export interface CompileBootPromptOptions {
   /** Agent and worker compiles only: false leaves the pointer alone. An App compile always sets it. */
   setPointer?: boolean;
+  /** The one-time conversion only: refuse (ADDRESS_OCCUPIED) when ANY node is already at the compiled address, judged inside the deciding transaction under the locks; never overwrite. No request path sets it. */
+  createOnly?: boolean;
   /** The whole operation's budget in ms across the initial attempt and its owner-drift retries. Default 30s (6258672877). */
   budgetMs?: number;
   /** Deterministic test seams (barriers at the boundaries); no request path passes these. */
@@ -375,6 +377,9 @@ async function decide(
       where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null },
       select: { id: true, nodeType: true },
     });
+    if (existing && options.createOnly) {
+      throw new GraphQLError('The compiled boot prompt address is occupied.', { extensions: { code: 'ADDRESS_OCCUPIED' } });
+    }
     if (existing && existing.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) {
       throw new GraphQLError('The compiled boot prompt address is occupied by another node.', { extensions: { code: 'CONFLICT' } });
     }
