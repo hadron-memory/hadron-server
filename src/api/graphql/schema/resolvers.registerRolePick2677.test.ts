@@ -96,6 +96,19 @@ describe('#2677 single pick over #2608 candidates', () => {
   });
 });
 
+describe('#2677 matchable and named-retired pins', () => {
+  it('a worker whose agent does not use tasks is not picked (the matcher\'s matchable), and a retired named worker reads like naming nobody', async () => {
+    const off = await worker('Off'); await bind(off);
+    await db.agent.update({ where: { id: teamAgentId }, data: { usesTasks: false } });
+    const unnamed = await pick(admin.id);
+    expect(ids(unnamed)).not.toContain(`WORKER:${off.id}`);
+    await db.agent.update({ where: { id: teamAgentId }, data: { usesTasks: true } });
+    const gone = await worker('Gone'); await db.worker.update({ where: { id: gone.id }, data: { retiredAt: at(0) } });
+    const base = await pick(admin.id);
+    expect(await pick(admin.id, { workerRef: gone.id })).toEqual(base);
+  });
+});
+
 describe('#2677 routing order: named, role holder, coordinator, managers, empty', () => {
   it('a named worker wins over everything and need not be free', async () => {
     const holder = await worker('Holder'); const named = await worker('Named', teamAgentId, 'engineer'); await bind(holder);
