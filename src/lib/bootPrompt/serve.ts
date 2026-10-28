@@ -156,6 +156,10 @@ export async function recordServedPrompt(
   served: ServedBootPrompt,
   variables: Record<string, string>,
 ): Promise<void> {
+  // #2047 PR-C: a share lock on the compiled node orders this record against cap-pruning, whose revision write takes the
+  // node's row lock first. A prune that started earlier finishes first; one that starts after waits until this
+  // transaction commits and then sees the record, so the served revision is never pruned between selection and record.
+  await db.$queryRaw`SELECT id FROM nodes WHERE id = ${served.compiledNodeId} FOR SHARE`;
   await db.servedPrompt.create({
     data: {
       id: generateId(),
