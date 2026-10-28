@@ -99,7 +99,7 @@ describe('#2704 — migration', () => {
     const pointerBefore = (await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).bootPromptNodeId;
     const before = await composeWorkerPrompt({ db, userId: adminId, roles: [], clientId: `user:${adminId}` } as Context, { ...w, role: null });
     expect(before.refusal ?? null).toBeNull();
-    expect(before.text).toContain('{{name}}'); // the served path leaves the legacy token literal today (#2702)
+    expect(before.text).toContain('You are iris, the coordinator.'); // #2705: the served path binds the legacy tokens
 
     const report = await migrate();
     expect(report).toMatchObject({ applied: true, migrated: 1, failed: 0 });
@@ -113,7 +113,7 @@ describe('#2704 — migration', () => {
     expect(approved(source)).toBe(true);
     expect(row.systemPrompt).toBe('You are {{name}}, the {{role}}.'); // the retired column is not edited
     const after = await composeWorkerPrompt({ db, userId: adminId, roles: [], clientId: `user:${adminId}` } as Context, { ...w, role: null });
-    expect(after.text).toContain('You are iris, the coordinator.');
+    expect(after.text).toBe(before.text); // the rename changes nothing a worker is served
     expect(after.text).not.toMatch(/\{\{(name|role|worker\.[a-zA-Z.]+|agent\.name|session\.llmModel)\}\}/);
     expect((await auditBootPromptTokens(db)).legacyBindingRemovable).toBe(true);
   });

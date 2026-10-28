@@ -14,8 +14,8 @@
  * revision untouched (serving reads the approved revision, so a failed row changes nothing a worker sees).
  *
  * The rename changes no rendered text: every path already binds legacy `{{role}}` to the same value as `{{worker.role}}`
- * (the worker's own role, else the persona role) and `{{name}}` to `{{worker.name}}` (cor:dmo:150:08). Compiled text served
- * today leaves a legacy token literal (#2702), so the migrated text is the first one that binds.
+ * (the worker's own role, else the persona role) and `{{name}}` to `{{worker.name}}` (cor:dmo:150:08). The served briefing binds the legacy
+ * tokens since #2705, so the rendered text is byte-identical before and after the rename.
  *
  * Idempotent: a source with no legacy token whose compiled node has none is not selected. A source already migrated by
  * an earlier run that stopped before the compile is picked up by its compiled node still holding a token.
