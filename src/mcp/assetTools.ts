@@ -12,6 +12,8 @@ import { setAssetPublicLink } from '../lib/asset/publicLink.js';
 import { AssetUploadError } from '../controller/operations/beginAssetUpload.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { GraphQLError } from 'graphql';
 
 export const SHAPE_HADRON_SET_ASSET_PUBLIC_LINK = {
   asset: z.string().min(1).describe('The asset id.'),
@@ -60,10 +62,8 @@ export function registerAssetTools(server: McpServer, deps: { db: PrismaClient; 
           'publicUrl empty does not mean the link is off: it also needs the deployment switch, a scanned asset in an unencrypted memory and a configured origin.',
         ].join('\n'));
       } catch (e) {
-        if (e instanceof AssetUploadError) return textResult(`[${e.code.toLowerCase()}] ${e.message}`);
-        if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
-          return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
-        }
+        if (e instanceof AssetUploadError) return { isError: true as const, ...textResult(`[${e.code.toLowerCase()}] ${e.message}`) };
+        if (e instanceof GraphQLError && isTrustedRefusal(e)) return { isError: true as const, ...textResult(`[${String(e.extensions?.code).toLowerCase()}] ${e.message}`) };
         throw e;
       }
     },

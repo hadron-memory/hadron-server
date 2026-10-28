@@ -28,6 +28,7 @@ export const TASK_EVENT_TYPES = [
   // #1754 — the backlog moves (cor:agt:050:02).
   'task.parked',
   'task.ready',
+  'task.warning',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -47,6 +48,12 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
  */
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
+/** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
+export const PASSIVE_EVENT_TYPES = ['task.warning'] as const;
+/** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
+export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
+export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
+
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
 
@@ -62,6 +69,7 @@ export type TaskEventPayload =
   | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean }
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
+  | { type: 'task.warning'; code: RecordedTaskWarningCode }
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
@@ -87,6 +95,9 @@ function partyJson(p: TaskParty): Prisma.InputJsonObject {
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
+    case 'task.warning':
+      if (!(RECORDED_TASK_WARNING_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task warning history code');
+      return { code: e.code };
     case 'task.created':
       // The owner rides task.created (#1757, cor:agt:050:01): a creator-named
       // owner is visible to the event stream from creation.
@@ -356,7 +367,36 @@ export async function appendHostOperationEvent(
  * reported to, a worker claiming it, its holder, whoever manages the App, the worker's own
  * bind (`startSession`), or the platform clearing it on retirement.
  */
-export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement';
+export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' | 'bind' | 'retirement' | 'cast';
+
+/**
+ * #2458 (cor:dmo:050:11): append the one `worker.casting` event a change of a worker's agent writes, in the change's
+ * own transaction: who, the worker, the old and new agent and role, and the per-worker boot-prompt pointer the change
+ * cleared (null when none was set). Ids and role words only.
+ */
+export async function appendWorkerCastingEvent(
+  tx: Prisma.TransactionClient,
+  args: {
+    appId: string; actor: EventActor; workerId: string;
+    fromAgentId: string; toAgentId: string; fromRole: string | null; toRole: string | null;
+    clearedBootPromptNodeId: string | null;
+  },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'worker.casting',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.workerId,
+      payload: {
+        fromAgentId: args.fromAgentId, toAgentId: args.toAgentId, fromRole: args.fromRole, toRole: args.toRole,
+        clearedBootPromptNodeId: args.clearedBootPromptNodeId,
+      },
+    },
+  });
+}
 
 /**
  * Append one `worker.reports-to` event: a set, handover or clear. The Worker
@@ -365,7 +405,7 @@ export type ReportsToSetter = 'current' | 'claimant' | 'holder' | 'app-manager' 
  */
 export async function appendReportsToEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter },
+  args: { appId: string; actor: EventActor; workerId: string; from: string | null; to: string | null; setBy: ReportsToSetter; oldExplicitNoTeam?: boolean; newExplicitNoTeam?: boolean },
 ): Promise<void> {
   await tx.agentTeamEvent.create({
     data: {
@@ -375,7 +415,9 @@ export async function appendReportsToEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       subjectWorkerId: args.workerId,
-      payload: { from: args.from, to: args.to, setBy: args.setBy },
+      payload: { from: args.from, to: args.to, setBy: args.setBy,
+        ...(args.oldExplicitNoTeam !== undefined ? { oldExplicitNoTeam: args.oldExplicitNoTeam, newExplicitNoTeam: args.newExplicitNoTeam } : {}),
+      },
     },
   });
 }

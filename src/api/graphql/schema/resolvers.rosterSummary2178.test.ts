@@ -6,7 +6,7 @@ import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
 import { loadRosterTaskSummaries } from '../../../lib/agentTasks/rosterSummary.js';
 import * as taskReadPolicy from './resolvers.agentTask.js';
-import { setS6NoticesAvailableForTest } from '../../../lib/stopSignals/delivery.js';
+import { declareAllStopLanes } from '../../../test/stopLanes.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -96,11 +96,9 @@ describe('#2178 safe roster enrichment — red first', () => {
     const expired = ago(1);
     await db.workerWakeSettings.update({ where: { workerId: w.Kit.id }, data: { pausedUntil: expired } });
     expect((await entry('Kit')).checkStatus.pendingReason).toBeNull();
-    setS6NoticesAvailableForTest(true);
-    try {
-      await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: w.Kit.id } }, ctx(admin.id));
-      expect(await entry('Kit')).toMatchObject({ pausedUntil: expired, checkStatus: { status: 'PENDING', pendingReason: 'STOPPED' } });
-    } finally { setS6NoticesAvailableForTest(false); }
+    await declareAllStopLanes(db, app.id);
+    await M.setTeamStopSignal({}, { input: { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: w.Kit.id } }, ctx(admin.id));
+    expect(await entry('Kit')).toMatchObject({ pausedUntil: expired, checkStatus: { status: 'PENDING', pendingReason: 'STOPPED' } });
   });
 
   it('selects STARTED ahead of PENDING, oldest assigned first, even without a session', async () => {

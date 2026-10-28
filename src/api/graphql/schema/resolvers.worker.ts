@@ -1,3 +1,4 @@
+import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
 // an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
@@ -16,20 +17,22 @@
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
+import { generateId } from '../../../lib/id.js';
+import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
 import {
   GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
   endGeneratedTickersForWorker, instantiateAgentTickerTemplates, planGeneratedTickers,
-  GeneratedAgentNotInstalledError,
+  GeneratedAgentNotInstalledError, lockAgentTemplates,
 } from '../../../lib/tickers/agentTickerTemplates.js';
 import { lockAppTickers, reasonEnum } from './resolvers.ticker.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import {
-  AgentNotFoundError,
+  AgentNotFoundError, WorkerNotFoundError,
   AmbiguousUserRefError,
   UserNotFoundError,
 } from '../../../lib/entityRef/errors.js';
@@ -37,7 +40,7 @@ import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/us
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
-import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
+import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
@@ -58,10 +61,12 @@ import {
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
+import { castTeamChoice, teamPlacement, type CastTeamArgs } from '../../../lib/workerTeamChoice.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -70,7 +75,10 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { eventActor } from '../../../lib/agentTasks/events.js';
+import { appendWorkerCastingEvent, eventActor } from '../../../lib/agentTasks/events.js';
+import { assertCastable, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
+import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import {
   type Context,
   requireOrgRole,
@@ -612,6 +620,18 @@ export async function resolveReportsToTarget(ctx: Context, appId: string, ref: s
   return id;
 }
 
+/** Cast-only fixed envelope; infrastructure failures are never absence. */
+async function resolveCastReportingHead(ctx: Context, appId: string, ref: string): Promise<string> {
+  const absent = () => new GraphQLError('Worker not found in this App.', { extensions: { code: 'WORKER_NOT_FOUND' } });
+  if (isId(ref) || hasSchemePrefix(ref)) {
+    try { return (await resolveWorkerRefId(ctx.db, ref, { scope: { appId } })).id; }
+    catch (e) { if (e instanceof WorkerNotFoundError) throw absent(); throw e; }
+  }
+  const id = await resolveWorkerIdByNameGated(ctx, appId, ref);
+  if (!id) throw absent();
+  return id;
+}
+
 /** True when the refusal is the per-App name unique (`workers_app_name_uniq`). */
 function isNameTaken(e: unknown): boolean {
   return (
@@ -794,7 +814,7 @@ export async function provisionWorkerMemory(
 }
 
 /** Argument shape shared by castWorker and its preview (#964). */
-type CastArgs = {
+type CastArgs = CastTeamArgs & {
   appRef: string;
   agentRef?: string | null;
   role?: string | null;
@@ -807,9 +827,19 @@ type CastTarget = {
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
   workerRole: string | null;
+  /** The role the caller passed (trimmed), or null: the cast re-checks it against the agent read in its transaction. */
+  requestedRole: string | null;
   requestedName: string | null;
   override: string | null;
+  choice: ReturnType<typeof castTeamChoice>;
+  reportingHeadId: string | null;
 };
+
+/** R222 (cor:dmo:050:11): a cast takes the role of the agent it names; `role` may only repeat it. */
+const roleOverrideRefused = (appId: string, agentRole: string | null, requested: string) => new GraphQLError(
+  `A cast takes the role of the agent it names ("${agentRole ?? ''}"); it cannot be overridden. Omit role, or cast the agent that answers "${requested}".`,
+  { extensions: { code: 'WORKER_ROLE_OVERRIDE_REFUSED', appId, agentRole } },
+);
 
 /**
  * The shared resolution HALF of casting (#964 — "single implementation" as a
@@ -822,8 +852,9 @@ type CastTarget = {
  * allocation vs. projection — is the caller's half, so every typed refusal up
  * to allocation behaves identically under preview and cast.
  */
-async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarget> {
+async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?: string): Promise<CastTarget> {
   const { appRef, agentRef, role, name, promptOverride } = args;
+  const choice = castTeamChoice(args);
   const roleNorm = (role ?? '').trim() || null;
   if (roleNorm !== null && roleNorm.includes(':')) {
     throw new GraphQLError('role must be a single loc atom (no ":").', {
@@ -840,8 +871,9 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // that merely contains the word ("teamster") is not. A validation refusal
   // like WORKER_NAME_REQUIRED; a worker already so named keeps the narrow
   // reply-exception of #1867 instead (cor:agt:020:04).
+  if (requestedName && reservedTeamPrefix(requestedName)) throw new GraphQLError('Worker mention tokens starting with team. are reserved.', { extensions: { code: 'WORKER_NAME_RESERVED_TEAM_PREFIX' } });
   const token = requestedName != null ? mentionTokenOf(requestedName) : null;
-  if (token != null && (BROADCAST_MENTION_TOKENS as readonly string[]).includes(token)) {
+  if (token != null && (RESERVED_WORKER_MENTION_TOKENS as readonly string[]).includes(token)) {
     throw new GraphQLError(
       `A worker named ${JSON.stringify(requestedName)} would mention-broadcast: its token @${token} routes a reply to every registered destination. Choose another name.`,
       { extensions: { code: 'WORKER_NAME_RESERVED', token } },
@@ -857,6 +889,17 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
     });
   }
   await requireWorkerStaffAccess(ctx, app);
+  let reportingHeadId: string | null = null;
+  if (choice.kind === 'REPORTS_TO') {
+    if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
+    // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
+    // A future pull-shaped standby activation MUST initialize coverage for existing reports
+    // before removing this guard and admitting new reports atomically under its common bracket.
+    if (s7Available()) throw new GraphQLError('Casting with a reporting head is not available while standby integration is incomplete.', { extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
+    reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
+    const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
+    if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });
+  }
 
   // 2. Resolve the agent being cast — installed in this App at cast time.
   let agent: CastTarget['agent'];
@@ -930,9 +973,16 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
     }
     agent = matches[0];
   }
-  // The casting's role: explicit wins, else the agent's dressing.
-  const workerRole = roleNorm ?? agent.personaRole ?? null;
-  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
+  // Preserve S12's typed identity-drift refusal before #2458 looks up the
+  // newly selected Agent's licence. The transaction was planned for the original.
+  if (expectedAgentId !== undefined && agent.id !== expectedAgentId) throw castTargetChanged();
+  // #2458 / R222: a cast takes its Agent's role; role selects, never overrides.
+  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
+    throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
+  }
+  await assertCastable(ctx.db, app, agent.id);
+  const workerRole = agent.personaRole ?? null;
+  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, override, choice, reportingHeadId };
 }
 
 /** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
@@ -955,6 +1005,12 @@ function generatedTickerRefusal(e: unknown): GraphQLError | null {
   return null;
 }
 
+function castTargetChanged(): GraphQLError {
+  return new GraphQLError('The cast target changed; retry the cast.', {
+    extensions: { code: 'CAST_TARGET_CHANGED', retryable: true },
+  });
+}
+
 export const workerMutations = {
   /**
    * castWorker — #974 (cor:dmo:050:11): cast an installed agent into the App
@@ -975,10 +1031,18 @@ export const workerMutations = {
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
   castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, app, agent, workerRole, requestedName, override } = await resolveCastTarget(
+    const { appId, app, agent, workerRole, requestedRole, requestedName, choice } = await resolveCastTarget(
       ctx,
       args,
     );
+
+    // Plan the complete authority bracket before any graph/name/Worker resource.
+    const agentOwner = await ctx.db.agent.findUniqueOrThrow({ where: { id: agent.id }, select: { organizationId: true, ownerUserId: true } });
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: appId }, { kind: 'agent', id: agent.id },
+      ...[app.organizationId, agentOwner.organizationId].filter((id): id is string => !!id).map(id => ({ kind: 'org' as const, id })),
+      ...[app.ownerUserId, agentOwner.ownerUserId].filter((id): id is string => !!id).map(id => ({ kind: 'user' as const, id })),
+    ];
 
     // 3+4. Allocate + create.
     /** Sentinel: this name is taken, so a register walk should advance. */
@@ -1009,27 +1073,54 @@ export const workerMutations = {
     ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
       for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
         try {
-          return await ctx.db.$transaction(async (tx) => {
+          const plannedWorkerId = generateId();
+          return await withAuthorizedTx(ctx, anchors, async () => {}, async (tx, txCtx) => {
+            // Exclusive anchors prevent concurrent casts from upgrading SHARE App rows together.
             await lockWorkerNames(tx, appId);
+            await lockAppReportsTo(tx, appId);
+            await lockAppTickers(tx, appId);
+            // Cleanup doors such as public leaveApp intentionally take no authority anchor.
+            // Hold the deciding membership rows as well, before any Worker row/write.
+            if (ctx.userId) {
+              if (app.organizationId) await tx.$queryRaw`
+                SELECT user_id FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+              await tx.$queryRaw`
+                SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+            }
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
             if (freshApp.deletedAt) throw forbidden();
-            await requireWorkerStaffAccess({ ...ctx, db: tx as unknown as Context['db'] }, freshApp);
+            await requireWorkerStaffAccess(txCtx, freshApp);
+            if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
+            const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
+            if (freshAgent.organizationId !== agentOwner.organizationId || freshAgent.ownerUserId !== agentOwner.ownerUserId) throw castTargetChanged();
             if (freshApp.uninstalledAt) {
               throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
+            }
+            const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
+            if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
+            // Preserve #2458's deciding licence/role check on the transaction.
+            // This remains read-only: install/changeWorkerAgent own grant provisioning.
+            const { agent: castAgent } = await assertCastable(tx, freshApp, agent.id);
+            const castRole = castAgent.personaRole ?? null;
+            if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
+              throw roleOverrideRefused(appId, castRole, requestedRole);
             }
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
             // applying the additional DAP naming-equivalence check.
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
+            const workerIds = [plannedWorkerId, ...(freshTarget.reportingHeadId ? [freshTarget.reportingHeadId] : [])].sort();
+            await tx.$queryRaw`SELECT id FROM workers WHERE id = ANY(${workerIds}::text[]) ORDER BY id FOR UPDATE`;
             const castWorkerRow = await tx.worker.create({
               data: { ...WORKER_SIGNATURE_DEFAULTS,
+                id: plannedWorkerId,
                 appId,
                 agentId: agent.id,
                 name: candidate,
                 slug,
-                role: workerRole,
-                promptOverride: override,
+                role: castRole,
+                promptOverride: freshTarget.override,
                 createdBy: ctx.userId ?? null,
                 // #1050 — casting does NOT hold. A name is held by the person
                 // who WORKS as it, and the canonical setup flow is a coordinator
@@ -1040,6 +1131,10 @@ export const workerMutations = {
               },
               select: { id: true, name: true, slug: true },
             });
+            if (choice.kind !== 'UNSET') {
+              await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: eventActor(ctx.userId), setBy: 'cast' });
+            }
+            if (freshTarget.reportingHeadId) await reconcileStopCoverage(tx, appId, new Date());
             // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
             // same transaction. Any refusal rolls the whole cast back, the name allocation included.
             try {
@@ -1050,7 +1145,12 @@ export const workerMutations = {
               throw generatedTickerRefusal(e) ?? e;
             }
             return castWorkerRow;
-          }, { timeout: 30_000 });
+          }, { lockMode: 'exclusive', timeout: 30_000, afterLock: async tx => {
+            await lockAgentTemplates(tx, agent.id, 'shared');
+            // Only a reporting-line birth changes S6 topology. Acquire its fence
+            // before name/graph/Worker resources; no-head casts need no coverage write.
+            if (choice.kind === 'REPORTS_TO') await lockStopFence(tx, appId, 'exclusive');
+          } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
           // collision is the caller-visible allocation signal.
@@ -1563,9 +1663,9 @@ export const workerMutations = {
    * bound — so exactly the workers that have accumulated an identity are the
    * ones that could not be re-cast.
    *
-   * Scope is deliberately ONE field. `name` is permanent by law
-   * (cor:agt:020:02 — the allocation contract), and `role`/`agent` define the
-   * casting itself: a different role is a different casting, not an edit.
+   * `name` is permanent by law (cor:agt:020:02 — the allocation contract). The
+   * agent, and with it the role, is changed by `changeWorkerAgent` (#2458,
+   * cor:dmo:050:11), never here: that change has its own checks and effects.
    *
    * Argument semantics: OMITTED preserves (the partial-update convention every
    * other surface follows), explicit `null` or blank CLEARS — matching both the
@@ -1670,6 +1770,113 @@ export const workerMutations = {
       );
     }
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+  },
+
+  /**
+   * changeWorkerAgent — #2458 / hrn:node:hadronmemory.com:specs:cor:dmo:050:11 (Holger R222): change the agent a
+   * worker casts; its role follows the agent (never typed in). Name, slug, URN, signature, trailer, reporting line
+   * and every past record stay; past sessions keep the agent and role they ran under (`Session.agentId`/`role`).
+   *
+   * Who: whoever manages the App, as themselves. The gate is updateWorker's signature/trailer gate verbatim: a
+   * bound worker session (even one its manager holds, R113), a worker or agent actor, an impersonation and a
+   * refused session binding are all FORBIDDEN, decided on the live transaction context.
+   *
+   * To what: `assertCastable`, the one casting check the cast runs too, plus the new agent must have a role of its
+   * own. A refused change changes nothing.
+   *
+   * A COMPLETE change, in one transaction: agent and role, the per-worker boot-prompt pointer cleared (it named the
+   * OLD agent's compiled prompt; the next bind takes the new agent's), the old agent's generated tickers ended and
+   * the new agent's templates instantiated, the missing same-org grants provisioned, and one `worker.casting`
+   * event. It takes effect at the next bind (startSession stamps agent and role from the locked worker row).
+   *
+   * Allowed while the worker has an open session: that session finishes under the agent and role it was bound with
+   * (`Session.agentId`/`role`). Reads that serve it (its register, briefing, matcher and context-reset settings)
+   * resolve from the session (src/lib/sessionPlacement.ts); every other reader sees the new row at once.
+   *
+   * Lock order: authority anchors, the App ticker lock (as retireWorker), the per-worker assignment lock, the old
+   * and new Agent rows FOR SHARE in id order, then the Worker row FOR UPDATE: the matcher and context reset take
+   * the assignment lock, then Agent, then Worker, so neither can cycle with this.
+   */
+  changeWorkerAgent: async (
+    _: unknown,
+    args: { workerRef: string; agentRef: string },
+    ctx: Context,
+  ) => {
+    const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    return withAuthorizedTx(ctx, anchors, async txCtx => {
+      const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
+      const actor = currentActor();
+      const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
+      if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
+    }, async tx => {
+      // Only a caller who passed the gate learns whether the agent exists: absent and not installed are one answer.
+      let toAgentId: string;
+      try {
+        ({ id: toAgentId } = await resolveAgentRef(tx as unknown as Context['db'], args.agentRef.trim()));
+      } catch (e) {
+        if (e instanceof AgentNotFoundError) throw workerAgentNotInstalled(app.id);
+        throw e;
+      }
+      await lockWorkersForAssignment(tx, [worker.id]);
+      const before = await tx.worker.findUnique({ where: { id: worker.id }, select: { agentId: true } });
+      if (!before) throw workerNotFound(args.workerRef);
+      const agentIds = [...new Set([before.agentId, toAgentId])].sort();
+      await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${agentIds}::text[]) ORDER BY id FOR SHARE`;
+      const [locked] = await tx.$queryRaw<Array<{ agent_id: string; role: string | null; retired_at: Date | null; name: string; boot_prompt_node_id: string | null }>>`
+        SELECT agent_id, role, retired_at, name, boot_prompt_node_id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      if (!locked) throw workerNotFound(args.workerRef);
+      if (locked.retired_at) {
+        throw new GraphQLError('This worker is retired; its casting no longer changes.', { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } });
+      }
+      // The Agent locks above were taken for the agent read before the worker lock. A change that landed in between
+      // moved it, so this transaction holds the wrong row: refuse rather than decide on an unlocked agent.
+      if (locked.agent_id !== before.agentId) {
+        throw new GraphQLError('This worker’s agent changed while the change was in flight; read it again.', {
+          extensions: { code: 'WORKER_CASTING_STALE', workerId: worker.id },
+        });
+      }
+      if (locked.agent_id === toAgentId) {
+        throw new GraphQLError('This worker already casts that agent; nothing to change.', {
+          extensions: { code: 'WORKER_AGENT_UNCHANGED', workerId: worker.id },
+        });
+      }
+      const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
+      const { agent, provisionGrantsFor } = await assertCastable(tx, freshApp, toAgentId);
+      // "The role is the new agent's own role" (cor:dmo:050:11): an agent with none has no role to change TO, and a
+      // worker left role-less would silently lose its role tasks. Refused, not stored as null (Vera, #36796).
+      const toRole = (agent.personaRole ?? '').trim();
+      if (toRole === '') {
+        throw new GraphQLError('That agent has no role of its own, so a worker cannot change to it; give the agent a personaRole first.', {
+          extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE', workerId: worker.id },
+        });
+      }
+      for (const grantAgentId of provisionGrantsFor) {
+        if (freshApp.organizationId) await ensureAgentOrgGrant(tx, freshApp.organizationId, grantAgentId, { createdBy: ctx.userId ?? null });
+      }
+      try {
+        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+        await tx.worker.update({
+          where: { id: worker.id },
+          data: { agentId: agent.id, role: toRole, bootPromptNodeId: null, bootPromptUrn: null },
+        });
+        await instantiateAgentTickerTemplates(tx, {
+          appId: app.id, agentId: agent.id, worker: { id: worker.id, name: locked.name }, createdBy: ctx.userId ?? null,
+        });
+      } catch (e) {
+        throw generatedTickerRefusal(e) ?? e;
+      }
+      await appendWorkerCastingEvent(tx, {
+        appId: app.id, actor: eventActor(ctx.userId), workerId: worker.id,
+        fromAgentId: locked.agent_id, toAgentId: agent.id, fromRole: locked.role, toRole,
+        clearedBootPromptNodeId: locked.boot_prompt_node_id,
+      });
+      return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    }, { afterLock: async (tx) => { await lockAppTickers(tx, app.id); } });
   },
 
   /** #1162 / cor:dmo:050:11: only an unreferenced, released miscast is removable. */
@@ -1918,7 +2125,7 @@ export const workerQueries = {
    * could mint anyway.
    */
   castWorkerPreview: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, agent, workerRole, requestedName, override } = await resolveCastTarget(
+    const { appId, agent, workerRole, requestedName, override, choice, reportingHeadId } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -1976,6 +2183,8 @@ export const workerQueries = {
       agentId: agent.id,
       agentName: agent.name,
       prompt,
+      teamPlacement: choice.kind,
+      reportsToWorkerId: reportingHeadId,
       // Deprecated (#2049 S12): always null; kept so older clients' queries validate.
       hasNamePlaceholder: null,
       tickers: tickers.map((t) => ({
@@ -2271,6 +2480,11 @@ export async function composeWorkerPrompt(
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) {
     return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
   }
+  // #2458 (cor:dmo:050:11): the worker's own open session finishes under the agent and role it was bound with, so a shed
+  // recovery reloads the old briefing until the next bind. Every other reader renders the live row.
+  const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
+  // The spread is shallow on purpose: everything agent-derived below is re-read from `worker.agentId`/`role`.
+  if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
     select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
@@ -2717,6 +2931,8 @@ export const workerFieldResolvers = {
      * worker read gate and masked on deny (see heldByUserId), since
      * Session.worker reaches this type through a wider audience.
      */
+    teamPlacement: async (worker: { appId: string; reportsToWorkerId?: string | null; explicitNoTeam?: boolean }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? teamPlacement(worker) : null,
     reportsToWorkerId: async (
       worker: { appId: string; reportsToWorkerId?: string | null },
       _: unknown,

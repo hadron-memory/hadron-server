@@ -20,7 +20,7 @@ import {
   getEmbeddingClient,
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
-import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
+import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
@@ -101,6 +101,8 @@ import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
+  /** Internal object-store request only, not a GraphQL/MCP search argument. Counts no-query browse matches. */
+  includeTotal?: boolean;
   query?: string | null;
   mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
   minScore?: number | null;
@@ -1006,7 +1008,7 @@ export const nodeQueries = {
       // at the bottom can re-enter it without a self-reference (which would
       // leave TypeScript unable to infer the return type).
       const core = async ({
-        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore,
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore, includeTotal,
       }: FindNodesArgs) => {
       const f = filter ?? {};
 
@@ -1240,6 +1242,12 @@ export const nodeQueries = {
 
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
+        // #2514: object queries promise an exact count before paging. Ordinary
+        // search remains uncounted; reuse the already admitted scope and filters.
+        const total = includeTotal ? await provider.filterCount({
+          db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
+          includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds,
+        }) : null;
         // A `where` predicate (JSONB the Prisma query can't express) OR a
         // property-path sort (an ORDER BY over a JSON path Prisma can't express)
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
@@ -1269,7 +1277,7 @@ export const nodeQueries = {
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
           const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
           await recordSearchHits(browseHits);
-          return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
+          return { hits: browseHits, passages: [], total, reason: null, degraded: null };
         }
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
@@ -1288,7 +1296,7 @@ export const nodeQueries = {
         return {
           hits: listHits,
           passages: [],
-          total: null,
+          total,
           reason: null,
           degraded: null,
         };
@@ -1601,25 +1609,9 @@ export const nodeQueries = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
         };
-        try {
-          const strict = await provider.lexicalSearch({ ...args, query: q });
-          if (!opts.relax || strict.length > 0) return strict;
-          const orQuery = relaxConjunctionToOr(q);
-          if (orQuery) {
-            const relaxed = await provider.lexicalSearch({ ...args, query: orQuery });
-            if (relaxed.length > 0) {
-              lexicalDegraded = [lexicalDegraded, 'and_relaxed_to_or'].filter(Boolean).join(',');
-              return relaxed;
-            }
-          }
-          return strict;
-        } catch (e) {
-          if (e instanceof BooleanQueryError) {
-            lexicalDegraded = 'literal_fallback';
-            return safeLiteralSearch(args);
-          }
-          throw e;
-        }
+        const result = await hybridKeywordCandidates(q, query => provider.lexicalSearch({ ...args, query }), !!opts.relax);
+        lexicalDegraded = result.degraded;
+        return result.hits;
       };
 
       if (indexedIds.length === 0) {
@@ -1761,15 +1753,10 @@ export const nodeQueries = {
       // within-result-set relevance signal. The cosine similarity is still carried
       // separately on `vector.similarity` (simById below).
       const kwRanked = await runKeywordRanked();
-      const fused = reciprocalRankFusionScored(
-        [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
-        (id) => id,
-        // Keep at least the (possibly widened) vector window: truncating to the
-        // original fetchN would drop the matches widening went out to find.
-      ).slice(0, Math.max(fetchN, vecHits.length));
+      const fused = composeHybridRanking(kwRanked, vecHits, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       return await buildResult(
-        fused.map((r) => ({ nodeId: r.item, score: r.score })),
+        fused.map((r) => ({ nodeId: r.nodeId, score: r.score })),
         simById,
         null,
         mergeDegraded(null),
@@ -2178,6 +2165,26 @@ export const nodeQueries = {
         },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 20,
+      });
+    },
+
+    nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+      const scope = await nodeRevisionsScope(ctx, nodeRef);
+      if (!scope) return [];
+      // Each entry carries the memory it was recorded in: a source that later MOVED keeps no more history
+      // visible than nodeRevisions shows, so the memory gate is in the `where`, before `take`.
+      const rows = await ctx.db.nodeEdgeRemoval.findMany({
+        where: scope.accessible === null
+          ? { sourceId: scope.nodeId }
+          : { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit ?? 20,
+      });
+      // The deleted target's address is another node's identity, and the edge's own loc is derived from both
+      // endpoints: show neither where the target's memory is not readable.
+      return rows.map((r) => {
+        const readable = scope.canRead(r.targetMemoryId);
+        return { ...r, targetLoc: readable ? r.targetLoc : null, edgeLoc: readable ? r.edgeLoc : null };
       });
     },
 

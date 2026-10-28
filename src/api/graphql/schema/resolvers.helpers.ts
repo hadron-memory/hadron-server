@@ -35,7 +35,6 @@ import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicen
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
-  getPrimaryAgent,
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
@@ -71,6 +70,7 @@ import {
   AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
@@ -87,6 +87,7 @@ import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemor
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -144,6 +145,8 @@ export interface Context {
   /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
   taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
   /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  /** #2609: uncapped pending history, captured in the mutation actor scope; consumed once after result shaping. */
+  taskWarningHistory?: import('./resolvers.taskWarnings.js').TaskWarningHistory[];
   taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
@@ -845,7 +848,7 @@ export async function requireAgentMemoryGrant(
   // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
   // still answer like a miss, without revealing its class (#1349, #1101).
   if (memory.class === 'system') {
-    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+    throw new GraphQLError('Agent system memories can only be attached via systemMemoryId, not as a memory item', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   // #1101: these classes have no App audience to grant. A personal share is
   // per-user, and a private memory is not shareable.
@@ -2622,8 +2625,11 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
  * 3. Users: app-class rows through the MCP shape/participation gate; other
  *    shared classes through their own membership, org, or subscription rules
+ *
+ * `destination` (#2484) is the node a create/update is about to write; it is what an App's write grant for its
+ * userless runs is judged against, and no other caller passes it.
  */
-export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
+export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, destination?: WriteDestination): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
   // shortcut applies only to non-strict org memories. A platform-admin USER
   // with an active App still cannot write another user's personal/private
@@ -2650,12 +2656,14 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     // A write always names its target: an explicit reference (#1503).
-    if (await canWriteToMemory(ctx.db, ctx, memoryId, EXPLICIT_REF)) return;
+    // #2484: only the node write door names a destination, which is what lets an App's prefix-scoped write grant
+    // answer for a userless run; every other write verb leaves it unset and never reaches that arm.
+    if (await canWriteToMemory(ctx.db, ctx, memoryId, destination ? { ...EXPLICIT_REF, destination } : EXPLICIT_REF)) return;
     throw memoryWriteForbidden();
   }
 
   // JWT user path
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (!ctx.userId) throw unauthenticatedError();
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
@@ -2780,7 +2788,9 @@ export function memoryWriteForbidden(): GraphQLError {
 
 export const MEMORY_INCLUDE = {
   // #2238: live rows only, matching ORG_INCLUDE.subscriptions.
-  subscriptions: { where: { deletedAt: null }, include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2557: the parent read authorized this Memory, but the non-null nested
+  // MemorySubscription.memory still needs its full row for GraphQL resolution.
+  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 export const AGENT_INCLUDE = {
@@ -2880,12 +2890,6 @@ export function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAg
   return rows[0] as EagerAppAgentRow | undefined;
 }
 
-export function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
-  if (parent.appAgents === undefined) return undefined;
-  const first = readPrimaryAppAgent(parent);
-  return first?.agent?.id ?? null;
-}
-
 export function readPrimaryAgentRecordFromEager(
   parent: { appAgents?: unknown },
 ): unknown | undefined {
@@ -2900,23 +2904,6 @@ export function readAllAgentRecordsFromEager(
   const rows = parent.appAgents;
   if (!Array.isArray(rows)) return undefined;
   return rows.map((r) => (r as EagerAppAgentRow).agent);
-}
-
-export async function readPrimaryAgentField(
-  parent: { id: string; appAgents?: unknown },
-  ctx: Context,
-  field: 'urn',
-): Promise<string | null> {
-  const first = readPrimaryAppAgent(parent);
-  if (first?.agent && typeof first.agent.urn === 'string') {
-    return first.agent.urn;
-  }
-  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
-  if (parent.appAgents === undefined) {
-    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
-    return primary?.[field] ?? null;
-  }
-  return null;
 }
 
 // ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────

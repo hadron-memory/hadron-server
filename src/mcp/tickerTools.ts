@@ -28,6 +28,7 @@ import { type AuthContext, validateSessionBinding } from '../middleware/auth.js'
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
@@ -37,9 +38,22 @@ const Q = resolvers.Query as unknown as {
   ticker: Resolver<{ ref: string }, Row | null>;
   workerWakeSettings: Resolver<{ workerRef: string }, Row>;
   agentTickerTemplates: Resolver<{ agentRef: string }, Row[]>;
-  dueWakes: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
+  dueWakes: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string; accepts?: string[] }, Row>;
   deliveryBatches: Resolver<{ appRef: string; workerRefs?: string[]; first?: number; after?: string }, Row>;
 };
+/**
+ * #2169 (Uma's P3-5 on #2166): the notice line of a due wake, written for the agent that reads it. `interrupt` is the
+ * platform's own flag, kept for clients, but nothing here sends an interrupt key (Holger's option A): the notice is text.
+ */
+const STOP_LINE_WHAT: Record<string, string> = {
+  PAUSE_DISPATCH: 'no new work is assigned to the workers it covers',
+  PAUSE: 'finish or stop at your next sub-task',
+  HALT: 'save your work and write a hand-off now',
+};
+export function stopLine(stop: { level: string; notice: string }): string {
+  return stop.notice === 'RESUME' ? `resume: ${stop.level} lifted` : `stop: ${stop.level} (${STOP_LINE_WHAT[stop.level] ?? 'see the stop signal'})`;
+}
+
 const M = resolvers.Mutation as unknown as {
   setAppDeliverySettings: Resolver<{ appRef: string; input: unknown }, Row>;
   setTeamPause: Resolver<{ appRef: string; paused: boolean }, Row>;
@@ -80,7 +94,7 @@ function textResult(text: string, isError = false) {
 
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
@@ -376,7 +390,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         const lines: string[] = [];
         for (const w of page.wakes) {
           const why = (w.reasons as Row[])
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? `stop signal ${r.stop.level} ${r.stop.notice.toLowerCase()}${r.stop.interrupt ? ' (interrupt)' : ''}` : r.kind === 'TASK' ? `task ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
             .join(' + ');
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
@@ -589,6 +603,9 @@ const SHAPE_HADRON_DUE_WAKES = {
   workerRefs: z.array(z.string()).optional().describe('Only these workers. Omit for every worker you may read.'),
   first: z.number().int().optional().describe('Workers per page (default 20, max 200).'),
   after: z.string().optional().describe('The previous page\'s endCursor.'),
+  accepts: z.array(z.enum(['MENTION', 'TICK', 'TASK', 'STOP'])).optional().describe(
+    'The reason kinds you can deliver. Omit it and no stop notice is ever returned. Include STOP only if you type stop notices into the worker\'s terminal: ' +
+      'you are then offered the worker\'s newest undelivered stop notice, and the lane you serve is recorded as taking them when you read it in one call from start to end (no workerRefs, no after, no next page: pass first: 200); setting a stop signal is refused until one is.'),
   session: SESSION_READ,
 };
 

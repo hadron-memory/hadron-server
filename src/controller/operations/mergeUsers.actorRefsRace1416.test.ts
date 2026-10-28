@@ -9,6 +9,7 @@ import { lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { approvedMergeProof } from '../../test/mergeConsent.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { mergeUsers } from './mergeUsers.js';
+import { waitForLockWaitersOfType } from '../../test/lockWait.js';
 
 let org: { id: string; urn: string };
 let source: { id: string };
@@ -30,16 +31,6 @@ const codeOf = async (p: Promise<unknown>) => {
   }
 };
 
-/** Poll until some backend is blocked on an advisory lock: the competing operation has reached its wait. */
-async function waitForAnchorWaiter(): Promise<void> {
-  for (let i = 0; i < 200; i++) {
-    const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
-    if (n > 0) return;
-    await sleep(25);
-  }
-  throw new Error('no backend reached the anchor wait');
-}
-
 /** Hold the source's authority anchor on a second connection, run `inside`, then commit after `ms`. */
 async function holdAnchor(mode: 'shared' | 'exclusive', inside: (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => Promise<void>, ms: number) {
   let release!: () => void;
@@ -55,7 +46,7 @@ async function holdAnchor(mode: 'shared' | 'exclusive', inside: (tx: Parameters<
   await ready;
   // `ms` is extra settling time on top of the observed wait (the expiry test needs wall-clock to pass).
   return { release, done, after: async () => {
-    try { await waitForAnchorWaiter(); await sleep(ms); } finally { release(); await done; }
+    try { await waitForLockWaitersOfType(db, 'advisory', 1); await sleep(ms); } finally { release(); await done; }
   } };
 }
 

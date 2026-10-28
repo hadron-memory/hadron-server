@@ -1,3 +1,4 @@
+import { mentionReach, mentionReachSql, reachEnvelopeOf } from '../mentionReach.js';
 // dueWakes — #1748, cor:agt:080:08–:15, :22, :23 (plan §4.2, §4.2a, §6.1).
 //
 // The loading around the pure rule in wakeRule.ts: who the caller may read, the
@@ -20,7 +21,7 @@
 // and budget, and are acknowledged per event through the v2 proof.
 
 import { coveringSignals, timeStoppedWorkers } from '../stopSignals/state.js';
-import { pendingStopNotices, s6NoticesAvailable, type PendingStopNotice } from '../stopSignals/delivery.js';
+import { pendingStopNotices, type PendingStopNotice } from '../stopSignals/delivery.js';
 import { Prisma } from '../../generated/prisma/index.js';
 import { batchTiming, loadDeliverySettings } from './batchTiming.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -188,9 +189,7 @@ function envelopeOf(data: unknown): RoutedMessage | null {
   const e = data as Record<string, unknown>;
   return {
     seq: 0,
-    authorWorkerId: typeof e.authorWorkerId === 'string' ? e.authorWorkerId : null,
-    mentions: Array.isArray(e.mentions) ? e.mentions.filter((v): v is string => typeof v === 'string') : [],
-    broadcastWakes: e.broadcastWakes === true,
+    ...reachEnvelopeOf(e),
     managerPost: e.managerPost === true,
     humanAuthored: e.authorSystem !== true && typeof e.authorWorkerId !== 'string' && typeof e.authorUserId === 'string',
   };
@@ -209,10 +208,9 @@ async function loadMessages(
   if (head <= lo) return [];
   if (!channel.encrypted) {
     const wanted = only && only.length > 0 ? Prisma.sql`AND (${candidatesFor(only)})` : Prisma.empty;
-    const rows = await db.$queryRaw<Array<{ seq: number; author: string | null; mentions: unknown; bw: boolean | null; mp: boolean | null; human: boolean | null; at: Date }>>(Prisma.sql`
+    const rows = await db.$queryRaw<Array<{ seq: number; data: unknown; bw: boolean | null; mp: boolean | null; human: boolean | null; at: Date }>>(Prisma.sql`
       SELECT n.seq::int AS seq,
-             n.data->>'authorWorkerId' AS author,
-             n.data->'mentions' AS mentions,
+             jsonb_build_object('authorWorkerId', n.data->'authorWorkerId', 'mentions', n.data->'mentions', 'broadcastWakes', n.data->'broadcastWakes', 'teamTagsVersion', n.data->'teamTagsVersion', 'teamBroadcastWorkerIds', n.data->'teamBroadcastWorkerIds') AS data,
              (n.data->>'broadcastWakes') = 'true' AS bw,
              (n.data->>'managerPost') = 'true' AS mp,
              ((n.data->'authorSystem') IS DISTINCT FROM 'true'::jsonb AND jsonb_typeof(n.data->'authorWorkerId') IS DISTINCT FROM 'string'
@@ -228,15 +226,18 @@ async function loadMessages(
       ORDER BY n.seq
       LIMIT ${limit}
     `);
-    return rows.map((r) => ({
-      seq: r.seq,
-      authorWorkerId: r.author,
-      mentions: Array.isArray(r.mentions) ? (r.mentions as unknown[]).filter((v): v is string => typeof v === 'string') : [],
-      broadcastWakes: r.bw === true,
-      managerPost: r.mp === true,
-      humanAuthored: r.human === true,
-      postedAtMs: new Date(r.at).getTime(),
-    }));
+    return rows.map((r) => {
+      const reach = reachEnvelopeOf(r.data);
+      return {
+        seq: r.seq,
+        ...reach,
+        // Preserve the existing plaintext loader for legacy envelopes; S3 stamps are strict.
+        broadcastWakes: reach.teamTagsVersion === 1 ? reach.broadcastWakes : r.bw === true,
+        managerPost: r.mp === true,
+        humanAuthored: r.human === true,
+        postedAtMs: new Date(r.at).getTime(),
+      };
+    });
   }
   const rows = await db.$queryRaw<Array<{ seq: number; data: unknown; at: Date }>>(Prisma.sql`
     SELECT n.seq::int AS seq, n.data, n.created_at AS at
@@ -282,9 +283,13 @@ function mattersTo(m: RoutedMessage, w: Watcher): boolean {
   if (m.authorWorkerId === w.workerId) return false;
   const direct = m.mentions.some((t) => w.tokens.includes(t));
   if (w.standbyHead) return direct && (m.humanAuthored === true || m.authorWorkerId === w.standbyHead);
-  const broadcast = !direct && m.mentions.some((t) => BROADCAST.includes(t));
-  if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
-  if (w.subCovers && (direct || broadcast)) return true;
+  if (m.teamTagsVersion === 1) {
+    if ((w.immediate || w.subCovers) && mentionReach(m, w.tokens, [w.workerId]) !== null) return true;
+  } else {
+    const broadcast = !direct && m.mentions.some((t) => BROADCAST.includes(t));
+    if (w.immediate && (direct || (broadcast && m.broadcastWakes))) return true;
+    if (w.subCovers && (direct || broadcast)) return true;
+  }
   return w.subAll;
 }
 
@@ -294,9 +299,13 @@ function candidatesFor(unmet: Watcher[]): Prisma.Sql {
     if (w.standbyHead) return standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${w.tokens}::text[]`, w.standbyHead);
     const notOwn = Prisma.sql`(n.data->>'authorWorkerId') IS DISTINCT FROM ${w.workerId}`;
     const parts: Prisma.Sql[] = [];
-    if (w.immediate || w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`);
-    if (w.subCovers) parts.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[])`);
-    if (w.immediate) parts.push(Prisma.sql`(jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[]) AND (n.data->>'broadcastWakes') = 'true')`);
+    if (w.immediate || w.subCovers) {
+      parts.push(Prisma.sql`((n.data->'teamTagsVersion') = '1'::jsonb AND ${mentionReachSql(Prisma.sql`n.data`, Prisma.sql`${w.tokens}::text[]`, Prisma.sql`${[w.workerId]}::text[]`)})`);
+      const legacy: Prisma.Sql[] = [Prisma.sql`jsonb_exists_any(n.data->'mentions', ${w.tokens}::text[])`];
+      if (w.subCovers) legacy.push(Prisma.sql`jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[])`);
+      if (w.immediate) legacy.push(Prisma.sql`(jsonb_exists_any(n.data->'mentions', ${[...BROADCAST]}::text[]) AND (n.data->>'broadcastWakes') = 'true')`);
+      parts.push(Prisma.sql`((n.data->'teamTagsVersion') IS DISTINCT FROM '1'::jsonb AND (${Prisma.join(legacy, ' OR ')}))`);
+    }
     if (w.subAll) parts.push(Prisma.sql`TRUE`);
     return Prisma.sql`(${notOwn} AND (${Prisma.join(parts, ' OR ')}))`;
   });
@@ -353,6 +362,8 @@ export async function computeDueWakes(args: {
   authorize?: (tx: Prisma.TransactionClient, workerIds: string[]) => Promise<void>;
   /** App-key registration prefilter; the deciding authorize checks the whole selected page again. */
   workerWhere?: Prisma.WorkerWhereInput;
+  /** #2169: the reason kinds this call can deliver. A STOP notice is offered only to a call that lists STOP. */
+  acceptsStop?: boolean;
   onWorkersSelected?: (workerIds: string[]) => void;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
@@ -408,8 +419,8 @@ export async function computeDueWakes(args: {
   const pendingOf = await loadPendingReasons(db, app.id, workers.map((w) => w.id), now);
   // #2022 (R68): a worker a `pause` or `halt` covers is due no tick. Live coverage, worked out in this read.
   const tickStopped = timeStoppedWorkers(await coveringSignals(db, app.id, ids, now));
-  // #2022 (cor:agt:090:04): the one stop notice each worker is due, offered only while the notice lane is on (DARK).
-  const stopOf = s6NoticesAvailable() ? await pendingStopNotices(db, app.id, ids) : new Map<string, PendingStopNotice>();
+  // #2022 (cor:agt:090:04): the one stop notice each worker is due, offered only to a call that declared it takes them (#2169).
+  const stopOf = args.acceptsStop ? await pendingStopNotices(db, app.id, ids) : new Map<string, PendingStopNotice>();
 
   // Registers: the channels each worker watches (not POST-only).
   const registers = await Promise.all(ids.map(async (id) => [id, await collectRegisterRows(db, { workerId: id })] as const));
@@ -570,7 +581,7 @@ export async function computeDueWakes(args: {
       checkPending: (pendingOf.get(w.id) ?? null) !== null,
       tasks: tasksFor(w.id)
         .slice(0, WAKE_TASK_REASONS_MAX)
-        .map(({ taskId, eventId, chainIndex, event, title, at, standbyHeld }) => ({ taskId, eventId, chainIndex, event, title, atMs: at.getTime(), ...(standbyHeld ? { standbyHeld } : {}) })),
+        .map(({ taskId, eventId, chainIndex, event, title, handle, at, standbyHeld }) => ({ taskId, eventId, chainIndex, event, title, handle, atMs: at.getTime(), ...(standbyHeld ? { standbyHeld } : {}) })),
       now,
     });
     // #2022: the stop notice rides ahead of everything else in the wake (cor:agt:090:04), or is the wake.

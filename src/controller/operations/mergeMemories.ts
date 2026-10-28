@@ -13,7 +13,7 @@ import {
   assertNoMintedSpecRemoval,
   preflightNoMintedCorpusRemoval,
 } from '../../lib/mintedSpecPermanence.js';
-import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import {
@@ -676,9 +676,7 @@ async function runMerge(
       // the fold rows. Take the complete Channel-memory set first: holding the
       // Node/Memory rows while waiting for a Channel key would invert against
       // final source disposition, which takes that key before its Memory rows.
-      for (const id of [...new Set([sourceMemoryId, targetMemoryId])].sort()) {
-        await lockMemoryForChannelChange(tx, id);
-      }
+      await lockMemoriesForChannelChange(tx, [sourceMemoryId, targetMemoryId]);
 
       // Read the target schema INSIDE the tx so the fold validates against the
       // schema current at fold time (a tightening committed between batches is

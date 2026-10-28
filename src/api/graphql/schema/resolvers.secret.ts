@@ -35,6 +35,7 @@ import {
   validateAndEncryptSecret,
   type SecretOwnerType,
 } from '../../../lib/secrets.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 function badInput(message: string): GraphQLError {
   return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -82,7 +83,7 @@ async function resolveSecretOwnerRef(
   switch (ownerType) {
     case 'user': {
       if (ownerRef == null) {
-        if (!ctx.userId) throw new Error('Forbidden');
+        if (!ctx.userId) throw forbiddenError();
         return ctx.userId;
       }
       return (await resolveUserRef(ctx.db, ownerRef)).id;
@@ -107,7 +108,7 @@ async function requireSecretOwnerWrite(
   switch (ownerType) {
     case 'user': {
       if (ctx.userId && ctx.userId === ownerId) return;
-      throw new Error('Forbidden');
+      throw forbiddenError();
     }
     case 'org': {
       await requireOrgRole(ctx, ownerId, 'ADMIN');

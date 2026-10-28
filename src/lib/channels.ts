@@ -93,7 +93,32 @@ function translateSessionExpired<T>(memoryId: string, fn: () => T): T {
  * subtree locks use, so it never contends with them.
  */
 export async function lockMemoryForChannelChange(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'channel-host:' + memoryId}))`;
+  await lockMemoriesForChannelChange(tx, [memoryId]);
+}
+
+/**
+ * Acquire a complete memory set before loc or row locks. Order the resolved
+ * signed PostgreSQL keys, not memory IDs: hash collisions can invert ID order
+ * (#1213). Preserve the existing one-argument advisory namespace.
+ */
+export async function lockMemoriesForChannelChange(
+  tx: Prisma.TransactionClient,
+  memoryIds: readonly string[],
+): Promise<void> {
+  const ids = [...new Set(memoryIds)];
+  if (ids.length === 0) return;
+  if (ids.length === 1) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'channel-host:' + ids[0]}))`;
+    return;
+  }
+  const rows = await tx.$queryRaw<Array<{ key: number }>>`
+    SELECT hashtext('channel-host:' || m.id) AS key
+    FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb) AS m(id)
+  `;
+  const keys = [...new Set(rows.map((row) => row.key))].sort((a, b) => a - b);
+  for (const key of keys) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`;
+  }
 }
 
 /**

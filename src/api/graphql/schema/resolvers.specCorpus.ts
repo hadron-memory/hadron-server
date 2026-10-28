@@ -26,12 +26,21 @@ import {
   parseOpenQuestions,
 } from '../../../lib/specMint.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
-import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { acquireLockSet, ancestorLocs, lockAncestorsForCreate } from '../../../lib/nodeSubtreeLock.js';
+import { legacyMemoryUrnToCanonical, normalizeUrnForLookup, parseUrnInput, UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
+import { emitNodeUrnV2, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
+import {
+  childKindOf,
+  childNumberAt,
+  formatSpecNumber,
+  nextSpecNumber,
+  specLevel,
+} from '../../../lib/specAllocation.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { archiveTombstone, discoverArchivePlan, validateArchivePlan, withArchivePlanRetries, ArchivePlanExhaustedError } from '../../../lib/tombstoneArchive.js';
 import { lockEdgeEndpointMemories } from '../../../lib/edgeEndpointLock.js';
 import { pendingEdgeStableTargetId } from '../../../lib/pendingEdgePromotion.js';
+import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
+import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { editorFromAuth, reconcileNodeWithIncludeHistory } from '../../../lib/nodeRevisionSnapshot.js';
 import { mayMintNodes } from './resolvers.nodeApproval.js';
@@ -46,6 +55,7 @@ import {
   SCANNED_FIELDS,
   corpusReferencePattern,
   findCorpusReferences,
+  findNodeUrnTokens,
   findTextCitations,
   renumberedLoc,
   rewriteCorpusReferences,
@@ -181,6 +191,150 @@ export const specCorpusMutations = {
     }
     for (const effect of completed.effects) effect();
     return completed.reserved;
+  },
+
+  /**
+   * #1178 — allocate the next citation under `parentLoc` and reserve it, in ONE
+   * transaction: mint-or-refuse, server-side, so no client has to read sibling
+   * numbers and write the next one (a client cannot make that atomic, and
+   * `createNode` overwrites on a collision instead of refusing). The number
+   * grammar is `hadron spec new`'s: features in tens (010..990), rules and flows
+   * by one (01..99), rule `00` never allocated, `after` lands strictly above it.
+   *
+   * R216: a number that was ever minted is never handed out again. The floor
+   * sits above the highest ever-minted direct child, read from (i) Node rows of
+   * any state (live, soft-deleted, or archived `__deleted-<id>`) that carry
+   * `mintedAt`, and (ii) the aliases a minted node leaves when it is moved out.
+   * Every number whose loc holds a Node row of ANY state is also skipped, so a
+   * tombstone is never resurrected and a live draft is never overwritten.
+   * Slice 1: a minted node hard-deleted in place leaves no row and no alias, so
+   * R216 holds only while one remains (Holger R219 = C); a durable high-water
+   * record is a later slice.
+   *
+   * The write is `reserveSpecCitation`'s: a placeholder spec node through the
+   * spec door's create path, with its gates unchanged. Authorization comes
+   * first and unreadable memories are concealed as not found, before any lock.
+   * The parent-path locks are taken before any read, so concurrent allocators
+   * serialize on them instead of racing to a conflict. One attempt, no retry.
+   *
+   * @throws GraphQLError `SPEC_PARENT_NOT_FOUND`, `SPEC_PARENT_NOT_NUMBERED`,
+   * `SPEC_NUMBER_SPACE_EXHAUSTED`.
+   */
+  allocateSpecNode: async (
+    _: unknown,
+    { memoryRef, parentLoc, after, name }: { memoryRef: string; parentLoc: string; after?: number | null; name?: string | null },
+    ctx: Context,
+  ) => {
+    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
+    const kind = childKindOf(parentLoc);
+    if (!kind) {
+      throw new GraphQLError(
+        `${parentLoc} cannot take numbered children: pass a module, feature or rule citation ([<product>:]<module>[:<feature>[:<rule>]])`,
+        { extensions: { code: 'SPEC_PARENT_NOT_NUMBERED', parentLoc } },
+      );
+    }
+    if (after != null && (!Number.isInteger(after) || after < 0)) {
+      throw new GraphQLError('after must be a non-negative integer', { extensions: { code: 'BAD_USER_INPUT' } });
+    }
+    const level = specLevel(kind);
+    const effects: Array<() => void> = [];
+    const reserved = await ctx.db.$transaction(async (tx) => {
+      let txCtx = withoutRequestCaches(ctx, tx);
+      const authorizeAttempt = async () => {
+        const current = await liveCaller(ctx, tx);
+        if (!current) throw authorizationDenied();
+        txCtx = current;
+        await concealUnreadableDenial(txCtx, memoryId, memoryRef, () => requireMemoryWriteAccess(txCtx, memoryId));
+      };
+      await authorizeAttempt();
+      // Lock order as reserveSpecCitation: the edge-endpoint memory key, then
+      // the address locks (here the parent's path, since the child's loc is not
+      // known until the number is read under them).
+      await lockEdgeEndpointMemories(tx, [memoryId]);
+      await lockPathForCreateUnder(tx, memoryId, parentLoc, { op: 'create' });
+      await authorizeAttempt();
+      const parent = await tx.node.findFirst({
+        where: { memoryId, loc: parentLoc, deletedAt: null },
+        select: { id: true },
+      });
+      if (!parent) {
+        throw new GraphQLError(`No node at ${parentLoc} to allocate under`, {
+          extensions: { code: 'SPEC_PARENT_NOT_FOUND', parentLoc },
+        });
+      }
+      const prefix = `${parentLoc}:`;
+      // Every row of any state under the parent: live, soft-deleted, archived.
+      const rows = await tx.node.findMany({
+        where: { memoryId, loc: { startsWith: prefix } },
+        select: { loc: true, mintedAt: true },
+      });
+      // A one-segment alpha parent is a flat module only while it has numbered
+      // children; one holding alphabetic children is a product root, whose
+      // children are chosen module codes, not allocated numbers.
+      if (!parentLoc.includes(':') && rows.some((r) => /^[a-z]{3}(:|$|__deleted-)/.test(r.loc.slice(prefix.length)))) {
+        throw new GraphQLError(`${parentLoc} is a product root: its children are module codes, not allocated numbers`, {
+          extensions: { code: 'SPEC_PARENT_NOT_NUMBERED', parentLoc },
+        });
+      }
+      const taken = new Set<number>();
+      let everMinted = 0;
+      for (const row of rows) {
+        const n = childNumberAt(parentLoc, row.loc, level);
+        if (n === null) continue;
+        // Only the unarchived loc holds the address; an archived row sits at a
+        // different loc and counts toward the floor alone.
+        if (!row.loc.includes('__deleted-')) taken.add(n);
+        if (row.mintedAt) everMinted = Math.max(everMinted, n);
+      }
+      // (ii) A minted node moved out leaves an alias at its old address.
+      const memory = await tx.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
+      const memoryUrns = new Set<string>(memory?.urn ? [memory.urn] : []);
+      const formerMemoryUrns = await tx.urnAlias.findMany({
+        where: { entityType: 'MEMORY', entityId: memoryId },
+        select: { urn: true },
+      });
+      for (const alias of formerMemoryUrns) memoryUrns.add(alias.urn);
+      for (const memoryUrn of memoryUrns) {
+        const aliasPrefix = safeNodeUrnV2(memoryUrn, parentLoc).slice('hrn:node:'.length) + ':';
+        const aliases = await tx.urnAlias.findMany({
+          where: { entityType: 'NODE', urn: { startsWith: aliasPrefix } },
+          select: { urn: true },
+        });
+        for (const alias of aliases) {
+          const n = childNumberAt(parentLoc, `${prefix}${alias.urn.slice(aliasPrefix.length)}`, level);
+          if (n !== null) everMinted = Math.max(everMinted, n);
+        }
+      }
+      const n = nextSpecNumber(level, everMinted, taken, after ?? null);
+      if (n === null) {
+        throw new GraphQLError(`Number space exhausted under ${parentLoc}`, {
+          extensions: { code: 'SPEC_NUMBER_SPACE_EXHAUSTED', parentLoc },
+        });
+      }
+      const loc = `${prefix}${formatSpecNumber(level, n)}`;
+      const node = await writeNodeCore(
+        {
+          memoryId, loc, name: name?.trim() || loc, role: 'spec', nodeType: 'info',
+          content: null, abstract: null, description: null, contentType: null,
+          alias: null, tags: [], data: null, properties: null,
+          llmModel: null, aiAgent: null, isLink: false, objectType: null,
+          edges: [],
+        },
+        txCtx,
+        'create',
+        {
+          ownsKind: 'spec',
+          governedContext: 'node-write',
+          concealUnreadable: { entity: 'memory', ref: memoryRef },
+          transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
+        },
+      );
+      await tx.node.update({ where: { id: node.id }, data: { isPlaceholder: true }, select: { id: true } });
+      return { ...node, isPlaceholder: true };
+    });
+    for (const effect of effects) effect();
+    return reserved;
   },
 };
 
@@ -842,7 +996,7 @@ async function unresolvedReferencesIn(
         kind: 'EDGE', sourceNodeId: p.source.id, sourceLoc: p.source.loc, field: 'pendingEdge',
         targetLoc: !target ? p.targetId
           : target.memoryId === corpus.id ? target.loc
-          : `hrn:node:${target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${target.loc}`,
+          : foreignNodeUrn(target.memory.urn, target.loc),
         text: p.name,
         reason: live ? 'PLACEHOLDER' : 'MISSING',
       });
@@ -1237,6 +1391,10 @@ async function fenceCorpusForMint(tx: Prisma.TransactionClient, memoryId: string
  * @throws GraphQLError `SPEC_CORPUS_BUSY` (retryable) when a node of the
  *   memory stays locked by an in-flight write.
  */
+/** The canonical node URN naming `loc` in the memory published as `memoryUrn`. */
+const foreignNodeUrn = (memoryUrn: string, loc: string) =>
+  `hrn:node:${memoryUrn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${loc}`;
+
 async function mintMemoryNodes(
   ctx: Context,
   memoryRef: string,
@@ -1362,11 +1520,76 @@ async function mintMemoryNodes(
     });
     for (const e of foreignTargets) {
       if (!(await isMemoryReadableCached(txCtx, e.target.memoryId))) continue;
-      const targetUrn = `hrn:node:${e.target.memory.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:${e.target.loc}`;
+      const targetUrn = foreignNodeUrn(e.target.memory.urn, e.target.loc);
       blockers.push({
         kind: 'CITES_UNMINTED', loc: e.source.loc, rule: null, targetLoc: targetUrn,
         message: `edge points at ${targetUrn}, which is not minted yet`,
       });
+    }
+    // #1594 (cor:dmo:120:07, R205) — a text citation or a live pending edge
+    // with a stable `@node-id:` target counts like an edge. A target the
+    // caller cannot read is skipped with NO finding (not MISSING, unlike the
+    // edge above): the mint result must not reveal whether it exists
+    // (cor:api:140:03). Every resolver failure is dropped for the same reason.
+    const citing = new Map<string, Array<{ sourceLoc: string; what: string }>>();
+    const noteCiting = (targetId: string, sourceLoc: string, what: string) => {
+      const list = citing.get(targetId) ?? [];
+      list.push({ sourceLoc, what });
+      citing.set(targetId, list);
+    };
+    const resolvedByUrn = new Map<string, string | null>();
+    for (const n of inScope) {
+      for (const field of SCANNED_FIELDS) {
+        for (const urn of findNodeUrnTokens(n[field])) {
+          let targetId = resolvedByUrn.get(urn);
+          if (targetId === undefined) {
+            targetId = await resolveNodeRefForCaller(txCtx, urn).then((r) => r.id, (e: unknown) => {
+              // Only the resolver's documented "no such citation" refusals are
+              // dropped (they must look like nothing is there). Anything else
+              // is an infrastructure fault: abort, never mint past a citation
+              // we could not check.
+              if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError
+                || e instanceof UrnNotQualifiedError || e instanceof UrnParseError) return null;
+              throw e;
+            });
+            resolvedByUrn.set(urn, targetId);
+          }
+          if (targetId !== null) noteCiting(targetId, n.loc, `${field} cites`);
+        }
+      }
+    }
+    const scopeLocById = new Map(inScope.map((n) => [n.id, n.loc]));
+    const pendingStable = await tx.pendingEdge.findMany({
+      where: { deletedAt: null, sourceId: { in: [...inScopeIds] } },
+      select: { sourceId: true, targetId: true },
+      orderBy: { id: 'asc' },
+    });
+    for (const p of pendingStable) {
+      const stableId = pendingEdgeStableTargetId(p.targetId);
+      if (stableId !== null) noteCiting(stableId, scopeLocById.get(p.sourceId) ?? '', 'pending edge points at');
+    }
+    if (citing.size > 0) {
+      const targets = await tx.node.findMany({
+        where: { id: { in: [...citing.keys()] }, memoryId: { not: id }, deletedAt: null, isPlaceholder: false, mintedAt: null },
+        select: { id: true, loc: true, memoryId: true, memory: { select: { urn: true } } },
+        orderBy: { id: 'asc' },
+      });
+      for (const t of targets) {
+        // The RESOLVED node's own memory decides, never the memory the
+        // address named: an alias can point anywhere.
+        if (!(await isMemoryReadableCached(txCtx, t.memoryId))) continue;
+        const targetUrn = foreignNodeUrn(t.memory.urn, t.loc);
+        const seen = new Set<string>();
+        for (const c of citing.get(t.id) ?? []) {
+          const key = `${c.sourceLoc} ${c.what}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          blockers.push({
+            kind: 'CITES_UNMINTED', loc: c.sourceLoc, rule: null, targetLoc: targetUrn,
+            message: `${c.what} ${targetUrn}, which is not minted yet`,
+          });
+        }
+      }
     }
     const staleAbstracts: MintFinding[] = citedInScope
       .filter((n) => isAbstractUnverified(n))

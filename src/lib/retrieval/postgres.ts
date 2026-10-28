@@ -16,6 +16,7 @@ import type {
   RegexSearchOpts,
   VectorSearchOpts,
   FilterSearchOpts,
+  FilterCountOpts,
   FilterWhereOpts,
   NodeSqlFilter,
   LexicalSort,
@@ -155,12 +156,15 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     const orderBy = orderByClause(opts.sort, opts.propertySort);
     const limitPh = bind(opts.limit);
     const offsetPh = bind(opts.offset ?? 0);
+    const document = opts.abstractOnly ? "setweight(to_tsvector('english', coalesce(abstract, '')), 'C')" : 'tsv';
+    const candidates = opts.candidateNodeIds == null ? '' : opts.candidateNodeIds.length
+      ? `AND id IN (${opts.candidateNodeIds.map(id => bind(id)).join(', ')})` : 'AND FALSE';
     const sql = `
-      SELECT id, ts_rank_cd(${weightsLit}, tsv, ${tsq.sql}) AS score
+      SELECT id, ts_rank_cd(${weightsLit}, ${document}, ${tsq.sql}) AS score
       FROM nodes
-      WHERE tsv @@ ${tsq.sql}
+      WHERE ${document} @@ ${tsq.sql}
         AND memory_id IN (${memPh})
-        ${deletedClause}${filterSql}
+        ${deletedClause}${filterSql} ${candidates}
       ORDER BY ${orderBy}
       LIMIT ${limitPh} OFFSET ${offsetPh}
     `;
@@ -231,6 +235,23 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
     return rows.map((r) => r.id);
   },
 
+  async filterCount(opts: FilterCountOpts): Promise<number> {
+    if (opts.memoryIds.length === 0) return 0;
+    const { params, bind } = paramBuilder();
+    const memPh = opts.memoryIds.map((m) => bind(m)).join(', ');
+    const deletedClause = opts.includeDeleted ? '' : 'AND deleted_at IS NULL';
+    const filterSql = filterClause(opts.filter, bind);
+    const excluded = opts.excludeNodeIds?.length
+      ? `AND id <> ALL(${bind(opts.excludeNodeIds)}::text[])` : '';
+    const rows = await opts.db.$queryRawUnsafe<{ total: bigint }[]>(`
+      SELECT COUNT(*) AS total FROM nodes
+      WHERE memory_id IN (${memPh}) ${deletedClause}${filterSql} ${excluded}
+    `, ...params);
+    const total = Number(rows[0]!.total);
+    if (!Number.isSafeInteger(total)) throw new Error('Object match count exceeds the safe integer range.');
+    return total;
+  },
+
   async filterWhere(opts: FilterWhereOpts): Promise<string[]> {
     if (opts.ids.length === 0 || opts.memoryIds.length === 0) return [];
     const { params, bind } = paramBuilder();
@@ -259,6 +280,8 @@ export const postgresRetrievalProvider: NodeRetrievalProvider = {
       queryEmbedding: opts.queryEmbedding,
       limit: opts.limit,
       onWindow: opts.onWindow,
+      candidateNodeIds: opts.candidateNodeIds,
+      abstractOnly: opts.abstractOnly,
       scope: opts.contentScope ?? 'CONTENT', // #1608: content by default for every caller
     });
   },

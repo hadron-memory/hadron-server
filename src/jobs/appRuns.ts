@@ -26,6 +26,7 @@ import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
@@ -386,6 +387,10 @@ export interface MintAppRunArgs {
   /** Fan-out lineage (plan-spawn): set on child + callback runs. */
   parentRunId?: string | null;
   entryNodeUrn: string;
+  /** #2438: the entry's stable node id, when the caller holds it (the trigger
+   * row). Preferred over resolving `entryNodeUrn` — a renamed or moved entry
+   * keeps launching — and stamped onto the run alongside the display URN. */
+  entryNodeId?: string | null;
   eventData?: Record<string, unknown> | null;
   /** Trigger policy link, or a previously captured `{chain:[...]}` snapshot
    *  that must remain an additional restriction (integration events). */
@@ -459,9 +464,13 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // UNAVAILABLE on encrypted memories — the server never holds the key, and
   // a run has no session to supply one. Fail loud at the gate, not deep in
   // assembly. Resolved best-effort: an unresolvable entry URN falls through
-  // to the runner's normal assembly failure.
+  // to the runner's normal assembly failure. #2438: the caller's stable id,
+  // when present, resolves in preference to the (possibly stale) URN, so a
+  // renamed entry keeps passing through these gates rather than skipping them.
+  let resolvedEntryNodeId: string | null = null;
   try {
-    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeUrn);
+    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeId ?? args.entryNodeUrn);
+    resolvedEntryNodeId = entryNodeId;
     const entryNode = await db.node.findUnique({
       where: { id: entryNodeId },
       select: { memory: { select: { isEncrypted: true, organizationId: true } } },
@@ -555,12 +564,20 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // Consent comes from setup, never the webhook/event payload. Child runs
   // inherit the parent's artifact; poll events use the origin trigger's pin.
   let automationPin: unknown = null;
+  // #2438: the entry id this run resolves by — the trigger row's stamp when
+  // the launch carries one (authoritative at mint), else the caller's, else a
+  // fresh resolution from the URN. Null on legacy rows and unresolvable refs.
+  let entryNodeId: string | null = args.entryNodeId ?? null;
   if (args.triggerKind === 'MANUAL') {
-    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, entryNodeId ?? args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
   } else if (args.triggerKind === 'SCHEDULE') {
-    automationPin = (await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+    const schedule = await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
+    automationPin = schedule?.automationPin;
+    if (schedule?.entryNodeId) entryNodeId = schedule.entryNodeId;
   } else if (args.triggerKind === 'WEBHOOK') {
-    automationPin = (await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+    const webhook = await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
+    automationPin = webhook?.automationPin;
+    if (webhook?.entryNodeId) entryNodeId = webhook.entryNodeId;
   } else if (args.parentRunId) {
     automationPin = args.triggerKind === 'INTEGRATION'
       ? await currentOriginPin(db, args.parentRunId)
@@ -578,6 +595,9 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       triggerId: args.triggerId ?? null,
       parentRunId: args.parentRunId ?? null,
       entryNodeUrn: args.entryNodeUrn,
+      // #2438: the stable id the pin's v4 format keys by; null keeps legacy
+      // runs on their stored pin's URN identity.
+      entryNodeId: entryNodeId ?? resolvedEntryNodeId,
       automationPin: (automationPin ?? undefined) as never,
       eventData: (args.eventData ?? undefined) as never,
       // Chain snapshot: `{chain: [...]}` since #510. checkActivation also
@@ -592,6 +612,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       // budget" — the two columns above are live-decremented remainders.
       budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
+      costMicroCents: 0n,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
     },
@@ -656,6 +677,8 @@ export interface RunExecutionDeps {
     opts: {
       onToolCall: (action: `tool.${string}`, cost: 0 | 1) => Promise<boolean>;
       log: (message: string) => void;
+      /** The flow node this hop executes (#2485). */
+      nodeUrn?: string;
     },
   ) => Promise<LlmToolLoopResult>;
   writeOutput: (run: AppRun, nodeUrn: string, text: string) => Promise<string | null>; // returns written node id/urn
@@ -751,26 +774,35 @@ async function executeAppRunInner(
   if (claimed.count === 0) return 'skipped';
   const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
 
-  const fail = async (code: string, message: string): Promise<RunOutcome> => {
+  const fail = async (code: string, message: string, reason?: string): Promise<RunOutcome> => {
     // Guarded transition: a concurrent cancelAppRun must not be overwritten
     // to FAILED — the audit log keeps CANCELLED (PR-493 review, Gemini).
     const res = await db.appRun.updateMany({
       where: { id: runId, status: 'RUNNING' },
-      data: { status: 'FAILED', failure: { code, message }, finishedAt: new Date() },
+      data: { status: 'FAILED', failure: { code, message, ...(reason ? { reason } : {}) }, finishedAt: new Date() },
     });
     return res.count === 1 ? 'failed' : 'skipped';
   };
 
-  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
+  // #2438: the entry address recorded at mint goes stale after a rename or
+  // move; the run's stable entry id (when stamped) resolves to the LIVE
+  // address, and hop 0 starts there. A resumed run's checkpoint still wins.
+  let entryAddress = run.entryNodeUrn;
+  if (!run.curNodeUrn && run.entryNodeId) {
+    const live = await db.node.findUnique({ where: { id: run.entryNodeId }, select: { loc: true, memory: { select: { urn: true } } } });
+    if (live) entryAddress = emitNodeUrnV2(live.memory.urn, live.loc);
+  }
+  let lastToolDenial: ActivationDenial | null = null;
+  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
   try {
-    await deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
+    await deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
     // Per-ATTEMPT wall clock (D-MN-5): recomputed at each claim.
     const deadline = Date.now() + (run.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
 
     // D-MN-5 resume: the checkpoint (curNodeUrn + data) written after each
     // hop makes a bus redelivery continue at the failing hop, never re-run
     // completed ones. A fresh run has neither → starts at the entry.
-    let cur = run.curNodeUrn ?? run.entryNodeUrn;
+    let cur = run.curNodeUrn ?? entryAddress;
     let envelope: Record<string, unknown> =
       run.data !== null && typeof run.data === 'object' && !Array.isArray(run.data)
         ? { ...(run.data as Record<string, unknown>) }
@@ -813,10 +845,12 @@ async function executeAppRunInner(
       // budget (the kill-switch contract). Entering an ADDITIONAL hop
       // consumes one action (D-MN-3: budgetActions is the LLM-hop ceiling);
       // the first hop is covered by run.execute at mint — today's behavior.
-      if (!(await checkActivation(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 }))) {
+      const entryDenial = await activationVerdict(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 });
+      if (entryDenial) {
         return fail(
           'ACTIVATION_DENIED',
           'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
+          `DENIED_${entryDenial}`,
         );
       }
 
@@ -828,7 +862,7 @@ async function executeAppRunInner(
       } catch (err) {
         // A mid-flow node that can't be loaded is the D20 entry-missing
         // analog: an OBSERVABLE failed run, position preserved on the row.
-        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
         await checkConsent();
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
@@ -888,6 +922,7 @@ async function executeAppRunInner(
           tokensOut,
           keyOwnerType: resolved.ownerType,
           createdBy: run.userId ?? null,
+          appRunId: runId,
         });
       };
       let result: LlmResult;
@@ -913,9 +948,11 @@ async function executeAppRunInner(
             {
               onToolCall: async (action, cost) => {
                 await checkConsent();
-                return checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                lastToolDenial = await activationVerdict(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                return lastToolDenial === null;
               },
               log: (message) => hopLogs.push(message),
+              nodeUrn: cur,
             },
           );
           toolCalls = loopResult.toolCalls;
@@ -975,15 +1012,15 @@ async function executeAppRunInner(
           }
         }
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
-        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }
         if (err instanceof ToolDeniedError) {
-          return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
+          return fail('ACTIVATION_DENIED', err.message, lastToolDenial ? `DENIED_${lastToolDenial}` : undefined); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
-          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message);
+          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message, err.cause.reason);
           return fail('TOOL_FAILED', err.message); // handler threw (D21)
         }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
@@ -1038,8 +1075,9 @@ async function executeAppRunInner(
       let writtenRef: string | null = null;
       if (spec.hasOutput || next === null) {
         // Output write — its own activation re-check (memory.write) + action budget.
-        if (!(await checkActivation(db, runId, 'memory.write', { actionCost: 1 }))) {
-          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).');
+        const writeDenial = await activationVerdict(db, runId, 'memory.write', { actionCost: 1 });
+        if (writeDenial) {
+          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).', `DENIED_${writeDenial}`);
         }
         try {
           writtenRef = await deps.writeOutput(run, cur, result.text);
@@ -1103,7 +1141,7 @@ async function executeAppRunInner(
     }
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
-    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err));
+    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err), err instanceof AutomationPinError ? err.reason : undefined);
   } finally { deps.releaseAutomationProof?.(run); }
 }
 
@@ -1127,19 +1165,23 @@ export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } 
  * (optionally) action budget headroom, decremented atomically on the same
  * statement so cancellation/zeroing halts the run at its next action.
  */
-async function checkActivation(
+type ActivationDenial = 'CANCELLED' | 'POLICY' | 'BUDGET';
+
+/** The activation re-check's verdict: null = allowed, else the FIRST check that
+ * failed (#2439 records it, so a denial's cause is never guessed from balances). */
+async function activationVerdict(
   db: PrismaClient,
   runId: string,
   action: PolicyAction,
   opts: { actionCost?: number } = {},
-): Promise<boolean> {
+): Promise<ActivationDenial | null> {
   const run = await db.appRun.findUnique({
     where: { id: runId },
     select: { status: true, policy: true, budgetActions: true, budgetTokens: true },
   });
-  if (!run || run.status !== 'RUNNING') return false;
-  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return false;
-  if (run.budgetTokens != null && run.budgetTokens <= 0) return false; // zeroed = kill switch
+  if (!run || run.status !== 'RUNNING') return 'CANCELLED';
+  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return 'POLICY';
+  if (run.budgetTokens != null && run.budgetTokens <= 0) return 'BUDGET'; // zeroed = kill switch
   const cost = opts.actionCost ?? 0;
   if (cost > 0) {
     const res = await db.appRun.updateMany({
@@ -1149,9 +1191,23 @@ async function checkActivation(
       // `gte: cost` guard failing) increments nothing.
       data: { budgetActions: { decrement: cost }, actionsSpent: { increment: cost } },
     });
-    return res.count === 1;
+    if (res.count !== 1) return 'BUDGET';
   }
-  return true;
+  return null;
+}
+
+/**
+ * The activation re-check (cor:agt:010:02): status live + policy allows +
+ * (optionally) action budget headroom, decremented atomically on the same
+ * statement so cancellation/zeroing halts the run at its next action.
+ */
+async function checkActivation(
+  db: PrismaClient,
+  runId: string,
+  action: PolicyAction,
+  opts: { actionCost?: number } = {},
+): Promise<boolean> {
+  return (await activationVerdict(db, runId, action, opts)) === null;
 }
 
 // ── Spawn lifecycle (plan-spawn D-SP-3/-4) ──────────────────────────────────

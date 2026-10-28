@@ -15,6 +15,8 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
+  // #430 — keyed by (memory, node, kind, remove_loc); no id column.
+  'GitMirrorObligation',
   // #2046 — keyed by (compiled node, compiled revision).
   'CompiledPromptRevision',
   'AgentSubscription',
@@ -101,6 +103,7 @@ const NODE_RELATIONS: Record<string, readonly string[]> = {
   PendingEdge: ['source'],
   NodeEmbedding: ['node'],
   NodeRevision: ['node'],
+  NodeEdgeRemoval: ['source'],
   NodeContentValidationReport: ['node'],
   Channel: ['chatRoot'],
   UsageEvent: ['node'],

@@ -13,7 +13,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
-import { s6NoticesAvailable, setS6NoticesAvailableForTest } from './delivery.js';
+import { declareAllStopLanes } from '../../test/stopLanes.js';
 import { verifyWakeProof } from '../tickers/wakeProof.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import { appendChatMessage } from '../chatRoot.js';
@@ -53,21 +53,17 @@ beforeEach(async () => {
 });
 afterEach(() => {
   post.mockRestore();
-  setS6NoticesAvailableForTest(false);
 });
 
 const due = async () => (await Q.dueWakes({}, { appRef: app.id }, ctx(manager.id))).wakes as any[];
+/** A call that takes stop notices (#2169): offered the worker's newest undelivered one. */
+const dueStop = async () => (await Q.dueWakes({}, { appRef: app.id, accepts: ['STOP'] }, ctx(manager.id))).wakes as any[];
 const kinds = (w: any) => w.reasons.map((r: any) => r.kind);
-// #2173: setting a signal is refused while the notice lane is off (R95). This file tests what a RECORDED signal offers while the lane is
-// dark, so the helper opens the lane for the one set call and restores whatever it was: the DARK tests then still see a dark lane.
+// #2173/#2169: setting a signal is refused while a lane has no fresh stop-consumer declaration (R95); this file tests what a
+// recorded signal offers, so every lane is declared for the set.
 const set = async (level: string, until?: Date) => {
-  const was = s6NoticesAvailable();
-  setS6NoticesAvailableForTest(true);
-  try {
-    return await M.setTeamStopSignal({}, { input: { appRef: app.id, level, scope: 'WORKER', worker: liam.id, ...(until ? { until } : {}) } }, ctx(manager.id));
-  } finally {
-    setS6NoticesAvailableForTest(was);
-  }
+  await declareAllStopLanes(db, app.id);
+  return M.setTeamStopSignal({}, { input: { appRef: app.id, level, scope: 'WORKER', worker: liam.id, ...(until ? { until } : {}) } }, ctx(manager.id));
 };
 const lift = (id: string) => M.liftTeamStopSignal({}, { appRef: app.id, id }, ctx(manager.id));
 const ack = (proof: string) => M.acknowledgeWakes({}, { proofs: [proof] }, ctx(manager.id));
@@ -88,16 +84,15 @@ describe('R68 — ticks under a stop signal', () => {
 });
 
 describe('cor:agt:090:04 — the notice lane', () => {
-  it('DARK: with the lane off, no STOP reason is ever offered (the notice is still recorded)', async () => {
+  it('a call that does not accept STOP is never offered a STOP reason (the notice is still recorded)', async () => {
     await set('HALT');
     expect(await due()).toEqual([]);
     expect(await db.agentTeamEvent.count({ where: { type: 'stop.notice', subjectWorkerId: liam.id } })).toBe(1);
   });
 
   it('a halt\'s notice interrupts, is acknowledged through the proof, and is then not offered again', async () => {
-    setS6NoticesAvailableForTest(true);
     const s = await set('HALT');
-    const [w] = await due();
+    const [w] = await dueStop();
     expect(kinds(w)).toEqual(['STOP']);
     expect(w.reasons[0].stop).toMatchObject({ signalId: s.id, level: 'HALT', notice: 'STOP', interrupt: true });
     // No batching window and no busy delay.
@@ -105,26 +100,24 @@ describe('cor:agt:090:04 — the notice lane', () => {
     const proof = verifyWakeProof(w.proof);
     expect(proof.tasks).toEqual([{ eventId: w.reasons[0].stop.eventId, chainIndex: 0 }]);
     expect((await ack(w.proof)).acknowledged).toBe(1);
-    expect(await due()).toEqual([]);
+    expect(await dueStop()).toEqual([]);
   });
 
   it('a pause notice rides ahead of a tick, and skips the floor right after a delivered wake', async () => {
-    setS6NoticesAvailableForTest(true);
-    const [tick] = await due();
+    const [tick] = await dueStop();
     await ack(tick.proof);
-    expect(await due()).toEqual([]); // inside the floor
+    expect(await dueStop()).toEqual([]); // inside the floor
     await set('PAUSE');
-    const [w] = await due();
+    const [w] = await dueStop();
     expect(kinds(w)).toEqual(['STOP']);
     expect(w.reasons[0].stop).toMatchObject({ level: 'PAUSE', notice: 'STOP', interrupt: false });
   });
 
   it('the resume after a delivered stop is offered; a never-delivered stop and its resume are dropped together', async () => {
-    setS6NoticesAvailableForTest(true);
     const a = await set('PAUSE');
-    await ack((await due())[0].proof);
+    await ack((await dueStop())[0].proof);
     await lift(a.id);
-    const [r] = await due();
+    const [r] = await dueStop();
     expect(r.reasons[0].stop).toMatchObject({ notice: 'RESUME', interrupt: false });
     await ack(r.proof);
     await db.appWakeReservation.deleteMany();
@@ -132,25 +125,23 @@ describe('cor:agt:090:04 — the notice lane', () => {
     await db.workerDeliveryTaskEvent.updateMany({ data: { deliveredAt: new Date(Date.now() - 3600_000) } });
     const b = await set('HALT');
     await lift(b.id);
-    expect((await due()).flatMap(kinds)).not.toContain('STOP');
+    expect((await dueStop()).flatMap(kinds)).not.toContain('STOP');
   });
 
   it('R105: a stop notice reaches a worker under the #2138 team pause, alone; its own pause holds it', async () => {
-    setS6NoticesAvailableForTest(true);
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
     await set('HALT');
-    const [w] = await due();
+    const [w] = await dueStop();
     expect(kinds(w)).toEqual(['STOP']);
     await db.appWakeReservation.deleteMany();
     await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3600_000) } });
-    expect(await due()).toEqual([]);
+    expect(await dueStop()).toEqual([]);
   });
 
   it('R89: a spent daily budget never withholds a stop notice', async () => {
-    setS6NoticesAvailableForTest(true);
     await db.app.update({ where: { id: app.id }, data: { wakeDailyBudget: 0 } });
     await set('HALT');
-    const page = await Q.dueWakes({}, { appRef: app.id }, ctx(manager.id));
+    const page = await Q.dueWakes({}, { appRef: app.id, accepts: ['STOP'] }, ctx(manager.id));
     expect(page.withheld).toBe(0);
     expect(kinds(page.wakes[0])).toEqual(['STOP']);
   });

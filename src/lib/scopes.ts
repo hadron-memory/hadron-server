@@ -44,6 +44,7 @@ import { narrowToAccessible } from './auth/narrowToAccessible.js';
 import { resolveActiveOrg, type ActiveOrgResolution } from './auth/activeOrg.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { LIVE_ORG_MEMBERSHIP } from './auth/liveOrgMembership.js';
+import { forbiddenError } from './refusals.js';
 
 /** The ladder's built-in tokens (D-2026-09-13-002); a scope may not take either name. */
 export const RESERVED_SCOPE_NAMES: ReadonlySet<string> = new Set(['global', 'app']);
@@ -121,7 +122,7 @@ export async function resolveScopeOwnerForWrite(
     where: { id, deletedAt: null, uninstalledAt: null },
     select: { organizationId: true, ownerUserId: true },
   });
-  if (!app) throw new Error('Forbidden');
+  if (!app) throw forbiddenError();
   await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
   return { organizationId: null, agentId: null, appId: id };
 }
@@ -134,14 +135,14 @@ export async function requireScopeWrite(ctx: Context, scope: ScopeOwnerColumns):
       where: { id: scope.agentId, deletedAt: null },
       select: { organizationId: true, ownerUserId: true },
     });
-    if (!agent) throw new Error('Forbidden');
+    if (!agent) throw forbiddenError();
     return requireAgentAccess(ctx, agent, 'ADMIN');
   }
   const app = await ctx.db.app.findFirst({
     where: { id: scope.appId!, deletedAt: null, uninstalledAt: null },
     select: { organizationId: true, ownerUserId: true },
   });
-  if (!app) throw new Error('Forbidden');
+  if (!app) throw forbiddenError();
   return requireOwnerOrOrgRole(ctx, app, 'ADMIN');
 }
 

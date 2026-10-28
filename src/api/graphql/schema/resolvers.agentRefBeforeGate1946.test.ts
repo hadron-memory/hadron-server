@@ -56,7 +56,7 @@ let anaApp: { id: string };
 const ctx = (userId: string): Context => ({ db, userId, roles: ['READER'] });
 const urnOf = (a: { urn: string }) => `hrn:agent:${a.urn}`;
 const nobody = () => `hrn:agent:${orgA.urn}:nobody`;
-const masked = (a: Answer, ref: string) => JSON.parse(JSON.stringify(a).split(ref).join('<ref>'));
+const masked = (a: Answer, ref: string) => JSON.parse(JSON.stringify(a).split(ref).join('<ref>').replace(/"requestId":"[^"]+"/g, '"requestId":"<id>"'));
 
 async function user(handle: string): Promise<string> {
   return (await db.user.create({ data: { id: generateId(), name: handle, handle: `${handle}-${generateId().slice(-6)}`, roles: ['READER'] } })).id;
@@ -295,7 +295,9 @@ describe('#1946 fix head (Atilla\'s P2s on #1955)', () => {
       tripped = false;
       const a = await ask({ db: faulty, userId: adminB, roles: ['READER'] } as Context, req.query, req.variables);
       expect(tripped).toBe(true);
-      expect(a.error?.message).toContain('database unavailable');
+      // #1789: a fault surfaces as the generic envelope; the detail is logged, not returned.
+      expect(a.error?.message).toBe('Internal server error.');
+      expect(a.error?.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     }
   });
 

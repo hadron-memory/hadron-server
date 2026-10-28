@@ -16,7 +16,7 @@ import {
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
-import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
@@ -65,6 +65,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   validateLoc,
@@ -163,6 +164,46 @@ import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js'
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
+
+
+/**
+ * #2517 — writes one `NodeEdgeRemoval` per live edge that points INTO `targetIds` from a node outside
+ * them, just before a hard delete cascades those edges away. Governed edges are skipped (comment
+ * threads go with the target, cor:dmo:110:04; derived INCLUDE edges are not recorded, cor:dmo:010:04) and so are edges already soft-deleted (they left the live
+ * graph earlier). Runs inside the delete's transaction.
+ */
+async function recordEdgeRemovals(tx: Prisma.TransactionClient, targetIds: string[], removedBy: string | null) {
+  const edges = await tx.edge.findMany({
+    where: {
+      targetId: { in: targetIds },
+      sourceId: { notIn: targetIds },
+      // Governed edges are skipped: comment edges go with their threads, and a derived INCLUDE edge (#2040) is
+      // not recorded (Vera, cor:dmo:010:04 Proposed: its tag stays in the source's content and reads as broken).
+      governedKind: null,
+      deletedAt: null,
+    },
+    select: {
+      id: true, loc: true, name: true, targetId: true, sourceId: true,
+      source: { select: { memoryId: true } },
+      target: { select: { loc: true, memoryId: true } },
+    },
+  });
+  if (edges.length === 0) return;
+  await tx.nodeEdgeRemoval.createMany({
+    data: edges.map((e) => ({
+      sourceId: e.sourceId,
+      memoryId: e.source.memoryId,
+      edgeId: e.id,
+      edgeLoc: e.loc,
+      edgeName: e.name,
+      targetId: e.targetId,
+      targetMemoryId: e.target.memoryId,
+      targetLoc: e.target.loc,
+      reason: 'TARGET_HARD_DELETED',
+      removedBy,
+    })),
+  });
+}
 
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
@@ -347,8 +388,17 @@ async function writeNodeCoreRaw(
       // memory without record-read access. Internal callers pass no
       // concealUnreadable and keep the bare denial.
       const conceal = opts?.concealUnreadable;
+      // #2484: the destination an App's write grant for its userless runs is judged against — this create or update, at
+      // this loc. Named only when the write carries no inline edges: a grant permits node create/update under a
+      // prefix and "no edges outside the prefix", and an `edges` list (even an empty one, which replaces the node's
+      // edges) reaches beyond it. Content with an include tag is the same thing by another road: the write derives an
+      // INCLUDE edge to every node the tag names (#2040), wherever it lives. Without a destination the grant arm
+      // never answers.
+      const carriesIncludeTag = typeof input.content === 'string' && input.content.includes('{{>');
+      const grantDestination: WriteDestination | undefined =
+        input.edges === undefined && !carriesIncludeTag ? { loc: input.loc, verb: mode } : undefined;
       const authorizeWrite = async (authCtx: Context) => {
-        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId);
+        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId, grantDestination);
         if (!conceal) {
           await gate();
         } else if (conceal.entity === 'node') {
@@ -2853,9 +2903,7 @@ export const nodeMutations = {
         // Channel had existed at selection time; no snapshot or update for
         // them may reach the Channel-owned address (#1298).
         const channelMemoryIds = [...new Set([...nodeById.values()].map((row) => row.memoryId))].sort();
-        for (const memoryId of channelMemoryIds) {
-          await lockMemoryForChannelChange(tx, memoryId);
-        }
+        await lockMemoriesForChannelChange(tx, channelMemoryIds);
         const newlyProtected = new Set<string>();
         const currentProtected = new Map<string, ProtectedLoc[]>();
         for (const row of scannedNodes) {
@@ -3234,6 +3282,11 @@ export const nodeMutations = {
             for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
               await requireMemoryWriteAccess(ctx, other);
             }
+            // #2517 (cor:dmo:010:04, Proposed) — the FK cascade below removes each edge an outside node held
+            // to the deleted set without a word on that node. Record the removal on every such SOURCE, in this
+            // transaction, as its own audit entry (never a NodeRevision). Judged after every refusal above, so
+            // a refused delete leaves nothing. Edges whose source goes in the same delete need no trace.
+            await recordEdgeRemovals(tx, affectedIds, deletedBy);
             // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
             // cascade misses pending rows aimed at the deleted nodes — clean them
             // up explicitly (PR-189 pattern), in both node-keyed forms (#449).

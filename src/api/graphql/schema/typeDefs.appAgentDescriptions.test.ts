@@ -58,4 +58,18 @@ describe('#1246 — App and Agent descriptions publish the live install model', 
     expect(block).toMatch(/personal apps reject dependency cascades/);
     expect(agentRef).toMatch(/initial agent installed into this new app/);
   });
+
+  it('#2640 — the Agent-naming App fields say they are gated and may be partial', () => {
+    const primary = before('    agentId: ID\n    agent: Agent', 'SOFT-DEPRECATED convenience read: the FIRST installed Agent.');
+    expect(primary).toMatch(/primary install/);
+    expect(primary).toMatch(/null when the caller may not read it/);
+    expect(primary).toMatch(/null is not proof that nothing is installed/);
+    expect(primary).toMatch(/entry whose `agent` is null/);
+    const list = before('    agents: [Agent!]!', '023-app-shape: convenience that returns every installed Agent');
+    expect(list).toMatch(/may read/);
+    expect(list).toMatch(/may be partial/);
+    expect(list).toMatch(/not the install count/);
+    const urn = before('    installedAgentUrn: String', 'SOFT-DEPRECATED convenience read: the FIRST installed Agent\'s canonical', 3000);
+    expect(urn).toMatch(/may not read that agent/);
+  });
 });

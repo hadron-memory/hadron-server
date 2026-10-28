@@ -27,12 +27,13 @@ import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
-import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
+import { flushTaskWarningHistory, renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type TaskRow = Record<string, any> & { id: string; status: string };
 type EventRow = Record<string, any> & { id: string; type: string; createdAt: Date };
@@ -58,7 +59,8 @@ const QA = resolvers.Query as unknown as {
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
-type RosterRow = import('../lib/agentTasks/roster.js').RosterEntry & {
+type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
@@ -103,7 +105,7 @@ function textResult(text: string, isError = false) {
 
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
@@ -132,6 +134,7 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.unreactedChildTaskId ? `child ${r.unreactedChildTaskId} ended (finished or cancelled)` : null,
     r.lastAssignedAt ? `last assigned ${r.lastAssignedAt.toISOString()}` : 'never assigned',
     // #1726: beside last activity, so a stale claim is easy to spot.
+    r.teamPlacement != null ? `team placement ${r.teamPlacement}` : null,
     r.reportsTo ? `reports to ${r.reportsTo.name}${r.reportsTo.retired ? ' (retired)' : ''}` : null,
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4
@@ -156,7 +159,8 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
   ]);
   const flags = [T.queued(t as never) ? 'queued' : null, waiting ? 'waiting on child tasks' : null].filter(Boolean);
   const lines = [
-    `- ${t.title} (id: ${t.id})`,
+    // #2553: the handle first, then the id it is an alias for.
+    `- ${t.handle} ${t.title} (id: ${t.id})`,
     `  status: ${t.status}${flags.length ? ` (${flags.join(', ')})` : ''}`,
     `  owner: ${partyLabel(owner)} · assignee: ${partyLabel(assignee)}`,
   ];
@@ -192,9 +196,11 @@ export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
 export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const actor = (await E.actor(e as never, {}, ctx)) as Party;
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
+  // #2553: the handle first, then the id (one read: the event row carries only the id).
+  const handle = e.taskId ? (await ctx.db.agentTask.findUnique({ where: { id: e.taskId }, select: { handle: true } }))?.handle ?? null : null;
   const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
   const line = `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
-    `${e.taskId ? ` task ${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
+    `${e.taskId ? ` task ${handle ? `${handle} ` : ''}${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;
   if (!e.severity) return line;
   // #1706 — an alarm: its episode, who it has woken, and its acknowledgement.
@@ -246,7 +252,10 @@ const party = z.object({
   worker: z.string().optional().describe('A worker of the App: its id, URN or name.'),
   user: z.string().optional().describe('A person who participates in the App: user id or handle.'),
 }).describe('Exactly one of worker or user.');
-const taskId = z.string().describe('The task id.');
+const taskId = z.string().describe(
+  'The task id, or its handle: AT3.405 (a project, then the number within each parent; AT0.<n> is a task with no project). ' +
+    'A person who belongs to several Apps qualifies it: hrn:agenttask:<app-urn>:AT3.405. The handle is not a GitHub issue number.',
+);
 
 /**
  * Register the agent-task tools on one MCP server instance. `auth` is the
@@ -294,7 +303,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     const ctx = ctxOf();
     try {
       const t = await call(ctx);
-      return textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      const result = textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }
@@ -455,7 +466,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
@@ -582,6 +593,7 @@ const availabilityFields = {
 const SHAPE_HADRON_TASK_CREATE = {
   appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
   parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
+  project: z.boolean().optional().describe('Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId.'),
   title: z.string().describe('What is asked, in the team\'s own words.'),
   description: z.string().optional(),
   source: z.string().optional().describe('Where the work came from: an issue URL, a node URN.'),
@@ -631,6 +643,7 @@ const SHAPE_HADRON_TASK_LIST = {
   status: z.array(z.enum(['BACKLOG', 'PENDING', 'STARTED', 'FINISHED', 'CANCELLED'])).optional(),
   owner: party.optional(),
   assignee: party.optional(),
+  creator: party.optional().describe('Who created the task: a worker, or a person for a task they created themselves (not one their worker created).'),
   tag: z.string().optional(),
   parentTaskId: z.string().optional(),
   rootsOnly: z.boolean().optional(),

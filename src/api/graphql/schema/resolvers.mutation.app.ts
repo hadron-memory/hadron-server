@@ -1,4 +1,6 @@
+import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -71,6 +73,8 @@ import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.j
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { forbiddenError } from '../../../lib/refusals.js';
+import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -209,19 +213,6 @@ async function provisionAppSharedMemory(
 }
 
 
-/**
- * #2403: an App's session timeout stamps every session's expiry, which cor:agt:020:03 makes a promise, so a
- * non-positive ceiling would be past before the session began. Refuses it with BAD_USER_INPUT; null/omitted
- * passes (the caller keeps or defaults it). No floor or cap: a range is a product ruling. Callers run it after
- * their access gate and before any write, so it adds no oracle.
- */
-function assertPositiveSessionTimeout(seconds: number | null | undefined): void {
-  if (seconds != null && seconds <= 0) {
-    throw new GraphQLError('sessionTimeoutSeconds must be a positive number of seconds.', {
-      extensions: { code: 'BAD_USER_INPUT' },
-    });
-  }
-}
 
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
@@ -569,6 +560,8 @@ export const appMutations = {
           },
           include: APP_INCLUDE,
         });
+          // #2553: the App's reserved project AT0, in the transaction that creates the App.
+          await ensureProjectZero(tx, app.id, { userId: app.ownerUserId ?? ctx.userId ?? null });
           // 009-install-agent-flow T015: the installer is auto-added as an
           // AppMember with role 'owner' when the Agent's installationPolicy
           // permits it, routed through ensureAppMember so the memberRoles +
@@ -577,13 +570,10 @@ export const appMutations = {
           // deleteApp / removeAppMember can act on the App between its
           // creation and this membership grant. ctx.userId may be absent for a
           // platform-admin caller; there is then no user to grant it to.
-          const installerAgent = await tx.agent.findUniqueOrThrow({
-            where: { id: resolvedAgentId },
-            select: { installationPolicy: true },
-          });
-          const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
-            ?.memberRoles ?? ['owner'];
-          if (allowedRoles.includes('owner') && ctx.userId) {
+          // #2171 (R211): the App offers the union of its Agents' roles
+          // (a union of one here); ensureAppMember re-decides under the fences.
+          const offered = await loadOfferedMemberRoles(tx, app.id);
+          if (offered.roles.includes('owner') && ctx.userId) {
             await ensureAppMember(tx, app.id, ctx.userId, 'owner', { actorId: ctx.userId });
           }
           return app;
@@ -717,7 +707,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
-              return tx.app.create({
+              const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,
                   name: `${depAgent.name} (cascaded from ${name})`,
@@ -730,6 +720,9 @@ export const appMutations = {
                   },
                 },
               });
+              // #2553: the cascaded App's reserved project AT0, in the same transaction.
+              await ensureProjectZero(tx, cascaded.id, { userId: ctx.userId ?? null });
+              return cascaded;
             },
           );
           // #951: a cascaded dependency App is an App like any other — it gets
@@ -1103,7 +1096,7 @@ export const appMutations = {
       // rights, and platform admins manage org Apps. That is safe only because
       // joinApp never self-grants `owner` (#1714).
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
-        throw new Error('Forbidden: only org admins or App owners can manage members');
+        throw forbiddenError('Forbidden: only org admins or App owners can manage members');
       }
 
       // Target user resolved AFTER the authorization gate above (which keys off
@@ -1124,7 +1117,7 @@ export const appMutations = {
               throw new Error('App ownership changed; retry member management');
             }
             if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
-              throw new Error('Forbidden: only org admins or App owners can manage members');
+              throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
           },
           (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
@@ -1186,7 +1179,7 @@ export const appMutations = {
       const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       const forbidRemove = () =>
-        new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
+        forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
 
       const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
       let resolvedUserId: string;

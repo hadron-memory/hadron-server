@@ -1019,6 +1019,9 @@ model Memory {
   /// creation (there is no shared creation helper to hang that on —
   /// hadron-server findings:memory-creation-has-no-shared-helper).
   config              MemoryConfig?
+  /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
+  appWriteGrants      AppMemoryWriteGrant[]
+  gitMirrorObligations GitMirrorObligation[]
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -1416,11 +1419,14 @@ model Node {
   updatedByUserId     String?             @map("updated_by_user_id")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  includeReferences        IncludeReference[]
+  includeSourceCoverage    IncludeSourceCoverage?
   outgoingEdges            Edge[]                        @relation("SourceNode")
   incomingEdges            Edge[]                        @relation("TargetNode")
   pendingEdges             PendingEdge[]
   usageEvents              UsageEvent[]
   revisions                NodeRevision[]
+  edgeRemovals             NodeEdgeRemoval[]
   /// #2046 (S9): the immutable provenance of each compiled revision of this node.
   compiledPromptRevisions  CompiledPromptRevision[]
   /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
@@ -1520,7 +1526,7 @@ model NodeEmbedding {
   @@map("node_embeddings")
 }
 
-/// Directed edge between two Nodes. The `label` describes the
+/// Directed edge between two Nodes. The optional `name` describes the
 /// relationship — e.g. "imports", "depends_on", "related-to", "cites",
 /// "abstract-of". An edge whose target is not yet synced lives in
 /// PendingEdge until the target arrives.
@@ -1606,6 +1612,7 @@ model Edge {
   @@unique([loc, memoryId])
   @@index([memoryId])
   @@index([targetId])
+  @@index([sourceId])
   // Graph-view scale path (#466): memoryEdges runs
   // `WHERE memory_id = ? ORDER BY loc LIMIT/OFFSET` (plus endpoint-liveness
   // joins). Same memory-scoped, loc-ordered seek as nodes_memory_id_loc_idx.
@@ -1738,6 +1745,10 @@ model Session {
   /// gated at start (the worker must belong to the session's App); "taken
   /// right now" derives from an ACTIVE session bound to the worker.
   workerId          String?           @map("worker_id")
+  /// #2458 (cor:dmo:050:11): the worker's role AT BIND, stamped from the locked worker row with `agentId`, so a
+  /// past session keeps the role it ran under after the worker's agent (and so its role) changes. Null for a
+  /// session with no worker; the migration backfills earlier sessions exactly (the role was immutable before #2458).
+  role              String?           @map("role")
   /// The active write-memory for this session, when there's an
   /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId          String?           @map("memory_id")
@@ -3372,12 +3383,17 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  agentTaskCounters       AgentTaskCounter[]
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
   appGrants               AppGrant[]
   wakeDays                AppWakeDay[]
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
+  automationAdoptionEvents AutomationAdoptionEvent[]
+  /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
+  memoryWriteGrants       AppMemoryWriteGrant[]
+  memoryWriteGrantEvents  AppMemoryWriteGrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -3388,6 +3404,7 @@ model App {
   contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
   stopSignals             TeamStopSignal[]
+  stopConsumerDeclarations StopConsumerDeclaration[]
   launchGrants            LaunchGrant[]
   /// #1956 — resume claims written before a deliberate context reset (cor:agt:020:03).
   resumeClaims            ResumeClaim[]
@@ -3881,6 +3898,8 @@ model Worker {
   /// leaves it alone. Written only by `src/lib/workers/reportsTo.ts`, which
   /// also appends the `worker.reports-to` event that keeps its history.
   reportsToWorkerId String?   @map("reports_to_worker_id")
+  /// S12: explicit human choice; false + null reportsTo is UNSET, never inferred NO_TEAM.
+  explicitNoTeam Boolean @default(false) @map("explicit_no_team")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4157,6 +4176,11 @@ model OAuthClient {
   updatedBy    String?   @map("updated_by")
   deletedAt    DateTime? @map("deleted_at")
   deletedBy    String?   @map("deleted_by")
+  /// #155: when an unused DCR client becomes collectable. Set to now + 30
+  /// days at registration and pushed forward by each token redemption; the
+  /// GC job (src/jobs/gcOauthClients.ts) soft-deletes a client 7 days past
+  /// it. NULL never expires (seeded and hand-made clients).
+  expiresAt    DateTime? @map("expires_at")
 
   authCodes AuthCode[]
 
@@ -4618,6 +4642,10 @@ model AppRun {
   automationPin        Json?                @map("automation_pin")
   manualAutomationPin  ManualAutomationPin?
   entryNodeUrn         String               @map("entry_node_urn")
+  /// #2438: the entry node's stable id — what the run resolves by once the
+  /// automation pin moved off literal URNs. NULL on runs minted before the
+  /// column existed; those keep verifying under their stored pin's URN identity.
+  entryNodeId          String?              @map("entry_node_id")
   eventData            Json?                @map("event_data")
   /// Run envelope (D-2026-05-09-013): the mutable bag of fields extracted
   /// by flow nodes as the walker advances. Bare field names — conditions
@@ -4670,6 +4698,12 @@ model AppRun {
   /// GraphQL field docs.
   tokensSpent          Int?                 @default(0) @map("tokens_spent")
   actionsSpent         Int?                 @default(0) @map("actions_spent")
+  /// #2439 — priced LLM cost of this run in micro-cents (1e-8 USD): the sum of
+  /// its usage events' `costMicroCents`, incremented where each event is
+  /// recorded. Unpriced events add nothing. NULL = UNKNOWN for a run minted
+  /// before the column existed (no usage-event link to back-fill from); new
+  /// runs start at 0.
+  costMicroCents       BigInt?              @map("cost_micro_cents")
   status               AppRunStatus         @default(PENDING)
   curNodeUrn           String?              @map("cur_node_urn")
   /// Spec 049 Phase 3b (D-2026-09-13-004): the trigger's scope, SNAPSHOTTED at mint as
@@ -4726,6 +4760,10 @@ model AgentSchedule {
   /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
   automationPin  Json?     @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
+  /// #2438: the entry node's stable id, stamped at adoption (and lazily at
+  /// launch) — a same-memory rename/move of the entry keeps the trigger
+  /// working; entryNodeUrn stays the immutable display/audit address.
+  entryNodeId     String?   @map("entry_node_id")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).
   policy         Json?
@@ -4895,6 +4933,10 @@ model AgentWebhook {
   /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
   automationPin  Json?     @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
+  /// #2438: the entry node's stable id, stamped at adoption (and lazily at
+  /// launch) — a same-memory rename/move of the entry keeps the trigger
+  /// working; entryNodeUrn stays the immutable display/audit address.
+  entryNodeId     String?   @map("entry_node_id")
   eventData      Json?     @map("event_data")
   policy         Json?
   aiConfigName   String?   @map("ai_config_name")
@@ -5472,6 +5514,128 @@ enum AutomationTier {
   APP
 }
 
+/// #2441 — append-only record of every approval, decline and revocation of an
+/// automation's consent (cor:agt:010:01). Written in the SAME transaction as
+/// the pin change by `adoptionDoor` (resolvers.automationPin.ts) and nowhere
+/// else. The trigger id, the actor and the org carry no FK on purpose: history
+/// must survive trigger deletion and user erasure, and an FK action would have
+/// to UPDATE a row the trigger refuses to update. The App FK cascades so a hard
+/// delete still works (the trigger lets a DELETE through once the App is gone).
+model AutomationAdoptionEvent {
+  id             String   @id @default(cuid())
+  appId          String   @map("app_id")
+  /// The App's organization; null for a user-owned App.
+  organizationId String?  @map("organization_id")
+  /// SCHEDULE | WEBHOOK | MANUAL (CHECK in automation-adoption-invariants.sql).
+  triggerKind    String   @map("trigger_kind")
+  /// The trigger row id; for MANUAL, the origin run id. Plain text, no FK.
+  triggerRef     String   @map("trigger_ref")
+  /// APPROVE | DECLINE | REVOKE (CHECK).
+  action         String
+  actorUserId    String   @map("actor_user_id")
+  /// APPROVE: the adopted hash. REVOKE: the hash of the removed pin. DECLINE
+  /// with nothing adopted: null.
+  pinHash        String?  @map("pin_hash")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([triggerKind, triggerRef, createdAt])
+  @@map("automation_adoption_events")
+}
+
+/// #2484 (cor:agt:010:01, epic #2435) — an App's write grant on ONE memory under ONE loc prefix, for its USERLESS
+/// runs only: the register-recorded grant the Open paragraph rules on. One row per (App, memory, prefix); the prefix
+/// is required and matches the loc itself and its `:`-boundary descendants only, judged on the destination after
+/// `writeTo` expansion, at write time (`src/lib/appWriteGrant.ts`). A row is never edited: it ends with a terminal
+/// `revokedAt` (trigger + CHECKs in app-memory-write-grant-invariants.sql, where the partial unique index also lives).
+/// `grantedBy` / `revokedBy` carry no FK on purpose: they are sealed history of who acted and must survive user
+/// erasure. `registerNodeUrn` is a citation of the register line, never evidence that the line exists.
+model AppMemoryWriteGrant {
+  id              String    @id @default(cuid())
+  appId           String    @map("app_id")
+  memoryId        String    @map("memory_id")
+  prefix          String
+  registerNodeUrn String?   @map("register_node_urn")
+  grantedBy       String    @map("granted_by")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  revokedAt       DateTime? @map("revoked_at")
+  revokedBy       String?   @map("revoked_by")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([memoryId])
+  @@map("app_memory_write_grants")
+}
+
+/// #2484 — append-only record of every grant and revocation of an App memory write grant: who, which App, which
+/// memory, which prefix, and nothing of any node's content. Written in the SAME transaction as the row change by
+/// `src/lib/appWriteGrant.ts` and nowhere else. The memory, grant and actor carry no FK on purpose: history must
+/// survive their deletion. The App FK cascades so a hard delete still works (the trigger lets a DELETE through once
+/// the App is gone).
+model AppMemoryWriteGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  memoryId    String   @map("memory_id")
+  grantId     String   @map("grant_id")
+  prefix      String
+  /// GRANT | REVOKE (CHECK in app-memory-write-grant-invariants.sql).
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([grantId])
+  @@map("app_memory_write_grant_events")
+}
+
+/// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.
+/// One row per (memory, node, kind, remove_loc): a WRITE row per node, plus one REMOVE row per distinct old loc a move
+/// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
+/// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
+/// a memory that is not mirrored (no source, no org, encrypted, invalid source), delete it. `attempt_seq` comes from
+/// `git_mirror_attempt_seq`, taken INSIDE the per-memory checkout lock and settled before it releases, so a stale
+/// settle can never overwrite a newer one (src/integrations/github/mirrorObligations.ts). `error_class` is a fixed,
+/// CHECK-constrained set (git-mirror-obligation-invariants.sql); no exception text, URL or token is ever stored.
+/// This slice records only failures the process survives: no retry, no reconcile, no writer-side PENDING.
+model GitMirrorObligation {
+  memoryId      String                   @map("memory_id")
+  nodeId        String                   @map("node_id")
+  kind          GitMirrorObligationKind
+  removeLoc     String                   @default("") @map("remove_loc")
+  state         GitMirrorObligationState
+  errorClass    String                   @map("error_class")
+  attempts      Int                      @default(1)
+  attemptSeq    BigInt                   @map("attempt_seq")
+  lastAttemptAt DateTime                 @default(now()) @map("last_attempt_at")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, nodeId, kind, removeLoc])
+  @@index([memoryId, state])
+  @@map("git_mirror_obligations")
+}
+
+enum GitMirrorObligationKind {
+  WRITE
+  REMOVE
+
+  @@map("git_mirror_obligation_kind")
+}
+
+/// FAILED = a retryable failure; NOT_CLONED = the repository is configured but not cloned here yet.
+enum GitMirrorObligationState {
+  FAILED
+  NOT_CLONED
+
+  @@map("git_mirror_obligation_state")
+}
+
 model AutomationVersion {
   id                String         @id @default(cuid())
   appId             String         @map("app_id")
@@ -5513,6 +5677,14 @@ model AutomationVersion {
 model AgentTask {
   id                   String    @id @default(cuid())
   appId                String    @map("app_id")
+  /// #2553: this task's own segment of its handle: the project number (counted per App) for a top-level row, else the
+  /// number counted within its parent. Assigned once at creation from `agent_task_counters`, never changed or reissued.
+  /// 0 is the reserved project `AT0` ("no project"). NOT NULL in the database (prisma/agent-task-number-invariants.sql,
+  /// which also fills it for any writer that leaves it out); optional here only so a writer need not state it.
+  taskNumber           BigInt?   @map("task_number")
+  /// #2553: the full dotted handle (`AT3.405.16`), composed once at creation from the parent's handle and never
+  /// recomputed: parentage is fixed at creation (a trigger refuses UPDATE of parent_task_id), so it always matches the tree.
+  handle               String?
   /// What is asked, in the team's own words. Never read by the platform.
   title                String
   description          String?
@@ -5563,6 +5735,8 @@ model AgentTask {
   app            App                 @relation(fields: [appId], references: [id], onDelete: Cascade)
   parent         AgentTask?          @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
   children       AgentTask[]         @relation("AgentTaskParent")
+  /// #2553: the counter of the numbers issued under this task.
+  childCounters  AgentTaskCounter[]
   ownerWorker    Worker?             @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
   ownerUser      User?               @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
   assigneeWorker Worker?             @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
@@ -5571,6 +5745,7 @@ model AgentTask {
   /// #2022 — times stop signals kept this task from being assigned.
   stopHolds      AgentTaskStopHold[]
 
+  @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
   @@index([ownerWorkerId])
@@ -5578,6 +5753,24 @@ model AgentTask {
   @@index([assigneeWorkerId])
   @@index([assigneeUserId])
   @@map("agent_tasks")
+}
+
+/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
+/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
+/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
+/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
+model AgentTaskCounter {
+  id           String  @id @default(cuid())
+  appId        String  @map("app_id")
+  parentTaskId String? @map("parent_task_id")
+  lastNumber   BigInt  @map("last_number")
+
+  app        App        @relation(fields: [appId], references: [id], onDelete: Cascade)
+  parentTask AgentTask? @relation(fields: [parentTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, parentTaskId])
+
+  @@map("agent_task_counters")
 }
 
 /// #1705 — one append-only record of something that happened in a team App's
@@ -6075,6 +6268,10 @@ model Ticker {
   sourceTemplateId       String? @map("source_template_id")
   sourceTemplateRevision Int?    @map("source_template_revision")
   generatedForWorkerId   String? @map("generated_for_worker_id")
+  /// #2429 (cor:dmo:050:11): set by every accepted `updateTicker` on a GENERATED ticker, whatever the fields and even when
+  /// the values end up unchanged (it fails toward blocking). An edited generated ticker is no longer the cast's own
+  /// bookkeeping, so it counts as a reference and blocks the miscast repair. Soft-deletes are not edits.
+  editedAt               DateTime? @map("edited_at")
   createdAt         DateTime  @default(now()) @map("created_at")
   createdBy         String?   @map("created_by")
   createdByWorkerId String?   @map("created_by_worker_id")
@@ -6347,6 +6544,22 @@ model TeamStopSignal {
   @@map("team_stop_signals")
 }
 
+/// #2169 (S6b, R95) — one serving lane's declaration that its consumer takes stop notices: a `dueWakes` call that
+/// passes `accepts: [STOP]` upserts the row of the lane it serves (a host registration id for a host key, `unhosted` for a
+/// person who manages the App or a non-host key). A declaration is FRESH for STOP_CONSUMER_FRESH_SECONDS; setting a stop
+/// signal is refused while any worker it would cover has no fresh lane. `lane` is deliberately not a foreign key: it is
+/// either a registration id or the literal `unhosted`, and a stale row for a deleted registration is simply never read.
+model StopConsumerDeclaration {
+  appId      String   @map("app_id")
+  lane       String
+  declaredAt DateTime @map("declared_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, lane])
+  @@map("stop_consumer_declarations")
+}
+
 /// #2022 (R95) — when a stop signal covered a worker: the HISTORY that stall clocks and notices read. Enforcement never
 /// reads it; it works coverage out live (cor:agt:090:02). Kept by `reconcileStopCoverage` under the App's stop fence:
 /// one open interval per (signal, worker) (partial unique index, prisma/stop-signal-invariants.sql). An interval ends
@@ -6517,6 +6730,33 @@ model AgentCloneAudit {
   @@map("agent_clone_audits")
 }
 
+/// #2517, cor:dmo:010:04 (Proposed) — a separate audit entry, written on each SOURCE node, when a hard
+/// delete cascades an edge that node held to the deleted target. Deliberately NOT a NodeRevision (a
+/// node's revisions stay snapshots of its own fields). The source is a real FK (the trace dies with the
+/// source); the target is NOT one, since the target row is gone by the time anyone reads this.
+model NodeEdgeRemoval {
+  id             String   @id @default(cuid())
+  sourceId       String   @map("source_id")
+  /// The source's memory when the edge was removed (a node can later be moved).
+  memoryId       String   @map("memory_id")
+  edgeId         String   @map("edge_id")
+  edgeLoc        String   @map("edge_loc")
+  edgeName       String?  @map("edge_name")
+  targetId       String   @map("target_id")
+  targetMemoryId String   @map("target_memory_id")
+  targetLoc      String   @map("target_loc")
+  /// Why the edge went: today only `TARGET_HARD_DELETED`.
+  reason         String
+  /// Same value `Node.deletedBy` would carry (user, app or client id), null when unattributed.
+  removedBy      String?  @map("removed_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId, createdAt])
+  @@map("node_edge_removals")
+}
+
 /// #1667, cor:dmo:060:15 — append-only record of every successful per-asset
 /// public-link switch call: who, when, to what. Written in the SAME transaction
 /// as the flag. Deliberately NO foreign keys: the record must outlive the asset
@@ -6532,4 +6772,83 @@ model AssetPublicLinkAudit {
 
   @@index([assetId, createdAt])
   @@map("asset_public_link_audits")
+}
+
+// #2063 R1 / cor:dmo:150:07. Plaintext structural metadata, never source prose.
+// No target FK: a source's written address survives target/edge deletion.
+model IncludeReference {
+  id                 String  @id @default(cuid())
+  includerId         String  @map("includer_id")
+  ordinal            Int
+  kind               IncludeReferenceKind
+  reference          String
+  targetMemoryId     String? @map("target_memory_id")
+  targetLoc          String? @map("target_loc")
+  pinnedRevNo        Int?    @map("pinned_rev_no")
+  requiresApproved   Boolean @default(false) @map("requires_approved")
+  requiresSigned     Boolean @default(false) @map("requires_signed")
+  metadataGeneration Int     @map("metadata_generation")
+  includer           Node    @relation(fields: [includerId], references: [id], onDelete: Cascade)
+
+  @@unique([includerId, ordinal])
+  @@index([targetMemoryId, targetLoc])
+  @@index([targetMemoryId, reference])
+  @@map("include_references")
+}
+
+enum IncludeReferenceKind {
+  loc
+  urn
+}
+
+enum IncludeSourceCoverageState {
+  COMPLETE_EMPTY
+  COMPLETE_TAGS
+  NEEDS_AUTHORIZED_REWRITE
+}
+
+// Fingerprints describe STORED bytes (ciphertext when sealed); no plaintext copy.
+// Tombstones remain sources. Only an includer's purge cascades coverage away.
+model IncludeSourceCoverage {
+  id                       String @id @default(cuid())
+  includerId               String @unique @map("includer_id")
+  sourceRevision           Int    @map("source_revision")
+  sourceMemoryId           String @map("source_memory_id")
+  sourceLoc                String @map("source_loc")
+  sourceContentFingerprint String @map("source_content_fingerprint")
+  sourceEncrypted          Boolean @map("source_encrypted")
+  parserVersion            Int    @map("parser_version")
+  metadataGeneration       Int    @map("metadata_generation")
+  referenceCount           Int    @map("reference_count")
+  state                    IncludeSourceCoverageState
+  includer                 Node   @relation(fields: [includerId], references: [id], onDelete: Cascade)
+
+  @@map("include_source_coverage")
+}
+
+enum IncludeRetentionState {
+  PREPARING
+  BACKFILLING
+  VERIFYING
+  ACTIVE
+  BLOCKED
+}
+
+// Singleton is absent/inactive until separately authorized maintenance verifies it.
+// R1 adds no activator, operator command, backfill or production caller.
+model IncludeRetentionGeneration {
+  id                        String @id @default("singleton")
+  schemaVersion             Int @default(1) @map("schema_version")
+  parserVersion             Int @default(1) @map("parser_version")
+  metadataGeneration        Int @default(1) @map("metadata_generation")
+  state                     IncludeRetentionState @default(PREPARING)
+  sourceHighWaterId         String? @map("source_high_water_id")
+  replayCursor              String? @map("replay_cursor")
+  bindingGeneration         Int @default(0) @map("binding_generation")
+  verifiedBindingGeneration Int? @map("verified_binding_generation")
+  sourceCount               Int @default(0) @map("source_count")
+  coveredCount              Int @default(0) @map("covered_count")
+  blockedCount              Int @default(0) @map("blocked_count")
+
+  @@map("include_retention_generation")
 }

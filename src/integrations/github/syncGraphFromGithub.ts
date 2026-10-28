@@ -1,8 +1,9 @@
-import { committedSyncReport, failedSyncReport, type SyncReportEntry, type SyncReportCode } from './syncReport.js';
+import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
+import { GitCommandError } from './execGit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
-import { assertIncludesWritable, prospectiveNodeId, includeRefusalText, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
+import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -39,7 +40,7 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
-import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMemoriesForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
@@ -269,7 +270,8 @@ export async function updateNodeFromGitSync(
       update = rest;
     }
   }
-  const changes = diffNodeChanges(before, update);
+  // Compare the logical JSON value, not Prisma's persistence-only null sentinel.
+  const changes = diffNodeChanges(before, update.data === Prisma.DbNull ? { ...update, data: null } : update);
 
   if (changes.length > 0) {
     await createNodeRevision(
@@ -305,6 +307,8 @@ const syncGraphFromGithubAsSystem = async (
 ): Promise<{
   error?: string;
   errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
+  fault?: true;
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -427,15 +431,21 @@ const syncGraphFromGithubAsSystem = async (
       : undefined;
 
     const token = await getInstallationToken(organization.githubInstallationId, credentials);
-    const cloneUrl = toHttpsUrl(graph.source, token);
+    const source = graph.source;
+    const cloneUrl = toHttpsUrl(source, token);
 
     // 2. Clone or pull the repo
     // Mirror writes use this same checkout. Hold their lock through the read:
     // otherwise a writer can switch to the write branch between checkout and
     // loadGraphFromFs, even when the read branch was selected correctly.
     const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode } = await withMirrorCheckoutLock(graph.id, async () => {
-      await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
-      return loadGraphFromFs(localPath, graphName, ownerRepo);
+      try {
+        await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
+        // Await the read so finally runs after its async success or failure.
+        return await loadGraphFromFs(localPath, graphName, ownerRepo);
+      } finally {
+        await restoreReadRemote(localPath, source);
+      }
     });
 
     // 4. Upsert all nodes and edges into the database (transactional)
@@ -536,9 +546,7 @@ const syncGraphFromGithubAsSystem = async (
       // Hold every endpoint memory key in one stable order for the ENTIRE
       // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
       // preserves the cleanup-vs-resurrection serialization added earlier.
-      for (const memoryId of edgeEndpointMemoryIds) {
-        await lockMemoryForChannelChange(tx, memoryId);
-      }
+      await lockMemoriesForChannelChange(tx, edgeEndpointMemoryIds);
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
       // synced loc (deduped, in resolved-key order) up front so a concurrent non-recursive
@@ -860,6 +868,9 @@ const syncGraphFromGithubAsSystem = async (
         const update = {
           loc,
           name,
+          // #2556: spread only present keys; old mirrors must not clear either column.
+          ...('nodeType' in node ? { nodeType: node.nodeType } : {}),
+          ...('data' in node ? { data: node.data === null ? Prisma.DbNull : node.data as Prisma.InputJsonValue } : {}),
           alias: node.alias ?? null,
           isLink: node.isLink ?? false,
           description: node.description ?? null,
@@ -903,11 +914,10 @@ const syncGraphFromGithubAsSystem = async (
           try {
             await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay, { includeSystemWrite: true });
           } catch (e) {
-            const text = includeRefusalText(e);
-            if (!text) throw e;
-            skippedInvalidIncludes.push({ loc, code: String((e as GraphQLError).extensions?.code), message: (e as Error).message });
-            // includeRefusalText admitted only these fixed public refusal codes.
-            reportEntries.push({ kind: 'invalid_include', loc, code: (e as GraphQLError).extensions.code as SyncReportCode });
+            const refusalCode = includeRefusalCode(e);
+            if (!refusalCode) throw e;
+            skippedInvalidIncludes.push({ loc, code: refusalCode, message: (e as Error).message });
+            reportEntries.push({ kind: 'invalid_include', loc, code: refusalCode });
             if (selfRow) skippedRowIds.add(selfRow.id);
             continue;
           }
@@ -942,8 +952,8 @@ const syncGraphFromGithubAsSystem = async (
         // A present one is written only if the RESULTING record satisfies the
         // memory's property schema (#725: a structured record must satisfy its
         // collection — the invariant every GraphQL/MCP write enforces through
-        // validateNodeAgainstSchema). Sync restores neither `properties` nor
-        // `data`, so the record is judged with the properties the row already
+        // validateNodeAgainstSchema). Sync does not restore `properties`, so
+        // the record is judged with the properties the row already
         // has (none, for a new node). A violation does NOT fail the sync — one
         // bad file must not block the memory — and does not write a
         // nonconforming record either: the stored objectType is kept and the
@@ -995,10 +1005,10 @@ const syncGraphFromGithubAsSystem = async (
         const refusesRole = async (prior: Node | null): Promise<boolean> => {
           // #1606 (cor:dmo:110:04) — git sync never writes a comment: a file
           // that lands on a comment's loc is skipped and the comment kept.
-          if (prior?.nodeType === COMMENT_NODE_TYPE) {
+          if (prior?.nodeType === COMMENT_NODE_TYPE || node.nodeType === COMMENT_NODE_TYPE) {
             reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_COMMENT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a comment, written only through the comment path`);
-            protectedRowIds.add(prior.id);
+            if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;
           }
@@ -1006,10 +1016,10 @@ const syncGraphFromGithubAsSystem = async (
           // a file landing on one is skipped and the node kept. A worker session's
           // sync that would create or change any boot-prompt node is refused whole
           // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
-          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || node.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
             reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_BOOT_PROMPT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a compiled boot prompt, written only by a compile`);
-            protectedRowIds.add(prior.id);
+            if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;
           }
@@ -1681,10 +1691,30 @@ const syncGraphFromGithubAsSystem = async (
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
-        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE } : {}),
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }
+          // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
+          : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
   }
 };
+
+/**
+ * #2527: restore the stored tokenless source under the shared checkout lock on
+ * every read exit, including a partial clone. Never replace the primary outcome
+ * or log the raw error/URL if restoration fails (same contract as #2396).
+ */
+async function restoreReadRemote(localPath: string, source: string): Promise<void> {
+  try {
+    if (!existsSync(join(localPath, '.git'))) return;
+    await execGit(['remote', 'set-url', 'origin', source], { cwd: localPath });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    console.error(
+      `[syncGraphFromGithub] Failed to restore the origin URL at ${localPath}; the checkout may still hold an installation token until the next successful restore.`,
+      typeof code === 'string' ? code : 'unknown',
+    );
+  }
+}
 
 async function gitSync(cloneUrl: string, localPath: string, readBranch?: string): Promise<void> {
   // #1146: validated BEFORE the clone/pull split, because both arms reach git

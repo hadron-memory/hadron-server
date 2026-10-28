@@ -140,14 +140,23 @@ async function applyTemplateConstraints(client: Client) {
   // #1632 — signing requests, append-only signature records, the content-change marker.
   await client.query(readFileSync(new URL('../../prisma/signing-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/automation-invariants.sql', import.meta.url), 'utf8'));
+  // #2441 — append-only automation adoption events.
+  await client.query(readFileSync(new URL('../../prisma/automation-adoption-invariants.sql', import.meta.url), 'utf8'));
+  // #2484 — App memory write grants (shape, one live row, terminal revoke) and append-only events.
+  await client.query(readFileSync(new URL('../../prisma/app-memory-write-grant-invariants.sql', import.meta.url), 'utf8'));
+  // #430 — Git-mirror obligation shape + attempt sequence.
+  await client.query(readFileSync(new URL('../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8'));
   // #1705 — agent task shape + append-only team events.
   await client.query(readFileSync(new URL('../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8'));
+  // #2553 — the per-App task number (needs agent_tasks and its counter table).
+  await client.query(readFileSync(new URL('../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8'));
   // #1706 — stall alarm episodes, alarm wakes, availability, stall windows.
   await client.query(readFileSync(new URL('../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8'));
   // #1707 — session model family, host registrations.
   await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
   // #1747 — tickers, subscriptions, wake settings, app grants, App ticker bounds.
   await client.query(readFileSync(new URL('../../prisma/ticker-invariants.sql', import.meta.url), 'utf8'));
+  await client.query(readFileSync(new URL('../../prisma/worker-team-choice-invariants.sql', import.meta.url), 'utf8'));
   // #2043 — a compiled boot prompt keeps its role.
   await client.query(readFileSync(new URL('../../prisma/boot-prompt-invariants.sql', import.meta.url), 'utf8'));
   // #2045 — a boot-prompt pointer's id and URN snapshot are set or cleared together.

@@ -440,6 +440,8 @@ const crudMutations = {
           ...(relevance !== undefined ? { relevance } : {}),
           ...(reasons !== undefined ? { reasons } : {}),
           ...(input.enabled != null ? { enabled: input.enabled } : {}),
+          // #2429: any accepted edit of a generated ticker, even a no-op, takes it out of the miscast repair's bookkeeping.
+          ...(t.generatedForWorkerId !== null ? { editedAt: new Date() } : {}),
           ...updatedStamp(txCtx),
         },
       });

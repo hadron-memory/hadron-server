@@ -96,6 +96,51 @@ describe('generateWithTools on the real ai SDK: tool terminals end the run', () 
     expect(steps()).toBe(1);
   });
 
+  it('a sibling admitted by policy does not execute once a terminal in the same step is set (#2418)', async () => {
+    // ai@7 starts both calls together. The sibling's policy admission is held on a deferred released from a
+    // macrotask after the terminal threw, so the order is fixed: terminal first, sibling admitted second.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const side = vi.fn(async () => ({ sent: 1 }));
+    const admitted: string[] = [];
+    const steps = script({
+      content: [
+        { type: 'tool-call', toolCallId: '1', toolName: 'term', input: '{}' },
+        { type: 'tool-call', toolCallId: '2', toolName: 'side', input: '{}' },
+      ],
+      finishReason: { unified: 'tool-calls', raw: 'x' }, usage: U(10, 2), warnings: [],
+    }, textStep(20, 3));
+    const err = await generateWithTools(resolved, req, [
+      throwing('term', () => { setTimeout(release, 0); throw new Error('terminal boom'); }),
+      { ...throwing('side', () => 0), execute: side as never },
+    ], {
+      toolCtx: stubCtx(),
+      onToolCall: async (action) => { if (action === 'tool.side') await gate; admitted.push(action); return true; },
+    }).catch((e: unknown) => e);
+    expect(admitted).toContain('tool.side'); // admitted and charged: the stated residual
+    expect(side).not.toHaveBeenCalled();     // but its side effect never ran
+    expect(err).toBeInstanceOf(ToolExecutionError);
+    expect((err as Error).message).toContain('terminal boom'); // the FIRST terminal's error, not a second wrapper
+    expect(steps()).toBe(1);
+  });
+
+  it('control: a sibling admitted before any terminal exists still executes (#2418)', async () => {
+    const side = vi.fn(async () => ({ sent: 1 }));
+    script({
+      content: [
+        { type: 'tool-call', toolCallId: '1', toolName: 'ok1', input: '{}' },
+        { type: 'tool-call', toolCallId: '2', toolName: 'side', input: '{}' },
+      ],
+      finishReason: { unified: 'tool-calls', raw: 'x' }, usage: U(10, 2), warnings: [],
+    }, textStep(20, 3));
+    const out = await generateWithTools(resolved, req, [
+      throwing('ok1', () => ({ ok: 1 })),
+      { ...throwing('side', () => 0), execute: side as never },
+    ], { toolCtx: stubCtx() });
+    expect(side).toHaveBeenCalledTimes(1);
+    expect(out.toolCalls.map((c) => [c.name, c.ok])).toEqual(expect.arrayContaining([['side', true]]));
+  });
+
   it('control: no tool failure still resolves with summed usage', async () => {
     script(callStep('t', '1', 10, 2), textStep(20, 3));
     const out = await generateWithTools(resolved, req, [throwing('t', () => ({ ok: 1 }))], { toolCtx: stubCtx() });

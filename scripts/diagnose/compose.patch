@@ -1,0 +1,32 @@
+diff --git a/scripts/e2e/compose.yaml b/scripts/e2e/compose.yaml
+index abf39c1c7..6107bec3f 100644
+--- a/scripts/e2e/compose.yaml
++++ b/scripts/e2e/compose.yaml
+@@ -12,6 +12,14 @@ services:
+       interval: 2s
+       timeout: 5s
+       retries: 30
++  embedstub:
++    build:
++      context: ../..
++      dockerfile: scripts/e2e/Dockerfile
++    command: [node, /app/scripts/e2e/diagnose/embedstub.mjs]
++    mem_limit: 4g
++    volumes:
++      - graphs:/var/lib/hadron/graphs:ro
+   app:
+     build:
+       context: ../..
+@@ -27,6 +35,12 @@ services:
+       DISABLE_RUN_WORKER: 'true'
+       DISABLE_SCHEDULER: 'true'
+       GRAPHS_PATH: /var/lib/hadron/graphs
++      NODE_OPTIONS: --import /app/scripts/e2e/diagnose/preload.mjs ${DIAG_NODE_OPTIONS:-}
++      MCP_MAX_SESSIONS_PER_PRINCIPAL: ${DIAG_SESSION_CAP:-25}
++      DIAG_SAMPLES_PATH: /var/lib/hadron/graphs/diagnose-samples.jsonl
++      DIAG_SNAPSHOT_DIR: /var/lib/hadron/graphs
++    mem_limit: 6g
++    memswap_limit: 6g
+     ports:
+       - '${E2E_BIND:-127.0.0.1}:${E2E_PORT}:4100'
+     volumes:

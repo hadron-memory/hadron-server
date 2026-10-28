@@ -13,6 +13,24 @@ import { generateId } from '../../../lib/id.js';
 import { compileBootPromptMutations as doors } from './resolvers.mutation.compileBootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
 
+/**
+ * #2430: a test-local wrapper around the REAL writeNodeCore (its result is untouched). While `injectEffects` is set it
+ * queues extra post-commit effects through the writer's own `afterCommit` callback, so the compile door's real
+ * after-the-transaction loop runs them. Off, it is a pure pass-through, so every other test here is unaffected.
+ */
+const injected = vi.hoisted(() => ({ effects: null as null | Array<() => void> }));
+vi.mock('./resolvers.mutation.node.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./resolvers.mutation.node.js')>();
+  return {
+    ...real,
+    writeNodeCore: ((...args: Parameters<typeof real.writeNodeCore>) => {
+      const opts = args[3];
+      if (injected.effects && opts?.transaction) for (const e of injected.effects) opts.transaction.afterCommit(e);
+      return real.writeNodeCore(...args);
+    }) as typeof real.writeNodeCore,
+  };
+});
+
 const poolTimeout = () =>
   new Prisma.PrismaClientKnownRequestError('Timed out fetching a new connection from the connection pool.', {
     code: 'P2024', clientVersion: 'test',
@@ -53,7 +71,7 @@ beforeEach(async () => {
   agentId = (await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'r-org:agent', organizationId: orgId, systemMemoryId: mem.id } })).id;
   await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'boot:source', name: 'src', content: 'hi', role: 'boot-prompt' } });
 });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { vi.useRealTimers(); injected.effects = null; vi.restoreAllMocks(); });
 
 const ctxWith = (database: Context['db']) => ({ db: database, userId: adminId, roles: [], clientId: `user:${adminId}` }) as Context;
 const snapshot = async () => ({ nodes: await db.node.count(), revisions: await db.compiledPromptRevision.count(), edges: await db.edge.count() });
@@ -136,5 +154,34 @@ describe('#2424 (2) a committed compile is reported as committed', () => {
     const stored = await db.node.findUniqueOrThrow({ where: { id: out.node.id } });
     expect(out.node.content).toBe(stored.content);
     expect(out.node.revSeq).toBe(out.revNo);
+  });
+});
+
+describe('#2430 a failing post-commit effect cannot turn a committed compile into an error', () => {
+  it('answers the committed result, logs the fixed line, and still runs the effect queued after the thrower', async () => {
+    const thrown = vi.fn(() => { throw new Error('effect-boom'); });
+    const sentinel = vi.fn();
+    injected.effects = [thrown, sentinel];
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const out = await doors.compileAgentBootPrompt(null, { agentRef: 'r-org:agent' }, ctxWith(db)) as
+      { node: { id: string; revSeq: number }; contentHash: string; pointerSet: boolean; revNo: number };
+
+    expect(thrown).toHaveBeenCalledTimes(1); // the injected effect really ran and threw (not a vacuous mock)
+    expect(sentinel).toHaveBeenCalledTimes(1); // one failure does not stop the later effects
+    // The fixed prefix is the contract; the detail may grow (e.g. a stack), so match it by substring.
+    expect(log).toHaveBeenCalledWith('[compileBootPrompt] a post-commit effect failed:', expect.stringContaining('effect-boom'));
+    expect(out.pointerSet).toBe(true);
+    const rev = await db.compiledPromptRevision.findMany({ where: { compiledNodeId: out.node.id } });
+    expect(rev).toHaveLength(1); // exactly the committed revision, no second one invited
+    expect(out.contentHash).toBe(rev[0]!.contentHash);
+    expect(out.revNo).toBe(rev[0]!.compiledRevNo);
+  });
+
+  it('control: with no failing effect the same compile logs no post-commit failure', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const out = await doors.compileAgentBootPrompt(null, { agentRef: 'r-org:agent' }, ctxWith(db)) as { pointerSet: boolean };
+    expect(out.pointerSet).toBe(true);
+    expect(log.mock.calls.some((c) => String(c[0]).includes('a post-commit effect failed'))).toBe(false);
   });
 });

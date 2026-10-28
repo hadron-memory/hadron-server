@@ -160,6 +160,7 @@ import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -636,6 +637,16 @@ export const memoryMutations = {
         // Owner is the authenticated caller (verified above); no org, no
         // membership to check. The memory is theirs outright.
       } else if (isUserOwned) {
+        // #2511: a personal/private memory belongs to a USER. An App-key caller
+        // has none, and `userId: undefined` below would drop the filter from the
+        // membership lookup, admitting any member of the org to a gate meant
+        // for the caller alone (the create then died on a CHECK constraint).
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Creating a personal/private memory requires an authenticated user (the creator is the owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
         // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
         // platform admin create a personal/private memory in an org they don't
         // belong to.
@@ -805,6 +816,7 @@ export const memoryMutations = {
         memoryId: memory.id,
         loc: name,
         name: rootName,
+        description: 'Root node for this memory.',
       });
 
       return memory;
@@ -1263,18 +1275,18 @@ export const memoryMutations = {
             // an org admin) deletes its install memory by hand, also after the App
             // was soft-deleted. Not content access: the record is all this opens.
             if (!(await installDeleteAllowed(authCtx, current))) {
-              throw new Error('Forbidden: only whoever manages the App can delete its install memory');
+              throw forbiddenError('Forbidden: only whoever manages the App can delete its install memory');
             }
             return;
           }
           if (current.class === 'personal' || current.class === 'private') {
             if (!authCtx.userId || current.userId !== authCtx.userId) {
-              throw new Error(`Forbidden: only the owner can delete a ${current.class} memory`);
+              throw forbiddenError(`Forbidden: only the owner can delete a ${current.class} memory`);
             }
           } else if (current.ownerUserId !== null) {
             // spec 047: a user-owned memory is deletable only by its owner.
             if (authCtx.userId !== current.ownerUserId) {
-              throw new Error('Forbidden: only the owner can delete this memory');
+              throw forbiddenError('Forbidden: only the owner can delete this memory');
             }
           } else {
             // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
@@ -1376,7 +1388,7 @@ export const memoryMutations = {
         } else if (source.ownerUserId !== null) {
           // spec 047: a user-owned source memory is cloneable only by its owner.
           if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can clone this memory');
+            throw forbiddenError('Forbidden: only the owner can clone this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
@@ -1656,7 +1668,7 @@ export const memoryMutations = {
         // gates the same way. spec 047: a user-owned source is gated by its owner.
         if (source.ownerUserId !== null) {
           if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can copy from this memory');
+            throw forbiddenError('Forbidden: only the owner can copy from this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
@@ -2113,7 +2125,7 @@ export const memoryMutations = {
         chosen,
         async () => {
           if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
-            throw new Error('Forbidden');
+            throw forbiddenError();
           }
         },
         () => refArgNotFoundError('memory', chosen),
@@ -2139,7 +2151,7 @@ export const memoryMutations = {
                   role: { in: ['ADMIN', 'OWNER'] } }, select: { id: true },
               })
             : null;
-          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw new Error('Forbidden');
+          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw forbiddenError();
           await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, chosen);
         },
         (tx) => tx.memorySubscription.delete({
@@ -2161,9 +2173,13 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
+      // `fault` is judged on its own: an exception with an empty message must not read as success.
+      if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
-        throw new Error(result.error);
+        // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
+        // of its own to be a typed refusal rather than a fault.
+        throw new GraphQLError(result.error, { extensions: { code: 'SYNC_FAILED' } });
       }
 
       // #1061 — one write per node the sync actually wrote. This mutation and
@@ -2198,7 +2214,7 @@ export const memoryMutations = {
       { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });

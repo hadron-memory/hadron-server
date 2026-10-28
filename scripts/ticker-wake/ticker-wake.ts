@@ -101,6 +101,7 @@ import {
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
   CALL_TIMEOUT_MS, type Config, type RosterEntry, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
+import { openTaskLine } from '../lib/openTaskLine.js';
 
 /** A runner that does not block: the sends of different workers overlap. */
 export type AsyncRunner = (argv: string[]) => Promise<RunResult>;
@@ -818,10 +819,10 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         };
 
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
-        // needs the same receiver and composer safety. An id-less accepted request may only be displaced by NEW ticks
+        // needs the same receiver and composer safety. An unresolved request may only be displaced by NEW ticks
         // after two cadences; the old request is never replayed without its id.
         const allowFreshTick = (p: Ambiguous): boolean => {
-          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
+          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS
             || p.receiver !== receiver || typeof term0?.incarnationId !== 'string' || !term0.incarnationId) return false;
           const old = [...unresolved, ...p.coverage];
           if (!work.some((t) => tickParts(t) && !unresolvedCovers(t, old))) return false;
@@ -915,9 +916,12 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           t.rule = alarm.type;
         }
 
+        // The count is a network read, so it comes BEFORE the final gates: nothing slow sits between the last idle and
+        // composer proof and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+        const openLine = dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id, undefined, clock, deadline, (why) => log(`${ts} ${name}: open-task count unknown (${why}); the wake goes without the line`));
         const unsafe = safeToType();
         if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks);
+        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...newWork])].sort();
         // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task
@@ -1046,7 +1050,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
  * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
-export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): string {
+export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>, openTasks = ''): string {
   const tagged = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
     + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
@@ -1058,14 +1062,14 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
     : tagged;
   const rule = 'No unfiltered chat catch-up.';
   // #2138 (Diego #28498): a tick lands mid-build too, so it never tells the worker to stop; it resumes what was running.
-  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}`;
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}${openTasks}`;
   const all = tasks.map((t): NudgeTask => (typeof t === 'string' ? { id: t, event: 'ASSIGNED' } : t));
   const assigned = [...new Set(all.filter((t) => t.event === 'ASSIGNED').map((t) => t.id))];
   const alarms = all.filter((t) => t.event === 'ALARM');
   const children = all.filter((t) => t.event === 'CHILD_FINISHED');
   const ticker = tickers.length ? `; ticker ${tickers.join(', ')}` : '';
   const which = assigned.length === 1 ? `hadron team task get ${assigned[0]}` : 'hadron team task list';
-  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}`;
+  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}${openTasks}`;
   // #1704: an alarm names its task and rule and how to acknowledge it, since delivery is never an acknowledgement
   // (cor:agt:050:20); a finished child names the child.
   const items = [
@@ -1078,7 +1082,7 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
     ...alarms.map((a) => `act on task ${a.id} (\`hadron team task get ${a.id}\`), then acknowledge its alarm with \`hadron team alarm ack ${a.eventId}\` (this message is not an acknowledgement)`),
     ...children.map((c) => `review the finished child task (\`hadron team task get ${c.id}\`)`),
   ];
-  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}`;
+  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}${openTasks}`;
 }
 
 /**

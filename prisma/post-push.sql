@@ -660,10 +660,23 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql
 
+-- #2441: append-only automation adoption events.
+\ir automation-adoption-invariants.sql
+
+-- #2484: an App's prefix-scoped write grant for userless runs, and its append-only events.
+\ir app-memory-write-grant-invariants.sql
+
+-- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
+\ir git-mirror-obligation-invariants.sql
+
 -- #1705: agent task shape + the append-only team event stream. One source,
 -- shared verbatim with migration 20261008010000_agent_tasks (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
+
+-- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
+-- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
+\ir agent-task-number-invariants.sql
 
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
@@ -779,3 +792,8 @@ CREATE TRIGGER agent_clone_audits_immutable
 
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- S12 explicit reporting choice (legacy UNSET retained).
+\ir worker-team-choice-invariants.sql
+-- #423: outgoing-edge lookup/delete must not scan every tenant’s edges.
+CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");

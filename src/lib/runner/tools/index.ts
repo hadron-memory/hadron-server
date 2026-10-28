@@ -17,6 +17,8 @@ import { EMAIL_TOOLS } from './emailTools.js';
 import { SECRET_TOOLS } from './secretTools.js';
 import { DRIVE_TOOLS } from './driveTools.js';
 import { TASK_TOOLS } from './taskTools.js';
+import { TEAM_CHAT_TOOLS } from './teamChatTools.js';
+import { GITHUB_TOOLS } from './githubTools.js';
 
 export { AuthorFailError };
 export { hadronReadNode, hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
@@ -30,6 +32,8 @@ export { hadronSendEmail } from './emailTools.js';
 export { hadronReadSecret } from './secretTools.js';
 export { driveSearch, driveGetFile, driveExportFile } from './driveTools.js';
 export { hadronTaskCreate } from './taskTools.js';
+export { teamChatRead } from './teamChatTools.js';
+export { githubIssueSnapshot } from './githubTools.js';
 export type { RunToolDef, RunToolContext };
 
 /** The author's printf — lands on the hop's trail element (D-TL-2). */
@@ -88,6 +92,8 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...SECRET_TOOLS,
     ...DRIVE_TOOLS,
     ...TASK_TOOLS,
+    ...TEAM_CHAT_TOOLS,
+    ...GITHUB_TOOLS,
   ].map((t) => [t.name, t]),
 );
 

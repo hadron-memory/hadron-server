@@ -53,6 +53,7 @@ import { afterWaits, anchorNow, coveringSignals, liveSql, lockStopFence, timeSto
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 import { s7Available } from '../tickers/s7Availability.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadAppWorkerActivity, loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
@@ -237,11 +238,21 @@ async function loadLastAssignedAt(db: Db, appId: string, workerIds: string[]): P
   return new Map(rows.filter((r) => r.subjectWorkerId && r._max.createdAt).map((r) => [r.subjectWorkerId as string, r._max.createdAt as Date]));
 }
 
+/** The role and `usesTasks` of the agent each worker's newest open session was bound under (#2458). */
+async function loadOpenSessionPlacements(db: Db, workerIds: string[]): Promise<Map<string, { role: string; usesTasks: boolean }>> {
+  const rows = await db.$queryRaw<{ id: string; role: string; usesTasks: boolean }[]>`
+    SELECT w.id, os.role AS role, a.uses_tasks AS "usesTasks" FROM workers w
+    ${OPEN_SESSION_PLACEMENT_JOIN}
+    JOIN agents a ON a.id = os.agent_id
+    WHERE w.id = ANY(${workerIds}::text[]) AND os.agent_id IS NOT NULL`;
+  return new Map(rows.map((r) => [r.id, { role: r.role, usesTasks: r.usesTasks }]));
+}
+
 /**
  * The work state of every worker of one App that is not retired, at `now`.
  * One query per kind of input, never one per worker.
  */
-export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Promise<WorkerWorkState[]> {
+export async function loadWorkerWorkStates(db: Db, appId: string, now: Date, opts?: { bySession?: boolean }): Promise<WorkerWorkState[]> {
   const workers = await db.worker.findMany({
     where: { appId, retiredAt: null },
     select: { id: true, appId: true, name: true, slug: true, role: true, agent: { select: { usesTasks: true } } },
@@ -249,6 +260,9 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
   });
   if (workers.length === 0) return [];
   const ids = workers.map((w) => w.id);
+  // #2458: a worker with an open session is matched on that session's agent and role, not the live worker row.
+  // Only the matcher asks (`bySession`): a manager-facing read, the roster, shows the live row (cor:dmo:050:11).
+  const placed = opts?.bySession ? await loadOpenSessionPlacements(db, ids) : new Map<string, { role: string; usesTasks: boolean }>();
   const [activity, launchable, open, lastAssigned, ending] = await Promise.all([
     loadAppWorkerActivity({ db } as unknown as Context, appId, { now }),
     loadLaunchableFamilies(db, { appId }, now),
@@ -268,7 +282,7 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
     const bindingFamily = bound ? a?.bindingFamily ?? null : null;
     const launchableFamilies = launchable.get(w.id) ?? [];
     return {
-      ...w, usesTasks: w.agent.usesTasks, bound, live, bindingFamily,
+      ...w, role: placed.get(w.id)?.role ?? w.role, usesTasks: placed.get(w.id)?.usesTasks ?? w.agent.usesTasks, bound, live, bindingFamily,
       bindingModel: bound ? a?.bindingModel ?? null : null,
       modelReportedAt: bound ? a?.modelReportedAt ?? null : null,
       launchableFamilies, lastActiveAt: a?.lastActiveAt ?? null, endingSession: ending.has(w.id),
@@ -297,14 +311,18 @@ export async function loadWorkerWorkStates(db: Db, appId: string, now: Date): Pr
 async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId: string, family: string, now: Date, req: Requirements, anchor: number): Promise<boolean> {
   // The owning Agent row fences usesTasks against updateAgent, before the
   // Worker row. No session/worker lock upgrades and no inherited setting.
-  const [owner] = await tx.$queryRaw<{ id: string; usesTasks: boolean }[]>`
-    SELECT a.id, a.uses_tasks AS "usesTasks" FROM agents a
-    JOIN workers w ON w.agent_id = a.id WHERE w.id = ${workerId} FOR SHARE OF a`;
+  // #2458: a worker with an open session is matched on that session's agent and role (it finishes under them); the
+  // placement is stable here because a bind and changeWorkerAgent both take this assignment lock.
+  const [owner] = await tx.$queryRaw<{ id: string; usesTasks: boolean; role: string | null; liveAgentId: string }[]>`
+    SELECT a.id, a.uses_tasks AS "usesTasks", COALESCE(os.role, w.role) AS role, w.agent_id AS "liveAgentId" FROM workers w
+    ${OPEN_SESSION_PLACEMENT_JOIN}
+    JOIN agents a ON a.id = COALESCE(os.agent_id, w.agent_id)
+    WHERE w.id = ${workerId} FOR SHARE OF a`;
   if (!owner?.usesTasks) return false;
-  const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; role: string | null; agentId: string }[]>`
-    SELECT app_id AS "appId", retired_at AS "retiredAt", role, agent_id AS "agentId" FROM workers WHERE id = ${workerId} FOR SHARE`;
+  const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; agentId: string }[]>`
+    SELECT app_id AS "appId", retired_at AS "retiredAt", agent_id AS "agentId" FROM workers WHERE id = ${workerId} FOR SHARE`;
   if (!w || w.appId !== appId || w.retiredAt) return false;
-  if (w.agentId !== owner.id || eligibleFamily(req, { id: workerId, role: w.role, freeFamilies: [family] }) === null) return false;
+  if (w.agentId !== owner.liveAgentId || eligibleFamily(req, { id: workerId, role: owner.role, freeFamilies: [family] }) === null) return false;
   // Bind/backfill take Worker before Session; end/refresh only need Session. Holding
   // existing session rows prevents a family refresh after the deciding read;
   // a new bind needs the held Worker row first.
@@ -418,7 +436,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
     if (candidates === null) {
       // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
       covering = await coveringSignals(db, appId, null, now);
-      candidates = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w) && !covering!.has(w.id)).sort(compareRank);
+      candidates = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w) && !covering!.has(w.id)).sort(compareRank);
     }
     for (const task of page) {
       if (spent.size === candidates.length) return out;
@@ -493,7 +511,7 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
   if (Number(n) === 0) return;
   const covering = await coveringSignals(db, appId, null, now);
   const timeStopped = timeStoppedWorkers(covering);
-  const free = (await loadWorkerWorkStates(db, appId, now)).filter((w) => w.free && matchable(w));
+  const free = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w));
   const decisive = new Set<string>();
   let after: { createdAt: Date; id: string } | null = null;
   for (;;) {

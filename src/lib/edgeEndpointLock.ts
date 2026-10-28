@@ -1,5 +1,5 @@
 import type { Prisma } from '../generated/prisma/index.js';
-import { lockMemoryForChannelChange } from './channels.js';
+import { lockMemoriesForChannelChange } from './channels.js';
 
 export interface EdgeEndpointSnapshot {
   id: string;
@@ -17,8 +17,8 @@ export interface EdgeEndpointSnapshot {
  * after reuse's edge sweep but before its message tombstones commit, leaving a
  * live edge that exposes a deleted message through endpoint hydration.
  *
- * Multiple memory keys are acquired in lexical order, matching the bulk
- * mutation gate's ordering and preventing cross-memory edges from deadlocking
+ * Multiple memory keys are acquired in resolved signed-key order, matching
+ * the bulk mutation gate and preventing cross-memory edges from deadlocking
  * when two callers name the same pair in opposite directions.
  */
 export async function lockLiveEdgeEndpoints(
@@ -52,9 +52,7 @@ export async function lockEdgeEndpointMemories(
   tx: Prisma.TransactionClient,
   memoryIds: readonly string[],
 ): Promise<void> {
-  for (const memoryId of [...new Set(memoryIds)].sort()) {
-    await lockMemoryForChannelChange(tx, memoryId);
-  }
+  await lockMemoriesForChannelChange(tx, memoryIds);
 }
 
 /** Revalidate endpoint identity and liveness while the caller holds its memory keys. */

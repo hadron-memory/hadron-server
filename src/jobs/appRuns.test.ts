@@ -743,6 +743,86 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
       expect(after.tokensSpent).toBe(35); // persisted once, never retried
     });
 
+    // Fault injection for the accounting branches of the rejected-call charge (#2427). Each fault
+    // throws on the FIRST matching write only, and `hits` counts how often that write was attempted.
+    const faulting = (where: 'counter' | 'orgQuota') => {
+      const hits = { n: 0 };
+      const wrap = <T extends object>(model: T, hit: (args: never) => boolean) => new Proxy(model, {
+        get: (target, key) => (key === 'updateMany'
+          ? async (args: never) => { if (hit(args)) { hits.n += 1; throw new Error('accounting store down'); } return (target as never as { updateMany: (a: never) => unknown }).updateMany(args); }
+          : Reflect.get(target, key)),
+      });
+      const proxied = new Proxy(db, {
+        get: (target, key) => {
+          if (where === 'counter' && key === 'appRun') {
+            return wrap(target.appRun, (a: { data?: { tokensSpent?: unknown } }) => a?.data?.tokensSpent !== undefined);
+          }
+          if (where === 'orgQuota' && key === 'quotaCounter') {
+            return wrap(target.quotaCounter, (a: { where?: { scopeKind?: string } }) => a?.where?.scopeKind === 'org');
+          }
+          return Reflect.get(target, key);
+        },
+      });
+      return { db: proxied as never, hits };
+    };
+
+    it('a fault on the run-counter write keeps the original failure and charges nothing', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const f = faulting('counter');
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(f.db, run.id, d)).toBe('failed');
+      quiet.mockRestore();
+      expect(f.hits.n).toBe(1);
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED'); // not replaced by the counter fault
+      expect(after.tokensSpent).toBe(0);
+      expect(after.budgetTokens).toBe(run.budgetTokens);
+      expect(await quota('app')).toBe(0);
+      expect(await quota('org')).toBe(0);
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(0);
+    });
+
+    it('an org-quota fault after the app quota persisted is not retried, so nothing is counted twice', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const f = faulting('orgQuota');
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(f.db, run.id, d)).toBe('failed');
+      quiet.mockRestore();
+      expect(f.hits.n).toBe(1); // attempted once, never retried
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED');
+      expect(after.tokensSpent).toBe(35);
+      expect(await quota('app')).toBe(35);
+      expect(await quota('org')).toBe(0);
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(0); // the fault precedes the event
+    });
+
+    it('a transient rejection whose charge faulted still resets to PENDING, and the retry does not charge the failed attempt again', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), Object.assign(new Error('upstream unavailable'), { statusCode: 503 }));
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const f = faulting('orgQuota');
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(f.db, run.id, d)).toBe('transient');
+      quiet.mockRestore();
+      expect(f.hits.n).toBe(1);
+      const parked = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(parked.status).toBe('PENDING');
+      expect(parked.tokensSpent).toBe(35);
+      expect(await quota('app')).toBe(35);
+      await script(call('t', '1', 5, 1), text(6, 2));
+      expect(await executeAppRun(db, run.id, d)).toBe('completed');
+      const done = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(done.tokensSpent).toBe(35 + 14); // the failed attempt once, the retry's own steps once
+      expect(await quota('app')).toBe(35 + 14);
+      expect(await quota('org')).toBe(14); // the faulted attempt's org share is lost, never re-charged
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(1); // only the retry's
+    });
+
     it('charging never resurrects a run that was cancelled mid-hop', async () => {
       await script(call('t', '1', 10, 2), providerError);
       const run = await mint();
