@@ -88,3 +88,17 @@ stack_owned() {
   marker=$(incus config get "$DIAG_PROJECT" user.hadron-diagnose) || return 1
   [ "$marker" = "$DIAG_RUN_TOKEN" ] || return 1
 }
+
+# purge_snapshots: heap snapshots hold real values, so they are deleted from the stack host and the deletion is verified.
+# SNAP_DIR is the container directory the server writes them to. Fails when any survives.
+SNAP_DIR=${SNAP_DIR:-/var/lib/hadron/graphs}
+purge_snapshots() {
+  declare -F app_exec >/dev/null || return 0
+  # The glob must expand inside the container, so both steps run in one sh -c there.
+  app_exec sh -c "rm -f -- '$SNAP_DIR'/*.heapsnapshot" >/dev/null 2>&1 || { echo "heap snapshot purge could not run" >&2; return 1; }
+  local left
+  # A failed listing is not proof of absence: only a successful, empty find passes.
+  left=$(app_exec sh -c "find '$SNAP_DIR' -maxdepth 1 -name '*.heapsnapshot'" 2>/dev/null) || { echo "heap snapshot purge could not be verified" >&2; return 1; }
+  if [ -n "$left" ]; then echo "heap snapshot files survived the purge" >&2; return 1; fi
+  return 0
+}
