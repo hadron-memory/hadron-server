@@ -2,17 +2,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, tombstoneNodes } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { computeContentHash } from './contentHash.js';
 import { computeApprovalHash } from './approvalHash.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { specCorpusMintMutations } from '../api/graphql/schema/resolvers.specCorpus.js';
 import { pendingEdgeStableTargetKey } from './pendingEdgePromotion.js';
+import { resolveNodeRef } from './entityRef/nodeRef.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
+const resolverFault = vi.hoisted(() => ({ on: false }));
+vi.mock('../api/graphql/schema/resolvers.nodeRefAccess.js', async (importActual) => {
+  const actual = await importActual<typeof import('../api/graphql/schema/resolvers.nodeRefAccess.js')>();
+  return {
+    ...actual,
+    resolveNodeRefForCaller: (...args: Parameters<typeof actual.resolveNodeRefForCaller>) => {
+      if (resolverFault.on) return Promise.reject(new Error('simulated resolver outage'));
+      return actual.resolveNodeRefForCaller(...args);
+    },
+  };
+});
 vi.mock('../integrations/github/mirrorNodeMove.js', () => ({
   mirrorNodeMoveToGit: vi.fn().mockResolvedValue(undefined),
 }));
@@ -178,7 +190,7 @@ describe('mintSpecCorpus: an edge to a deleted spec is unresolved (@codex P2 on 
       memoryId: draft.id, sourceId: source.id, targetId: doomed.id, loc: 'pas:010:depends-on:pas:030', name: 'depends-on',
     } });
     expect((await mint(true)).blockers).toEqual([]);
-    await resolvers.Mutation.deleteNode(null, { nodeRef: doomed.id }, as());
+    await tombstoneNodes(db, [doomed.id]);
 
     expect((await mint(true)).blockers).toEqual([
       expect.objectContaining({ kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'MISSING', targetLoc: 'pas:030' }),
@@ -217,10 +229,25 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     })]);
     await db.node.update({ where: { id: gone.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     expect((await mint(true)).blockers).toEqual([]);
-    await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
+    await tombstoneNodes(db, [gone.id]);
     expect((await mint(true)).blockers).toEqual([expect.objectContaining({
       kind: 'UNRESOLVED_REFERENCE', loc: 'pas:010', rule: 'MISSING', targetLoc: `hrn:node:${other.urn}:cor:010`,
     })]);
+  });
+
+  it('checks CITES_UNMINTED only for sources in the mint scope (#1612): a minted unchanged source is skipped, an edited one blocks', async () => {
+    const other = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'other-specs' }, as());
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: other.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Draft.',
+    } });
+    await edgeFrom010To(target.id);
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+    await db.node.update({ where: { id: source.id }, data: { mintedAt: new Date(), mintedByInfo: 'test', mintedRevNo: 1, mintedHash: 'h', contentRevSeq: 1 } });
+    expect((await mint(true)).blockers.filter((b: { kind: string }) => b.kind === 'CITES_UNMINTED')).toEqual([]);
+    await db.node.update({ where: { id: source.id }, data: { contentRevSeq: 2 } });
+    expect((await mint(true)).blockers).toContainEqual(expect.objectContaining({
+      kind: 'CITES_UNMINTED', loc: 'pas:010', targetLoc: `hrn:node:${other.urn}:cor:010`,
+    }));
   });
 
   it('blocks uniformly, revealing nothing, on edges into a memory the caller cannot read', async () => {
@@ -554,5 +581,123 @@ describe('Memory.corpusMintedAt is derived from the nodes (#1591)', () => {
     const latest = (await db.node.aggregate({ where: { memoryId: draft.id }, _max: { mintedAt: true } }))._max.mintedAt;
     expect(latest).toBeInstanceOf(Date);
     expect(await resolvers.Memory.corpusMintedAt({ id: draft.id }, {}, as())).toEqual(latest);
+  });
+});
+
+describe('mintSpecCorpus: a text citation into another memory is a CITES_UNMINTED reference (#1594, cor:dmo:120:07)', () => {
+  const foreign = async (name: string, loc: string, extra: Record<string, unknown> = {}) => {
+    const m = await resolvers.Mutation.createMemory(null, { orgId: org.id, name }, as());
+    const n = await db.node.create({ data: {
+      id: generateId(), memoryId: m.id, loc, name: loc, role: 'spec', nodeType: 'info', tags: ['spec'], content: 'Draft.', ...extra,
+    } });
+    return { m, n, urn: `hrn:node:${m.urn}:${loc}` };
+  };
+  const cite = async (text: string, field: 'content' | 'abstract' = 'content') => {
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010:01' } });
+    await db.node.update({ where: { id: source.id }, data: { [field]: text } });
+  };
+  const hiddenMemory = async () => {
+    await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
+    return db.memory.create({ data: {
+      id: generateId(), urn: `${org.urn}:outsiders-specs`, name: 'outsiders-specs', class: 'private',
+      organizationId: org.id, userId: outsider.id,
+    } });
+  };
+  const blockersOf = async () => (await mint(true)).blockers;
+
+  it('blocks on content and abstract citing a readable unminted node, naming its canonical URN', async () => {
+    const t = await foreign('other-specs', 'cor:010');
+    await cite(`See ${t.urn} for the rule.`);
+    expect(await blockersOf()).toEqual([expect.objectContaining({ kind: 'CITES_UNMINTED', loc: 'pas:010:01', targetLoc: t.urn })]);
+    await cite('Plain.');
+    await cite(`See (${t.urn}).`, 'abstract');
+    expect(await blockersOf()).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'CITES_UNMINTED', targetLoc: t.urn })]));
+  });
+
+  it('finds the URN inside a portal URL and either separator style', async () => {
+    const t = await foreign('other-specs', 'cor:010');
+    await cite(`[x](https://h/app/u/${t.urn})`);
+    expect((await blockersOf()).map((b) => b.targetLoc)).toContain(t.urn);
+    await cite(`see hrn:node:${t.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '').replace(':', '::')}::cor:010.`);
+    expect((await blockersOf()).map((b) => b.targetLoc)).toContain(t.urn);
+  });
+
+  it('blocks on a live pending edge with a stable @node-id target into a readable unminted node', async () => {
+    const t = await foreign('other-specs', 'cor:010');
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010:01' } });
+    await db.pendingEdge.create({ data: { id: generateId(), sourceId: source.id, targetId: pendingEdgeStableTargetKey(t.n.id), name: 'depends-on' } });
+    expect(await blockersOf()).toEqual([expect.objectContaining({ kind: 'CITES_UNMINTED', loc: 'pas:010:01', targetLoc: t.urn })]);
+  });
+
+  it('reports nothing for a minted, placeholder or deleted foreign target, or the corpus itself', async () => {
+    const minted = await foreign('m-specs', 'cor:010', { mintedAt: new Date(), mintedByInfo: 'test' });
+    const ph = await foreign('p-specs', 'cor:010', { isPlaceholder: true, content: null });
+    const gone = await foreign('g-specs', 'cor:010', { deletedAt: new Date() });
+    await cite(`${minted.urn} ${ph.urn} ${gone.urn} hrn:node:${draft.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:pas:010`);
+    expect((await blockersOf()).filter((b) => b.kind === 'CITES_UNMINTED')).toEqual([]);
+  });
+
+  it('is no existence oracle: the unreadable-target reports are deep-equal whatever is behind the address', async () => {
+    const hidden = await hiddenMemory();
+    const n = await db.node.create({ data: {
+      id: generateId(), memoryId: hidden.id, loc: 'cor:010', name: 'cor:010', role: 'spec', nodeType: 'info', content: 'Written.',
+    } });
+    const hurn = hidden.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '');
+    const readable = await foreign('open-specs', 'cor:777');
+    const orgUrn = org.urn;
+    await cite(`hrn:node:${hurn}:cor:010`);
+    const existing = await blockersOf();
+    await cite(`hrn:node:${hurn}:cor:999`);
+    const missingLoc = await blockersOf();
+    await cite(`hrn:node:${orgUrn}:no-such-memory:cor:010`);
+    const missingMemory = await blockersOf();
+    await cite(`hrn:node:${readable.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:cor:999`);
+    const readableMissing = await blockersOf();
+    expect(existing).toEqual([]);
+    expect(missingLoc).toEqual(existing);
+    expect(missingMemory).toEqual(existing);
+    expect(readableMissing).toEqual(existing);
+    expect(n.id).toBeTruthy();
+  });
+
+  it('gates on the RESOLVED node: a real NODE alias into an unreadable memory reports nothing, into a readable one reports', async () => {
+    const t = await foreign('open-specs', 'cor:010');
+    const hidden = await hiddenMemory();
+    const dest = await resolvers.Mutation.createMemory(null, { orgId: org.id, name: 'dest-specs' }, as());
+    const aliasUrn = `${t.m.urn.replace(/^(?:hrn|urn):mem(?:ory)?:/i, '')}:cor:010`;
+    await db.urnAlias.create({ data: {
+      urn: aliasUrn, entityType: 'NODE', entityId: t.n.id, reason: 'RENAME', replacedByUrn: `${hidden.urn}:moved:010`,
+    } });
+    await cite(t.urn);
+    // The old address is now only an alias: it must still resolve to the moved node.
+    await db.node.update({ where: { id: t.n.id }, data: { memoryId: hidden.id, loc: 'moved:010' } });
+    expect((await resolveNodeRef(db, t.urn)).id).toBe(t.n.id);
+    expect((await blockersOf()).filter((b) => b.kind === 'CITES_UNMINTED')).toEqual([]);
+    expect(JSON.stringify(await blockersOf())).not.toContain('moved:010');
+    // Control: the same alias resolving into a readable memory does report.
+    await db.node.update({ where: { id: t.n.id }, data: { memoryId: dest.id, loc: 'moved:010' } });
+    expect(await blockersOf()).toEqual([expect.objectContaining({
+      kind: 'CITES_UNMINTED', loc: 'pas:010:01', targetLoc: `hrn:node:${dest.urn}:moved:010`,
+    })]);
+  });
+
+  it('aborts the mint on an unexpected resolver failure, but drops the documented refusals (#1594 BLIND P2)', async () => {
+    const t = await foreign('other-specs', 'cor:010');
+    await cite(`See ${t.urn}, hrn:node:${org.urn}:no-such-memory:cor:010 and hrn:node:${org.urn}::x.`);
+    resolverFault.on = true;
+    try {
+      await expect(mint(true)).rejects.toThrow('simulated resolver outage');
+      await expect(mint()).rejects.toThrow('simulated resolver outage');
+    } finally { resolverFault.on = false; }
+    expect(await stateOf()).toBe('DRAFT');
+    expect(await blockersOf()).toEqual([expect.objectContaining({ kind: 'CITES_UNMINTED', targetLoc: t.urn })]);
+  });
+
+  it('leaves UNRESOLVED_REFERENCE output unchanged by foreign text citations', async () => {
+    const before = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    const t = await foreign('other-specs', 'cor:010');
+    await cite(`See ${t.urn}.`);
+    const after = await resolvers.Query.specUnresolvedReferences(null, { memoryRef: draft.id }, as());
+    expect(after).toEqual(before);
   });
 });

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #1037 — an explicitly-qualified reference beats connection state.
  *
@@ -57,7 +58,7 @@ beforeEach(async () => {
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team A', urn: `${org.urn}:team-a` } });
   appB = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team B', urn: `${org.urn}:team-b` } });
   for (const a of [appA, appB]) await db.appAgent.create({ data: { appId: a.id, agentId: agent.id } });
-  await db.worker.create({ data: { appId: appA.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
+  await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: appA.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
 });
 
 /** A user whose connection is pinned to App B — a later bind in another App. */
@@ -345,11 +346,13 @@ describe('#1037 — the team tools', () => {
       // before the tool's own try/catch, so the failure surfaces as a failure.
       // What matters is that it is NOT reported as "no active App", which would
       // send the caller to fix their selection while the server is down.
-      await expect(
-        createTestableMcpServer(unpinned()).callToolText(
-          'hadron_team_work_items', { worker: DARA_URN() },
-        ),
-      ).rejects.toThrow(/connection terminated/);
+      // #1789: the fault is the generic envelope (detail to the log), still not "no active App".
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const text = await createTestableMcpServer(unpinned()).callToolText(
+        'hadron_team_work_items', { worker: DARA_URN() },
+      );
+      expect(text).toMatch(/^\[INTERNAL_SERVER_ERROR\] Internal server error\. Request id: /);
+      expect(text).not.toMatch(/connection terminated|no active App/i);
     } finally {
       spy.mockRestore();
     }

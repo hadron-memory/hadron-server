@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 /**
  * #947 — the hadron_record_work / hadron_team_work_items MCP tools: THIN
  * delegation to resolvers.Mutation.recordTeamWork /
@@ -63,7 +64,7 @@ beforeEach(async () => {
   // #974: the named identity is a Worker casting bound via workerRef — the
   // record's workerName comes from this row.
   const worker = await db.worker.create({
-    data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
   });
   session = await M.startSession(
     {},

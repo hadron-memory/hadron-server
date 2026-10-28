@@ -14,6 +14,7 @@ import {
   deriveChatTitle,
   isMemoryReadableCached,
 } from './resolvers.helpers.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export const chatQueries = {
     myChats: async (
@@ -21,7 +22,7 @@ export const chatQueries = {
       { agentRef, limit, offset }: { agentRef: string; limit?: number; offset?: number },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #876 (HIGH): the chat surface authorizes on raw caller identity and
       // deliberately bypasses memoryAccessFilter (see src/lib/chatLoc.ts), so
       // neither the org narrowing nor the personal-class carve-out reaches it.
@@ -30,7 +31,7 @@ export const chatQueries = {
       // lookups carry no organizationId filter) — decrypted transcripts, the
       // highest-sensitivity per-user data on the platform. No support case in
       // v1 justifies reading someone's private AI conversations.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1946: an Agent that doesn't exist answers the same empty list as one
       // the caller has no chats with (and can't read), so the list is no
@@ -132,7 +133,7 @@ export const chatQueries = {
           ...excludeChannelRoots,
         },
         orderBy: { updatedAt: 'desc' as const },
-        take: limit ?? 100,
+        take: limit ?? 20,
         skip: offset ?? 0,
       });
       if (tops.length === 0) return [];
@@ -192,12 +193,12 @@ export const chatQueries = {
       { chatId, limit, beforeSeq }: { chatId: string; limit?: number; beforeSeq?: number | null },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #876 (HIGH): same identity-scoped bypass as myChats above — chatLoc's
       // filter is keyed on createdBy / the caller's AppMember rows with no org
       // constraint, and the site gate admits on `mem.createdBy === ctx.userId`.
       // Impersonated sessions do not read chat transcripts.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can
@@ -241,7 +242,7 @@ export const chatQueries = {
       //      clause keys on the OWNER (`Memory.userId`), which
       //      `chk_personal_visibility_user` makes NOT NULL for that class, so
       //      the fallback guarded a row the database forbids.
-      if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw new Error('Forbidden');
+      if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw forbiddenError();
       const rows = await ctx.db.node.findMany({
         where: {
           memoryId: chatNode.memoryId,
@@ -290,7 +291,7 @@ export const chatQueries = {
           { createdAt: 'desc' as const },
           { loc: 'desc' as const },
         ],
-        take: limit ?? 100,
+        take: limit ?? 20,
         // `id` rides along for the #1061 usage attribution; the projection
         // below doesn't use it (a transcript entry is addressed by loc/seq).
         select: { id: true, loc: true, content: true, data: true, seq: true, createdAt: true, memoryId: true, nodeType: true },

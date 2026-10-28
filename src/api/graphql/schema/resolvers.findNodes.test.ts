@@ -437,3 +437,16 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
     expect(cross).toMatchObject({ hits: [], total: 0 });
   });
 });
+
+it('#2421 shared hybrid keyword extraction preserves independent degraded envelopes across calls', async () => {
+  await db.memory.update({where:{id:graph.id},data:{vectorIndexEnabled:false}});
+  await mkNode(graph.id, {loc:'extraction.banana',name:'banana shake'});
+  for (const [query, degraded] of [
+    ['banana zucchini', 'no_vector_index,and_relaxed_to_or'],
+    ['(banana OR', 'no_vector_index,literal_fallback'],
+    ['banana', 'no_vector_index'],
+  ]) {
+    const result = await findNodes({query,mode:'hybrid',filter:{memoryIds:[graph.id]}});
+    expect(result.degraded).toBe(degraded);
+  }
+});

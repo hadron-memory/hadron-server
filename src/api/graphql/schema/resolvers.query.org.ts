@@ -39,6 +39,7 @@ import {
   requireOwnerOrOrgRole,
 } from './resolvers.helpers.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * May this caller OPEN the resolved resource? (`cor:acl:060:01`, amended
@@ -284,7 +285,7 @@ export const orgQueries = {
       if (isPlatformAdmin && q === '') {
         return page({ deletedAt: null });
       }
-      if (!ctx.userId && !isPlatformAdmin) throw new Error('Unauthenticated');
+      if (!ctx.userId && !isPlatformAdmin) throw unauthenticatedError();
       // A blank query would make `contains: ''` match every row, re-opening
       // the enumeration path #384 closes — return an empty page instead.
       if (q === '') return { items: [], total: 0 };

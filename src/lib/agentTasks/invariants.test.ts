@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1705 — the database half of the agent-task contract
  * (prisma/agent-task-invariants.sql), tested at the database rather than
@@ -174,7 +175,7 @@ async function workerRow(): Promise<string> {
     select: { id: true },
   });
   const w = await db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'W', slug: 'w' },
     select: { id: true },
   });
   return w.id;
@@ -186,10 +187,35 @@ describe('agent-task-stall-invariants.sql (#1706)', () => {
   it('the latest stall-invariants migration carries a byte-identical copy of the invariants file', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261014150000_host_report_timeout/migration.sql', import.meta.url),
+      new URL('../../../prisma/migrations/20261024100200_context_reset_availability/migration.sql', import.meta.url),
       'utf8',
     );
-    expect(migration.endsWith(source)).toBe(true);
+    // #2200: the constraints are the migration's copy; the partial index below the marker is built by its own
+    // CONCURRENTLY migration (one statement per file), so it is not part of this one.
+    const [constraints, indexSection] = source.split('\n-- #2200: the escalation');
+    expect(migration.endsWith(`${constraints}\n`)).toBe(true);
+    const index = readFileSync(
+      new URL('../../../prisma/migrations/20261023130100_alarm_schedule_open_due_idx/migration.sql', import.meta.url),
+      'utf8',
+    );
+    const statement = (t: string) => t.slice(t.indexOf('CREATE INDEX')).replace(/CONCURRENTLY /, '').trim();
+    expect(statement(indexSection)).toBe(statement(index));
+    expect(index.match(/;/g)).toHaveLength(1);
+  });
+
+  it('#2200: a schedule row is woken or ended, never both', async () => {
+    const t = await task();
+    const a = await event({ taskId: t.id, type: 'stall.not-started', severity: 'alarm', chain: [{ userId: owner.id }], episodeStart: new Date('2026-10-09T10:00:00Z') });
+    const dueAt = new Date('2026-10-09T10:15:00Z');
+    await expectCheckViolation(
+      db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: 0, dueAt, wokenAt: dueAt, endedAt: dueAt } }),
+      /chk_agent_team_alarm_schedule_shape/,
+    );
+    await expect(db.agentTeamAlarmSchedule.create({ data: { eventId: a.id, chainIndex: 0, dueAt, endedAt: dueAt } })).resolves.toBeTruthy();
+    await expectCheckViolation(
+      db.agentTeamAlarmSchedule.update({ where: { eventId_chainIndex: { eventId: a.id, chainIndex: 0 } }, data: { wokenAt: dueAt } }),
+      /chk_agent_team_alarm_schedule_shape/,
+    );
   });
 
   const alarm = (taskId: string, data: Record<string, unknown> = {}) =>
@@ -316,8 +342,8 @@ describe('agent-task-matching-invariants.sql (#1707)', () => {
     const other = await db.app.create({
       data: { id: generateId(), name: 'Other', urn: `inv-${generateId().toLowerCase()}:team`, ownerUserId: owner.id },
     });
-    const mine = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
-    const theirs = await db.worker.create({ data: { appId: other.id, agentId: agent.id, name: 'Zed', slug: 'zed' } });
+    const mine = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' } });
+    const theirs = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: other.id, agentId: agent.id, name: 'Zed', slug: 'zed' } });
     const r = await registration();
     await expectCheckViolation(
       db.hostRegistrationWorker.create({ data: { registrationId: r.id, workerId: mine.id, family: 'Codex' } }),

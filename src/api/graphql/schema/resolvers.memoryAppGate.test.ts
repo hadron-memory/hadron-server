@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
@@ -46,7 +47,7 @@ beforeEach(async () => {
   await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `hash-${generateId()}`, keyPreview: 'SYNTHETIC-KEY-PREVIEW' } });
   const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: 'synthetic-org:worker-agent', name: 'Worker Agent', visibility: 'ORGANIZATION' } });
   workerMemory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, urn: 'synthetic-org:worker-memory', name: 'Worker Memory', class: 'app' } });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, memoryId: workerMemory.id, name: 'Synthetic Worker', slug: 'synthetic-worker', role: 'engineer', heldByUserId: holder.id, heldAt: new Date() } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, memoryId: workerMemory.id, name: 'Synthetic Worker', slug: 'synthetic-worker', role: 'engineer', heldByUserId: holder.id, heldAt: new Date() } });
   publicMemory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, urn: 'synthetic-org:public-knowledge', name: 'Public Knowledge', class: 'knowledge', visibility: 'PUBLIC' } });
 });
 

@@ -1,3 +1,4 @@
+import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
 import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
@@ -18,7 +19,7 @@ import {
   fetchUser,
   checkOrgMembership,
   signJwt,
-  verifyJwt,
+  verifyAuthenticatedJwt,
   sendMagicLink,
   verifyMagicLink,
   buildEmailSendPerIpRateLimit,
@@ -37,15 +38,23 @@ import {
 } from './auth/index.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
+import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
 import {
   createPendingLoginState,
   claimPendingLoginState,
   type ClaimResult,
+  type ClaimedLoginState,
   type LoginProvider,
-  type PendingLoginState,
+  type NewPendingLogin,
 } from './auth/pendingLoginState.js';
+import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/providerNonce.js';
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
+import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
+import { signingSurfacePolicy } from './lib/signing/surface.js';
+import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
+import { googleReauthenticatedSince } from './auth/google.js';
 import {
   oauthSurfaceRefusal,
   oauthSurfaceRefusalMessage,
@@ -57,8 +66,11 @@ import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
+import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
+import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
+import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
   formatGraphQLError,
@@ -66,20 +78,24 @@ import {
 } from './api/graphql/formatError.js';
 import { safeEqual } from './lib/constantTime.js';
 import { sourceNamesRepo } from './lib/gitSource.js';
-import { generateUniqueHandle, isHandleTaken } from './lib/userHandle.js';
-import { ensureUserPrincipal, RootNameTakenError } from './lib/principal/mintPrincipal.js';
+import { provisionEmailUser, provisionGithubUser } from './auth/userProvision.js';
 import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
-import { handleMcpRequest, handleMcpDelete } from './mcp/server.js';
+import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/requestContext.js';
+import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
+import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
 import { startOrphanObjectReaperLoop } from './jobs/reapOrphanAssetObjects.js';
+import { startAssetBytesSweepLoop } from './jobs/sweepAssetBytes.js';
 import { startSessionKeySweepLoop } from './lib/sessionKeyCache.js';
 import { startSessionReaperLoop } from './jobs/reapSessions.js';
 import { startPendingEdgePromotionSweepLoop } from './jobs/promotePendingEdges.js';
-import { startEmbeddingWorkerLoop, startEmbeddingBusListener } from './jobs/embedNodes.js';
+import { startEmbeddingWorkerLoop, startEmbeddingBusListener, stopEmbeddingWorker, assertEmbeddingObligationsReconciled } from './jobs/embedNodes.js';
+import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
@@ -118,6 +134,7 @@ import {
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
 import { preserveHeartbeatIfLapsed } from './lib/sessionActivity.js';
+import { INDEXED_MEMORY_WHERE } from './lib/embedding/indexing.js';
 
 /**
  * #557: named once, because the raw-body capture in the body parser and the
@@ -219,10 +236,15 @@ export async function createServer(): Promise<Express> {
   // #1925: before the global CORS middleware, which allows the portal's origin WITH credentials; this
   // unauthenticated read answers any origin without them. See src/api/capabilities.ts.
   mountCapabilitiesRoute(app);
+  // #1789: the request id exists before anything that can fail, including body parsing and auth. After the capabilities
+  // route on purpose: its answer is byte-identical and ETag-cached, and a per-request header would break both.
+  app.use(assignRequestId);
   app.use(
     cors({
       origin: process.env.FRONTEND_URL || 'http://localhost:5173',
       credentials: true,
+      // #1789: the portal reads the request id off a failed response to show it to the person.
+      exposedHeaders: [REQUEST_ID_HEADER],
     }),
   );
   mountTeamSpecSchemaRoutes(app);
@@ -300,16 +322,15 @@ export async function createServer(): Promise<Express> {
   const persistStateOrFail = async (
     res: express.Response,
     state: string,
-    provider: LoginProvider,
-    pending: PendingLoginState,
+    login: NewPendingLogin,
   ): Promise<boolean> => {
+    const { provider } = login;
     try {
-      await createPendingLoginState(state, provider, pending);
+      await createPendingLoginState(state, login);
       return true;
     } catch (err) {
-      console.error(`[auth] ${provider} login start failed to persist state:`, err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to start sign-in — please try again.' });
+      respondInternalFault(res, `auth/${provider}/start`, err);
       return false;
     }
   };
@@ -324,7 +345,7 @@ export async function createServer(): Promise<Express> {
     res: express.Response,
     state: string,
     provider: LoginProvider,
-  ): Promise<PendingLoginState | null> => {
+  ): Promise<ClaimedLoginState | null> => {
     let claim: ClaimResult;
     try {
       claim = await claimPendingLoginState(state, provider);
@@ -387,7 +408,7 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'github', { redirect, returnTo, clientState }))) {
+    if (!(await persistStateOrFail(res, state, { provider: 'github', data: { redirect, returnTo, clientState } }))) {
       return;
     }
     res.redirect(buildAuthUrl(state));
@@ -429,6 +450,16 @@ export async function createServer(): Promise<Express> {
       }
       phase = 'internal_error';
 
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Look up by the GitHub id only: a username can be renamed
+      // and re-registered by someone else, and the leg must never link or create (Ruth §10 condition 3).
+      if (pending.ceremonyNonceHash) {
+        await completeCeremonyLeg(req, res, {
+          provider: 'github', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: () => db.user.findFirst({ where: { githubId: ghUser.id, deletedAt: null }, select: { id: true } }),
+        });
+        return;
+      }
+
       // Upsert user — first check by githubUsername to handle seed data
       // that may have a placeholder githubId
       const existing = await db.user.findUnique({
@@ -447,47 +478,7 @@ export async function createServer(): Promise<Express> {
               avatarUrl: ghUser.avatar_url,
             },
           })
-        : await (async () => {
-            for (let attempt = 0; ; attempt++) {
-              const ghHandle = await generateUniqueHandle(db, {
-                seeds: [ghUser.login, ghUser.name],
-              });
-              try {
-                // upsert on githubId absorbs the provider-id race (→ update
-                // branch); a P2002 here is a handle/githubUsername collision.
-                // #692: mint the pool principal in the same tx (idempotent — a
-                // no-op on the update branch of an existing user).
-                return await db.$transaction(async (tx) => {
-                  const user = await tx.user.upsert({
-                    where: { githubId: ghUser.id },
-                    create: {
-                      githubId: ghUser.id,
-                      githubUsername: ghUser.login,
-                      handle: ghHandle,
-                      identityProvider: 'GITHUB',
-                      name: ghUser.name,
-                      avatarUrl: ghUser.avatar_url,
-                      roles: ['READER'],
-                    },
-                    update: {
-                      githubUsername: ghUser.login,
-                      name: ghUser.name,
-                      avatarUrl: ghUser.avatar_url,
-                    },
-                  });
-                  await ensureUserPrincipal(tx, user);
-                  return user;
-                });
-              } catch (err: any) {
-                if (err instanceof RootNameTakenError && attempt < 1) continue; // pool race
-                // Only a genuine handle collision is retryable (once).
-                if (err?.code === 'P2002' && attempt < 1 && (await isHandleTaken(db, ghHandle))) {
-                  continue;
-                }
-                throw err;
-              }
-            }
-          })();
+        : await provisionGithubUser(db, ghUser);
 
       // #627 / spec 048: no workspace is provisioned at signup (the auto-personal
       // org is retired). `isNew` is now purely an onboarding hint for the portal.
@@ -608,10 +599,12 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'google', { redirect, returnTo, clientState }))) {
+    // #2204: the OIDC nonce, independent of `state` and `client_state`; only its hash is stored.
+    const { nonce, nonceHash } = mintProviderNonce();
+    if (!(await persistStateOrFail(res, state, { provider: 'google', data: { redirect, returnTo, clientState, providerNonceHash: nonceHash } }))) {
       return;
     }
-    res.redirect(buildGoogleAuthUrl(state));
+    res.redirect(buildGoogleAuthUrl(state, nonce));
   });
 
   app.get('/auth/google/callback', async (req, res) => {
@@ -625,6 +618,15 @@ export async function createServer(): Promise<Express> {
     const pending = await claimStateOrFail(res, state, 'google');
     if (!pending) return;
 
+    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
+    // exchange (the legacy skip never reaches passkey step-up).
+    const nonceExpected = nonceExpectation(pending);
+    if (!nonceExpected) {
+      recordNonceRefusal('google', 'ceremony_unbound');
+      failLoginCallback(res, 'google', 'verify_failed');
+      return;
+    }
+
     // Diagnostics phase marker — see the GitHub callback.
     let phase: LoginFailureReason = 'exchange_failed';
     try {
@@ -635,8 +637,21 @@ export async function createServer(): Promise<Express> {
       // signature against Google's JWKS) — never a bare decode.
       const idToken = await exchangeGoogleCode(code);
       phase = 'verify_failed';
-      const identity = await verifyGoogleIdToken(idToken);
+      const identity = await verifyGoogleIdToken(idToken, nonceExpected);
       phase = 'internal_error';
+
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Google was asked to re-authenticate (max_age=0, R154), so an
+      // auth_time older than this leg refuses. Lookup by the Google id only: no email link, no creation.
+      if (pending.ceremonyNonceHash) {
+        const reauthenticated = googleReauthenticatedSince(identity.authTime, pending.startedAt);
+        await completeCeremonyLeg(req, res, {
+          provider: 'google', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: async () => reauthenticated
+            ? db.user.findFirst({ where: { googleId: identity.sub, deletedAt: null }, select: { id: true } })
+            : null,
+        });
+        return;
+      }
 
       // Match order per #581: by googleId → by verified email (link) → create.
       const user = await resolveGoogleUser(identity);
@@ -737,10 +752,12 @@ export async function createServer(): Promise<Express> {
     }
 
     const state = crypto.randomBytes(16).toString('hex');
-    if (!(await persistStateOrFail(res, state, 'apple', { redirect, returnTo, clientState }))) {
+    // #2204: see the Google start route.
+    const { nonce, nonceHash } = mintProviderNonce();
+    if (!(await persistStateOrFail(res, state, { provider: 'apple', data: { redirect, returnTo, clientState, providerNonceHash: nonceHash } }))) {
       return;
     }
-    res.redirect(buildAppleAuthUrl(state));
+    res.redirect(buildAppleAuthUrl(state, nonce));
   });
 
   // POST, not GET: Apple form_posts the result cross-site. The state lives in
@@ -768,6 +785,15 @@ export async function createServer(): Promise<Express> {
     const pending = await claimStateOrFail(res, state, 'apple');
     if (!pending) return;
 
+    // #2204: what the ID token's nonce must match. Null = a ceremony row with no nonce hash, refused before any
+    // exchange (the legacy skip never reaches passkey step-up).
+    const nonceExpected = nonceExpectation(pending);
+    if (!nonceExpected) {
+      recordNonceRefusal('apple', 'ceremony_unbound');
+      failLoginCallback(res, 'apple', 'verify_failed');
+      return;
+    }
+
     // Diagnostics phase marker — see the GitHub callback.
     let phase: LoginFailureReason = 'exchange_failed';
     try {
@@ -778,8 +804,18 @@ export async function createServer(): Promise<Express> {
       // signature against Apple's JWKS) — never a bare decode.
       const idToken = await exchangeAppleCode(code);
       phase = 'verify_failed';
-      const identity = await verifyAppleIdToken(idToken);
+      const identity = await verifyAppleIdToken(idToken, nonceExpected);
       phase = 'internal_error';
+
+      // #1631 PR1b: a passkey ceremony's sign-in leg. Lookup by the Apple id only: no email link, no creation.
+      // Apple offers no re-authentication request, so a silent Apple session is accepted (R154 known limit).
+      if (pending.ceremonyNonceHash) {
+        await completeCeremonyLeg(req, res, {
+          provider: 'apple', ceremonyNonceHash: pending.ceremonyNonceHash,
+          lookup: () => db.user.findFirst({ where: { appleId: identity.sub, deletedAt: null }, select: { id: true } }),
+        });
+        return;
+      }
 
       // First-authorization-only name capture; null on every later login.
       const name = parseAppleUserField(userField);
@@ -893,12 +929,14 @@ export async function createServer(): Promise<Express> {
         await sendMagicLink(emailSend.email, db, redirect, clientStateHash);
         res.json({ ok: true });
       } catch (err) {
-        console.error('Email auth error:', err);
         Sentry.captureException(err);
-        res.status(500).json({ error: 'Failed to send verification email' });
+        respondInternalFault(res, 'auth/email', err);
       }
     },
   );
+
+  // #1897 B1: read once, at mount, with the routes it pairs with (restart semantics are #1895's).
+  const passkeySignInOn = signingSurfacePolicy().registration;
 
   app.get('/auth/email/verify', async (req, res) => {
     const { token, redirect: redirectParam, return_to: returnToRaw } = req.query as {
@@ -959,25 +997,29 @@ export async function createServer(): Promise<Express> {
         return;
       }
 
-      // Upsert user by email. #692: mint the pool principal (for the default
-      // random handle) in the same tx — idempotent on the update branch.
-      const user = await db.$transaction(async (tx) => {
-        const u = await tx.user.upsert({
-          where: { email: result.email },
-          create: {
-            email: result.email,
-            identityProvider: 'EMAIL',
-            roles: ['READER'],
-          },
-          update: {},
-        });
-        await ensureUserPrincipal(tx, u);
-        return u;
-      });
+      // Upsert user by email (+ pool principal, #692; one retry on a lost email-unique race, #442).
+      const user = await provisionEmailUser(db, result.email);
 
       // #627 / spec 048: no workspace provisioned at signup; `isNew` is an
       // onboarding hint only.
       const isNew = user.createdAt.getTime() >= startedAt;
+
+      // #1897 slice B1 (cor:aut:030:02): with the registration switch on, a magic link alone signs nobody in.
+      // The account exists as above (R82), but no handoff code, JWT, cookie or key is published until the
+      // person's passkey completes the server-hosted step. The portal continuation carries the ORIGINAL
+      // clientStateHash through unchanged. A user with no usable passkey gets the same fixed refusal as a bad
+      // token: enrollment is B2, and signing in without the factor is never the fallback.
+      if (passkeySignInOn) {
+        const dest = redirectParam && isServerLocalPath(redirectParam) ? redirectParam : '/';
+        const begun = await beginPasskeySignIn(req, res, {
+          userId: user.id,
+          continuation: isOptionC
+            ? { kind: 'OAUTH', returnTo: returnTo! }
+            : { kind: 'PORTAL', clientStateHash: result.clientStateHash, redirect: dest, isNew },
+        });
+        if (!begun) res.status(400).json({ error: 'Invalid or expired token' });
+        return;
+      }
 
       // #804 Option-C: same contract as the github/google/apple callbacks —
       // set the JWT as an HttpOnly `hadron_token` cookie on THIS server's
@@ -1035,15 +1077,17 @@ export async function createServer(): Promise<Express> {
       callbackUrl.searchParams.set('code', code);
       res.redirect(callbackUrl.toString());
     } catch (err) {
-      console.error('Email verify error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Email verification failed' });
+      respondInternalFault(res, 'auth/email/verify', err);
     }
   });
 
   // #792 — dev-only login (triple-gated: DEV_LOGIN_ENABLED + non-production
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
+  mountPasskeyCeremonyRoutes(app);
+  mountPasskeySignInRoutes(app);
+  mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 
   // #477 Sink 1 — login handoff exchange. The portal's server `load` (NOT the
   // browser) POSTs the one-time code from /auth/callback?code=… here and gets
@@ -1078,6 +1122,7 @@ export async function createServer(): Promise<Express> {
     // authoritative user row (roles may have changed since the code was issued).
     const jwt = await signJwt({
       login: redeemed.login,
+      ...(redeemed.signInId ? { sid: redeemed.signInId } : {}),
       sub: user.id,
       roles: user.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
       ...(user.githubUsername ? { githubUsername: user.githubUsername } : {}),
@@ -1095,7 +1140,7 @@ export async function createServer(): Promise<Express> {
       return;
     }
     try {
-      const payload = await verifyJwt(authHeader.slice(7));
+      const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: this endpoint bypasses resolveAuthContext (and so
       // the session-row re-validation), so an impersonation token is rejected
       // outright rather than echoing the target's profile.
@@ -1133,15 +1178,28 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   const { typeDefs, resolvers: deploymentResolvers } = deploymentSchema();
+  // hadron-internal#3 L1-L3: fleet-wide bounds on every client-supplied document,
+  // read here so a malformed value refuses boot.
+  const admission = readGraphqlAdmissionConfig();
+  // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
+  console.log(JSON.stringify({
+    event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
+    maxCost: admission.maxCost, listFactor: admission.listFactor, maxQueryBytes: admission.maxQueryBytes,
+    maxTokens: admission.maxTokens, maxSelections: admission.maxSelections,
+  }));
   const apollo = new ApolloServer({
     // #2087: concealed errors must not depend on the deployment's NODE_ENV.
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission)],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
+    // L2: graphql-js aborts the lexer at this many tokens (GRAPHQL_PARSE_FAILED, 400).
+    parseOptions: { maxTokens: admission.maxTokens },
+    // L3: Apollo's document-level rule, fragments expanded and memoized (GRAPHQL_VALIDATION_FAILED, 400).
+    maxRecursiveSelections: admission.maxSelections,
   });
   await apollo.start();
 
@@ -1191,10 +1249,13 @@ export async function createServer(): Promise<Express> {
 
   app.use(
     '/graphql',
+    // L1 (hadron-internal#3): the query source bound, before anything else runs.
+    querySourceCap(admission.maxQueryBytes),
     // Spec 041: establish the request-scoped key store BEFORE Apollo so the
     // context builder and every resolver run inside it. Keys staged here are
     // invisible to concurrent requests and vanish with the request's async
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
+    bindRequestId,
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
     (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
@@ -1347,7 +1408,6 @@ export async function createServer(): Promise<Express> {
       });
       res.json({ ok: true });
     } catch (err) {
-      console.error('Outcome report error:', err);
       // Distinguish "no such session" from "something else went wrong".
       // This catch used to answer 404 for EVERY failure, which was survivable
       // while the only statement inside it was the update — but the auth
@@ -1360,7 +1420,7 @@ export async function createServer(): Promise<Express> {
         return;
       }
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Failed to record outcome' });
+      respondInternalFault(res, 'sessions/outcome', err);
     }
   });
 
@@ -1461,9 +1521,8 @@ export async function createServer(): Promise<Express> {
       }
       res.json({ ok: true });
     } catch (err) {
-      console.error('Reload error:', err);
       Sentry.captureException(err);
-      res.status(500).json({ error: 'Reload failed' });
+      respondInternalFault(res, 'reload', err);
     }
   });
 
@@ -1776,15 +1835,15 @@ export async function createServer(): Promise<Express> {
   // ---------------------------------------------------------------------------
 
   // #1610: each MCP request gets its own actor holder (see requestActor.ts).
-  app.post('/mcp', async (req, res) => {
+  app.post('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
-  app.get('/mcp', async (req, res) => {
+  app.get('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
   });
 
-  app.delete('/mcp', async (req, res) => {
+  app.delete('/mcp', bindRequestId, async (req, res) => {
     await requestActorStorage.run(emptyActor(), () => handleMcpDelete(req, res));
   });
 
@@ -1827,9 +1886,21 @@ export async function createServer(): Promise<Express> {
     startMergeConsentSweepLoop(db);
   }
 
+  // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
+  // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
+  if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_OAUTH_CLIENT_GC !== 'true') {
+    startOauthClientGcLoop(db);
+  }
+
   // #1647 — resume pending notices of admin-initiated account erasures (restart-safe outbox).
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_USER_DELETION_NOTICES !== 'true') {
     startUserDeletionNoticeLoop(db);
+  }
+
+  // #1631 PR2 — send every passkey registration's email notice (restart-safe outbox). Dark with the
+  // registration switch: nothing registers while it is off, so the loop doesn't run either.
+  if (process.env.NODE_ENV !== 'test' && signingSurfacePolicy().registration) {
+    startPasskeyRegistrationNoticeLoop(db);
   }
 
   // Background job: purge soft-deleted assets past their 24h recovery
@@ -1862,12 +1933,28 @@ export async function createServer(): Promise<Express> {
     startOrphanObjectReaperLoop(db);
   }
 
+  // Background job (#1140): hourly bounded sweep for Asset rows whose bytes are
+  // missing from object storage — the mirror of the orphan sweep. Read-only
+  // against the store; raises the `asset.bytes_missing` alarm.
+  if (
+    process.env.NODE_ENV !== 'test' &&
+    process.env.DISABLE_ASSET_BYTES_SWEEP !== 'true'
+  ) {
+    startAssetBytesSweepLoop(db);
+  }
+
   // Background job (#930, narrowed by #1114): end sessions past `expiresAt`,
   // stamping `autoExpiredAt`. Inactivity no longer ends anything — liveness is
   // derived at read time — so this loop honours the hard-expiry promise and
   // nothing else.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_SESSION_REAPER !== 'true') {
     startSessionReaperLoop(db);
+  }
+
+  // #2261 — idle eviction of MCP transports. Its own timer on purpose: DISABLE_SESSION_REAPER must not also
+  // switch off the bound on what the process holds in memory (the #2259 leak).
+  if (process.env.NODE_ENV !== 'test') {
+    startMcpTransportSweepLoop();
   }
 
   // #1706 — agent-task stall evaluator: the four stall rules, owner-chain
@@ -1906,11 +1993,16 @@ export async function createServer(): Promise<Express> {
   // tests (which drive embedNode/drainEmbeddingQueue directly). Warns if any
   // memory is vector-indexed but no embedding endpoint is configured.
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_EMBED_WORKER !== 'true') {
-    startEmbeddingWorkerLoop(db);
+    // No legacy timestamp-only work may slip into the new token worker. Serving writes
+    // remains available with explicit pending status if operator reconciliation is needed.
+    let embeddingReady = false;
+    try { await assertEmbeddingObligationsReconciled(db); embeddingReady = true; }
+    catch (error) { console.error('[embed-worker] admission stays closed:', error); }
+    if (embeddingReady) startEmbeddingWorkerLoop(db);
     // Same-process bus listener (spec 039): near-instant retries + backfill
     // drains via embed.wake.v1. No-op (null) when NATS_URL is unset — the
     // sweep loop above is the standalone fallback (D-2026-06-17-004).
-    startEmbeddingBusListener(db).catch((err) => {
+    if (embeddingReady) startEmbeddingBusListener(db).catch((err) => {
       // A subscribe/consumer failure (broker auth, incompatible durable)
       // must not become an unhandled rejection that can take boot down —
       // the sweep loop above keeps draining regardless (PR-489 review,
@@ -1918,7 +2010,7 @@ export async function createServer(): Promise<Express> {
       console.error('[embed-worker] failed to start bus listener (sweep continues):', err);
     });
     void db.memory
-      .count({ where: { vectorIndexEnabled: true, deletedAt: null } })
+      .count({ where: { ...INDEXED_MEMORY_WHERE, deletedAt: null } })
       .then((n) => {
         if (n > 0 && !isEmbeddingConfigured()) {
           console.warn(
@@ -1978,5 +2070,11 @@ export async function createServer(): Promise<Express> {
   // sentryApolloPlugin instead. No-op when SENTRY_DSN is unset.
   Sentry.setupExpressErrorHandler(app);
 
+  // #1789: a fault that reaches Express shows the caller the generic envelope, not Express's default stack page.
+  app.use(internalFaultErrorHandler);
+
+  app.locals.stopEmbeddingWorker = () => Promise.all([
+    stopEmbeddingWorker(db), stopEmbeddingPublisher(),
+  ]).then(results => results.every(Boolean));
   return app;
 }

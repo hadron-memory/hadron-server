@@ -10,7 +10,7 @@
  *
  * Source-free by construction: a record names revisions by (node id, revSeq) and a hash. It never carries a loc, a title,
  * a node object or text, so reading it hands the caller no included part. Lists are cor:api:120:04 pages: `{items, total}`,
- * default 50, cap 200; provenance has its own page. With serving OFF (`BOOT_PROMPT_SERVE_ENABLED`) every field is empty.
+ * default 50, cap 200; provenance has its own page. With serving OFF (the BOOT_PROMPT_SERVE_ENABLED gate) every field is empty.
  */
 import type { Context } from './resolvers.helpers.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';

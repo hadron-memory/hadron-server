@@ -62,6 +62,7 @@ import {
   ruleRefFieldResolvers,
 } from './resolvers.memoryConfig.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 export type TemplateOwnerType = 'HADRON_SERVER' | 'ORGANIZATION' | 'USER' | 'APP';
 
@@ -183,7 +184,7 @@ async function resolveOwnerForWrite(ctx: Context, ownerType: TemplateOwnerType, 
   const none = { hadronServerId: null, organizationId: null, ownerUserId: null, appId: null };
   switch (ownerType) {
     case 'HADRON_SERVER': {
-      if (ctx.impersonation || !isPlatformAdmin(ctx)) throw new Error('Forbidden');
+      if (ctx.impersonation || !isPlatformAdmin(ctx)) throw forbiddenError();
       const id = await hadronServerId(ctx);
       if (ref && ref !== id) throw badInput('ownerRef does not name this server; omit it for a server-owned template.', { field: 'ownerRef' });
       return { ...none, hadronServerId: id };
@@ -195,16 +196,16 @@ async function resolveOwnerForWrite(ctx: Context, ownerType: TemplateOwnerType, 
       return { ...none, organizationId: id };
     }
     case 'USER': {
-      if (ctx.impersonation || !ctx.userId) throw new Error('Forbidden');
+      if (ctx.impersonation || !ctx.userId) throw forbiddenError();
       // A user owns templates for themselves only; the ref, when given, must be them.
-      if (ref && (await resolveUserRef(ctx.db, ref)).id !== ctx.userId) throw new Error('Forbidden');
+      if (ref && (await resolveUserRef(ctx.db, ref)).id !== ctx.userId) throw forbiddenError();
       return { ...none, ownerUserId: ctx.userId };
     }
     case 'APP': {
       if (!ref) throw badInput('An App-owned template needs ownerRef.', { field: 'ownerRef' });
       const { id } = await resolveAppRef(ctx.db, ref);
       const app = await liveApp(ctx, id);
-      if (!app) throw new Error('Forbidden');
+      if (!app) throw forbiddenError();
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       return { ...none, appId: id };
     }
@@ -326,7 +327,7 @@ async function lockLiveOwner(tx: Prisma.TransactionClient, owner: OwnerColumns):
       ? await tx.$queryRaw`SELECT 1 FROM "organizations" WHERE "id" = ${orgId} AND "deleted_at" IS NULL FOR SHARE`
       : rows;
   }
-  if (live.length === 0) throw new Error('Forbidden');
+  if (live.length === 0) throw forbiddenError();
 }
 
 /** Lock a template's row for the rest of the transaction and read it, or null when it is gone. */
@@ -463,7 +464,7 @@ export const memoryConfigTemplateMutations = {
       const template = await ctx.db.$transaction(async (tx) => {
         await lockLiveOwner(tx, owner);
         await lockRuleRefs(ctx, tx, rules.flatMap((r) => r.resolved));
-        await reassertManageOwner(ctx, tx, owner, () => new Error('Forbidden'));
+        await reassertManageOwner(ctx, tx, owner, () => forbiddenError());
         const id = generateId();
         const created = await tx.memoryConfigTemplate.create({
           data: {

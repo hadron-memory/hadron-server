@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * #1079 — the URN alias map: a rename no longer 404s every published URN.
  *
@@ -98,7 +99,7 @@ describe('#1079 — DERIVED URNs heal through their parent, with no change of th
     const agent = await mkAgent(`${org.urn}:se`);
     const app = await mkApp(`${org.urn}:team`);
     const worker = await db.worker.create({
-      data: { appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' },
     });
     // The URN as it would appear in a commit trailer or an issue signature.
     const published = composeWorkerUrn(app.urn, 'dara');

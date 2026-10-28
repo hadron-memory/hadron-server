@@ -1,3 +1,9 @@
+import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
+import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
+import { storedIncludeTags, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
 // sessionMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { ownsSession } from '../../../lib/sessionOwnership.js';
@@ -11,7 +17,8 @@ import {
   revisionStateHashRefreshMarker,
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany } from '../../../lib/nodeSubtreeLock.js';
+import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
+import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -33,7 +40,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
+import { resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -60,7 +67,7 @@ import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { serializeJson } from '../../../integrations/db/provider.js';
-import { deleteToolConnection, type ToolCalendarEvent } from '../../../lib/emailClient.js';
+import { deleteToolConnection, runEmailOperation, type ToolCalendarEvent } from '../../../lib/emailClient.js';
 import {
   loadLastEventBySession,
   mostRecentlyActive,
@@ -83,6 +90,8 @@ import {
   SESSION_INCLUDE,
   mapToolCalendarEvent,
   runOwnedEmailOperation,
+  requireEmailConnection,
+  ConnectionNotFoundError,
   type SessionInput,
   type UsageEventInput,
 } from './resolvers.helpers.js';
@@ -99,8 +108,11 @@ import {
 } from '../../../lib/resumeClaims.js';
 import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -463,6 +475,32 @@ export async function writeSessionHandoff(
   }
 }
 
+// ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
+/** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
+function explicitFamilyOrThrow(family: string | null | undefined): string | null {
+  const explicit = family != null ? normalizeFamily(family) : null;
+  if (family != null && !explicit) {
+    throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return explicit;
+}
+
+/**
+ * What a binding-preserving flow writes back: an explicit family wins, otherwise a supplied model is read against
+ * the session's STORED tool (never a transport's). Null/omitted input never clears, and a model nothing classifies
+ * keeps the existing family rather than guessing one. Shared by updateSession and the resume of an open session,
+ * so the two cannot drift.
+ */
+function modelFamilyRefresh(
+  explicitFamily: string | null,
+  llmModel: string | null | undefined,
+  storedTool: string | null,
+): { llmModel?: string; modelReportedAt?: Date; family?: string } {
+  const family = explicitFamily ?? (llmModel != null ? deriveFamily({ llmModel, tool: storedTool }) : null);
+  // #2252: a supplied model IS a report, so it stamps the time (a repeat of the same model refreshes it).
+  return { ...(llmModel != null ? { llmModel, modelReportedAt: new Date() } : {}), ...(family != null ? { family } : {}) };
+}
+
 // ── #1956: resume claims ───────────────────────────────────────────────────
 
 /** The optional provenance a redemption passes on when it must start the worker's next session. */
@@ -652,6 +690,10 @@ export const sessionMutations = {
       // thin-client directive; before this it was the CLI's contract only,
       // and this mutation was an ungated second surface in waiting).
       let workerId: string | undefined;
+      // #2458: the agentRef the caller passed (if any), and the role the bind stamps; both decided on the LOCKED
+      // worker row below, so a change of the worker's agent landing during this bind is never half-applied.
+      let requestedAgentId: string | undefined;
+      let boundRole: string | null = null;
       // #1029 — the worker's previous stint, derived below when the caller
       // supplies no explicit chain link.
       let derivedPrevSessionId: string | undefined;
@@ -698,57 +740,63 @@ export const sessionMutations = {
             throw workerRefNotFound(workerRef);
           }
         } else {
-          // NAME (#990). A name is unique only WITHIN an App, so this form
-          // needs App context — which a bare-name caller always has, since it
-          // comes from an App key, an explicit appRef, or an MCP active-App
-          // selection. Without one there is nothing to scope the lookup to, and
-          // guessing across the caller's Apps would resolve one name to
-          // several workers.
+          // #1597: only a bare NAME with no App context searches the caller's
+          // bind-authorized Apps. ID/URN failures and selected-App misses never
+          // fall through here. A unique identity still runs every bind gate below.
           if (appId === null) {
-            throw new GraphQLError(
-              `workerRef "${workerRef}" is a worker name, which is only unique within an App — pass appRef (or select an App), or use the worker's id or URN.`,
-              { extensions: { code: 'SESSION_WORKER_NAME_NEEDS_APP', workerRef } },
-            );
-          }
-          // App lifecycle, checked here and not only at the gate (PR #996
-          // review, Copilot). When `appId` came from `appRef` these were
-          // already enforced above, and the worker-DERIVED path enforces them
-          // below — but when it came from `ctx.appId` (an MCP active-App
-          // SELECTION or an App key) this is the only lifecycle check before
-          // `session.create`. A stale selection pointing at an uninstalled App
-          // must not be able to resolve a name and open a session there.
-          //
-          // This stays HERE rather than inside the shared resolver (#1015):
-          // uninstall bars starting a session, but not READING the roster —
-          // Worker rows outlive their App's uninstall — so the two callers
-          // genuinely differ, and only on this point.
-          const lifecycle = await ctx.db.app.findUnique({
-            where: { id: appId },
-            select: { uninstalledAt: true },
-          });
-          if (lifecycle?.uninstalledAt) {
-            throw new GraphQLError('Cannot start a session in an uninstalled App.', {
-              extensions: { code: 'APP_UNINSTALLED', appId },
+            const candidates = await resolveWorkerBindCandidatesByName(ctx, workerRef);
+            if (candidates.length === 0) throw workerRefNotFound(workerRef);
+            if (candidates.length > 1) {
+              const lines = candidates.map(c =>
+                `${c.name} — ${c.urn ?? c.id}; App ${c.app.name} (${c.app.urn}); role ${c.role ?? 'unset'}; ` +
+                `holder ${c.holder?.handle ?? c.holder?.githubUsername ?? c.holder?.id ?? 'unheld'}`);
+              throw new GraphQLError(
+                `Worker name "${workerRef}" is ambiguous. Choose a worker id or URN:\n${lines.join('\n')}`,
+                { extensions: { code: 'SESSION_WORKER_NAME_AMBIGUOUS', candidates } },
+              );
+            }
+            resolvedWorkerId = candidates[0].id;
+          } else {
+            // App lifecycle, checked here and not only at the gate (PR #996
+            // review, Copilot). When `appId` came from `appRef` these were
+            // already enforced above, and the worker-DERIVED path enforces them
+            // below — but when it came from `ctx.appId` (an MCP active-App
+            // SELECTION or an App key) this is the only lifecycle check before
+            // `session.create`. A stale selection pointing at an uninstalled App
+            // must not be able to resolve a name and open a session there.
+            //
+            // This stays HERE rather than inside the shared resolver (#1015):
+            // uninstall bars starting a session, but not READING the roster —
+            // Worker rows outlive their App's uninstall — so the two callers
+            // genuinely differ, and only on this point.
+            const lifecycle = await ctx.db.app.findUnique({
+              where: { id: appId },
+              select: { uninstalledAt: true },
             });
+            if (lifecycle?.uninstalledAt) {
+              throw new GraphQLError('Cannot start a session in an uninstalled App.', {
+                extensions: { code: 'APP_UNINSTALLED', appId },
+              });
+            }
+            // The staff read gate runs BEFORE the lookup, not after, and a denial
+            // is reported as WORKER_NOT_FOUND — the shared
+            // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
+            // resolver and `Query.worker` cannot drift on it. A missing App, a
+            // soft-deleted App, a refused caller and an absent name all return
+            // null there and collapse into the one refusal below.
+            //
+            // In practice a caller who reached here via `appRef` has ALREADY
+            // cleared `isAppParticipant` above, the same predicate that gate
+            // uses, so an outsider is refused FORBIDDEN before any name is looked
+            // up. The gate is therefore defense in depth, not the only barrier —
+            // and deliberately so: `appId` can also arrive from an App-key
+            // credential (which skips that membership branch), so the name branch
+            // must be self-sufficient rather than relying on an ordering above it
+            // that a later change could reshuffle.
+            const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
+            if (!byName) throw workerRefNotFound(workerRef);
+            resolvedWorkerId = byName;
           }
-          // The staff read gate runs BEFORE the lookup, not after, and a denial
-          // is reported as WORKER_NOT_FOUND — the shared
-          // `resolveWorkerIdByNameGated` owns that ordering (#1015) so this
-          // resolver and `Query.worker` cannot drift on it. A missing App, a
-          // soft-deleted App, a refused caller and an absent name all return
-          // null there and collapse into the one refusal below.
-          //
-          // In practice a caller who reached here via `appRef` has ALREADY
-          // cleared `isAppParticipant` above, the same predicate that gate
-          // uses, so an outsider is refused FORBIDDEN before any name is looked
-          // up. The gate is therefore defense in depth, not the only barrier —
-          // and deliberately so: `appId` can also arrive from an App-key
-          // credential (which skips that membership branch), so the name branch
-          // must be self-sufficient rather than relying on an ordering above it
-          // that a later change could reshuffle.
-          const byName = await resolveWorkerIdByNameGated(ctx, appId, workerRef);
-          if (!byName) throw workerRefNotFound(workerRef);
-          resolvedWorkerId = byName;
         }
         const worker = await ctx.db.worker.findUnique({
           where: { id: resolvedWorkerId },
@@ -1061,6 +1109,7 @@ export const sessionMutations = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
+        requestedAgentId = agentId;
         agentId = worker.agentId;
         workerId = worker.id;
         // #1050 — an UNHELD name is held by the person who binds it. That is
@@ -1133,6 +1182,11 @@ export const sessionMutations = {
         // checked lifecycle. Recheck the settled App in the transaction before
         // claiming a name or inserting a session. An explicit Worker ref may
         // have replaced a stale selection above; only the final App matters.
+        // #2022 (Diego #2166 P2-2): a bind that sets reportsTo is a stop-coverage writer, so it takes the App's stop
+        // fence EXCLUSIVE before any row lock, the App row included: an App-row writer (setTeamPause, under the
+        // App's anchors) holds the fence shared before it updates that row, so taking the fence after the App row
+        // here was a real deadlock (40P01). This path takes no authority anchors, so the fence is its first lock.
+        if (reportsToId && appId) await lockStopFence(tx, appId, 'exclusive');
         if (appId) {
           await lockSessionAppActive(tx, appId);
         }
@@ -1179,9 +1233,22 @@ export const sessionMutations = {
             SELECT status FROM host_operations WHERE id = ${launch.grant.operationId} FOR SHARE`;
           if (op?.status !== 'collected') throw launchGrantInvalid();
         }
+        // #2162 (cor:agt:050:27 §4, R118): the per-worker assignment lock, before the worker row, the order every task
+        // write and a context reset's claim take it in. A worker under a `resetting` mark takes no new session, force
+        // included: its reset is fenced on the session it has, and a rebind would strand it. (Resuming that same open
+        // session is not a bind; it does not come here.)
         if (workerId) {
-          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null }>>`
-            SELECT name, held_by_user_id, held_at, retired_at FROM workers WHERE id = ${workerId} FOR UPDATE`;
+          await lockWorkersForAssignment(tx, [workerId]);
+          if (appId && (await isWorkerResetting(tx, workerId, appId, new Date()))) {
+            throw new GraphQLError(
+              'This worker is resetting its context: its relaunched agent resumes the session it has. Clear its availability to cancel the reset.',
+              { extensions: { code: 'WORKER_RESETTING', workerId } },
+            );
+          }
+        }
+        if (workerId) {
+          const [locked] = await tx.$queryRaw<Array<{ name: string; held_by_user_id: string | null; held_at: Date | null; retired_at: Date | null; agent_id: string; role: string | null }>>`
+            SELECT name, held_by_user_id, held_at, retired_at, agent_id, role FROM workers WHERE id = ${workerId} FOR UPDATE`;
           // #1625 review (Baloo, residual P2): the HOLD and retirement are
           // re-validated under the lock for EVERY bind, force included. The
           // checks far above read a snapshot; a release, a claim by someone
@@ -1193,6 +1260,17 @@ export const sessionMutations = {
               { extensions: { code: 'WORKER_RETIRED', workerId } },
             );
           }
+          // #2458 (cor:dmo:050:11): the agent and role this session runs under are the LOCKED row's. The agent read
+          // above was a snapshot, and a change of the worker's agent may have committed during the lock wait; the
+          // bind takes the new casting whole (agent AND role) rather than the old agent beside the new role.
+          if (requestedAgentId !== undefined && requestedAgentId !== locked.agent_id) {
+            throw new GraphQLError(
+              'agentRef and workerRef disagree — the worker casts a different agent. Omit agentRef; it is derived from the worker.',
+              { extensions: { code: 'BAD_USER_INPUT' } },
+            );
+          }
+          agentId = locked.agent_id;
+          boundRole = locked.role;
           if (locked.held_by_user_id && locked.held_by_user_id !== ctx.userId) {
             const holder = await tx.user.findUnique({
               where: { id: locked.held_by_user_id },
@@ -1372,6 +1450,7 @@ export const sessionMutations = {
           appId,
           agentId,
           workerId,
+          role: workerId ? boundRole : null,
           // #929 review P1: attribute the session to the calling user (the
           // schema documents userId as "the developer in a DEVELOPER
           // session"). Without it a session started outside any App context
@@ -1386,6 +1465,8 @@ export const sessionMutations = {
           customerId: input.customerId,
           language: input.language,
           llmModel: input.llmModel,
+          // #2252: a model given at bind is a report.
+          modelReportedAt: input.llmModel != null ? new Date() : null,
           parentSessionId: input.parentSessionId,
           prevSessionId: input.prevSessionId ?? supersedes[0]?.id ?? derivedPrevSessionId,
           // #928 coding-session provenance.
@@ -1432,6 +1513,8 @@ export const sessionMutations = {
               );
             },
           });
+          // #2022 (R95): a team signal covers the worker from the moment it joins the team.
+          await reconcileStopCoverage(tx, bindAppId, new Date());
         }
         if (supersedes.length > 0) {
           const ids = supersedes.map((r) => r.id).filter((id) => id !== created.id);
@@ -1474,18 +1557,13 @@ export const sessionMutations = {
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
       // Null/omitted metadata never clears an existing family during recovery.
-      const explicit = family != null ? normalizeFamily(family) : null;
-      if (family != null && !explicit) {
-        throw new GraphQLError('family must be a valid model-family token.', { extensions: { code: 'BAD_USER_INPUT' } });
-      }
-      const refreshedFamily = explicit ?? (llmModel != null ? deriveFamily({ llmModel, tool: session.tool }) : null);
+      const refresh = modelFamilyRefresh(explicitFamilyOrThrow(family), llmModel, session.tool);
       return ctx.db.session.update({
         where: { id },
         data: {
           ...(prNumber !== undefined ? { prNumber } : {}),
           ...(branch !== undefined ? { branch } : {}),
-          ...(llmModel != null ? { llmModel } : {}),
-          ...(refreshedFamily != null ? { family: refreshedFamily } : {}),
+          ...refresh,
           updatedBy: ctx.userId ?? ctx.clientId ?? null,
           // #1543 — a pr/branch edit must not revive a lapsed session.
           ...(await preserveHeartbeatIfLapsed(ctx.db as never, id)),
@@ -1594,6 +1672,9 @@ export const sessionMutations = {
       const given = input ?? {};
       if (!ctx.userId || ctx.impersonation) throw nothingToResume();
       const userId = ctx.userId;
+      // #2086: a bad family refuses BEFORE any claim is read or spent. It sits after the NOTHING_TO_RESUME line
+      // above, so an App key or an impersonation learns nothing about the value either way.
+      const explicitFamily = explicitFamilyOrThrow(given.family);
       const now = new Date();
       const claims = await liveClaimsOf(ctx.db, userId, now);
 
@@ -1618,6 +1699,12 @@ export const sessionMutations = {
         try {
           verdict = await ctx.db.$transaction(async (tx) => {
             const ok = await resumeOwnLapsedSessionInTx(ctx, tx, sessionId);
+            // #2086: only after the gate permits, inside its transaction, so a refusal or a lost claim writes nothing.
+            if (ok) {
+              const stored = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { tool: true } });
+              const refresh = modelFamilyRefresh(explicitFamily, given.llmModel, stored.tool);
+              if (Object.keys(refresh).length) await tx.session.update({ where: { id: sessionId }, data: { ...refresh, updatedBy: userId } });
+            }
             if (claimId) {
               if (!(await consumeResumeClaim(tx, claimId, userId))) throw lost;
               if (ok) await tx.resumeClaim.update({ where: { id: claimId }, data: { resumedSessionId: sessionId } });
@@ -1772,7 +1859,7 @@ export const sessionMutations = {
       ctx: Context,
     ) => {
       const appId = ctx.appId;
-      if (!appId) throw new Error('Forbidden: App Key required');
+      if (!appId) throw forbiddenError('Forbidden: App Key required');
       const hasSuppliedKey = hasRequestOperationKey();
       // Lock the App before provisioning any dependent row. The lock and all
       // writes commit together, so uninstall cannot pass the check mid-flight.
@@ -1786,7 +1873,7 @@ export const sessionMutations = {
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
         if (!(await isAgentInstalled(tx, app.id, agentId))) {
-          throw new Error('Forbidden: App is not allowed to operate this agent');
+          throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
 
         const agent = await tx.agent.findUniqueOrThrow({ where: { id: agentId } });
@@ -1805,6 +1892,9 @@ export const sessionMutations = {
         if (app.identifyUserMethod === 'USER_ID' && hasSuppliedKey) {
           throw new GraphQLError('An operation key is only accepted in SECRET mode.', { extensions: { code: 'BAD_UNLOCK_INPUT' } });
         }
+
+        // #2406 / cor:aut:020:02: malformed caller timeouts cannot provision a session.
+        assertPositiveSessionTimeout(sessionTimeoutSeconds);
 
         // #1796: consume request-only supply before any provisioning writes.
         const parsedKey = getRequestOperationKey();
@@ -2000,7 +2090,7 @@ export const sessionMutations = {
     },
 
     endAgentSession: async (_: unknown, { sessionId }: { sessionId: string }, ctx: Context) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       const session = await ctx.db.session.findUnique({ where: { id: sessionId } });
       if (!session || session.appId !== ctx.appId) {
         throw new Error('Session not found');
@@ -2041,7 +2131,8 @@ export const sessionMutations = {
         select: { id: true },
       })).map((n) => n.id);
       const edges = await ctx.db.edge.findMany({
-        where: { sourceId: { in: nodeIds }, deletedAt: null },
+        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
         include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
       });
       const edgeSnapshots = edges.map((e) => ({
@@ -2054,14 +2145,6 @@ export const sessionMutations = {
         data: e.data,
       }));
 
-      // Count existing revisions to auto-increment
-      const existingRevisions = await ctx.db.node.count({
-        where: { memoryId: sysMemId, loc: { startsWith: 'revisions:' }, deletedAt: null },
-      });
-      const revNum = existingRevisions + 1;
-      const label = `rev-${revNum}`;
-      const revLoc = `revisions:${label}`;
-
       // Ensure revisions parent exists
       try {
         await ctx.db.node.upsert({
@@ -2069,13 +2152,37 @@ export const sessionMutations = {
           create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
           update: {},
         });
-      } catch { /* exists */ }
+      } catch (err) {
+        // #2476: only the cold-path race loss means the parent exists.
+        if (!isNodeLocUniqueViolation(err)) throw err;
+      }
 
       // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
       // delete of the `revisions` parent could count zero descendants and then
       // orphan this row. Hold the ancestor-path lock across the insert (advisory
       // before row; READ COMMITTED so the delete's count sees this post-commit).
-      await ctx.db.$transaction(async (tx) => {
+      // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is
+      // taken first (the key every `revisions:<label>` create takes) and the count is read after it
+      // is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves (a restore's
+      // auto-save included) each see the previous save's row and take distinct slots.
+      const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
+        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+        // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
+        const slotRows = await tx.node.findMany({
+          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
+          select: { loc: true },
+        });
+        let revNum: number;
+        try {
+          revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
+        } catch (e) {
+          if (e instanceof RevisionSlotsExhaustedError) {
+            throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+          }
+          throw e;
+        }
+        const label = `rev-${revNum}`;
+        const revLoc = `revisions:${label}`;
         await lockAncestorsForCreate(tx, sysMemId, revLoc);
         await tx.node.create({
           data: {
@@ -2091,6 +2198,7 @@ export const sessionMutations = {
             } as InputJsonValue,
           },
         });
+        return { label, revLoc };
       });
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
@@ -2206,7 +2314,7 @@ export const sessionMutations = {
             select: { id: true },
           })).map((n) => n.id);
           await tx.edge.updateMany({
-            where: { sourceId: { in: currentNodeIds }, deletedAt: null },
+            where: { sourceId: { in: currentNodeIds }, deletedAt: null, governedKind: null },
             data: { deletedAt: new Date() },
           });
 
@@ -2274,6 +2382,10 @@ export const sessionMutations = {
               },
             });
             locToId.set(loc, upserted.id);
+            // #2040 — re-derive the include edges from the restored content. No
+            // refusal here: the snapshot was valid when taken, and the walk would
+            // see a half-restored graph.
+            await syncDerivedIncludesEdges(tx, upserted, storedIncludeTags(nodeData.content), [sysMemId]);
           }
 
           // Restore edges from snapshot. Spec 037: derive loc when an older
@@ -2366,17 +2478,31 @@ export const sessionMutations = {
 
     // ── Chat ownership mutations ────────────────────────────────────
 
+    /**
+     * Delete is connection MANAGEMENT: only an ADMIN of the owning org may do it
+     * (cor:dmo:080:04), never the owner or a delegated grant, so this does NOT
+     * reuse `requireEmailConnection`. A missing, already-deleted or not-yours
+     * connection gets the same typed FORBIDDEN as a non-ADMIN (#2593), before any
+     * write or provider teardown; a repeat delete answers as missing. Only the
+     * authorization failure maps to the denial: infrastructure errors stay errors.
+     */
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
+      const connection = await ctx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
+      if (!connection) throw authorizationDenied();
       await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
       await withAuthorizedTx(
         ctx,
         [{ kind: 'connection', id }, { kind: 'org', id: connection.organizationId }],
         (txCtx) => requireOrgRole(txCtx, connection.organizationId, 'ADMIN'),
-        (tx) => tx.exchangeConnection.update({
-          where: { id },
-          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-        }),
+        async (tx) => {
+          // Guarded on the live row: a delete that won the lock first leaves nothing to
+          // stamp, and this one answers as missing without a second teardown.
+          const { count } = await tx.exchangeConnection.updateMany({
+            where: { id, deletedAt: null },
+            data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+          });
+          if (count === 0) throw authorizationDenied();
+        },
         {
           lockMode: 'exclusive',
           afterLock: async (tx) => {
@@ -2393,22 +2519,49 @@ export const sessionMutations = {
       return true;
     },
 
+    /**
+     * Probe the owner's connection and record the outcome (hadron-internal#18).
+     * The gate runs first and alone: a denied, missing or deleted connection is
+     * the same typed FORBIDDEN, with no provider call and no write. The probe's
+     * own error, typed by the email client, reaches the caller unchanged. Each
+     * status write re-runs the gate under the connection fence that delete and
+     * grant revocation take, so authority lost during the probe writes nothing.
+     */
     testExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+      const operation = 'list-messages';
+      let connection: Awaited<ReturnType<typeof requireEmailConnection>>;
       try {
-        await runOwnedEmailOperation(ctx, id, 'list-messages', { top: 1 });
-        await ctx.db.exchangeConnection.update({
-          where: { id },
-          data: { syncStatus: 'OK', lastError: null, lastSyncAt: new Date() },
-        });
-        return true;
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        await ctx.db.exchangeConnection.update({
-          where: { id },
-          data: { syncStatus: 'ERROR', lastError: errMsg },
-        });
-        throw new Error(`Exchange connection test failed: ${errMsg}`);
+        connection = await requireEmailConnection(ctx, id, operation);
+      } catch (err) {
+        if (err instanceof ConnectionNotFoundError) throw authorizationDenied();
+        throw err;
       }
+      const recordStatus = async (data: { syncStatus: 'OK' | 'ERROR'; lastError: string | null; lastSyncAt?: Date }) => {
+        try {
+          await withAuthorizedTx(
+            ctx,
+            [{ kind: 'connection', id: connection.id }],
+            async (txCtx) => { await requireEmailConnection(txCtx, connection.id, operation); },
+            (tx) => tx.exchangeConnection.updateMany({ where: { id: connection.id, deletedAt: null }, data }),
+            { afterLock: async (tx) => {
+              await tx.$queryRaw`SELECT id FROM exchange_connections WHERE id = ${connection.id} FOR UPDATE`;
+            } },
+          );
+        } catch (err) {
+          // Authority lost during the probe: record nothing. Anything else is a fault.
+          if (err instanceof ConnectionNotFoundError) return;
+          if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return;
+          throw err;
+        }
+      };
+      try {
+        await runEmailOperation(connection.provider, operation, { top: 1, connectionId: connection.toolConnectionId });
+      } catch (err: unknown) {
+        await recordStatus({ syncStatus: 'ERROR', lastError: err instanceof Error ? err.message : String(err) });
+        throw err;
+      }
+      await recordStatus({ syncStatus: 'OK', lastError: null, lastSyncAt: new Date() });
+      return true;
     },
 
     exchangeReply: async (

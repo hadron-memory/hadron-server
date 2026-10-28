@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 /**
  * Spec 049 Phase 6 — resolveRegister and its consumers, what is pinned:
  *   - the install default applies to a Worker through its Agent-in-App
@@ -60,7 +61,7 @@ beforeEach(async () => {
   appMem = await db.memory.create({
     data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
   });
-  worker = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', heldByUserId: admin.id } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris', heldByUserId: admin.id } });
   channel = (await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id })).channel;
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
   entry = `hrn:node:${appMem.urn}:${node.loc}`;

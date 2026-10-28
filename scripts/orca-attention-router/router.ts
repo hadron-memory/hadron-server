@@ -43,6 +43,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { openTaskLine } from '../lib/openTaskLine.js';
 import { createHash } from 'node:crypto';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
@@ -85,7 +86,7 @@ const LARGE_GAP_SPAN = 400;
  * anything outside the walked bound stays unread — nothing is silently
  * acknowledged).
  */
-export function nudgeText(a: AttentionItem): string {
+export function nudgeText(a: AttentionItem, openTasks = ''): string {
   const where = [
     a.firstUnreadSeq === null ? '' : `unread #${a.firstUnreadSeq}–#${a.lastSeq}`,
     a.lastRelevantSeq === null ? '' : `latest mention #${a.lastRelevantSeq}`,
@@ -110,7 +111,8 @@ export function nudgeText(a: AttentionItem): string {
       ` CLI: \`hadron team chat read --mentions-me --since ${since} --before ${bound} --limit 200\`, then follow each page's prevBefore BACKWARD to your first unread — beforeSeq selects the NEWEST page under the bound, so page down to the floor and stop at an empty or floor page; MCP: \`hadron_team_chat_read\` with your session, \`sinceSeq=${since}\`, \`beforeSeq=${bound}\`, its mentions filter and limit 200, then re-call with \`beforeSeq\` = the smallest seq on your last page until the floor (MCP pages carry no prevBefore field).` +
       ` Then mark read through your OWN session at the highest seq actually delivered to you, never above #${a.lastSeq} (CLI: \`hadron team chat mark-read --through <that seq>\`; MCP: \`hadron_team_chat_mark_read\` — a mentions-filtered read never auto-marks).` +
       ' An incomplete walk marks NOTHING; anything outside the walked bound — messages arriving now included — stays unread. If no mention needs action, mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat.' +
-      ' (Orca attention router; counts as of send.)'
+      ' (Orca attention router; counts as of send.)' +
+      openTasks
     );
   }
   // Watermark-anchored read instruction (production lesson 2026-10-12, Eden's
@@ -126,7 +128,8 @@ export function nudgeText(a: AttentionItem): string {
     head +
     `${from} ` +
     'Read team chat unfiltered with your own live session; if nothing needs action, ' +
-    'mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. (Orca attention router; counts as of send.)'
+    'mark read and end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. (Orca attention router; counts as of send.)' +
+    openTasks
   );
 }
 
@@ -141,13 +144,14 @@ export function nudgeText(a: AttentionItem): string {
  * send — and anchors an unfiltered catch-up from the watermark, mentions or
  * not. "Mark read" appears exactly once.
  */
-export function livenessNudgeText(cursor: number, head: number): string {
+export function livenessNudgeText(cursor: number, head: number, openTasks = ''): string {
   return 'Hadron team liveness check — the idle-watch rule for your roster flag, not a mention nudge: '
     + `the team chat has moved past your read watermark (your cursor #${cursor} < head #${head}). `
     + `Catch up: read team chat unfiltered with your own live session — CLI: \`hadron team chat read --since ${cursor} --limit 200\` then follow nextSince; MCP: \`hadron_team_chat_read\` with your session and \`sinceSeq=${cursor}\` then the returned cursor — `
     + 'then mark read through your OWN session. '
     + 'If nothing needs action, end with one short line (for example "read through #N, nothing in my lane"); do not post to team chat. '
-    + '(Orca attention router; liveness nudge; cursor and head as of send.)';
+    + '(Orca attention router; liveness nudge; cursor and head as of send.)'
+    + openTasks;
 }
 
 const AGENT_IDENTITIES = new Set(['claude', 'codex']);
@@ -1043,11 +1047,17 @@ const IDLE_MARKERS: readonly RegExp[] = [
  * glyphs plus the worktree path) or Codex's `permissions:`/path lines, and
  * the collapsed-output indicators (`+ Show details`, `+ N lines (^t to
  * expand)`) that sit between a turn's output and its footer or notice
- * header (#1983 — weak on their own: a weak-only window still holds).
+ * header (#1983 — weak on their own: a weak-only window still holds), and
+ * Codex's background-process status line (`2 background terminals running ·
+ * /ps to view · /stop to close`), drawn between the `Worked for` footer and
+ * the composer for as long as a process the turn started keeps running
+ * (a dev server, a watcher). It says nothing about the turn: live capture,
+ * Greta 2026-10-21, held as unknown on every pass for 7.5 h.
  */
 const isWeakChrome = (s: string): boolean =>
   /^❯ /.test(s) || /^[▐▛█▝▜▀│╭╮╰╯ ]*[~❯]/.test(s) || /^permissions: /.test(s)
-  || /^\+ (Show details|\d+ lines)/.test(s);
+  || /^\+ (Show details|\d+ lines)/.test(s)
+  || /^\d+ background terminals? running · \/ps to view/.test(s);
 
 /**
  * The recap block — a completed turn's OWN summary chrome, positionally NEWER
@@ -1320,12 +1330,13 @@ const real = (p: string): string => {
 };
 
 /**
- * The worker id a CLI team-session binding in this worktree names, if any.
+ * The CLI team-session binding in this worktree, if any: its worker and, when
+ * the file records them, the session and App it was bound under.
  *
  * The binding lives in the worktree's git dir (`hadron team session start`).
  * An MCP-bound worker leaves none; absence is not a mismatch.
  */
-export function boundWorker(worktree: string): string | null {
+export function teamBinding(worktree: string): { workerId: string; sessionId?: string; appId?: string } | null {
   try {
     const dotGit = join(worktree, '.git');
     let gitDir = dotGit;
@@ -1334,10 +1345,17 @@ export function boundWorker(worktree: string): string | null {
       gitDir = isAbsolute(pointer) ? pointer : join(worktree, pointer);
     }
     const binding = JSON.parse(readFileSync(join(gitDir, 'hadron-team-session.json'), 'utf8'));
-    return typeof binding.workerId === 'string' && binding.workerId ? binding.workerId : null;
+    if (typeof binding.workerId !== 'string' || !binding.workerId) return null;
+    const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
+    return { workerId: binding.workerId, sessionId: str(binding.sessionId), appId: str(binding.appId) };
   } catch {
     return null;
   }
+}
+
+/** The worker id a CLI team-session binding in this worktree names, if any. */
+export function boundWorker(worktree: string): string | null {
+  return teamBinding(worktree)?.workerId ?? null;
 }
 
 /**
@@ -1531,6 +1549,9 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         outcome.dropped.push(entry.name);
         continue;
       }
+      // The open-task count is one more network read, so it is taken HERE, before the rechecks below, never between
+      // the last gate and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+      const openLine = openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker, undefined, undefined, undefined, (why) => log(`orca-attention-router: ${entry.name}: open-task count unknown (${why}); the wake goes without the line`));
       // The recompute above is a network round trip (or several) that reopened
       // BOTH windows the gates had closed: the agent may have gone busy (#1490
       // steering hazard — a busy agent renders an EMPTY prompt box, so the
@@ -1559,7 +1580,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
         continue;
       }
       mustOwn();
-      const [ok, how] = sendNudge(cfg, handle, nudgeText(now), run);
+      const [ok, how] = sendNudge(cfg, handle, nudgeText(now, openLine), run);
       if (!ok) {
         outcome.held[entry.name] = how;
         continue;
@@ -1735,6 +1756,8 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             outcome.livenessDropped.push(entry.name);
             continue;
           }
+          // Read before the rechecks, never between the last gate and the send (#2613 LOCAL P2-1).
+          const openLine = openTaskLine(run, cfg.hadronCli, cfg.app, entry.worker, undefined, undefined, undefined, (why) => log(`orca-attention-router: ${entry.name}: open-task count unknown (${why}); the wake goes without the line`));
           const recheckTracked = listTerminals(cfg, run).find((t) => t.handle === sendHandle)?.lastOutputAt;
           const [idleAgain, againWhy] = provesIdle(cfg, sendHandle, sendDetail, recheckTracked, RECHECK_IDLE_TIMEOUT_MS, run);
           if (!idleAgain) {
@@ -1749,7 +1772,7 @@ export function pollOnce(cfg: Config, run: Runner = runCommand, log: (line: stri
             continue;
           }
           mustOwn();
-          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead), run);
+          const [ok, how] = sendNudge(cfg, sendHandle, livenessNudgeText(nowCursor, nowHead, openLine), run);
           if (!ok) {
             outcome.held[entry.name] = `liveness: ${how}`;
             continue; // a failed send holds the token; the clock stands — retried next poll

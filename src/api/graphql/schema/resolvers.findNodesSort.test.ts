@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * Resolver-level behavior for the findNodes property-path sort (#719,
  * `sortProperty`): ordering by a properties/data JSON path across the no-query
@@ -120,7 +121,7 @@ describe('findNodes sortProperty — vector re-sort', () => {
     await db.memory.update({ where: { id: memId }, data: { vectorIndexEnabled: true } });
     const seed = async (loc: string, abstract: string, properties: Record<string, unknown>) => {
       const id = generateId();
-      await db.node.create({ data: { id, memoryId: memId, loc, name: loc, abstract, properties, embeddingPendingAt: new Date() } as any });
+      await db.node.create({ data: { id, memoryId: memId, loc, name: loc, abstract, properties, embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } as any });
       expect(await embedNode(db, id, { abstract })).toBe('embedded');
     };
     // all three embed to the same slot as the query → all are vector hits, then re-sorted by rank.

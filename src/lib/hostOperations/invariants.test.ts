@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1709 — the database facts of host operations (prisma/host-operation-invariants.sql),
  * tested at the database rather than through a resolver: the closed set and its
@@ -40,14 +41,14 @@ beforeEach(async () => {
   const agent = await db.agent.create({ data: { organizationId: org.id, name: 'A', urn: `${org.urn}:a`, visibility: 'ORGANIZATION' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'T', urn: `${org.urn}:t` }, select: { id: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'O', urn: `${org.urn}:o` }, select: { id: true } });
-  kit = await db.worker.create({ data: { appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true } });
-  zed = await db.worker.create({ data: { appId: otherApp.id, agentId: agent.id, name: 'Zed', slug: 'zed' }, select: { id: true } });
+  kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true } });
+  zed = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: agent.id, name: 'Zed', slug: 'zed' }, select: { id: true } });
 });
 
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
     const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261016050000_host_key_use_issue_action/migration.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261024100100_context_reset_host_operations/migration.sql', import.meta.url), 'utf8');
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
@@ -57,7 +58,7 @@ describe('the invariants file', () => {
 });
 
 describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', () => {
-  it('each of the five types with its own arguments is accepted', async () => {
+  it('each of the six types with its own arguments is accepted', async () => {
     await expect(op()).resolves.toBeTruthy();
     // #1883: a start records the hold that authorized it (prisma/host-launch-invariants.sql).
     await expect(op({ type: 'worker.start', args: { workerId: kit.id, worktree: 'hadron-server/kit', family: 'claude', taskId: 't1' }, holdUserId: user.id })).resolves.toBeTruthy();
@@ -65,7 +66,11 @@ describe('cor:agt:070:03 — the closed set, with exactly its typed arguments', 
     await expect(op({ type: 'worker.deliver', args: { workerId: kit.id, sessionId: 's1', eventId: 'e1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worker.end', args: { workerId: kit.id, sessionId: 's1' } })).resolves.toBeTruthy();
     await expect(op({ type: 'worktree.remove', args: { workerId: kit.id, worktree: 'hadron-server/kit' } })).resolves.toBeTruthy();
-    expect(HOST_OPERATION_TYPES).toHaveLength(5);
+    // #2162 (cor:agt:050:27): the reset, with exactly its ids.
+    await expect(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1', resetId: 'r1' } })).resolves.toBeTruthy();
+    await expectCheck(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1' } }));
+    await expectCheck(op({ type: 'worker.reset-context', args: { workerId: kit.id, sessionId: 's1', taskId: 't1', resetId: 'r1', command: 'kill' } }));
+    expect(HOST_OPERATION_TYPES).toHaveLength(6);
   });
 
   it('a shell type, an extra or missing argument, a non-string, a bad token or another worker\'s id is refused', async () => {

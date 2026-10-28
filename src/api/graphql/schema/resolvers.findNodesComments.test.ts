@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * #1608 (cor:dmo:110:08) — content by default; comments only when asked for,
  * filtered on the server BEFORE ranking, pagination and limits, in every
@@ -105,7 +106,7 @@ describe('findNodes content scope (cor:dmo:110:08)', () => {
     await db.memory.update({ where: { id: memory.id }, data: { vectorIndexEnabled: true } });
     const { comments } = await seed(30);
     for (const node of await db.node.findMany({ where: { memoryId: memory.id, deletedAt: null } })) {
-      await db.node.update({ where: { id: node.id }, data: { embeddingPendingAt: new Date() } });
+      await db.node.update({ where: { id: node.id }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
       // 'skipped' is fine: the comment write's own background drain may win
       // the latest-wins guard with the same text. The end state is asserted below.
       expect(['embedded', 'skipped']).toContain(await embedNode(db, node.id, node.nodeType === 'comment' ? { content: node.content } : { abstract: node.abstract }));
@@ -181,7 +182,7 @@ describe('#1674 review cycle (Jane)', () => {
   const sweep = async () => {
     // The sweep path: embed every pending node from its STORED row, no plaintext.
     for (const n of await db.node.findMany({ where: { memoryId: memory.id, deletedAt: null } })) {
-      await db.node.update({ where: { id: n.id }, data: { embeddingPendingAt: new Date() } });
+      await db.node.update({ where: { id: n.id }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
       await embedNode(db, n.id);
     }
     // A background drain from a comment write may hold the latest-wins stamp;

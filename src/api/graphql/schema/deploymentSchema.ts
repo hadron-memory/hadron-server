@@ -8,6 +8,9 @@ const signingTypes = new Set([
   'SigningRequest', 'NodeSignature', 'NodeSignatureStatus',
 ]);
 
+/** #1631 PR3: the owner's passkey records, a registration-switch read (#1895). */
+const registrationTypes = new Set(['PasskeyCredential', 'PasskeyWindow', 'PasskeyCancelRecord']);
+
 /** #1918: public-reference generators consume the same per-flag field data. */
 export const capabilityFields: Readonly<Record<string, Readonly<Record<string, 'signing' | 'registration'>>>> = {
   ServerInfo: { signing: 'signing', passkeyRegistration: 'registration' },
@@ -24,6 +27,7 @@ export function deploymentSchema() {
   const document = visit(parse(typeDefs), {
     enter(node, _key, parent, _path, ancestors) {
       if (!policy.signing && 'name' in node && node.name && node.kind !== Kind.FIELD_DEFINITION && signingTypes.has(node.name.value)) return null;
+      if (!policy.registration && 'name' in node && node.name && node.kind !== Kind.FIELD_DEFINITION && registrationTypes.has(node.name.value)) return null;
       if (node.kind !== Kind.FIELD_DEFINITION) return;
       let type = node.type;
       while (type.kind !== Kind.NAMED_TYPE) type = type.type;
@@ -31,7 +35,8 @@ export function deploymentSchema() {
       const capabilityFlag = owner && !Array.isArray(owner) && 'name' in owner && owner.name
         ? capabilityFields[owner.name.value]?.[node.name.value] : undefined;
       const capabilityOff = capabilityFlag !== undefined && !policy[capabilityFlag];
-      if (!capabilityOff && (policy.signing || !signingTypes.has(type.name.value))) return;
+      const registrationOff = !policy.registration && registrationTypes.has(type.name.value);
+      if (!capabilityOff && !registrationOff && (policy.signing || !signingTypes.has(type.name.value))) return;
       if (owner && !Array.isArray(owner) && 'name' in owner && owner.name) {
         const fields = removedFields.get(owner.name.value) ?? new Set<string>();
         fields.add(node.name.value);
@@ -41,7 +46,7 @@ export function deploymentSchema() {
     },
   });
   const filtered = Object.fromEntries(Object.entries(resolvers)
-    .filter(([name]) => policy.signing || !signingTypes.has(name))
+    .filter(([name]) => (policy.signing || !signingTypes.has(name)) && (policy.registration || !registrationTypes.has(name)))
     .map(([name, fields]) => [name, removedFields.has(name)
       ? Object.fromEntries(Object.entries(fields).filter(([field]) => !removedFields.get(name)!.has(field)))
       : fields]));

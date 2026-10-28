@@ -16,8 +16,8 @@ const ticker = (over: Record<string, unknown> = {}): SubscriptionInput => ({
   } as SubscriptionInput['ticker'],
   lastAckedTick: 0,
 });
-const run = (channels: ChannelInput[], subs: SubscriptionInput[] = [], extra: { mentionsImmediate?: boolean; now?: Date } = {}) =>
-  workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: extra.mentionsImmediate ?? true, channels, subscriptions: subs, now: extra.now ?? NOW });
+const run = (channels: ChannelInput[], subs: SubscriptionInput[] = [], extra: { mentionsImmediate?: boolean; now?: Date; checkPending?: boolean } = {}) =>
+  workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: extra.mentionsImmediate ?? true, channels, subscriptions: subs, checkPending: extra.checkPending, now: extra.now ?? NOW });
 
 describe('the due rule — cor:agt:080:08–:12', () => {
   it('nothing unread: nothing due, even on a current tick (S2 of :10)', () => {
@@ -53,6 +53,25 @@ describe('the due rule — cor:agt:080:08–:12', () => {
   it('a late poll yields one wake for the current tick, not one per missed tick', () => {
     const w = run([channel('c1', [msg(3)])], [ticker()], { now: new Date('2026-10-05T10:05:00Z') });
     expect(w?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 6 }]);
+  });
+
+  it('R63: anchorAtMs is the EARLIEST waiting reason: a mention post, the oldest unacknowledged tick, a task event', () => {
+    const post = (seq: number, ms: number) => msg(seq, { mentions: ['liam'], postedAtMs: ms });
+    const t0 = Date.parse('2026-10-05T09:00:00Z');
+    // Mention only.
+    expect(run([channel('c1', [post(5, t0 + 7000)])])?.anchorAtMs).toBe(t0 + 7000);
+    // The FIRST still-due mention, not the newest.
+    expect(run([channel('c1', [post(5, t0 + 7000), post(6, t0 + 9000)])])?.anchorAtMs).toBe(t0 + 7000);
+    // A tick: the oldest unacknowledged tick (tick 1 at anchor + 600 s), whichever tick is current.
+    const late = { now: new Date('2026-10-05T10:05:00Z') }; // tick 6
+    expect(run([channel('c1', [msg(3)])], [ticker()], late)?.anchorAtMs).toBe(t0 + 600_000);
+    expect(run([channel('c1', [msg(3)])], [{ ...ticker(), lastAckedTick: 4 }], late)?.anchorAtMs).toBe(t0 + 5 * 600_000);
+    // Mixed: the earlier of a task event and a mention.
+    const w = workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: true, channels: [channel('c1', [post(5, t0 + 9000)])], subscriptions: [], now: NOW,
+      tasks: [{ taskId: 't', eventId: 'e', chainIndex: 0, event: 'ASSIGNED', title: 'x', handle: 'AT0.1', atMs: t0 + 2000 }] });
+    expect(w?.anchorAtMs).toBe(t0 + 2000);
+    // Nothing carries a time (pure fixtures): null, never invented.
+    expect(run([channel('c1', [msg(6, { mentions: ['liam'] })])])?.anchorAtMs).toBeNull();
   });
 
   it('#2068: an every-tick ticker ticks with nothing unread; one without it stays silent', () => {
@@ -139,5 +158,59 @@ describe('the due rule — cor:agt:080:08–:12', () => {
   it('counts mentions of a worker that may not be woken (dormant workers are counted, B2)', () => {
     expect(relevantMentionCount([channel('c1', [msg(3, { mentions: ['liam'] }), msg(4, { mentions: ['all'] }), msg(5)])], W, tokens)).toBe(2);
     expect(relevantMentionCount([channel('c1', [msg(3, { mentions: ['liam'] })], true)], W, ['nobody'])).toBe(0);
+  });
+});
+
+describe('#2138 §3.3 — channel checks and the ticker', () => {
+  const checkedAgo = (sec: number) => NOW.getTime() - sec * 1000;
+  const checked = (sec: number | null, msgs: RoutedMessage[] = []) => ({ ...channel('c1', msgs), lastCheckedAtMs: sec === null ? null : checkedAgo(sec) });
+
+  it('read-team-channel: due with an unread message and a stale or missing check; not due with a fresh check', () => {
+    const unread = [msg(3, { mentions: ['liam'] })];
+    const rtc = [ticker({ relevance: 'MENTIONS', reasons: ['read-team-channel'] })];
+    // mentionsImmediate off so only the ticker can wake it
+    const go = (ch: ChannelInput) => run([ch], rtc, { mentionsImmediate: false });
+    expect(go(checked(null, unread))?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(go(checked(700, unread))?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]); // older than the 600 s cadence
+    expect(go(checked(599, unread))).toBeNull(); // younger than the cadence: waits for the next tick
+    expect(go(checked(10, unread))).toBeNull();
+  });
+
+  it('live-check: due for a stale check with NOTHING unread; not for a fresh check, nor a pending worker', () => {
+    const lc = [ticker({ reasons: ['live-check'] })];
+    expect(run([checked(null)], lc)?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([checked(700)], lc)?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([checked(599)], lc)).toBeNull();
+    expect(run([checked(null)], lc, { checkPending: true })).toBeNull();
+    expect(run([checked(700)], lc, { checkPending: true })).toBeNull();
+  });
+
+  it('live-check lists no channel when nothing is unread, and still obeys the tick schedule and the acknowledged tick', () => {
+    const lc = [ticker({ reasons: ['live-check'] })];
+    expect(run([checked(null)], lc)?.channels).toEqual([]);
+    expect(run([checked(null)], [{ ...ticker({ reasons: ['live-check'] }), lastAckedTick: 1 }])).toBeNull();
+    expect(run([checked(null)], lc, { now: new Date('2026-10-05T09:09:59Z') })).toBeNull();
+  });
+
+  it('a check on a channel the ticker does not cover does not make it fresh', () => {
+    const lc = [ticker({ reasons: ['live-check'], channelIds: ['c1'] })];
+    const other = { ...channel('c2', []), lastCheckedAtMs: checkedAgo(5) };
+    expect(run([checked(null), other], lc)?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+    expect(run([checked(5), other], lc)).toBeNull();
+  });
+
+  it('every-tick ignores freshness (its meaning is unconditional)', () => {
+    expect(run([checked(5)], [ticker({ reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+  });
+});
+
+describe('S3 versioned subtree wake routing', () => {
+  it('uses only immutable recipient IDs/global stamp and excludes own posts', () => {
+    const team = msg(1,{mentions:['team.head.all','all'],teamTagsVersion:1,teamBroadcastWorkerIds:[W]});
+    expect(run([channel('c',[team],true)])?.reasons).toEqual([{kind:'MENTION'}]);
+    expect(run([channel('c',[{...team,teamBroadcastWorkerIds:['elsewhere']}],true)])).toBeNull();
+    expect(run([channel('c',[{...team,authorWorkerId:W}],true)])).toBeNull();
+    expect(run([channel('c',[msg(2,{mentions:['team'],broadcastWakes:true,teamTagsVersion:1,teamBroadcastWorkerIds:[]})],true)])).toBeNull();
+    expect(run([channel('c',[msg(3,{mentions:['team'],broadcastWakes:true})],true)])).not.toBeNull();
   });
 });

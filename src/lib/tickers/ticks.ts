@@ -39,6 +39,19 @@ export function currentTick(t: TickerSchedule, now: Date): number | null {
   return null;
 }
 
+/**
+ * R63 (#2017): the time of the OLDEST tick the subscriber has not acknowledged, up to and including tick `k`: the first
+ * non-quiet tick after `lastAcked`. A tick that has waited since then keeps its older anchor, so a steady cadence cannot
+ * push a delivery out. Falls back to tick `k` itself when none is found within the skip bound.
+ */
+export function oldestUnackedTickAt(t: TickerSchedule, lastAcked: number, k: number): Date {
+  const quiet = (t.quietHours ?? null) as QuietHours | null;
+  for (let j = Math.max(lastAcked + 1, 1), n = 0; j <= k && n <= MAX_SKIPS; j++, n++) {
+    if (!inQuietHours(quiet, tickTime(t, j))) return tickTime(t, j);
+  }
+  return tickTime(t, k);
+}
+
 /** When the next firing tick after `now` falls, or null. Used by readers; not by the due rule. */
 export function nextTickAfter(t: TickerSchedule, now: Date): Date | null {
   if (!t.enabled || t.deletedAt) return null;

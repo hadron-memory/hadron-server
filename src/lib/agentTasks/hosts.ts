@@ -16,6 +16,8 @@
  * that one lapsed (`host.lost`, once, stamping `lostAt`).
  */
 
+import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
+import { reconcileStopCoverage } from '../stopSignals/lifecycle.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { lockAuthorityAnchors } from '../auth/authorityAnchors.js';
@@ -23,7 +25,7 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import { appendHostEvent } from './events.js';
 import { FAMILY_PATTERN } from './availability.js';
 import { normalizeFamily } from './family.js';
-import { HOST_WORKTREES_MAX, isHostToken } from '../hostOperations/types.js';
+import { HOST_CAPABILITIES, HOST_WORKTREES_MAX, isHostCapability, isHostToken } from '../hostOperations/types.js';
 
 /**
  * cor:agt:070:01 (#1763; Holger, team chat #10405) — a registration lapses
@@ -77,6 +79,11 @@ export type HostRegistrationInput = {
   pollIntervalSeconds: number;
   /** #1709: `worktrees` are the worker's existing worktrees on this host (cor:agt:070:06, :08); none when omitted. */
   workers: { workerId: string; family: string; worktrees?: string[] }[];
+  /**
+   * #2162 (cor:agt:070:01, Proposed): the capability-gated operation types this host performs. Every refresh states
+   * them in full; omitted means none, so a host that stops declaring one is never issued it again.
+   */
+  capabilities?: string[];
 };
 
 /** #1709: hooks a key-authenticated caller runs inside the registration's transaction, after the App's anchor. */
@@ -116,6 +123,12 @@ export async function registerHost(
   if (input.workers.length > HOST_WORKERS_MAX) {
     throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host registers at most ${HOST_WORKERS_MAX} workers.`);
   }
+  const capabilities = [...new Set(input.capabilities ?? [])].sort();
+  for (const c of capabilities) {
+    if (!isHostCapability(c)) {
+      throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host declares only these capabilities: ${HOST_CAPABILITIES.join(', ')}.`);
+    }
+  }
   const workers = new Map<string, { family: string; worktrees: string[] }>();
   for (const w of input.workers) {
     const family = normalizeFamily(w.family);
@@ -143,9 +156,14 @@ export async function registerHost(
     workers.set(w.workerId, { family, worktrees });
   }
 
+  // `now` is the caller's sample, taken just before this call (it defaults to one here): its monotonic half.
+  const anchor = anchorNow();
   return db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: input.appId }], 'shared');
     if (hooks.authorize) await hooks.authorize(tx);
+    // #2022: the stop fence, exclusive, before the lapse lock (src/lib/stopSignals/state.ts): a host signal covers the
+    // workers this registration lists (R84), so a change of the list is a change of coverage, recorded below.
+    await lockStopFence(tx, input.appId, 'exclusive');
     // #1863: the App's lapse count, stable for this transaction, taken BEFORE
     // the registration row (the lock order of recordHostLost).
     const checkIns = await lockAppLapseCheckIns(tx, input.appId);
@@ -182,7 +200,7 @@ export async function registerHost(
     const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, checkIns));
     await tx.hostRegistration.update({
       where: { id: cur.id },
-      data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null },
+      data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null, capabilities },
     });
     await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: cur.id } });
     if (workers.size) {
@@ -191,6 +209,8 @@ export async function registerHost(
       });
     }
     if (hooks.afterWrite) await hooks.afterWrite(tx, { registrationId: cur.id, workerCount: workers.size });
+    // The coverage history at the moment after this registration's waits (Xan #2166 LOCAL-1).
+    await reconcileStopCoverage(tx, input.appId, afterWaits(now, anchor));
     const registered = isNew || wasLapsed;
     if (registered) {
       await appendHostEvent(tx, {
@@ -230,8 +250,10 @@ export async function loadLaunchableFamilies(
     ORDER BY 1, 2`;
   const out = new Map<string, string[]>();
   for (const r of rows) {
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
     const list = out.get(r.workerId) ?? [];
-    list.push(r.family);
+    if (!list.includes(family)) list.push(family);
     out.set(r.workerId, list);
   }
   return out;

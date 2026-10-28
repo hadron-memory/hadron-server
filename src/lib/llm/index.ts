@@ -387,6 +387,30 @@ export interface LlmToolLoopResult extends LlmResult {
   toolCalls: ToolCallRecord[];
 }
 
+/**
+ * #862 — the usage the provider already billed for the steps a tool-loop call
+ * COMPLETED before it was rejected (cor:agt:010:02: every action decrements the
+ * run's budget on that call). Carried on the thrown error, never invented:
+ *
+ *   - absent means unknown: no step completed, or none reported usage;
+ *   - present with zeros means a step really measured zero;
+ *   - the step that failed is never included, and is never represented as zero.
+ *
+ * A step is measured when the SDK gave a defined input or output count; an
+ * undefined side of a measured step counts as 0 on that side.
+ */
+export interface PartialUsage {
+  tokensIn: number;
+  tokensOut: number;
+  /** Completed steps that reported usage; >= 1 whenever the property exists. */
+  measuredSteps: number;
+}
+
+/** The measured usage of a rejected tool-loop call, or undefined when unknown. */
+export function partialUsageOf(err: unknown): PartialUsage | undefined {
+  return (err as { partialUsage?: PartialUsage } | null)?.partialUsage;
+}
+
 /** Unverified provider for the tool loop (D-TL-8) — typed, not string-matched
  *  (PR-545 review, Copilot). Always non-transient: a tools-node must never
  *  silently run without its tools. */
@@ -465,6 +489,22 @@ export async function generateWithTools(
   const toolCalls: ToolCallRecord[] = [];
   // Our terminal errors, captured before the SDK can wrap them.
   let fatal: Error | null = null;
+  const terminal = (): Error | null => fatal;
+  // #862: usage of the steps the SDK reports complete, for a rejected call.
+  const measured: Array<{ tokensIn: number; tokensOut: number }> = [];
+  const withMeasuredUsage = <E extends Error>(err: E): E => {
+    // The usage belongs to THIS invocation: an error instance thrown again by a
+    // later call (a reused provider error) must not carry the last call's steps.
+    if (measured.length === 0) delete (err as E & { partialUsage?: PartialUsage }).partialUsage;
+    if (measured.length > 0) {
+      (err as E & { partialUsage?: PartialUsage }).partialUsage = {
+        tokensIn: measured.reduce((n, step) => n + step.tokensIn, 0),
+        tokensOut: measured.reduce((n, step) => n + step.tokensOut, 0),
+        measuredSteps: measured.length,
+      };
+    }
+    return err;
+  };
 
   const sdkTools = Object.fromEntries(
     toolDefs.map((def) => [
@@ -478,6 +518,11 @@ export async function generateWithTools(
             if (opts.onToolCall && !(await opts.onToolCall(def.policyAction ?? `tool.${def.name}`, def.cost))) {
               throw new ToolDeniedError(def.name);
             }
+            // #2418: ai@7 starts every call of a step together, so a sibling can be admitted (and charged)
+            // while a terminal runs. Past admission, an already-set terminal means this call's side effect
+            // must not run: it throws the first terminal (nothing replaces it) and records ok:false.
+            const ended = terminal();
+            if (ended) throw ended;
             const result = await def.execute(opts.toolCtx, args ?? {});
             toolCalls.push({ name: def.name, ok: true, ms: Date.now() - started });
             return result;
@@ -485,15 +530,22 @@ export async function generateWithTools(
             toolCalls.push({ name: def.name, ok: false, ms: Date.now() - started });
             // instanceof, not name-matching: a non-Error rejection with a
             // spoofed `name` must not ride the passthrough (PR-540 Copilot).
-            fatal =
-              err instanceof AuthorFailError || err instanceof ToolDeniedError
-                ? err
-                : new ToolExecutionError(
-                    def.name,
-                    String((err as Error)?.message ?? err),
-                    { cause: err },
-                  );
-            throw fatal; // abort the SDK loop
+            // The FIRST terminal wins: with parallel calls in one step a later
+            // sibling's failure must not replace the error that ended the run.
+            if (fatal === null) {
+              fatal =
+                err instanceof AuthorFailError || err instanceof ToolDeniedError
+                  ? err
+                  : new ToolExecutionError(
+                      def.name,
+                      String((err as Error)?.message ?? err),
+                      { cause: err },
+                    );
+            }
+            // ai@7 turns a throwing execute into a `tool-error` part and keeps
+            // looping, so a throw alone no longer aborts (#2412): `stopWhen`
+            // ends the loop after this step, and the resolved path rethrows.
+            throw fatal;
           }
         },
       }),
@@ -507,9 +559,21 @@ export async function generateWithTools(
       ...(req.system ? { system: req.system } : {}),
       prompt: req.prompt,
       tools: sdkTools,
-      stopWhen: stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP),
+      stopWhen: [stepCountIs(opts.stepCap ?? DEFAULT_TOOL_STEP_CAP), () => terminal() !== null],
+      onStepEnd: (step) => {
+        const { inputTokens, outputTokens } = step.usage ?? {};
+        if (inputTokens !== undefined || outputTokens !== undefined) {
+          measured.push({ tokensIn: inputTokens ?? 0, tokensOut: outputTokens ?? 0 });
+        }
+      },
       ...settings,
     });
+    // Backstop (#2412): the SDK resolved after a tool terminal. Our error
+    // wins, un-wrapped, so the kernel maps it (AUTHOR_FAIL / ACTIVATION_DENIED /
+    // TOOL_FAILED) instead of recording a success. Thrown inside this try, so
+    // the catch below attaches the steps it completed (#862).
+    const ended = terminal();
+    if (ended) throw ended;
     const usage = out.totalUsage ?? out.usage; // summed across steps (spike-pinned)
     return {
       text: out.text,
@@ -522,20 +586,21 @@ export async function generateWithTools(
       toolCalls,
     };
   } catch (err) {
-    if (fatal) throw fatal; // our terminal errors win over SDK wrapping
-    if (err instanceof LlmInvocationError) throw err;
+    const ended = terminal();
+    if (ended) throw withMeasuredUsage(ended); // our terminal errors win over SDK wrapping
+    if (err instanceof LlmInvocationError) throw withMeasuredUsage(err);
     // Transient (⇒ bus-redelivery retry) ONLY while no SIDE-EFFECTING tool
     // has executed (D-TL-6, refined per PR-540 Gemini): cost-0 tools are
     // retry-safe — reads are pure, and hadron_log writes only to the
     // in-memory hop element, which a transient reset never persisted.
     const costOf = new Map(toolDefs.map((t) => [t.name, t.cost]));
     const sideEffectRan = toolCalls.some((c) => c.ok && (costOf.get(c.name) ?? 1) > 0);
-    throw new LlmInvocationError(
+    throw withMeasuredUsage(new LlmInvocationError(
       `LLM tool loop failed (${provider}/${model}): ${String((err as Error)?.message ?? err)}`,
       provider,
       isTransient(err) && !sideEffectRan,
       { cause: err },
-    );
+    ));
   }
 }
 

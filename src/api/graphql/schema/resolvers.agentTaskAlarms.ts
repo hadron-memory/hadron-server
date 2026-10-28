@@ -34,6 +34,7 @@
 // escalation holds the alarm FOR SHARE while it wakes the next owner, so an
 // acknowledgement and a wake never interleave.
 
+import { familySpellings, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import {
   HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
   HOST_REPORT_TIMEOUT_MAX_MINUTES,
@@ -65,7 +66,8 @@ import {
   type AvailabilityReason,
   type AvailabilitySetter,
 } from '../../../lib/agentTasks/events.js';
-import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
+import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/contextReset.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import {
@@ -298,8 +300,20 @@ export const agentTaskAlarmMutations = {
       } else {
         throw notPermitted("Only the worker itself, the person holding its name, or whoever manages the App sets a worker's availability.");
       }
+      // #2162 (cor:agt:050:27 §2.4): a write by the worker, its holder or a manager cancels a live context reset at
+      // once (its epoch moves; the host's later steps are refused). While a granted stop could still be acted on, by
+      // a live reset or one already ended, the worker is not made available before the lease ends: it stays
+      // unavailable, lapsing by itself then (#2255 review: every such write, not only the first).
+      const lease = await cancelLiveReset(tx, workerId, 'CANCELLED_BY_CLEAR', now);
+      if (lease && value.state === 'available') {
+        await holdForStopLease(tx, { workerId, appId: freshApp.id }, lease, now);
+        return;
+      }
+      const until = lease && value.until && value.until.getTime() < lease.leaseEnd.getTime() ? lease.leaseEnd : value.until;
       // #1709: a person's or a worker's write replaces a host's mark, and no longer names the host.
-      const data = { ...value, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null };
+      const data = {
+        ...value, until, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
+      };
       await tx.workerAvailability.upsert({
         where: { workerId },
         create: { workerId, ...data },
@@ -308,9 +322,9 @@ export const agentTaskAlarmMutations = {
       await appendAvailabilityEvent(tx, {
         appId: freshApp.id,
         actor: eventActor(ctx.userId),
-        event: { kind: 'worker', workerId, state: value.state, reason: value.reason, until: value.until, setBy },
+        event: { kind: 'worker', workerId, state: value.state, reason: value.reason, until, setBy },
       });
-    });
+    }, { lockWorkerIds: [workerId] });
     // #1707: availability changed, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
     return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId } });
@@ -325,8 +339,8 @@ export const agentTaskAlarmMutations = {
     if (!input) throw badInput('input is required.');
     const now = new Date();
     const value = normalizeAvailability(input, now);
-    const family = (input.family ?? '').trim().toLowerCase();
-    if (!FAMILY_PATTERN.test(family)) {
+    const family = normalizeFamily(input.family);
+    if (!family) {
       throw badInput('family is a lowercase token (letters, digits, ".", "_" or "-"; up to 64 characters), e.g. claude or codex.');
     }
     const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
@@ -336,6 +350,11 @@ export const agentTaskAlarmMutations = {
         throw notPermitted("Only whoever manages the App sets a model family's availability.");
       }
       const data = { ...value, setAt: now, ...setByColumns(ctx) };
+      // Existing aliases are the same availability key. A deliberate setter
+      // updates these records too; historical events remain untouched.
+      await tx.modelFamilyAvailability.updateMany({
+        where: { appId: freshApp.id, family: { in: familySpellings(family) } }, data,
+      });
       await tx.modelFamilyAvailability.upsert({
         where: { appId_family: { appId: freshApp.id, family } },
         create: { appId: freshApp.id, family, ...data },

@@ -1,3 +1,9 @@
+import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
+import { GitCommandError } from './execGit.js';
+import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
+import { currentActor } from '../../lib/requestActor.js';
+import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { createDecipheriv } from 'crypto';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -29,16 +35,17 @@ import { serializeTags } from '../db/provider.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
-import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
+import { wakeEmbeddingQueue } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
-import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMemoriesForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
 import { safeNodeUrnV2 } from '../../lib/urnEmit.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCount, reconcilePendingEdgeCounts } from '../../lib/pendingEdgePromotion.js';
+import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE } from './encryptedGitSync.js';
 import {
   buildNodeRevisionSnapshot,
   createNodeRevision,
@@ -113,6 +120,13 @@ export interface SkippedUndeclaredRole {
   code: 'ROLE_NOT_DECLARED';
 }
 
+/** #2040 — a synced file whose include tags are invalid; the file is skipped, its row kept. */
+export interface SkippedInvalidInclude {
+  loc: string;
+  code: string;
+  message: string;
+}
+
 export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string {
   return `${s.loc} (role "${s.role}", strict parent "${s.strictParent}")`;
 }
@@ -125,6 +139,7 @@ export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string 
 export function describeSyncOutcome(result: {
   nodeCount?: number;
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  skippedInvalidIncludes?: SkippedInvalidInclude[];
   deferredLateRows?: string[];
   heldMoves?: string[];
 }): string {
@@ -135,6 +150,10 @@ export function describeSyncOutcome(result: {
     section(
       result.skippedUndeclaredRoles?.map(describeSkippedUndeclaredRole),
       (n) => `Skipped ${n} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):`,
+    ) +
+    section(
+      result.skippedInvalidIncludes?.map((i) => `${i.loc} (${i.code}: ${i.message})`),
+      (n) => `Skipped ${n} file(s) with an invalid include tag (fix the tag; the stored node was kept as it was):`,
     ) +
     section(
       result.deferredLateRows,
@@ -170,7 +189,7 @@ export class GitSyncUnreadableFileError extends Error {
 
 export class GitSyncEncryptedMemoryError extends Error {
   constructor() {
-    super('Git sync cannot write an encrypted memory without its data key.');
+    super(ENCRYPTED_GIT_SYNC_MESSAGE);
     this.name = 'GitSyncEncryptedMemoryError';
   }
 }
@@ -251,7 +270,8 @@ export async function updateNodeFromGitSync(
       update = rest;
     }
   }
-  const changes = diffNodeChanges(before, update);
+  // Compare the logical JSON value, not Prisma's persistence-only null sentinel.
+  const changes = diffNodeChanges(before, update.data === Prisma.DbNull ? { ...update, data: null } : update);
 
   if (changes.length > 0) {
     await createNodeRevision(
@@ -286,7 +306,9 @@ const syncGraphFromGithubAsSystem = async (
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   error?: string;
-  errorCode?: 'BAD_USER_INPUT';
+  errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
+  fault?: true;
   nodeCount?: number;
   /**
    * #1061 — the nodes this run actually wrote, for a caller that HAS a
@@ -312,6 +334,8 @@ const syncGraphFromGithubAsSystem = async (
    * is kept as it was; every other file still syncs.
    */
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  /** #2040 — files NOT synced because an include tag is malformed or cycles. */
+  skippedInvalidIncludes?: SkippedInvalidInclude[];
   /**
    * #1330 — files left for the next sync because the node they would write
    * arrived after this sync locked its rows (`loc (node <id>)`). Only while
@@ -334,6 +358,14 @@ const syncGraphFromGithubAsSystem = async (
     // user-owned memory has no org — surface it as an error so an explicit
     // syncMemory call gets a meaningful message rather than a silent no-op
     // (startup's batch loop guards on `organization` before calling).
+    // R206 / cor:sec:040:05: an explicit sync of an encrypted memory fails loudly
+    // with the typed code BEFORE the DB-only and no-organization no-ops, so a
+    // memory with no source (or no org) never reads as a healthy sync. The row
+    // is left untouched: there is nothing to mark ERROR on a memory that has no
+    // sync to fail.
+    if ((await db.memory.findUnique({ where: { id: graph.id }, select: { isEncrypted: true } }))?.isEncrypted) {
+      return { error: ENCRYPTED_GIT_SYNC_MESSAGE, errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE };
+    }
     if (!graph.organization) {
       return { error: 'Memory has no organization (user-owned memories are not git-synced)' };
     }
@@ -399,28 +431,28 @@ const syncGraphFromGithubAsSystem = async (
       : undefined;
 
     const token = await getInstallationToken(organization.githubInstallationId, credentials);
-    const cloneUrl = toHttpsUrl(graph.source, token);
+    const source = graph.source;
+    const cloneUrl = toHttpsUrl(source, token);
 
     // 2. Clone or pull the repo
     // Mirror writes use this same checkout. Hold their lock through the read:
     // otherwise a writer can switch to the write branch between checkout and
     // loadGraphFromFs, even when the read branch was selected correctly.
     const { graph: fsGraph, edges, skippedInvalidLoc, unreadable, rootNode } = await withMirrorCheckoutLock(graph.id, async () => {
-      await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
-      return loadGraphFromFs(localPath, graphName, ownerRepo);
+      try {
+        await gitSync(cloneUrl, localPath, graph.readBranch ?? undefined);
+        // Await the read so finally runs after its async success or failure.
+        return await loadGraphFromFs(localPath, graphName, ownerRepo);
+      } finally {
+        await restoreReadRemote(localPath, source);
+      }
     });
 
     // 4. Upsert all nodes and edges into the database (transactional)
-    // Spec 033 T029 — defer embedding enqueue until after the transaction
-    // commits. The plaintext was loaded from the filesystem by
-    // loadNodeFromFs (FR-013 reconcile already ran), so it's safe to use
-    // as in-closure plaintext for the prompt-drain embed — matching the
-    // GraphQL / MCP write paths so encrypted memories embed correctly at
-    // write time without a session key (FR-027).
-    const pendingEmbeds: Array<{
-      nodeId: string;
-      plaintext: { content: string | null; abstract: string | null };
-    }> = [];
+    // Git sync refuses encrypted memories under its authority transaction. Stamp
+    // ordinary obligations with each accepted write, then issue ONE post-commit
+    // wake: no second plaintext/job list grows with the import size.
+    let embeddingWakeNeeded = false;
     // #1061 — accumulated INSIDE the transaction (that is where the surviving
     // row ids are known) but declared outside it so the refs survive the commit
     // and can be returned to the caller.
@@ -428,8 +460,10 @@ const syncGraphFromGithubAsSystem = async (
     const skippedProtected: string[] = [];
     const skippedObjectTypes: string[] = [];
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
+    const skippedInvalidIncludes: SkippedInvalidInclude[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
+    const reportEntries: SyncReportEntry[] = [];
     // #1411 review — occupants a previous attempt parked and could not settle.
     // Grows by a distinct row (one sitting at a file's loc) per retry, so the
     // attempts are bounded by the file count.
@@ -501,7 +535,8 @@ const syncGraphFromGithubAsSystem = async (
     for (;;) {
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
-    for (const acc of [pendingEmbeds, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves]) {
+    embeddingWakeNeeded = false;
+    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves, reportEntries]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -511,12 +546,10 @@ const syncGraphFromGithubAsSystem = async (
       // Hold every endpoint memory key in one stable order for the ENTIRE
       // snapshot-to-cleanup/edge-write interval. This includes graph.id, so it
       // preserves the cleanup-vs-resurrection serialization added earlier.
-      for (const memoryId of edgeEndpointMemoryIds) {
-        await lockMemoryForChannelChange(tx, memoryId);
-      }
+      await lockMemoriesForChannelChange(tx, edgeEndpointMemoryIds);
       // #664/#752: a git-sync bulk-upserts/moves rows into an EXISTING memory,
       // bypassing the locked create surfaces. Lock the ancestor path of every
-      // synced loc (deduped, root→leaf) up front so a concurrent non-recursive
+      // synced loc (deduped, in resolved-key order) up front so a concurrent non-recursive
       // delete of an ancestor in this memory can't count zero descendants and
       // then miss the rows this sync commits. READ COMMITTED (the tx default) is
       // required so that delete's count sees these rows once the sync commits.
@@ -803,6 +836,13 @@ const syncGraphFromGithubAsSystem = async (
       // P2). An id is "settled" once it is mapped OR waiting.
       const idSettled = (id: string): boolean => fileIdToRowId.has(id) || unappliedFileIds.has(id);
 
+      // #2040 — every file of this run, as if already written: a tag is judged
+      // against the graph the sync will leave, so a new file cannot hide a cycle
+      // through another new file.
+      const includeOverlay = {
+        memoryId: graph.id,
+        contents: new Map(fsGraph.nodes.filter((n) => n.loc).map((n) => [n.loc!, n.content ?? null] as const)),
+      };
       for (const node of fsGraph.nodes) {
         const loc = node.loc!;
         if (isProtected(loc)) {
@@ -821,12 +861,16 @@ const syncGraphFromGithubAsSystem = async (
               });
           if (protectedRow) protectedRowIds.add(protectedRow.id);
           skippedProtected.push(loc);
+          reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_LOC' });
           continue;
         }
         const name = node.name!;
         const update = {
           loc,
           name,
+          // #2556: spread only present keys; old mirrors must not clear either column.
+          ...('nodeType' in node ? { nodeType: node.nodeType } : {}),
+          ...('data' in node ? { data: node.data === null ? Prisma.DbNull : node.data as Prisma.InputJsonValue } : {}),
           alias: node.alias ?? null,
           isLink: node.isLink ?? false,
           description: node.description ?? null,
@@ -860,6 +904,25 @@ const syncGraphFromGithubAsSystem = async (
           ...governedSignalsFromMirror(node),
         };
 
+        // #2040 — a push cannot be refused, so a file whose include tags are
+        // invalid is skipped and named in the result; its row stays as it was.
+        {
+          const selfRow = await tx.node.findUnique({
+            where: { loc_memoryId: { loc, memoryId: graph.id } },
+            select: { id: true },
+          });
+          try {
+            await assertIncludesWritable(tx, { id: selfRow?.id ?? prospectiveNodeId(loc), memoryId: graph.id, loc }, update.content, [graph.id], includeOverlay, { includeSystemWrite: true });
+          } catch (e) {
+            const refusalCode = includeRefusalCode(e);
+            if (!refusalCode) throw e;
+            skippedInvalidIncludes.push({ loc, code: refusalCode, message: (e as Error).message });
+            reportEntries.push({ kind: 'invalid_include', loc, code: refusalCode });
+            if (selfRow) skippedRowIds.add(selfRow.id);
+            continue;
+          }
+        }
+
         // A repo file can restore a server-exported reservation, but only in
         // the state reserveSpecCitation could have created: a blank spec in a
         // draft corpus. Decide inside the write transaction, against the
@@ -889,8 +952,8 @@ const syncGraphFromGithubAsSystem = async (
         // A present one is written only if the RESULTING record satisfies the
         // memory's property schema (#725: a structured record must satisfy its
         // collection — the invariant every GraphQL/MCP write enforces through
-        // validateNodeAgainstSchema). Sync restores neither `properties` nor
-        // `data`, so the record is judged with the properties the row already
+        // validateNodeAgainstSchema). Sync does not restore `properties`, so
+        // the record is judged with the properties the row already
         // has (none, for a new node). A violation does NOT fail the sync — one
         // bad file must not block the memory — and does not write a
         // nonconforming record either: the stored objectType is kept and the
@@ -905,6 +968,7 @@ const syncGraphFromGithubAsSystem = async (
           } catch (e) {
             if (!(e instanceof NodeSchemaViolation)) throw e;
             skippedObjectTypes.push(`${loc} (${fileObjectType}): ${e.message}`);
+            reportEntries.push({ kind: 'object_type_rejected', loc, code: 'OBJECT_TYPE_REJECTED' });
             return {};
           }
         };
@@ -930,8 +994,10 @@ const syncGraphFromGithubAsSystem = async (
         // 2026-09-27). `prior` is the row the file would write, current under
         // the locks above; a file with no role key assigns nothing. A refused
         // file is skipped and reported, and its row survives the cleanup pass.
-        const defer = (late: { id: string }, keep?: { id: string }): true => {
+        const defer = (late: { id: string; loc?: string }, keep?: { id: string; loc?: string }): true => {
           deferredLateRows.push(`${loc} (node ${late.id})`);
+          const fromLoc = keep?.loc ?? late.loc;
+          reportEntries.push({ kind: 'deferred', loc, ...(fromLoc && fromLoc !== loc ? { fromLoc } : {}), code: 'ROW_CHANGED' });
           deferredLocs.add(loc);
           if (keep) protectedRowIds.add(keep.id);
           return true;
@@ -939,17 +1005,31 @@ const syncGraphFromGithubAsSystem = async (
         const refusesRole = async (prior: Node | null): Promise<boolean> => {
           // #1606 (cor:dmo:110:04) — git sync never writes a comment: a file
           // that lands on a comment's loc is skipped and the comment kept.
-          if (prior?.nodeType === COMMENT_NODE_TYPE) {
+          if (prior?.nodeType === COMMENT_NODE_TYPE || node.nodeType === COMMENT_NODE_TYPE) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_COMMENT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a comment, written only through the comment path`);
-            protectedRowIds.add(prior.id);
+            if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
             return true;
           }
+          // #2043 — git sync never writes a compiled boot prompt (a compile does):
+          // a file landing on one is skipped and the node kept. A worker session's
+          // sync that would create or change any boot-prompt node is refused whole
+          // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
+          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || node.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_BOOT_PROMPT' });
+            console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a compiled boot prompt, written only by a compile`);
+            if (prior) protectedRowIds.add(prior.id);
+            refusedRoleLocs.add(loc);
+            return true;
+          }
+          assertNoWorkerSessionBootPromptWrite(prior?.role, governedSignalsFromMirror(node).role ?? undefined, 'import');
           const signals = governedSignalsFromMirror(node);
           // #1641 §3.2 — no mirror ever writes a decision or a decision log:
           // anyone with push access could otherwise forge one. A file that
           // declares the role, or lands on a decision's loc, is skipped.
           if (isDecisionFamilyRole(signals.role) || isDecisionFamilyRole(prior?.role)) {
+            reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_DECISION' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — decisions are written only through the decision operations`);
             if (prior) protectedRowIds.add(prior.id);
             refusedRoleLocs.add(loc);
@@ -975,6 +1055,7 @@ const syncGraphFromGithubAsSystem = async (
           });
           if (strictParent === null) return false;
           skippedUndeclaredRoles.push({ loc, role: signals.role, strictParent, code: 'ROLE_NOT_DECLARED' });
+          reportEntries.push({ kind: 'undeclared_role', loc, code: 'ROLE_NOT_DECLARED' });
           if (prior) protectedRowIds.add(prior.id);
           refusedRoleLocs.add(loc);
           return true;
@@ -1005,6 +1086,7 @@ const syncGraphFromGithubAsSystem = async (
           // (Copilot on PR #1165).
           if (byId.loc !== loc && isProtected(byId.loc)) {
             skippedProtected.push(`${byId.loc} → ${loc}`);
+            reportEntries.push({ kind: 'protected', loc, fromLoc: byId.loc, code: 'PROTECTED_LOC' });
             protectedRowIds.add(byId.id);
             refusedMoveLocs.add(loc);
             incomingEdgesWait();
@@ -1022,6 +1104,7 @@ const syncGraphFromGithubAsSystem = async (
             continue;
           }
           if (byId.loc !== loc && refusedMoverIds.has(byId.id)) {
+            reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'DESTINATION_PROTECTED' });
             console.warn(
               `[syncGraphFromGithub] "${graphName}": refusing move of ${byId.id} "${byId.loc}" → "${loc}" — the loc is held by a row that will not move this run (a minted spec keeps its citation, #1468)`,
             );
@@ -1039,6 +1122,7 @@ const syncGraphFromGithubAsSystem = async (
               where: { loc_memoryId: { loc, memoryId: graph.id } },
             });
             if (occupant && skippedRowIds.has(occupant.id)) {
+            reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'DESTINATION_PROTECTED' });
               // #1224 / @codex P2 on PR #1229 — the occupant's OWN file was
               // renamed to something unusable this run, so it is not moving
               // out of the way and it is not being deleted either. Parking it
@@ -1068,6 +1152,7 @@ const syncGraphFromGithubAsSystem = async (
               // own file never settled it. Hold the move instead: both rows
               // keep valid addresses, and the mover's edges wait with it.
               heldMoves.push(`${byId.loc} → ${loc} (occupant ${occupant.id})`);
+              reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'MOVE_HELD' });
               protectedRowIds.add(byId.id);
               deferredLocs.add(loc);
               incomingEdgesWait();
@@ -1077,6 +1162,7 @@ const syncGraphFromGithubAsSystem = async (
               occupant && occupant.id !== byId.id
               && (await lockMintedSpecsIn(tx, graph.id, [occupant.id])).length > 0
             ) {
+              reportEntries.push({ kind: 'held_move', loc, fromLoc: byId.loc, code: 'DESTINATION_PROTECTED' });
               // #1468 — a minted spec is never parked. Parking hands its
               // published citation to the incoming node, and whether the
               // spec's own file re-homes it later this run cannot be known
@@ -1183,11 +1269,16 @@ const syncGraphFromGithubAsSystem = async (
         writtenNodes.push({ id: rowId, loc, memoryId: graph.id });
         locToRowId.set(loc, rowId);
         if (node.id && !idSettled(node.id)) fileIdToRowId.set(node.id, rowId);
-        pendingEmbeds.push({
-          nodeId: rowId,
-          plaintext: { content: node.content ?? null, abstract: node.abstract ?? null },
-        });
+        const embeddingToken = await stampEmbeddingObligation(tx, rowId, graph.id);
+        if (embeddingToken) embeddingWakeNeeded = true;
 
+      }
+
+      // #2040 — derive include edges once every file of this sync is written, so
+      // a tag may name a file synced later in the same run.
+      for (const written of writtenNodes) {
+        const row = await tx.node.findUnique({ where: { id: written.id }, select: { content: true } });
+        await syncDerivedIncludesEdges(tx, written, storedIncludeTags(row?.content), [graph.id]);
       }
 
       // Spec 049 S4: never delete a row under (or above) a Channel's address,
@@ -1258,8 +1349,13 @@ const syncGraphFromGithubAsSystem = async (
             ? { NOT: { OR: deletionFilter.notClauses as Prisma.NodeWhereInput[] } }
             : {}),
           ...unreadableLocFilter,
+          // #2043 — repo-wins cleanup never removes a compiled boot prompt, file or no file:
+          // only a compile (or a deliberate delete) removes one.
+          nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE },
         };
         const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
+        // #2043 (cor:agt:040:11) — nor does a worker session's sync delete a boot-prompt source.
+        await assertNoBootPromptRows(tx, pruned.map((n) => n.id), 'import');
         if (memoryState.readBranch == null && !memoryState.readBranchCorrected && pruned.length > 0) {
           // #1566: old blank-read syncs could ingest the write branch and
           // adopt Hadron-created nodes as repo-owned. Boot sync runs before an
@@ -1510,6 +1606,17 @@ const syncGraphFromGithubAsSystem = async (
           }
         }
         await reconcilePendingEdgeCount(tx, graph.id);
+        // #1507: the graph and its outcome commit together. A metadata failure
+        // must roll back the graph, never leave a falsely clean old report.
+        const recordedAt = new Date();
+        await tx.memory.update({
+          where: { id: graph.id },
+          data: {
+            lastSyncedAt: recordedAt, syncStatus: 'OK', syncError: null,
+            lastSyncReport: committedSyncReport(reportEntries, recordedAt, skippedInvalidLoc.length > 0),
+            ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
+          },
+        });
       });
       break;
     } catch (error) {
@@ -1539,26 +1646,8 @@ const syncGraphFromGithubAsSystem = async (
       console.warn(`[syncGraphFromGithub] "${graphName}": pending-edge count reconcile failed (the periodic repair will fix it):`, err),
     );
 
-    // 5. Record sync time and status
-    await db.memory.update({
-      where: { id: graph.id },
-      data: {
-        lastSyncedAt: new Date(), syncStatus: 'OK', syncError: null,
-        ...(correctionCheckCompleted ? { readBranchCorrected: true } : {}),
-      },
-    }).catch(() => {});
-
-    // 6. Spec 033 T029 — enqueue embedding for each upserted node now that
-    // the transaction has committed. Fire-and-forget; enqueueNodeEmbedding
-    // is a no-op when the memory isn't vector-indexed and is internally
-    // catch-all so it can never break the sync.
-    for (const e of pendingEmbeds) {
-      void enqueueNodeEmbedding(db, {
-        nodeId: e.nodeId,
-        memoryId: graph.id,
-        plaintext: e.plaintext,
-      });
-    }
+    // The transaction is visible before any local selector or optional broker wake.
+    if (embeddingWakeNeeded) wakeEmbeddingQueue(db);
 
     if (skippedProtected.length > 0) {
       console.warn(`Sync of "${graphName}": skipped ${skippedProtected.length} file(s) under a Channel's address: ${skippedProtected.join(', ')}`);
@@ -1579,26 +1668,53 @@ const syncGraphFromGithubAsSystem = async (
         `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
       );
     }
+    if (skippedInvalidIncludes.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": skipped ${skippedInvalidIncludes.length} file(s) with an invalid include tag: ${skippedInvalidIncludes.map((i) => `${i.loc} (${i.code})`).join('; ')}`,
+      );
+    }
     if (heldMoves.length > 0) {
       console.warn(
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, deferredLateRows, heldMoves };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({
       where: { id: graph.id },
-      data: { syncStatus: 'ERROR', syncError: (error as Error).message },
+      data: { syncStatus: 'ERROR', syncError: (error as Error).message,
+        lastSyncReport: failedSyncReport(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError ? 'BAD_USER_INPUT' : 'SYNC_FAILED') },
     }).catch(() => {});
     console.error(`Failed to sync memory "${graph.name}":`, error);
     return {
       error: (error as Error).message,
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
-        ? { errorCode: 'BAD_USER_INPUT' as const } : {}),
+        ? { errorCode: 'BAD_USER_INPUT' as const }
+        : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }
+          // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
+          : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
   }
 };
+
+/**
+ * #2527: restore the stored tokenless source under the shared checkout lock on
+ * every read exit, including a partial clone. Never replace the primary outcome
+ * or log the raw error/URL if restoration fails (same contract as #2396).
+ */
+async function restoreReadRemote(localPath: string, source: string): Promise<void> {
+  try {
+    if (!existsSync(join(localPath, '.git'))) return;
+    await execGit(['remote', 'set-url', 'origin', source], { cwd: localPath });
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    console.error(
+      `[syncGraphFromGithub] Failed to restore the origin URL at ${localPath}; the checkout may still hold an installation token until the next successful restore.`,
+      typeof code === 'string' ? code : 'unknown',
+    );
+  }
+}
 
 async function gitSync(cloneUrl: string, localPath: string, readBranch?: string): Promise<void> {
   // #1146: validated BEFORE the clone/pull split, because both arms reach git
@@ -1675,4 +1791,4 @@ function extractOwnerRepo(gitUrl: string): string {
  * the system even inside a worker's request: node and revision then agree.
  */
 export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
-  runAsSystem(() => syncGraphFromGithubAsSystem(...args));
+  withSyncCaller(boundWorkerId(), () => runAsSystem(() => syncGraphFromGithubAsSystem(...args)));

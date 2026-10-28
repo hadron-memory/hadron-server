@@ -1,8 +1,10 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
-import { AUDIT_USER_COLUMNS } from './mergeUsers.js';
+import { generateId } from '../../lib/id.js';
+import { AUDIT_USER_COLUMNS, DIRECT_USER_REFERENCES } from './mergeUsers.js';
 
 type AuditColumn = { table_name: string; column_name: string };
 
@@ -21,6 +23,16 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   // is a sealed record of the time. Pinned in agentTasks/agentTasks.test.ts.
   'agent_team_events.actor_user_id',
   'agent_team_events.acknowledged_by_user_id',
+  // #2441 — adoption events are append-only history of who approved, declined
+  // or revoked an automation; sealed like the stream above.
+  'automation_adoption_events.actor_user_id',
+  // #2484 — an App's write grant is the sealed record of who delegated and who ended it, and its events are
+  // append-only (triggers refuse the UPDATE a retarget would need). For a personal or private memory the grant also
+  // fails closed after a merge: the write-time check requires the grantor to still own the memory, so a retargeted
+  // owner simply re-grants. Pinned in lib/appWriteGrant.test.ts.
+  'app_memory_write_grants.granted_by',
+  'app_memory_write_grants.revoked_by',
+  'app_memory_write_grant_events.actor_user_id',
   // #1632 — signing requests and signature records are guarded history (a
   // trigger refuses any change to a request's pins and any update of a
   // record): who asked, who was named and who signed are sealed. A merged-away
@@ -52,10 +64,14 @@ describe('mergeUsers audit actor registry', () => {
         AND (column_name IN ('created_by', 'updated_by', 'deleted_by', 'revoked_by')
           OR (table_name = 'automation_versions' AND column_name IN ('published_by', 'approved_by'))
           OR (table_name = 'agent_tasks' AND column_name = 'assigned_by')
+          OR (table_name = 'workers' AND column_name = 'retired_by')
           OR (table_name = 'ticker_subscriptions' AND column_name IN ('ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'))
           OR (table_name = 'app_grants' AND column_name = 'granted_by')
           OR (table_name = 'app_key_scopes' AND column_name IN ('granted_by_user_id', 'revoked_by_user_id'))
           OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id'))
+          OR (table_name = 'automation_adoption_events' AND column_name = 'actor_user_id')
+          OR (table_name = 'app_memory_write_grants' AND column_name = 'granted_by')
+          OR (table_name = 'app_memory_write_grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'signing_requests' AND column_name IN ('requester_user_id', 'named_signer_id'))
           OR (table_name = 'node_signatures' AND column_name = 'signer_id'))
     `;
@@ -163,7 +179,7 @@ describe('mergeUsers audit actor registry', () => {
       data: { organizationId: org.id, name: 'Audit Agent', urn: `${org.urn}:agent` },
     });
     const worker = await db.worker.create({
-      data: {
+      data: { ...WORKER_SIGNATURE_DEFAULTS,
         appId: app.id,
         agentId: agent.id,
         name: 'Audit Worker',
@@ -269,5 +285,86 @@ describe('mergeUsers audit actor registry', () => {
       deletedBy: actor.id,
       deletedAt: expect.any(Date),
     });
+  });
+
+  // #1416 (R204): the action-specific actor columns the generic created/updated/deleted/revoked guard does not
+  // cover. `workers.retired_by` rides AUDIT_USER_COLUMNS (checked by the test above); the impersonation columns
+  // are rewritten by a dedicated statement in mergeUsers, in a fixed order after the live sessions are ended.
+  // This list is semantic: it names the columns whose value IS a User.id, never every `_by` column.
+  const IMPERSONATION_USER_COLUMNS = new Set([
+    'impersonation_sessions.admin_user_id',
+    'impersonation_sessions.target_user_id',
+    'impersonation_sessions.ended_by',
+  ]);
+
+  it('classifies every User-valued column of impersonation_sessions and workers.retired_by', async () => {
+    const columns = await db.$queryRaw<AuditColumn[]>`
+      SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'impersonation_sessions'
+        AND (column_name LIKE '%\_by' OR column_name LIKE '%\_user\_id' OR column_name LIKE '%\_by\_id')
+    `;
+    const schemaPairs = new Set(columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`));
+    // A new actor or participant column on the audit table fails here until a ruling classifies it.
+    expect([...schemaPairs].sort()).toEqual([...IMPERSONATION_USER_COLUMNS].sort());
+    expect(AUDIT_USER_COLUMNS.workers).toContain('retired_by');
+    // The dedicated statement owns these; the generic loops must not also touch them.
+    expect(Object.keys(AUDIT_USER_COLUMNS)).not.toContain('impersonation_sessions');
+    expect(DIRECT_USER_REFERENCES.filter(([table]) => table === 'impersonation_sessions')).toEqual([]);
+  });
+
+  // `minted_by` / `validate_by` look like actor columns and are not. Each is classified here by what it holds;
+  // a new column of either name fails until it is classified too.
+  const MINTED_VALIDATE_BY_CLASSIFICATION: Readonly<Record<string, string>> = {
+    // The node's mint attribution: a User.id, rewritten by DIRECT_USER_REFERENCES.
+    'nodes.minted_by': 'user-id: follows the survivor',
+    // ctx.userId ?? ctx.clientId ?? 'unknown' — mixed User / client / sentinel provenance, no FK, no authority
+    // consumer. Issuance history; R204 leaves it where it was written.
+    'action_tickets.minted_by': 'mixed provenance: preserved',
+    // ContentValidator enums (configuration), not identities.
+    'node_role_rules.validate_by': 'enum: not an actor',
+    'memory_config_template_rules.validate_by': 'enum: not an actor',
+  };
+
+  it('classifies every minted_by / validate_by column and leaves the mixed ones out of the rewrite', async () => {
+    const columns = await db.$queryRaw<AuditColumn[]>`
+      SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND column_name IN ('minted_by', 'validate_by')
+    `;
+    const schemaPairs = columns.map(({ table_name, column_name }) => `${table_name}.${column_name}`).sort();
+    expect(schemaPairs).toEqual(Object.keys(MINTED_VALIDATE_BY_CLASSIFICATION).sort());
+
+    const rewritten = new Set([
+      ...DIRECT_USER_REFERENCES.map(([table, column]) => `${table}.${column}`),
+      ...coveredPairs(AUDIT_USER_COLUMNS),
+    ]);
+    for (const [pair, kind] of Object.entries(MINTED_VALIDATE_BY_CLASSIFICATION)) {
+      expect(rewritten.has(pair), pair).toBe(kind.startsWith('user-id'));
+    }
+  });
+
+  it('keeps action_tickets.minted_by as written, whatever it holds', async () => {
+    const [source, target, actor] = await Promise.all([
+      db.user.create({ data: { handle: 'ticket-merge-source' } }),
+      db.user.create({ data: { handle: 'ticket-merge-target' } }),
+      db.user.create({ data: { handle: 'ticket-merge-actor', roles: ['ADMIN'] } }),
+    ]);
+    const org = await db.organization.create({ data: { name: 'Ticket merge org', urn: 'ticket-merge-org.test' } });
+    const mint = async (mintedBy: string) => {
+      const id = generateId();
+      await db.actionTicket.create({ data: { id, organizationId: org.id, action: 'comm.outbound', mintedBy } });
+      return id;
+    };
+    const ids = [await mint(source.id), await mint('client:some-app'), await mint('unknown')];
+
+    await mergeUsers(db, { sourceUserId: source.id, targetUserId: target.id, actorUserId: actor.id });
+
+    const rows = await db.actionTicket.findMany({ where: { id: { in: ids } }, orderBy: { id: 'asc' } });
+    expect(new Map(rows.map((r) => [r.id, r.mintedBy]))).toEqual(
+      new Map([
+        [ids[0], source.id],
+        [ids[1], 'client:some-app'],
+        [ids[2], 'unknown'],
+      ]),
+    );
   });
 });

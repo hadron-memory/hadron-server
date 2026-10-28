@@ -406,10 +406,8 @@ describe('FR-011 — hadron_validate sparse-node rule extension', () => {
     return srv.callToolText('hadron_validate', { memoryUrn });
   }
 
-  // createMemory provisions a root node that has no description / content /
-  // abstract — hadron_validate will (correctly) flag it. We assert against the
-  // specific test-node URN being absent/present rather than against the
-  // total sparse-count, so the memory-root noise floor doesn't matter.
+  // #2513: createMemory describes its scaffold root. Keep these assertions
+  // focused on each test node so they exercise the sparse rule itself.
 
   it("flags a sparse node (no description, no content, no abstract) with the new message", async () => {
     await addNode({ loc: 'sp-none' });

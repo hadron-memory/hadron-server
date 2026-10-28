@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1708 — Task Management T5: task events as the second relevance source of the
  * due-wake computation, with per-event acknowledgement (design:agent-tasks §6;
@@ -47,7 +48,7 @@ async function mkUser(n: number) {
 }
 const mkWorker = (name: string, extra: Record<string, unknown> = {}) =>
   db.worker.create({
-    data: { id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date(), ...extra },
     select: { id: true, name: true },
   });
 
@@ -69,7 +70,7 @@ beforeEach(async () => {
 const dueFor = (c: Context = ctx(manager.id), now = new Date()) =>
   computeDueWakes({ ctx: c, app, reader: { manager: true, userId: c.userId ?? null }, requester: { userId: c.userId! }, now });
 
-type TaskReason = { kind: 'TASK'; taskId: string; eventId: string; chainIndex: number; event: string; title: string };
+type TaskReason = { kind: 'TASK'; taskId: string; eventId: string; chainIndex: number; event: string; title: string; handle: string };
 const taskReasons = (page: Awaited<ReturnType<typeof dueFor>>, workerId: string): TaskReason[] =>
   (page.wakes.find((w) => w.workerId === workerId)?.wake.reasons ?? []).filter((r) => r.kind === 'TASK') as unknown as TaskReason[];
 const dueIds = (page: Awaited<ReturnType<typeof dueFor>>) => page.wakes.map((w) => w.workerId).sort();
@@ -96,7 +97,7 @@ describe('each waking event makes exactly its subject due', () => {
     const page = await dueFor();
     expect(dueIds(page)).toEqual([liam.id]);
     expect(taskReasons(page, liam.id)).toEqual([
-      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42' },
+      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/) },
     ]);
   });
 
@@ -150,7 +151,7 @@ describe("a child's finish wakes the child's owner (the parent's assignee, 050:1
     const page = await dueFor();
     expect(dueIds(page)).toEqual([liam.id]);
     expect(taskReasons(page, liam.id)).toEqual([
-      { kind: 'TASK', taskId: child.id, eventId: e.id, chainIndex: 0, event: 'CHILD_FINISHED', title: 'Child' },
+      { kind: 'TASK', taskId: child.id, eventId: e.id, chainIndex: 0, event: 'CHILD_FINISHED', title: 'Child', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/) },
     ]);
   });
 
@@ -212,7 +213,8 @@ describe('acknowledgement per event (wake proof v2)', () => {
     const { eventId } = await assignedTo(liam);
     const page = await dueFor();
     const proof = verifyWakeProof(page.wakes[0]!.proof);
-    expect(proof.v).toBe(2);
+    expect(proof.v).toBe(3); // #2072: v3 carries the wake key and no channel range
+    expect(proof.channels).toEqual([]);
     expect(proof.tasks).toEqual([{ eventId, chainIndex: 0 }]);
     await ack(page.wakes[0]!.proof);
     const row = await db.workerDeliveryTaskEvent.findUnique({ where: { workerId_eventId_chainIndex: { workerId: liam.id, eventId, chainIndex: 0 } } });
@@ -231,6 +233,8 @@ describe('acknowledgement per event (wake proof v2)', () => {
   it('a v1 proof (issued before this deploy) still verifies and acknowledges', async () => {
     const v1 = signWakeProof({ v: 1, kind: 'wake-proof', appId: app.id, workerId: liam.id, requester: { userId: manager.id }, channels: [], ticks: [], exempt: false, issuedAt: Date.now() } as any);
     expect(verifyWakeProof(v1).tasks).toEqual([]);
+    // #2072 (R53): its wake's receipt is recorded once, though it names nothing; a repeat changes nothing.
+    expect(await ack(v1)).toEqual({ acknowledged: 1, unchanged: 0 });
     expect(await ack(v1)).toEqual({ acknowledged: 0, unchanged: 1 });
   });
 
@@ -267,7 +271,7 @@ describe('an alarm wakes its currently-woken chain position (050:19)', () => {
     const page = await dueFor();
     expect(dueIds(page)).toEqual([liam.id]);
     expect(taskReasons(page, liam.id)).toEqual([
-      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ALARM', title: 'Review #42' },
+      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ALARM', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/) },
     ]);
   });
 
@@ -405,7 +409,7 @@ describe("the router's surface: an App key with attention:deliver (cor:agt:080:2
     const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
     expect(page.wakes).toHaveLength(1);
     expect(page.wakes[0].reasons).toEqual([
-      { kind: 'TASK', ticker: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', ref: `TASK:${taskId}:assigned` } },
+      { kind: 'TASK', ticker: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/), ref: `TASK:${taskId}:assigned` } },
     ]);
     expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
     const row = await db.workerDeliveryTaskEvent.findFirstOrThrow({ where: { eventId } });
@@ -523,5 +527,16 @@ describe('dueness follows Tickers, not session liveness (Colin P3 on #1859)', ()
     expect((await taskStallTick(db, new Date())).undeliverable).toBe(1);
     expect((await taskStallTick(db, new Date(Date.now() + MIN))).undeliverable).toBe(0);
     expect(await db.workerDeliveryTaskEvent.count({ where: { undeliverableReason: 'dormant', deliveredAt: null } })).toBe(1);
+  });
+});
+
+describe('#2138 §3.6 — a team pause silences task-event wakes too', () => {
+  it('a task.assigned wake is due, not due while the team is paused, due again when it resumes', async () => {
+    await assignedTo(liam);
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
+    expect(dueIds(await dueFor())).toEqual([]);
+    await db.app.update({ where: { id: app.id }, data: { teamPausedAt: null } });
+    expect(dueIds(await dueFor())).toEqual([liam.id]);
   });
 });

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #943 — `SessionInput.appRef`: the write path that makes the team-chat
  * authorship gate reachable.
@@ -485,7 +486,7 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
 
   beforeEach(async () => {
     worker = await db.worker.create({
-      data: { appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: teamAgent.id, name: 'Iris', slug: 'iris' },
     });
   });
 
@@ -529,14 +530,12 @@ describe('SessionInput.workerRef (#974) — binding the named identity', () => {
     );
   });
 
-  it('a NAME-shaped ref with no App context → SESSION_WORKER_NAME_NEEDS_APP (#990)', async () => {
-    // Changed deliberately by #990: a bare string is now a worker NAME, and a
-    // name is only unique within an App. Answering WORKER_NOT_FOUND here would
-    // claim a lookup that never happened — this says which input is missing.
-    // The id and URN shapes above keep the original refusal.
+  it('an absent NAME-shaped ref without App context → WORKER_NOT_FOUND (#1597)', async () => {
+    // Unscoped names now search the caller’s bindable Apps. This name has no
+    // candidate; ID and URN shapes retain their existing refusal above.
     await expectCode(
       startSession(ctx(contrib.id), { workerRef: 'no-such-worker' }),
-      'SESSION_WORKER_NAME_NEEDS_APP',
+      'WORKER_NOT_FOUND',
     );
   });
 

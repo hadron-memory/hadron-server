@@ -16,6 +16,7 @@ import {
   purgeCollectedAssetObjects,
   type CollectedAssetKeys,
 } from '../../lib/asset/purge.js';
+import { forbiddenError } from '../../lib/refusals.js';
 
 /**
  * Thrown when account deletion is blocked because the target is the only
@@ -196,7 +197,7 @@ async function runDeletionTxn(
         await tx.$queryRaw`SELECT id FROM users WHERE id = ${actorUserId} FOR SHARE`;
         const actor = await tx.user.findUnique({ where: { id: actorUserId }, select: { roles: true, deletedAt: true } });
         if (!actor || actor.deletedAt || !actor.roles.some((r) => r === 'ADMIN' || r === 'OWNER')) {
-          throw new Error('Forbidden');
+          throw forbiddenError();
         }
       }
       // Lock + liveness re-check under the lock (mergeUsers precedent):
@@ -349,6 +350,9 @@ async function runDeletionTxn(
       // Copilot). Erasure wins over worker-name permanence for the erased
       // user's own castings, deliberately.
       await tx.worker.deleteMany({ where: { agent: { ownerUserId: targetUserId } } });
+      // #2044 / R94 C: another App's install memory of one of these Agents is neither erased nor a
+      // blocker. `Memory.installOfAgentId` is ON DELETE SET NULL: the agent delete below detaches
+      // it and it stays with its App (`isInstallMemory`), whose managers may delete it (R45).
       // User-owned Agents (before memories: their system memories are owned
       // rows swept by the memory pass — Agent.systemMemoryId carries no FK).
       await tx.agent.deleteMany({ where: { ownerUserId: targetUserId } });
@@ -469,6 +473,24 @@ async function runDeletionTxn(
           deletedBy: actorUserId,
           updatedBy: actorUserId,
         },
+      });
+
+      // ── 5. #1631 PR3 / cor:aut:040:05 (#10404): passkey records ────────
+      // Each record stays as a verification record (public key, credential id, times, window outcome); its
+      // identifying parts are erased: the label, and the cancel record's IP address and user agent. The guard
+      // admits exactly this, and only now that the user row is soft-deleted (step 4 above).
+      // An erased label reads as the fixed text 'Erased passkey' (Holger, 2026-10-21, team chat #29507).
+      await tx.$executeRaw`UPDATE passkey_credentials SET label = 'Erased passkey',
+          cancel_ip = CASE WHEN cancelled_at IS NOT NULL THEN '' END,
+          cancel_user_agent = CASE WHEN cancelled_at IS NOT NULL THEN '' END
+        WHERE owner_id = ${targetUserId}`;
+      // Ceremony state carries no history worth keeping: a deleted user can't confirm, register or revoke.
+      await tx.freshSignIn.deleteMany({ where: { userId: targetUserId } });
+      await tx.passkeyCeremony.deleteMany({ where: { userId: targetUserId } });
+      // An unsent notice can no longer be delivered (the address is erased); settle it without its cancel token.
+      await tx.passkeyRegistrationNotice.updateMany({
+        where: { userId: targetUserId, sentAt: null, failedAt: null },
+        data: { failedAt: now, cancelTokenEnc: null, leaseUntil: null, claimToken: null },
       });
 
       return {

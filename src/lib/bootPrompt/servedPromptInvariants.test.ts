@@ -38,7 +38,7 @@ describe('served-prompt-invariants.sql (#2047)', () => {
       agentId = agent.id;
       appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'T', urn: `${org.urn}:t` } })).id;
       otherAppId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'U', urn: `${org.urn}:u` } })).id;
-      workerId = (await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'W', slug: 'w' } })).id;
+      workerId = (await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'W', slug: 'w', signature: '', trailer: '' } })).id;
       sessionId = (await db.session.create({ data: { id: generateId(), appId, agentId, workerId, type: 'DEVELOPER' } as never })).id;
       runId = (
         await db.appRun.create({
@@ -106,7 +106,7 @@ describe('served-prompt-invariants.sql (#2047)', () => {
       const otherAgent = await db.agent.create({ data: { id: generateId(), name: 'B', organizationId: (await db.app.findUniqueOrThrow({ where: { id: appId } })).organizationId, urn: `x:${generateId()}` } as never });
       await bad(bind({ agentId: otherAgent.id }), /served_prompts_session_owner_fkey/);
       await bad(run({ agentId: otherAgent.id }), /served_prompts_run_owner_fkey/);
-      const otherWorker = await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'W2', slug: 'w2' } });
+      const otherWorker = await db.worker.create({ data: { id: generateId(), appId, agentId, name: 'W2', slug: 'w2', signature: '', trailer: '' } });
       await bad(bind({ workerId: otherWorker.id }), /served_prompts_session_owner_fkey/);
     });
 

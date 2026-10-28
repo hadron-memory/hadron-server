@@ -34,6 +34,7 @@ import { UrnNotQualifiedError } from '../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../lib/entityRef/errors.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type ActorRef = { id: string; name: string | null; handle: string | null; urn: string | null };
 type Author = { kind: 'WORKER' | 'USER' | 'USER_AGENT' | 'APP'; worker: ActorRef | null; user: ActorRef | null; agent: ActorRef | null; app: ActorRef | null };
@@ -62,6 +63,11 @@ function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
+/** A refusal is a failed call: isError is set (#1789). */
+function refused(text: string) {
+  return { isError: true as const, ...textResult(text) };
+}
+
 /**
  * A resolver refusal as `[<code>] <message>`, plus its extensions (threadId,
  * currentRevision, class, field/max) as `key: value` so an agent can act on
@@ -71,18 +77,15 @@ function textResult(text: string) {
  * server fault and is rethrown.
  */
 export function commentErrorText(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
-    return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'));
-  }
-  if (e instanceof Error && (e.message === 'Forbidden' || e.message === 'Unauthenticated')) {
-    return textResult(`[${e.message.toLowerCase()}] ${e.message}.`);
+    return refused([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'));
   }
   // A ref that can't be resolved as written is the caller's input, not a
   // server fault (the scope tools' convention).
   if (e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) {
-    return textResult(`[bad_user_input] ${e.message}`);
+    return refused(`[bad_user_input] ${e.message}`);
   }
   throw e;
 }
@@ -172,7 +175,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
     userId: auth.userId ?? undefined,
     // #1868: the presented hdr_user_ key, so the shared authorized transaction
     // re-checks it is still unrevoked at the write (as #1864's signing tools do).
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     sessionId: auth.sessionId ?? undefined,
     roles: auth.roles as Context['roles'],
@@ -183,12 +186,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_list_comments',
     `Read the discussion on a node: its comment threads, newest first, each with its replies (cor:dmo:110). ${COMMENT_FRAMING} Needs read access to the node's memory. A node read's "Feedback:" line says when there are open threads.`,
-    {
-      targetRef: z.string().describe('The node whose discussion to read: its URN or id.'),
-      state: z.array(z.enum(['OPEN', 'RESOLVED'])).optional().describe('Only threads in these states. Default: all.'),
-      limit: z.number().int().nonnegative().optional().describe('Threads per page (default 50, cap 200). Each thread returns up to 200 replies.'),
-      offset: z.number().int().nonnegative().optional().describe('Page offset.'),
-    },
+    SHAPE_HADRON_LIST_COMMENTS,
     async ({ targetRef, state, limit, offset }) => {
       const ctx = ctxOf();
       try {
@@ -224,7 +222,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_get_comment',
     `Read one comment by its URN or id (cor:dmo:110). ${COMMENT_FRAMING} Read the whole thread with hadron_list_comments on its target.`,
-    { commentRef },
+    SHAPE_HADRON_GET_COMMENT,
     async ({ commentRef: ref }) => {
       const ctx = ctxOf();
       try {
@@ -244,12 +242,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
       + 'Needs write access to the node\'s memory, in an app, knowledge, personal, group or system memory (never a private one). You hold at most ONE open thread per node: '
       + 'a second is refused [comment_open_thread_exists] with its threadId, so reply there instead. If you started a worker session with '
       + 'hadron_start_session, the comment is authored by that worker.',
-    {
-      targetRef: z.string().describe('The node to comment on: its URN or id. A comment cannot be a target (use hadron_reply_to_comment).'),
-      body: z.string().describe('The comment (markdown, up to 20,000 characters).'),
-      quote: z.string().optional().describe('Optional plain-text passage of the node the comment is about (up to 2,000 characters).'),
-      anchorRevision: z.number().int().optional().describe('The node revision the comment is about. Default: its current revision.'),
-    },
+    SHAPE_HADRON_CREATE_COMMENT,
     async ({ targetRef, body, quote, anchorRevision }) => {
       const ctx = ctxOf();
       try {
@@ -264,10 +257,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
     'hadron_reply_to_comment',
     'Reply in a comment thread (cor:dmo:110:05). `commentRef` may be any comment of the thread. A resolved thread accepts replies and stays resolved; '
       + 'reopen it with hadron_reopen_comment_thread. Needs write access to the memory.',
-    {
-      commentRef,
-      body: z.string().describe('The reply (markdown, up to 20,000 characters).'),
-    },
+    SHAPE_HADRON_REPLY_TO_COMMENT,
     async ({ commentRef: ref, body }) => {
       const ctx = ctxOf();
       try {
@@ -281,12 +271,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_edit_comment',
     'Edit your own comment\'s body and/or quote (cor:dmo:110:05). Only its author may; the earlier text stays in its revision history.',
-    {
-      commentRef,
-      body: z.string().optional().describe('The new body.'),
-      quote: z.string().nullable().optional().describe('The new quote; null clears it. Omit to keep it.'),
-      expectedRevision,
-    },
+    SHAPE_HADRON_EDIT_COMMENT,
     async ({ commentRef: ref, body, quote, expectedRevision: rev }) => {
       const ctx = ctxOf();
       try {
@@ -300,7 +285,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_delete_comment',
     'Delete your own comment (cor:dmo:110:05). A top-level comment with replies stays as a stub showing it was deleted, so the replies keep their context; any other comment is no longer shown at all, and a stub goes with its last reply. Its text is no longer served either way, and it no longer counts as your open comment. Its author may; so may a memory manager.',
-    { commentRef, expectedRevision },
+    SHAPE_HADRON_DELETE_COMMENT,
     async ({ commentRef: ref, expectedRevision: rev }) => {
       const ctx = ctxOf();
       try {
@@ -314,7 +299,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_resolve_comment_thread',
     'Mark a comment thread resolved (cor:dmo:110:05): name its top-level comment. Any writer of the memory may, not only its author.',
-    { commentRef: z.string().describe('The thread\'s top-level comment: URN or id. A reply is refused [comment_not_top_level] with threadRootId.'), expectedRevision },
+    SHAPE_HADRON_RESOLVE_COMMENT_THREAD,
     async ({ commentRef: ref, expectedRevision: rev }) => {
       const ctx = ctxOf();
       try {
@@ -328,7 +313,7 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_reopen_comment_thread',
     'Reopen a resolved comment thread (cor:dmo:110:05): name its top-level comment. Any writer of the memory may. Refused [comment_open_thread_exists] when its author already has another open thread on the node.',
-    { commentRef: z.string().describe('The thread\'s top-level comment: URN or id.'), expectedRevision },
+    SHAPE_HADRON_REOPEN_COMMENT_THREAD,
     async ({ commentRef: ref, expectedRevision: rev }) => {
       const ctx = ctxOf();
       try {
@@ -339,3 +324,42 @@ export function registerCommentTools(server: McpServer, deps: { db: PrismaClient
     },
   );
 }
+
+// ── #2260: parameter shapes, built ONCE per process ──────────────────────────
+// A shape is pure data (no session state: moved here only because nothing in it resolves to a
+// function- or block-scoped binding, so `tsc` rejects one that captures `auth` or any other
+// per-session value). Every MCP session registers these same objects instead of rebuilding ~15 MB.
+
+const SHAPE_HADRON_LIST_COMMENTS = {
+  targetRef: z.string().describe('The node whose discussion to read: its URN or id.'),
+  state: z.array(z.enum(['OPEN', 'RESOLVED'])).optional().describe('Only threads in these states. Default: all.'),
+  limit: z.number().int().nonnegative().optional().describe('Threads per page (default 20, cap 200). Each thread returns up to 200 replies.'),
+  offset: z.number().int().nonnegative().optional().describe('Page offset.'),
+};
+
+const SHAPE_HADRON_GET_COMMENT = { commentRef };
+
+const SHAPE_HADRON_CREATE_COMMENT = {
+  targetRef: z.string().describe('The node to comment on: its URN or id. A comment cannot be a target (use hadron_reply_to_comment).'),
+  body: z.string().describe('The comment (markdown, up to 20,000 characters).'),
+  quote: z.string().optional().describe('Optional plain-text passage of the node the comment is about (up to 2,000 characters).'),
+  anchorRevision: z.number().int().optional().describe('The node revision the comment is about. Default: its current revision.'),
+};
+
+const SHAPE_HADRON_REPLY_TO_COMMENT = {
+  commentRef,
+  body: z.string().describe('The reply (markdown, up to 20,000 characters).'),
+};
+
+const SHAPE_HADRON_EDIT_COMMENT = {
+  commentRef,
+  body: z.string().optional().describe('The new body.'),
+  quote: z.string().nullable().optional().describe('The new quote; null clears it. Omit to keep it.'),
+  expectedRevision,
+};
+
+const SHAPE_HADRON_DELETE_COMMENT = { commentRef, expectedRevision };
+
+const SHAPE_HADRON_RESOLVE_COMMENT_THREAD = { commentRef: z.string().describe('The thread\'s top-level comment: URN or id. A reply is refused [comment_not_top_level] with threadRootId.'), expectedRevision };
+
+const SHAPE_HADRON_REOPEN_COMMENT_THREAD = { commentRef: z.string().describe('The thread\'s top-level comment: URN or id.'), expectedRevision };

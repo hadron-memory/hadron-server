@@ -1,0 +1,34 @@
+{
+  "description": "hadron-server #2391 / hadron-cli #945 shared Markdown body-framing fixture (cor:int:020:01, F1). A node file is `---\\n<frontmatter>\\n---\\n` followed by `body`; a conforming reader returns `loaded` as the node content (null = no content). Writers frame stored content as `\\n<content>\\n` (empty for null). The reader normalizes CRLF to LF over the whole file, then removes ONE leading `\\n` and ONE trailing `\\n` if present, nothing else; a result that is empty or only ASCII whitespace (space, \\t, \\n, \\r, \\v, \\f) is null. kind: `roundtrip` = writing `stored` produces `body` and reading it gives `stored` back; `lossy` = writing `stored` produces `body`, and the ruled read differs from `stored`; `parse` = a hand-written file, read only. Copies in other repos must match case for case.",
+  "version": "markdown-body-framing-v1",
+  "frontmatter": "---\nname: fixture\n---\n",
+  "cases": [
+    { "name": "plain", "kind": "roundtrip", "stored": "X", "body": "\nX\n", "loaded": "X" },
+    { "name": "trailing-newline", "kind": "roundtrip", "stored": "X\n", "body": "\nX\n\n", "loaded": "X\n" },
+    { "name": "leading-newline", "kind": "roundtrip", "stored": "\nX", "body": "\n\nX\n", "loaded": "\nX" },
+    { "name": "indented-code", "kind": "roundtrip", "stored": "    code\n", "body": "\n    code\n\n", "loaded": "    code\n" },
+    { "name": "blank-lines-both-ends", "kind": "roundtrip", "stored": "\n\nX\n\n", "body": "\n\n\nX\n\n\n", "loaded": "\n\nX\n\n" },
+    { "name": "tabs-and-spaces-around", "kind": "roundtrip", "stored": "  \tX\t  ", "body": "\n  \tX\t  \n", "loaded": "  \tX\t  " },
+    { "name": "lone-cr-is-content", "kind": "roundtrip", "stored": "A\rB", "body": "\nA\rB\n", "loaded": "A\rB" },
+    { "name": "multiline-unicode", "kind": "roundtrip", "stored": "héllo 🧪\n\n- item\n", "body": "\nhéllo 🧪\n\n- item\n\n", "loaded": "héllo 🧪\n\n- item\n" },
+    { "name": "unicode-boundaries", "kind": "roundtrip", "stored": " ﻿X\u0085  ", "body": "\n ﻿X\u0085  \n", "loaded": " ﻿X\u0085  " },
+    { "name": "nbsp-only-is-content", "kind": "roundtrip", "stored": " ", "body": "\n \n", "loaded": " " },
+    { "name": "bom-only-is-content", "kind": "roundtrip", "stored": "﻿", "body": "\n﻿\n", "loaded": "﻿" },
+    { "name": "nel-only-is-content", "kind": "roundtrip", "stored": "\u0085", "body": "\n\u0085\n", "loaded": "\u0085" },
+    { "name": "line-separator-only-is-content", "kind": "roundtrip", "stored": " ", "body": "\n \n", "loaded": " " },
+    { "name": "null", "kind": "roundtrip", "stored": null, "body": "\n\n", "loaded": null },
+    { "name": "empty-string-reads-null", "kind": "lossy", "stored": "", "body": "\n\n", "loaded": null },
+    { "name": "spaces-only-reads-null", "kind": "lossy", "stored": "   ", "body": "\n   \n", "loaded": null },
+    { "name": "newline-only-reads-null", "kind": "lossy", "stored": "\n", "body": "\n\n\n", "loaded": null },
+    { "name": "ascii-whitespace-mix-reads-null", "kind": "lossy", "stored": " \t\n\u000b\u000c ", "body": "\n \t\n\u000b\u000c \n", "loaded": null },
+    { "name": "crlf-in-content-normalizes", "kind": "lossy", "stored": "A\r\nB\r\n", "body": "\nA\r\nB\r\n\n", "loaded": "A\nB\n" },
+    { "name": "trailing-cr-joins-the-frame-newline", "kind": "lossy", "stored": "A\r", "body": "\nA\r\n", "loaded": "A" },
+    { "name": "hand-no-blank-line", "kind": "parse", "body": "Body\n", "loaded": "Body" },
+    { "name": "hand-no-final-newline", "kind": "parse", "body": "\nBody", "loaded": "Body" },
+    { "name": "hand-no-framing", "kind": "parse", "body": "Body", "loaded": "Body" },
+    { "name": "hand-extra-trailing-blank-lines", "kind": "parse", "body": "\nBody\n\n\n", "loaded": "Body\n\n" },
+    { "name": "hand-crlf-file", "kind": "parse", "body": "\r\nLine 1\r\nLine 2\r\n", "loaded": "Line 1\nLine 2" },
+    { "name": "hand-empty", "kind": "parse", "body": "", "loaded": null },
+    { "name": "root-manifest", "kind": "parse", "body": "\n# Memory name\n\nA description.\n", "loaded": "# Memory name\n\nA description." }
+  ]
+}

@@ -38,8 +38,8 @@ const refused = (op: Promise<unknown>, state = '23514') =>
 async function passkey(ownerId = signerId): Promise<string> {
   const id = generateId();
   await db.$executeRaw`INSERT INTO passkey_credentials
-    (id, owner_id, credential_id, public_key, algorithm, user_handle, label, registered_at, counter, transports, backup_eligible, backed_up)
-    VALUES (${id}, ${ownerId}, ${Buffer.from(`cred-${id}`)}, ${Buffer.from('pk')}, -7, ${Buffer.alloc(32, 1)}, 'YubiKey',
+    (id, owner_id, credential_id, public_key, algorithm, user_handle, enrollment_rp_id, label, registered_at, counter, transports, backup_eligible, backed_up)
+    VALUES (${id}, ${ownerId}, ${Buffer.from(`cred-${id}`)}, ${Buffer.from('pk')}, -7, ${Buffer.alloc(32, 1)}, ${RP}, 'YubiKey',
       (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3), 0, ARRAY['usb'], false, false)`;
   return id;
 }

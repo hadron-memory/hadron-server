@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #960 — the team-role platform surface: teamRoles read +
  * createTeamRole/updateTeamRole writes.
@@ -751,7 +752,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
   /** Mint a worker holding `name`, as a real cast would. */
   const mintWorker = (name: string) =>
     db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name, slug: workerSlugBase(name) },
     });
 
   const roleLocs = async () =>
@@ -780,7 +781,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
     // and the thing that refusal actually protected — name permanence — was
     // never the register's doing.
     await db.worker.create({
-      data: { appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Fred', slug: 'fred' },
     });
     const res = await M.deleteTeamRole(
       {},
@@ -810,7 +811,7 @@ describe('deleteTeamRole (#1002, simplified by #1050)', () => {
 
     await expect(
       db.worker.create({
-        data: { appId: app.id, agentId: roleAgent.id, name: 'Kira', slug: 'kira-2' },
+        data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'Kira', slug: 'kira-2' },
       }),
     ).rejects.toThrow();
   });

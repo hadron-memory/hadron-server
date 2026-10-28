@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1026 — `Worker.portalUrl`, the GraphQL half of "worker reads carry the
  * worker's portal URL".
@@ -56,7 +57,7 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
   });
   worker = await db.worker.create({
-    data: { appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara', role: 'server-engineer' },
+    data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara', role: 'server-engineer' },
   });
 });
 
@@ -98,7 +99,7 @@ describe('Worker.portalUrl (#1026)', () => {
       data: { id: generateId(), organizationId: org.id, name: 'Legacy', urn: 'norootcolon' },
     });
     const legacyWorker = await db.worker.create({
-      data: { appId: legacyApp.id, agentId: agent.id, name: 'Old', slug: 'old' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: legacyApp.id, agentId: agent.id, name: 'Old', slug: 'old' },
     });
     expect(await resolvers.Worker.urn(legacyWorker as never, {}, ctx())).toBeNull();
     expect(await resolvers.Worker.portalUrl(legacyWorker as never, {}, ctx())).toBeNull();
@@ -140,7 +141,7 @@ describe('Worker.portalUrl — the App lookup it shares with Worker.urn (#1026)'
   it('memoizes across WORKERS of one App, not just across fields of one worker', async () => {
     process.env.FRONTEND_URL = PORTAL;
     const second = await db.worker.create({
-      data: { appId: app.id, agentId: agent.id, name: 'Gil', slug: 'gil' },
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Gil', slug: 'gil' },
     });
     const c = ctx();
     const spy = vi.spyOn(db.app, 'findUnique');

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { observeTransactionBackend, waitForAdvisoryWaiter } from '../../../test/advisoryWaiter.js';
 /**
  * #1726 — a Worker records who it reports to (Task Management, #1704).
@@ -60,7 +61,7 @@ async function user(n: number) {
   return db.user.create({ data: { id: generateId(), githubId: 98_000 + n, githubUsername: `rt-${n}`, roles: ['READER'] }, select: { id: true } });
 }
 async function worker(appId: string, name: string, extra: Record<string, unknown> = {}) {
-  return db.worker.create({ data: { id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra }, select: { id: true } });
+  return db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: teamAgent.id, name, slug: name.toLowerCase(), ...extra }, select: { id: true } });
 }
 
 beforeEach(async () => {
@@ -93,7 +94,7 @@ describe('the value: same App, not itself, not retired, no cycle', () => {
     expect(await reportsToOf(dan)).toBeNull();
     expect((await events(dan)).map((e) => e.payload)).toEqual([
       { from: null, to: ada.id, setBy: 'app-manager' },
-      { from: ada.id, to: null, setBy: 'app-manager' },
+      { from: ada.id, to: null, setBy: 'app-manager', oldExplicitNoTeam: false, newExplicitNoTeam: true },
     ]);
   });
 

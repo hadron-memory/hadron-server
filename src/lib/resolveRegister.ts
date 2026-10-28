@@ -36,6 +36,7 @@ import { composeWorkerUrn } from './entityRef/workerRef.js';
 import { normalizeUrnForLookup } from './urn.js';
 import { emitEntityUrnV2 } from './urnEmit.js';
 import { readStatesFor } from './channelReadState.js';
+import { openSessionPlacement } from './sessionPlacement.js';
 
 /** v2 entity URN for display; falls back to the bare urn (display strings never throw). */
 function safeEmitEntityUrnV2(type: 'memory' | 'agent', bareUrn: string): string {
@@ -105,6 +106,7 @@ type EntryRow = RegisterEntry;
 async function attendeeColumns(
   db: Context['db'],
   attendee: RegisterAttendee,
+  actingSessionId?: string | null,
 ): Promise<{ workerId: string | null; agentId: string; appId: string; organizationId: string | null; attendeeUrn: string | null; heldByUserId: string | null } | null> {
   if ('workerId' in attendee) {
     const w = await db.worker.findUnique({
@@ -118,7 +120,10 @@ async function attendeeColumns(
     } catch {
       urn = null;
     }
-    return { workerId: w.id, agentId: w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn, heldByUserId: w.heldByUserId };
+    // #2458 (cor:dmo:050:11): the worker's OWN open session finishes under the agent it was bound with; any other reader
+    // sees the live row.
+    const placed = actingSessionId ? await openSessionPlacement(db, w.id, actingSessionId) : null;
+    return { workerId: w.id, agentId: placed?.agentId ?? w.agentId, appId: w.appId, organizationId: w.app.organizationId, attendeeUrn: urn, heldByUserId: w.heldByUserId };
   }
   // An Agent-in-App attendee EXISTS only as a live install: without the
   // AppAgent row the pair is fabricated, and resolving it would hand the
@@ -182,8 +187,8 @@ function rank(e: EntryRow): number {
  * Worker › Agent › everyone). Rows only — no gates, no watermarks; what the
  * run snapshot stores and `resolveRegister` builds its view from.
  */
-export async function collectRegisterRows(db: Context['db'], attendee: RegisterAttendee): Promise<{ columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>; rows: EntryRow[] } | null> {
-  const columns = await attendeeColumns(db, attendee);
+export async function collectRegisterRows(db: Context['db'], attendee: RegisterAttendee, actingSessionId?: string | null): Promise<{ columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>; rows: EntryRow[] } | null> {
+  const columns = await attendeeColumns(db, attendee, actingSessionId);
   if (!columns) return null;
   const arms: Prisma.RegisterEntryWhereInput[] = [
     // Named the Agent in this App (App-owned), or the Agent anywhere in the org (org-owned).
@@ -226,10 +231,10 @@ export interface ResolveRegisterArgs {
 export async function resolveRegister(db: Context['db'], args: ResolveRegisterArgs): Promise<RegisterView | null> {
   const collected = args.rows
     ? await (async () => {
-        const columns = await attendeeColumns(db, args.attendee);
+        const columns = await attendeeColumns(db, args.attendee, args.actor?.sessionId);
         return columns ? { columns, rows: args.rows! } : null;
       })()
-    : await collectRegisterRows(db, args.attendee);
+    : await collectRegisterRows(db, args.attendee, args.actor?.sessionId);
   if (!collected) return null;
   const { columns, rows } = collected;
   const viewer = args.actor ?? null;

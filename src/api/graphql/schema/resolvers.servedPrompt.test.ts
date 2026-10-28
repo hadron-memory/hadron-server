@@ -42,7 +42,7 @@ describe('served-prompt record reads (#2047)', () => {
     appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'T', urn: `${org.urn}:t` } })).id;
     await db.appMember.create({ data: { appId, userId: ownerU, role: 'owner' } });
     await db.appMember.create({ data: { appId, userId: memberU, role: 'cook' } });
-    workerId = (await db.worker.create({ data: { id: generateId(), appId, agentId: agent.id, name: 'W', slug: 'w' } })).id;
+    workerId = (await db.worker.create({ data: { id: generateId(), appId, agentId: agent.id, name: 'W', slug: 'w', signature: '', trailer: '' } })).id;
     sessionId = (await db.session.create({ data: { id: generateId(), appId, agentId: agent.id, workerId, type: 'DEVELOPER' } as never })).id;
     runId = (
       await db.appRun.create({

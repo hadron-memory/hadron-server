@@ -14,6 +14,8 @@
  */
 
 import { GraphQLError } from 'graphql';
+import { withAuthorizedTx } from './authorizedTx.js';
+import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { Prisma, type RegisterEntry } from '../../../generated/prisma/index.js';
 import {
   type Context,
@@ -44,8 +46,9 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { isAppParticipant } from './resolvers.helpers.js';
 import { collectRegisterRows, resolveRegister, toGqlRegisterRows, type RegisterAttendee } from '../../../lib/resolveRegister.js';
-import { advanceReadState } from '../../../lib/channelReadState.js';
+import { advanceReadState, readStateIncarnations } from '../../../lib/channelReadState.js';
 import { OPEN_SESSION_SCAN_CAP, isSessionLive, loadLastEventBySession, recentlyTouchedFilter } from '../../../lib/sessionActivity.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 type RegisterRoleInput = 'WATCH' | 'POST' | 'BOTH';
 
@@ -59,11 +62,26 @@ async function readableEntry(ctx: Context, ref: string): Promise<RegisterEntry |
 }
 
 async function writableEntry(ctx: Context, ref: string): Promise<RegisterEntry> {
-  if (ctx.impersonation) throw new Error('Forbidden');
+  if (ctx.impersonation) throw forbiddenError();
   const row = await readableEntry(ctx, ref);
   if (!row) throw new GraphQLError(`No match for registerEntryRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
   await requireRegisterOwnerWrite(ctx, row);
   return row;
+}
+
+/** Register changes can revoke a batch's resolved channel policy. Use the
+ * same owner domain that delivery acknowledgements hold shared, exclusively
+ * through the write/commit. Org-owned defaults share the App's org anchor.
+ */
+async function withRegisterOwnerWrite<T>(
+  ctx: Context,
+  owner: { appId: string | null; organizationId: string | null },
+  write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
+): Promise<T> {
+  const anchors: AuthorityAnchor[] = owner.appId
+    ? [{ kind: 'app', id: owner.appId }]
+    : [{ kind: 'org', id: owner.organizationId! }];
+  return withAuthorizedTx(ctx, anchors, txCtx => requireRegisterOwnerWrite(txCtx, owner), write, { lockMode: 'exclusive' });
 }
 
 export const registerQueries = {
@@ -229,12 +247,12 @@ async function readableAttendee(
  * its attention.
  */
 async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, appId: string): Promise<void> {
-  if (ctx.impersonation) throw new Error('Forbidden');
+  if (ctx.impersonation) throw forbiddenError();
   if (!ctx.userId) {
     if (ctx.appId && ctx.appId === appId) return;
-    throw new Error('Forbidden');
+    throw forbiddenError();
   }
-  if (!('workerId' in attendee)) throw new Error('Forbidden');
+  if (!('workerId' in attendee)) throw forbiddenError();
   const now = new Date();
   const open = await ctx.db.session.findMany({
     where: { workerId: attendee.workerId, userId: ctx.userId, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
@@ -243,7 +261,7 @@ async function requireReadStateDriver(ctx: Context, attendee: RegisterAttendee, 
     take: OPEN_SESSION_SCAN_CAP,
   });
   const events = await loadLastEventBySession(ctx.db as never, open.map((s) => s.id));
-  if (!open.some((s) => isSessionLive(s, events.get(s.id), now))) throw new Error('Forbidden');
+  if (!open.some((s) => isSessionLive(s, events.get(s.id), now))) throw forbiddenError();
 }
 
 /**
@@ -263,7 +281,7 @@ async function registeredChannel(
   // answer this returns for a foreign Channel and so would have been silent.
   const id = await resolveChannelRefId(ctx.db, channelRef ?? '');
   if (!id) return null;
-  const collected = await collectRegisterRows(ctx.db, attendee);
+  const collected = await collectRegisterRows(ctx.db, attendee, ctx.sessionId);
   if (!collected || !collected.rows.some((r) => r.channelId === id)) return null;
   return ctx.db.channel.findFirst({ where: { id, deletedAt: null }, select: { id: true, lastSeq: true } });
 }
@@ -274,7 +292,8 @@ async function readStateRow(ctx: Context, attendee: RegisterAttendee, channelId:
   });
   // Only the attendee URN is needed here; no access fields are projected.
   const view = await resolveRegister(ctx.db, { attendee, rows: [] });
-  return { attendeeUrn: view?.attendeeUrn ?? null, channelId, lastSeenSeq: row?.lastSeenSeq ?? 0, updatedAt: row?.updatedAt ?? new Date(0) };
+  const incarnations = await readStateIncarnations(ctx.db, attendee, channelId);
+  return { attendeeUrn: view?.attendeeUrn ?? null, channelId, lastSeenSeq: row?.lastSeenSeq ?? 0, updatedAt: row?.updatedAt ?? new Date(0), ...incarnations };
 }
 
 export const readStateQueries = {
@@ -334,15 +353,15 @@ export const registerMutations = {
     },
     ctx: Context,
   ): Promise<RegisterEntry> => {
-    if (ctx.impersonation) throw new Error('Forbidden');
-    if (!ctx.userId) throw new Error('Unauthenticated');
+    if (ctx.impersonation) throw forbiddenError();
+    if (!ctx.userId) throw unauthenticatedError();
     const owner = await resolveRegisterOwnerForWrite(ctx, input.ownerRef);
     const channel = await resolveChannelForOwner(ctx, input.channelRef, owner);
     const attendee = input.attendeeRef?.trim()
       ? await resolveRegisterAttendee(ctx, input.attendeeRef, owner)
       : { attendeeWorkerId: null, attendeeAgentId: null };
     try {
-      return await ctx.db.registerEntry.create({
+      return await withRegisterOwnerWrite(ctx, owner, tx => tx.registerEntry.create({
         data: {
           id: generateId(),
           ...owner,
@@ -353,7 +372,7 @@ export const registerMutations = {
           description: input.description?.trim() || null,
           createdBy: ctx.userId,
         },
-      });
+      }));
     } catch (e) {
       // The (owner, channel, attendee) partial unique: one live row per key.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -371,24 +390,30 @@ export const registerMutations = {
     ctx: Context,
   ): Promise<RegisterEntry> => {
     const row = await writableEntry(ctx, ref);
-    return ctx.db.registerEntry.update({
-      where: { id: row.id },
-      data: {
-        ...(input.role != null ? { role: input.role } : {}),
-        ...(input.mentionOnly != null ? { mentionOnly: input.mentionOnly } : {}),
-        ...(input.description !== undefined ? { description: input.description?.trim() || null } : {}),
-        updatedBy: ctx.userId ?? null,
-      },
+    return withRegisterOwnerWrite(ctx, row, async (tx, txCtx) => {
+      const current = await writableEntry(txCtx, row.id);
+      return tx.registerEntry.update({
+        where: { id: current.id },
+        data: {
+          ...(input.role != null ? { role: input.role } : {}),
+          ...(input.mentionOnly != null ? { mentionOnly: input.mentionOnly } : {}),
+          ...(input.description !== undefined ? { description: input.description?.trim() || null } : {}),
+          updatedBy: ctx.userId ?? null,
+        },
+      });
     });
   },
 
   deleteRegisterEntry: async (_: unknown, { ref }: { ref: string }, ctx: Context): Promise<boolean> => {
     const row = await writableEntry(ctx, ref);
-    await ctx.db.registerEntry.update({
-      where: { id: row.id },
-      data: { deletedAt: new Date(), deletedBy: ctx.userId ?? null },
+    return withRegisterOwnerWrite(ctx, row, async (tx, txCtx) => {
+      const current = await writableEntry(txCtx, row.id);
+      await tx.registerEntry.update({
+        where: { id: current.id },
+        data: { deletedAt: new Date(), deletedBy: ctx.userId ?? null },
+      });
+      return true;
     });
-    return true;
   },
 };
 

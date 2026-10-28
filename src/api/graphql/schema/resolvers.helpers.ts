@@ -1,5 +1,5 @@
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
-import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
+import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
@@ -35,7 +35,6 @@ import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicen
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
-  getPrimaryAgent,
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
@@ -71,6 +70,7 @@ import {
   AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
@@ -83,21 +83,33 @@ import {
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
+import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
+import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
- * The STORED (uncompiled) content of a Node whose `content` a read resolver
- * replaced with rendered Mustache output (`node(ref:)` / `nextNode` without
- * `raw`). Field resolvers that verify the parent against the database —
- * `Node.authorship`'s and `Node.revision`'s reconcile — must compare stored
- * state, not presentation. A Symbol key is never serialized by GraphQL, so the
- * wire shape is unchanged (#1326 review, Codex on #1397 `138e8185`).
+ * Marks a Node row whose `content` field answers with the STORED text unless a
+ * query asks otherwise: `node(raw: true)` / `nextNode(raw: true)` set it for
+ * the node they return, and `nodeBatch` sets it on every node (R21 A: a bulk
+ * read resolves only for `content(raw: false)`). `Node.content` reads it as its
+ * default; an explicit `content(raw:)` wins. The row itself is never rewritten,
+ * so field resolvers that verify the parent against the database see stored
+ * text. A Symbol key is never serialized by GraphQL (#2041).
  */
-export const STORED_NODE_CONTENT: unique symbol = Symbol('storedNodeContent');
+export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
+  /**
+   * #2044: set ONLY by a door that re-runs its write gate on a transaction client holding the
+   * install memory's authority fence (writeNodeCore). On the pooled client an install memory's
+   * write gate otherwise answers NO: a writer that never rechecks in its own transaction
+   * (restoreNodeRevision, moveNode, deleteNode, ...) cannot hold the fence, so it fails closed.
+   */
+  installWritePreflight?: boolean;
   /**
    * #1301 — set by an MCP handler that DELEGATES to a GraphQL resolver (e.g.
    * `hadron_update_node_data` → `updateNodeData`), so a refusal addresses the
@@ -122,6 +134,7 @@ export interface Context {
   roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
   organizationId?: string; // set when the Client is scoped to an organization
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (#562)
+  signInId?: string;       // #1897: the factor-protected sign-in this credential descends from (JWT sid or key root)
   oauthScopes?: string[];  // immutable OAuth grant on the presented hdr_user_ key (#1261)
   // Admin impersonation: set when the request authenticated with an
   // impersonation JWT — userId is the TARGET, roles is [], and reads must be
@@ -129,6 +142,12 @@ export interface Context {
   // org-scope chokepoints in this file + src/lib/auth consult it). Mutations
   // are blocked wholesale by the read-only Apollo plugin.
   impersonation?: ImpersonationContext;
+  /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
+  taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
+  /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  /** #2609: uncapped pending history, captured in the mutation actor scope; consumed once after result shaping. */
+  taskWarningHistory?: import('./resolvers.taskWarnings.js').TaskWarningHistory[];
+  taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
   // endpoint (lazily created on first use; see loadEdgeEndpointNode). #381.
@@ -148,6 +167,9 @@ export interface Context {
   // response's nodes/edges overwhelmingly share a memory, so the memory-urn
   // lookup is memoized per request (lazily created; see loadMemoryUrn).
   memoryUrnCache?: Map<string, Promise<string | null>>;
+  // #2193 — Node.memory's record read, memoized per memory: a node list loads
+  // and gates each distinct memory once (see loadReadableMemoryRecord).
+  memoryRecordCache?: Map<string, Promise<unknown | null>>;
   // Request-scoped per-parent reconciliation. Node.revision,
   // Node.contentValidation and Node.authorship can all resolve on one GraphQL
   // Node object; share its locked read without mixing distinct parent states.
@@ -173,6 +195,8 @@ export interface Context {
   // membership query + a row lookup EACH (see loadReadableAgent/loadEntryNode).
   readableAgentFilterCache?: Promise<Record<string, unknown>>;
   readableAgentCache?: Map<string, Promise<unknown | null>>;
+  // #2109 — App.viewerManages: per-request, per-caller facts and the same-tick batch (see resolvers.appViewerManages.ts).
+  viewerManagesCache?: import('./resolvers.appViewerManages.js').ViewerManagesCache;
   entryNodeCache?: Map<string, Promise<{ memoryId: string } | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
@@ -616,6 +640,7 @@ function userPrincipalOnly(ctx: Context): Context {
     roles: ctx.roles,
     organizationId: ctx.organizationId,
     apiKeyId: ctx.apiKeyId,
+    signInId: ctx.signInId,
     oauthScopes: ctx.oauthScopes,
     impersonation: ctx.impersonation,
   };
@@ -823,7 +848,7 @@ export async function requireAgentMemoryGrant(
   // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
   // still answer like a miss, without revealing its class (#1349, #1101).
   if (memory.class === 'system') {
-    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+    throw new GraphQLError('Agent system memories can only be attached via systemMemoryId, not as a memory item', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   // #1101: these classes have no App audience to grant. A personal share is
   // per-user, and a private memory is not shareable.
@@ -1046,6 +1071,8 @@ export function nodeNotFoundError(ref: string): GraphQLError {
 type MemoryRecordReadBatch = {
   memberOrgIds?: Promise<string[]>;
   accessibleIds?: Promise<string[] | null>;
+  /** #1813: the caller's system-record grant lookups, built from THIS list's ctx so it cannot span principals. */
+  systemGrants?: SystemMemoryGrantBatch;
 };
 
 /** Gate a record list without repeating membership and access-set queries per row. */
@@ -1133,6 +1160,7 @@ export async function canReadMemoryRecord(
   const accessible = () => batch
     ? (batch.accessibleIds ??= getAccessibleMemoryIds(ctx))
     : getAccessibleMemoryIds(ctx, memory.id);
+  const systemGrants = () => batch ? (batch.systemGrants ??= createSystemMemoryGrantBatch(ctx)) : undefined;
   if (memory.class === 'personal' || memory.class === 'private') {
     // Impersonation: personal-class records are invisible even though the
     // TARGET owns them — the shared-org scope excludes all identity-scoped
@@ -1147,11 +1175,19 @@ export async function canReadMemoryRecord(
   // System records follow the installed/licensed Agent or manager audience,
   // never the record-only org-member shortcut (#1807).
   if (memory.class === 'system') {
+    // #2064 §10: a user's own session is NOT a different principal for an App's INSTALL
+    // memory. Its record rights (a manager's, R45) are the user's, and binding a session
+    // of some other App must not drop them. A pure App key (no user), a run principal and
+    // an impersonation keep the hard-isolated content set below.
+    if (ctx.sessionId && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)
+      && await ctx.db.memory.count({ where: { id: memory.id, isInstallMemory: true } }) > 0) {
+      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
+    }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
     }
-    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
   }
   if (memory.ownerUserId != null) {
     // Impersonation: user-owned (spec 047) records are identity-scoped —
@@ -1225,6 +1261,33 @@ export async function canReadMemoryRecord(
   // Scope the shared gate to THIS memory so it stays an indexed point-read.
   const accessibleIds = await accessible();
   return accessibleIds === null || accessibleIds.includes(memory.id);
+}
+
+/**
+ * #2193 — a memory's RECORD as `Query.memory` would answer it to this caller:
+ * the same full-row load, the same deleted check and the same
+ * {@link canReadMemoryRecord}, so impersonation, App-key, run and session
+ * scope match it by construction. Unreadable, deleted and missing are all
+ * null (cor:api:140:03).
+ *
+ * For a nested entity field such as `Node.memory` (cor:acl:110): the parent
+ * that admitted the node authorized the NODE, by its own rule, and never the
+ * memory record. Memoized per memory under a `*Cache` key, so a node list
+ * loads and gates each distinct memory once and `withoutRequestCaches` strips
+ * the memo like the others.
+ */
+export function loadReadableMemoryRecord(ctx: Context, memoryId: string): Promise<unknown | null> {
+  const cache = (ctx.memoryRecordCache ??= new Map<string, Promise<unknown | null>>());
+  let pending = cache.get(memoryId);
+  if (!pending) {
+    pending = (async () => {
+      const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, include: MEMORY_INCLUDE });
+      if (!memory || memory.deletedAt) return null;
+      return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
+    })();
+    cache.set(memoryId, pending);
+  }
+  return pending;
 }
 
 // The ordering moved to src/lib/auth/orgRole.ts (#1196): this module imports
@@ -1930,15 +1993,37 @@ export function defaultAiConfigOf(
 // ── Uniform find-many surface (#473) — Spec: cor:api:120 ───────────────
 
 // Standard page bounds for the uniform `<entity>s(filter, orgId, limit,
-// offset)` list queries — matches the globalSearch idiom (default 50, cap
-// 200). `limit: 0` is preserved (an empty page with just `total` — the cheap
+// offset)` list queries — default 20 (#2211), cap
+// 200. `limit: 0` is preserved (an empty page with just `total` — the cheap
 // count, same contract as memoryNodes). Spec: cor:api:120:02.
-export const LIST_PAGE_DEFAULT = 50;
+export const LIST_PAGE_DEFAULT = 20;
 export const LIST_PAGE_MAX = 200;
 
 export function clampListTake(limit?: number | null): number {
   if (limit == null) return LIST_PAGE_DEFAULT;
   return Math.min(LIST_PAGE_MAX, Math.max(0, limit));
+}
+
+/**
+ * #2213 — size arguments of the `<field>Page` siblings (cor:api:120:04). An
+ * omitted or null limit pages at 20; 0 is count-only (an empty page with the
+ * real total); a negative limit is 0; a limit over 200 is served as 200, never a
+ * refusal. A negative or omitted offset is 0. Same default as `clampListTake` since #2211.
+ */
+export const PAGE_ARGS_DEFAULT = 20;
+export const PAGE_ARGS_MAX = 200;
+
+export function pageArgs(args: { limit?: number | null; offset?: number | null }): { take: number; skip: number } {
+  const limit = args.limit ?? PAGE_ARGS_DEFAULT;
+  return {
+    take: Math.min(PAGE_ARGS_MAX, Math.max(0, limit)),
+    skip: Math.max(0, args.offset ?? 0),
+  };
+}
+
+/** `{ items, total, hasMore }`: hasMore is whether rows remain past this page. */
+export function pageEnvelope<T>(items: T[], total: number, skip: number) {
+  return { items, total, hasMore: skip + items.length < total };
 }
 
 /**
@@ -2263,7 +2348,9 @@ export async function getAccessibleMemoryIds(
           // where the two columns DISAGREE, and production has none (0 of 15
           // personal user-owned rows). Nobody loses reach; an aligned row still
           // arrives through the strict-owner clause above.
-          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+          // #2044: not an install memory — that kind has its own audience below, so
+          // a user-owned App's owner keeps no blanket read once the App is deleted.
+          { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId, isInstallMemory: false },
         ],
       },
       select: { id: true },
@@ -2313,6 +2400,12 @@ export async function getAccessibleMemoryIds(
     // runs on nearly every read surface, so the shortcut is worth stating.
     if (!options?.excludeAppDerived && !(onlyMemoryId && accessibleIds.has(onlyMemoryId))) {
       for (const id of await appDerivedMemoryIds(ctx, onlyMemoryId)) accessibleIds.add(id);
+    }
+    // #2044: install memories — content for the live App's participants only.
+    if (!options?.excludeAppDerived) {
+      for (const id of await readableInstallMemoryIds(ctx.db, ctx)) {
+        if (!onlyMemoryId || id === onlyMemoryId) accessibleIds.add(id);
+      }
     }
     if (isRunPrincipal(ctx)) {
       const privateCandidates = await ctx.db.memory.findMany({ where: { id: { in: [...accessibleIds] }, class: 'private' }, select: { id: true } });
@@ -2532,8 +2625,11 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
  * 3. Users: app-class rows through the MCP shape/participation gate; other
  *    shared classes through their own membership, org, or subscription rules
+ *
+ * `destination` (#2484) is the node a create/update is about to write; it is what an App's write grant for its
+ * userless runs is judged against, and no other caller passes it.
  */
-export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
+export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, destination?: WriteDestination): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
   // shortcut applies only to non-strict org memories. A platform-admin USER
   // with an active App still cannot write another user's personal/private
@@ -2541,9 +2637,15 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { ownerUserId: true, userId: true, class: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true },
     });
     if (!memory) throw memoryWriteForbidden();
+    // #2044: an install memory has its own write audience; no platform-role
+    // shortcut below may reach it (a deleted App's memory takes no write at all).
+    if (isInstallMemoryRow(memory)) {
+      if (await installWriteAllowed(ctx, memory)) return;
+      throw memoryWriteForbidden();
+    }
     const strictOwner = memory.class === 'personal' || memory.class === 'private';
     // A strict owner's rights under App selection are decided by the shared
     // gate below, the same rule MCP applies (#1503, ruling (c)): an explicit
@@ -2554,12 +2656,14 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     // A write always names its target: an explicit reference (#1503).
-    if (await canWriteToMemory(ctx.db, ctx, memoryId, EXPLICIT_REF)) return;
+    // #2484: only the node write door names a destination, which is what lets an App's prefix-scoped write grant
+    // answer for a userless run; every other write verb leaves it unset and never reaches that arm.
+    if (await canWriteToMemory(ctx.db, ctx, memoryId, destination ? { ...EXPLICIT_REF, destination } : EXPLICIT_REF)) return;
     throw memoryWriteForbidden();
   }
 
   // JWT user path
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (!ctx.userId) throw unauthenticatedError();
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
@@ -2572,8 +2676,16 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
       appId: true,
       userMemoryOfAgentId: true,
       createdBy: true,
+      installOfAgentId: true,
+      isInstallMemory: true,
     },
   });
+
+  // #2044: see the App-keyed branch above.
+  if (isInstallMemoryRow(memory)) {
+    if (await installWriteAllowed(ctx, memory)) return;
+    throw memoryWriteForbidden();
+  }
 
   // 034-memory-class-access: owner-owned personal/private memories are
   // owner-only to write — no ADMIN/OWNER bypass, no org-role path — EXCEPT a
@@ -2593,6 +2705,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
   if (memory.ownerUserId !== null) {
     if (ctx.userId === memory.ownerUserId) return;
     if (memory.class === 'app' && await canWriteToMemory(ctx.db, ctx, memoryId)) return;
+    // #2206 case 2: a user-owned Agent's system memory, by whoever manages the Agent (the shared predicate).
+    if (memory.class === 'system' && await canManageAgentSystemMemory(ctx.db, ctx, memoryId)) return;
     throw memoryWriteForbidden();
   }
 
@@ -2627,11 +2741,12 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
     throw memoryWriteForbidden();
   }
 
-  // Definition authoring uses the same org-management gate as Agent edits.
-  // User-owned and platform-admin cases were already decided above.
+  // Definition authoring follows whoever manages the Agent (#2206, cor:dmo:050:13), through the one predicate MCP
+  // shares: a live Agent's own system memory with matching tenant, never a class-only org-ADMIN shortcut (a system
+  // row no live Agent points at is nobody's definition). User-owned and platform-admin cases were decided above.
   if (memory.class === 'system') {
-    await requireOrgRole(ctx, memory.organizationId, 'ADMIN');
-    return;
+    if (await canManageAgentSystemMemory(ctx.db, ctx, memoryId)) return;
+    throw memoryWriteForbidden();
   }
 
   // One shared predicate for GraphQL and MCP: free-standing knowledge via
@@ -2665,14 +2780,17 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
  * partial-response transport, but make the authorization classification
  * explicit so Apollo does not report an ordinary denial as a server fault.
  */
-function memoryWriteForbidden(): GraphQLError {
+export function memoryWriteForbidden(): GraphQLError {
   return new GraphQLError('Forbidden: no write access to this memory', {
     extensions: { code: 'FORBIDDEN' },
   });
 }
 
 export const MEMORY_INCLUDE = {
-  subscriptions: { include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2238: live rows only, matching ORG_INCLUDE.subscriptions.
+  // #2557: the parent read authorized this Memory, but the non-null nested
+  // MemorySubscription.memory still needs its full row for GraphQL resolution.
+  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 export const AGENT_INCLUDE = {
@@ -2721,7 +2839,8 @@ export const ORG_INCLUDE = {
     orderBy: { name: 'asc' as const },
   },
   subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
-  exchangeConnections: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' as const } },
+  // No exchangeConnections here: Organization.exchangeConnections resolves
+  // through listOrgExchangeConnections, never from an eager row (hadron-internal#18).
 };
 
 // #980: `worker: true` eager-loads the bound Worker so `Session.worker`
@@ -2771,12 +2890,6 @@ export function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAg
   return rows[0] as EagerAppAgentRow | undefined;
 }
 
-export function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
-  if (parent.appAgents === undefined) return undefined;
-  const first = readPrimaryAppAgent(parent);
-  return first?.agent?.id ?? null;
-}
-
 export function readPrimaryAgentRecordFromEager(
   parent: { appAgents?: unknown },
 ): unknown | undefined {
@@ -2791,23 +2904,6 @@ export function readAllAgentRecordsFromEager(
   const rows = parent.appAgents;
   if (!Array.isArray(rows)) return undefined;
   return rows.map((r) => (r as EagerAppAgentRow).agent);
-}
-
-export async function readPrimaryAgentField(
-  parent: { id: string; appAgents?: unknown },
-  ctx: Context,
-  field: 'urn',
-): Promise<string | null> {
-  const first = readPrimaryAppAgent(parent);
-  if (first?.agent && typeof first.agent.urn === 'string') {
-    return first.agent.urn;
-  }
-  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
-  if (parent.appAgents === undefined) {
-    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
-    return primary?.[field] ?? null;
-  }
-  return null;
 }
 
 // ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────
@@ -3275,6 +3371,47 @@ export function deriveChatTitle(
 // the AI-config lib and this resolver layer share one implementation.
 
 /**
+ * An org's live exchange connections, for whoever may manage them: org ADMIN or
+ * OWNER, or a platform admin, under `requireOrgRole` (impersonation included).
+ * The ONE list predicate: `Query.exchangeConnections` refuses with its
+ * FORBIDDEN, and `Organization.exchangeConnections` masks that refusal to `[]`
+ * (hadron-internal#18), so the two surfaces always admit the same callers and
+ * return the same rows in the same order.
+ */
+export async function listOrgExchangeConnections(ctx: Context, orgId: string) {
+  const scope = await orgExchangeConnectionScope(ctx, orgId);
+  return ctx.db.exchangeConnection.findMany(scope);
+}
+
+/**
+ * The admission and the row scope of `listOrgExchangeConnections`, built once so
+ * the list and `Query.exchangeConnectionsPage` (#2213) can never disagree about
+ * who sees which rows. Refuses before returning a scope, so a count or a page
+ * built from it is never read for a denied caller.
+ */
+export async function orgExchangeConnectionScope(ctx: Context, orgId: string) {
+  await requireOrgRole(ctx, orgId, 'ADMIN');
+  return {
+    where: { organizationId: orgId, deletedAt: null },
+    // The id tiebreak makes rows created in the same millisecond come back in
+    // one order on every read, so the two surfaces agree row for row.
+    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+  };
+}
+
+/**
+ * `requireEmailConnection`'s answer for a missing or deleted connection. The
+ * message is unchanged for the operation surfaces; a caller that must answer
+ * absence like denial (hadron-internal#18) can tell it apart by type.
+ */
+export class ConnectionNotFoundError extends Error {
+  constructor() {
+    super('Connection not found');
+    this.name = 'ConnectionNotFoundError';
+  }
+}
+
+/**
  * Load an email connection and enforce the shared access gate for a MAIL/
  * CALENDAR OPERATION. The ONE place connection-operation authorization lives —
  * never hand-roll a per-resolver connection gate. Connection MANAGEMENT (list,
@@ -3340,7 +3477,7 @@ export async function requireEmailConnection(
   });
   // Soft-deleted / non-existent connections fail first (before any auth
   // branch) so absence and denial stay indistinguishable.
-  if (!connection) throw new Error('Connection not found');
+  if (!connection) throw new ConnectionNotFoundError();
 
   if (ctx.appId) {
     // App / headless-run context — a covering grant is mandatory (fail-closed),

@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #1761 + #1762 — whoever manages the App is in a root task's alarm chain
  * (cor:agt:050:25, :18) and may acknowledge any alarm in the App (cor:agt:050:24).
@@ -62,7 +63,7 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: appOwnerMember.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: app.id, userId: plain.id, role: 'member' } });
-  const w = (name: string) => db.worker.create({ data: { id: generateId(), appId: app.id, agentId, name, slug: name.toLowerCase() }, select: { id: true } });
+  const w = (name: string) => db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name, slug: name.toLowerCase() }, select: { id: true } });
   ada = await w('Ada');
   anne = await w('Anne');
 });
@@ -194,7 +195,7 @@ describe('#1762 — any chain owner, or whoever manages the App, may acknowledge
 
   it('a worker acting through a session is never "the manager", even when its driver manages the App', async () => {
     const a = await alarmWithoutManagers();
-    const other = await db.worker.create({ data: { id: generateId(), appId: app.id, agentId, name: 'Liam', slug: 'liam' }, select: { id: true } });
+    const other = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name: 'Liam', slug: 'liam' }, select: { id: true } });
     await expectCode(
       runAsActor({ workerId: other.id, agentId }, () => M.acknowledgeAlarm({}, { eventId: a.id }, ctx(orgAdmin.id))),
       'ALARM_NOT_IN_CHAIN',

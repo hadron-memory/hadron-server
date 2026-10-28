@@ -284,6 +284,29 @@ describe('server-owned Scope selection for plugin EXPORT', () => {
   });
 });
 
+describe('includes in an exported body (#2041, cor:dmo:150:03 R9)', () => {
+  it('exports the resolved text with {{var}} verbatim, lints the stored text, and the header hash follows the target', async () => {
+    const target = await mkNode('policies:conduct', { content: 'Be kind.', isRunnable: false });
+    await mkNode('tasks:declared', {
+      properties: declaration(),
+      content: '# Body\n\n{{> policies:conduct}}\n\nHi {{name}}\n\n{{> nope}}',
+    });
+    const first = await plan({ intent: 'EXPORT', files: [] });
+    const entry = first.entries[0];
+    expect(entry.renderedBody).toContain('Be kind.');
+    expect(entry.renderedBody).toContain('Hi {{name}}');
+    expect(entry.renderedBody).not.toContain('{{> policies:conduct}}');
+    // an include the exporter can't resolve is the notice, never the raw tag or a gap
+    expect(entry.renderedBody).toContain('[Include unavailable]');
+    // lint still judges the stored text: the {{name}} placeholder is reported
+    expect(entry.findings.map((f: { rule: string }) => f.rule)).toContain('skill-content-has-template');
+    await db.node.update({ where: { id: target.id }, data: { content: 'Be kind and brief.' } });
+    const second = await plan({ intent: 'EXPORT', files: [] });
+    const headerHash = (body: string) => /hash=([0-9a-f]{16})/.exec(body)![1];
+    expect(headerHash(second.entries[0].renderedBody)).not.toBe(headerHash(entry.renderedBody));
+  });
+});
+
 describe('classes and bodies', () => {
   it('never-exported, with a body only for EXPORT', async () => {
     await mkNode('tasks:declared', { properties: declaration() });

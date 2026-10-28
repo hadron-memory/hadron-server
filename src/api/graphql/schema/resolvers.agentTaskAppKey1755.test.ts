@@ -1,3 +1,4 @@
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #1755 — the App's own key may read its tasks and events (cor:agt:050:21).
  * READ-ONLY: it never creates, assigns or cancels, and never acts as a worker.
@@ -50,7 +51,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: appY.id, userId: member.id, role: 'member' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, userCtx());
   agentId = agent.id;
-  anne = await db.worker.create({ data: { id: generateId(), appId: appX.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
+  anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: appX.id, agentId, name: 'Anne', slug: 'anne' }, select: { id: true } });
   keyX = await db.appKey.create({ data: { id: generateId(), appId: appX.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
 });
 
@@ -115,7 +116,7 @@ describe('an App key reads its OWN App\'s tasks and events (#1755)', () => {
       runAsActor({ workerId: anne.id, agentId }, () => M.createAgentTask({}, { input: { appRef: appX.id, title: 'nope' } }, keyCtx())),
       'APP_NOT_FOUND',
     );
-    expect(await db.agentTask.count()).toBe(1);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(1);
     expect(await db.agentTeamEvent.count()).toBe(before);
   });
 
@@ -145,7 +146,7 @@ describe('isolation: a key never reaches another App\'s rows (#1785 cycle 1)', (
   it('a tree never includes a descendant that belongs to another App', async () => {
     const root = await mk(appX.id, 'root');
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: root.id } });
-    const foreign = await db.agentTask.create({ data: { ...row, id: generateId(), appId: appY.id, parentTaskId: root.id, title: "foreign child" } as any });
+    const foreign = await db.agentTask.create({ data: { ...row, id: generateId(), appId: appY.id, parentTaskId: root.id, title: "foreign child", handle: `${row.handle}.${row.taskNumber}` } as any });
     const tree = await Q.agentTaskTree({}, { root: root.id }, keyCtx());
     expect(tree.map((t: { id: string }) => t.id)).toEqual([root.id]);
     expect(await Q.agentTask({}, { id: foreign.id }, keyCtx())).toBeNull();
@@ -177,11 +178,13 @@ describe('every task-domain write is refused for a key (#1785 cycle 1)', () => {
       taskId: t.id, id: t.id, appRef: appX.id, workerRef: anne.id, worker: anne.id, assignee: { worker: anne.id },
       input: { appRef: appX.id, taskId: t.id, title: 'x', name: 'x' }, result: { outcome: 'succeeded' },
     };
+    // #2553: the task number counters are part of "nothing is written"; their BigInts serialize as strings.
     const snapshot = async () => JSON.stringify([
       await db.agentTask.findMany({ orderBy: { id: 'asc' } }),
+      await db.agentTaskCounter.findMany({ orderBy: { id: 'asc' } }),
       await db.agentTeamEvent.count(),
       await db.worker.findMany({ orderBy: { id: 'asc' } }),
-    ]);
+    ], (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
     const before = await snapshot();
     for (const name of names) {
       await expect(M[name]({}, args, keyCtx()), name).rejects.toBeInstanceOf(Error);

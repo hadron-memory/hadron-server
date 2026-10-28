@@ -65,6 +65,8 @@ export interface SageMakerEmbeddingClientOptions {
    * optional dedicated credentials.
    */
   sdkClient?: SageMakerRuntimeClient;
+  /** Query-only deadline; document calls retain the existing SDK behavior. */
+  queryTimeoutMs?: number;
 }
 
 export class SageMakerEmbeddingClient implements EmbeddingClient {
@@ -74,9 +76,11 @@ export class SageMakerEmbeddingClient implements EmbeddingClient {
   private readonly endpointName: string;
   private readonly inferenceComponentName?: string;
   private readonly sdk: SageMakerRuntimeClient;
+  private readonly queryTimeoutMs?: number;
 
   constructor(opts: SageMakerEmbeddingClientOptions) {
     this.endpointName = opts.endpointName;
+    this.queryTimeoutMs = opts.queryTimeoutMs;
     this.model = opts.model;
     this.dim = opts.dim;
     // Default provider label captures the lineage clearly when stored
@@ -122,10 +126,15 @@ export class SageMakerEmbeddingClient implements EmbeddingClient {
         : {}),
     });
 
+    const signal = purpose === 'query' && this.queryTimeoutMs !== undefined
+      ? AbortSignal.timeout(this.queryTimeoutMs) : undefined;
     let response;
     try {
-      response = await this.sdk.send(command);
+      response = signal
+        ? await this.sdk.send(command, { abortSignal: signal })
+        : await this.sdk.send(command);
     } catch (err) {
+      if (signal?.aborted) throw new EmbeddingRequestError(`query embed timed out after ${this.queryTimeoutMs}ms`);
       // AWS SDK errors carry a `name` (e.g. "ValidationException",
       // "ModelError", "ServiceUnavailable"). Including it in the
       // wrapped message keeps diagnostic info available on
@@ -147,6 +156,7 @@ export class SageMakerEmbeddingClient implements EmbeddingClient {
       const text = await streamToString(response.Body);
       body = JSON.parse(text);
     } catch (err) {
+      if (signal?.aborted) throw new EmbeddingRequestError(`query embed timed out after ${this.queryTimeoutMs}ms`);
       throw new EmbeddingRequestError(
         `response was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
       );

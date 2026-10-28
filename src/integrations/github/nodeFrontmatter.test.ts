@@ -170,6 +170,19 @@ describe('nodeFilePath', () => {
   });
 });
 
+describe('path-separator loc rejection (#287)', () => {
+  it.each(['../escape', 'a/../b', 'a\\b', '/abs', 'a:../b', 'a:b/c', 'a:b\\c'])('rejects %j through both shared path helpers', (loc) => {
+    expect(() => nodeFilePath('/g', loc)).toThrow(/Unsafe loc/);
+    expect(() => orphanedLegacyPaths('/g', loc)).toThrow(/Unsafe loc/);
+  });
+
+  it('preserves the supported root and ordinary colon-delimited addresses', () => {
+    expect(nodeFilePath('/g', '')).toBe('/g/README.md');
+    expect(() => orphanedLegacyPaths('/g', '')).toThrow(/Unsafe loc/);
+    expect(nodeFilePath('/g', 'notes:v1.2:two..dots')).toBe('/g/notes/v1.2/two..dots.md');
+  });
+});
+
 describe('orphanedLegacyPaths', () => {
   it('points at the old parent README and the old edge sidecar dir', () => {
     expect(orphanedLegacyPaths('/g', 'srv:msg:010:02')).toEqual({
@@ -385,5 +398,15 @@ describe('exporter → importer round-trip (frontmatter format)', () => {
     expect(edges).toContainEqual(
       expect.objectContaining({ sourceId: 'src1', targetId: 'tgt1', name: 'runs', isRunnable: true }),
     );
+  });
+});
+
+describe('derived include edges (#2040)', () => {
+  it('are never mirrored into the nodes: frontmatter', () => {
+    const entries = buildEdgeFrontmatter([
+      { governedKind: 'INCLUDE', target: { id: 'b', loc: 'b' }, name: 'includes', loc: 'includes:a:b' },
+      { target: { id: 'c', loc: 'c' }, name: 'cites', loc: 'a:cites:c' },
+    ]);
+    expect(entries.map((e) => e.id)).toEqual(['c']);
   });
 });
