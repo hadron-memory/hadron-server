@@ -329,7 +329,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     }
     const ctx = ctxOf();
     try {
-      return textResult(await call(ctx));
+      // #2607: a write that files task warnings (hadron_alarm_ack) renders them where the task tools do.
+      const result = textResult(`${await call(ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }

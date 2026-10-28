@@ -9510,7 +9510,8 @@ export const typeDefs = `#graphql
     { path (the mutation's response key), code, text, register? }. Codes are a
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
-    task.finish.open-children); a client must tolerate unknown codes. \`text\` is
+    task.finish.open-children, and from #2607 task.cancel.open-children on
+    cancelAgentTask and alarm.ack.outside-chain on acknowledgeAlarm); a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
     blocks and never reveals another worker's state to a caller who could not
@@ -9729,6 +9730,9 @@ export const typeDefs = `#graphql
     to, directly or up the reportsTo chain, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
     Holger team chat #8150). Refusals:
     TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #2607 (experiment): a cancel that leaves pending or started children
+    succeeds with the warning task.cancel.open-children in
+    \`extensions.warnings\` (see createAgentTask); it does not end them.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
 
@@ -9761,6 +9765,9 @@ export const typeDefs = `#graphql
     Refusals: ALARM_NOT_FOUND (also for an App you cannot read),
     NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
     stands), SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #2607 (experiment): an acknowledgement by a manager of the App who is no
+    owner in the chain succeeds with the warning alarm.ack.outside-chain in
+    \`extensions.warnings\` (see createAgentTask).
     """
     acknowledgeAlarm(eventId: ID!): AgentTeamEvent!
 
