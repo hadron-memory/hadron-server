@@ -171,37 +171,19 @@ describe('#960 — teamRoles read', () => {
     expect(be.nameRange).toBeUndefined();
   });
 
-  it('resolves the role-agent (the casting default) and hasNamePlaceholder', async () => {
+  it('resolves the role-agent (the casting default); hasNamePlaceholder is retired and always null (#2049)', async () => {
     const page = await teamRoles(ctx(contrib.id));
     const be = page.items.find((r: any) => r.role === 'backend-engineer');
     expect(be.roleAgent?.id).toBe(roleAgent.id);
-    expect(be.hasNamePlaceholder).toBe(true);
-    // No installed agent carries frontend-engineer dressing → null, null.
+    // No installed agent carries frontend-engineer dressing → no role-agent.
     const fe = page.items.find((r: any) => r.role === 'frontend-engineer');
     expect(fe.roleAgent).toBeNull();
-    expect(fe.hasNamePlaceholder).toBeNull();
-  });
-
-  it('flags a nameless template — the pre-guard corpus check', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are a {{role}} with no name.' },
-    });
-    const page = await teamRoles(ctx(contrib.id));
-    const be = page.items.find((r: any) => r.role === 'backend-engineer');
-    expect(be.hasNamePlaceholder).toBe(false);
-  });
-
-  it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
-    });
-    const page = await teamRoles(ctx(contrib.id));
-    const be = page.items.find((r: any) => r.role === 'backend-engineer');
-    // applyPersonaTemplate leaves "{{ name }}" literal, so this template
-    // produces nameless workers — the flag must say so.
-    expect(be.hasNamePlaceholder).toBe(false);
+    // Deprecated field: whatever the template says, it resolves null.
+    for (const prompt of ['You are {{name}}.', 'You are {{worker.name}}.', 'You are a {{role}} with no name.']) {
+      await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: prompt } });
+      const again = await teamRoles(ctx(contrib.id));
+      for (const item of again.items) expect(item.hasNamePlaceholder).toBeNull();
+    }
   });
 
   it('excludes role SUB-nodes and paginates deterministically', async () => {
