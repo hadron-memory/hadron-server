@@ -1,6 +1,5 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
-import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -28,6 +27,7 @@ import {
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
@@ -115,19 +115,6 @@ async function chatWriteTx(
  * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
  * so `session.llmModel` has no value here and is empty.
  */
-export function agentPlatformValues(agent: { name: string; urn: string; personaRole: string | null }) {
-  return {
-    'worker.name': agent.name,
-    'worker.role': agent.personaRole ?? '',
-    'agent.name': agent.name,
-    'worker.reportsTo.name': '',
-    'worker.signature': '',
-    'worker.trailer': '',
-    'worker.url': portalUrlForUrn(agent.urn) ?? '',
-    'session.llmModel': '',
-  };
-}
-
 export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
   return applyPlatformVariables(agent.systemPrompt ?? '', agentPlatformValues(agent), { name: agent.name, role: agent.personaRole ?? '' });
 }
@@ -145,7 +132,7 @@ export async function serveChatPrompt(
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
   const variables = agentPlatformValues(agent);
-  return { text: applyPlatformVariables(served.content, variables), served, variables };
+  return { text: applyPlatformVariables(served.content, variables), served, variables: { ...variables } };
 }
 
 export const chatMutations = {

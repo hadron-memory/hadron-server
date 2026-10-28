@@ -47,6 +47,10 @@ import {
 } from '../lib/llm/index.js';
 import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
+import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
+import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
+import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
+import { applyPlatformVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -584,9 +588,18 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       : (await db.appRun.findUnique({ where: { id: args.parentRunId } }))?.automationPin;
   }
 
-  const run = await db.appRun.create({
+  // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
+  // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
+  const runServing = bootPromptServingEnabled() && args.agentId
+    ? await (async () => {
+        const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
+        return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
+      })()
+    : null;
+  const runId = generateId();
+  const createRun = (client: Pick<PrismaClient, 'appRun'>) => client.appRun.create({
     data: {
-      id: generateId(),
+      id: runId,
       organizationId: args.organizationId,
       appId: args.appId,
       agentId: args.agentId ?? null,
@@ -617,11 +630,30 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       createdBy: args.createdBy ?? null,
     },
   });
+  const run = runServing
+    ? await db.$transaction(async (tx) => {
+        const created = await createRun(tx);
+        await recordServedPrompt(tx, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing.agent.id }, runServing.served, { ...agentPlatformValues(runServing.agent) });
+        return created;
+      })
+    : await createRun(db);
   if (args.triggerKind === 'MANUAL' && automationPin) {
     await db.manualAutomationPin.create({ data: { runId: run.id, pin: automationPin as never, adoptedBy: args.userId ?? args.createdBy ?? null } });
   }
   if (args.publish !== false) await publishRunRequested(db, run.id);
   return run;
+}
+
+/** #2047 — append one `{hop, blocks}` entry to the run's derived-block log when the blocks differ from the last entry. */
+async function logDerivedBlocks(db: PrismaClient, runId: string, hop: number, blocks: string[]): Promise<void> {
+  const row = await db.appRun.findUnique({ where: { id: runId }, select: { derivedLog: true } });
+  const log = Array.isArray(row?.derivedLog) ? (row!.derivedLog as Array<{ hop: number; blocks: string[] }>) : [];
+  const last = log[log.length - 1];
+  // A run with no block yet and none now has nothing to record: the first entry exists to show what was seen.
+  if (last ? JSON.stringify(last.blocks) === JSON.stringify(blocks) : blocks.length === 0) return;
+  await db.$executeRaw`
+    UPDATE app_runs SET derived_log = COALESCE(derived_log, '[]'::jsonb) || ${JSON.stringify([{ hop, blocks }])}::jsonb
+    WHERE id = ${runId} AND status = 'RUNNING'`;
 }
 
 /** Publish + stamp publishedAt on success; NULL keeps the sweep republishing. */
@@ -827,6 +859,19 @@ async function executeAppRunInner(
       throw err;
     }
 
+    // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
+    // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
+    let servedText: string | null = null;
+    if (bootPromptServingEnabled() && run.agentId) {
+      const record = await db.servedPrompt.findFirst({ where: { runId } });
+      if (record) {
+        const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
+        if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
+        servedText = applyPlatformVariables(content, record.variables as unknown as Parameters<typeof applyPlatformVariables>[1]);
+      }
+    }
+    const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);
+
     for (let hop = 0; ; hop++) {
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
@@ -882,6 +927,10 @@ async function executeAppRunInner(
       // checkpoint advances, so a message landing in between is never skipped.
       const attention = await renderAttentionSection(db, run);
       if (attention.text) instructions = `${instructions}\n\n${attention.text}`;
+      // #2047: the derived blocks this hop saw, appended to the run's log only when they differ from the last entry (an
+      // empty list is an entry too, so a block going away is recorded). Guarded on RUNNING, before the hop's LLM call, so
+      // a hop that fails or is aborted still shows what it saw.
+      if (servedText !== null) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
 
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
@@ -937,10 +986,10 @@ async function executeAppRunInner(
             run,
             resolved,
             {
-              system:
+              system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
                 'Use the available tools as the step instructions direct, ' +
-                'then reply with a concise result of what you did.',
+                'then reply with a concise result of what you did.'),
               prompt: instructions,
               ...maxTokens,
             },
@@ -968,9 +1017,9 @@ async function executeAppRunInner(
           const objectResult = await deps.llmObject(
             resolved,
             {
-              system:
+              system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
-                'Extract the requested fields from the task context below.',
+                'Extract the requested fields from the task context below.'),
               prompt: instructions,
               ...maxTokens,
             },
@@ -986,9 +1035,9 @@ async function executeAppRunInner(
           };
         } else {
           result = await deps.llm(resolved, {
-            system:
+            system: serve(
               'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
-              'Produce ONLY the requested output document — no preamble, no meta-commentary.',
+              'Produce ONLY the requested output document — no preamble, no meta-commentary.'),
             prompt: instructions,
             ...maxTokens,
           });
