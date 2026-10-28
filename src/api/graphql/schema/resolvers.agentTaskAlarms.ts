@@ -40,9 +40,10 @@ import {
   HOST_REPORT_TIMEOUT_MAX_MINUTES,
   HOST_REPORT_TIMEOUT_MIN_MINUTES,
 } from '../../../lib/hostOperations/settle.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { type Context } from './resolvers.helpers.js';
+import { emitTaskWarnings, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import {
   actorManagesApp,
   inTaskWriteTx,
@@ -202,8 +203,11 @@ export const agentTaskAlarmMutations = {
    * not end the stall episode. Any owner in the alarm's chain, or whoever
    * manages the App (cor:agt:050:24), and nobody else. A second acknowledgement is refused and the first stands
    * (050:20 edge case, Proposed).
+   * #2607: an acknowledgement admitted only by the manager arm (the caller is no owner in the chain) still succeeds,
+   * with the `alarm.ack.outside-chain` warning. Decided from the locked row's chain with the same `inChain` the gate
+   * uses, so an owner in the chain who also manages the App gets none; filed after commit.
    */
-  acknowledgeAlarm: async (_: unknown, { eventId }: { eventId: string }, ctx: Context) => {
+  acknowledgeAlarm: async (_: unknown, { eventId }: { eventId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
     const id = typeof eventId === 'string' ? eventId.trim() : '';
     const found = isId(id)
       ? await ctx.db.agentTeamEvent.findUnique({ where: { id }, select: { appId: true } })
@@ -213,6 +217,7 @@ export const agentTaskAlarmMutations = {
     // An event of an App the caller does not participate in reads as missing.
     if (!app || !actor) throw alarmNotFound(id);
     requireWritable(ctx, app);
+    const warn: TaskWarningCode[] = [];
     await inTaskWriteTx(ctx, app, actor, () => alarmNotFound(id), async (tx, txCtx, freshApp) => {
       const [row] = await tx.$queryRaw<{ appId: string; severity: string | null; chain: unknown; acknowledgedAt: Date | null }[]>`
         SELECT app_id AS "appId", severity, chain, acknowledged_at AS "acknowledgedAt"
@@ -223,7 +228,8 @@ export const agentTaskAlarmMutations = {
       }
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
       // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
-      if (!inChain(actor, row.chain) && !(await actorManagesApp(txCtx, freshApp, actor))) {
+      const ownerInChain = inChain(actor, row.chain);
+      if (!ownerInChain && !(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError(
           'ALARM_NOT_IN_CHAIN',
           "Only an owner in the alarm's chain, or whoever manages the App, acknowledges it (cor:agt:050:24).",
@@ -233,6 +239,7 @@ export const agentTaskAlarmMutations = {
       if (row.acknowledgedAt) {
         throw taskError('ALARM_ALREADY_ACKNOWLEDGED', 'This alarm is already acknowledged; the first acknowledgement stands.', { eventId: id });
       }
+      if (!ownerInChain) warn.push('alarm.ack.outside-chain');
       // The server's clock, never a client value (Rook P3-2).
       await tx.agentTeamEvent.update({
         where: { id },
@@ -243,6 +250,7 @@ export const agentTaskAlarmMutations = {
         },
       });
     });
+    await emitTaskWarnings(ctx, info, app.id, { codes: warn });
     return ctx.db.agentTeamEvent.findUniqueOrThrow({ where: { id } });
   },
 
