@@ -65,7 +65,10 @@ describe('#1246 — App and Agent descriptions publish the live install model', 
     expect(primary).toMatch(/null when the caller may not read it/);
     expect(primary).toMatch(/null is not proof that nothing is installed/);
     expect(primary).toMatch(/entry whose `agent` is null/);
-    const list = before('    agents: [Agent!]!', '023-app-shape: convenience that returns every installed Agent');
+    const list = before('    agents: [Agent!]!', '023-app-shape: convenience list of the installed Agents');
+    expect(list).not.toMatch(/equivalent to App\.appAgents\.map/i);
+    expect(list).not.toMatch(/FULL multi-Agent set/i);
+    expect(list).toMatch(/appagents/);
     expect(list).toMatch(/may read/);
     expect(list).toMatch(/may be partial/);
     expect(list).toMatch(/not the install count/);

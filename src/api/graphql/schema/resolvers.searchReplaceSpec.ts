@@ -38,6 +38,7 @@ import {
   concealUnreadableDenial,
   getAccessibleMemoryIds,
 } from './resolvers.helpers.js';
+import { attachIncludePinWarnings } from '../../../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 
 export interface SpecSearchReplaceInput {
@@ -433,6 +434,10 @@ export async function searchReplaceInSpecNodes(
       ownerRepo: node.raw.ownerRepo ?? '',
       clientId: ctx.clientId,
     });
+  }
+  for (let i = 0; i < applied.changed.length; i++) {
+    const node = applied.changed[i]!;
+    if (node.contentChanged) attachIncludePinWarnings(ctx, applied.result.results[i]!, node.plaintext.content, node.storedContent);
   }
   return applied.result;
 }

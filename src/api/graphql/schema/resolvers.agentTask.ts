@@ -1503,13 +1503,16 @@ export const agentTaskMutations = {
    * Cancel a pending, started or backlog task: its owner, or whoever manages
    * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
    */
-  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, cancels it.", { taskId });
       }
       refuseEnded(task);
       const openChildCount = await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } });
+      // #2607: cancelling with open children still succeeds; it does not end them, and the response says so.
+      if (openChildCount > 0) warn.push('task.cancel.open-children');
       await tx.agentTask.update({
         where: { id: task.id },
         data: { status: 'cancelled', cancelledAt: new Date(), ...updatedStamp(ctx) },
@@ -1528,6 +1531,7 @@ export const agentTaskMutations = {
     }, { assignee: true });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
+    await emitTaskWarnings(ctx, info, cancelled.appId, { codes: warn, taskId: cancelled.id });
     return cancelled;
   },
 };

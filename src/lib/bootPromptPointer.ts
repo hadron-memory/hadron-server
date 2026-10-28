@@ -26,6 +26,7 @@ import { COMPILED_BOOT_PROMPT_NODE_TYPE, isBootPromptRole } from './bootPrompt.j
 import { currentActor, currentActorAmbiguity } from './requestActor.js';
 import { managesAgent, managesApp, type AppManagerCaller } from './auth/appManagement.js';
 import { isRunPrincipal } from './auth/runPrincipal.js';
+import { isOperatorConversionContext } from './auth/operatorConversion.js';
 import { authorizationDenied } from './auth/authorizationDenied.js';
 import { resolveNodeRef, isConcealedNodeRefAmbiguity } from './entityRef/nodeRef.js';
 import { NodeNotFoundError } from './entityRef/errors.js';
@@ -198,6 +199,8 @@ export async function assertMayWriteBootPromptPointer(
   ctx: BootPromptPointerCaller,
   owner: BootPromptPointerOwner,
 ): Promise<void> {
+  // #2676 (P9): the one-time conversion's operator principal (src/admin only; see auth/operatorConversion.ts).
+  if (isOperatorConversionContext(ctx)) return;
   if (currentActor().workerId !== null || currentActorAmbiguity() !== null || ctx.sessionBindingRefused) {
     throw pointerError(
       'BOOT_PROMPT_POINTER_SESSION_REFUSED',

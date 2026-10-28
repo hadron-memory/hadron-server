@@ -161,6 +161,7 @@ import { type ToolDriveFile } from '../../../lib/emailClient.js';
 import { concealWriteBeyondRead, findInstallMemory, lockInstallAuthorityFirst, resolveInstallTarget, withInstallMemory, type InstallTarget } from './installMemory.js';
 import { searchReplaceInSpecNodes } from './resolvers.searchReplaceSpec.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
+import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWarningLifetime } from '../../../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
@@ -1009,6 +1010,9 @@ async function writeNodeCoreRaw(
         ? await getAccessibleMemoryIds(ctx)
         : null;
       let writeEmbeddingWorkToken: string | null = null;
+      const includeWarningLifetime = captureIncludePinWarningLifetime(ctx);
+      let includeWarningContentSaved = false;
+      let includeWarningStoredContent: string | null = null;
       // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
       // this write locked and revalidated, before its update; null for a create
       // or a resurrected tombstone, whose old text is not the includer's.
@@ -1023,6 +1027,8 @@ async function writeNodeCoreRaw(
           const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes, undefined, stored);
           const result = await replaceInlineEdges(tx, writtenNode);
           await syncDerivedIncludesEdges(tx, writtenNode, tags, readableForIncludes, stored);
+          includeWarningContentSaved = true;
+          includeWarningStoredContent = storedPlaintext;
           return result;
         }
         return replaceInlineEdges(tx, writtenNode);
@@ -1763,6 +1769,7 @@ async function writeNodeCoreRaw(
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
         const pooledDb = opts?.transaction?.pooledDb ?? ctx.db;
+        if (includeWarningContentSaved) attachIncludePinWarnings(ctx, finalNode, input.content, includeWarningStoredContent, { ...ctx, db: pooledDb }, includeWarningLifetime);
         void publishNodeWritten({
           nodeId: finalNode.id,
           memoryId: input.memoryId,
@@ -3085,7 +3092,11 @@ export const nodeMutations = {
         });
       }
 
-      return buildResult();
+      const result = buildResult();
+      for (let i = 0; i < plans.length; i++) {
+        if (plans[i]!.contentChanged) attachIncludePinWarnings(ctx, result.results[i]!, plans[i]!.plaintext.content, plans[i]!.storedContent);
+      }
+      return result;
     },
 
     searchReplaceInSpecNodes,
@@ -4436,6 +4447,7 @@ export const nodeMutations = {
         );
       }
 
+      if (contentChanged) attachIncludePinWarnings(ctx, finalNode, finalNode.content, tgtPt.content);
       return finalNode;
     },
 
@@ -4571,7 +4583,7 @@ export const nodeMutations = {
 
       // Restore (+ optional truncate) in one transaction (#617) so the portal
       // never sequences restore + N deletes and can't half-apply on a crash.
-      const { restored, restoredPlaintext, destinationEncrypted } = await ctx.db.$transaction(async (tx) => {
+      const { restored, restoredPlaintext, destinationEncrypted, previousContent } = await ctx.db.$transaction(async (tx) => {
         // Spec 049 S4: lock-then-gate — the check above is the fast refusal.
         await lockLocForWrite(tx, node.memoryId, node.loc);
         // Row lock + drift reconciled as its own revision before the restore's
@@ -4756,7 +4768,7 @@ export const nodeMutations = {
           await syncDerivedIncludesEdges(tx, current, tags, readable, stored);
         }
         restored.embeddingWorkToken = await stampEmbeddingObligation(tx, restored.id, restored.memoryId);
-        return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
+        return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted, previousContent: logicalCurrent.content as string | null };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on
       // non-encrypted memories; ciphertext snapshots are handled by embedNode's
@@ -4771,9 +4783,11 @@ export const nodeMutations = {
       // other. The revision-pruning mutations below (delete/label/clear
       // history) are NOT: they touch snapshot rows, never the node.
       recordNodeWrite(ctx.db, toUsageNodeRef(restored), ctx);
-      return destinationEncrypted
+      const result = destinationEncrypted
         ? decryptNodeFieldsWithKey({ ...restored }, requireKey(restored.memoryId))
         : restored;
+      attachIncludePinWarnings(ctx, result, restoredPlaintext.content as string | null, previousContent);
+      return result;
     },
 
     // #617 — delete a single snapshot. Write-gated on the node's CURRENT memory
@@ -4947,5 +4961,7 @@ export async function writeNodeCore(...args: Parameters<typeof writeNodeCoreRaw>
   const written = await writeNodeCoreRaw(...args);
   const ctx = args[1];
   if (!written || typeof written !== 'object' || typeof (written as { memoryId?: unknown }).memoryId !== 'string') return written;
-  return concealWriteBeyondRead(ctx, written as { memoryId: string }) as unknown as typeof written;
+  const projected = await concealWriteBeyondRead(ctx, written as { memoryId: string });
+  carryIncludePinWarnings(ctx, written, projected);
+  return projected as unknown as typeof written;
 }
