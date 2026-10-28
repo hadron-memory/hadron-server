@@ -15,12 +15,14 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 // A mutant seam for the compile (the drift pin): off unless a test turns it on.
-const drift = vi.hoisted(() => ({ on: false }));
+const drift = vi.hoisted(() => ({ on: false, gap: null as null | (() => Promise<void>) }));
 vi.mock('../api/graphql/schema/compileBootPrompt.js', async (orig) => {
   const m = await orig<typeof import('../api/graphql/schema/compileBootPrompt.js')>();
   return {
     ...m,
     compileBootPrompt: async (...a: Parameters<typeof m.compileBootPrompt>) => {
+      // The gap between the converter's precheck and the compile: a node committed there (the race pin).
+      if (drift.gap) { const g = drift.gap; drift.gap = null; await g(); }
       const r = await m.compileBootPrompt(...a);
       return drift.on ? { ...r, node: { ...r.node, content: `${r.node.content} (edited)` } } : r;
     },
@@ -256,6 +258,21 @@ describe('#2676 — repeatable, preview, and what as-is cannot carry', () => {
     }
   });
 
+  it('a node committed at the compiled address after the precheck is refused ADDRESS_OCCUPIED and never overwritten', async () => {
+    const agent = await agentWith('gap', 'Agent text.');
+    drift.gap = async () => {
+      await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'boot:compiled', name: 'Mine', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE, content: 'independent concurrent content' } });
+    };
+    const report = await run();
+    drift.gap = null;
+    expect(report.rows[0]).toMatchObject({ outcome: 'failed', reason: 'ADDRESS_OCCUPIED' });
+    const n = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:compiled' } });
+    expect(n.content).toBe('independent concurrent content');
+    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).bootPromptNodeId).toBeNull();
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' } });
+    expect(source.approvedRevNo).toBeNull();
+  });
+
   it('approvals are recorded as the operator conversion: no user id, the info string', async () => {
     const agent = await agentWith('ap', 'Agent text.');
     await run();
@@ -308,7 +325,7 @@ describe('#2676 — the operator seam is narrow', () => {
     const agent = await agentWith('restore', 'Agent text.');
     const src = await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Boot prompt', role: 'boot-prompt', content: 'Agent text.' } });
     const manager = await db.user.create({ data: { id: generateId(), name: 'earlier-approver' } });
-    await db.node.update({ where: { id: src.id }, data: { revSeq: 2, approvedRevNo: 1, approvedBy: manager.id, approvedAt: new Date(), approvalHash: 'earlier' } });
+    await db.node.update({ where: { id: src.id }, data: { revSeq: 2, contentRevSeq: 2, approvedRevNo: 1, approvedBy: manager.id, approvedAt: new Date(), approvalHash: 'earlier' } });
     drift.on = true;
     const report = await run();
     drift.on = false;

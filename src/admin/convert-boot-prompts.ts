@@ -160,7 +160,7 @@ async function sourceCompileApprove(
     if (reuse?.approved) return reuse.id;
     let compiledId = reuse?.id ?? null;
     if (!compiledId) {
-      const compiled = await compileBootPrompt(ctx, p.compile, { setPointer: false });
+      const compiled = await compileBootPrompt(ctx, p.compile, { setPointer: false, createOnly: true });
       if (compiled.node.content !== p.expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
       compiledId = compiled.node.id;
     }
