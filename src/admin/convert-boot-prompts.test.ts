@@ -1,4 +1,4 @@
-/** #2676 (S13): the as-is conversion of Agent.systemPrompt and Worker.promptOverride to approved, compiled boot-prompt nodes. */
+/** #2676 (S13, P9): the operator script converting Agent.systemPrompt and Worker.promptOverride to approved, compiled boot-prompt nodes as-is. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../test/helpers.js';
@@ -6,7 +6,24 @@ import { generateId } from '../lib/id.js';
 import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
-import { convertBootPrompts } from './convertBootPrompts.js';
+import { convertBootPrompts } from './convert-boot-prompts.js';
+import { OPERATOR_CONVERSION_INFO, createOperatorConversionContext, isOperatorConversionContext } from '../lib/auth/operatorConversion.js';
+import { requireMemoryWriteAccess } from '../api/graphql/schema/resolvers.helpers.js';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+// A mutant seam for the compile (the drift pin): off unless a test turns it on.
+const drift = vi.hoisted(() => ({ on: false }));
+vi.mock('../api/graphql/schema/compileBootPrompt.js', async (orig) => {
+  const m = await orig<typeof import('../api/graphql/schema/compileBootPrompt.js')>();
+  return {
+    ...m,
+    compileBootPrompt: async (...a: Parameters<typeof m.compileBootPrompt>) => {
+      const r = await m.compileBootPrompt(...a);
+      return drift.on ? { ...r, node: { ...r.node, content: `${r.node.content} (edited)` } } : r;
+    },
+  };
+});
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -32,7 +49,7 @@ async function appWith(slug: string, agentId: string) {
 }
 const workerOf = (appId: string, agentId: string, slug: string, promptOverride: string | null) =>
   db.worker.create({ data: { id: generateId(), appId, agentId, name: slug, slug, signature: '', trailer: '', promptOverride } });
-const run = (apply = true) => convertBootPrompts(db, { actingUserId: adminId, apply });
+const run = (apply = true) => convertBootPrompts(db, { apply });
 const nodeCount = () => db.node.count();
 const approved = (n: { revSeq: number; approvedRevNo: number | null }) => n.approvedRevNo === n.revSeq;
 
@@ -160,13 +177,22 @@ describe('#2676 — repeatable, preview, and what as-is cannot carry', () => {
     expect(await db.node.count({ where: { memoryId: bad.systemMemoryId! } })).toBe(0);
   });
 
-  it('an override holding {{name}} or {{role}} fails: a combined text would bind what the override keeps as written', async () => {
+  it('an override holding {{name}} / {{role}} converts as written and is listed as a row whose rendering will differ', async () => {
     const agent = await agentWith('tok', 'Agent text.');
     const app = await appWith('cv-tok', agent.id);
-    const worker = await workerOf(app.id, agent.id, 'w', 'I am {{name}}.');
-    const report = await run();
-    expect(report.rows.find((r) => r.id === worker.id)).toMatchObject({ outcome: 'failed', reason: 'OVERRIDE_HAS_LEGACY_TOKEN' });
-    expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).bootPromptNodeId).toBeNull();
+    const worker = await workerOf(app.id, agent.id, 'w', 'I am {{name}}, {{role}} and {{name}}.');
+    const plain = await workerOf(app.id, agent.id, 'p', 'No tokens.');
+    for (const apply of [false, true]) {
+      const report = await run(apply);
+      expect(report.failed).toBe(0);
+      expect(report.renderedDifferences).toEqual([
+        { kind: 'WORKER', id: worker.id, name: 'w', reason: 'OVERRIDE_LEGACY_TOKEN_NOW_BINDS', tokens: ['{{name}}', '{{role}}'] },
+      ]);
+      if (!apply) continue;
+      const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      expect((await db.node.findUniqueOrThrow({ where: { id: w.bootPromptNodeId! } })).content).toBe('Agent text.\n\nI am {{name}}, {{role}} and {{name}}.');
+      expect((await db.worker.findUniqueOrThrow({ where: { id: plain.id } })).bootPromptNodeId).not.toBeNull();
+    }
   });
 
   it('an override holding an include tag fails, and no install memory is made for it', async () => {
@@ -187,41 +213,83 @@ describe('#2676 — repeatable, preview, and what as-is cannot carry', () => {
     expect(await db.memory.count({ where: { isInstallMemory: true } })).toBe(0);
   });
 
-  it('a user-owned App is refused by the manager gate and shows as a failed row, with nothing left behind', async () => {
-    const agent = await agentWith('uo', 'Agent text.');
+  it('a user-owned Agent and App convert too: the operator is no manager of anything', async () => {
     const owner = await db.user.create({ data: { id: generateId(), name: 'owner' } });
+    const mem = await db.memory.create({ data: { id: generateId(), class: 'system', name: 'uo-sys', urn: 'uo:uo-sys', ownerUserId: owner.id } });
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'uo', urn: 'uo:uo', ownerUserId: owner.id, systemMemoryId: mem.id, systemPrompt: 'Agent text.' } });
     const { app } = await createDbAppWithKey(db, 'cv-uo', orgId);
     await db.app.update({ where: { id: app.id }, data: { organizationId: null, ownerUserId: owner.id } });
     await createDbAppAgent(db, app.id, agent.id);
     const worker = await workerOf(app.id, agent.id, 'w', 'Override.');
     const report = await run();
-    expect(report.rows.find((r) => r.id === worker.id)).toMatchObject({ outcome: 'failed' });
-    expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).bootPromptNodeId).toBeNull();
-    expect(report.rows.find((r) => r.kind === 'AGENT')).toMatchObject({ outcome: 'converted' });
+    expect(report.rows.map((r) => r.reason ?? r.outcome)).toEqual(['converted', 'converted']);
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: w.bootPromptNodeId! } })).content).toBe('Agent text.\n\nOverride.');
   });
 
   it('a compile that returns other text than the old composition fails the row: nothing approved, no pointer', async () => {
     const agent = await agentWith('drift', 'Agent text.');
-    const real = resolvers.Mutation.compileAgentBootPrompt as (...a: unknown[]) => Promise<{ node: { content: string } }>;
-    const spy = vi.spyOn(resolvers.Mutation as unknown as { compileAgentBootPrompt: typeof real }, 'compileAgentBootPrompt').mockImplementation(async (...a: unknown[]) => {
-      const r = await real(...a);
-      return { ...r, node: { ...r.node, content: `${r.node.content} (edited)` } };
-    });
+    drift.on = true;
     const report = await run();
-    spy.mockRestore();
+    drift.on = false;
     expect(report.rows[0]).toMatchObject({ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' });
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).bootPromptNodeId).toBeNull();
     const compiled = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:compiled' } });
     expect(compiled.approvedRevNo).toBeNull();
   });
 
-  it('an unknown user is refused, and a user who manages nothing converts nothing and writes nothing', async () => {
-    const agent = await agentWith('guard', 'Agent text.');
+  it('approvals are recorded as the operator conversion: no user id, the info string', async () => {
+    const agent = await agentWith('ap', 'Agent text.');
+    await run();
+    for (const loc of ['boot:source', 'boot:compiled']) {
+      const n = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc } });
+      expect(n).toMatchObject({ approvedBy: null, approvedByInfo: OPERATOR_CONVERSION_INFO });
+    }
+  });
+});
+
+describe('#2676 — the operator seam is narrow', () => {
+  it('the GraphQL compile and pointer mutations still refuse a user who does not manage the Agent', async () => {
+    const agent = await agentWith('gq', 'Agent text.');
+    await run();
     const plain = await db.user.create({ data: { id: generateId(), name: 'plain' } });
-    await expect(convertBootPrompts(db, { actingUserId: generateId(), apply: true })).rejects.toThrow(/no user/);
-    const report = await convertBootPrompts(db, { actingUserId: plain.id, apply: true });
-    expect(report).toMatchObject({ converted: 0, failed: 1 });
-    expect(await db.node.count()).toBe(0);
-    expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).bootPromptNodeId).toBeNull();
+    const ctx = { db, userId: plain.id, roles: [], clientId: `user:${plain.id}` } as Context;
+    const m = resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    await expect(m.compileAgentBootPrompt(null, { agentRef: agent.id, setPointer: false }, ctx)).rejects.toThrow();
+    const row = await db.agent.findUniqueOrThrow({ where: { id: agent.id } });
+    await expect(m.setAgentBootPrompt(null, { agentRef: agent.id, nodeRef: row.bootPromptNodeId }, ctx)).rejects.toThrow();
+  });
+
+  it('the marker cannot be carried by anything a request or a payload can build', () => {
+    const ctx = createOperatorConversionContext(db);
+    expect(isOperatorConversionContext(ctx)).toBe(true);
+    expect(isOperatorConversionContext({ ...ctx })).toBe(true);
+    expect(isOperatorConversionContext(JSON.parse(JSON.stringify({ ...ctx, db: undefined })))).toBe(false);
+    expect(isOperatorConversionContext({ db, userId: null, roles: [], clientId: OPERATOR_CONVERSION_INFO })).toBe(false);
+    expect(isOperatorConversionContext({ operatorConversion: true, [Symbol('operatorConversion')]: true })).toBe(false);
+    expect(isOperatorConversionContext(null)).toBe(false);
+  });
+
+  it('the operator writes system memories only', async () => {
+    const ctx = createOperatorConversionContext(db);
+    const system = await db.memory.create({ data: { id: generateId(), class: 'system', name: 's', urn: 'cv-org:s-sys', organizationId: orgId } });
+    const knowledge = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'k', urn: 'cv-org:k', organizationId: orgId } });
+    await expect(requireMemoryWriteAccess(ctx, system.id)).resolves.toBeUndefined();
+    await expect(requireMemoryWriteAccess(ctx, knowledge.id)).rejects.toThrow();
+  });
+
+  it('only src/admin and scripts import the operator constructor', () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = join(dir, name);
+        if (statSync(path).isDirectory()) { walk(path); continue; }
+        if (!/\.(ts|tsx)$/.test(name) || /\.test\.ts$/.test(name)) continue;
+        if (path.startsWith(join('src', 'admin')) || path === join('src', 'lib', 'auth', 'operatorConversion.ts')) continue;
+        if (readFileSync(path, 'utf8').includes('createOperatorConversionContext')) offenders.push(path);
+      }
+    };
+    walk('src');
+    expect(offenders).toEqual([]);
   });
 });
