@@ -28,7 +28,8 @@ export type LintKind =
   | 'NO_QUALIFYING_REVISION'
   | 'PINNED_NEWER_APPROVED'
   | 'SIGNING_NOT_CHECKED'
-  | 'BROKEN_INCLUDE';
+  | 'BROKEN_INCLUDE'
+  | 'WORKER_LINK_MISSING';
 
 /** Every field a warning may carry; the serializer is an allowlist, there is no free-form detail (cor:api:120:04). */
 export interface LintWarning {
@@ -42,8 +43,8 @@ export interface LintWarning {
   newerRevision: number | null;
   /** Reserved for the policy-override notice; never set by source lint. */
   overriddenNodeLoc: null;
-  /** Reserved for the worker signature/trailer lint; never set by source lint. */
-  workerField: null;
+  /** Which stored field lacks the worker link; set only by {@link lintWorkerFields}, null for source lint. */
+  workerField: 'signature' | 'trailer' | null;
 }
 
 export interface LintWarningPage {
@@ -61,6 +62,7 @@ const TARGET_BATCH = 100;
 
 const KIND_RANK: Record<LintKind, number> = {
   BROKEN_INCLUDE: 0, RETIRED_TARGET: 1, NO_QUALIFYING_REVISION: 2, PINNED_NEWER_APPROVED: 3, SIGNING_NOT_CHECKED: 4,
+  WORKER_LINK_MISSING: 5,
 };
 
 /** What lint reads of a node: the stored (decrypted) source and how it is classified. */
@@ -219,6 +221,29 @@ export async function lintSourceWarnings(ctx: Context, subject: LintSubject): Pr
     }
   }
   return warnings.sort((a, b) => a.position - b.position || KIND_RANK[a.kind] - KIND_RANK[b.kind]);
+}
+
+/** The platform variable that renders the worker's portal link (cor:agt:040:04). */
+const WORKER_LINK_VARIABLE = '{{worker.url}}';
+
+/**
+ * cor:agt:040:04 S3 / cor:agt:040:13 S5: a worker's signature or trailer that would not carry the worker link.
+ * The values are free-form templates, so the link is present when the stored text names the `worker.url` variable
+ * or holds this worker's own portal URL literally; a blank value delivers nothing and so lacks it. Pure: no
+ * reads, nothing to disclose, and the order is signature then trailer.
+ */
+export function lintWorkerFields(stored: { signature: string; trailer: string }, portalUrl: string | null): LintWarning[] {
+  const warnings: LintWarning[] = [];
+  for (const field of ['signature', 'trailer'] as const) {
+    const value = stored[field];
+    if (value.includes(WORKER_LINK_VARIABLE) || (portalUrl && value.includes(portalUrl))) continue;
+    warnings.push(warning(
+      'WORKER_LINK_MISSING', 0,
+      `The worker's ${field} does not carry the worker link (${WORKER_LINK_VARIABLE}).`,
+      { workerField: field },
+    ));
+  }
+  return warnings;
 }
 
 const encodeCursor = (offset: number) => Buffer.from(String(offset), 'utf8').toString('base64url');

@@ -104,7 +104,8 @@ const REVIEWED_PAGED_FIELDS = [
   "ServedPrompt.provenance",
   "Session.servedPrompts",
   "Ticker.subscribers",
-  "User.sharedOrganizations"
+  "User.sharedOrganizations",
+  "Worker.signatureLint"
 ];
 const servers: Server[] = [];
 type Reply = Omit<Response, 'json'> & { json(): Promise<any> }; // eslint-disable-line @typescript-eslint/no-explicit-any

@@ -2281,6 +2281,8 @@ export const typeDefs = `#graphql
     SIGNING_NOT_CHECKED
     "The target is missing or the caller cannot read it. Position only: it never says which, or anything about the target."
     BROKEN_INCLUDE
+    "A worker's signature or trailer does not carry the worker link (hrn:node:hadronmemory.com:specs:cor:agt:040:04 S3). workerField names which."
+    WORKER_LINK_MISSING
   }
 
   "#2048 — one link-lint warning. A fixed set of fields: there is no free-form detail."
@@ -2297,7 +2299,7 @@ export const typeDefs = `#graphql
     newerRevision: Int
     "Reserved for the policy-agent override notice; null for source lint."
     overriddenNodeLoc: String
-    "Reserved for the worker signature/trailer lint; null for source lint."
+    "For WORKER_LINK_MISSING, which stored field lacks the worker link: signature or trailer. Null otherwise."
     workerField: String
   }
 
@@ -5016,6 +5018,12 @@ export const typeDefs = `#graphql
     signature: String
     "Per-worker commit trailer template, masked for nonreaders (hrn:node:hadronmemory.com:specs:cor:agt:040:04)."
     trailer: String
+    """
+    #2048 — whether the signature and trailer above carry the worker link, as they hold now (hrn:node:hadronmemory.com:specs:cor:agt:040:13). Same
+    gate as signature and trailer: null (unavailable, not "no warnings") for a caller who may not see them, and on a
+    fault. A warning never blocks an edit.
+    """
+    signatureLint(first: Int = 50, after: String): LintWarningPage
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
     """
