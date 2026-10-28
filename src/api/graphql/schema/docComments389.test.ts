@@ -33,3 +33,22 @@ describe('#389 residual doc comments', () => {
     expect(text).toContain('not-URN-legal');
   });
 });
+
+
+describe('#2689 served-prompt and Chat description ownership', () => {
+  const definitions = parse(typeDefs).definitions;
+  const description = (name: string) => {
+    const def = definitions.find(node => 'name' in node && node.name?.value === name);
+    return def && 'description' in def ? def.description?.value ?? '' : '';
+  };
+  it('attaches the existing chat-scope prose to Chat', () => {
+    expect(description('Chat')).toContain('A saved chat in one of the chat-scope tiers.');
+    expect(description('Chat')).toContain('scope is set at chat creation and immutable');
+    expect(description('Chat')).toContain('readable by every AppMember of that App.');
+  });
+  it('describes ServedPromptKind as bind/chat/run rather than chat storage', () => {
+    expect(description('ServedPromptKind')).toMatch(/kind of served prompt/i);
+    expect(description('ServedPromptKind')).toMatch(/bind.*chat.*run/i);
+    expect(description('ServedPromptKind')).not.toContain('chat-scope tiers');
+  });
+});

@@ -10,7 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { bindAgentPrompt } from './resolvers.mutation.chat.js';
-import { applyPlatformVariables, templateBindsName } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -60,9 +60,9 @@ describe('one pass over the authored source (blind review P2-1, P3-1)', () => {
     );
   });
 
-  it('templateBindsName also recognises the exact {{worker.name}} token', () => {
-    expect(templateBindsName('You are {{worker.name}}.')).toBe(true);
-    expect(templateBindsName('You are {{ worker.name }}.')).toBe(false);
+  it('binds only the exact {{worker.name}} token', () => {
+    expect(applyPlatformVariables('You are {{worker.name}}.', values)).toBe(`You are ${values['worker.name']}.`);
+    expect(applyPlatformVariables('You are {{ worker.name }}.', values)).toBe('You are {{ worker.name }}.');
   });
 });
 

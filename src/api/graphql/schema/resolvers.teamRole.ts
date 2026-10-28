@@ -34,7 +34,6 @@ import {
   withRoleWriteLock,
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
-import { templateBindsName } from '../../../lib/personaDescription.js';
 import { writeNodeCore, nodeMutations } from './resolvers.mutation.node.js';
 import {
   type Context,
@@ -140,10 +139,8 @@ async function loadRoleNodes(
 
 /**
  * Assemble one TeamRole projection from a decrypted role node + the role-agent
- * index. `hasNamePlaceholder` moved to the role-AGENT's dressing with the
- * Worker model: it flags a `systemPrompt` that never binds `{{name}}` — the
- * silent-breakage check #960 kept on the read because agents authored before
- * the guard exist. Null when no single role-agent resolves.
+ * index. `hasNamePlaceholder` is a retired, deprecated field and is always null
+ * (#2049 S12); the SDL keeps it so older clients' queries still validate.
  *
  * #1050: the name REGISTER is gone from this projection — no `register`,
  * `freeCount`, `exhausted`, `nameRange` or `nameConvention`. A role is now a
@@ -194,16 +191,7 @@ async function buildTeamRole(
   const role = node.loc.slice(ROLES_BRANCH_PREFIX.length);
   const entry = roleAgentIndex.get(role.toLowerCase());
   let roleAgent: Record<string, unknown> | null = null;
-  let hasNamePlaceholder: boolean | null = null;
   if (entry?.agent) {
-    // The read-side check stays computed even when the agent object below is
-    // masked: it discloses one boolean about the caller's OWN App's casting
-    // default, and it is exactly what an operator needs to find templates
-    // authored before any write-path guard existed.
-    // Shared with applyPersonaTemplate's exact token (#985 review): a
-    // whitespace-tolerant probe would bless `{{ name }}`, which the composer
-    // leaves literal.
-    hasNamePlaceholder = templateBindsName(entry.agent.systemPrompt);
     // The agent OBJECT runs Query.agent's own read gate, masked to null on
     // deny — the same #552 posture as Worker.agent: a nested Agent hands the
     // caller its field resolvers (systemPrompt included).
@@ -236,7 +224,9 @@ async function buildTeamRole(
     // appear here).
     repos: parseRepoAffinity(node.data?.repos),
     roleAgent,
-    hasNamePlaceholder,
+    // Deprecated (#2049 S12): the name-placeholder check is retired; the field
+    // stays in the SDL so older clients' queries keep validating.
+    hasNamePlaceholder: null,
   };
 }
 

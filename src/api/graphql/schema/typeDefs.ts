@@ -1442,6 +1442,8 @@ export const typeDefs = `#graphql
     contentHash: String!
     "Whether this compile wrote the pointer."
     pointerSet: Boolean!
+    "Current warnings for the revision just compiled; null when unavailable."
+    lintWarnings(first: Int = 50, after: String): LintWarningPage
     "Always false: a compile never approves or signs."
     approvalIssued: Boolean!
   }
@@ -1861,6 +1863,11 @@ export const typeDefs = `#graphql
     """
     lapsesAt: DateTime
     events: [UsageEvent!]!
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this session was served at its bind. Readable by whoever may read the
+    worker's internals; an empty page for anyone else, and while boot-prompt serving is off.
+    """
+    servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
   }
 
   """
@@ -2276,6 +2283,10 @@ export const typeDefs = `#graphql
 
   "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — what link lint warns about."
   enum LintKind {
+    "A recompile would select a newer revision; shown only to a compiler, without hidden target details."
+    RECOMPILE_AVAILABLE
+    "An install-memory node replaces an Agent node."
+    POLICY_OVERRIDE
     "The include's target is soft-deleted (hrn:node:hadronmemory.com:specs:cor:agt:040:13, R20 A)."
     RETIRED_TARGET
     "The target is readable but has no revision that meets the include's settings (approved and/or rev=N)."
@@ -2286,12 +2297,14 @@ export const typeDefs = `#graphql
     SIGNING_NOT_CHECKED
     "The target is missing or the caller cannot read it. Position only: it never says which, or anything about the target."
     BROKEN_INCLUDE
+    "A worker's signature or trailer does not carry the worker link (hrn:node:hadronmemory.com:specs:cor:agt:040:04 S3). workerField names which."
+    WORKER_LINK_MISSING
   }
 
   "#2048 — one link-lint warning. A fixed set of fields: there is no free-form detail."
   type LintWarning {
     kind: LintKind!
-    "0-based offset of the include tag in the node's source text."
+    "0-based source-tag offset, or immutable occurrence ordinal for compiled-revision lint."
     position: Int!
     text: String!
     "The target's URN, only for a target the caller can read; null for BROKEN_INCLUDE."
@@ -2302,7 +2315,7 @@ export const typeDefs = `#graphql
     newerRevision: Int
     "Reserved for the policy-agent override notice; null for source lint."
     overriddenNodeLoc: String
-    "Reserved for the worker signature/trailer lint; null for source lint."
+    "For WORKER_LINK_MISSING, which stored field lacks the worker link: signature or trailer. Null otherwise."
     workerField: String
   }
 
@@ -3081,12 +3094,12 @@ export const typeDefs = `#graphql
     """
     appAgents: [AppAgent!]!
     """
-    023-app-shape: convenience that returns every installed Agent
-    (equivalent to App.appAgents.map(aa => aa.agent)). Previously was
-    a soft-deprecated single-element synthesis; now returns the FULL
-    multi-Agent set per spec 023 US1. Only the installed Agents this caller may
-    read: the list may be PARTIAL, an unreadable Agent is left out, and its length
-    is not the install count (use \`appAgents\`, one entry per install).
+    023-app-shape: convenience list of the installed Agents this caller may
+    read: the non-null Agent entries of \`appAgents\`. A withheld install is
+    omitted here and appears in \`appAgents\` with \`agent: null\`. Only the
+    installed Agents this caller may read: the list may be PARTIAL, an unreadable
+    Agent is left out, and its length is not the install count (use \`appAgents\`,
+    one entry per install).
     """
     agents: [Agent!]!
     "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
@@ -4739,6 +4752,68 @@ export const typeDefs = `#graphql
     effectiveApiStyle: AiApiStyle
   }
 
+  "The kind of served prompt: bind, chat, or run."
+  enum ServedPromptKind {
+    BIND
+    CHAT
+    RUN
+  }
+
+  enum ServedPromptPointerLevel {
+    WORKER
+    APP_AGENT
+    AGENT
+  }
+
+  """
+  #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: one entry of a served revision's provenance. Ids, revisions and hashes only: never a loc, a
+  title, a node or text, so reading provenance hands the caller no included part. pruned is true when that revision is
+  no longer retained.
+  """
+  type ServedPromptProvenanceEntry {
+    nodeId: ID!
+    revSeq: Int!
+    hash: String!
+    pruned: Boolean!
+  }
+
+  type ServedPromptProvenancePage {
+    items: [ServedPromptProvenanceEntry!]!
+    total: Int!
+  }
+
+  """
+  #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: what a bind, a chatbot chat or a headless run was given. Immutable platform data, never
+  editable and never exported. Names the compiled revision served by (compiledNodeId, servedRevSeq), the pointer level that
+  chose it, that revision's own provenance and the values the platform variables were filled with. No composed text.
+  """
+  type ServedPrompt {
+    "Current warnings for this record's provenanceRevSeq, never the newest compile."
+    currentLint(first: Int = 50, after: String): LintWarningPage
+    id: ID!
+    kind: ServedPromptKind!
+    pointerLevel: ServedPromptPointerLevel!
+    compiledNodeId: ID!
+    "Node.revSeq of the revision served (never contentRevSeq)."
+    servedRevSeq: Int!
+    "The compile revision that owns the provenance."
+    provenanceRevSeq: Int!
+    compiledContentHash: String!
+    "1 for a bind or a run; a chat counts up each time its served revision changes."
+    ordinal: Int!
+    variables: JSON!
+    servedAt: DateTime!
+    "True when the served revision is no longer retained (neither current nor in history)."
+    pruned: Boolean!
+    "Provenance of the served revision, one page at a time (default 50, cap 200)."
+    provenance(limit: Int, offset: Int): ServedPromptProvenancePage!
+  }
+
+  type ServedPromptsPage {
+    items: [ServedPrompt!]!
+    total: Int!
+  }
+
   """
   A saved chat in one of the chat-scope tiers.
 
@@ -4767,6 +4842,12 @@ export const typeDefs = `#graphql
     shared chats in the list.
     """
     createdBy: ID
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this chat was served, once at its start and again whenever its served
+    revision changed. Readable only by whoever manages the App the chat runs in, never by its end user; everyone else
+    gets an empty page. Empty while boot-prompt serving is off.
+    """
+    servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
   }
 
   """
@@ -4890,6 +4971,8 @@ export const typeDefs = `#graphql
   by its id or by the computed \`urn\` below (#991).
   """
   type Worker {
+    "Current lint of the compiled revision recorded for the open session; null when unavailable."
+    promptLintWarnings(first: Int = 50, after: String): LintWarningPage
     id: ID!
     appId: ID!
     """
@@ -4956,6 +5039,12 @@ export const typeDefs = `#graphql
     signature: String
     "Per-worker commit trailer template, masked for nonreaders (hrn:node:hadronmemory.com:specs:cor:agt:040:04)."
     trailer: String
+    """
+    #2048 — whether the signature and trailer above carry the worker link, as they hold now (hrn:node:hadronmemory.com:specs:cor:agt:040:13). Same
+    gate as signature and trailer: null (unavailable, not "no warnings") for a caller who may not see them, and on a
+    fault. A warning never blocks an edit.
+    """
+    signatureLint(first: Int = 50, after: String): LintWarningPage
     "Per-worker individuality layered over the agent's template prompt."
     promptOverride: String
     """
@@ -4995,7 +5084,7 @@ export const typeDefs = `#graphql
     the register). Three senses of one word across two types.
     """
     heldAt: DateTime
-    "S12 placement; null is withheld, UNSET is no recorded choice (including OFF-era casts)."
+    "Recorded reporting choice: REPORTS_TO means a reporting head was chosen, NO_TEAM records a choice to have none, and UNSET means no choice was recorded. Null means the value is withheld."
     teamPlacement: WorkerTeamPlacement
     """
     #1726 — the one Worker this worker reports to: a non-retired Worker of the
@@ -5106,6 +5195,11 @@ export const typeDefs = `#graphql
     "Retirement instant — a retired worker stops authoring and takes no new sessions; the name stays reserved."
     retiredAt: DateTime
     retiredBy: String
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's
+    internals; null for anyone else, when no session is open, and while boot-prompt serving is off.
+    """
+    servedPrompt: ServedPrompt
   }
 
   """
@@ -5198,8 +5292,8 @@ export const typeDefs = `#graphql
     template and no override was given.
     """
     prompt: String
-    "Whether the agent's systemPrompt binds {{name}} — a nameless template silently produces workers whose prompt never names them. Null when the agent has no template."
-    hasNamePlaceholder: Boolean
+    "Always null. The name-placeholder check was retired with the old variable logic (#2049)."
+    hasNamePlaceholder: Boolean @deprecated(reason: "Retired (#2049); always null.")
     "#2024 — the tickers this cast would create, each at its effective cadence (the larger of the template's and the App's floor). Non-reserving: nothing is written or held, so a later cast may differ if the App changes. Empty when the Agent declares none."
     tickers: [CastPreviewTicker!]!
   }
@@ -5259,14 +5353,8 @@ export const typeDefs = `#graphql
     posture), like Worker.agent.
     """
     roleAgent: Agent
-    """
-    Whether the role-agent's systemPrompt binds {{name}} — the check that
-    finds templates which silently produce nameless workers (role-agents
-    authored before any guard existed). Null when no single role-agent
-    resolves. Computed even when roleAgent itself is masked: it discloses one
-    boolean about the caller's own App's casting default.
-    """
-    hasNamePlaceholder: Boolean
+    "Always null. The name-placeholder check was retired with the old variable logic (#2049)."
+    hasNamePlaceholder: Boolean @deprecated(reason: "Retired (#2049); always null.")
   }
 
   type TeamRolesPage {
@@ -6171,6 +6259,11 @@ export const typeDefs = `#graphql
     this caller since the run. A null here is a normal, expected state.
     """
     entryNode: Node
+    """
+    #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this run was served. Readable by whoever may read the run; null for anyone
+    else, and while boot-prompt serving is off.
+    """
+    servedPrompt: ServedPrompt
   }
 
   "One health check the validator runs (#819)."
@@ -7569,7 +7662,58 @@ export const typeDefs = `#graphql
     revokedBy: String
   }
 
+  "Effective include selection settings recorded by the compiler (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptSelection {
+    rev: Int
+    approved: Boolean!
+    signed: Boolean!
+  }
+
+  "One recorded source/include occurrence; contains no source text (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptOccurrence {
+    order: Int!
+    depth: Int!
+    parent: Int
+    kind: String!
+    nodeId: ID!
+    revNo: Int!
+    hash: String!
+    replacesNodeId: ID
+    position: CompiledPromptTagPosition
+    selection: CompiledPromptSelection!
+    "Null when the source or its retained snapshot is unreadable; otherwise whether revision text is absent."
+    pruned: Boolean
+  }
+
+  "One-based position of an include tag (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptTagPosition {
+    line: Int!
+    column: Int!
+  }
+
+  "A page of one compiled revision's immutable provenance (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptProvenancePage {
+    nodeId: ID!
+    revNo: Int!
+    contentHash: String!
+    version: Int!
+    pruned: Boolean!
+    items: [CompiledPromptOccurrence!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   type Query {
+    """
+    Recorded source revisions for exactly revNo of a compiled boot prompt (hrn:node:hadronmemory.com:specs:cor:agt:040:12).
+    Uses the compiled node's read gate; denied, missing, deleted or noncompiled nodes return null.
+    Provenance survives pruning; pruned marks absent revision text. Source status is null when unreadable.
+    No source text is returned.
+    Limit defaults to 20, clamps to 0..100; offset defaults to 0 and clamps negative values to 0.
+    A missing or malformed provenance record is an integrity error, never an empty page.
+    """
+    compiledPromptProvenance(nodeRef: ID!, revNo: Int!, limit: Int, offset: Int): CompiledPromptProvenancePage
+
     "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
     recoveryNode(nodeRef: ID!): RecoveryNode
     "Page through retained deleted nodes you can recover. Default 20, maximum 200; total counts all accessible results. No timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
@@ -7642,6 +7786,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
+    All tag, source and date filters combine with the other selectors using AND.
     owner / assignee / creator name a party of the App (a ref naming nobody matches
     nothing; a retired worker is no party to name, so it matches nothing). creator is
     the task's creator as createdBy projects it: a worker, or a person for a task they created
@@ -7659,6 +7804,26 @@ export const typeDefs = `#graphql
       assignee: AgentTaskPartyInput
       creator: AgentTaskPartyInput
       tag: String
+      "Match at least one tag. Empty arrays do not narrow the list."
+      tagsAny: [String!]
+      "Match every tag. Empty arrays do not narrow the list."
+      tagsAll: [String!]
+      "Exact opaque source value, without interpretation or prefix matching."
+      source: String
+      "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
+      overdue: Boolean
+      "Inclusive creation-time lower bound."
+      createdAfter: DateTime
+      "Inclusive creation-time upper bound."
+      createdBefore: DateTime
+      "Inclusive start-time lower bound; tasks with no start time never match."
+      startedAfter: DateTime
+      "Inclusive start-time upper bound; tasks with no start time never match."
+      startedBefore: DateTime
+      "Inclusive finish-time lower bound; tasks with no finish time never match."
+      finishedAfter: DateTime
+      "Inclusive finish-time upper bound; tasks with no finish time never match."
+      finishedBefore: DateTime
       parentTaskId: ID
       rootsOnly: Boolean
       queued: Boolean
@@ -9238,9 +9403,9 @@ export const typeDefs = `#graphql
       agentRef: ID
       role: String
       name: String
-      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid. Returns WORKER_REPORTING_CAST_UNAVAILABLE when casting with a reporting head is unavailable."
       reportsTo: ID
-      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
       promptOverride: String
     ): CastWorkerPreview!
@@ -9520,7 +9685,8 @@ export const typeDefs = `#graphql
     { path (the mutation's response key), code, text, register? }. Codes are a
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
-    task.finish.open-children); a client must tolerate unknown codes. \`text\` is
+    task.finish.open-children, and from #2607 task.cancel.open-children on
+    cancelAgentTask and alarm.ack.outside-chain on acknowledgeAlarm); a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
     blocks and never reveals another worker's state to a caller who could not
@@ -9739,6 +9905,9 @@ export const typeDefs = `#graphql
     to, directly or up the reportsTo chain, or whoever manages the App (hrn:node:hadronmemory.com:specs:cor:agt:050:09; a backlog task directly,
     Holger team chat #8150). Refusals:
     TASK_NOT_FOUND, TASK_NOT_OWNER, TASK_ENDED, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #2607 (experiment): a cancel that leaves pending or started children
+    succeeds with the warning task.cancel.open-children in
+    \`extensions.warnings\` (see createAgentTask); it does not end them.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
 
@@ -9771,6 +9940,9 @@ export const typeDefs = `#graphql
     Refusals: ALARM_NOT_FOUND (also for an App you cannot read),
     NOT_AN_ALARM, ALARM_NOT_IN_CHAIN, ALARM_ALREADY_ACKNOWLEDGED (the first
     stands), SESSION_NOT_BOUND, APP_UNINSTALLED.
+    #2607 (experiment): an acknowledgement by a manager of the App who is no
+    owner in the chain succeeds with the warning alarm.ack.outside-chain in
+    \`extensions.warnings\` (see createAgentTask).
     """
     acknowledgeAlarm(eventId: ID!): AgentTeamEvent!
 
@@ -11101,9 +11273,8 @@ export const typeDefs = `#graphql
     extends it as its base. AgentMemoryItem attachments do not block deletion.
 
     Also refused with DECISION_CONTAINED (#1641) while the Agent's system memory holds a decision or a
-    decision log: removing the memory would remove them, so the Agent is kept. This guard is live
-    whether or not minted-corpus permanence is enforced; the separate minted-corpus refusal applies only
-    when that enforcement is on.
+    decision log: removing the memory would remove them, so the Agent is kept. Decision protection always applies.
+    If this server requires minted content to be retained, its separate deletion restrictions also apply.
 
     See hrn:node:hadronmemory.com:specs:cor:dmo:050:14.
 
@@ -12099,9 +12270,9 @@ export const typeDefs = `#graphql
       keep the typed refusal. One rule, one message, both paths.
       """
       name: String
-      "S12 head choice: requires staffing and App management; refuses WORKER_REPORTING_CAST_UNAVAILABLE if standby becomes available without cast coverage integration."
+      "Worker reference to report to. Requires worker-staffing access and App management. Supply either reportsTo or noTeam: true, never both. Null or a blank reference is invalid. Returns WORKER_REPORTING_CAST_UNAVAILABLE when casting with a reporting head is unavailable."
       reportsTo: ID
-      "S12 explicit no-team choice; omit reportsTo. Both keys conflict, single null/blank/false is invalid. Omission remains UNSET while enforcement is OFF."
+      "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
       promptOverride: String
     ): Worker!
@@ -14292,7 +14463,7 @@ export const typeDefs = `#graphql
     lastActiveAt: DateTime
     "When it was last assigned a task; the matcher picks the least recent (hrn:node:hadronmemory.com:specs:cor:agt:060:06)."
     lastAssignedAt: DateTime
-    "S12 recorded choice; null means withheld, never UNSET or NO_TEAM."
+    "Recorded reporting choice: REPORTS_TO means a reporting head was chosen, NO_TEAM records a choice to have none, and UNSET means no choice was recorded. Null means the value is withheld."
     teamPlacement: WorkerTeamPlacement
     "#1726 — the worker it reports to; group by this for the team's structure. Read it with lastActiveAt: nothing clears a claim automatically."
     reportsTo: AgentTaskParty

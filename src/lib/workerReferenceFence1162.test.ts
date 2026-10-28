@@ -5,6 +5,11 @@ import { Prisma } from '../generated/prisma/index.js';
 import { workerReferenceError } from './workerReferenceError.js';
 
 const source = readFileSync(new URL('../../prisma/worker-reference-invariants.sql', import.meta.url), 'utf8');
+// A table created AFTER the closed #1162 migration cannot be added to it (the migration replays in order, so a trigger on
+// a later table would fail a fresh deploy). Such a table puts its fence trigger in its own invariants file; the inventory
+// is the union.
+const laterFences = ['served-prompt-invariants.sql'].map((f) => readFileSync(new URL(`../../prisma/${f}`, import.meta.url), 'utf8'));
+const inventory = [source, ...laterFences].join('\n');
 describe('#1162 reference fence deployment', () => {
   it('ships byte-identical migration and post-push guards', () => {
     // The guard file is its migrations, in order: the #1162 fence, then each later table that joined the inventory.
@@ -17,7 +22,7 @@ describe('#1162 reference fence deployment', () => {
   it('enumerates every typed scalar Worker/session column in the current schema', () => {
     for (const model of Prisma.dmmf.datamodel.models) {
       const table = model.dbName ?? model.name;
-      const trigger = source.split(`CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "${table}"`).at(-1)?.split(';')[0];
+      const trigger = inventory.split(`CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "${table}"`).at(-1)?.split(';')[0];
       for (const field of model.fields.filter((f) => f.kind === 'scalar' && /(?:worker|session)Id$/i.test(f.name))) {
         expect(trigger, `${model.name}.${field.name} missing from closed fence inventory`).toContain(`'${/workerId$/i.test(field.name) ? 'w' : 's'}:$.${field.dbName ?? field.name}'`);
       }

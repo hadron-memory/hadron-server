@@ -8,6 +8,7 @@ import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
@@ -935,6 +936,10 @@ function lastEventAtBatched(ctx: Context, sessionId: string): Promise<Date | nul
 }
 
 export const typeResolvers = {
+  ...servedPromptTypeResolvers,
+  Chat: {
+    servedPrompts: servedPromptOwnerFields.chatServedPrompts,
+  },
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
     // this boolean (write-only secret posture, same as tool-held tokens).
@@ -947,6 +952,10 @@ export const typeResolvers = {
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
+  },
+  CompiledBootPrompt: {
+    lintWarnings: (r: { node: { id: string }; revNo: number }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
+      import('../../../lib/compiledBootPromptLint.js').then(m => m.lintCompiledRevision(ctx, r.node.id, r.revNo, args)),
   },
   NodeApprovalReceipt: {
     /** #2048 — the same warnings as Node.lintWarnings, for the node just approved; approving never blocked on them. */
@@ -1250,6 +1259,8 @@ export const typeResolvers = {
       resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   AppRun: {
+    /** #2047: the run's record, self-authorized (the run read gate). */
+    servedPrompt: servedPromptOwnerFields.runServedPrompt,
     // #2439: BigInt over the wire as a string, like UsageEvent.costMicroCents; NULL = unknown.
     costMicroCents: (r: { costMicroCents?: bigint | null }) => r.costMicroCents != null ? r.costMicroCents.toString() : null,
     failureReason: (r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null }) => plainRunFailure(r),
@@ -2058,6 +2069,8 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #2047: a bind's record, self-authorized (worker internals). */
+    servedPrompts: servedPromptOwnerFields.sessionServedPrompts,
     /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */
     endReason: sessionEndReason,
     /** #1645: nested events inherit current session and memory read boundaries. */

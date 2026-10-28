@@ -1,5 +1,6 @@
 /**
- * #2198 (action register S1) — typed WARNINGS on task create / assign / reassign / finish.
+ * #2198 (action register S1) — typed WARNINGS on task create / assign / reassign / finish; #2607 adds task cancel
+ * and alarm acknowledgement.
  *
  * A warning is advice at the point of action: the call still succeeds (R125), and the response says what the team
  * has learned is usually wrong, with a stable `code`, a fixed `text`, and — for a caller that has an Agent — where
@@ -40,6 +41,9 @@ export const TASK_WARNING_CODES = [
   'task.assign.assignee-busy',
   'task.assign.assignee-paused',
   'task.finish.open-children',
+  // #2607 (action register phase 3): ungated, fixed text, about the caller's own act.
+  'task.cancel.open-children',
+  'alarm.ack.outside-chain',
 ] as const;
 export type TaskWarningCode = (typeof TASK_WARNING_CODES)[number];
 
@@ -50,6 +54,8 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
   'task.assign.assignee-busy': 'The assignee already has an open task.',
   'task.assign.assignee-paused': 'The assignee has paused itself, so the task may wait.',
   'task.finish.open-children': 'This task still has open child tasks.',
+  'task.cancel.open-children': 'This task still has open child tasks; cancelling it does not end them.',
+  'alarm.ack.outside-chain': 'You acknowledged an alarm outside its chain, as a manager of the App.',
 };
 
 export type TaskWarningRegister =

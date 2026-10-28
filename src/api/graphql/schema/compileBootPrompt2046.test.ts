@@ -12,6 +12,7 @@ import { readCompiledRevision, sha256Hex } from '../../../lib/bootCompile/proven
 import { compileBootPrompt, compileNotPermitted, workerCompiledLoc, type CompileTargetInput } from './compileBootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
 import { resolvers } from './resolvers.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -402,5 +403,32 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
       budgetMs: 250,
       seams: { beforeFence: async (a) => { if (a === 0) { await new Promise((r) => setTimeout(r, 400)); await db.agent.update({ where: { id: f.agent.id }, data: { organizationId: second } }); } } },
     }))).toBe('CONFLICT');
+  });
+});
+
+describe('#2047 PR-C (§10 #2698): a worker compile locks its pointer owner before it writes the compiled node', () => {
+  it('parked on the worker assignment lock, the compile holds no lock on the compiled node (bind order: assignment, worker, node)', async () => {
+    const f = await fixture();
+    await f.source(f.install.id, `boot:workers:${f.worker.id}:source`, 'for iris');
+    const first = await compileBootPrompt(ctxOf(f.admin.id), { kind: 'WORKER', workerId: f.worker.id });
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockWorkersForAssignment(tx, [f.worker.id]);
+      locked();
+      await held;
+    });
+    await lockedP;
+    let done = false;
+    const recompiling = compileBootPrompt(ctxOf(f.admin.id), { kind: 'WORKER', workerId: f.worker.id }).then((r) => { done = true; return r; });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(done).toBe(false); // parked behind the assignment lock
+    // A bind that already holds the assignment lock wants the node next: it must be free to take it.
+    await expect(db.$transaction((tx) => tx.$queryRaw`SELECT id FROM nodes WHERE id = ${first.nodeId} FOR SHARE NOWAIT`)).resolves.toBeTruthy();
+    release();
+    await holder;
+    expect((await recompiling).revNo).toBe(2);
   });
 });
