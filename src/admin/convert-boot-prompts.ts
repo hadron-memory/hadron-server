@@ -147,23 +147,34 @@ async function sourceCompileApprove(
     if (row.content !== p.sourceText) throw new RowFailure('SOURCE_TEXT_CHANGED_ON_WRITE');
     src = { id: written.id, approved: false };
   }
-  if (!src.approved) await approveAsOperator(db, src.id);
-
-  const reuse = await reusableNode(db, { memoryId: p.sourceMemoryId, loc: p.compiledLoc }, p.expected, true)
-    .catch((e) => {
-      // A compiled node with other text is not an obstacle: the compile writes a new revision of it.
-      if (e instanceof RowFailure) return null;
-      throw e;
-    });
-  if (reuse?.approved) return reuse.id;
-  let compiledId = reuse?.id ?? null;
-  if (!compiledId) {
-    const compiled = await compileBootPrompt(ctx, p.compile, { setPointer: false });
-    if (compiled.node.content !== p.expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
-    compiledId = compiled.node.id;
+  // Judged before anything is approved: a node already at the compiled address that is not this exact compiled
+  // text is ADDRESS_OCCUPIED, never a compile target (the compile would write over it).
+  const reuse = await reusableNode(db, { memoryId: p.sourceMemoryId, loc: p.compiledLoc }, p.expected, true);
+  const approvedHere = !src.approved;
+  if (approvedHere) await approveAsOperator(db, src.id);
+  try {
+    if (reuse?.approved) return reuse.id;
+    let compiledId = reuse?.id ?? null;
+    if (!compiledId) {
+      const compiled = await compileBootPrompt(ctx, p.compile, { setPointer: false });
+      if (compiled.node.content !== p.expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
+      compiledId = compiled.node.id;
+    }
+    await approveAsOperator(db, compiledId);
+    return compiledId;
+  } catch (e) {
+    // The compile needs the approved source, so it is approved first; a row that then fails leaves nothing approved.
+    if (approvedHere) await withdrawApproval(db, src.id);
+    throw e;
   }
-  await approveAsOperator(db, compiledId);
-  return compiledId;
+}
+
+/** Undo an approval this run just made (the failed row's source), restoring the not-approved state. */
+async function withdrawApproval(db: PrismaClient, nodeId: string): Promise<void> {
+  await db.node.updateMany({
+    where: { id: nodeId },
+    data: { approvedRevNo: null, approvedBy: null, approvedByInfo: null, approvedAt: null, approvalHash: null },
+  });
 }
 
 async function convertAgent(

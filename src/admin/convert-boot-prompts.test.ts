@@ -1,4 +1,5 @@
 /** #2676 (S13, P9): the operator script converting Agent.systemPrompt and Worker.promptOverride to approved, compiled boot-prompt nodes as-is. */
+import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../lib/bootPrompt.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../test/helpers.js';
@@ -236,6 +237,22 @@ describe('#2676 — repeatable, preview, and what as-is cannot carry', () => {
     expect((await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).bootPromptNodeId).toBeNull();
     const compiled = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:compiled' } });
     expect(compiled.approvedRevNo).toBeNull();
+    const source = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' } });
+    expect(source.approvedRevNo).toBeNull();
+    expect(source.approvalHash).toBeNull();
+  });
+
+  it('a node at the compiled address with other text or a non-compiled shape is ADDRESS_OCCUPIED and is never written over', async () => {
+    for (const [key, nodeType] of [['occc1', COMPILED_BOOT_PROMPT_NODE_TYPE], ['occc2', null]] as const) {
+      const agent = await agentWith(key, 'Agent text.');
+      const other = await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'boot:compiled', name: 'Mine', role: 'boot-prompt', ...(nodeType ? { nodeType } : {}), content: 'independent text' } });
+      const report = await run();
+      const r = report.rows.find((x) => x.id === agent.id)!;
+      expect(r).toMatchObject({ outcome: 'failed', reason: 'ADDRESS_OCCUPIED' });
+      expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).content).toBe('independent text');
+      const source = await db.node.findFirst({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' } });
+      expect(source?.approvedRevNo ?? null).toBeNull();
+    }
   });
 
   it('approvals are recorded as the operator conversion: no user id, the info string', async () => {
