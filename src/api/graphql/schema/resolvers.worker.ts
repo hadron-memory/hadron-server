@@ -14,6 +14,7 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -2743,6 +2744,8 @@ export const workerFieldResolvers = {
     urn: (u: { handle?: string | null }) => userUrn(u.handle),
   },
   Worker: {
+    /** #2047: the record of the open session, self-authorized (worker internals). */
+    servedPrompt: servedPromptOwnerFields.workerServedPrompt,
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
      * `Worker.app`, this never returns an App object (and therefore cannot hand
