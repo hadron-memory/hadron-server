@@ -7559,7 +7559,56 @@ export const typeDefs = `#graphql
     revokedBy: String
   }
 
+  "Effective include selection settings recorded by the compiler (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptSelection {
+    rev: Int
+    approved: Boolean!
+    signed: Boolean!
+  }
+
+  "One recorded source/include occurrence; contains no source text (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptOccurrence {
+    order: Int!
+    depth: Int!
+    parent: Int
+    kind: String!
+    nodeId: ID!
+    revNo: Int!
+    hash: String!
+    replacesNodeId: ID
+    position: CompiledPromptTagPosition
+    selection: CompiledPromptSelection!
+    pruned: Boolean!
+  }
+
+  "One-based position of an include tag (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptTagPosition {
+    line: Int!
+    column: Int!
+  }
+
+  "A page of one compiled revision's immutable provenance (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
+  type CompiledPromptProvenancePage {
+    nodeId: ID!
+    revNo: Int!
+    contentHash: String!
+    version: Int!
+    pruned: Boolean!
+    items: [CompiledPromptOccurrence!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   type Query {
+    """
+    Recorded source revisions for exactly revNo of a compiled boot prompt (hrn:node:hadronmemory.com:specs:cor:agt:040:12).
+    Uses the compiled node's read gate; denied, missing, deleted or noncompiled nodes return null.
+    Provenance survives pruning; pruned marks absent revision text. No source text is returned.
+    Limit defaults to 20, clamps to 0..100; offset defaults to 0 and clamps negative values to 0.
+    A missing or malformed provenance record is an integrity error, never an empty page.
+    """
+    compiledPromptProvenance(nodeRef: ID!, revNo: Int!, limit: Int, offset: Int): CompiledPromptProvenancePage
+
     "Read a retained deleted node in a live memory that you can read and write. Returns the stored body without expanding templates or includes. hrn:node:hadronmemory.com:specs:cor:dmo:010:04"
     recoveryNode(nodeRef: ID!): RecoveryNode
     "Page through retained deleted nodes you can recover. Default 20, maximum 200; total counts all accessible results. No timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"

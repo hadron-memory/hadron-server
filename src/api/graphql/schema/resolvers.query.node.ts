@@ -1,3 +1,5 @@
+import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
+import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
@@ -178,6 +180,54 @@ async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
 }
 
 export const nodeQueries = {
+    /** #2046 P5: provenance belongs to a compiled revision, never its latest derived edge. */
+    compiledPromptProvenance: async (
+      _: unknown,
+      args: { nodeRef: string; revNo: number; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => ctx.db.$transaction(async (tx) => {
+      // One read-only snapshot for admission, revision identity, and pruning observations.
+      await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+      const fresh = await liveReadSnapshotContext(ctx, tx);
+      const scope = await nodeRevisionsScope(fresh, args.nodeRef);
+      if (!scope) return null;
+      const node = await tx.node.findUnique({ where: { id: scope.nodeId }, select: { nodeType: true } });
+      if (node?.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
+      if (!Number.isInteger(args.revNo) || args.revNo < 1) return null;
+      // Preserve the history surface's snapshot-memory gate even if a legacy compiled node moved.
+      const historical = await tx.nodeRevision.findFirst({
+        where: { nodeId: scope.nodeId, revNo: args.revNo }, orderBy: { id: 'desc' }, select: { memoryId: true },
+      });
+      if (historical?.memoryId && !scope.canRead(historical.memoryId)) return null;
+      const revision = await readCompiledRevision(tx, scope.nodeId, args.revNo);
+      if (!revision) return null;
+      const { take, skip } = pageArgs(args);
+      const occurrences = revision.provenance.occurrences.slice(skip, skip + Math.min(100, take));
+      // Only the requested page's source revision identities are looked up. No source body or
+      // related entity object is exposed; recorded IDs/hashes/settings are the compiled artifact.
+      const ids = [...new Set(occurrences.map((o) => o.nodeId))];
+      const [current, history] = await Promise.all([
+        tx.node.findMany({ where: { id: { in: ids } }, select: { id: true, revSeq: true } }),
+        occurrences.length ? tx.nodeRevision.findMany({
+          where: { OR: occurrences.map((o) => ({ nodeId: o.nodeId, revNo: o.revNo })) },
+          select: { nodeId: true, revNo: true },
+        }) : Promise.resolve([]),
+      ]);
+      const currentRevs = new Map(current.map((n) => [n.id, n.revSeq]));
+      const retained = new Set(history.map((r) => `${r.nodeId}:${r.revNo}`));
+      const items = occurrences.map((o) => ({
+        order: o.order, depth: o.depth, parent: o.parent, kind: o.kind,
+        nodeId: o.nodeId, revNo: o.revNo, hash: o.hash,
+        replacesNodeId: o.replacesNodeId ?? null,
+        position: o.position ? { line: o.position.line, column: o.position.column } : null,
+        selection: { rev: o.selection.rev, approved: o.selection.approved, signed: o.selection.signed },
+        pruned: currentRevs.get(o.nodeId) !== o.revNo && !retained.has(`${o.nodeId}:${o.revNo}`),
+      }));
+      return { nodeId: revision.nodeId, revNo: revision.revNo, contentHash: revision.contentHash,
+        pruned: revision.pruned, version: revision.provenance.version,
+        ...pageEnvelope(items, revision.occurrenceCount, skip) };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }),
+
     /**
      * #817 — the next sibling under a parent, by `seq`. The GraphQL twin of
      * `hadron_get_next_node`, which was MCP-only, locking the CLI and portal
