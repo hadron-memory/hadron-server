@@ -135,6 +135,13 @@ describe('#2677 routing order: named, role holder, coordinator, managers, empty'
     expect(await pick(member.id)).toMatchObject({ entries: [] });
   });
 
+  it('a platform admin is not a manager of the App for the routed event (Holger, #43360)', async () => {
+    const plat = await db.user.create({ data: { githubId: 219004, githubUsername: 'rp-plat', handle: 'rp-plat', roles: ['ADMIN'] } });
+    const r = await pick(admin.id);
+    expect(r.entries.map((e: any) => e.id)).not.toContain(plat.id);
+    expect(r.entries.map((e: any) => e.id)).toContain(admin.id);
+  });
+
   it('nothing matches: an empty result, not an error', async () => {
     await db.orgMember.deleteMany({ where: { organizationId: org.id } });
     expect(await pick(admin.id).catch(() => 'refused')).toSatisfy((r: any) => r === 'refused' || r.entries.length === 0);
