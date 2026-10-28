@@ -50,7 +50,16 @@ it('meets the fixed provisional 8/10 top-three symptom threshold', async () => {
     expect(hits.length).toBeLessThanOrEqual(3);
     results.push({ symptom: row.symptom, expectedLoc: row.loc, hits });
   }
+  const output = vi.spyOn(console, 'log');
   const correct = reportSymptomRanking(results);
+  const lines = output.mock.calls.map(call => call[0]);
+  output.mockRestore();
+  expect(results).toHaveLength(10);
+  expect(lines).toHaveLength(13); // disclosure, header, ten rows, total
+  taskSymptoms2421.forEach((row, i) => {
+    expect(lines[i + 2].startsWith(`${row.symptom} | ${row.loc} | `)).toBe(true);
+  });
+  expect(lines.at(-1)).toBe(`Total hits: ${correct}/10`);
   expect(correct).toBeGreaterThanOrEqual(8);
 });
 it('ranks only abstract-bearing runnable nodes in the effective chain, nearest once', async () => {
