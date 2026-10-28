@@ -1,13 +1,12 @@
 /** #2608 experimental register role picking; a read only, never assignment or routing. */
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
-import { type Context, clampListTake, requireReadableAgent, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, clampListTake, isMemoryReadableCached, requireReadableAgent, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveParticipatedApp } from './resolvers.agentTask.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { registerTaskLoc } from './resolvers.taskWarnings.js';
 import { findEffectiveNodeIdByLoc } from '../../../lib/effectiveSystemMemory.js';
 import { agentBaseChain } from '../../../lib/agentBase.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 
@@ -27,9 +26,11 @@ async function readableRoleTask(tx: Prisma.TransactionClient, c: Context, agentI
   // Missing system memories contribute no nodes, but do not erase an Agent link's depth.
   const links = await tx.agent.findMany({ where: { id: { in: chain }, deletedAt: null }, select: { id: true, systemMemoryId: true } });
   const first = chain.map(id => links.find(a => a.id === id)).find(a => a?.systemMemoryId);
-  if (!first?.systemMemoryId) return null;
+  if (!first?.systemMemoryId || !(await isMemoryReadableCached(c, first.systemMemoryId))) return null;
+  // Effective inherited nodes are admitted through the child's readable system memory, as Query.node does.
+  // Re-gating the base's memory would incorrectly drop licensed inherited definitions.
   const hit = await findEffectiveNodeIdByLoc(tx, first.systemMemoryId, taskLoc, { inheritRoot: first.id !== agent.id });
-  if (!hit || !(await canReadMemory(tx as never, c as never, hit.memoryId))) return null;
+  if (!hit) return null;
   const task = await tx.node.findUnique({ where: { id: hit.id }, select: { isRunnable: true, memory: { select: { urn: true, deletedAt: true } } } });
   if (!task?.isRunnable || task.memory.deletedAt) return null;
   // Count Agent links, not contributed memories: an intermediate Agent with no memory still has depth.
@@ -51,9 +52,9 @@ export const registerRoleCandidateQueries = {
         if (e instanceof GraphQLError && ['TEAM_AGENT_NOT_FOUND', 'TEAM_AGENT_AMBIGUOUS'].includes(String(e.extensions.code))) return empty;
         throw e;
       }
-      if (!team.systemMemoryId) return empty;
+      if (!team.systemMemoryId || !(await isMemoryReadableCached(c, team.systemMemoryId))) return empty;
       const entry = await findEffectiveNodeIdByLoc(tx, team.systemMemoryId, `register:${args.code}`);
-      if (!entry || !(await canReadMemory(tx as never, c as never, entry.memoryId))) return empty;
+      if (!entry) return empty;
       const data = await tx.node.findUnique({ where: { id: entry.id }, select: { data: true } });
       const taskLoc = registerTaskLoc(data?.data, args.code);
       if (!taskLoc) return empty;
