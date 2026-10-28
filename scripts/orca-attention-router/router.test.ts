@@ -1838,6 +1838,18 @@ describe('Orca attention router — a human typing: never appended to; hold the 
     expect(promptLineIsEmpty([RULE, '❯', RULE], 'claude')).toBe(false);
   });
 
+  it('Claude: a background shell replaces the cycle hint with a counter; still one mode footer, still empty (#2695)', () => {
+    // Hugo's live footer, 2026-10-28: ticker-wake held every wake for days.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on · 1 shell'], 'claude')).toBe(true);
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ auto mode on · 2 shells · ← for agents'], 'claude')).toBe(true);
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on (shift+tab to cycle) · 1 shell'], 'claude')).toBe(true);
+    // Without the hint, the mode text must still end in `on`: a bare glyph or
+    // an unknown phrase is not the footer, and a second row still holds.
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ something else · 1 shell'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵'], 'claude')).toBe(false);
+    expect(promptLineIsEmpty([RULE, '❯', RULE, '  ⏵⏵ bypass permissions on · 1 shell', '  esc to interrupt'], 'claude')).toBe(false);
+  });
+
   it('Claude: the composer status line is the terminal BOTTOM — trailing non-chrome content holds (blind P2, #1823)', () => {
     // The blind-review counterexample: a shell `cat`s a captured Claude idle
     // screen and returns to its own prompt. Reading only the FIRST nonblank

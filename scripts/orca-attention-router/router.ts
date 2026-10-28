@@ -928,8 +928,13 @@ const CODEX_PLACEHOLDERS = new Set(['Ask Codex to do anything']);
  * (Claude draws typed whitespace as nothing, and Orca blanks pending text in
  * the tail), so the caller must ALSO see no `draft` from Orca. If Claude Code
  * reshapes the line every Claude worker holds: fail closed.
+ *
+ * The `(shift+tab to cycle)` hint is optional: with a background shell running,
+ * Claude draws `⏵⏵ bypass permissions on · 1 shell` instead, and requiring the
+ * hint held every wake to that worker for days (#2695). Without the hint the
+ * mode text must still end in ` on`, so an unknown `⏵⏵` line holds.
  */
-const CLAUDE_MODE_FOOTER = /^⏵⏵ .+ \(shift\+tab to cycle\)( · .+)?$/;
+const CLAUDE_MODE_FOOTER = /^⏵⏵ \S.*? on(?: \(shift\+tab to cycle\))?(?: · .+)?$/;
 
 /** Collapse ASCII whitespace AND NBSP: Codex draws its prompt as `›` + U+00A0. */
 const squash = (s: string): string => s.replace(/[\s\u00a0]+/g, ' ').trim();
