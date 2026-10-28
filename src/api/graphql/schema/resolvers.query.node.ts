@@ -194,11 +194,12 @@ export const nodeQueries = {
       const node = await tx.node.findUnique({ where: { id: scope.nodeId }, select: { nodeType: true } });
       if (node?.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
       if (!Number.isInteger(args.revNo) || args.revNo < 1) return null;
-      // Preserve the history surface's snapshot-memory gate even if a legacy compiled node moved.
-      const historical = await tx.nodeRevision.findFirst({
-        where: { nodeId: scope.nodeId, revNo: args.revNo }, orderBy: { id: 'desc' }, select: { memoryId: true },
+      // Numbered snapshots are unique by (nodeId, revNo). Unknown snapshot ownership
+      // cannot authorize this provenance read, even when the live node is readable.
+      const historical = await tx.nodeRevision.findUnique({
+        where: { nodeId_revNo: { nodeId: scope.nodeId, revNo: args.revNo } }, select: { memoryId: true },
       });
-      if (historical?.memoryId && !scope.canRead(historical.memoryId)) return null;
+      if (historical && (!historical.memoryId || !scope.canRead(historical.memoryId))) return null;
       const revision = await readCompiledRevision(tx, scope.nodeId, args.revNo);
       if (!revision) return null;
       const { take, skip } = pageArgs(args);
