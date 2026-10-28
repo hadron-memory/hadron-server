@@ -144,7 +144,7 @@ export interface FindNodesArgs {
  * empty answer. `canRead` is the per-snapshot memory gate; `accessible` (null = unrestricted) is the set
  * it tests, for callers that push it into SQL.
  */
-async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
+export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
   requireRole(ctx, 'READER');
   // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
   // qualified node URN. A genuine miss collapses to [] (no existence

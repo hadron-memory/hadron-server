@@ -244,6 +244,7 @@ import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptL
 
 /** Most changed nodes whose lint one hadron_replace_text result checks; the rest are disclosed, never silently dropped. */
 const REPLACE_LINT_MAX_NODES = 100;
+import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
@@ -4156,6 +4157,8 @@ export function createMcpServerInstance(
       // spec 049 S4 protected-loc gate, and a root-level Channel address
       // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
+      let sectionContentSaved = false;
+      let sectionPinStoredContent: string | null = null;
       try {
         sectionId = await db.$transaction(async (tx) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
@@ -4241,6 +4244,8 @@ export function createMcpServerInstance(
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
+          sectionContentSaved = true;
+          sectionPinStoredContent = storedForIncludes;
           return row.id;
         });
       } catch (e) {
@@ -4264,7 +4269,7 @@ export function createMcpServerInstance(
       recordNodeWrite(db, { id: sectionId, loc, memoryId }, auth);
 
       const urn = await nodeUrn(loc, memoryId);
-      return textResult(`Node saved: ${urn}`);
+      return textResult(`Node saved: ${urn}${sectionContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId }, content, sectionPinStoredContent)) : ''}`);
     },
   );
 
@@ -5967,7 +5972,7 @@ export function createMcpServerInstance(
         ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
         : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
       const urn = await nodeUrn(node.loc, node.memoryId);
-      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
     }
@@ -6544,7 +6549,7 @@ export function createMcpServerInstance(
       // #322: return the stable PK too — edges/replies created against the URN
       // break if the node is later moved/renamed; the id never changes.
       // #2048 (cor:agt:040:13): a boot-prompt source's link-lint warnings ride on the result; they never block the write.
-      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), upserted.id))}`);
+      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})${renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId }, content))}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), upserted.id))}`);
     },
   );
 
@@ -6797,6 +6802,8 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
+      let includePinContentSaved = false;
+      let includePinPriorContent: string | null = null;
       if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
@@ -6903,7 +6910,11 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+            if (content !== undefined) {
+              await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+              includePinContentSaved = true;
+              includePinPriorContent = (currentForDiff.content as string | null) ?? null;
+            }
             existing.embeddingWorkToken = await stampEmbeddingObligation(tx, updated.id, updated.memoryId);
             const embeddedPlaintext = updKey ? decryptNodeFieldsWithKey({ ...updated }, updKey) : updated;
             existing.content = embeddedPlaintext.content;
@@ -6961,7 +6972,7 @@ export function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -7095,14 +7106,15 @@ export function createMcpServerInstance(
     }
 
     try {
+      const ctx = doorCtx((k) => mcpDoorCanReplay(fields, k, mode));
       const node = await (
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
         { input: { memoryId: memory.id, loc, ...fields, ...signal } },
-        doorCtx((k) => mcpDoorCanReplay(fields, k, mode)),
+        ctx,
       );
-      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => {
         const code = (e as { extensions?: { code?: string } }).extensions?.code;
@@ -7370,6 +7382,10 @@ export function createMcpServerInstance(
         }
         // #2048: lint warnings of each boot-prompt source this call changed (a dry run changed nothing).
         const lintLines: string[] = [];
+        for (const item of result.results) {
+          const warning = renderIncludePinWarnings(await includePinWarningsFor(ctx, item));
+          if (warning) lintLines.push(warning);
+        }
         if (!result.dryRun) {
           const changed = result.results.filter((x: { replacements: number }) => x.replacements > 0);
           for (const r of changed.slice(0, REPLACE_LINT_MAX_NODES)) {

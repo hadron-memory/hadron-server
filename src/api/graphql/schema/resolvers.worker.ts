@@ -44,6 +44,7 @@ import {
 import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { lintWorkerFields, pageLintWarnings } from '../../../lib/bootPromptLint.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
 import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -56,7 +57,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPlatformVariables, templateBindsName, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -2120,8 +2121,7 @@ export const workerQueries = {
    * refusals) is the SAME code castWorker runs, and the name projection
    * consults the same roster the allocation's unique arbitrates. Returns what
    * the caller needs to decide: the name the cast would allocate, the
-   * composed boot prompt (reviewable BEFORE the name is permanent — where a
-   * template missing {{name}} becomes visible), and which Team Agent
+   * composed boot prompt (reviewable BEFORE the name is permanent), and which Team Agent
    * resolved.
    *
    * THE PREVIEW RESERVES NOTHING. No lease exists by law (cor:agt:020:03 —
@@ -2204,7 +2204,8 @@ export const workerQueries = {
       prompt,
       teamPlacement: choice.kind,
       reportsToWorkerId: reportingHeadId,
-      hasNamePlaceholder: previewTemplate ? templateBindsName(previewTemplate) : null,
+      // Deprecated (#2049 S12): always null; kept so older clients' queries validate.
+      hasNamePlaceholder: null,
       tickers: tickers.map((t) => ({
         name: t.name,
         templateId: t.templateId,
@@ -2988,6 +2989,22 @@ export const workerFieldResolvers = {
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
     trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
+    /** #2048 S11c: current warnings of the stored signature and trailer, behind the same gate as the fields. */
+    signatureLint: async (
+      worker: { appId: string; slug?: string; signature: string; trailer: string },
+      args: { first?: number | null; after?: string | null },
+      ctx: Context,
+    ) => {
+      try {
+        // The gate's own lookup can fault too: inside the boundary, so a fault is the advertised null, never a field error.
+        if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+        const urn = worker.slug ? await resolveWorkerUrnField({ appId: worker.appId, slug: worker.slug }, ctx) : null;
+        return pageLintWarnings(lintWorkerFields(worker, urn ? portalUrlForUrn(urn) : null), args);
+      } catch (error) {
+        console.error('[bootPromptLint] worker signature lint unavailable:', error instanceof Error ? error.message : error);
+        return null;
+      }
+    },
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },
       _: unknown,
