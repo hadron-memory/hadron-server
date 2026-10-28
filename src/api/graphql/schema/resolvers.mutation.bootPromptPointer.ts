@@ -87,7 +87,7 @@ async function writePointer(
         [base, ...ownerAnchors(expected)],
         async () => {},
         async (tx: Prisma.TransactionClient, txCtx: Context) => {
-          const owner = await loadBootPromptPointerOwner(tx, target);
+          const owner = await loadBootPromptPointerOwner(tx, target, { lockForWrite: true });
           if (!owner) throw notFound();
           const tenant = ownerTenant(owner);
           if (tenant.organizationId !== expected.organizationId || tenant.ownerUserId !== expected.ownerUserId) {

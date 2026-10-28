@@ -32,7 +32,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
-  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits CASCADE');
+  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -40,6 +40,8 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // afterwards. That also means nothing below cascades it away, so it has to be
   // cleared explicitly or aliases leak between tests.
   await db.urnAlias.deleteMany();
+  // #1667 — the public-link audit is FK-free (it outlives the asset), so nothing cascades it away.
+  await db.assetPublicLinkAudit.deleteMany();
   // 036-ai-service-config: configs FK every owner level (incl.
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
@@ -82,7 +84,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, agent_task_stop_holds, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, agent_task_stop_holds, agent_task_counters, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();

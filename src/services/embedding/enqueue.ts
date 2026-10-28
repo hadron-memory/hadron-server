@@ -1,21 +1,23 @@
+import { embeddingEligibleSql } from './rawChat.js';
 /**
  * 033-rag-vector-retrieval — write-path embedding enqueue + prompt-drain.
  *
  * Called from every node write surface (GraphQL upsertNode, MCP
  * hadron_create_node/hadron_update_node, importer, restoreNodeRevision). When the memory is
- * vector-indexed it sets the durable `embeddingPendingAt` marker (the recovery
- * net) and, if an embedding endpoint is configured, fires a `setImmediate`
- * prompt-drain that embeds using the in-closure PLAINTEXT — so encrypted
- * memories embed correctly at write time without a session key (FR-027).
+ * vector-indexed the writer has already stamped a durable obligation in its
+ * transaction. After commit, a free dispatcher slot may use the writer's plaintext.
+ * Saturation retains no plaintext job: ordinary work recovers via the sweep;
+ * encrypted work awaits fresh authorized plaintext (R132).
  *
  * Never throws onto the caller's request path.
  */
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isEmbeddingConfigured } from '../../lib/embedding/index.js';
-import { embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
+import { randomUUID } from 'node:crypto';
+import { embeddingDispatcher, embedNode, EMBED_WAKE_SUBJECT, type EmbedPlaintext } from '../../jobs/embedNodes.js';
 import { getBusClient } from '../../lib/bus/index.js';
-import { memoryIsVectorIndexed, SYSTEM_MEMORY_CLASS } from '../../lib/embedding/indexing.js';
+import { SYSTEM_MEMORY_CLASS } from '../../lib/embedding/indexing.js';
 
 /**
  * Fire-and-forget bus wake-up (spec 039). Never throws — a broker outage
@@ -24,23 +26,55 @@ import { memoryIsVectorIndexed, SYSTEM_MEMORY_CLASS } from '../../lib/embedding/
  * (dedup only needs to guard broker-level republish retries, not distinct
  * enqueues of the same node).
  */
-export async function publishEmbedWake(payload: { nodeId?: string }): Promise<void> {
+let publishing: Promise<void> | null = null;
+let publishDirty = false;
+let publishClosed = false;
+
+/** One shared in-flight publish, no id/payload queue; Postgres owns every obligation. */
+export function publishEmbedWake(_payload: { nodeId?: string }): Promise<void> {
+  if (publishClosed) return Promise.resolve();
+  if (publishing) { publishDirty = true; return publishing; }
+  publishing = (async () => {
+    try {
+      const bus = await getBusClient();
+      if (bus) await bus.publish(EMBED_WAKE_SUBJECT, {}, { idempotencyKey: randomUUID() });
+    } catch (error) {
+      console.error('[embed-enqueue] bus wake failed; durable sweep remains:', error);
+    }
+  })().finally(() => {
+    publishing = null;
+    if (publishDirty && !publishClosed) { publishDirty = false; void publishEmbedWake({}); }
+  });
+  return publishing;
+}
+
+/** Close synchronously, retain at most the already admitted publish, and wait boundedly. */
+export async function stopEmbeddingPublisher(graceMs = 5_000): Promise<boolean> {
+  publishClosed = true;
+  publishDirty = false;
+  if (!publishing) return true;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
-    const bus = await getBusClient();
-    if (!bus) return;
-    await bus.publish(EMBED_WAKE_SUBJECT, payload, {
-      idempotencyKey: `${payload.nodeId ?? 'drain'}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-    });
-  } catch (err) {
-    console.error('[embed-enqueue] bus publish error (sweep will recover):', err);
-  }
+    return await Promise.race([
+      publishing.then(() => true),
+      new Promise<boolean>(resolve => { deadline = setTimeout(() => resolve(false), graceMs); }),
+    ]);
+  } finally { if (deadline) clearTimeout(deadline); }
 }
 
 export interface EnqueueArgs {
   nodeId: string;
   memoryId: string;
+  /** Captured in the writer transaction. Never re-read a newer token for this plaintext. */
+  workToken: string | null;
   /** Plaintext content/abstract from the write — used by the prompt-drain. */
   plaintext: EmbedPlaintext;
+}
+
+/** Bulk ordinary writers need one wake, not a list of plaintext jobs or per-row promises. */
+export function wakeEmbeddingQueue(db: PrismaClient): void {
+  void publishEmbedWake({});
+  if (isEmbeddingConfigured()) embeddingDispatcher(db).nudge();
 }
 
 /** Invalidate an old embed on revival without queuing work for an unindexed memory. */
@@ -52,64 +86,25 @@ export function pendingAtForRevival(previous: Date | null, indexed: boolean): Da
 }
 
 /**
- * Mark a node for (re-)embedding and kick off the prompt-drain. No-op for
- * memories that aren't vector-indexed (one cheap SELECT, then return).
+ * Offer an already committed obligation to bounded local admission and coalesce
+ * a recovery wake. This function performs no database or endpoint operations.
  */
 export async function enqueueNodeEmbedding(
   db: PrismaClient,
   args: EnqueueArgs,
 ): Promise<void> {
-  try {
-    const memory = await db.memory.findUnique({
-      where: { id: args.memoryId },
-      select: { vectorIndexEnabled: true, class: true },
-    });
-    if (!memory || !memoryIsVectorIndexed(memory)) return;
-
-    // Durable marker (recovery net): fresh attempt resets failure state.
-    // updateMany (not update) so a node deleted between the write and this
-    // async enqueue is a no-op, not a thrown "record not found".
-    await db.node.updateMany({
-      where: { id: args.nodeId },
-      data: {
-        embeddingPendingAt: new Date(),
-        embeddingFailedAt: null,
-        embeddingError: null,
-        embeddingAttempts: 0,
-      },
-    });
-
-    // Bus wake-up (spec 039): covers what the prompt-drain can't — a crash
-    // between marker and drain, transient prompt-drain failures (bus
-    // redelivery beats sweep ticks), and work distribution once multiple
-    // instances share the queue group. The listener is idempotent (a marker
-    // the prompt-drain already cleared resolves to a cheap skip).
-    //
-    // This deliberately does NOT ride evt.node.written.v1 (PR-507 review):
-    // the wake is only reliable when published AFTER the durable marker
-    // stamp above, and that ordering exists solely inside this function —
-    // the write paths fire the fact event concurrently with this enqueue,
-    // so an event-borne wake can race the stamp, ack on "no marker", and
-    // leave the node to the slow sweep. Module-internal job, by design.
-    void publishEmbedWake({ nodeId: args.nodeId });
-
-    // Prompt-drain: embed now with in-closure plaintext, off the request path.
-    // Only when an endpoint is configured — otherwise leave it for the sweep
-    // (also endpoint-guarded) so we don't burn the attempts cap on a missing
-    // endpoint.
-    if (isEmbeddingConfigured()) {
-      setImmediate(() => {
-        embedNode(db, args.nodeId, args.plaintext).catch((err) => {
-          console.error('[embed-enqueue] prompt-drain error:', err);
-        });
-      });
-    }
-  } catch (err) {
-    // Enqueue failures must never break the write. The sweep will recover any
-    // node whose marker was set; if even the marker write failed, a later edit
-    // or a manual backfill re-stamps it.
-    console.error('[embed-enqueue] error:', err);
-  }
+  // The authoritative transaction already stamped the obligation. No per-node enqueue
+  // SELECT/UPDATE/publish promises can fan out here, even under saturation.
+  if (!args.workToken) return;
+  // Another worker may have an endpoint even when this process does not.
+  if (!isEmbeddingConfigured()) { void publishEmbedWake({}); return; }
+  const dispatcher = embeddingDispatcher(db);
+  const admitted = dispatcher.tryRun(args.nodeId, () => embedNode(db, args.nodeId, args.plaintext, undefined, { workToken: args.workToken! }));
+  // An admitted prompt already owns this obligation. Its completion nudges recovery;
+  // an immediate local nudge OR echoed bus wake would reserve the other free slot
+  // against the next prompt.
+  // Rejected work still asks the shared durable drain to recover ordinary overflow.
+  if (!admitted) { dispatcher.nudge(); void publishEmbedWake({}); }
 }
 
 /**
@@ -120,20 +115,20 @@ export async function backfillMemoryEmbeddings(
   db: PrismaClient,
   memoryId: string,
 ): Promise<number> {
-  const res = await db.node.updateMany({
-    where: { memoryId, deletedAt: null },
-    data: {
-      embeddingPendingAt: new Date(),
-      embeddingFailedAt: null,
-      embeddingError: null,
-      embeddingAttempts: 0,
-    },
-  });
+  const count = await db.$executeRaw`
+    UPDATE nodes SET embedding_pending_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
+      embedding_work_token = gen_random_uuid(), embedding_failed_at = NULL,
+      embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
+        THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
+      embedding_attempts = 0
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${embeddingEligibleSql()}
+      AND EXISTS (SELECT 1 FROM memories WHERE id = ${memoryId} AND (vector_index_enabled = true OR class = 'system') AND deleted_at IS NULL)
+  `;
   // Drain ping (empty payload): the bus listener drains the whole queue now
   // instead of trickling it out at sweep pace — the big win for re-indexing
   // a large memory. Fire-and-forget; the sweep remains the fallback.
   void publishEmbedWake({});
-  return res.count;
+  return count;
 }
 
 /**
@@ -161,7 +156,7 @@ export async function stampMemoryEmbeddingsBatch(
   const after = opts.afterNodeId ?? '';
   const rows = await db.$queryRaw<{ id: string; eligible: boolean }[]>`
     SELECT n.id,
-      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX}
+      (n.abstract IS NOT NULL AND n.abstract !~ ${BLANK_ABSTRACT_REGEX} AND ${embeddingEligibleSql('n')}
         AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM node_embeddings e WHERE e.node_id = n.id AND e.kind = 'abstract')) AS eligible
     FROM nodes n
@@ -173,18 +168,20 @@ export async function stampMemoryEmbeddingsBatch(
   const eligibleIds = rows.filter((r) => r.eligible).map((r) => r.id);
   let stamped = 0;
   if (!opts.dryRun && eligibleIds.length > 0) {
-    const res = await db.node.updateMany({
-      // Re-asserted in the write: a node queued, failed or deleted since the read is not touched.
-      // ...and the PARENT is re-asserted too: a memory soft-deleted (deleteAgent) or no longer system since the read
-      // keeps live node rows, and those must not be queued.
-      where: {
-        id: { in: eligibleIds }, memoryId, deletedAt: null, embeddingPendingAt: null, embeddingFailedAt: null,
-        memory: { deletedAt: null, class: SYSTEM_MEMORY_CLASS },
-      },
-      data: { embeddingPendingAt: new Date(), embeddingFailedAt: null, embeddingError: null, embeddingAttempts: 0 },
-    });
-    stamped = res.count;
-    if (stamped > 0) void publishEmbedWake({});
+    stamped = await db.$executeRaw`
+      UPDATE nodes AS n SET
+        embedding_pending_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
+        embedding_work_token = gen_random_uuid(), embedding_failed_at = NULL,
+        embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
+          THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
+        embedding_attempts = 0
+      WHERE n.id = ANY(${eligibleIds}::text[]) AND n.memory_id = ${memoryId}
+        AND n.deleted_at IS NULL AND ${embeddingEligibleSql('n')} AND n.embedding_pending_at IS NULL AND n.embedding_failed_at IS NULL
+        AND EXISTS (SELECT 1 FROM memories m WHERE m.id = n.memory_id
+          AND m.deleted_at IS NULL AND m.class = ${SYSTEM_MEMORY_CLASS}::"MemoryClass")
+    `;
+    // This helper may be inside the operator's transaction. Its caller wakes
+    // only after commit; no pre-commit publish or independent drain escapes it.
   }
   return {
     inspected: rows.length,
@@ -209,14 +206,13 @@ export async function restampFailedEmbeddings(
   db: PrismaClient | Prisma.TransactionClient,
   memoryId: string,
 ): Promise<number> {
-  const res = await db.node.updateMany({
-    where: { memoryId, deletedAt: null, embeddingFailedAt: { not: null } },
-    data: {
-      embeddingPendingAt: new Date(),
-      embeddingFailedAt: null,
-      embeddingError: null,
-      embeddingAttempts: 0,
-    },
-  });
-  return res.count;
+  return db.$executeRaw`
+    UPDATE nodes SET embedding_pending_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
+      embedding_work_token = gen_random_uuid(), embedding_failed_at = NULL,
+      embedding_error = CASE WHEN (SELECT is_encrypted FROM memories WHERE id = ${memoryId})
+        THEN 'Embedding pending: fresh authorized plaintext is required.' ELSE NULL END,
+      embedding_attempts = 0
+    WHERE memory_id = ${memoryId} AND deleted_at IS NULL AND ${embeddingEligibleSql()} AND embedding_failed_at IS NOT NULL
+      AND EXISTS (SELECT 1 FROM memories WHERE id = ${memoryId} AND (vector_index_enabled = true OR class = 'system') AND deleted_at IS NULL)
+  `;
 }

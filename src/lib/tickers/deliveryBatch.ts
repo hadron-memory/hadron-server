@@ -24,7 +24,7 @@ import { batchKeyOf, type BatchProof } from './wakeProof.js';
 import { standbyAdmitsSql, workerStandby } from './standby.js';
 import { s7Available } from './s7Availability.js';
 
-export const DELIVERY_BATCHES_PAGE_DEFAULT = 50;
+export const DELIVERY_BATCHES_PAGE_DEFAULT = 20;
 export const DELIVERY_BATCHES_PAGE_MAX = 200;
 /** A global batch selects at most ten; no channel can contribute an eleventh.
  * Count all reached rows before this cap so overflow is exact without loading their bodies. */
@@ -223,14 +223,48 @@ export async function loadDeliveryBatches(args: DeliverySelectionArgs): Promise<
   return { batches, nextAfter };
 }
 
+/** One admission definition for rendering and exact counting. Both use the same alias and snapshot. */
+function admittedDeliveryPredicate(ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Prisma.Sql {
+  return Prisma.sql`(${ch.predicate})
+    ${standby ? Prisma.sql`AND ${standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${[standby.token]}::text[]`, standby.headWorkerId)}` : Prisma.empty}`;
+}
+
+function admittedDeliveryRows(ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Prisma.Sql {
+  return Prisma.sql`SELECT n.id, n.seq, n.created_at,
+    MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
+    FROM nodes n WHERE ${admittedDeliveryPredicate(ch, standby)}`;
+}
+
+/** Exact pre-cap C7 total for one authorized self selection, at the caller's snapshot/asOf. Never renders or signs. */
+export async function loadPendingDeliverySummary(args: DeliverySelectionArgs): Promise<number> {
+  if (args.hostId !== null || args.workerIds?.length !== 1) throw new Error('Footer requires one self worker');
+  const { workers, nextAfter } = await loadDeliveryEligibility({ ...args, first: 1 });
+  if (nextAfter !== null) throw new Error('Incomplete footer selection');
+  const now = args.now ?? new Date();
+  const settings = await loadDeliverySettings(args.ctx.db, args.app.id);
+  let total = 0;
+  for (const worker of workers) {
+    if (worker.channels.length === 0) continue;
+    // Channel predicates are disjoint (each fixes n.message_channel_id); OR counts every reached row once.
+    // One plain aggregate avoids per-channel round trips and windowing every row of a large backlog.
+    const predicates = worker.channels.map(channel => Prisma.sql`(${admittedDeliveryPredicate(channel, worker.standby)})`);
+    const [row] = await args.ctx.db.$queryRaw<Array<{ total: bigint; oldest: Date | null }>>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS total, MIN(n.created_at) AS oldest FROM nodes n
+      WHERE ${Prisma.join(predicates, ' OR ')}`);
+    const count = Number(row?.total);
+    if (!Number.isSafeInteger(count) || count < 0) throw Object.assign(new Error('Unsafe footer count'), { code: 'FOOTER_UNSAFE_COUNT' });
+    if (row.oldest && batchTiming(settings, { oldestPostedAt: row.oldest }).deliverAfter <= now) total += count;
+    if (!Number.isSafeInteger(total)) throw Object.assign(new Error('Unsafe footer count'), { code: 'FOOTER_UNSAFE_COUNT' });
+  }
+  return total;
+}
+
 /** The messages of a plaintext channel above `lo` that reach the worker, with their reply parent when it is in the channel. */
 async function eligibleMessages(db: Context['db'], ch: EligibleDeliveryChannel, standby: EligibleDeliveryWorker['standby']): Promise<{ messages: BatchMessage[]; totalEligible: number; oldestPostedAt: Date | null }> {
   const rows = await db.$queryRaw<Row[]>(Prisma.sql`
-    SELECT n.seq::int AS seq, n.content, n.data, n.created_at, MIN(n.created_at) OVER() AS oldest_posted_at, COUNT(*) OVER() AS total_eligible
-    FROM nodes n WHERE ${ch.predicate}
-      ${standby ? Prisma.sql`AND ${standbyAdmitsSql(Prisma.sql`n.data`, Prisma.sql`${[standby.token]}::text[]`, standby.headWorkerId)}` : Prisma.empty}
-    ORDER BY n.seq
-    LIMIT ${ELIGIBLE_READ_LIMIT}`);
+    SELECT e.seq::int AS seq, n.content, n.data, e.created_at, e.oldest_posted_at, e.total_eligible
+    FROM (${admittedDeliveryRows(ch, standby)}) e JOIN nodes n ON n.id = e.id
+    ORDER BY e.seq LIMIT ${ELIGIBLE_READ_LIMIT}`);
   const eligible = rows;
   const parentSeqs = [...new Set(eligible.map((r) => replyToOf(r.data)).filter((s): s is number => s !== null))];
   const parents = parentSeqs.length === 0 ? [] : await db.$queryRaw<Array<{ seq: number; content: string | null; data: unknown }>>(Prisma.sql`

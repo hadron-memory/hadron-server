@@ -1,3 +1,5 @@
+import { resetEmbeddingObligations, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
+import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
@@ -11,7 +13,7 @@ import {
   assertNoMintedSpecRemoval,
   preflightNoMintedCorpusRemoval,
 } from '../../lib/mintedSpecPermanence.js';
-import { lockMemoryForChannelChange } from '../../lib/channels.js';
+import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../lib/channels.js';
 import { computeContentHash } from '../../lib/contentHash.js';
 import { clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import {
@@ -285,24 +287,10 @@ async function runMerge(
   const resetRelocatedVectors = async (tx: Prisma.TransactionClient, ids: string[]) => {
     if (ids.length === 0) return;
     const destination = await tx.memory.findUniqueOrThrow({
-      where: { id: targetMemoryId }, select: { vectorIndexEnabled: true },
+      where: { id: targetMemoryId }, select: { vectorIndexEnabled: true, class: true },
     });
-    const stamp = new Date();
-    const sameStamp = destination.vectorIndexEnabled
-      ? await tx.node.findMany({ where: { id: { in: ids }, embeddingPendingAt: stamp }, select: { id: true } })
-      : [];
     await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: ids } } });
-    await tx.node.updateMany({
-      where: { id: { in: ids } },
-      data: {
-        embeddingPendingAt: destination.vectorIndexEnabled ? stamp : null,
-        embeddingFailedAt: null, embeddingError: null, embeddingAttempts: 0,
-      },
-    });
-    if (sameStamp.length) await tx.node.updateMany({
-      where: { id: { in: sameStamp.map((n) => n.id) } },
-      data: { embeddingPendingAt: new Date(stamp.getTime() - 1) },
-    });
+    await resetEmbeddingObligations(tx, ids, memoryIsVectorIndexed(destination));
   };
 
   /** Hold both flags through a batch so encryptMemory cannot flip mid-write. */
@@ -688,9 +676,7 @@ async function runMerge(
       // the fold rows. Take the complete Channel-memory set first: holding the
       // Node/Memory rows while waiting for a Channel key would invert against
       // final source disposition, which takes that key before its Memory rows.
-      for (const id of [...new Set([sourceMemoryId, targetMemoryId])].sort()) {
-        await lockMemoryForChannelChange(tx, id);
-      }
+      await lockMemoriesForChannelChange(tx, [sourceMemoryId, targetMemoryId]);
 
       // Read the target schema INSIDE the tx so the fold validates against the
       // schema current at fold time (a tightening committed between batches is
@@ -819,6 +805,7 @@ async function runMerge(
           }
           writeData.revisionContentHash = revisionStateHashRefreshMarker();
           await tx.node.update({ where: { id: tgt.id }, data: writeData });
+          await stampEmbeddingObligation(tx, tgt.id, targetMemoryId);
         }
         foldedIds.push(src.id);
       }

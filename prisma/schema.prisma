@@ -764,10 +764,11 @@ model Memory {
   /// (CHECK chk_personal_visibility_user): `class IN ('personal','private')`
   /// ⇔ `userId IS NOT NULL`.
   userId                String? @map("user_id")
-  /// Legacy 005 Agent-pivot for personal memories. **Retained for
-  /// backward-compat queries** (008 R-3); not consulted by post-008
-  /// access-control, which uses `appId` directly. A future cleanup
-  /// spec may collapse it.
+  /// Agent pivot used by live access-control and memory classification.
+  /// With a calling App, legacy personal/private rows with appId NULL require
+  /// this Agent installed; agent-scoped AgentSubscription checks use this Agent too.
+  /// Marks per-user/session/anonymous holdings for exclusion from shared App/team
+  /// memory folds. Free-standing personal/private memories leave this and appId NULL.
   userMemoryOfAgentId   String? @map("user_memory_of_agent_id")
   /// #723 — the IDENTITY of an App's `shared` app-class memory: the Agent whose
   /// shared space this is, under `appId`. Set ONLY on that runtime memory (NULL
@@ -822,17 +823,13 @@ model Memory {
   /// `properties`/`objectType` are validated against it in the enforcement
   /// phase (a later PR) — free-form until then.
   schema               Json?
-  /// #1447/#1448 — this memory is a DRAFT spec corpus: its specs' citations
-  /// are not yet permanent, so they can be renumbered, moved and deleted
-  /// freely, and a move records no UrnAlias (nothing outside can cite a draft
-  /// number). Chosen ONLY at creation (`createMemory(draftCorpus: true)`); no
-  /// update path sets it, and minting clears it once, one-way. Every existing
-  /// memory, and every memory created without asking, is minted (false). A
-  /// dedicated Memory column rather than MemoryConfig so config-template apply
-  /// (which copies NodeRoleRule columns only) can never carry it.
+  /// #1591 — legacy whole-corpus flag retained for compatibility. Draft rights
+  /// now belong to each node and end at its first mint; false does not mean
+  /// every node in this memory is minted. Minting still clears this flag.
   corpusDraft          Boolean           @default(false) @map("corpus_draft")
-  /// #1448 — when this spec corpus was minted (draft → minted, once, one-way),
-  /// and by whom. Null for a corpus that was never a draft.
+  /// #1591 — legacy record of the latest nonempty mint in this memory and its
+  /// actor. Node mint records determine mint state; this stamp confers no
+  /// memory-wide removal protection or draft rights.
   corpusMintedAt       DateTime?         @map("corpus_minted_at")
   corpusMintedBy       String?           @map("corpus_minted_by")
   /// Classification tags for search and filtering.
@@ -895,6 +892,8 @@ model Memory {
   syncStatus           SyncStatus        @default(PENDING) @map("sync_status")
   /// Error message from the last failed sync.
   syncError            String?           @map("sync_error")
+  /// Versioned last completed sync outcome; null after a clean sync (or before any sync).
+  lastSyncReport       String?           @map("last_sync_report")
   /// Number of live unresolved PendingEdge records whose live source is in
   /// this memory (a derived projection, denormalized for dashboard display).
   pendingEdgeCount     Int               @default(0) @map("pending_edge_count")
@@ -1020,6 +1019,9 @@ model Memory {
   /// creation (there is no shared creation helper to hang that on —
   /// hadron-server findings:memory-creation-has-no-shared-helper).
   config              MemoryConfig?
+  /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
+  appWriteGrants      AppMemoryWriteGrant[]
+  gitMirrorObligations GitMirrorObligation[]
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -1101,6 +1103,13 @@ model Asset {
   /// pending (CLEAN, or BLOCKED with bytes confirmed gone). Every
   /// sweep touch pushes it forward, so no row can monopolize a batch.
   scanDueAt     DateTime?       @map("scan_due_at")
+  /// When the bytes-missing row sweep (#1140) last examined this row.
+  /// NULL = never. It is the sweep's persisted cursor (least-recently
+  /// examined first, NULLs first), so a restart resumes instead of
+  /// re-walking the same head of the table. A deferral (encrypted memory
+  /// with no cached session key) stamps it too, so such a row rotates
+  /// behind other work; a failed store lookup does NOT.
+  bytesCheckedAt DateTime?      @map("bytes_checked_at")
   /// Optional; agent- or user-provided.
   description   String?
   uploadedAt    DateTime        @default(now()) @map("uploaded_at")
@@ -1112,12 +1121,18 @@ model Asset {
   /// Soft-delete marker. Janitor sweeps R2 object + hard-deletes
   /// after 24h.
   deletedAt     DateTime?       @map("deleted_at")
+  /// #1667, cor:dmo:060:15 — the per-asset public-link opt-in. STORED POLICY, not
+  /// proof of publication: the anonymous hotlink also needs the deployment gate
+  /// and the existing eligibility checks. Every asset starts OFF.
+  publicLinkEnabled Boolean     @default(false) @map("public_link_enabled")
 
   memory Memory? @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
   @@index([memoryId, scanStatus, uploadedAt(sort: Desc)])
   // #896 — the scan sweep's selector (due rows, oldest due first).
   @@index([scanDueAt])
+  // #1140 — the bytes-missing row sweep's cursor (least-recently examined first).
+  @@index([bytesCheckedAt])
   // 006-asset-upload-redesign: two partial indexes for staged assets
   // (WHERE memory_id IS NULL) live in the migration SQL only — Prisma
   // schema syntax can't express WHERE clauses on @@index. See
@@ -1133,29 +1148,30 @@ model Asset {
 /// `baragaun.com:secureid:auth:tokens`) and **not stored**. `id` is
 /// optional in YAML; the server assigns it on import if missing.
 ///
-/// **Node types** define the node's role in the memory:
-///   - `info` (default)  — living knowledge: specs, guides, facts.
-///                         Shown in tree, normal search priority.
-///   - `abstract`        — condensed knowledge: summaries, TL;DRs,
-///                         paper abstracts. Highest search priority.
-///                         May be the only representation if the source
-///                         is archived.
-///   - `reference`       — external source: papers, URLs, legislation,
-///                         books. Carries metadata (DOI, ISBN, URL) in
-///                         `data`.
-///   - `record`          — immutable history: chat messages, session
-///                         logs. Hidden in tree by default, low search
-///                         priority.
-///   - `system`          — agent configuration: conversation designs,
-///                         stages, prompt templates, partials. Hidden
-///                         in tree, excluded from search.
+/// **Node types** — the authoritative canonical list for ordinary nodes:
+///   - `abstract`        — agent-generated summaries (chat summaries,
+///                         topic abstracts); searched first by retrieval flows.
+///   - `chat`            — chat session and message nodes.
+///   - `data`            — the structured payload is the artifact, with no
+///                         human-authored content body.
+///   - `info` (default)  — reference content: articles, guides, extracted facts;
+///                         the default for user-authored knowledge.
+///   - `prompt`          — system prompt content for an LLM call.
+///   - `record`          — append-mostly stored data: user profiles, session
+///                         logs, append-only event logs.
+///   - `reference`       — external sources or cross-memory pointers: papers,
+///                         URLs, legislation, asset references.
+///   - `system`          — agent-internal configuration: conversation designs,
+///                         stages, topics; typically in an Agent's system
+///                         memory and hidden from end-user search.
+/// `comment` is platform-reserved for governed feedback (see `commentMeta`);
+/// the canonical ordinary-node list is not a closed set of stored values.
 /// (The earlier `asset` node-type was promoted to its own Asset table
 /// in spec 004-asset-upload.)
 ///
-/// **Column type is `String` (not enum)** because the running schema
-/// pre-dates the formalization; the intended-values list above is the
-/// contract — tightening to a Prisma enum is reserved for a future
-/// cleanup spec.
+/// **Column type is free-form `String` (not enum)** to preserve extensibility
+/// for third-party agents and apps: no Prisma enum or DB CHECK constraint.
+/// Hadron core does not special-case non-canonical third-party values.
 ///
 /// **Chat-root `data.scope`** (spec 017, 2026-05-12) — chat-root nodes
 /// (loc `chats:<id>`, depth 2, nodeType `record`) carry a `scope` field
@@ -1247,7 +1263,10 @@ model Node {
   /// Set when this node needs (re-)embedding; cleared on success. The single
   /// work signal the embedding worker drains (FR-006/FR-007). Operational
   /// state only — intentionally NOT versioned on NodeRevision.
-  embeddingPendingAt  DateTime?           @map("embedding_pending_at")
+  embeddingPendingAt DateTime? @map("embedding_pending_at")
+  /// internal#4: opaque identity of one durable obligation; time only schedules it.
+  /// Operational, never copied into revisions or approval/authorship state.
+  embeddingWorkToken String?   @db.Uuid @map("embedding_work_token")
   /// Set when an embed attempt failed (record, not a work signal). Transient
   /// failures keep pending set for retry; permanent failures clear pending (FR-009).
   embeddingFailedAt   DateTime?           @map("embedding_failed_at")
@@ -1400,11 +1419,14 @@ model Node {
   updatedByUserId     String?             @map("updated_by_user_id")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  includeReferences        IncludeReference[]
+  includeSourceCoverage    IncludeSourceCoverage?
   outgoingEdges            Edge[]                        @relation("SourceNode")
   incomingEdges            Edge[]                        @relation("TargetNode")
   pendingEdges             PendingEdge[]
   usageEvents              UsageEvent[]
   revisions                NodeRevision[]
+  edgeRemovals             NodeEdgeRemoval[]
   /// #2046 (S9): the immutable provenance of each compiled revision of this node.
   compiledPromptRevisions  CompiledPromptRevision[]
   /// #1606 — present iff `nodeType = 'comment'` (deferred DB trigger).
@@ -1504,7 +1526,7 @@ model NodeEmbedding {
   @@map("node_embeddings")
 }
 
-/// Directed edge between two Nodes. The `label` describes the
+/// Directed edge between two Nodes. The optional `name` describes the
 /// relationship — e.g. "imports", "depends_on", "related-to", "cites",
 /// "abstract-of". An edge whose target is not yet synced lives in
 /// PendingEdge until the target arrives.
@@ -1590,6 +1612,7 @@ model Edge {
   @@unique([loc, memoryId])
   @@index([memoryId])
   @@index([targetId])
+  @@index([sourceId])
   // Graph-view scale path (#466): memoryEdges runs
   // `WHERE memory_id = ? ORDER BY loc LIMIT/OFFSET` (plus endpoint-liveness
   // joins). Same memory-scoped, loc-ordered seek as nodes_memory_id_loc_idx.
@@ -1722,6 +1745,10 @@ model Session {
   /// gated at start (the worker must belong to the session's App); "taken
   /// right now" derives from an ACTIVE session bound to the worker.
   workerId          String?           @map("worker_id")
+  /// #2458 (cor:dmo:050:11): the worker's role AT BIND, stamped from the locked worker row with `agentId`, so a
+  /// past session keeps the role it ran under after the worker's agent (and so its role) changes. Null for a
+  /// session with no worker; the migration backfills earlier sessions exactly (the role was immutable before #2458).
+  role              String?           @map("role")
   /// The active write-memory for this session, when there's an
   /// unambiguous one. Resolves the multi-writable-memory ambiguity.
   memoryId          String?           @map("memory_id")
@@ -1762,6 +1789,12 @@ model Session {
   /// could not be classified. A worker's family is its live bound session's.
   /// A matching input only, never an authorization input: it is self-declared.
   family            String?
+  /// #2252 — when `llmModel` was last SELF-REPORTED (start, resume, or an
+  /// updateSession carrying a model; a repeat of the same model counts). Null
+  /// for a session that never reported, including every row from before this
+  /// column: no historical backfill. Not `updated_at`, which unrelated writes
+  /// move. Describes a self-report, not verified detection.
+  modelReportedAt   DateTime?         @map("model_reported_at")
   /// #1709 (cor:agt:070:08; Holger via Vera #10773) — a host-launched session:
   /// the host that started it, the `worker.start` operation, the task it was
   /// launched for (none for a manager's start without one), and who issued the
@@ -1952,26 +1985,30 @@ model UsageEvent {
 /// from), "Juno" (the mentee chat agent shared across MicroMentor
 /// orgs).
 model Agent {
-  id                   String          @id @default(cuid())
+  id                    String          @id @default(cuid())
   /// #2138 §3.5 — false: every worker cast from this Agent counts as HAVING a task (coordinators, the
   /// lifecycle agent), so it is expected to check every period.
-  usesTasks            Boolean         @default(true) @map("uses_tasks")
-  organizationId       String?         @map("organization_id")
+  usesTasks             Boolean         @default(true) @map("uses_tasks")
+  /// #2162 (cor:agt:050:27) — when a task one of this Agent's workers had started finishes or is cancelled, and it holds
+  /// no other started task, the platform asks the worker's host to reset its context: a shed, never a session end.
+  /// Off by default; written by whoever manages the Agent, like `usesTasks`.
+  resetContextAfterTask Boolean         @default(false) @map("reset_context_after_task")
+  organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
   /// post-push.sql: `(organization_id IS NULL) <> (owner_user_id IS NULL)` — so
   /// exactly one of `organizationId`/`ownerUserId` is non-null.
-  ownerUserId          String?         @map("owner_user_id")
-  ownerUser            User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  ownerUserId           String?         @map("owner_user_id")
+  ownerUser             User?           @relation("AgentOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   /// Globally unique identifier (e.g. "micromentor.org:juno");
   /// derived from `org.urn + ":" + slug`.
-  urn                  String          @unique
+  urn                   String          @unique
   /// Display name of this agent.
-  name                 String
-  description          String?
+  name                  String
+  description           String?
   /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
   /// for a worker briefing, or to this Agent's name/role for a chat.
-  systemPrompt         String?         @map("system_prompt")
+  systemPrompt          String?         @map("system_prompt")
   /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
   /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
@@ -1981,28 +2018,28 @@ model Agent {
   /// read only when the row is gone; both are set or both NULL
   /// (chk_*_boot_prompt_pointer_pair, prisma/boot-prompt-pointer-invariants.sql).
   /// Written only through `setBootPromptPointer` (src/lib/bootPromptPointer.ts).
-  bootPromptNodeId     String?         @map("boot_prompt_node_id")
-  bootPromptUrn        String?         @map("boot_prompt_urn")
+  bootPromptNodeId      String?         @map("boot_prompt_node_id")
+  bootPromptUrn         String?         @map("boot_prompt_urn")
   /// Memory containing conversation designs (stages, prompts,
   /// partials). Universally read-only from any App context post-008
   /// (DEVELOP-from-App is dropped per R-10); edits happen in the
   /// Agent ownership surface.
-  systemMemoryId       String?         @map("system_memory_id")
+  systemMemoryId        String?         @map("system_memory_id")
   /// PUBLIC | ORGANIZATION | PERSONAL (035-visibility-enum-cleanup gave
   /// agents their own enum). PERSONAL is the creator-only draft state.
-  visibility           AgentVisibility @default(PERSONAL)
+  visibility            AgentVisibility @default(PERSONAL)
   /// Opt-in marketplace catalogue flag (cor:acl:080:04): whether this agent is
   /// advertised in the marketplace browse. DISTINCT from `visibility` — PUBLIC
   /// governs access, this governs advertisement. Contributes to the owner org's
   /// discoverability (cor:acl:080:02) only when that org is activated.
-  listedOnMarketplace  Boolean         @default(false) @map("listed_on_marketplace")
+  listedOnMarketplace   Boolean         @default(false) @map("listed_on_marketplace")
   /// Coarse behavior hint — see AgentType enum doc. Largely legacy
   /// post-008.
-  type                 AgentType       @default(ASSISTANT)
+  type                  AgentType       @default(ASSISTANT)
   /// Surfaces this Agent is designed for (free-form per 008 R-9; v1
   /// known values: 'chat', 'slack', 'mcp', 'web'). Distinct from the
   /// per-App `surfaces` — this is the *design-time* declaration.
-  surfaces             String[]        @default([])
+  surfaces              String[]        @default([])
   // 036-ai-service-config: the legacy ai_provider/ai_model/
   // ai_api_key_encrypted/ai_api_key_preview columns were dropped in favor
   // of Agent-owned AiServiceConfig rows (the Agent's design-time default
@@ -2011,15 +2048,15 @@ model Agent {
   /// Loc of the currently-published revision of the Agent's system
   /// memory. Lets the Builder ship draft revisions without affecting
   /// running Apps.
-  publishedRevisionLoc String?         @map("published_revision_loc")
+  publishedRevisionLoc  String?         @map("published_revision_loc")
   /// Optimistic editor-lock owner (one Builder at a time can hold the
   /// edit lock on the system memory).
-  editorLockUserId     String?         @map("editor_lock_user_id")
+  editorLockUserId      String?         @map("editor_lock_user_id")
   /// When the editor lock expires (auto-released on stale).
-  editorLockExpiresAt  DateTime?       @map("editor_lock_expires_at")
+  editorLockExpiresAt   DateTime?       @map("editor_lock_expires_at")
   /// Agent working state (per-user data like family budget,
   /// preferences); automatically available to the LLM as context.
-  properties           Json?
+  properties            Json?
   // 008-agent-installation (2026-05-02): Agent declares per-deployment memory
   // provisioning shape. Schema: { appMemory: 'shared' | 'user' | 'none' }.
   // Personal-class provisioning is implicit (lazy on first user-attributed write).
@@ -2027,11 +2064,11 @@ model Agent {
   /// provisioned. Shape: `{ appMemory: 'shared' | 'user' | 'none' }`.
   /// `personalMemory` provisioning is implicit (lazy-create on first
   /// user-attributed write). 008-agent-installation FR-008.
-  memoryProvisioning   Json            @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
+  memoryProvisioning    Json            @default("{\"appMemory\": \"shared\"}") @map("memory_provisioning")
   /// Spec 049 Phase 5 (plan §3.5 recommendation): the defaults this Agent's
   /// install-created register row is made with — `{ mentionOnly?: boolean }`.
   /// A scalar default, not a reference that can rot; null = platform defaults.
-  registerDefaults     Json?           @map("register_defaults")
+  registerDefaults      Json?           @map("register_defaults")
   // 008-agent-installation (2026-05-02): Agent declares membership constraints.
   // Schema: { maxMembers: number | 'unlimited', memberRoles: string[] }.
   // Enforced at AppMember invite-acceptance time.
@@ -2039,7 +2076,7 @@ model Agent {
   /// Agent. Shape: `{ maxMembers: number | 'unlimited', memberRoles:
   /// string[] }`. `maxMembers` enforced at AppMember
   /// invite-acceptance time. 008-agent-installation FR-009.
-  installationPolicy   Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
+  installationPolicy    Json            @default("{\"maxMembers\": \"unlimited\", \"memberRoles\": [\"owner\"]}") @map("installation_policy")
   // #928 persona dressing, re-cut to the Worker model by #974 (cor:agt:020:01,
   // D-2026-08-14-004): a persona is UNIVERSAL DRESSING on an Agent — a role
   // plus a template prompt that let any agent present as a colleague. The
@@ -2052,28 +2089,31 @@ model Agent {
   /// Persona role — free string with conventions ("backend-engineer").
   /// A dedicated column so roster/casting queries can filter without
   /// parsing the prompt.
-  personaRole          String?         @map("persona_role")
+  personaRole           String?         @map("persona_role")
   /// #1885 (cor:dmo:050:14) — the one base Agent this Agent extends, or null.
   /// The child inherits its base chain's system-memory nodes (except boot
   /// prompts). One base, no cycles, at most 4 Agents in a chain counting this
   /// one: enforced by `src/lib/agentBase.ts`, the only writer, and backstopped
   /// by `agent_base_guard` (prisma/agent-base-invariants.sql). `Restrict`, as
   /// for an imported Agent: a live child keeps its base from being removed.
-  extendsAgentId       String?         @map("extends_agent_id")
+  extendsAgentId        String?         @map("extends_agent_id")
   /// #1892 (cor:dmo:050:15) — the index node whose incoming, trigger-labelled
   /// edges list this Agent's own tasks; null when it names none. Written only
   /// by `setAgentIndexRefs`, read by src/lib/agentDefinitionLists.ts.
   /// `SetNull`: removing the index node unsets the pointer.
+  /// #2245 (R145/R146): the Agent this one was cloned from, as a plain ref (the source's URN at clone time).
+  /// No FK: the source may be retired or renamed, and the provenance must survive both.
+  clonedFromAgentRef   String?         @map("cloned_from_agent_ref")
   tasksIndexRef        String?         @map("tasks_index_ref")
   /// #1892 (cor:dmo:050:16) — the index node whose incoming, trigger-labelled
   /// edges list the processes this Agent starts or owns; null when none.
-  processesIndexRef    String?         @map("processes_index_ref")
-  createdAt            DateTime        @default(now()) @map("created_at")
-  createdBy            String?         @map("created_by")
-  updatedAt            DateTime?       @updatedAt @map("updated_at")
-  updatedBy            String?         @map("updated_by")
-  deletedAt            DateTime?       @map("deleted_at")
-  deletedBy            String?         @map("deleted_by")
+  processesIndexRef     String?         @map("processes_index_ref")
+  createdAt             DateTime        @default(now()) @map("created_at")
+  createdBy             String?         @map("created_by")
+  updatedAt             DateTime?       @updatedAt @map("updated_at")
+  updatedBy             String?         @map("updated_by")
+  deletedAt             DateTime?       @map("deleted_at")
+  deletedBy             String?         @map("deleted_by")
 
   /// Online URN-shape migration gate (spec 021 FR-032, repurposed for the #697
   /// v1→v2 emission flip). Null = pre-normalization row; set = row normalized
@@ -2122,6 +2162,8 @@ model Agent {
   @@index([legacyUrn])
   @@index([bootPromptNodeId])
   @@map("agents")
+  /// #2024 (S8, cor:agt:080:33): the tickers this Agent declares; each cast of a worker from it instantiates them.
+  tickerTemplates       AgentTickerTemplate[]
 }
 
 /// Associates a Memory with an Agent, with a per-memory access level.
@@ -3341,20 +3383,28 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  agentTaskCounters       AgentTaskCounter[]
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
   appGrants               AppGrant[]
   wakeDays                AppWakeDay[]
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
+  automationAdoptionEvents AutomationAdoptionEvent[]
+  /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
+  memoryWriteGrants       AppMemoryWriteGrant[]
+  memoryWriteGrantEvents  AppMemoryWriteGrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
   /// #1707 — hosts that registered which workers they can launch (cor:agt:070:01).
   hostRegistrations       HostRegistration[]
   hostOperations          HostOperation[]
+  /// #2162 — the context resets of this App's workers.
+  contextResets           ContextReset[]
   /// #2022 (S6, cor:agt:090) — the App's stop signals, live and ended.
   stopSignals             TeamStopSignal[]
+  stopConsumerDeclarations StopConsumerDeclaration[]
   launchGrants            LaunchGrant[]
   /// #1956 — resume claims written before a deliberate context reset (cor:agt:020:03).
   resumeClaims            ResumeClaim[]
@@ -3848,6 +3898,8 @@ model Worker {
   /// leaves it alone. Written only by `src/lib/workers/reportsTo.ts`, which
   /// also appends the `worker.reports-to` event that keeps its history.
   reportsToWorkerId String?   @map("reports_to_worker_id")
+  /// S12: explicit human choice; false + null reportsTo is UNSET, never inferred NO_TEAM.
+  explicitNoTeam Boolean @default(false) @map("explicit_no_team")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -3879,6 +3931,8 @@ model Worker {
   appGrants            AppGrant[]
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
+  /// #2162 — this worker's context resets (cor:agt:050:27).
+  contextResets        ContextReset[]
   /// #2022 — worker- and team-scope stop signals naming this worker as target.
   stopSignalsTargeting TeamStopSignal[]
 
@@ -4013,6 +4067,9 @@ model UserApiKey {
   oauthScopes String[]  @map("oauth_scopes")
   lastUsedAt  DateTime? @map("last_used_at")
   revokedAt   DateTime? @map("revoked_at")
+  /// #2298: the owner hid this REVOKED key from their default list. Display
+  /// state only: never read by authentication, revocation or lineage.
+  hiddenAt    DateTime? @map("hidden_at")
 
   /// Authenticated credential that minted this key (#1253). Null means
   /// direct issuance or unknown legacy ancestry; never inferred/backfilled.
@@ -4119,6 +4176,11 @@ model OAuthClient {
   updatedBy    String?   @map("updated_by")
   deletedAt    DateTime? @map("deleted_at")
   deletedBy    String?   @map("deleted_by")
+  /// #155: when an unused DCR client becomes collectable. Set to now + 30
+  /// days at registration and pushed forward by each token redemption; the
+  /// GC job (src/jobs/gcOauthClients.ts) soft-deletes a client 7 days past
+  /// it. NULL never expires (seeded and hand-made clients).
+  expiresAt    DateTime? @map("expires_at")
 
   authCodes AuthCode[]
 
@@ -4524,6 +4586,10 @@ model PendingLoginState {
   /// #1631 PR1b: SHA-256 of the ceremony browser cookie when this state is a passkey ceremony's sign-in leg.
   /// Such a state carries no return_to or client_state (CHECK), and its callback mints no session.
   ceremonyNonceHash String?  @map("ceremony_nonce_hash")
+  /// #2204: SHA-256 of the OIDC `nonce` sent to Google/Apple (binds the ID token to this attempt). NULL only for
+  /// GitHub and for rows minted before #2204; `chk_pending_login_provider_nonce` (NOT VALID) refuses a new
+  /// google/apple row without it. Distinct from `client_state` and `ceremony_nonce_hash`, which bind the browser.
+  providerNonceHash String?  @map("provider_nonce_hash")
   expiresAt         DateTime @map("expires_at")
   createdAt         DateTime @default(now()) @map("created_at")
 
@@ -4576,6 +4642,10 @@ model AppRun {
   automationPin        Json?                @map("automation_pin")
   manualAutomationPin  ManualAutomationPin?
   entryNodeUrn         String               @map("entry_node_urn")
+  /// #2438: the entry node's stable id — what the run resolves by once the
+  /// automation pin moved off literal URNs. NULL on runs minted before the
+  /// column existed; those keep verifying under their stored pin's URN identity.
+  entryNodeId          String?              @map("entry_node_id")
   eventData            Json?                @map("event_data")
   /// Run envelope (D-2026-05-09-013): the mutable bag of fields extracted
   /// by flow nodes as the walker advances. Bare field names — conditions
@@ -4622,13 +4692,18 @@ model AppRun {
   /// false total (PR #854 review, Codex P2). `tokens_spent` is backfilled from
   /// the hop trail where one exists; `actions_spent` has no such signal.
   ///
-  /// KNOWN GAP: a hop aborted by the tool loop (ToolDenied / ToolExecution /
-  /// AuthorFail) does not increment. The provider has already billed that
-  /// call, but generateWithTools discards the accumulated usage when a tool
-  /// throws, so the number is not available at the failure site. Tracked
-  /// separately; see the GraphQL field docs.
+  /// A rejected tool-loop call counts the steps the SDK had already completed
+  /// (#862); usage the SDK did not report (the failed step, or a step without
+  /// counts) is not counted, so such a run can still under-report. See the
+  /// GraphQL field docs.
   tokensSpent          Int?                 @default(0) @map("tokens_spent")
   actionsSpent         Int?                 @default(0) @map("actions_spent")
+  /// #2439 — priced LLM cost of this run in micro-cents (1e-8 USD): the sum of
+  /// its usage events' `costMicroCents`, incremented where each event is
+  /// recorded. Unpriced events add nothing. NULL = UNKNOWN for a run minted
+  /// before the column existed (no usage-event link to back-fill from); new
+  /// runs start at 0.
+  costMicroCents       BigInt?              @map("cost_micro_cents")
   status               AppRunStatus         @default(PENDING)
   curNodeUrn           String?              @map("cur_node_urn")
   /// Spec 049 Phase 3b (D-2026-09-13-004): the trigger's scope, SNAPSHOTTED at mint as
@@ -4685,6 +4760,10 @@ model AgentSchedule {
   /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
   automationPin  Json?     @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
+  /// #2438: the entry node's stable id, stamped at adoption (and lazily at
+  /// launch) — a same-memory rename/move of the entry keeps the trigger
+  /// working; entryNodeUrn stays the immutable display/audit address.
+  entryNodeId     String?   @map("entry_node_id")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).
   policy         Json?
@@ -4854,6 +4933,10 @@ model AgentWebhook {
   /// #1719 R5b: owner-adopted complete graph; NULL fails closed at execution.
   automationPin  Json?     @map("automation_pin")
   entryNodeUrn   String    @map("entry_node_urn")
+  /// #2438: the entry node's stable id, stamped at adoption (and lazily at
+  /// launch) — a same-memory rename/move of the entry keeps the trigger
+  /// working; entryNodeUrn stays the immutable display/audit address.
+  entryNodeId     String?   @map("entry_node_id")
   eventData      Json?     @map("event_data")
   policy         Json?
   aiConfigName   String?   @map("ai_config_name")
@@ -5431,6 +5514,128 @@ enum AutomationTier {
   APP
 }
 
+/// #2441 — append-only record of every approval, decline and revocation of an
+/// automation's consent (cor:agt:010:01). Written in the SAME transaction as
+/// the pin change by `adoptionDoor` (resolvers.automationPin.ts) and nowhere
+/// else. The trigger id, the actor and the org carry no FK on purpose: history
+/// must survive trigger deletion and user erasure, and an FK action would have
+/// to UPDATE a row the trigger refuses to update. The App FK cascades so a hard
+/// delete still works (the trigger lets a DELETE through once the App is gone).
+model AutomationAdoptionEvent {
+  id             String   @id @default(cuid())
+  appId          String   @map("app_id")
+  /// The App's organization; null for a user-owned App.
+  organizationId String?  @map("organization_id")
+  /// SCHEDULE | WEBHOOK | MANUAL (CHECK in automation-adoption-invariants.sql).
+  triggerKind    String   @map("trigger_kind")
+  /// The trigger row id; for MANUAL, the origin run id. Plain text, no FK.
+  triggerRef     String   @map("trigger_ref")
+  /// APPROVE | DECLINE | REVOKE (CHECK).
+  action         String
+  actorUserId    String   @map("actor_user_id")
+  /// APPROVE: the adopted hash. REVOKE: the hash of the removed pin. DECLINE
+  /// with nothing adopted: null.
+  pinHash        String?  @map("pin_hash")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([triggerKind, triggerRef, createdAt])
+  @@map("automation_adoption_events")
+}
+
+/// #2484 (cor:agt:010:01, epic #2435) — an App's write grant on ONE memory under ONE loc prefix, for its USERLESS
+/// runs only: the register-recorded grant the Open paragraph rules on. One row per (App, memory, prefix); the prefix
+/// is required and matches the loc itself and its `:`-boundary descendants only, judged on the destination after
+/// `writeTo` expansion, at write time (`src/lib/appWriteGrant.ts`). A row is never edited: it ends with a terminal
+/// `revokedAt` (trigger + CHECKs in app-memory-write-grant-invariants.sql, where the partial unique index also lives).
+/// `grantedBy` / `revokedBy` carry no FK on purpose: they are sealed history of who acted and must survive user
+/// erasure. `registerNodeUrn` is a citation of the register line, never evidence that the line exists.
+model AppMemoryWriteGrant {
+  id              String    @id @default(cuid())
+  appId           String    @map("app_id")
+  memoryId        String    @map("memory_id")
+  prefix          String
+  registerNodeUrn String?   @map("register_node_urn")
+  grantedBy       String    @map("granted_by")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  revokedAt       DateTime? @map("revoked_at")
+  revokedBy       String?   @map("revoked_by")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([memoryId])
+  @@map("app_memory_write_grants")
+}
+
+/// #2484 — append-only record of every grant and revocation of an App memory write grant: who, which App, which
+/// memory, which prefix, and nothing of any node's content. Written in the SAME transaction as the row change by
+/// `src/lib/appWriteGrant.ts` and nowhere else. The memory, grant and actor carry no FK on purpose: history must
+/// survive their deletion. The App FK cascades so a hard delete still works (the trigger lets a DELETE through once
+/// the App is gone).
+model AppMemoryWriteGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  memoryId    String   @map("memory_id")
+  grantId     String   @map("grant_id")
+  prefix      String
+  /// GRANT | REVOKE (CHECK in app-memory-write-grant-invariants.sql).
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([grantId])
+  @@map("app_memory_write_grant_events")
+}
+
+/// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.
+/// One row per (memory, node, kind, remove_loc): a WRITE row per node, plus one REMOVE row per distinct old loc a move
+/// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
+/// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
+/// a memory that is not mirrored (no source, no org, encrypted, invalid source), delete it. `attempt_seq` comes from
+/// `git_mirror_attempt_seq`, taken INSIDE the per-memory checkout lock and settled before it releases, so a stale
+/// settle can never overwrite a newer one (src/integrations/github/mirrorObligations.ts). `error_class` is a fixed,
+/// CHECK-constrained set (git-mirror-obligation-invariants.sql); no exception text, URL or token is ever stored.
+/// This slice records only failures the process survives: no retry, no reconcile, no writer-side PENDING.
+model GitMirrorObligation {
+  memoryId      String                   @map("memory_id")
+  nodeId        String                   @map("node_id")
+  kind          GitMirrorObligationKind
+  removeLoc     String                   @default("") @map("remove_loc")
+  state         GitMirrorObligationState
+  errorClass    String                   @map("error_class")
+  attempts      Int                      @default(1)
+  attemptSeq    BigInt                   @map("attempt_seq")
+  lastAttemptAt DateTime                 @default(now()) @map("last_attempt_at")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@id([memoryId, nodeId, kind, removeLoc])
+  @@index([memoryId, state])
+  @@map("git_mirror_obligations")
+}
+
+enum GitMirrorObligationKind {
+  WRITE
+  REMOVE
+
+  @@map("git_mirror_obligation_kind")
+}
+
+/// FAILED = a retryable failure; NOT_CLONED = the repository is configured but not cloned here yet.
+enum GitMirrorObligationState {
+  FAILED
+  NOT_CLONED
+
+  @@map("git_mirror_obligation_state")
+}
+
 model AutomationVersion {
   id                String         @id @default(cuid())
   appId             String         @map("app_id")
@@ -5472,6 +5677,14 @@ model AutomationVersion {
 model AgentTask {
   id                   String    @id @default(cuid())
   appId                String    @map("app_id")
+  /// #2553: this task's own segment of its handle: the project number (counted per App) for a top-level row, else the
+  /// number counted within its parent. Assigned once at creation from `agent_task_counters`, never changed or reissued.
+  /// 0 is the reserved project `AT0` ("no project"). NOT NULL in the database (prisma/agent-task-number-invariants.sql,
+  /// which also fills it for any writer that leaves it out); optional here only so a writer need not state it.
+  taskNumber           BigInt?   @map("task_number")
+  /// #2553: the full dotted handle (`AT3.405.16`), composed once at creation from the parent's handle and never
+  /// recomputed: parentage is fixed at creation (a trigger refuses UPDATE of parent_task_id), so it always matches the tree.
+  handle               String?
   /// What is asked, in the team's own words. Never read by the platform.
   title                String
   description          String?
@@ -5498,8 +5711,9 @@ model AgentTask {
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
   tags                 String[]  @default([])
-  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). Stored only in T1.
-  closeSessionWhenDone Boolean   @default(true) @map("close_session_when_done")
+  /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
+  /// default only reaches a raw insert, since every create path writes the resolved value.
+  closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
   /// The latest assignment, by hand or by the matcher, in the #1610 actor shape.
   assignedAt           DateTime? @map("assigned_at")
   assignedBy           String?   @map("assigned_by")
@@ -5521,6 +5735,8 @@ model AgentTask {
   app            App                 @relation(fields: [appId], references: [id], onDelete: Cascade)
   parent         AgentTask?          @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
   children       AgentTask[]         @relation("AgentTaskParent")
+  /// #2553: the counter of the numbers issued under this task.
+  childCounters  AgentTaskCounter[]
   ownerWorker    Worker?             @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
   ownerUser      User?               @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
   assigneeWorker Worker?             @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
@@ -5529,6 +5745,7 @@ model AgentTask {
   /// #2022 — times stop signals kept this task from being assigned.
   stopHolds      AgentTaskStopHold[]
 
+  @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
   @@index([ownerWorkerId])
@@ -5536,6 +5753,24 @@ model AgentTask {
   @@index([assigneeWorkerId])
   @@index([assigneeUserId])
   @@map("agent_tasks")
+}
+
+/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
+/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
+/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
+/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
+model AgentTaskCounter {
+  id           String  @id @default(cuid())
+  appId        String  @map("app_id")
+  parentTaskId String? @map("parent_task_id")
+  lastNumber   BigInt  @map("last_number")
+
+  app        App        @relation(fields: [appId], references: [id], onDelete: Cascade)
+  parentTask AgentTask? @relation(fields: [parentTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, parentTaskId])
+
+  @@map("agent_task_counters")
 }
 
 /// #1705 — one append-only record of something that happened in a team App's
@@ -5610,6 +5845,10 @@ model AgentTeamAlarmSchedule {
   chainIndex Int       @map("chain_index")
   dueAt      DateTime  @map("due_at")
   wokenAt    DateTime? @map("woken_at")
+  /// #2200 (R196) — when the escalation found that the alarm's OWN episode had ended (the task moved, so the
+  /// condition no longer holds) and closed this row unwoken. Woken or ended, never both
+  /// (chk_agent_team_alarm_schedule_shape); the alarm event, its chain and every `woken_at` stay as written.
+  endedAt    DateTime? @map("ended_at")
 
   event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
@@ -5631,20 +5870,28 @@ model AgentTeamAlarmSchedule {
 /// The actor ids follow the #1610 shape. Shape: chk_worker_availability_shape
 /// (prisma/agent-task-stall-invariants.sql).
 model WorkerAvailability {
-  workerId      String    @id @map("worker_id")
+  workerId              String    @id @map("worker_id")
   /// 'available' | 'unavailable'.
-  state         String
+  state                 String
   /// Unavailable only: 'stalled' | 'out-of-tokens' | 'host-down' | 'other'.
-  reason        String?
-  until         DateTime?
-  setAt         DateTime  @map("set_at")
-  setBy         String    @map("set_by")
-  setByUserId   String?   @map("set_by_user_id")
-  setByWorkerId String?   @map("set_by_worker_id")
-  setByAgentId  String?   @map("set_by_agent_id")
+  reason                String?
+  until                 DateTime?
+  setAt                 DateTime  @map("set_at")
+  setBy                 String    @map("set_by")
+  setByUserId           String?   @map("set_by_user_id")
+  setByWorkerId         String?   @map("set_by_worker_id")
+  setByAgentId          String?   @map("set_by_agent_id")
   /// #1709 — the host whose key set this record (`setBy = host` only), so a
   /// host clears only its own marks (cor:agt:060:08).
-  setByHostId   String?   @map("set_by_host_id")
+  setByHostId           String?   @map("set_by_host_id")
+  /// #2162 (cor:agt:050:27) — a `resetting` mark only: the instant the host reported the old agent stopped. The
+  /// worker's first activity AFTER it ends the mark (the relaunched agent's first call); null while the old agent may
+  /// still be running, when no activity ends it.
+  clearsOnActivityAfter DateTime? @map("clears_on_activity_after")
+  /// #2162 (cor:agt:050:27) — a `resetting` mark only, and always on one: the reset that claimed it. A reset moves or
+  /// releases only its own mark, so an older reset still open after its lease lapsed never touches a newer one's.
+  /// No FK: both rows go with their worker (cascade), and the shape CHECK pairs this with the reason.
+  contextResetId        String?   @map("context_reset_id")
 
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
@@ -5724,6 +5971,9 @@ model HostRegistration {
   registeredAt        DateTime  @default(now()) @map("registered_at")
   refreshedAt         DateTime  @map("refreshed_at")
   lostAt              DateTime? @map("lost_at")
+  /// #2162 (cor:agt:070:01, Proposed) — the capability-gated operation types this host declared it performs. A host
+  /// is never issued such a type unless its live registration lists it; today that is only `worker.reset-context`.
+  capabilities        String[]  @default([])
 
   app         App                      @relation(fields: [appId], references: [id], onDelete: Cascade)
   workers     HostRegistrationWorker[]
@@ -5866,6 +6116,50 @@ model LaunchGrant {
   @@map("launch_grants")
 }
 
+/// #2162 (cor:agt:050:27) — one context reset of a worker, requested when a task it had started finished or was
+/// cancelled. At most one per task (`taskId` unique: a task ends once). The phase only moves forward:
+/// requested → claimed → checkpointed → stop-granted → agent-stopped → relaunched → done, or to `refused` / `failed`
+/// with a closed `reason`. `epoch` moves at claim and at every cancellation, so a host call naming an older epoch is
+/// refused STALE_EPOCH. The host operation keeps its own 070:02 status; this row is the reset's protocol state.
+/// Never reads or writes the task's outcome.
+model ContextReset {
+  id                   String    @id
+  appId                String    @map("app_id")
+  workerId             String    @map("worker_id")
+  /// The worker's session open when the task ended: the fence the claim re-checks.
+  sessionId            String    @map("session_id")
+  taskId               String    @unique @map("task_id")
+  /// The host the reset was issued to; null when no capable live host registered the worker (HOST_UNSUPPORTED).
+  hostId               String?   @map("host_id")
+  hostOperationId      String?   @unique @map("host_operation_id")
+  phase                String
+  /// Refused or failed only: a word from the closed set (src/lib/contextReset/types.ts).
+  reason               String?
+  epoch                Int       @default(0)
+  requestedAt          DateTime  @map("requested_at")
+  claimedAt            DateTime? @map("claimed_at")
+  /// The agent process the host observed at claim: `{pid, startTime}`.
+  claimProcess         Json?     @map("claim_process")
+  /// `{checkpointNodeId, sessionId, taskId}`, registered before any process control.
+  recoveryRef          Json?     @map("recovery_ref")
+  recoveryRegisteredAt DateTime? @map("recovery_registered_at")
+  stopGrantedAt        DateTime? @map("stop_granted_at")
+  stopLeaseMs          Int?      @map("stop_lease_ms")
+  agentStoppedAt       DateTime? @map("agent_stopped_at")
+  relaunchedAt         DateTime? @map("relaunched_at")
+  relaunchProcess      Json?     @map("relaunch_process")
+  /// When a cancellation found a stop lease outstanding: the mark lifts no earlier than this.
+  releasePendingAt     DateTime? @map("release_pending_at")
+  endedAt              DateTime? @map("ended_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, phase])
+  @@index([phase])
+  @@map("context_resets")
+}
+
 /// #1709 (cor:agt:050:10) — a task's request that its assignee end its worker
 /// session: written when a task with `closeSessionWhenDone` finishes or is
 /// cancelled while its worker assignee has an open session. One per task.
@@ -5967,6 +6261,17 @@ model Ticker {
   enabled           Boolean   @default(true)
   ownerUserId       String?   @map("owner_user_id")
   ownerWorkerId     String?   @map("owner_worker_id")
+  /// #2024 (S8): set only on a ticker the platform generated at cast from an Agent ticker template. The template
+  /// is a plain reference (no FK, so removing a template never cascades into runtime state) and the revision is
+  /// the one the ticker was made from; `generatedForWorkerId` is the worker it was made for. The unique
+  /// (generatedForWorkerId, sourceTemplateId) makes a retried cast unable to mint a second instance.
+  sourceTemplateId       String? @map("source_template_id")
+  sourceTemplateRevision Int?    @map("source_template_revision")
+  generatedForWorkerId   String? @map("generated_for_worker_id")
+  /// #2429 (cor:dmo:050:11): set by every accepted `updateTicker` on a GENERATED ticker, whatever the fields and even when
+  /// the values end up unchanged (it fails toward blocking). An edited generated ticker is no longer the cast's own
+  /// bookkeeping, so it counts as a reference and blocks the miscast repair. Soft-deletes are not edits.
+  editedAt               DateTime? @map("edited_at")
   createdAt         DateTime  @default(now()) @map("created_at")
   createdBy         String?   @map("created_by")
   createdByWorkerId String?   @map("created_by_worker_id")
@@ -5985,8 +6290,41 @@ model Ticker {
   deliveryTicks WorkerDeliveryTick[]
 
   @@unique([appId, slug], map: "tickers_app_slug_uniq")
+  @@unique([generatedForWorkerId, sourceTemplateId], map: "tickers_generated_uniq")
   @@index([appId, deletedAt])
   @@map("tickers")
+}
+
+/// #2024 (S8, cor:agt:080:33) — one ticker an Agent declares. Casting a worker from the Agent into an App creates
+/// the worker's tickers from these (a SNAPSHOT: a later edit or removal reaches only future casts, R96 A) and
+/// subscribes it. Identity is `id`, never the name or a position; `revision` counts edits so a stale writer is
+/// refused (`expectedRevision`); `shapeVersion` lets a future shape be decoded explicitly (an unknown one is
+/// refused). Soft-deleted rows stay, because generated tickers keep their provenance.
+/// Live names are unique per Agent ignoring case; the CHECKs mirror the ticker's (prisma/agent-ticker-template-invariants.sql).
+model AgentTickerTemplate {
+  id             String    @id @default(cuid())
+  agentId        String    @map("agent_id")
+  revision       Int       @default(1)
+  shapeVersion   Int       @default(1) @map("shape_version")
+  name           String
+  /// Requested cadence; the cast clamps it up to the App's floor (R92).
+  cadenceSeconds Int       @map("cadence_seconds")
+  quietHours     Json?     @map("quiet_hours")
+  /// 'ALL' | 'MENTIONS'.
+  relevance      String    @default("ALL")
+  /// Closed set, non-empty: 'read-team-channel' | 'every-tick' | 'live-check' (a template with none would never fire).
+  reasons        String[]  @default(["read-team-channel"]) @map("reasons")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  createdBy      String?   @map("created_by")
+  updatedAt      DateTime? @updatedAt @map("updated_at")
+  updatedBy      String?   @map("updated_by")
+  deletedAt      DateTime? @map("deleted_at")
+  deletedBy      String?   @map("deleted_by")
+
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, deletedAt])
+  @@map("agent_ticker_templates")
 }
 
 /// #1747 — a worker's subscription to one ticker (cor:agt:080:02). Workers of the
@@ -6206,6 +6544,22 @@ model TeamStopSignal {
   @@map("team_stop_signals")
 }
 
+/// #2169 (S6b, R95) — one serving lane's declaration that its consumer takes stop notices: a `dueWakes` call that
+/// passes `accepts: [STOP]` upserts the row of the lane it serves (a host registration id for a host key, `unhosted` for a
+/// person who manages the App or a non-host key). A declaration is FRESH for STOP_CONSUMER_FRESH_SECONDS; setting a stop
+/// signal is refused while any worker it would cover has no fresh lane. `lane` is deliberately not a foreign key: it is
+/// either a registration id or the literal `unhosted`, and a stale row for a deleted registration is simply never read.
+model StopConsumerDeclaration {
+  appId      String   @map("app_id")
+  lane       String
+  declaredAt DateTime @map("declared_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, lane])
+  @@map("stop_consumer_declarations")
+}
+
 /// #2022 (R95) — when a stop signal covered a worker: the HISTORY that stall clocks and notices read. Enforcement never
 /// reads it; it works coverage out live (cor:agt:090:02). Kept by `reconcileStopCoverage` under the App's stop fence:
 /// one open interval per (signal, worker) (partial unique index, prisma/stop-signal-invariants.sql). An interval ends
@@ -6362,4 +6716,149 @@ model IncludeHistoryEpoch {
   n  BigInt
 
   @@map("include_history_epoch")
+}
+
+/// #2245 (R170.6): one append-only record per Agent clone. Written in the clone's own transaction, so the audit and
+/// the copy commit or roll back together. Ids are plain columns, deliberately NOT foreign keys: the record must
+/// outlive the Agents, orgs and users it names. Exactly one of the two targets is set (CHECK in post-push.sql);
+/// S1 only writes `targetOrgId`. Immutable (trigger) and exposed on no read surface.
+model AgentCloneAudit {
+  id                String   @id @map("id")
+  actorUserId       String?  @map("actor_user_id")
+  sourceAgentId     String   @map("source_agent_id")
+  newAgentId        String   @map("new_agent_id")
+  targetOrgId       String?  @map("target_org_id")
+  targetUserId      String?  @map("target_user_id")
+  nodeCount         Int      @map("node_count")
+  edgeCount         Int      @map("edge_count")
+  skippedEdgeCount  Int      @map("skipped_edge_count")
+  importCount       Int      @map("import_count")
+  linkCount         Int      @map("link_count")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([sourceAgentId])
+  @@map("agent_clone_audits")
+}
+
+/// #2517, cor:dmo:010:04 (Proposed) — a separate audit entry, written on each SOURCE node, when a hard
+/// delete cascades an edge that node held to the deleted target. Deliberately NOT a NodeRevision (a
+/// node's revisions stay snapshots of its own fields). The source is a real FK (the trace dies with the
+/// source); the target is NOT one, since the target row is gone by the time anyone reads this.
+model NodeEdgeRemoval {
+  id             String   @id @default(cuid())
+  sourceId       String   @map("source_id")
+  /// The source's memory when the edge was removed (a node can later be moved).
+  memoryId       String   @map("memory_id")
+  edgeId         String   @map("edge_id")
+  edgeLoc        String   @map("edge_loc")
+  edgeName       String?  @map("edge_name")
+  targetId       String   @map("target_id")
+  targetMemoryId String   @map("target_memory_id")
+  targetLoc      String   @map("target_loc")
+  /// Why the edge went: today only `TARGET_HARD_DELETED`.
+  reason         String
+  /// Same value `Node.deletedBy` would carry (user, app or client id), null when unattributed.
+  removedBy      String?  @map("removed_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  source Node @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId, createdAt])
+  @@map("node_edge_removals")
+}
+
+/// #1667, cor:dmo:060:15 — append-only record of every successful per-asset
+/// public-link switch call: who, when, to what. Written in the SAME transaction
+/// as the flag. Deliberately NO foreign keys: the record must outlive the asset
+/// row (the janitor hard-deletes assets) and the actor.
+model AssetPublicLinkAudit {
+  id                String   @id @map("id")
+  assetId           String   @map("asset_id")
+  memoryId          String   @map("memory_id")
+  actorUserId       String   @map("actor_user_id")
+  enabled           Boolean
+  previouslyEnabled Boolean  @map("previously_enabled")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([assetId, createdAt])
+  @@map("asset_public_link_audits")
+}
+
+// #2063 R1 / cor:dmo:150:07. Plaintext structural metadata, never source prose.
+// No target FK: a source's written address survives target/edge deletion.
+model IncludeReference {
+  id                 String  @id @default(cuid())
+  includerId         String  @map("includer_id")
+  ordinal            Int
+  kind               IncludeReferenceKind
+  reference          String
+  targetMemoryId     String? @map("target_memory_id")
+  targetLoc          String? @map("target_loc")
+  pinnedRevNo        Int?    @map("pinned_rev_no")
+  requiresApproved   Boolean @default(false) @map("requires_approved")
+  requiresSigned     Boolean @default(false) @map("requires_signed")
+  metadataGeneration Int     @map("metadata_generation")
+  includer           Node    @relation(fields: [includerId], references: [id], onDelete: Cascade)
+
+  @@unique([includerId, ordinal])
+  @@index([targetMemoryId, targetLoc])
+  @@index([targetMemoryId, reference])
+  @@map("include_references")
+}
+
+enum IncludeReferenceKind {
+  loc
+  urn
+}
+
+enum IncludeSourceCoverageState {
+  COMPLETE_EMPTY
+  COMPLETE_TAGS
+  NEEDS_AUTHORIZED_REWRITE
+}
+
+// Fingerprints describe STORED bytes (ciphertext when sealed); no plaintext copy.
+// Tombstones remain sources. Only an includer's purge cascades coverage away.
+model IncludeSourceCoverage {
+  id                       String @id @default(cuid())
+  includerId               String @unique @map("includer_id")
+  sourceRevision           Int    @map("source_revision")
+  sourceMemoryId           String @map("source_memory_id")
+  sourceLoc                String @map("source_loc")
+  sourceContentFingerprint String @map("source_content_fingerprint")
+  sourceEncrypted          Boolean @map("source_encrypted")
+  parserVersion            Int    @map("parser_version")
+  metadataGeneration       Int    @map("metadata_generation")
+  referenceCount           Int    @map("reference_count")
+  state                    IncludeSourceCoverageState
+  includer                 Node   @relation(fields: [includerId], references: [id], onDelete: Cascade)
+
+  @@map("include_source_coverage")
+}
+
+enum IncludeRetentionState {
+  PREPARING
+  BACKFILLING
+  VERIFYING
+  ACTIVE
+  BLOCKED
+}
+
+// Singleton is absent/inactive until separately authorized maintenance verifies it.
+// R1 adds no activator, operator command, backfill or production caller.
+model IncludeRetentionGeneration {
+  id                        String @id @default("singleton")
+  schemaVersion             Int @default(1) @map("schema_version")
+  parserVersion             Int @default(1) @map("parser_version")
+  metadataGeneration        Int @default(1) @map("metadata_generation")
+  state                     IncludeRetentionState @default(PREPARING)
+  sourceHighWaterId         String? @map("source_high_water_id")
+  replayCursor              String? @map("replay_cursor")
+  bindingGeneration         Int @default(0) @map("binding_generation")
+  verifiedBindingGeneration Int? @map("verified_binding_generation")
+  sourceCount               Int @default(0) @map("source_count")
+  coveredCount              Int @default(0) @map("covered_count")
+  blockedCount              Int @default(0) @map("blocked_count")
+
+  @@map("include_retention_generation")
 }

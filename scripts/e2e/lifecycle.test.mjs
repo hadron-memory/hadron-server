@@ -7,6 +7,7 @@ import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { stopCapturedChild } from './captured-pid.mjs';
 const script = fileURLToPath(new URL('./stack.sh', import.meta.url));
 for (const scenario of ['stopped', 'absent', 'unmarked', 'daemon-failure', 'half-created']) {
   test(`recorded Incus teardown: ${scenario}, even with Docker newly available`, t => {
@@ -91,7 +92,9 @@ test('failed ownership write terminates its detached forwarder', async t => {
   const root = mkdtempSync(join(tmpdir(), 'e2e-state-failure-'));
   const captured = join(root, 'child.pid');
   t.after(() => {
-    if (existsSync(captured)) { try { process.kill(Number(readFileSync(captured, 'utf8')), 'SIGTERM'); } catch {} }
+    if (existsSync(captured)) {
+      try { stopCapturedChild(readFileSync(captured, 'utf8'), process.kill); } catch {}
+    }
     rmSync(root, { recursive: true, force: true });
   });
   const probe = createServer().listen(0, '127.0.0.1'); await once(probe, 'listening');

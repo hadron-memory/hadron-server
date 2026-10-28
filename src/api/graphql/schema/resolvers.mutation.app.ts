@@ -1,4 +1,6 @@
+import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
@@ -71,6 +73,8 @@ import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.j
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { forbiddenError } from '../../../lib/refusals.js';
+import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -207,6 +211,8 @@ async function provisionAppSharedMemory(
     console.warn('[createApp] app-class memory provisioning failed:', err);
   }
 }
+
+
 
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
@@ -350,6 +356,8 @@ export const appMutations = {
         // `@handle:slug` couldn't be resolved from the emitted bare URN.
         namespace = handle;
       }
+      // #2403: after the org ADMIN / authenticated-user gate, before any write or agent lookup.
+      assertPositiveSessionTimeout(sessionTimeoutSeconds);
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
@@ -552,6 +560,8 @@ export const appMutations = {
           },
           include: APP_INCLUDE,
         });
+          // #2553: the App's reserved project AT0, in the transaction that creates the App.
+          await ensureProjectZero(tx, app.id, { userId: app.ownerUserId ?? ctx.userId ?? null });
           // 009-install-agent-flow T015: the installer is auto-added as an
           // AppMember with role 'owner' when the Agent's installationPolicy
           // permits it, routed through ensureAppMember so the memberRoles +
@@ -560,13 +570,10 @@ export const appMutations = {
           // deleteApp / removeAppMember can act on the App between its
           // creation and this membership grant. ctx.userId may be absent for a
           // platform-admin caller; there is then no user to grant it to.
-          const installerAgent = await tx.agent.findUniqueOrThrow({
-            where: { id: resolvedAgentId },
-            select: { installationPolicy: true },
-          });
-          const allowedRoles = (installerAgent.installationPolicy as { memberRoles?: string[] })
-            ?.memberRoles ?? ['owner'];
-          if (allowedRoles.includes('owner') && ctx.userId) {
+          // #2171 (R211): the App offers the union of its Agents' roles
+          // (a union of one here); ensureAppMember re-decides under the fences.
+          const offered = await loadOfferedMemberRoles(tx, app.id);
+          if (offered.roles.includes('owner') && ctx.userId) {
             await ensureAppMember(tx, app.id, ctx.userId, 'owner', { actorId: ctx.userId });
           }
           return app;
@@ -701,7 +708,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
-              return tx.app.create({
+              const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,
                   name: `${depAgent.name} (cascaded from ${name})`,
@@ -714,6 +721,9 @@ export const appMutations = {
                   },
                 },
               });
+              // #2553: the cascaded App's reserved project AT0, in the same transaction.
+              await ensureProjectZero(tx, cascaded.id, { userId: ctx.userId ?? null });
+              return cascaded;
             },
             { fence: true },
           );
@@ -796,6 +806,8 @@ export const appMutations = {
           extensions: { code: 'BAD_USER_INPUT' },
         });
       }
+      // #2403: after the access gate, before any write.
+      assertPositiveSessionTimeout(sessionTimeoutSeconds);
       // URN updates: accept a new slug and rebuild the full URN against the
       // app's current org.
       let newUrn: string | undefined;
@@ -1086,7 +1098,7 @@ export const appMutations = {
       // rights, and platform admins manage org Apps. That is safe only because
       // joinApp never self-grants `owner` (#1714).
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
-        throw new Error('Forbidden: only org admins or App owners can manage members');
+        throw forbiddenError('Forbidden: only org admins or App owners can manage members');
       }
 
       // Target user resolved AFTER the authorization gate above (which keys off
@@ -1107,7 +1119,7 @@ export const appMutations = {
               throw new Error('App ownership changed; retry member management');
             }
             if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
-              throw new Error('Forbidden: only org admins or App owners can manage members');
+              throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
           },
           (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
@@ -1169,7 +1181,7 @@ export const appMutations = {
       const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       const forbidRemove = () =>
-        new Error('Forbidden: only org admins, App owners, or the user themselves can remove members');
+        forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
 
       const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
       let resolvedUserId: string;
@@ -1516,6 +1528,58 @@ export const appMutations = {
       if (!row) {
         throw new GraphQLError(`UserApiKey ${id} not found.`, {
           extensions: { code: 'NOT_FOUND' },
+        });
+      }
+      return row;
+    },
+
+    // #2298: hide (or unhide) one of the caller's own REVOKED keys in the default
+    // list. Display state only. Authority, anchor and lock are revokeUserApiKey's:
+    // the shared exclusive user anchor serializes hide against revoke, so a hidden
+    // ACTIVE key cannot occur, and the `{ id, userId }` scope collapses unknown and
+    // foreign ids to NOT_FOUND. Idempotent: the first hiddenAt is kept.
+    setUserApiKeyHidden: async (
+      _: unknown,
+      { id, hidden }: { id: string; hidden: boolean },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'setUserApiKeyHidden requires a user-scoped credential; AppKey callers cannot hide user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const row = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: ctx.userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== ctx.userId || txCtx.impersonation) {
+            throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+          }
+        },
+        async (tx) => {
+          // Guarded on the consumed state, so a repeat keeps the original stamp.
+          if (hidden) {
+            await tx.userApiKey.updateMany({
+              where: { id, userId: ctx.userId, revokedAt: { not: null }, hiddenAt: null },
+              data: { hiddenAt: new Date() },
+            });
+          } else {
+            await tx.userApiKey.updateMany({
+              where: { id, userId: ctx.userId, hiddenAt: { not: null } },
+              data: { hiddenAt: null },
+            });
+          }
+          return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
+        },
+        { lockMode: 'exclusive' },
+      );
+      if (!row) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+      }
+      if (hidden && !row.revokedAt) {
+        throw new GraphQLError('Only a revoked API key can be hidden; revoke it first.', {
+          extensions: { code: 'BAD_USER_INPUT', reason: 'KEY_ACTIVE' },
         });
       }
       return row;

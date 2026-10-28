@@ -12,6 +12,7 @@ import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorsh
 import { computeContentHash } from '../../lib/contentHash.js';
 import { rebindIncludeTags } from '../../lib/includes/rebindIncludeTags.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
 /**
@@ -373,6 +374,7 @@ export async function extractParentNodeGraph(
       });
       if (nodeRows.length > 0) {
         await tx.node.createMany({ data: nodeRows });
+        await resetEmbeddingObligations(tx, nodeRows.map(row => row.id!), args.vectorIndexEnabled);
       }
 
       // ── Edges (intra-subtree only) ───────────────────────────────────────
@@ -452,7 +454,7 @@ export async function extractParentNodeGraph(
         });
         await tx.node.updateMany({
           where: { memoryId: args.sourceMemoryId, id: { in: movedIds }, deletedAt: null },
-          data: { deletedAt: now, deletedBy: args.actorId },
+          data: { deletedAt: now, deletedBy: args.actorId, embeddingPendingAt: null, embeddingWorkToken: null },
         });
         // PendingEdges hang off moved nodes (sourceId, Cascade) — soft-delete
         // them too so none dangle at a now-deleted node, and keep the source's

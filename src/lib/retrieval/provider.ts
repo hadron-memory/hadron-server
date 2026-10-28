@@ -81,6 +81,16 @@ export interface FilterSearchOpts {
   limit: number;
 }
 
+/** Exact no-query match count; deliberately has no paging or sorting arguments. */
+export interface FilterCountOpts {
+  db: PrismaClient;
+  memoryIds: string[];
+  filter?: NodeSqlFilter;
+  includeDeleted?: boolean;
+  /** Effective-memory overrides/boot prompts already excluded by the read scope. */
+  excludeNodeIds?: string[];
+}
+
 export interface FilterWhereOpts {
   /** #2175: same recovery subset as the ranked candidate selector. */
   tombstoneMemoryIds?: string[];
@@ -95,6 +105,9 @@ export interface FilterWhereOpts {
 
 export interface LexicalSearchOpts {
   db: PrismaClient;
+  /** #2421: opt-in role-task candidate set and abstract-only matching; ordinary search unchanged. */
+  candidateNodeIds?: string[];
+  abstractOnly?: boolean;
   /** Boolean surface grammar (see tsquery.ts). */
   query: string;
   memoryIds: string[];
@@ -130,6 +143,9 @@ export interface RegexSearchOpts {
 
 export interface VectorSearchOpts {
   db: PrismaClient;
+  /** #2421: filter before the vector window, not after its cap. */
+  candidateNodeIds?: string[];
+  abstractOnly?: boolean;
   queryEmbedding: number[];
   memoryIds: string[];
   limit: number;
@@ -162,6 +178,8 @@ export interface NodeRetrievalProvider {
    * can't express the JSONB predicate); the plain no-filter browse stays Prisma.
    */
   filterSearch(opts: FilterSearchOpts): Promise<string[]>;
+  /** Object-store paging uses the same structured filters without LIMIT/OFFSET. */
+  filterCount(opts: FilterCountOpts): Promise<number>;
   /**
    * Narrow a bounded candidate id set to those satisfying a JSONB `where`
    * predicate (and re-assert the memory scope). Used to compose `where` with

@@ -12,7 +12,7 @@ import { generateId } from '../lib/id.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { createTestableMcpServer } from './server.js';
 import { STOP_SIGNAL_WRITE_TOOLS } from './stopSignalTools.js';
-import { setS6NoticesAvailableForTest } from '../lib/stopSignals/delivery.js';
+import { declareAllStopLanes } from '../test/stopLanes.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -43,9 +43,8 @@ beforeEach(async () => {
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'owner' } });
   anne = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Anne', slug: 'anne', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
-  setS6NoticesAvailableForTest(true); // #2173: setting a signal is refused while the notice lane is off; these tests need it on
+  await declareAllStopLanes(db, app.id); // #2173/#2169: setting a signal is refused until a consumer has declared the lane; these tests need it declared
 });
-afterEach(() => setS6NoticesAvailableForTest(false));
 
 describe('stop-signal tools', () => {
   it('every write refuses without a session, and writes nothing', async () => {
@@ -76,12 +75,12 @@ describe('stop-signal tools', () => {
     expect(await db.teamStopSignal.count()).toBe(0);
   });
 
-  it('#2173: with the notice lane off, hadron_stop_signal_set answers [stop_signal_unavailable] (the GraphQL code), writes nothing, and lift still works', async () => {
+  it('#2173: with no lane declared, hadron_stop_signal_set answers [stop_signal_unavailable] (the GraphQL code), writes nothing, and lift still works', async () => {
     const s = mcp(authOf(admin.id));
     const plain = await session({ userId: admin.id });
     const made = text(await s.callTool('hadron_stop_signal_set', { appRef: app.id, level: 'PAUSE', scope: 'WORKER', worker: 'Anne', session: plain.id })); // lane on
     const id = /^- (\S+)/.exec(made)![1];
-    setS6NoticesAvailableForTest(false);
+    await db.$executeRaw`DELETE FROM stop_consumer_declarations WHERE app_id = ${app.id}`;
     for (const level of ['PAUSE_DISPATCH', 'PAUSE', 'HALT']) {
       const r = text(await s.callTool('hadron_stop_signal_set', { appRef: app.id, level, scope: 'TEAM', worker: 'Anne', session: plain.id }));
       expect({ level, code: code(r) }).toEqual({ level, code: 'STOP_SIGNAL_UNAVAILABLE' });

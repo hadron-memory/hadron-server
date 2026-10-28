@@ -1,3 +1,4 @@
+import { resetEmbeddingObligations } from '../services/embedding/obligation.js';
 /**
  * moveNodeSubtree — rebase a node AND its loc-subtree, within one memory OR
  * across memories (#768 same-memory rename; #781 cross-memory relocation).
@@ -59,7 +60,7 @@ import { assertRoleWritersForNodes, type RoleWriterPrincipal } from './nodeRoleW
 import { COMMENT_NODE_TYPE, COMMENTABLE_CLASSES, commentError, commentGovernedError } from './comments/index.js';
 import { decisionContainedError, isDecisionFamilyRole, refuseUnderDecisionLog } from './decisions/index.js';
 import { deriveEdgeLoc } from './edgeLoc.js';
-import { lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockNodeForDelete } from './nodeSubtreeLock.js';
 import type { Prisma } from '../generated/prisma/index.js';
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import { recordUrnRename } from './urnAlias.js';
@@ -232,13 +233,14 @@ async function aliasTargetId(
  * ancestor. Then re-reads the row by id and throws
  * {@link SubtreeMoveSourceChangedError} if it was relocated/deleted meanwhile.
  * The caller must already hold the DESTINATION ancestor lock. Two moves that
- * relocate into each other's subtrees can still deadlock on these keys —
- * Postgres detects and aborts one (self-healing; moves are infrequent).
+ * relocate into each other's subtrees declare their full caller union first;
+ * these source-path acquisitions are then subsets of that initial set (#2054).
  */
 export async function lockSourceForMove(
   tx: Prisma.TransactionClient,
   source: { id: string; loc: string; memoryId: string },
 ): Promise<void> {
+  await acquireLockSet(tx, [...ancestorLocs(source.loc), source.loc].map(loc => ({ memoryId: source.memoryId, loc })));
   await lockAncestorsForCreate(tx, source.memoryId, source.loc);
   await lockNodeForDelete(tx, source.memoryId, source.loc);
   const fresh = await tx.node.findUnique({
@@ -712,15 +714,7 @@ export async function moveNodeSubtree(
   // (nothing to rebuild — the vectors just stay deleted). Content is plaintext
   // here (encrypted memories are refused above).
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: { in: movedIdList } } });
-  await tx.node.updateMany({
-    where: { id: { in: movedIdList } },
-    data: {
-      embeddingPendingAt: destVectorIndexEnabled ? new Date() : null,
-      embeddingFailedAt: null,
-      embeddingError: null,
-      embeddingAttempts: 0,
-    },
-  });
+  await resetEmbeddingObligations(tx, movedIdList, destVectorIndexEnabled);
 
   // PendingEdge rows follow their source node by FK (no memoryId column), but the
   // denormalized Memory.pendingEdgeCount does not — move the credit from the

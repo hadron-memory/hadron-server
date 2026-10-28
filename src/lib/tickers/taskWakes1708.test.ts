@@ -70,7 +70,7 @@ beforeEach(async () => {
 const dueFor = (c: Context = ctx(manager.id), now = new Date()) =>
   computeDueWakes({ ctx: c, app, reader: { manager: true, userId: c.userId ?? null }, requester: { userId: c.userId! }, now });
 
-type TaskReason = { kind: 'TASK'; taskId: string; eventId: string; chainIndex: number; event: string; title: string };
+type TaskReason = { kind: 'TASK'; taskId: string; eventId: string; chainIndex: number; event: string; title: string; handle: string };
 const taskReasons = (page: Awaited<ReturnType<typeof dueFor>>, workerId: string): TaskReason[] =>
   (page.wakes.find((w) => w.workerId === workerId)?.wake.reasons ?? []).filter((r) => r.kind === 'TASK') as unknown as TaskReason[];
 const dueIds = (page: Awaited<ReturnType<typeof dueFor>>) => page.wakes.map((w) => w.workerId).sort();
@@ -97,7 +97,7 @@ describe('each waking event makes exactly its subject due', () => {
     const page = await dueFor();
     expect(dueIds(page)).toEqual([liam.id]);
     expect(taskReasons(page, liam.id)).toEqual([
-      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42' },
+      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/) },
     ]);
   });
 
@@ -151,7 +151,7 @@ describe("a child's finish wakes the child's owner (the parent's assignee, 050:1
     const page = await dueFor();
     expect(dueIds(page)).toEqual([liam.id]);
     expect(taskReasons(page, liam.id)).toEqual([
-      { kind: 'TASK', taskId: child.id, eventId: e.id, chainIndex: 0, event: 'CHILD_FINISHED', title: 'Child' },
+      { kind: 'TASK', taskId: child.id, eventId: e.id, chainIndex: 0, event: 'CHILD_FINISHED', title: 'Child', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/) },
     ]);
   });
 
@@ -271,7 +271,7 @@ describe('an alarm wakes its currently-woken chain position (050:19)', () => {
     const page = await dueFor();
     expect(dueIds(page)).toEqual([liam.id]);
     expect(taskReasons(page, liam.id)).toEqual([
-      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ALARM', title: 'Review #42' },
+      { kind: 'TASK', taskId, eventId, chainIndex: 0, event: 'ALARM', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/) },
     ]);
   });
 
@@ -409,7 +409,7 @@ describe("the router's surface: an App key with attention:deliver (cor:agt:080:2
     const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
     expect(page.wakes).toHaveLength(1);
     expect(page.wakes[0].reasons).toEqual([
-      { kind: 'TASK', ticker: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', ref: `TASK:${taskId}:assigned` } },
+      { kind: 'TASK', ticker: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/), ref: `TASK:${taskId}:assigned` } },
     ]);
     expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
     const row = await db.workerDeliveryTaskEvent.findFirstOrThrow({ where: { eventId } });

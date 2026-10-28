@@ -42,6 +42,8 @@ export type AvailabilityRecord = {
   reason: string | null;
   until: Date | null;
   setAt: Date;
+  /** #2162: a `resetting` mark's stop instant; activity after it ends the mark. Absent reads as null. */
+  clearsOnActivityAfter?: Date | null;
 } | null;
 
 /**
@@ -55,6 +57,11 @@ export function recordInEffect(record: AvailabilityRecord, now: Date, lastActivi
   if (record.until && record.until.getTime() <= now.getTime()) return false;
   // cor:agt:060:07 (Proposed): the worker's next activity ends a stall mark.
   if (record.reason === 'stalled' && lastActivityAt && lastActivityAt.getTime() > record.setAt.getTime()) return false;
+  // #2162 (cor:agt:050:27): the relaunched agent's first activity ends a `resetting` mark. Only activity AFTER the host
+  // reported the old agent stopped counts, never after the mark was set: the old agent's own last calls, between the
+  // claim and the stop, must not lift it.
+  if (record.reason === 'resetting' && record.clearsOnActivityAfter && lastActivityAt
+      && lastActivityAt.getTime() > record.clearsOnActivityAfter.getTime()) return false;
   return true;
 }
 
@@ -164,7 +171,7 @@ export async function markStalled(
       where: { workerId: args.workerId },
       data: {
         state: 'unavailable', reason: 'stalled', until: null, setAt: args.now, setBy: 'stall-rule',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     changed = !stalled;
@@ -296,7 +303,7 @@ async function recordLapse(db: PrismaClient, r: LapsedRecord, now: Date): Promis
       where: { workerId: r.workerId, state: 'unavailable', until: r.until, setAt: r.setAt },
       data: {
         state: 'available', reason: null, until: null, setAt: r.until, setBy: 'lapse',
-        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null,
+        setByUserId: null, setByWorkerId: null, setByAgentId: null, setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
       },
     });
     if (n.count === 0) return false;

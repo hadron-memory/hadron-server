@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval US3 — mode:hybrid (RRF fusion) on hadron_find_nodes.
  *
@@ -78,7 +79,7 @@ async function seedNode(opts: {
       abstract: opts.abstract ?? null,
       description: opts.description ?? null,
       tags: opts.tags ?? [],
-      embeddingPendingAt: opts.embedAs ? new Date() : null,
+      embeddingPendingAt: opts.embedAs ? new Date() : null, embeddingWorkToken: opts.embedAs ? randomUUID() : null,
     },
   });
   if (opts.embedAs) {

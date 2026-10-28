@@ -1,3 +1,4 @@
+import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
 // an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
@@ -15,18 +16,25 @@
 // needs no Team Agent at all.
 import { accountFenceClient, isSerializationConflict, withAccountFenceTransaction } from '../../../lib/includes/includeHistoryFence.js';
 import { retryAccountFence } from '../../../lib/includes/accountFenceRetry.js';
-import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../lib/includes/includeHistoryFence.js';
-import { normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
+import { generateId } from '../../../lib/id.js';
+import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { WORKER_SIGNATURE_DEFAULTS, normalizeWorkerSignature, withWorkerSignatures } from '../../../lib/workerSignature.js';
 import { assertWorkerNameNotConfusable, lockWorkerNames } from '../../../lib/workerName.js';
+import {
+  GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
+  endGeneratedTickersForWorker, instantiateAgentTickerTemplates, planGeneratedTickers,
+  GeneratedAgentNotInstalledError, lockAgentTemplates,
+} from '../../../lib/tickers/agentTickerTemplates.js';
+import { lockAppTickers, reasonEnum } from './resolvers.ticker.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import {
-  AgentNotFoundError,
+  AgentNotFoundError, WorkerNotFoundError,
   AmbiguousUserRefError,
   UserNotFoundError,
 } from '../../../lib/entityRef/errors.js';
@@ -34,7 +42,7 @@ import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/us
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
-import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
+import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
@@ -55,18 +63,24 @@ import {
 } from '../../../lib/workerHandoff.js';
 import { resolveMemoryRoot } from './chat-scope.js';
 import { idleCutoffs, toNaiveUtc } from '../../../lib/sessionActivity.js';
+import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { userUrn } from '../../../lib/userHandle.js';
 import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
+import { castTeamChoice, teamPlacement, type CastTeamArgs } from '../../../lib/workerTeamChoice.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
-import { miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
+import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { eventActor } from '../../../lib/agentTasks/events.js';
+import { appendWorkerCastingEvent, eventActor } from '../../../lib/agentTasks/events.js';
+import { assertCastable, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
+import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import {
   type Context,
   requireOrgRole,
@@ -467,6 +481,70 @@ export async function resolveWorkerIdByName(
   return rows[0]?.id ?? null;
 }
 
+/** #1597: authorized, live-App NAME discovery for a bind with no App context.
+ * Reuses the participation set and point gate (hrn:node:hadronmemory.com:specs:cor:agt:020:00).
+ * No name query runs for a denied App; hold/liveness decisions remain with startSession.
+ */
+export async function resolveWorkerBindCandidatesByName(ctx: Context, name: string) {
+  if (!ctx.userId || ctx.impersonation || isRunPrincipal(ctx)) return [];
+  const participant = await participantAppWhere(ctx.db, ctx, { includeMemberships: true });
+  // The existing point gate admits platform administrators to live org Apps,
+  // never to another person's user-owned App merely by platform role.
+  const apps = await ctx.db.app.findMany({
+    where: {
+      deletedAt: null, uninstalledAt: null,
+      OR: [
+        ...(participant ? [participant] : []),
+        ...(isPlatformAdmin(ctx) ? [{ organizationId: { not: null }, organization: { is: { deletedAt: null } } }] : []),
+      ],
+    },
+    select: { id: true, name: true, urn: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+    orderBy: [{ urn: 'asc' }, { id: 'asc' }],
+  });
+  // #2346: one set-oriented query narrows the reachable Apps to those with a
+  // live worker of this name, judged by the database's lower() (the expression
+  // `workers_app_name_uniq` indexes, as `resolveWorkerIdByName`). This is an
+  // internal discovery step only: the read gate below still runs for every App
+  // that matched before anything is returned, so a denied App stays
+  // indistinguishable from an absent name and nothing is capped or sampled.
+  const trimmed = name.trim();
+  if (trimmed === '' || apps.length === 0) return [];
+  const matched = await ctx.db.$queryRaw<{ app_id: string }[]>`
+    SELECT app_id FROM workers
+    WHERE app_id = ANY(${apps.map((a) => a.id)}::text[])
+      AND lower(name) = lower(${trimmed})
+      AND retired_at IS NULL`;
+  const matchedAppIds = new Set(matched.map((r) => r.app_id));
+  const candidates = [];
+  for (const app of apps) {
+    if (!matchedAppIds.has(app.id)) continue;
+    try {
+      await requireWorkerReadAccess(ctx, app);
+    } catch (e) {
+      if (!(e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN')) throw e;
+      continue;
+    }
+    const id = await resolveWorkerIdByName(ctx.db, app.id, name);
+    if (!id) continue;
+    const row = await ctx.db.worker.findFirst({
+      where: { id, appId: app.id, retiredAt: null },
+      select: { id: true, name: true, slug: true, role: true,
+        heldBy: { select: { id: true, handle: true, githubUsername: true } } },
+    });
+    if (!row) continue;
+    // #1764 restricts taking an unheld name, not rebinding one already held
+    // by this caller. Holds survive role changes: omitting that identity could
+    // silently choose and claim a different same-name worker (#1597 P2-1).
+    if (app.ownerUserId !== null && app.ownerUserId !== ctx.userId &&
+        row.heldBy?.id !== ctx.userId && !(await managesApp(ctx, app))) continue;
+    let urn: string | null = null;
+    try { urn = composeWorkerUrn(normalizeUrnForLookup(app.urn), row.slug); } catch { /* legacy unaddressable App: use worker id */ }
+    candidates.push({ id: row.id, name: row.name, urn, role: row.role,
+      app: { id: app.id, name: app.name, urn: safeCanonicalUrn('app', app.urn) }, holder: row.heldBy });
+  }
+  return candidates;
+}
+
 /**
  * Resolve a worker NAME within an App, with the staff read gate applied FIRST
  * (#990's ordering, extracted in #1015 so it has ONE definition).
@@ -541,6 +619,18 @@ export async function resolveReportsToTarget(ctx: Context, appId: string, ref: s
     id = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
   }
   if (!id) throw new GraphQLError(`Worker not found in this App: "${trimmed}"`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  return id;
+}
+
+/** Cast-only fixed envelope; infrastructure failures are never absence. */
+async function resolveCastReportingHead(ctx: Context, appId: string, ref: string): Promise<string> {
+  const absent = () => new GraphQLError('Worker not found in this App.', { extensions: { code: 'WORKER_NOT_FOUND' } });
+  if (isId(ref) || hasSchemePrefix(ref)) {
+    try { return (await resolveWorkerRefId(ctx.db, ref, { scope: { appId } })).id; }
+    catch (e) { if (e instanceof WorkerNotFoundError) throw absent(); throw e; }
+  }
+  const id = await resolveWorkerIdByNameGated(ctx, appId, ref);
+  if (!id) throw absent();
   return id;
 }
 
@@ -726,7 +816,7 @@ export async function provisionWorkerMemory(
 }
 
 /** Argument shape shared by castWorker and its preview (#964). */
-type CastArgs = {
+type CastArgs = CastTeamArgs & {
   appRef: string;
   agentRef?: string | null;
   role?: string | null;
@@ -739,9 +829,19 @@ type CastTarget = {
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
   workerRole: string | null;
+  /** The role the caller passed (trimmed), or null: the cast re-checks it against the agent read in its transaction. */
+  requestedRole: string | null;
   requestedName: string | null;
   override: string | null;
+  choice: ReturnType<typeof castTeamChoice>;
+  reportingHeadId: string | null;
 };
+
+/** R222 (cor:dmo:050:11): a cast takes the role of the agent it names; `role` may only repeat it. */
+const roleOverrideRefused = (appId: string, agentRole: string | null, requested: string) => new GraphQLError(
+  `A cast takes the role of the agent it names ("${agentRole ?? ''}"); it cannot be overridden. Omit role, or cast the agent that answers "${requested}".`,
+  { extensions: { code: 'WORKER_ROLE_OVERRIDE_REFUSED', appId, agentRole } },
+);
 
 /**
  * The shared resolution HALF of casting (#964 — "single implementation" as a
@@ -754,8 +854,9 @@ type CastTarget = {
  * allocation vs. projection — is the caller's half, so every typed refusal up
  * to allocation behaves identically under preview and cast.
  */
-async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarget> {
+async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?: string): Promise<CastTarget> {
   const { appRef, agentRef, role, name, promptOverride } = args;
+  const choice = castTeamChoice(args);
   const roleNorm = (role ?? '').trim() || null;
   if (roleNorm !== null && roleNorm.includes(':')) {
     throw new GraphQLError('role must be a single loc atom (no ":").', {
@@ -772,8 +873,9 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
   // that merely contains the word ("teamster") is not. A validation refusal
   // like WORKER_NAME_REQUIRED; a worker already so named keeps the narrow
   // reply-exception of #1867 instead (cor:agt:020:04).
+  if (requestedName && reservedTeamPrefix(requestedName)) throw new GraphQLError('Worker mention tokens starting with team. are reserved.', { extensions: { code: 'WORKER_NAME_RESERVED_TEAM_PREFIX' } });
   const token = requestedName != null ? mentionTokenOf(requestedName) : null;
-  if (token != null && (BROADCAST_MENTION_TOKENS as readonly string[]).includes(token)) {
+  if (token != null && (RESERVED_WORKER_MENTION_TOKENS as readonly string[]).includes(token)) {
     throw new GraphQLError(
       `A worker named ${JSON.stringify(requestedName)} would mention-broadcast: its token @${token} routes a reply to every registered destination. Choose another name.`,
       { extensions: { code: 'WORKER_NAME_RESERVED', token } },
@@ -789,6 +891,17 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
     });
   }
   await requireWorkerStaffAccess(ctx, app);
+  let reportingHeadId: string | null = null;
+  if (choice.kind === 'REPORTS_TO') {
+    if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
+    // Ada36559 supersedes the dropped push-model S5/S7 dependency (#2138r4/#2130).
+    // A future pull-shaped standby activation MUST initialize coverage for existing reports
+    // before removing this guard and admitting new reports atomically under its common bracket.
+    if (s7Available()) throw new GraphQLError('Casting with a reporting head is not available while standby integration is incomplete.', { extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
+    reportingHeadId = await resolveCastReportingHead(ctx, appId, choice.ref);
+    const head = await ctx.db.worker.findUniqueOrThrow({ where: { id: reportingHeadId }, select: { retiredAt: true } });
+    if (head.retiredAt) throw new GraphQLError('A worker cannot report to a retired worker.', { extensions: { code: 'WORKER_REPORTS_TO_RETIRED', reportsTo: reportingHeadId } });
+  }
 
   // 2. Resolve the agent being cast — installed in this App at cast time.
   let agent: CastTarget['agent'];
@@ -862,9 +975,42 @@ async function resolveCastTarget(ctx: Context, args: CastArgs): Promise<CastTarg
     }
     agent = matches[0];
   }
-  // The casting's role: explicit wins, else the agent's dressing.
-  const workerRole = roleNorm ?? agent.personaRole ?? null;
-  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedName, override };
+  // Preserve S12's typed identity-drift refusal before #2458 looks up the
+  // newly selected Agent's licence. The transaction was planned for the original.
+  if (expectedAgentId !== undefined && agent.id !== expectedAgentId) throw castTargetChanged();
+  // #2458 / R222: a cast takes its Agent's role; role selects, never overrides.
+  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
+    throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
+  }
+  await assertCastable(ctx.db, app, agent.id);
+  const workerRole = agent.personaRole ?? null;
+  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, override, choice, reportingHeadId };
+}
+
+/** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
+function generatedTickerRefusal(e: unknown): GraphQLError | null {
+  if (e instanceof GeneratedTickerLimitError) {
+    return new GraphQLError(
+      `${e.message} Delete a ticker, or ask whoever manages the App to raise the limit; nothing was cast.`,
+      { extensions: { code: 'TICKER_LIMIT_REACHED', liveCap: e.liveCap, live: e.live, adding: e.adding } },
+    );
+  }
+  if (e instanceof GeneratedAgentNotInstalledError) {
+    return new GraphQLError(`${e.message}`, { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: e.appId } });
+  }
+  if (e instanceof GeneratedTickerNameTakenError) {
+    return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'TICKER_NAME_TAKEN', name: e.name } });
+  }
+  if (e instanceof GeneratedNameTooLongError) {
+    return new GraphQLError(`${e.message} Nothing was cast.`, { extensions: { code: 'BAD_USER_INPUT', workerName: e.workerName } });
+  }
+  return null;
+}
+
+function castTargetChanged(): GraphQLError {
+  return new GraphQLError('The cast target changed; retry the cast.', {
+    extensions: { code: 'CAST_TARGET_CHANGED', retryable: true },
+  });
 }
 
 export const workerMutations = {
@@ -887,10 +1033,18 @@ export const workerMutations = {
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
   castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, app, agent, workerRole, requestedName, override } = await resolveCastTarget(
+    const { appId, app, agent, workerRole, requestedRole, requestedName, choice } = await resolveCastTarget(
       ctx,
       args,
     );
+
+    // Plan the complete authority bracket before any graph/name/Worker resource.
+    const agentOwner = await ctx.db.agent.findUniqueOrThrow({ where: { id: agent.id }, select: { organizationId: true, ownerUserId: true } });
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: appId }, { kind: 'agent', id: agent.id },
+      ...[app.organizationId, agentOwner.organizationId].filter((id): id is string => !!id).map(id => ({ kind: 'org' as const, id })),
+      ...[app.ownerUserId, agentOwner.ownerUserId].filter((id): id is string => !!id).map(id => ({ kind: 'user' as const, id })),
+    ];
 
     // 3+4. Allocate + create.
     /** Sentinel: this name is taken, so a register walk should advance. */
@@ -921,27 +1075,54 @@ export const workerMutations = {
     ): Promise<{ id: string; name: string; slug: string } | typeof NAME_TAKEN> => {
       for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
         try {
-          return await ctx.db.$transaction(async (tx) => {
+          const plannedWorkerId = generateId();
+          return await withAuthorizedTx(ctx, anchors, async () => {}, async (tx, txCtx) => {
+            // Exclusive anchors prevent concurrent casts from upgrading SHARE App rows together.
             await lockWorkerNames(tx, appId);
+            await lockAppReportsTo(tx, appId);
+            await lockAppTickers(tx, appId);
+            // Cleanup doors such as public leaveApp intentionally take no authority anchor.
+            // Hold the deciding membership rows as well, before any Worker row/write.
+            if (ctx.userId) {
+              if (app.organizationId) await tx.$queryRaw`
+                SELECT user_id FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+              await tx.$queryRaw`
+                SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
+            }
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
             if (freshApp.deletedAt) throw forbidden();
-            await requireWorkerStaffAccess({ ...ctx, db: tx as unknown as Context['db'] }, freshApp);
+            await requireWorkerStaffAccess(txCtx, freshApp);
+            if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
+            const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
+            if (freshAgent.organizationId !== agentOwner.organizationId || freshAgent.ownerUserId !== agentOwner.ownerUserId) throw castTargetChanged();
             if (freshApp.uninstalledAt) {
               throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
+            }
+            const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
+            if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
+            // Preserve #2458's deciding licence/role check on the transaction.
+            // This remains read-only: install/changeWorkerAgent own grant provisioning.
+            const { agent: castAgent } = await assertCastable(tx, freshApp, agent.id);
+            const castRole = castAgent.personaRole ?? null;
+            if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
+              throw roleOverrideRefused(appId, castRole, requestedRole);
             }
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
             // applying the additional DAP naming-equivalence check.
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
-            return tx.worker.create({
+            const workerIds = [plannedWorkerId, ...(freshTarget.reportingHeadId ? [freshTarget.reportingHeadId] : [])].sort();
+            await tx.$queryRaw`SELECT id FROM workers WHERE id = ANY(${workerIds}::text[]) ORDER BY id FOR UPDATE`;
+            const castWorkerRow = await tx.worker.create({
               data: { ...WORKER_SIGNATURE_DEFAULTS,
+                id: plannedWorkerId,
                 appId,
                 agentId: agent.id,
                 name: candidate,
                 slug,
-                role: workerRole,
-                promptOverride: override,
+                role: castRole,
+                promptOverride: freshTarget.override,
                 createdBy: ctx.userId ?? null,
                 // #1050 — casting does NOT hold. A name is held by the person
                 // who WORKS as it, and the canonical setup flow is a coordinator
@@ -952,7 +1133,26 @@ export const workerMutations = {
               },
               select: { id: true, name: true, slug: true },
             });
-          }, { timeout: 30_000 });
+            if (choice.kind !== 'UNSET') {
+              await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: eventActor(ctx.userId), setBy: 'cast' });
+            }
+            if (freshTarget.reportingHeadId) await reconcileStopCoverage(tx, appId, new Date());
+            // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
+            // same transaction. Any refusal rolls the whole cast back, the name allocation included.
+            try {
+              await instantiateAgentTickerTemplates(tx, {
+                appId, agentId: agent.id, worker: castWorkerRow, createdBy: ctx.userId ?? null,
+              });
+            } catch (e) {
+              throw generatedTickerRefusal(e) ?? e;
+            }
+            return castWorkerRow;
+          }, { lockMode: 'exclusive', timeout: 30_000, afterLock: async tx => {
+            await lockAgentTemplates(tx, agent.id, 'shared');
+            // Only a reporting-line birth changes S6 topology. Acquire its fence
+            // before name/graph/Worker resources; no-head casts need no coverage write.
+            if (choice.kind === 'REPORTS_TO') await lockStopFence(tx, appId, 'exclusive');
+          } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
           // collision is the caller-visible allocation signal.
@@ -1028,37 +1228,61 @@ export const workerMutations = {
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
     await requireWorkerStaffAccess(ctx, app);
-    // #2046 S9-3: the include-history fence FIRST (the compile's order), then the stop fence and the rest.
-    await withIncludeHistoryTransaction(ctx.db, async (fence) => {
-      const tx = includeHistoryClient(fence);
-      // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
-      // leaves every stop signal's coverage, recorded below.
-      await lockStopFence(tx, worker.appId, 'exclusive');
-      // #1726: the reportsTo graph lock BEFORE the worker row (the lock
-      // protocol in src/lib/workerReportsTo.ts; #1737 review, Diego P2-2).
-      await lockAppReportsTo(tx, worker.appId);
-      const retired = await tx.worker.updateMany({
-        where: { id: worker.id, retiredAt: null },
-        data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
-      });
-      // #1726: a retired worker reports to nobody. Workers that report TO it
-      // keep their value; the roster flags them (`reportsToRetired`) rather
-      // than the platform silently clearing a structure someone set.
-      if (retired.count > 0) {
-        await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
-        // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
-        // with it, reason WORKER_RETIRED (history kept, never deleted).
-        const actor = currentActor();
-        await tx.tickerSubscription.updateMany({
-          where: { workerId: worker.id, endedAt: null },
-          data: {
-            endedAt: new Date(), endedReason: 'WORKER_RETIRED',
-            endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
-          },
+    // #1416 (R204): `retired_by` is a User.id that a merge rewrites to the survivor, so the retirer takes its own
+    // shared user anchor (withAuthorizedTx adds the caller's) and is re-authorized on the transaction context: a
+    // retirer merged away before this point is refused instead of stamping a deleted account. Lock order, as
+    // setWorkerReportsTo: authority anchors, authority-row SHARE locks, then (afterLock) the stop fence
+    // exclusively, the reportsTo graph, and the worker writes. #2046 S9-3: `fence: true` enters the include-history
+    // fence FIRST (the compile's order), before the anchors.
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    await withAuthorizedTx(
+      ctx,
+      anchors,
+      async (txCtx) => { await requireWorkerStaffAccess(txCtx, app); },
+      async (tx) => {
+        const retired = await tx.worker.updateMany({
+          where: { id: worker.id, retiredAt: null },
+          data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
         });
-        await reconcileStopCoverage(tx, worker.appId, new Date());
-      }
-    });
+        // #1726: a retired worker reports to nobody. Workers that report TO it
+        // keep their value; the roster flags them (`reportsToRetired`) rather
+        // than the platform silently clearing a structure someone set.
+        if (retired.count > 0) {
+          await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+          // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
+          // with it, reason WORKER_RETIRED (history kept, never deleted).
+          const actor = currentActor();
+          await tx.tickerSubscription.updateMany({
+            where: { workerId: worker.id, endedAt: null },
+            data: {
+              endedAt: new Date(), endedReason: 'WORKER_RETIRED',
+              endedBy: ctx.userId ?? null, endedByWorkerId: actor.workerId, endedByAgentId: actor.agentId,
+            },
+          });
+          // #2024 (S8): the tickers generated for this worker end with it (and the subscriptions others hold to
+          // them). Nothing else is touched.
+          await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+          await reconcileStopCoverage(tx, worker.appId, new Date());
+        }
+      },
+      {
+        fence: true,
+        afterLock: async (tx) => {
+          // #2022: the stop fence, exclusive, before the graph lock (src/lib/stopSignals/state.ts): a retired worker
+          // leaves every stop signal's coverage, recorded below.
+          await lockStopFence(tx, worker.appId, 'exclusive');
+          // #1726: the reportsTo graph lock BEFORE the worker row (the lock protocol in src/lib/workerReportsTo.ts).
+          await lockAppReportsTo(tx, worker.appId);
+          // #2024 (S8): the App ticker lock after the graph and BEFORE any worker row, the order the cast and every
+          // ticker write use (a ticker edit holds it while it reads its subscribers' workers).
+          await lockAppTickers(tx, worker.appId);
+        },
+      },
+    );
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -1443,9 +1667,9 @@ export const workerMutations = {
    * bound — so exactly the workers that have accumulated an identity are the
    * ones that could not be re-cast.
    *
-   * Scope is deliberately ONE field. `name` is permanent by law
-   * (cor:agt:020:02 — the allocation contract), and `role`/`agent` define the
-   * casting itself: a different role is a different casting, not an edit.
+   * `name` is permanent by law (cor:agt:020:02 — the allocation contract). The
+   * agent, and with it the role, is changed by `changeWorkerAgent` (#2458,
+   * cor:dmo:050:11), never here: that change has its own checks and effects.
    *
    * Argument semantics: OMITTED preserves (the partial-update convention every
    * other surface follows), explicit `null` or blank CLEARS — matching both the
@@ -1552,6 +1776,113 @@ export const workerMutations = {
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
+  /**
+   * changeWorkerAgent — #2458 / hrn:node:hadronmemory.com:specs:cor:dmo:050:11 (Holger R222): change the agent a
+   * worker casts; its role follows the agent (never typed in). Name, slug, URN, signature, trailer, reporting line
+   * and every past record stay; past sessions keep the agent and role they ran under (`Session.agentId`/`role`).
+   *
+   * Who: whoever manages the App, as themselves. The gate is updateWorker's signature/trailer gate verbatim: a
+   * bound worker session (even one its manager holds, R113), a worker or agent actor, an impersonation and a
+   * refused session binding are all FORBIDDEN, decided on the live transaction context.
+   *
+   * To what: `assertCastable`, the one casting check the cast runs too, plus the new agent must have a role of its
+   * own. A refused change changes nothing.
+   *
+   * A COMPLETE change, in one transaction: agent and role, the per-worker boot-prompt pointer cleared (it named the
+   * OLD agent's compiled prompt; the next bind takes the new agent's), the old agent's generated tickers ended and
+   * the new agent's templates instantiated, the missing same-org grants provisioned, and one `worker.casting`
+   * event. It takes effect at the next bind (startSession stamps agent and role from the locked worker row).
+   *
+   * Allowed while the worker has an open session: that session finishes under the agent and role it was bound with
+   * (`Session.agentId`/`role`). Reads that serve it (its register, briefing, matcher and context-reset settings)
+   * resolve from the session (src/lib/sessionPlacement.ts); every other reader sees the new row at once.
+   *
+   * Lock order: authority anchors, the App ticker lock (as retireWorker), the per-worker assignment lock, the old
+   * and new Agent rows FOR SHARE in id order, then the Worker row FOR UPDATE: the matcher and context reset take
+   * the assignment lock, then Agent, then Worker, so neither can cycle with this.
+   */
+  changeWorkerAgent: async (
+    _: unknown,
+    args: { workerRef: string; agentRef: string },
+    ctx: Context,
+  ) => {
+    const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
+    const anchors: AuthorityAnchor[] = [
+      { kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ];
+    return withAuthorizedTx(ctx, anchors, async txCtx => {
+      const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
+      const actor = currentActor();
+      const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
+      if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
+    }, async tx => {
+      // Only a caller who passed the gate learns whether the agent exists: absent and not installed are one answer.
+      let toAgentId: string;
+      try {
+        ({ id: toAgentId } = await resolveAgentRef(tx as unknown as Context['db'], args.agentRef.trim()));
+      } catch (e) {
+        if (e instanceof AgentNotFoundError) throw workerAgentNotInstalled(app.id);
+        throw e;
+      }
+      await lockWorkersForAssignment(tx, [worker.id]);
+      const before = await tx.worker.findUnique({ where: { id: worker.id }, select: { agentId: true } });
+      if (!before) throw workerNotFound(args.workerRef);
+      const agentIds = [...new Set([before.agentId, toAgentId])].sort();
+      await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${agentIds}::text[]) ORDER BY id FOR SHARE`;
+      const [locked] = await tx.$queryRaw<Array<{ agent_id: string; role: string | null; retired_at: Date | null; name: string; boot_prompt_node_id: string | null }>>`
+        SELECT agent_id, role, retired_at, name, boot_prompt_node_id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
+      if (!locked) throw workerNotFound(args.workerRef);
+      if (locked.retired_at) {
+        throw new GraphQLError('This worker is retired; its casting no longer changes.', { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } });
+      }
+      // The Agent locks above were taken for the agent read before the worker lock. A change that landed in between
+      // moved it, so this transaction holds the wrong row: refuse rather than decide on an unlocked agent.
+      if (locked.agent_id !== before.agentId) {
+        throw new GraphQLError('This worker’s agent changed while the change was in flight; read it again.', {
+          extensions: { code: 'WORKER_CASTING_STALE', workerId: worker.id },
+        });
+      }
+      if (locked.agent_id === toAgentId) {
+        throw new GraphQLError('This worker already casts that agent; nothing to change.', {
+          extensions: { code: 'WORKER_AGENT_UNCHANGED', workerId: worker.id },
+        });
+      }
+      const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
+      const { agent, provisionGrantsFor } = await assertCastable(tx, freshApp, toAgentId);
+      // "The role is the new agent's own role" (cor:dmo:050:11): an agent with none has no role to change TO, and a
+      // worker left role-less would silently lose its role tasks. Refused, not stored as null (Vera, #36796).
+      const toRole = (agent.personaRole ?? '').trim();
+      if (toRole === '') {
+        throw new GraphQLError('That agent has no role of its own, so a worker cannot change to it; give the agent a personaRole first.', {
+          extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE', workerId: worker.id },
+        });
+      }
+      for (const grantAgentId of provisionGrantsFor) {
+        if (freshApp.organizationId) await ensureAgentOrgGrant(tx, freshApp.organizationId, grantAgentId, { createdBy: ctx.userId ?? null });
+      }
+      try {
+        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+        await tx.worker.update({
+          where: { id: worker.id },
+          data: { agentId: agent.id, role: toRole, bootPromptNodeId: null, bootPromptUrn: null },
+        });
+        await instantiateAgentTickerTemplates(tx, {
+          appId: app.id, agentId: agent.id, worker: { id: worker.id, name: locked.name }, createdBy: ctx.userId ?? null,
+        });
+      } catch (e) {
+        throw generatedTickerRefusal(e) ?? e;
+      }
+      await appendWorkerCastingEvent(tx, {
+        appId: app.id, actor: eventActor(ctx.userId), workerId: worker.id,
+        fromAgentId: locked.agent_id, toAgentId: agent.id, fromRole: locked.role, toRole,
+        clearedBootPromptNodeId: locked.boot_prompt_node_id,
+      });
+      return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    }, { afterLock: async (tx) => { await lockAppTickers(tx, app.id); } });
+  },
+
   /** #1162 / cor:dmo:050:11: only an unreferenced, released miscast is removable. */
   deleteWorker: async (
     _: unknown,
@@ -1585,6 +1916,7 @@ export const workerMutations = {
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
         if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
         if (await miscastHasReferences(tx, current)) throw refuse();
+        await deletePristineGeneratedTickers(tx, worker.id);
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
@@ -1774,6 +2106,8 @@ export const workerQueries = {
           lastActiveAt: null,
           bound: false,
           bindingFamily: null,
+          bindingModel: null,
+          modelReportedAt: null,
         },
       })),
     };
@@ -1799,7 +2133,7 @@ export const workerQueries = {
    * could mint anyway.
    */
   castWorkerPreview: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, agent, workerRole, requestedName, override } = await resolveCastTarget(
+    const { appId, agent, workerRole, requestedName, override, choice, reportingHeadId } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -1842,13 +2176,33 @@ export const workerQueries = {
     const boundOverride = override ? applyPlatformVariables(override, values) : override;
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
+    // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
+    // what is committed now, takes no lock and writes nothing, so a cast may still differ if the App changes.
+    let tickers;
+    try {
+      tickers = await planGeneratedTickers(ctx.db as unknown as Prisma.TransactionClient, { appId, agentId: agent.id, workerName: name });
+    } catch (e) {
+      throw generatedTickerRefusal(e) ?? e;
+    }
+
     return {
       name,
       role: workerRole,
       agentId: agent.id,
       agentName: agent.name,
       prompt,
+      teamPlacement: choice.kind,
+      reportsToWorkerId: reportingHeadId,
       hasNamePlaceholder: template ? templateBindsName(template) : null,
+      tickers: tickers.map((t) => ({
+        name: t.name,
+        templateId: t.templateId,
+        templateRevision: t.templateRevision,
+        requestedCadenceSeconds: t.requestedCadenceSeconds,
+        effectiveCadenceSeconds: t.effectiveCadenceSeconds,
+        relevance: t.relevance,
+        reasons: t.reasons.map(reasonEnum),
+      })),
     };
   },
 };
@@ -1864,11 +2218,26 @@ export const workerQueries = {
  * lapsed but open session keeps its family; only an end, or a newer bind,
  * clears or replaces it (#1723 review, Diego P2-2).
  */
+/** The #2252 fields' shared read: masked to null on the family gate, else the activity row of the one fold. */
+async function bindingModelOf(
+  ctx: Context,
+  worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+  info?: { operation?: { operation?: string } },
+): Promise<WorkerActivity | null> {
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+  if (worker.__heldWorkerActivity) return worker.__heldWorkerActivity;
+  const activity = await loadAppWorkerActivity(ctx, worker.appId, { memoize: info?.operation?.operation === 'query' });
+  return activity.get(worker.id) ?? null;
+}
+
 export type WorkerActivity = {
   hasLiveSession: boolean;
   lastActiveAt: Date | null;
   bound: boolean;
   bindingFamily: string | null;
+  /** #2252: the newest open session's reported model, its report time, and the tier derived from it. */
+  bindingModel: string | null;
+  modelReportedAt: Date | null;
 };
 
 /**
@@ -1888,7 +2257,7 @@ async function queryWorkerActivity(
   now: Date,
 ): Promise<Map<string, WorkerActivity>> {
   const rows = await ctx.db.$queryRaw<
-    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null }[]
+    { workerId: string; live: boolean; lastActiveAt: Date | null; bound: boolean; bindingFamily: string | null; bindingModel: string | null; modelReportedAt: Date | null }[]
   >(workerActivitySql(scope, now));
   return new Map<string, WorkerActivity>(
     rows.map((row) => [
@@ -1898,6 +2267,8 @@ async function queryWorkerActivity(
         lastActiveAt: row.lastActiveAt,
         bound: row.bound,
         bindingFamily: normalizeFamily(row.bindingFamily),
+        bindingModel: row.bindingModel,
+        modelReportedAt: row.modelReportedAt,
       },
     ]),
   );
@@ -1956,6 +2327,13 @@ export function workerActivitySql(scope: Prisma.Sql, now: Date): Prisma.Sql {
            bool_or(s.ended_at IS NULL) AS "bound",
            (array_agg(s.family ORDER BY s.started_at DESC, s.id DESC)
               FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingFamily",
+           -- #2252: the model and its report time come from the SAME newest open
+           -- session as the family (same ordering), so a newer bind that reported
+           -- none does not inherit an older one's, and the two never mix sessions.
+           (array_agg(s.llm_model ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "bindingModel",
+           (array_agg(s.model_reported_at ORDER BY s.started_at DESC, s.id DESC)
+              FILTER (WHERE s.ended_at IS NULL))[1] AS "modelReportedAt",
            max(LEAST(GREATEST(
              s.started_at,
              -- The reaper advances updated_at while setting auto_expired_at.
@@ -2109,6 +2487,11 @@ export async function composeWorkerPrompt(
   if (!(await maySeeWorkerInternals(ctx, worker.appId))) {
     return { text: null, renderedAt: new Date(), roleAgentUpdatedAt: null };
   }
+  // #2458 (cor:dmo:050:11): the worker's own open session finishes under the agent and role it was bound with, so a shed
+  // recovery reloads the old briefing until the next bind. Every other reader renders the live row.
+  const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
+  // The spread is shallow on purpose: everything agent-derived below is re-read from `worker.agentId`/`role`.
+  if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
     select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
@@ -2359,6 +2742,13 @@ export const workerFieldResolvers = {
     name: async (u: { id: string; name?: string | null }, _args: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.name ?? null) : null,
   },
+  /**
+   * #2223 — `heldBy` on the roster. The producer (the roster leaf) has already put `name` through the shared
+   * #384 gate in bulk, so only the derived URN is resolved here.
+   */
+  WorkerHolder: {
+    urn: (u: { handle?: string | null }) => userUrn(u.handle),
+  },
   Worker: {
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
@@ -2548,6 +2938,8 @@ export const workerFieldResolvers = {
      * worker read gate and masked on deny (see heldByUserId), since
      * Session.worker reaches this type through a wider audience.
      */
+    teamPlacement: async (worker: { appId: string; reportsToWorkerId?: string | null; explicitNoTeam?: boolean }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? teamPlacement(worker) : null,
     reportsToWorkerId: async (
       worker: { appId: string; reportsToWorkerId?: string | null },
       _: unknown,
@@ -2630,6 +3022,27 @@ export const workerFieldResolvers = {
       });
       return activity.get(worker.id)?.bindingFamily ?? null;
     },
+    /** #2252 — the model its binding last reported (the newest open session's; same gate and fold as `family`). Self-declared; never authorization. */
+    model: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
+    /** #2252 — when that model was self-reported; null when the session never reported one. */
+    modelReportedAt: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<Date | null> => (await bindingModelOf(ctx, worker, info))?.modelReportedAt ?? null,
+    /** #2252 / R189 — the coarse tier of `model` from the server's one mapping; null when unmapped. Advisory only. */
+    tier: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => tierOf((await bindingModelOf(ctx, worker, info))?.bindingModel),
     /**
      * hadron-cli#487 — when this worker was last DRIVEN, across every session
      * it has ever had; null for a worker nobody has ever bound.

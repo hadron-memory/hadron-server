@@ -1,3 +1,4 @@
+import { poolDatasourceUrl } from './poolUrl.js';
 import { workerReferenceError } from '../../lib/workerReferenceError.js';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../../lib/id.js';
@@ -14,6 +15,8 @@ import { ATTRIBUTED_NODE_FIELDS } from '../../lib/nodeRevisionSnapshot.js';
 // 667-webfetch-polling: WebFetchPollBinding (jobId is the PK).
 // durable-login-state: PendingLoginState (the OAuth `state` is the PK).
 const MODELS_WITHOUT_ID = new Set<string>([
+  // #430 — keyed by (memory, node, kind, remove_loc); no id column.
+  'GitMirrorObligation',
   // #2046 — keyed by (compiled node, compiled revision).
   'CompiledPromptRevision',
   'AgentSubscription',
@@ -51,7 +54,8 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'WorkerWakeAck',
 ]);
 
-const basePrisma = new PrismaClient();
+const datasourceUrl = poolDatasourceUrl(process.env.DATABASE_URL, process.env);
+const basePrisma = new PrismaClient(datasourceUrl === undefined ? undefined : { datasourceUrl });
 
 type NodeData = Record<string, unknown>;
 
@@ -99,6 +103,7 @@ const NODE_RELATIONS: Record<string, readonly string[]> = {
   PendingEdge: ['source'],
   NodeEmbedding: ['node'],
   NodeRevision: ['node'],
+  NodeEdgeRemoval: ['source'],
   NodeContentValidationReport: ['node'],
   Channel: ['chatRoot'],
   UsageEvent: ['node'],

@@ -53,6 +53,12 @@ describe('hadron_task_* return the warnings', () => {
     expect(warned).not.toMatch(/→/);
     const clean = text(await s.callTool('hadron_task_create', { appRef: app.id, title: 'sourced', source: 'https://example.test/1', session: plain.id }));
     expect(clean).not.toMatch(/Warning \[/);
+    const events = await db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'task.warning' } });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ taskId: idOf(warned), actorUserId: member.id, actorWorkerId: null, actorAgentId: null, actorRunId: null, payload: { code: 'task.create.no-source' } });
+    const visible = text(await s.callTool('hadron_team_events', { appRef: app.id, types: ['task.warning'], session: plain.id }));
+    expect(visible).toContain('task.warning');
+
   });
 
   it('a worker session: the mapped role task rides on the line; an open-children finish warns and still finishes', async () => {
@@ -70,6 +76,9 @@ describe('hadron_task_* return the warnings', () => {
     expect(out).toContain(`Warning [task.finish.open-children]:`);
     expect(out).toContain(`→ hrn:node:${memory.urn}:tasks:finish`);
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: parent } })).status).toBe('finished');
+    const events = await db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'task.warning' } });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ taskId: parent, actorUserId: member.id, actorWorkerId: anne.id, actorAgentId: agentId, actorRunId: null, payload: { code: 'task.finish.open-children' } });
   });
 
   it('a refused call carries no warning lines', async () => {
@@ -77,5 +86,6 @@ describe('hadron_task_* return the warnings', () => {
     const plain = await session({ userId: member.id });
     const out = text(await s.callTool('hadron_task_finish', { taskId: generateId(), outcome: 'succeeded', session: plain.id }));
     expect(out).not.toMatch(/Warning \[/);
+    expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'task.warning' } })).toBe(0);
   });
 });

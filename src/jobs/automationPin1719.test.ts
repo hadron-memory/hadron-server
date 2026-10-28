@@ -135,7 +135,10 @@ it.each(['delete-node', 'add-edge', 'delete-edge', 'revision'] as const)('detect
   const f = await fixture();
   if (alteration === 'delete-node') await db.node.update({ where: { id: f.next.id }, data: { deletedAt: new Date() } });
   else if (alteration === 'delete-edge') await db.edge.update({ where: { id: f.edge.id }, data: { deletedAt: new Date() } });
-  else if (alteration === 'revision') await db.node.update({ where: { id: f.entry.id }, data: { revSeq: { increment: 1 } } });
+  // #2438 (v4): a bare revSeq bump over identical bytes is NOT drift — an
+  // address move bumps it too, and the approved bytes are what executes. The
+  // drift case pairs the bump with an authored change, as a real edit does.
+  else if (alteration === 'revision') await db.node.update({ where: { id: f.entry.id }, data: { revSeq: { increment: 1 }, abstract: 'revised' } });
   else await db.edge.create({ data: { memoryId: f.memory.id, sourceId: f.entry.id, targetId: f.dependency.id, name: 'documents', loc: 'entry:documents:doc' } });
   const run = await f.run();
   expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
@@ -209,7 +212,12 @@ it('setup and re-adoption persist no authored bytes on triggers, manual consent 
   const consent = await db.manualAutomationPin.findUniqueOrThrow({ where: { runId: manual.id } });
   for (const pin of [schedule.automationPin, run.automationPin, manual.automationPin, consent.pin]) {
     expect(JSON.stringify(pin)).not.toContain('approved doc');
-    expect(Object.values((pin as any).nodes).every((node: any) => Object.keys(node).sort().join() === 'hash,urn')).toBe(true);
+    // v3 stored nodes are {urn,hash}; v4 (#2438) are bare digests — either
+    // way, nothing but addresses and hashes persists.
+    if ((pin as any).format === 'hadron-automation-pin-v3')
+      expect(Object.values((pin as any).nodes).every((node: any) => Object.keys(node).sort().join() === 'hash,urn')).toBe(true);
+    else
+      expect(Object.values((pin as any).nodes).every((node: any) => typeof node === 'string')).toBe(true);
   }
 });
 it('setup refuses a routed definition the creator cannot read before copying any bytes', async () => {
@@ -237,7 +245,9 @@ it.each(['entry', 'runAsSelf'] as const)('an authorized owner %s edit re-capture
   const f = await fixture();
   if (field === 'runAsSelf') await db.memory.update({ where: { id: f.memory.id }, data: { class: 'app', appId: f.app.id } });
   const row = await appRunMutations.updateAgentSchedule({}, { id: f.schedule.id, input: field === 'entry' ? { entryNodeUrn: 'hrn:node:pin.test:flow:next' } : { runAsSelf: false } }, f.ctx);
-  expect((row.automationPin as any).entry).toBe(row.entryNodeUrn);
+  // #2438: v4 keys the consent by the stable entry id (stamped with the
+  // re-capture) instead of the literal URN.
+  expect((row.automationPin as any).entryId).toBe(row.entryNodeId);
   expect((row.automationPin as any).userId).toBe(row.userId);
   const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: row.userId ?? undefined, triggerKind: 'SCHEDULE', triggerId: row.id, entryNodeUrn: row.entryNodeUrn });
   expect(await executeAppRun(db, run.id, f.deps)).toBe('completed');

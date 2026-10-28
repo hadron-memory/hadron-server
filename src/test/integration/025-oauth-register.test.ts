@@ -98,6 +98,18 @@ describe('POST /oauth/register — happy path + validation', () => {
     expect(row.redirectUris).toEqual(['https://example.com/callback']);
   });
 
+  it('#155: a registered client expires 30 days from registration unless it is used', async () => {
+    const before = Date.now();
+    const res = await postRegister({ client_name: 'Expiring Client', redirect_uris: ['https://example.com/cb'] });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { client_id: string };
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: body.client_id } });
+    const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+    expect(row.expiresAt).not.toBeNull();
+    expect(row.expiresAt!.getTime()).toBeGreaterThanOrEqual(before + thirtyDays);
+    expect(row.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + thirtyDays);
+  });
+
   it('falls back to "Unnamed MCP Client" when client_name is absent', async () => {
     const res = await postRegister({ redirect_uris: ['https://example.com/cb'] });
     expect(res.status).toBe(201);
@@ -247,6 +259,70 @@ describe('POST /oauth/register — DB failure returns 500 (not a crash)', () => 
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+// ── #156: one operator log line per successful registration ──────────
+
+describe('POST /oauth/register — #156 dcr_registered log line', () => {
+  let server: Server;
+  let baseUrl: string;
+  let ipOctet = 100;
+  const post = (body: unknown) => fetch(`${baseUrl}/oauth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': `198.51.100.${ipOctet++}` },
+    body: JSON.stringify(body),
+  });
+  /** The `[oauth] dcr_registered` calls only; other boot/request logs are ignored. */
+  const dcrLines = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.filter((call) => call[0] === '[oauth] dcr_registered');
+
+  beforeAll(async () => {
+    const app = await createServer();
+    server = createHttpServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  });
+  beforeEach(async () => { await cleanDb(db); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('logs exactly one line with client_id, client_name and ip, and never a redirect URI', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const res = await post({ client_name: 'Some MCP Client', redirect_uris: ['https://example.com/cb?state=secret'] });
+    expect(res.status).toBe(201);
+    const { client_id } = (await res.json()) as { client_id: string };
+    const lines = dcrLines(spy);
+    expect(lines).toHaveLength(1);
+    const [, payload] = lines[0] as [string, Record<string, unknown>];
+    expect(payload).toEqual({ client_id, client_name: 'Some MCP Client', ip: expect.any(String) });
+    expect((payload.ip as string).length).toBeGreaterThan(0);
+    expect(JSON.stringify(lines)).not.toMatch(/example\.com|state=secret/);
+  });
+
+  it('strips control characters and truncates client_name to 80 before logging', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const forged = 'Evil\n[oauth] dcr_registered { client_id: "dcr_fake" }\r\u0007\u2028' + 'x'.repeat(200);
+    expect((await post({ client_name: forged, redirect_uris: ['https://example.com/cb'] })).status).toBe(201);
+    const [, payload] = dcrLines(spy)[0] as [string, { client_name: string }];
+    expect(payload.client_name).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/);
+    expect(payload.client_name.length).toBe(80);
+    expect(payload.client_name.startsWith('Evil[oauth] dcr_registered')).toBe(true);
+  });
+
+  it('logs nothing for a refused (400) registration', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect((await post({ client_name: 'X', redirect_uris: ['relative/cb'] })).status).toBe(400);
+    expect(dcrLines(spy)).toHaveLength(0);
+  });
+
+  it('logs nothing when persisting the registration fails (500)', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(db.oAuthClient, 'create').mockRejectedValueOnce(new Error('simulated DB outage'));
+    expect((await post({ client_name: 'X', redirect_uris: ['https://example.com/cb'] })).status).toBe(500);
+    expect(dcrLines(spy)).toHaveLength(0);
   });
 });
 

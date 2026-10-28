@@ -1,5 +1,5 @@
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
-import { systemMemoryReadGrants } from '../../../lib/auth/systemMemoryRead.js';
+import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
@@ -35,7 +35,6 @@ import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicen
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
-  getPrimaryAgent,
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
@@ -71,6 +70,7 @@ import {
   AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { GraphQLError } from 'graphql';
@@ -87,6 +87,7 @@ import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemor
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -144,6 +145,8 @@ export interface Context {
   /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
   taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
   /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  /** #2609: uncapped pending history, captured in the mutation actor scope; consumed once after result shaping. */
+  taskWarningHistory?: import('./resolvers.taskWarnings.js').TaskWarningHistory[];
   taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
@@ -192,6 +195,8 @@ export interface Context {
   // membership query + a row lookup EACH (see loadReadableAgent/loadEntryNode).
   readableAgentFilterCache?: Promise<Record<string, unknown>>;
   readableAgentCache?: Map<string, Promise<unknown | null>>;
+  // #2109 — App.viewerManages: per-request, per-caller facts and the same-tick batch (see resolvers.appViewerManages.ts).
+  viewerManagesCache?: import('./resolvers.appViewerManages.js').ViewerManagesCache;
   entryNodeCache?: Map<string, Promise<{ memoryId: string } | null>>;
   // Request-scoped memo for NodeRevision.editedByUser / approvedByUser
   // candidate lookups (#620) — a node's history repeats the same few editor
@@ -843,7 +848,7 @@ export async function requireAgentMemoryGrant(
   // AgentMemoryItem. Check class AFTER concealment: an unreadable memory must
   // still answer like a miss, without revealing its class (#1349, #1101).
   if (memory.class === 'system') {
-    throw new Error('Agent system memories can only be attached via systemMemoryId, not as a memory item');
+    throw new GraphQLError('Agent system memories can only be attached via systemMemoryId, not as a memory item', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   // #1101: these classes have no App audience to grant. A personal share is
   // per-user, and a private memory is not shareable.
@@ -1066,6 +1071,8 @@ export function nodeNotFoundError(ref: string): GraphQLError {
 type MemoryRecordReadBatch = {
   memberOrgIds?: Promise<string[]>;
   accessibleIds?: Promise<string[] | null>;
+  /** #1813: the caller's system-record grant lookups, built from THIS list's ctx so it cannot span principals. */
+  systemGrants?: SystemMemoryGrantBatch;
 };
 
 /** Gate a record list without repeating membership and access-set queries per row. */
@@ -1153,6 +1160,7 @@ export async function canReadMemoryRecord(
   const accessible = () => batch
     ? (batch.accessibleIds ??= getAccessibleMemoryIds(ctx))
     : getAccessibleMemoryIds(ctx, memory.id);
+  const systemGrants = () => batch ? (batch.systemGrants ??= createSystemMemoryGrantBatch(ctx)) : undefined;
   if (memory.class === 'personal' || memory.class === 'private') {
     // Impersonation: personal-class records are invisible even though the
     // TARGET owns them — the shared-org scope excludes all identity-scoped
@@ -1173,13 +1181,13 @@ export async function canReadMemoryRecord(
     // an impersonation keep the hard-isolated content set below.
     if (ctx.sessionId && ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx)
       && await ctx.db.memory.count({ where: { id: memory.id, isInstallMemory: true } }) > 0) {
-      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+      return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
     }
     if (ctx.sessionId || ctx.impersonation || isRunPrincipal(ctx) || !ctx.userId) {
       const ids = await accessible();
       return ids === null || ids.includes(memory.id);
     }
-    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id)).length > 0;
+    return (await systemMemoryReadGrants(ctx.db, ctx, memory.id, systemGrants())).length > 0;
   }
   if (memory.ownerUserId != null) {
     // Impersonation: user-owned (spec 047) records are identity-scoped —
@@ -1985,15 +1993,37 @@ export function defaultAiConfigOf(
 // ── Uniform find-many surface (#473) — Spec: cor:api:120 ───────────────
 
 // Standard page bounds for the uniform `<entity>s(filter, orgId, limit,
-// offset)` list queries — matches the globalSearch idiom (default 50, cap
-// 200). `limit: 0` is preserved (an empty page with just `total` — the cheap
+// offset)` list queries — default 20 (#2211), cap
+// 200. `limit: 0` is preserved (an empty page with just `total` — the cheap
 // count, same contract as memoryNodes). Spec: cor:api:120:02.
-export const LIST_PAGE_DEFAULT = 50;
+export const LIST_PAGE_DEFAULT = 20;
 export const LIST_PAGE_MAX = 200;
 
 export function clampListTake(limit?: number | null): number {
   if (limit == null) return LIST_PAGE_DEFAULT;
   return Math.min(LIST_PAGE_MAX, Math.max(0, limit));
+}
+
+/**
+ * #2213 — size arguments of the `<field>Page` siblings (cor:api:120:04). An
+ * omitted or null limit pages at 20; 0 is count-only (an empty page with the
+ * real total); a negative limit is 0; a limit over 200 is served as 200, never a
+ * refusal. A negative or omitted offset is 0. Same default as `clampListTake` since #2211.
+ */
+export const PAGE_ARGS_DEFAULT = 20;
+export const PAGE_ARGS_MAX = 200;
+
+export function pageArgs(args: { limit?: number | null; offset?: number | null }): { take: number; skip: number } {
+  const limit = args.limit ?? PAGE_ARGS_DEFAULT;
+  return {
+    take: Math.min(PAGE_ARGS_MAX, Math.max(0, limit)),
+    skip: Math.max(0, args.offset ?? 0),
+  };
+}
+
+/** `{ items, total, hasMore }`: hasMore is whether rows remain past this page. */
+export function pageEnvelope<T>(items: T[], total: number, skip: number) {
+  return { items, total, hasMore: skip + items.length < total };
 }
 
 /**
@@ -2595,8 +2625,11 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  *    AppAgent.role + AgentMemoryItem.role + AgentSubscription gates
  * 3. Users: app-class rows through the MCP shape/participation gate; other
  *    shared classes through their own membership, org, or subscription rules
+ *
+ * `destination` (#2484) is the node a create/update is about to write; it is what an App's write grant for its
+ * userless runs is judged against, and no other caller passes it.
  */
-export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): Promise<void> {
+export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, destination?: WriteDestination): Promise<void> {
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
   // shortcut applies only to non-strict org memories. A platform-admin USER
   // with an active App still cannot write another user's personal/private
@@ -2623,12 +2656,14 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string): 
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     // A write always names its target: an explicit reference (#1503).
-    if (await canWriteToMemory(ctx.db, ctx, memoryId, EXPLICIT_REF)) return;
+    // #2484: only the node write door names a destination, which is what lets an App's prefix-scoped write grant
+    // answer for a userless run; every other write verb leaves it unset and never reaches that arm.
+    if (await canWriteToMemory(ctx.db, ctx, memoryId, destination ? { ...EXPLICIT_REF, destination } : EXPLICIT_REF)) return;
     throw memoryWriteForbidden();
   }
 
   // JWT user path
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (!ctx.userId) throw unauthenticatedError();
 
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
@@ -2753,7 +2788,9 @@ export function memoryWriteForbidden(): GraphQLError {
 
 export const MEMORY_INCLUDE = {
   // #2238: live rows only, matching ORG_INCLUDE.subscriptions.
-  subscriptions: { where: { deletedAt: null }, include: { organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2557: the parent read authorized this Memory, but the non-null nested
+  // MemorySubscription.memory still needs its full row for GraphQL resolution.
+  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
 };
 
 export const AGENT_INCLUDE = {
@@ -2853,12 +2890,6 @@ export function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAg
   return rows[0] as EagerAppAgentRow | undefined;
 }
 
-export function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
-  if (parent.appAgents === undefined) return undefined;
-  const first = readPrimaryAppAgent(parent);
-  return first?.agent?.id ?? null;
-}
-
 export function readPrimaryAgentRecordFromEager(
   parent: { appAgents?: unknown },
 ): unknown | undefined {
@@ -2873,23 +2904,6 @@ export function readAllAgentRecordsFromEager(
   const rows = parent.appAgents;
   if (!Array.isArray(rows)) return undefined;
   return rows.map((r) => (r as EagerAppAgentRow).agent);
-}
-
-export async function readPrimaryAgentField(
-  parent: { id: string; appAgents?: unknown },
-  ctx: Context,
-  field: 'urn',
-): Promise<string | null> {
-  const first = readPrimaryAppAgent(parent);
-  if (first?.agent && typeof first.agent.urn === 'string') {
-    return first.agent.urn;
-  }
-  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
-  if (parent.appAgents === undefined) {
-    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
-    return primary?.[field] ?? null;
-  }
-  return null;
 }
 
 // ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────
@@ -3365,13 +3379,24 @@ export function deriveChatTitle(
  * return the same rows in the same order.
  */
 export async function listOrgExchangeConnections(ctx: Context, orgId: string) {
+  const scope = await orgExchangeConnectionScope(ctx, orgId);
+  return ctx.db.exchangeConnection.findMany(scope);
+}
+
+/**
+ * The admission and the row scope of `listOrgExchangeConnections`, built once so
+ * the list and `Query.exchangeConnectionsPage` (#2213) can never disagree about
+ * who sees which rows. Refuses before returning a scope, so a count or a page
+ * built from it is never read for a denied caller.
+ */
+export async function orgExchangeConnectionScope(ctx: Context, orgId: string) {
   await requireOrgRole(ctx, orgId, 'ADMIN');
-  return ctx.db.exchangeConnection.findMany({
+  return {
     where: { organizationId: orgId, deletedAt: null },
     // The id tiebreak makes rows created in the same millisecond come back in
     // one order on every read, so the two surfaces agree row for row.
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
+    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
+  };
 }
 
 /**

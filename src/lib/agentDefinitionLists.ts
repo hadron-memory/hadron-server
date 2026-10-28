@@ -46,6 +46,10 @@
  * that loc is the one involved, inherited or the child's own override.
  */
 
+import { GraphQLError } from 'graphql';
+import { getRetrievalProvider } from './retrieval/postgres.js';
+import { composeHybridRanking, hybridKeywordCandidates, type MatchedBy } from './retrieval/hybrid.js';
+import { getEmbeddingClient, isEmbeddingConfigured } from './embedding/index.js';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { canReadMemory, filterReadableMemoryIds } from '../mcp/access-control.js';
@@ -89,7 +93,8 @@ export type ListedNode = {
   inheritedFrom: InheritedFrom | null;
 };
 
-export type AgentTaskEntry = { node: ListedNode; trigger: string | null };
+export type AgentTaskEntry = { node: ListedNode & { abstract?: string }; trigger: string | null; matchedBy?: MatchedBy };
+export type AgentTaskSearch = { symptom?: string | null; limit?: number | null };
 
 export type AgentProcessKind = 'STARTS' | 'INVOLVED';
 export type AgentProcessEntry = { node: ListedNode; kind: AgentProcessKind; trigger: string | null };
@@ -253,10 +258,58 @@ async function resolveIndexSources(
  * An Agent's tasks (cor:dmo:050:15): its effective runnable nodes and every
  * chain index's listed tasks, each once, with a trigger where an index edge
  * gives one. Ordered by loc, then memory id, for a stable list.
+ * #2421 experiment: symptom ranks its runnable effective-chain subset by
+ * abstract only (cor:dmo:050:15); omission preserves the original list.
  */
-export async function listAgentTasks(db: Db, auth: AuthContext, agentId: string, ref: string): Promise<AgentTaskEntry[]> {
+export async function listAgentTasks(db: Db, auth: AuthContext, agentId: string, ref: string, search: AgentTaskSearch = {}): Promise<AgentTaskEntry[]> {
   const agent = await gatedAgent(db, auth, agentId, ref);
-  return tasksOf(db, auth, agent, await agentContext(db, agent));
+  const ctx = await agentContext(db, agent);
+  const entries = await tasksOf(db, auth, agent, ctx);
+  if (search.symptom == null) return entries; // byte-identical legacy list
+  const symptom = search.symptom.trim();
+  if (!symptom || (search.limit != null && (!Number.isInteger(search.limit) || search.limit < 1))) {
+    throw new GraphQLError('symptom must be non-empty and limit must be a positive integer.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  const limit = Math.min(search.limit ?? 3, 3);
+  // #2421 experimental search is only the effective SYSTEM set, not the wider
+  // readable outside-chain index entries accepted by the unfiltered list.
+  const rows = await db.node.findMany({
+    where: { id: { in: entries.map(e => e.node.id) }, memoryId: { in: ctx.scope.memoryIds }, deletedAt: null, isRunnable: true, abstract: { not: null } },
+    select: { id: true, memoryId: true, loc: true, role: true, deletedAt: true, abstract: true },
+  });
+  const candidates = rows.filter(r => !!r.abstract?.trim());
+  if (!candidates.length) return [];
+  const ids = candidates.map(r => r.id);
+  const provider = getRetrievalProvider();
+  const lexOpts = { db, memoryIds: ctx.scope.memoryIds, candidateNodeIds: ids, abstractOnly: true, limit: ids.length, filter: { isRunnable: true } };
+  let vector: Array<{ nodeId: string; score: number }> = [];
+  let vectorAvailable = false;
+  if (isEmbeddingConfigured()) {
+    // Embedding unavailability degrades to keyword; database/provider errors
+    // still escape. Summary-only filtering occurs before the vector window.
+    let embedding: number[] | undefined;
+    try { [embedding] = await getEmbeddingClient().embed([symptom], 'query'); } catch { /* keyword fallback */ }
+    vectorAvailable = !!embedding;
+    if (embedding) vector = await provider.vectorSearch({ db, memoryIds: ctx.scope.memoryIds, candidateNodeIds: ids, abstractOnly: true, queryEmbedding: embedding, limit: ids.length, contentScope: 'CONTENT' });
+  }
+  const { hits: keyword } = await hybridKeywordCandidates(symptom,
+    query => provider.lexicalSearch({ ...lexOpts, fields: ['abstract'], query }), !vectorAvailable);
+  const ranked = composeHybridRanking(keyword, vector, ids.length);
+  // Re-read and re-authorize current rows before rendering; an override, move,
+  // revocation or boot-prompt turn during retrieval cannot retain an old stamp.
+  const current = await db.node.findMany({
+    where: { id: { in: ranked.map(h => h.nodeId) }, memoryId: { in: ctx.scope.memoryIds }, isRunnable: true, deletedAt: null, abstract: { not: null } },
+    select: { id: true, memoryId: true, loc: true, role: true, deletedAt: true, abstract: true },
+  });
+  const effective = await retainEffective(db, current, await effectiveScope(db, [agent.systemMemoryId]));
+  const ok = await reverifyServed(db, auth, agent.systemMemoryId, entries.map(e => e.node), effective);
+  const byId = new Map(entries.map(e => [e.node.id, e]));
+  const abstract = new Map(effective.filter(r => !!r.abstract?.trim()).map(r => [r.id, r.abstract!]));
+  return ranked.flatMap(h => {
+    const entry = byId.get(h.nodeId);
+    if (!entry || !ok.has(h.nodeId) || !abstract.has(h.nodeId)) return [];
+    return [{ ...entry, node: { ...entry.node, abstract: abstract.get(h.nodeId)! }, matchedBy: h.matchedBy }];
+  }).slice(0, limit);
 }
 
 async function tasksOf(

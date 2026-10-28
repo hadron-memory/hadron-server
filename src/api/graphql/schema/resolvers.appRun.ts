@@ -452,6 +452,11 @@ export const appRunMutations = {
     // by this App's context; snapshotted onto each run at mint.
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    // #2438: the setup pin already resolved the entry — its entryId is the
+    // stable key. The unadopted marker carries none (⇒ null: an unresolvable
+    // entry keeps the URN path; D20 records the setup failure).
+    const entryNodeId = automationPin != null && typeof automationPin === 'object' && 'entryId' in automationPin
+      ? (automationPin as { entryId: string }).entryId : null;
     return ctx.db.agentSchedule.create({
       data: {
         id: generateId(),
@@ -468,6 +473,7 @@ export const appRunMutations = {
         runAt: input.runAt != null ? validatedRunAt(input.runAt) : null,
         timezone,
         entryNodeUrn: input.entryNodeUrn,
+        entryNodeId,
         automationPin: automationPin as never,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
@@ -555,9 +561,18 @@ export const appRunMutations = {
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
             ...(input.entryNodeUrn != null ? { entryNodeUrn: input.entryNodeUrn } : {}),
-            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? { automationPin: await captureSetupConsent(tx as never, existing.appId,
+            ...(input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined || agentId !== undefined ? await captureSetupConsent(tx as never, existing.appId,
               input.runAsSelf != null ? resolveRunAsSelf(txCtx, input.runAsSelf) : existing.userId,
-              input.entryNodeUrn ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })) as never } : {}),
+              // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
+              // the stamped id — after a rename the stored URN is stale, and
+              // re-capturing it would break a working schedule's consent.
+              input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
+              // #2438: a re-captured setup pin re-stamps the entry id with
+              // it (the marker's absent entryId clears to null only when the
+              // entry itself no longer resolves — the URN path takes over).
+              automationPin: consent as never,
+              ...(consent != null && typeof consent === 'object' && 'entryId' in consent ? { entryNodeId: (consent as { entryId: string }).entryId } : { entryNodeId: null }),
+            })) : {}),
             ...(input.eventData !== undefined ? { eventData: input.eventData as never } : {}),
             ...(input.policy !== undefined ? { policy: input.policy as never } : {}),
             ...(input.aiConfigName !== undefined ? { aiConfigName: input.aiConfigName } : {}),
@@ -674,7 +689,12 @@ export const appRunMutations = {
         if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
         if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
       },
-      async (tx) => tx.agentWebhook.create({
+      async (tx) => {
+        // #2438: stamp the entry's stable id from the setup pin's own
+        // resolution (same as createAgentSchedule); null on the unadopted
+        // marker — that row keeps the URN path.
+        const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+        return tx.agentWebhook.create({
         data: {
         id: generateId(),
         organizationId: app.organizationId,
@@ -685,15 +705,18 @@ export const appRunMutations = {
         name: input.name,
         secret: generateWebhookSecret(),
         argsSchema: (input.argsSchema ?? undefined) as never,
-        automationPin: await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId })) as never,
+        automationPin: consent as never,
         entryNodeUrn: input.entryNodeUrn,
+        entryNodeId: consent != null && typeof consent === 'object' && 'entryId' in consent
+          ? (consent as { entryId: string }).entryId : null,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
         enabled: input.enabled ?? true,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
         },
-      }),
+      });
+      },
       { afterLock: async (tx) => {
         await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
       } },
@@ -899,7 +922,7 @@ export const appRunQueries = {
   ) => {
     const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.agentSchedule.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentSchedule.count({ where }),
@@ -971,7 +994,7 @@ export const appRunQueries = {
       // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.appRun.findMany({
         where,
@@ -991,7 +1014,7 @@ export const appRunQueries = {
   ) => {
     const app = await requireScheduleAdmin(ctx, appRef);
     const where = { appId: app.id, deletedAt: null };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.agentWebhook.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.agentWebhook.count({ where }),
@@ -1010,7 +1033,7 @@ export const appRunQueries = {
     const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
     await requireOrgRole(ctx, organizationId, 'ADMIN');
     const where = { organizationId };
-    const take = Math.min(Math.max(limit ?? 50, 1), 200);
+    const take = Math.min(Math.max(limit ?? 20, 1), 200);
     const [items, total] = await Promise.all([
       ctx.db.actionTicket.findMany({ where, orderBy: { createdAt: 'desc' }, take, skip: Math.max(0, offset ?? 0) }),
       ctx.db.actionTicket.count({ where }),

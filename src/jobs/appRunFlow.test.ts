@@ -36,6 +36,7 @@ import { makeProdRunDeps, runContext } from './appRunDeps.js';
 import { resolveRunTools, hadronCreateNode, hadronUpdateNode, hadronReadNode } from '../lib/runner/tools/index.js';
 import { ToolDeniedError } from '../lib/llm/index.js';
 import type { AppRun } from '../generated/prisma/index.js';
+import { splitNodeUrn } from '../lib/urn.js';
 
 const ORG_URN = 'flow-int-org';
 const MEM_URN = `${ORG_URN}:flowmem`;
@@ -351,6 +352,24 @@ describe('3-node flow through production deps (§10)', () => {
     expect(trail[1].logs).toEqual(['task node created']);
   });
 
+  it('the tool loop is told which flow node the hop executes (#2485: node-scoped tool reach)', async () => {
+    await db.node.update({
+      where: { loc_memoryId: { loc: 'flow:act', memoryId } },
+      data: { data: { tools: ['hadron_log'] } as never },
+    });
+    const run = await mintFlow();
+    const { deps } = flowDeps(0.92);
+    const seen: Array<string | undefined> = [];
+    deps.llmTools = async (_r, _resolved, _req, _toolNames, opts) => {
+      seen.push(opts.nodeUrn);
+      return { text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'anthropic', model: 'test', toolCalls: [] };
+    };
+    expect(await executeAppRun(db, run.id, deps)).toBe('completed');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeDefined();
+    expect(splitNodeUrn(seen[0]!).loc).toBe('flow:act');
+  });
+
   it('a policy chain lacking tool.hadron_create_node halts the tool call BEFORE the node exists (§7 fixture)', async () => {
     await db.node.update({
       where: { loc_memoryId: { loc: 'flow:act', memoryId } },
@@ -560,10 +579,9 @@ describe('AppRun spend counters (#832)', () => {
     expect(after.tokensSpent).toBe(100);
   });
 
-  it('DOCUMENTS the known gap: a TOOL-LOOP abort is not counted', async () => {
-    // generateWithTools discards accumulated usage when a tool throws, so the
-    // provider's already-billed tokens are unavailable at the failure site.
-    // Pinned so the gap is visible and a future fix has a target to flip.
+  it('a tool-loop abort that carries no measured usage counts nothing (unknown is not zero, #862)', async () => {
+    // A rejection with no completed step has no partialUsage, so nothing is
+    // counted. (With completed steps the kernel counts them: appRuns.test.ts.)
     const run = await mintFlow();
     const { deps } = flowDeps(0.92);
     (deps as { llmObject: unknown }).llmObject = vi.fn(async () => {
@@ -572,7 +590,7 @@ describe('AppRun spend counters (#832)', () => {
     await executeAppRun(db, run.id, deps);
     const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(after.status).toBe('FAILED');
-    // Under-reports by construction — see AppRun.tokensSpent's KNOWN GAP note.
+    // Nothing measured, so nothing counted — see AppRun.tokensSpent's docs.
     expect(after.tokensSpent).toBe(0);
   });
 

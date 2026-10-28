@@ -1,7 +1,15 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import { PARALLEL_DBS, testMaxWorkers } from './src/test/dbWorkers.js';
 
+// Production runs under plain Node ESM, where `import 'graphql'` resolves to the package's CommonJS entry (it has no
+// `exports` map, so Node ignores its `module` field). Vite prefers `module` (index.mjs): a second copy of graphql, whose
+// classes fail `instanceof` against the schema Apollo builds and against `graphql-query-complexity`. Pin tests to the
+// entry production uses so a graphql type means the same thing in both.
+const GRAPHQL_ENTRY = fileURLToPath(new URL('./node_modules/graphql/index.js', import.meta.url));
+
 export default defineConfig({
+  resolve: { alias: [{ find: /^graphql$/, replacement: GRAPHQL_ENTRY }] },
   test: {
     globals: true,
     // Each test file runs in its own subprocess so the PrismaClient singleton

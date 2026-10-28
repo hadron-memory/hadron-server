@@ -4,8 +4,9 @@
 // and (#1749, S3) an App key holding the attention:deliver scope. Under
 // impersonation nobody holds or manages anything. A holder reads the workers
 // they hold; a manager reads every worker of the App; a scoped key reads the
-// workers of its own App, through the App-derived reach alone (never a personal
-// memory), and is refused while bound to a session. Which channels a wake shows
+// workers of its own App through current host-registration scope: its own host
+// only, or workers registered on no host for a non-host key. Former-host keys
+// fail closed. This is App-derived reach (never personal memory), with session-bound keys refused. Which channels a wake shows
 // is the two-reader gate in src/lib/tickers/dueWakes.ts.
 //
 // ACKNOWLEDGING (cor:agt:080:17): only the requester named in the proof; the
@@ -24,7 +25,9 @@ import type { WakeProof } from '../../../lib/tickers/wakeProof.js';
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import { legacyWakeKeyScope, authorizeLegacyWakeWorkers } from '../../../lib/tickers/wakeKeyScope.js';
 import { generateId } from '../../../lib/id.js';
+import { recordStopConsumerDeclaration, UNHOSTED_LANE } from '../../../lib/stopSignals/delivery.js';
 
 type Reader = { manager: boolean; userId: string | null };
 
@@ -47,10 +50,10 @@ const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
 ];
 
 /** The last gate of an App key's read: scope held now, under the shared anchor; records the read in the same transaction. */
-async function decideKeyAnswer(ctx: Context, app: TaskApp, key: { appKeyId: string; appId: string }, workerCount: number): Promise<void> {
+async function decideKeyAnswer(ctx: Context, app: TaskApp, key: { appKeyId: string; appId: string }, workerCount: number, authorize: (tx: Prisma.TransactionClient) => Promise<void>): Promise<void> {
   await ctx.db.$transaction(async (tx) => {
     await lockAuthorityAnchors(tx, appAnchors(app), 'shared');
-    await requireKeyScope(tx, key, 'attention:deliver');
+    await authorize(tx);
     await tx.appKeyWakeRead.create({ data: { id: generateId(), appKeyId: key.appKeyId, appId: app.id, workerCount } });
   });
 }
@@ -72,28 +75,39 @@ async function keyEntry(ctx: Context, key: { appKeyId: string; appId: string }, 
   if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
   await requireKeyScope(ctx.db, key, 'attention:deliver');
   refuseSessionBound(ctx);
+  const scope = await legacyWakeKeyScope(ctx.db, key);
   const held = app;
   return {
     app: held,
-    authorize: async (tx: Prisma.TransactionClient) => {
+    hostId: scope.hostId,
+    workerWhere: scope.where,
+    authorize: async (tx: Prisma.TransactionClient, workerIds: string[]) => {
       await lockAuthorityAnchors(tx, appAnchors(held), 'shared');
-      await requireKeyScope(tx, key, 'attention:deliver');
+      if (!(await authorizeLegacyWakeWorkers(tx, key, scope.hostId, workerIds))) {
+        throw taskError('WORKER_NOT_FOUND', 'Worker not found. Read the due wakes again.');
+      }
     },
   };
 }
 
+/** #2169: whether a call's `accepts` lists STOP. An unknown kind is refused by the SDL enum, so only the list is read here. */
+const acceptsStop = (accepts: readonly string[] | null | undefined): boolean => !!accepts && accepts.includes('STOP');
+
 export async function dueWakesFor(
   requestCtx: Context,
-  a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null },
+  a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null },
 ) {
   const key = appKeyCaller(requestCtx);
   // Live platform roles: a manager arm taken from an old credential would widen the worker set (Diego P2-1).
   const ctx = (await liveCaller(requestCtx)) ?? (() => { throw taskError('APP_NOT_FOUND', 'App not found.'); })();
   let app: TaskApp;
   let reader: Reader;
-  let authorize: ((tx: Prisma.TransactionClient) => Promise<void>) | undefined;
+  let authorize: ((tx: Prisma.TransactionClient, workerIds: string[]) => Promise<void>) | undefined;
+  let workerWhere: Prisma.WorkerWhereInput | undefined;
+  let selectedWorkerIds: string[] = [];
+  let keyHostId: string | null = null;
   if (key) {
-    ({ app, authorize } = await keyEntry(ctx, key, a.appRef));
+    ({ app, authorize, workerWhere, hostId: keyHostId } = await keyEntry(ctx, key, a.appRef));
     reader = { manager: true, userId: null };
   } else {
     const resolved = await resolveParticipatedApp(ctx, a.appRef);
@@ -108,7 +122,8 @@ export async function dueWakesFor(
   }
   const result = await computeDueWakes({
     ctx, app, reader, requester: key ? { appKeyId: key.appKeyId } : { userId: reader.userId! },
-    workerIds: only, first: a.first, after: a.after, authorize,
+    workerIds: only, first: a.first, after: a.after, authorize, workerWhere, acceptsStop: acceptsStop(a.accepts),
+    onWorkersSelected: ids => { selectedWorkerIds = ids; },
   });
 
   const workerIds = [...new Set([...result.wakes.map((w) => w.workerId), ...result.dormant.map((d) => d.workerId)])];
@@ -116,7 +131,13 @@ export async function dueWakesFor(
   // dormant-only, nothing-due and empty pages carry worker names, mention counts and cursors too (N4, Diego, Riana).
   // The same transaction writes the audit row (key, App, workers shown, time), so a read is recorded exactly when it
   // is allowed to be returned (cor:agt:080:23).
-  if (key) await decideKeyAnswer(ctx, app, key, workerIds.length);
+  if (key) await decideKeyAnswer(ctx, app, key, workerIds.length, tx => authorize!(tx, selectedWorkerIds));
+  // #2169 (R95): a call that takes stop notices declares the lane it serves, once its own answer is authorized. Written
+  // whether or not anything is due, because an idle consumer is still a serving one.
+  // Only a call that read the lane from its start to its end: no workerRefs, no `after` (a tail page skipped the prefix) and no
+  // next page (#2432 BLIND, LOCAL). A lane larger than one page (max 200) cannot declare; the consumer asks for `first: 200`.
+  const wholeLane = !(a.workerRefs && a.workerRefs.length > 0) && !a.after && result.nextAfter === null;
+  if (acceptsStop(a.accepts) && wholeLane) await declareStopLane(ctx, app, key ? { hostId: keyHostId } : reader.manager ? { hostId: null } : null);
   // The budget notice is posted by the platform itself, once a day per App, whoever's read triggered it: a person's or an
   // App key's (#1791, cor:agt:080:15). Posted only once an App key's answer is decided: a read that is refused posts nothing (Rook #1799).
   if (result.budgetNotice) await postBudgetNotice(ctx, app, result.budgetNotice);
@@ -136,7 +157,7 @@ export async function dueWakesFor(
         ticker: r.kind === 'TICK' ? tickers.get(r.tickerId) ?? null : null,
         // #1708: the task is gated in computeDueWakes (a reader of the App's tasks only), so it is shown as is.
         task: r.kind === 'TASK'
-          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
+          ? { id: r.taskId, eventId: r.eventId, chainIndex: r.chainIndex, event: r.event, title: r.title, handle: r.handle, ref: taskReasonRef(r.taskId, r.event), ...(r.standbyHeld ? { standbyHeld: r.standbyHeld } : {}) }
           : null,
         // #2022: a stop notice concerns the worker itself; whoever may read its wakes sees it.
         ...(r.kind === 'STOP'
@@ -160,6 +181,22 @@ export async function dueWakesFor(
     dormant: result.dormant.map((d) => ({ worker: workers.get(d.workerId)!, mentions: d.mentions })),
     pageInfo: { hasNextPage: result.nextAfter !== null, endCursor: result.nextAfter },
   };
+}
+
+/**
+ * #2169: the lane a declaring call serves. A host key serves its own live registration; a non-host key and a person who
+ * manages the App (who reads every worker) serve `unhosted`. A person who only holds some workers declares nothing: their
+ * partial view is not a lane, and a declaration from them would open the set guard for workers they cannot reach.
+ */
+async function declareStopLane(ctx: Context, app: TaskApp, serves: { hostId: string | null } | null): Promise<void> {
+  if (!serves) return;
+  let lane: string = UNHOSTED_LANE;
+  if (serves.hostId) {
+    const reg = await ctx.db.hostRegistration.findFirst({ where: { appId: app.id, hostId: serves.hostId, lostAt: null }, select: { id: true } });
+    if (!reg) return;
+    lane = reg.id;
+  }
+  await recordStopConsumerDeclaration(ctx.db, app.id, lane, new Date());
 }
 
 /**
@@ -230,14 +267,19 @@ export async function acknowledgeWakesFor(requestCtx: Context, a: { proofs: stri
 async function acknowledgeAsKey(requestCtx: Context, key: { appKeyId: string; appId: string }, proofs: string[]) {
   await requireKeyScope(requestCtx.db, key, 'attention:deliver');
   refuseSessionBound(requestCtx);
+  const scope = await legacyWakeKeyScope(requestCtx.db, key);
   return acknowledgeWakes({
     ctx: requestCtx,
     requester: { appKeyId: key.appKeyId },
     proofs,
+    prepareWorkers: async (tx, batch) => {
+      if (batch.some(p => p.appId !== key.appId) || !(await authorizeLegacyWakeWorkers(tx, key, scope.hostId, batch.map(p => p.workerId)))) {
+        throw taskError('WAKE_PROOF_REQUESTER_MISMATCH', 'This wake proof was issued to someone else.');
+      }
+    },
     mayReadWorker: async (p: WakeProof, tx: Prisma.TransactionClient) => {
       if (p.appId !== key.appId) return false;
-      await requireKeyScope(tx, key, 'attention:deliver');
-      return true;
+      return authorizeLegacyWakeWorkers(tx, key, scope.hostId, [p.workerId]);
     },
   });
 }
@@ -246,7 +288,7 @@ async function acknowledgeAsKey(requestCtx: Context, key: { appKeyId: string; ap
 const STOP_LEVEL_ENUM = { 'pause-dispatch': 'PAUSE_DISPATCH', pause: 'PAUSE', halt: 'HALT' } as const;
 
 export const wakeQueries = {
-  dueWakes: (_: unknown, a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null }, ctx: Context) =>
+  dueWakes: (_: unknown, a: { appRef: string; workerRefs?: string[] | null; first?: number | null; after?: string | null; accepts?: string[] | null }, ctx: Context) =>
     dueWakesFor(ctx, a),
 };
 

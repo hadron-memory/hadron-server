@@ -16,7 +16,8 @@ import { nodeUrnRoundTrips } from '../../lib/urnEmit.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
 vi.mock('child_process', () => ({ execFile: vi.fn((...args: unknown[]) => {
-  (args.at(-1) as Function)(null, { stdout: '', stderr: '' });
+  // rev-list --count answers 0: nothing unpublished (#2308).
+  (args.at(-1) as Function)(null, { stdout: (args[1] as string[]).includes('rev-list') ? '0\n' : '', stderr: '' });
 }) }));
 vi.mock('./githubApp.js', () => ({
   getInstallationToken: vi.fn(async () => 'fake-token'),

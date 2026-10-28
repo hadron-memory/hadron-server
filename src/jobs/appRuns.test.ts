@@ -23,6 +23,12 @@ vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null), // sweep/standalone mode in tests
 }));
 
+// #2412: the real `ai` SDK drives one test below; only the provider factories are replaced.
+const sdkModel: { model: unknown } = { model: null };
+vi.mock('@ai-sdk/anthropic', () => ({ createAnthropic: () => () => sdkModel.model }));
+vi.mock('@ai-sdk/openai', () => ({ createOpenAI: () => () => sdkModel.model }));
+vi.mock('@ai-sdk/amazon-bedrock', () => ({ createAmazonBedrock: () => () => sdkModel.model }));
+
 import {
   mintAppRun,
   executeAppRun,
@@ -583,6 +589,249 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
     expect(await executeAppRun(db, r2.id, d2)).toBe('failed');
     expect(((await db.appRun.findUniqueOrThrow({ where: { id: r2.id } })).failure as { code?: string }).code)
       .toBe('TOOL_FAILED');
+  });
+
+  it.each([
+    ['hadron_fail', 'AUTHOR_FAIL'],
+    ['denied', 'ACTIVATION_DENIED'],
+    ['throws', 'TOOL_FAILED'],
+  ])('#2412: on the real ai SDK a %s terminal fails the run as %s and the model is asked once', async (kind, code) => {
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { generateWithTools } = await import('../lib/llm/index.js');
+    const { hadronFail } = await import('../lib/runner/tools/index.js');
+    const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 2, text: 2, reasoning: 0 } };
+    const tool = kind === 'hadron_fail' ? 'hadron_fail' : 't';
+    const steps = [
+      { content: [{ type: 'tool-call', toolCallId: '1', toolName: tool, input: '{}' }], finishReason: { unified: 'tool-calls', raw: 'x' }, usage, warnings: [] },
+      { content: [{ type: 'text', text: 'carried on' }], finishReason: { unified: 'stop', raw: 'x' }, usage, warnings: [] },
+    ];
+    let asked = 0;
+    sdkModel.model = new MockLanguageModelV4({ doGenerate: async () => steps[asked++] as never });
+    const t = { name: 't', description: 'd', inputSchema: { type: 'object', properties: {} }, cost: 1, execute: async () => { throw new Error('boom'); } };
+    const run = await mint();
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+      resolveConfig: vi.fn(async () => ({ ownerType: 'HADRON_SERVER', config: { provider: 'anthropic', model: 'test' } }) as never),
+      llmTools: async (r, resolved, req, _names, opts) => generateWithTools(resolved, req, [hadronFail, t as never], {
+        onToolCall: kind === 'denied' ? async () => false : opts.onToolCall,
+        toolCtx: { log: opts.log, db, run: r, principal: {} as never },
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(after.failure, JSON.stringify(after.failure)).toMatchObject({ code });
+    expect(asked).toBe(1);
+  });
+
+  // ── #862: usage of steps completed before a rejected tool-loop call is counted ─────────────────────────
+  describe('#862 a rejected tool-loop call counts the steps that completed (real ai SDK)', () => {
+    const UU = (i: number | undefined, o: number | undefined) => ({
+      inputTokens: { total: i, noCache: i, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: o, text: o, reasoning: 0 },
+    });
+    const call = (name: string, id: string, i: number, o: number) => ({
+      content: [{ type: 'tool-call', toolCallId: id, toolName: name, input: '{}' }],
+      finishReason: { unified: 'tool-calls', raw: 'x' }, usage: UU(i, o), warnings: [],
+    });
+    const text = (i: number, o: number) => ({
+      content: [{ type: 'text', text: 'all done' }], finishReason: { unified: 'stop', raw: 'x' }, usage: UU(i, o), warnings: [],
+    });
+    const script = async (...steps: unknown[]) => {
+      const { MockLanguageModelV4 } = await import('ai/test');
+      let n = 0;
+      sdkModel.model = new MockLanguageModelV4({
+        doGenerate: async () => { const step = steps[n++]; if (step instanceof Error) throw step; return step as never; },
+      });
+      return () => n;
+    };
+    const readOnly = (over: Record<string, unknown> = {}) => ({
+      name: 't', description: 'd', inputSchema: { type: 'object', properties: {} }, cost: 0, execute: async () => ({ ok: 1 }), ...over,
+    });
+    const realDeps = async (tools: unknown[]) => {
+      const { generateWithTools } = await import('../lib/llm/index.js');
+      return deps({
+        loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_log'] })),
+        resolveConfig: vi.fn(async () => ({ ownerType: 'HADRON_SERVER', config: { provider: 'anthropic', model: 'test' } }) as never),
+        llmTools: async (r, resolved, req, _names, opts) => generateWithTools(resolved, req, tools as never, {
+          onToolCall: opts.onToolCall,
+          toolCtx: { log: opts.log, db, run: r, principal: {} as never },
+        }),
+      });
+    };
+    const providerError = new Error('provider refused the request');
+    const quota = async (kind: 'app' | 'org') => (await db.quotaCounter.findFirst({
+      where: { scopeKind: kind, scopeId: kind === 'app' ? appId : orgId, action: 'llm.tokens' },
+    }))?.used ?? 0;
+
+    it('charges the completed steps once to the run, both quotas and one usage event, and keeps the failure code', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      expect(await executeAppRun(db, run.id, await realDeps([readOnly()]))).toBe('failed');
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED');
+      expect(after.tokensSpent).toBe(35);
+      expect((run.budgetTokens ?? 0) - (after.budgetTokens ?? 0)).toBe(35);
+      expect(await quota('app')).toBe(35);
+      expect(await quota('org')).toBe(35);
+      const events = await db.usageEvent.findMany({ where: { type: 'app-run' } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ tokensIn: 30, tokensOut: 5, provider: 'anthropic', model: 'test' });
+    });
+
+    it('a rejection before any step completed counts nothing: unknown is not zero', async () => {
+      await script(providerError);
+      const run = await mint();
+      expect(await executeAppRun(db, run.id, await realDeps([readOnly()]))).toBe('failed');
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.tokensSpent).toBe(0);
+      expect(after.budgetTokens).toBe(run.budgetTokens);
+      expect(await quota('app')).toBe(0);
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(0);
+    });
+
+    it('a completed step that measured zero is recorded as a measured zero (one event, no tokens)', async () => {
+      await script(call('t', '1', 0, 0), providerError);
+      const run = await mint();
+      await executeAppRun(db, run.id, await realDeps([readOnly()]));
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.tokensSpent).toBe(0);
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(1);
+    });
+
+    it('a transient rejection charges the failed attempt before the reset, and the retry adds only its own steps', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), Object.assign(new Error('upstream unavailable'), { statusCode: 503 }));
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      expect(await executeAppRun(db, run.id, d)).toBe('transient');
+      const parked = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(parked.status).toBe('PENDING');
+      expect(parked.tokensSpent).toBe(35);
+      await script(call('t', '1', 5, 1), text(6, 2));
+      expect(await executeAppRun(db, run.id, d)).toBe('completed');
+      const done = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(done.tokensSpent).toBe(35 + 14); // the failed attempt once, the retry's own totalUsage once
+      const hops = done.hops as Array<{ tokensSpent: number }>;
+      expect(hops).toHaveLength(1);
+      expect(hops[0].tokensSpent).toBe(14); // the failed attempt is not in the checkpoint
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(2);
+    });
+
+    it('a tool terminal after a completed step counts that step too and still maps to AUTHOR_FAIL', async () => {
+      const { hadronFail } = await import('../lib/runner/tools/index.js');
+      await script(call('t', '1', 10, 2), call('hadron_fail', '2', 20, 3), text(1, 1));
+      const run = await mint();
+      await executeAppRun(db, run.id, await realDeps([readOnly(), hadronFail]));
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('AUTHOR_FAIL');
+      expect(after.tokensSpent).toBe(35);
+    });
+
+    it('an accounting fault keeps the original failure and charges nothing twice', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const broken = new Proxy(db, {
+        get: (target, key) => (key === 'quotaCounter'
+          ? new Proxy({}, { get: () => async () => { throw new Error('quota store down'); } })
+          : Reflect.get(target, key)),
+      });
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(broken as never, run.id, d)).toBe('failed');
+      quiet.mockRestore();
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED'); // not replaced by the quota fault
+      expect(after.tokensSpent).toBe(35); // persisted once, never retried
+    });
+
+    // Fault injection for the accounting branches of the rejected-call charge (#2427). Each fault
+    // throws on the FIRST matching write only, and `hits` counts how often that write was attempted.
+    const faulting = (where: 'counter' | 'orgQuota') => {
+      const hits = { n: 0 };
+      const wrap = <T extends object>(model: T, hit: (args: never) => boolean) => new Proxy(model, {
+        get: (target, key) => (key === 'updateMany'
+          ? async (args: never) => { if (hit(args)) { hits.n += 1; throw new Error('accounting store down'); } return (target as never as { updateMany: (a: never) => unknown }).updateMany(args); }
+          : Reflect.get(target, key)),
+      });
+      const proxied = new Proxy(db, {
+        get: (target, key) => {
+          if (where === 'counter' && key === 'appRun') {
+            return wrap(target.appRun, (a: { data?: { tokensSpent?: unknown } }) => a?.data?.tokensSpent !== undefined);
+          }
+          if (where === 'orgQuota' && key === 'quotaCounter') {
+            return wrap(target.quotaCounter, (a: { where?: { scopeKind?: string } }) => a?.where?.scopeKind === 'org');
+          }
+          return Reflect.get(target, key);
+        },
+      });
+      return { db: proxied as never, hits };
+    };
+
+    it('a fault on the run-counter write keeps the original failure and charges nothing', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const f = faulting('counter');
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(f.db, run.id, d)).toBe('failed');
+      quiet.mockRestore();
+      expect(f.hits.n).toBe(1);
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED'); // not replaced by the counter fault
+      expect(after.tokensSpent).toBe(0);
+      expect(after.budgetTokens).toBe(run.budgetTokens);
+      expect(await quota('app')).toBe(0);
+      expect(await quota('org')).toBe(0);
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(0);
+    });
+
+    it('an org-quota fault after the app quota persisted is not retried, so nothing is counted twice', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), providerError);
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const f = faulting('orgQuota');
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(f.db, run.id, d)).toBe('failed');
+      quiet.mockRestore();
+      expect(f.hits.n).toBe(1); // attempted once, never retried
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect((after.failure as { code?: string }).code).toBe('LLM_FAILED');
+      expect(after.tokensSpent).toBe(35);
+      expect(await quota('app')).toBe(35);
+      expect(await quota('org')).toBe(0);
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(0); // the fault precedes the event
+    });
+
+    it('a transient rejection whose charge faulted still resets to PENDING, and the retry does not charge the failed attempt again', async () => {
+      await script(call('t', '1', 10, 2), call('t', '2', 20, 3), Object.assign(new Error('upstream unavailable'), { statusCode: 503 }));
+      const run = await mint();
+      const d = await realDeps([readOnly()]);
+      const f = faulting('orgQuota');
+      const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await executeAppRun(f.db, run.id, d)).toBe('transient');
+      quiet.mockRestore();
+      expect(f.hits.n).toBe(1);
+      const parked = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(parked.status).toBe('PENDING');
+      expect(parked.tokensSpent).toBe(35);
+      expect(await quota('app')).toBe(35);
+      await script(call('t', '1', 5, 1), text(6, 2));
+      expect(await executeAppRun(db, run.id, d)).toBe('completed');
+      const done = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(done.tokensSpent).toBe(35 + 14); // the failed attempt once, the retry's own steps once
+      expect(await quota('app')).toBe(35 + 14);
+      expect(await quota('org')).toBe(14); // the faulted attempt's org share is lost, never re-charged
+      expect(await db.usageEvent.count({ where: { type: 'app-run' } })).toBe(1); // only the retry's
+    });
+
+    it('charging never resurrects a run that was cancelled mid-hop', async () => {
+      await script(call('t', '1', 10, 2), providerError);
+      const run = await mint();
+      const cancelling = readOnly({ execute: async () => { await db.appRun.update({ where: { id: run.id }, data: { status: 'CANCELLED' } }); return { ok: 1 }; } });
+      await executeAppRun(db, run.id, await realDeps([cancelling]));
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(after.status).toBe('CANCELLED');
+      expect(after.tokensSpent).toBe(12); // the provider already billed the step
+    });
   });
 
   it('an unverified tool-loop provider maps to NO_TOOL_SUPPORT (D-TL-8)', async () => {

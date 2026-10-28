@@ -59,11 +59,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_request_signature',
     'Ask for a node\'s current content to be signed by a person with a passkey (cor:dmo:130:03). Any reader of the node may ask; agents never sign. The request pins the current revision and ends exactly once: completed, declined, expired, stale (the title, abstract or content changed) or withdrawn. Read the outcome with hadron_get_signing_request; a node read\'s "Signatures:" line shows signatures. Refused on encrypted memories and comment nodes.',
-    {
-      nodeRef: z.string().describe('The node to sign: its URN or id.'),
-      expectedRevision: z.number().int().positive().optional().describe('Refuse (REVISION_MISMATCH) unless this is still the current revision.'),
-      signer: z.string().optional().describe('A user id to name as the only signer; they must be able to write the node\'s memory (SIGNER_NOT_A_WRITER otherwise). Omitted: any writer of the memory.'),
-    },
+    SHAPE_HADRON_REQUEST_SIGNATURE,
     async ({ nodeRef, expectedRevision, signer }) => {
       const ctx = ctxOf();
       try {
@@ -78,7 +74,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_get_signing_request',
     'Read a signing request\'s state and, once completed, its signature (cor:dmo:130:03). Visible to the node\'s readers; an unknown id and one you cannot read look the same.',
-    { id: z.string().describe('The signing request id.') },
+    SHAPE_HADRON_GET_SIGNING_REQUEST,
     async ({ id }) => {
       const ctx = ctxOf();
       try {
@@ -94,7 +90,7 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
   server.tool(
     'hadron_withdraw_signing_request',
     'Withdraw an open signing request. Only the account that asked, from any of its sessions or workers (#10397).',
-    { id: z.string().describe('The signing request id.') },
+    SHAPE_HADRON_WITHDRAW_SIGNING_REQUEST,
     async ({ id }) => {
       const ctx = ctxOf();
       try {
@@ -106,3 +102,18 @@ export function registerSigningTools(server: McpServer, deps: { db: PrismaClient
     },
   );
 }
+
+// ── #2260: parameter shapes, built ONCE per process ──────────────────────────
+// A shape is pure data (no session state: moved here only because nothing in it resolves to a
+// function- or block-scoped binding, so `tsc` rejects one that captures `auth` or any other
+// per-session value). Every MCP session registers these same objects instead of rebuilding ~15 MB.
+
+const SHAPE_HADRON_REQUEST_SIGNATURE = {
+  nodeRef: z.string().describe('The node to sign: its URN or id.'),
+  expectedRevision: z.number().int().positive().optional().describe('Refuse (REVISION_MISMATCH) unless this is still the current revision.'),
+  signer: z.string().optional().describe('A user id to name as the only signer; they must be able to write the node\'s memory (SIGNER_NOT_A_WRITER otherwise). Omitted: any writer of the memory.'),
+};
+
+const SHAPE_HADRON_GET_SIGNING_REQUEST = { id: z.string().describe('The signing request id.') };
+
+const SHAPE_HADRON_WITHDRAW_SIGNING_REQUEST = { id: z.string().describe('The signing request id.') };

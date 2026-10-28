@@ -199,7 +199,8 @@ only when ALL of these hold:
 
 A timeout alone never resolves an entry. After 2 team-tick cadences (20 min),
 Ada's #26811 ruling allows **one fresh request for strictly newer tick work**
-when the old input was accepted, the composer is provably empty, and the same
+when the old send is still unresolved (including a failed send carrying a request
+identity that Orca never reported accepted), the composer is provably empty, and the same
 terminal handle/incarnation still receives it. Busy/deadline, draft, identity,
 server-timing and pre-send server-check guards still apply. The incarnation is
 checked again after reconciliation/evidence reads. No new tick means no new
@@ -292,3 +293,52 @@ and a Codex terminal, against a shim or an isolated S1 server; see the PR receip
 for the head it names and does not carry to later heads by itself.
 Verified by the 63 fake-runner and contract tests (the contract tests build the schema from the real typeDefs); live-host rollout
 evidence is separate.
+
+### A prior receiver that is provably gone (#2275 partial slice)
+
+An ambiguous receipt for another receiver stops holding the worker only when a
+successful, complete current terminal inventory proves that the prior
+handle/incarnation is absent. Completeness requires Orca `result.hostScope`:
+at least one legible covered host, with any omitted hosts restricted to
+`runtime:` peers (which own separate control planes). Missing scope or an omitted
+local/SSH/unknown host holds, even if all returned terminal rows look valid.
+A reused handle needs a known different incarnation. Failed or partial lists,
+unknown identities, and a still-present
+old incarnation (even disconnected or unwritable) remain held.
+
+Before replacement, the script checks the inventory and current incarnation
+again and applies the normal composer, draft, timing and idle rules. It keeps
+the old request in `needs-person.json`, then atomically saves normal unresolved
+send intent for the current receiver. A crash or failed write keeps an
+ambiguous receipt; unrelated workers' receipts are preserved. It neither
+replays the old request ID against the new receiver nor acknowledges a wake,
+task, or chat read merely because the local receiver changed.
+
+This is **at-least-once notification recovery**: an accepted old prompt may
+have executed before its terminal died. The replacement may name unacknowledged
+work again; it is not an exactly-once claim. The worker still reads the server
+cursor and current task state. Only confirmation of the new send can support
+the normal acknowledgement path.
+
+This slice does not change family derivation, relaunch scripts, existing host
+receipt files, same-receiver never-accepted recovery, or escalation. Tests use
+synthetic mocked hosts; deployment and any existing-state remediation remain
+separate host-manager actions.
+
+### Failed request identities can yield to newer ticks (#2275 slice A)
+
+After the same 20-minute window, a failed request with an identity, including
+a `; same-id retry:` failure, can yield to a strictly newer tick under the
+same receiver/incarnation, empty-composer and idle/send guards above. The log
+still says `Orca never reported the input accepted` and `needs a person`;
+the old request is not retyped as a fresh prompt. Its coverage is archived
+before the replacement intent is atomically persisted, preserving other receipts.
+Displacement itself never acknowledges a wake, completes a task or marks chat read.
+A failed same-id retry cannot prove the old prompt never ran: this is
+**at-least-once notification recovery**, relying on the server cursor/task protocol,
+not exactly-once delivery. Families derivation, relaunch changes, escalation and
+existing receipt remediation remain separate; rollout requires Hugo's actual grant.
+
+## Open-task line (#2613)
+
+Every wake this script types ends with ` You have N open task(s) (as read when this was sent); run `hadron team task mine`.` when the delivered worker holds assigned PENDING or STARTED tasks in the wake App (the same set as `hadron team task mine`). The count comes from the existing `agentTasks` read under this script's credential, shared in `scripts/lib/openTaskLine.ts`. Zero adds nothing; a refused, malformed or over-budget read also adds nothing and never says "none", and logs ONE diagnostic per delivery attempt naming only the worker and a closed reason (`refused`, `malformed`, `timeout` or `page_cap`), never anything the read returned (#2630). The count is the read as of send: it is read before the final gates and is never revalidated after them. Existing wake text is unchanged ahead of the added line. Merging deploys nothing. Fresh/recovery briefs and the future in-poller delivery (hadron-cli#907) are out of scope; that delivery needs the same line.

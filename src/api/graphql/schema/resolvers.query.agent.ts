@@ -33,6 +33,7 @@ import {
   rethrowAiConfigTyped,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * #1892 — the full Node rows behind a list's entries, in list order, each
@@ -65,9 +66,9 @@ export const agentQueries = {
      * index lists, each once, with the listing edge's trigger where one exists.
      * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
      */
-    agentTaskList: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    agentTaskList: async (_: unknown, { ref, symptom, limit }: { ref: string; symptom?: string | null; limit?: number | null }, ctx: Context) => {
       const { id } = await resolveAgentRef(ctx.db, ref);
-      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref));
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { symptom, limit }));
     },
 
     /**
@@ -255,7 +256,7 @@ export const agentQueries = {
     },
 
     agentAIConfig: async (_: unknown, { agentRef }: { agentRef: string }, ctx: Context) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
       // #1944: through the read gate first, so an unreadable Agent answers as
       // absent; the key read itself stays owner/org-ADMIN only, below.
@@ -284,7 +285,7 @@ export const agentQueries = {
     // platform ADMIN/OWNER for HADRON_SERVER-owned rows, org ADMIN of the
     // owning org otherwise.
     aiServiceConfig: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
-      if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
+      if (!ctx.userId && !isPlatformAdmin(ctx)) throw unauthenticatedError();
       const config = await ctx.db.aiServiceConfig.findUnique({ where: { id: ref } });
       if (!config) return null;
       try {
@@ -311,14 +312,14 @@ export const agentQueries = {
       },
       ctx: Context,
     ) => {
-      if (!ctx.userId && !isPlatformAdmin(ctx)) throw new Error('Unauthenticated');
+      if (!ctx.userId && !isPlatformAdmin(ctx)) throw unauthenticatedError();
       try {
         let ownerWhere: Record<string, string> = {};
         if (filter) {
           ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerId));
         } else if (!isPlatformAdmin(ctx)) {
           // No owner filter = the cross-owner ops view — platform staff only.
-          throw new Error('Forbidden');
+          throw forbiddenError();
         }
         const take = clampListTake(limit);
         const skip = Math.max(0, offset ?? 0);
@@ -405,7 +406,7 @@ export const agentQueries = {
         // same owner as the named personal Agent. Otherwise naming another
         // user's App would turn the Agent-owner gate into a cross-user decrypt.
         if (userOwnedAgent && resolvedAppId && !effectiveOrgId && appOwnerUserId !== personalAgentOwnerId) {
-          throw new Error('Forbidden');
+          throw forbiddenError();
         }
         // Privileged surface (decrypted key): org ADMIN of the effective
         // org — same gate as the legacy agentAIConfig/appAIConfig queries
@@ -414,7 +415,7 @@ export const agentQueries = {
           if (effectiveOrgId) {
             await requireOrgRole(ctx, effectiveOrgId, 'ADMIN');
           } else if (!userOwnedAgent && !isPlatformAdmin(ctx)) {
-            throw new Error('Forbidden');
+            throw forbiddenError();
           }
         }
         const resolved = await resolveAiConfigWithFallback(ctx.db, name ?? null, {

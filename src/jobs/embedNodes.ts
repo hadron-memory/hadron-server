@@ -1,3 +1,5 @@
+import { isRawChatNode } from '../services/embedding/rawChat.js';
+import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval — embedding worker (interim Postgres-backed queue).
  *
@@ -10,8 +12,10 @@
  * Mirrors the `cleanupAnonymousMemories` job shape.
  */
 
+import { FRESH_PLAINTEXT_REQUIRED } from '../services/embedding/obligation.js';
+import { EmbeddingDispatcher } from '../services/embedding/dispatcher.js';
 import { COMMENT_NODE_TYPE } from '../lib/comments/index.js';
-import { embeddingKindsWanted, memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
+import { embeddingKindsWanted, memoryIsVectorIndexed, INDEXED_MEMORY_WHERE } from '../lib/embedding/indexing.js';
 import { Prisma } from '../generated/prisma/index.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { EmbeddingClient } from '../lib/embedding/index.js';
@@ -26,6 +30,7 @@ import {
   upsertChunkVectors,
   deleteNodeVectors,
   deleteNodeChunkVectors,
+  deleteNodeAbstractVector,
 } from '../services/embedding/vectors.js';
 import { chunkNode } from '../lib/chunking.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
@@ -52,6 +57,8 @@ export type EmbedOutcome =
  * out of the index for good.
  */
 export interface EmbedRetryOpts {
+  /** internal#4: a prompt must carry its writer-captured obligation, never adopt a newer row token. */
+  workToken?: string;
   /** First-retry delay in ms (default 60s). Tests pass 0 for immediacy. */
   retryBaseMs?: number;
   /** Backoff ceiling in ms (default 6h). */
@@ -90,6 +97,7 @@ export async function embedNode(
       nodeType: true,
       deletedAt: true,
       embeddingPendingAt: true,
+      embeddingWorkToken: true,
       // #1608 — a comment's stub state (a deleted-with-replies stub is never indexed).
       commentMeta: { select: { retractedAt: true } },
       embeddingAttempts: true,
@@ -113,6 +121,20 @@ export async function embedNode(
   if (!node || node.deletedAt) return 'skipped';
   const memory = node.memory;
   const capturedPendingAt = node.embeddingPendingAt;
+  const capturedWorkToken = node.embeddingWorkToken;
+  if (!capturedWorkToken || !capturedPendingAt
+    || (retryOpts.workToken !== undefined && retryOpts.workToken !== capturedWorkToken)) return 'skipped';
+  // Excluded turns never reach plaintext selection or an embedding provider.
+  // Clear only this obligation; existing vectors require the separately reviewed
+  // purge plan and are deliberately left untouched by this build (#1282).
+  if (isRawChatNode(node)) {
+    await clearMarkers(db, nodeId, capturedWorkToken);
+    return 'skipped';
+  }
+  if (capturedPendingAt.getTime() > Date.now()) return 'skipped';
+  // R132: a keyless worker cannot recover this plaintext. Preserve the explicit pending
+  // diagnostic and obligation; only a fresh authorized plaintext prompt can serve it.
+  if (memory.isEncrypted && plaintext === undefined) return 'skipped';
 
   // #1608 (cor:dmo:110:08) — a comment's searchable text is its BODY, whatever
   // the memory's embeddingSource: a comment has no abstract, so the default
@@ -120,15 +142,15 @@ export async function embedNode(
   // P2-1). A stub (#1721: deleted, kept for its replies) is never indexed; its vectors go.
   const isComment = node.nodeType === COMMENT_NODE_TYPE;
   if (isComment && node.commentMeta?.retractedAt) {
-    await deleteNodeVectors(db, nodeId);
-    await clearMarkers(db, nodeId, capturedPendingAt);
+    await deleteNodeVectors(db, nodeId, capturedWorkToken);
+    await clearMarkers(db, nodeId, capturedWorkToken);
     return 'skipped';
   }
 
-  // Not indexed (#2199: a system memory always is, by summary): drop any stale vectors and clear the marker.
+  // Not indexed: retain #2199 system-summary semantics under the captured UUID.
   if (!memoryIsVectorIndexed(memory)) {
-    await deleteNodeVectors(db, nodeId);
-    await clearMarkers(db, nodeId, capturedPendingAt);
+    await deleteNodeVectors(db, nodeId, capturedWorkToken);
+    await clearMarkers(db, nodeId, capturedWorkToken);
     return 'skipped';
   }
 
@@ -148,8 +170,7 @@ export async function embedNode(
 
       if (memory.isEncrypted && abstractText != null && isCiphertext(abstractText)) {
         // Sweep on a GraphQL-encrypted node: no plaintext, no session key (#206).
-        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)', capturedPendingAt);
-        return 'failed-permanent';
+        return 'skipped'; // R132: explicit pending requires fresh authorized plaintext.
       }
 
       if (abstractText == null || abstractText.trim() === '') {
@@ -162,10 +183,10 @@ export async function embedNode(
         // alone is true — but when wantChunks is also true, we need to
         // preserve chunks. Special-case both:
         if (!wantChunks) {
-          await deleteNodeVectors(db, nodeId);
+          await deleteNodeVectors(db, nodeId, capturedWorkToken);
         } else {
           // Targeted: drop the abstract row only; chunks survive.
-          await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'abstract'`;
+          if (!(await deleteNodeAbstractVector(db, nodeId, capturedWorkToken))) return 'skipped';
         }
       } else {
         const c = client ?? getEmbeddingClient();
@@ -176,15 +197,15 @@ export async function embedNode(
         embeddedChars += abstractText.length;
         usedClient = c;
         // Latest-wins guard on the UPSERT (not just the clear): re-check
-        // `embeddingPendingAt` in the DB right before writing. PR-219
+        // `embeddingWorkToken` in the DB right before writing. PR-219
         // review (Gemini high) — without this, two concurrent
         // prompt-drains race to INSERT and the slower one's older vector
         // silently overwrites the newer one.
         const fresh = await db.node.findUnique({
           where: { id: nodeId },
-          select: { embeddingPendingAt: true },
+          select: { embeddingWorkToken: true },
         });
-        if (fresh?.embeddingPendingAt?.getTime() !== capturedPendingAt?.getTime()) {
+        if (fresh?.embeddingWorkToken !== capturedWorkToken) {
           return 'skipped';
         }
         // The pre-check above is a cheap early-out; THIS is the authoritative
@@ -200,7 +221,7 @@ export async function embedNode(
             dim: c.dim,
             embedding: vec,
           },
-          capturedPendingAt,
+          capturedWorkToken,
         );
         if (!wrote) return 'skipped';
       }
@@ -208,18 +229,17 @@ export async function embedNode(
 
     if (wantChunks) {
       // Spec 033 US2 T040 — chunk path. Mirror the abstract-path checks:
-      // encrypted-no-plaintext is a permanent failure; empty content
-      // clears the chunk vectors; otherwise chunk, embed, upsert.
+      // unavailable encrypted plaintext leaves the obligation pending (R132);
+      // empty plaintext clears the chunk vectors; otherwise chunk, embed, upsert.
       const contentText =
         plaintext?.content !== undefined ? plaintext.content : node.content;
 
       if (memory.isEncrypted && contentText != null && isCiphertext(contentText)) {
-        await markPermanentFailure(db, nodeId, 'encrypted-no-plaintext (#206)', capturedPendingAt);
-        return 'failed-permanent';
+        return 'skipped'; // Never consume an encrypted obligation without usable plaintext.
       }
 
       if (contentText == null || contentText.trim() === '') {
-        if (!(await deleteNodeChunkVectors(db, nodeId, capturedPendingAt))) return 'skipped';
+        if (!(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
       } else {
         const chunks = chunkNode(contentText, {
           chunkTokens: memory.chunkTokens ?? undefined,
@@ -227,7 +247,7 @@ export async function embedNode(
           forceFixedSize: memory.forceFixedSize,
         });
         if (chunks.length === 0) {
-          if (!(await deleteNodeChunkVectors(db, nodeId, capturedPendingAt))) return 'skipped';
+          if (!(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
         } else {
           const c = client ?? getEmbeddingClient();
           const vectors = await c.embed(
@@ -244,9 +264,9 @@ export async function embedNode(
           // Same latest-wins guard before the upsert.
           const fresh = await db.node.findUnique({
             where: { id: nodeId },
-            select: { embeddingPendingAt: true },
+            select: { embeddingWorkToken: true },
           });
-          if (fresh?.embeddingPendingAt?.getTime() !== capturedPendingAt?.getTime()) {
+          if (fresh?.embeddingWorkToken !== capturedWorkToken) {
             return 'skipped';
           }
           const wroteChunks = await upsertChunkVectors(
@@ -264,7 +284,7 @@ export async function embedNode(
               chunkText: ch.text,
               embedding: vectors[i],
             })),
-            capturedPendingAt,
+            capturedWorkToken,
           );
           if (!wroteChunks) return 'skipped';
         }
@@ -272,8 +292,8 @@ export async function embedNode(
     }
 
     // Latest-wins: only clear the marker if no newer write re-stamped it while
-    // we were embedding (optimistic guard on the captured embeddingPendingAt).
-    const cleared = await clearMarkers(db, nodeId, capturedPendingAt);
+    // we were embedding (optimistic guard on the captured work token).
+    const cleared = await clearMarkers(db, nodeId, capturedWorkToken);
     if (cleared && usedClient && embeddedChars > 0) {
       // 046-usage-metering (FR-007): one event per embedded node. tokensIn is
       // the standard ~4-chars/token ESTIMATE (the endpoint returns no usage);
@@ -296,37 +316,38 @@ export async function embedNode(
     return cleared ? 'embedded' : 'skipped';
   } catch (err) {
     // Same latest-wins guard on the failure path (PR-219 review, Gemini high):
-    // if a newer write has re-stamped embeddingPendingAt, this failure record
+    // if a newer write has replaced the work token, this failure record
     // would mask a fresh attempt that's already in flight or queued.
     if (classifyEmbedError(err) === 'permanent') {
       // Deterministic rejection (4xx, dimension mismatch): retrying the same
       // payload fails identically, so stop immediately (#882). Recovery is an
       // operator/config fix + retryFailedEmbeddings.
-      await markPermanentFailure(db, node.id, String(err), capturedPendingAt);
+      await markPermanentFailure(db, node.id, String(err), capturedWorkToken);
       return 'failed-permanent';
     }
     await markRetryableFailure(
       db,
       node.id,
-      capturedPendingAt,
+      capturedWorkToken,
       node.embeddingAttempts,
       retryOpts,
-      String(err),
+      memory.isEncrypted ? FRESH_PLAINTEXT_REQUIRED : String(err),
     );
     return 'failed-transient';
   }
 }
 
-/** Clear markers iff embeddingPendingAt is still the captured value (latest-wins). */
+/** Clear markers iff the writer-captured work token still owns this obligation. */
 async function clearMarkers(
   db: PrismaClient,
   nodeId: string,
-  capturedPendingAt: Date | null,
+  capturedWorkToken: string,
 ): Promise<boolean> {
   const res = await db.node.updateMany({
-    where: { id: nodeId, embeddingPendingAt: capturedPendingAt },
+    where: { id: nodeId, embeddingWorkToken: capturedWorkToken },
     data: {
       embeddingPendingAt: null,
+      embeddingWorkToken: null,
       embeddingFailedAt: null,
       embeddingError: null,
       embeddingAttempts: 0,
@@ -339,7 +360,7 @@ async function clearMarkers(
  * Record a permanent-class failure: clear pending so the sweep never
  * re-selects it; keep failedAt/error as the record. Recovery is the
  * `retryFailedEmbeddings` mutation (or a fresh write, which re-stamps via
- * enqueueNodeEmbedding). Guarded by the captured `embeddingPendingAt`
+ * stampEmbeddingObligation). Guarded by the captured `embeddingWorkToken`
  * (latest-wins) — a newer write's re-stamp means a fresh attempt owns the
  * markers and this stale failure must not clobber it.
  */
@@ -347,11 +368,11 @@ async function markPermanentFailure(
   db: PrismaClient,
   nodeId: string,
   error: string,
-  capturedPendingAt: Date | null,
+  capturedWorkToken: string,
 ): Promise<void> {
   await db.node.updateMany({
-    where: { id: nodeId, embeddingPendingAt: capturedPendingAt },
-    data: { embeddingPendingAt: null, embeddingFailedAt: new Date(), embeddingError: error },
+    where: { id: nodeId, embeddingWorkToken: capturedWorkToken },
+    data: { embeddingPendingAt: null, embeddingWorkToken: null, embeddingFailedAt: new Date(), embeddingError: error },
   });
 }
 
@@ -364,7 +385,7 @@ async function markPermanentFailure(
  * removes the node from the queue — the pre-#882 5-attempt cap is how a
  * transient endpoint blip silently dropped 65 spec nodes from the index.
  *
- * Optimistic guard: only stamp if embeddingPendingAt is still the value
+ * Optimistic guard: only stamp if embeddingWorkToken is still the value
  * captured at the start of this attempt. A newer write that re-stamped it
  * has either already retried successfully or has its own attempt in flight;
  * either way this stale failure shouldn't clobber it. updateMany returns
@@ -373,7 +394,7 @@ async function markPermanentFailure(
 async function markRetryableFailure(
   db: PrismaClient,
   nodeId: string,
-  capturedPendingAt: Date | null,
+  capturedWorkToken: string,
   priorAttempts: number,
   retryOpts: EmbedRetryOpts,
   error: string,
@@ -384,12 +405,13 @@ async function markRetryableFailure(
   // Exponent clamped so a long-failing node can't overflow the arithmetic.
   const delayMs = Math.min(baseMs * 2 ** Math.min(attempts - 1, 20), maxMs);
   await db.node.updateMany({
-    where: { id: nodeId, embeddingPendingAt: capturedPendingAt },
+    where: { id: nodeId, embeddingWorkToken: capturedWorkToken },
     data: {
       embeddingFailedAt: new Date(),
       embeddingAttempts: attempts,
       embeddingError: error,
       embeddingPendingAt: new Date(Date.now() + delayMs),
+      embeddingWorkToken: randomUUID(),
     },
   });
 }
@@ -417,17 +439,11 @@ export interface DrainResult {
 // backed-off rows are never selected to manufacture fairness — the due
 // filter is unchanged (#882).
 //
-// The rotation cursor is process-local. Every batch-selection entry path
-// goes through drainEmbeddingQueue — the periodic sweep
-// (startEmbeddingWorkerLoop) and the bus drain ping (handleEmbedWake with an
-// empty payload) — so one cursor serves both. A direct `{ nodeId }` wake is
-// NOT a batch selection (it embeds one named node off its own marker) and
-// does not participate. Overlapping drains in one process (sweep tick racing
-// a ping) may interleave cursor writes and wobble the rotation point, but it
-// still only ever moves through memories that were actually served — never
-// holds still for a waiting memory. Multi-process deployments each rotate
-// independently; concurrent duplicate selections resolve to skips through
-// embedNode's latest-wins marker guards, exactly as before.
+// The rotation cursor is process-local. All production entry paths use one
+// dispatcher control reservation. It consumes the bounded candidate-ID batch
+// before advancing to another selection, so an admitted pipeline cap cannot
+// silently discard the memories over which this cursor advanced. Processes
+// rotate independently; this is fairness, not a fleet lease or exactly-once.
 
 let drainRotationMemoryId: string | null = null;
 
@@ -464,7 +480,10 @@ async function selectFairDueBatch(db: PrismaClient, batchSize: number): Promise<
       db.$queryRaw<DuePick[]>(Prisma.sql`
         SELECT DISTINCT ON (memory_id) id, memory_id
         FROM nodes
-        WHERE embedding_pending_at <= ${nowUtc}::timestamp${memoryFilter}${excludeSql}
+        WHERE embedding_pending_at <= ${nowUtc}::timestamp
+          AND embedding_work_token IS NOT NULL AND deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM memories m WHERE m.id = nodes.memory_id
+            AND m.deleted_at IS NULL AND (m.vector_index_enabled = true OR m.class = 'system') AND m.is_encrypted = false)${memoryFilter}${excludeSql}
         ORDER BY memory_id, embedding_pending_at ASC, id ASC
         LIMIT ${limit}
       `);
@@ -498,7 +517,10 @@ async function selectFairDueBatch(db: PrismaClient, batchSize: number): Promise<
     if (rows.length === 1 && selected.length < batchSize) {
       const fill = await db.$queryRaw<{ id: string }[]>(Prisma.sql`
         SELECT id FROM nodes
-        WHERE embedding_pending_at <= ${nowUtc}::timestamp AND id NOT IN (${Prisma.join([...excluded])})
+        WHERE embedding_pending_at <= ${nowUtc}::timestamp
+          AND embedding_work_token IS NOT NULL AND deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM memories m WHERE m.id = nodes.memory_id
+            AND m.deleted_at IS NULL AND (m.vector_index_enabled = true OR m.class = 'system') AND m.is_encrypted = false) AND id NOT IN (${Prisma.join([...excluded])})
         ORDER BY embedding_pending_at ASC, id ASC
         LIMIT ${batchSize - selected.length}
       `);
@@ -523,63 +545,88 @@ export async function drainEmbeddingQueue(
   opts: { batchSize?: number; client?: EmbeddingClient } & EmbedRetryOpts = {},
 ): Promise<DrainResult> {
   if (!isEmbeddingConfigured()) return { embedded: 0, failed: 0, skipped: 0 };
-  const batchSize = opts.batchSize ?? 25;
-  const client = opts.client ?? getEmbeddingClient();
-
-  const pending = await selectFairDueBatch(db, batchSize);
-
+  const outcomes = await embeddingDispatcher(db).drainWith(
+    (nodeId) => embedNode(db, nodeId, undefined, opts.client, opts), opts.batchSize,
+  );
   const result: DrainResult = { embedded: 0, failed: 0, skipped: 0 };
-  for (const nodeId of pending) {
-    const outcome = await embedNode(db, nodeId, undefined, client, {
-      retryBaseMs: opts.retryBaseMs,
-      retryMaxMs: opts.retryMaxMs,
-    });
-    if (outcome === 'embedded') result.embedded += 1;
-    else if (outcome === 'failed-permanent' || outcome === 'failed-transient') result.failed += 1;
-    else result.skipped += 1;
+  for (const outcome of outcomes) {
+    if (outcome === 'embedded') result.embedded++;
+    else if (outcome === 'failed-permanent' || outcome === 'failed-transient') result.failed++;
+    else result.skipped++;
   }
   return result;
 }
 
 /**
- * Start the periodic sweep loop (setTimeout initial delay → setInterval).
- * No-op-ish when no embedding endpoint is configured (drain returns early).
- * Returns the initial timer so callers can clearTimeout in tests/shutdown.
+ * Periodic wakes use the shared selector rather than spawning overlapping drains.
+ * stopEmbeddingWorker owns the current timer and bounded lifecycle teardown.
  */
+let sharedDispatcher: EmbeddingDispatcher | undefined;
+const workerTimers = new WeakMap<object, NodeJS.Timeout>();
+const busStops = new WeakMap<object, () => Promise<void>>();
+
+export function embeddingDispatcher(db: PrismaClient): EmbeddingDispatcher {
+  // Process-wide, not keyed by a client/transaction wrapper that could multiply
+  // admission capacity. The production selector uses the first pooled client.
+  if (!sharedDispatcher) {
+    sharedDispatcher = new EmbeddingDispatcher({
+      select: (limit) => selectFairDueBatch(db, limit),
+      run: (id) => embedNode(db, id),
+      onError: (error) => console.error('[embed-worker] bounded worker failed:', error),
+    });
+  }
+  return sharedDispatcher;
+}
+
+/** Admission remains closed if the migration/producer cut left runnable legacy obligations. */
+export async function assertEmbeddingObligationsReconciled(db: PrismaClient): Promise<void> {
+  const legacy = await db.node.count({ where: {
+    deletedAt: null, embeddingPendingAt: { not: null }, embeddingWorkToken: null,
+    memory: { deletedAt: null, ...INDEXED_MEMORY_WHERE },
+  } });
+  if (legacy) {
+    await embeddingDispatcher(db).stop(0);
+    throw new Error('Embedding worker admission closed: unreconciled legacy obligations.');
+  }
+}
+
 export function startEmbeddingWorkerLoop(
   db: PrismaClient,
   opts: { intervalMs?: number; initialDelayMs?: number; batchSize?: number } = {},
 ): NodeJS.Timeout {
-  const intervalMs = opts.intervalMs ?? 30_000;
-  const initialDelayMs = opts.initialDelayMs ?? 5_000;
-  const run = async () => {
-    try {
-      const r = await drainEmbeddingQueue(db, { batchSize: opts.batchSize });
-      if (r.embedded || r.failed) {
-        console.log(`[embed-worker] embedded=${r.embedded} failed=${r.failed} skipped=${r.skipped}`);
-      }
-    } catch (err) {
-      console.error('[embed-worker] drain error:', err);
-    }
+  const tick = () => {
+    if (isEmbeddingConfigured()) embeddingDispatcher(db).nudge();
+    workerTimers.set(db, setTimeout(tick, opts.intervalMs ?? 30_000));
   };
-  return setTimeout(() => {
-    void run();
-    setInterval(() => void run(), intervalMs);
-  }, initialDelayMs);
+  const timer = setTimeout(tick, opts.initialDelayMs ?? 5_000);
+  workerTimers.set(db, timer);
+  return timer;
+}
+
+export async function stopEmbeddingWorker(db: PrismaClient, graceMs = 5_000): Promise<boolean> {
+  const timer = workerTimers.get(db);
+  if (timer) clearTimeout(timer);
+  workerTimers.delete(db);
+  const stopBus = busStops.get(db);
+  busStops.delete(db);
+  // Close admission synchronously before waiting for broker teardown.
+  const settled = embeddingDispatcher(db).stop(graceMs);
+  let deadline: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      Promise.all([settled, stopBus ? stopBus().then(() => true, () => false) : true])
+        .then(([jobs, bus]) => jobs && bus),
+      new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), Math.max(0, graceMs)); }),
+    ]);
+  } finally { if (deadline) clearTimeout(deadline); }
 }
 
 // ── Bus wake-up (spec 039 — first same-process job listener) ────────────────
 //
-// Subject `embed.wake.v1` on the platform bus. Payload { nodeId } wakes a
-// check-and-embed for one node; an EMPTY payload is a drain ping (published
-// after a backfill stamp) that drains the whole queue without waiting for
-// sweep ticks. Everything is idempotent off the durable marker columns —
-// duplicate deliveries and bus-vs-sweep races resolve to skips (the
-// at-least-once contract in src/lib/bus/types.ts). With no broker configured
-// the listener simply never starts and the sweep alone drains the queue
-// (D-2026-06-17-004). The write-path prompt-drain is NOT replaced: it embeds
-// encrypted memories from in-closure plaintext, which no bus message can
-// carry.
+// Subject `embed.wake.v1` only nudges the shared selector. Legacy { nodeId }
+// hints remain valid but store no per-message job. Work and retry identity live
+// in Postgres; the broker is optional. Encrypted work can use only an admitted
+// fresh plaintext prompt, never a broker payload or a keyless sweep (R132).
 
 import { getBusClient } from '../lib/bus/index.js';
 
@@ -590,15 +637,9 @@ export interface EmbedWakePayload {
   nodeId?: string;
 }
 
-// A drain ping processes at most this many batches before yielding back to
-// the bus (re-published pings / the sweep pick up any remainder). Guards
-// against a pathological queue where skipped rows retain their marker.
-const MAX_DRAIN_BATCHES = 200;
-
 /**
- * Handle one wake-up. Throws ONLY on a transient single-node failure so the
- * bus redelivers with its delay (faster + capped-by-max_deliver retry, vs
- * waiting out sweep ticks); everything else resolves (ack).
+ * Validate and coalesce one wake, then ack. Durable backoff, not broker
+ * redelivery timing, schedules retryable work.
  */
 export async function handleEmbedWake(
   db: PrismaClient,
@@ -621,62 +662,8 @@ export async function handleEmbedWake(
   // No endpoint configured → nothing this process can do; ack and leave the
   // marker for the sweep once configuration arrives (same posture as drain).
   if (!isEmbeddingConfigured()) return;
-  if (nodeId) {
-    // Idempotency gate: embedNode itself embeds unconditionally (the sweep
-    // pre-filters on the marker; the prompt-drain runs right after setting
-    // it), so the wake-up checks the marker here — a node the prompt-drain
-    // or sweep already drained resolves to one cheap SELECT, not a re-embed
-    // (the at-least-once duplicate-delivery contract).
-    const row = await db.node.findUnique({
-      where: { id: nodeId },
-      select: { embeddingPendingAt: true, memory: { select: { isEncrypted: true } } },
-    });
-    if (!row?.embeddingPendingAt) return;
-    // A FUTURE-dated stamp is a backed-off retry that is not yet due (#882).
-    // Bus naks redeliver after ~15s while the first backoff step is 60s and
-    // grows — without this check a redelivery would bypass the backoff the
-    // failure just scheduled and burn immediate attempts against an
-    // unhealthy endpoint (PR-883 review, Codex P2). Ack and leave it to the
-    // sweep's due-stamp filter, which owns backed-off work.
-    if (row.embeddingPendingAt.getTime() > Date.now()) return;
-    // Encrypted memory: PUNT (PR-489 review, Codex P2). The wake arrives
-    // within milliseconds of the write — while the prompt-drain (which holds
-    // the plaintext this bus message cannot carry) may still be in flight.
-    // A plaintext-less embedNode here would record a PERMANENT
-    // encrypted-no-plaintext failure (#206) and clear the marker, and the
-    // prompt-drain's latest-wins guard would then skip its write — leaving
-    // the node unembedded. The prompt-drain owns encrypted embeds; the sweep
-    // keeps its documented #206 behavior for crash recovery.
-    if (row.memory.isEncrypted) return;
-    const outcome = await embedNode(db, nodeId, undefined, client);
-    if (outcome === 'failed-transient') {
-      throw new Error(`transient embed failure for node ${nodeId} — nak for redelivery`);
-    }
-    return;
-  }
-  // Drain ping: pull full batches until the queue comes up short.
-  const batchSize = 25;
-  for (let i = 0; i < MAX_DRAIN_BATCHES; i++) {
-    const r = await drainEmbeddingQueue(db, { batchSize, ...(client ? { client } : {}) });
-    const processed = r.embedded + r.failed + r.skipped;
-    if (r.failed > 0) {
-      // Failed rows are rescheduled with a future-dated pendingAt (#882
-      // backoff), so the next batch can no longer tight-loop on exactly
-      // them — but a batch full of failures still means the endpoint is
-      // most likely unhealthy, and marching on would burn one doomed
-      // attempt (and one backoff step) per remaining queued node. Keep the
-      // PR-489 posture: on a full batch, THROW so the bus redelivers this
-      // ping after the nak delay (spaced continuation, max_deliver-capped);
-      // on a short batch the queue is nearly done — return and let the
-      // sweep's cadence handle the stragglers.
-      if (processed === batchSize) {
-        throw new Error('embed drain paused after failures — nak for spaced continuation');
-      }
-      return;
-    }
-    if (processed < batchSize) return;
-  }
-  console.warn('[embed-worker] drain ping hit the batch cap — remainder left to the sweep');
+  // Any valid wake uses one shared admission path, including node-specific hints.
+  embeddingDispatcher(db).nudge();
 }
 
 /**
@@ -705,6 +692,9 @@ export async function startEmbeddingBusListener(
       await handleEmbedWake(db, msg.payload);
     },
   );
+  // Shutdown may race subscription establishment; do not resurrect a stopped listener.
+  if (embeddingDispatcher(db).state().closed) { await unsubscribe(); return null; }
+  busStops.set(db, unsubscribe);
   console.log(`[embed-worker] bus listener active on ${EMBED_WAKE_SUBJECT}`);
   return unsubscribe;
 }

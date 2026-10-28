@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   corpusReferencePattern,
   findCorpusReferences,
+  findNodeUrnTokens,
   findTextCitations,
   renumberedLoc,
   rewriteCorpusReferences,
@@ -127,5 +128,18 @@ describe('findTextCitations', () => {
     expect(findTextCitations('See pas:010..v2 too', P, 'pas:010')).toEqual([]);
     expect(findTextCitations('See pas:010... Then more.', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
     expect(findTextCitations('See pas:010.. next', P, 'pas:010').map((c) => c.citation)).toEqual(['pas:010']);
+  });
+});
+
+describe('findNodeUrnTokens (#1594)', () => {
+  it('finds prefixed node URNs in either style and case, inside a portal URL, without trailing punctuation', () => {
+    expect(findNodeUrnTokens(
+      'See hrn:node:a.org:m:cor:010, (urn:NODE:a.org::m::cor:020). [x](https://p.test/app/u/hrn:node:b.org:n:pas:1.5) end.',
+    )).toEqual(['hrn:node:a.org:m:cor:010', 'urn:NODE:a.org::m::cor:020', 'hrn:node:b.org:n:pas:1.5']);
+  });
+  it('ignores unprefixed addresses, longer prefixes and a missing loc, and deduplicates', () => {
+    expect(findNodeUrnTokens('a.org:m:cor:010 xhrn:node:a.org:m:cor:1 hrn:node:a.org hrn:memory:a.org:m')).toEqual([]);
+    expect(findNodeUrnTokens('hrn:node:a.org:m:l hrn:node:a.org:m:l')).toEqual(['hrn:node:a.org:m:l']);
+    expect(findNodeUrnTokens(null)).toEqual([]);
   });
 });

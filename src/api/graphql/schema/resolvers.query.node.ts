@@ -20,7 +20,7 @@ import {
   getEmbeddingClient,
   isEmbeddingConfigured,
 } from '../../../lib/embedding/index.js';
-import { reciprocalRankFusionScored } from '../../../lib/rrf.js';
+import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
@@ -36,6 +36,7 @@ import type { LexicalField, BrowseSort, NodeSqlFilter } from '../../../lib/retri
 import { expandWithNeighbors } from '../../../lib/search.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import {
@@ -78,6 +79,8 @@ import {
   isOwnerOrOrgMember,
   canReadMemoryRecord,
   getAccessibleMemoryIds,
+  pageArgs,
+  pageEnvelope,
   memoryAccessFilter,
   isMemoryReadableCached,
   loadMemoryUrn,
@@ -98,6 +101,8 @@ import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
+  /** Internal object-store request only, not a GraphQL/MCP search argument. Counts no-query browse matches. */
+  includeTotal?: boolean;
   query?: string | null;
   mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
   minScore?: number | null;
@@ -130,6 +135,46 @@ export interface FindNodesArgs {
   orgId?: string | null;
   limit?: number | null;
   offset?: number | null;
+}
+
+/**
+ * The admission shared by `nodeRevisions` and `nodeRevisionsPage` (#2212 A1): READER, a node ref that
+ * resolves for the caller (a genuine miss collapses to the empty answer; a malformed ref propagates), a
+ * live node, read on its CURRENT memory (#602) and no concealed comment history (#1663). `null` is the
+ * empty answer. `canRead` is the per-snapshot memory gate; `accessible` (null = unrestricted) is the set
+ * it tests, for callers that push it into SQL.
+ */
+async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
+  requireRole(ctx, 'READER');
+  // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
+  // qualified node URN. A genuine miss collapses to [] (no existence
+  // disclosure); a malformed / unqualified URN propagates — mirrors
+  // memoryUsageSummary / resolveReadableMemoryId.
+  let nodeId: string;
+  try {
+    ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
+  } catch (e) {
+    if (e instanceof NodeNotFoundError) return null;
+    throw e;
+  }
+  // Access control (#602): this resolver previously had NO gate — any
+  // authenticated caller could read any tenant's node revision history.
+  const node = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true } });
+  if (!node) return null;
+  // Full accessible-memory set for the principal (null = unrestricted).
+  // getAccessibleMemoryIds encodes the principal + memory-class rules
+  // (spec 034). We gate the node's CURRENT memory AND each snapshot's
+  // memory: a node MOVED across memories keeps its stable id (moveNode),
+  // so its history can hold snapshots captured while it lived in a memory
+  // the caller can't read (#602 / Codex P1) — gating the current memory
+  // alone would leak those.
+  const accessible = await getAccessibleMemoryIds(ctx);
+  const canRead = (memId: string) => accessible === null || accessible.includes(memId);
+  // No read on the current memory ⇒ empty (no existence disclosure, matching memoryUsageSummary).
+  if (!canRead(node.memoryId)) return null;
+  // #1663 — a comment stub's history is for memory managers.
+  if (await isConcealedCommentHistory(ctx, nodeId)) return null;
+  return { nodeId, memoryId: node.memoryId, accessible, canRead };
 }
 
 export const nodeQueries = {
@@ -963,12 +1008,12 @@ export const nodeQueries = {
       // at the bottom can re-enter it without a self-reference (which would
       // leave TypeScript unable to infer the return type).
       const core = async ({
-        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore,
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore, includeTotal,
       }: FindNodesArgs) => {
       const f = filter ?? {};
 
       // ── (spec 049 scope handling lives in the wrapper at the end of core) ──
-      const finalLimit = limit ?? 50;
+      const finalLimit = limit ?? 20;
       const off = offset ?? 0;
       // #497 — optional absolute relevance floor. Applied to the ranked scores
       // before paging (a NaN guard so a bad arg is simply ignored, never throws).
@@ -1197,6 +1242,12 @@ export const nodeQueries = {
 
       // ── No query → filtered list (subsumes `nodes`) ──
       if (!hasQuery) {
+        // #2514: object queries promise an exact count before paging. Ordinary
+        // search remains uncounted; reuse the already admitted scope and filters.
+        const total = includeTotal ? await provider.filterCount({
+          db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
+          includeDeleted: !!f.includeDeleted, excludeNodeIds: inheritance.excludeNodeIds,
+        }) : null;
         // A `where` predicate (JSONB the Prisma query can't express) OR a
         // property-path sort (an ORDER BY over a JSON path Prisma can't express)
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
@@ -1226,7 +1277,7 @@ export const nodeQueries = {
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
           const browseHits = ordered.map((n) => ({ node: n, score: null, vector: null }));
           await recordSearchHits(browseHits);
-          return { hits: browseHits, passages: [], total: null, reason: null, degraded: null };
+          return { hits: browseHits, passages: [], total, reason: null, degraded: null };
         }
         const orderBy =
           sort === 'seq' ? { seq: 'asc' as const }
@@ -1245,7 +1296,7 @@ export const nodeQueries = {
         return {
           hits: listHits,
           passages: [],
-          total: null,
+          total,
           reason: null,
           degraded: null,
         };
@@ -1558,25 +1609,9 @@ export const nodeQueries = {
           db: ctx.db, memoryIds: scopeIds, fields: lexFields, filter: sqlFilter,
           includeDeleted: !!f.includeDeleted, sort: 'relevance' as const, offset: 0, limit: fetchN,
         };
-        try {
-          const strict = await provider.lexicalSearch({ ...args, query: q });
-          if (!opts.relax || strict.length > 0) return strict;
-          const orQuery = relaxConjunctionToOr(q);
-          if (orQuery) {
-            const relaxed = await provider.lexicalSearch({ ...args, query: orQuery });
-            if (relaxed.length > 0) {
-              lexicalDegraded = [lexicalDegraded, 'and_relaxed_to_or'].filter(Boolean).join(',');
-              return relaxed;
-            }
-          }
-          return strict;
-        } catch (e) {
-          if (e instanceof BooleanQueryError) {
-            lexicalDegraded = 'literal_fallback';
-            return safeLiteralSearch(args);
-          }
-          throw e;
-        }
+        const result = await hybridKeywordCandidates(q, query => provider.lexicalSearch({ ...args, query }), !!opts.relax);
+        lexicalDegraded = result.degraded;
+        return result.hits;
       };
 
       if (indexedIds.length === 0) {
@@ -1718,15 +1753,10 @@ export const nodeQueries = {
       // within-result-set relevance signal. The cosine similarity is still carried
       // separately on `vector.similarity` (simById below).
       const kwRanked = await runKeywordRanked();
-      const fused = reciprocalRankFusionScored(
-        [kwRanked.map((r) => r.nodeId), vecHits.map((h) => h.nodeId)],
-        (id) => id,
-        // Keep at least the (possibly widened) vector window: truncating to the
-        // original fetchN would drop the matches widening went out to find.
-      ).slice(0, Math.max(fetchN, vecHits.length));
+      const fused = composeHybridRanking(kwRanked, vecHits, Math.max(fetchN, vecHits.length));
       const simById = new Map(vecHits.map((h) => [h.nodeId, h.score]));
       return await buildResult(
-        fused.map((r) => ({ nodeId: r.item, score: r.score })),
+        fused.map((r) => ({ nodeId: r.nodeId, score: r.score })),
         simById,
         null,
         mergeDegraded(null),
@@ -2134,49 +2164,38 @@ export const nodeQueries = {
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
         },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 50,
+        take: limit ?? 20,
+      });
+    },
+
+    nodeEdgeRemovals: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
+      const scope = await nodeRevisionsScope(ctx, nodeRef);
+      if (!scope) return [];
+      // Each entry carries the memory it was recorded in: a source that later MOVED keeps no more history
+      // visible than nodeRevisions shows, so the memory gate is in the `where`, before `take`.
+      const rows = await ctx.db.nodeEdgeRemoval.findMany({
+        where: scope.accessible === null
+          ? { sourceId: scope.nodeId }
+          : { sourceId: scope.nodeId, memoryId: { in: scope.accessible } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit ?? 20,
+      });
+      // The deleted target's address is another node's identity, and the edge's own loc is derived from both
+      // endpoints: show neither where the target's memory is not readable.
+      return rows.map((r) => {
+        const readable = scope.canRead(r.targetMemoryId);
+        return { ...r, targetLoc: readable ? r.targetLoc : null, edgeLoc: readable ? r.edgeLoc : null };
       });
     },
 
     nodeRevisions: async (_: unknown, { nodeRef, limit }: { nodeRef: string; limit?: number }, ctx: Context) => {
-      requireRole(ctx, 'READER');
-      // cor:api:140 / 007-entity-id-or-urn: nodeRef may be an ID or a fully-
-      // qualified node URN. A genuine miss collapses to [] (no existence
-      // disclosure); a malformed / unqualified URN propagates — mirrors
-      // memoryUsageSummary / resolveReadableMemoryId.
-      let nodeId: string;
-      try {
-        ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
-      } catch (e) {
-        if (e instanceof NodeNotFoundError) return [];
-        throw e;
-      }
-      // Access control (#602): this resolver previously had NO gate — any
-      // authenticated caller could read any tenant's node revision history.
-      const node = await ctx.db.node.findUnique({
-        where: { id: nodeId },
-        select: { memoryId: true },
-      });
-      if (!node) return [];
-      // Full accessible-memory set for the principal (null = unrestricted).
-      // getAccessibleMemoryIds encodes the principal + memory-class rules
-      // (spec 034). We gate the node's CURRENT memory AND each snapshot's
-      // memory: a node MOVED across memories keeps its stable id (moveNode),
-      // so its history can hold snapshots captured while it lived in a memory
-      // the caller can't read (#602 / Codex P1) — gating the current memory
-      // alone would leak those.
-      const accessible = await getAccessibleMemoryIds(ctx);
-      const canRead = (memId: string) => accessible === null || accessible.includes(memId);
-      // No read on the current memory ⇒ [] (no existence disclosure, matching
-      // memoryUsageSummary).
-      if (!canRead(node.memoryId)) return [];
-      // #1663 — a comment stub's history is for memory managers.
-      if (await isConcealedCommentHistory(ctx, nodeId)) return [];
-
+      const scope = await nodeRevisionsScope(ctx, nodeRef);
+      if (!scope) return [];
+      const { nodeId, memoryId, canRead } = scope;
       const revisions = await ctx.db.nodeRevision.findMany({
         where: { nodeId },
         orderBy: { createdAt: 'desc' },
-        take: limit ?? 50,
+        take: limit ?? 20,
       });
       // Drop snapshots captured while the node lived in a memory the caller
       // can't read. Legacy rows (memoryId NULL) fall back to the node's current
@@ -2184,8 +2203,33 @@ export const nodeQueries = {
       // node spanning inaccessible memories may under-return near the limit —
       // safe, never over-returns.)
       return decryptReadableRevisions(
-        ctx.db, revisions.filter((v) => canRead(v.memoryId ?? node.memoryId)), node.memoryId,
+        ctx.db, revisions.filter((v) => canRead(v.memoryId ?? memoryId)), memoryId,
       );
+    },
+
+    /**
+     * #2212 A1 — `nodeRevisions` as a page. Same admission (one shared `nodeRevisionsScope`), but the
+     * per-snapshot memory gate is in the SQL `where`, so `total` counts only snapshots the caller may read
+     * and the page does not under-return. Legacy rows (memoryId NULL) fall back to the node's memory,
+     * already authorized by the scope. Decryption runs on the returned page only.
+     */
+    nodeRevisionsPage: async (
+      _: unknown,
+      args: { nodeRef: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { take, skip } = pageArgs(args);
+      const scope = await nodeRevisionsScope(ctx, args.nodeRef);
+      if (!scope) return pageEnvelope([], 0, skip);
+      const { nodeId, memoryId, accessible } = scope;
+      const where: Prisma.NodeRevisionWhereInput = accessible === null
+        ? { nodeId }
+        : { nodeId, OR: [{ memoryId: { in: accessible } }, { memoryId: null }] };
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.nodeRevision.count({ where }),
+        ctx.db.nodeRevision.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(await decryptReadableRevisions(ctx.db, rows, memoryId), total, skip);
     },
 
     // #617 (Display) — a single snapshot by id, so the portal doesn't filter
@@ -2442,7 +2486,7 @@ export const nodeQueries = {
           ],
         },
         orderBy: { loc: 'asc' },
-        take: limit ?? 500,
+        take: limit ?? 20,
         include: {
           outgoingEdges: { include: { target: true } },
           incomingEdges: { include: { source: true } },

@@ -22,6 +22,7 @@ export async function withAuthorizedTx<T>(
   authorize: (txCtx: Context) => Promise<void>,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
   options: {
+    afterAnchors?: (tx: Prisma.TransactionClient) => Promise<void>;
     afterLock?: (tx: Prisma.TransactionClient) => Promise<void>;
     lockMode?: 'shared' | 'exclusive';
     isolationLevel?: Prisma.TransactionIsolationLevel;
@@ -54,6 +55,10 @@ export async function withAuthorizedTx<T>(
     const uniqueRows = [...new Map(rowAnchors.map((a) => [`${a.kind}:${a.id}`, a])).values()]
       .sort((a, b) => rowOrder[a.kind] - rowOrder[b.kind] || a.id.localeCompare(b.id));
     await lockAuthorityAnchors(tx, rowAnchors, options.lockMode ?? 'shared');
+    // Advisory-only locks that must precede EVERY row lock below (#2245): a writer whose own order is
+    // "advisory key, then rows" (setAgentBase: graph lock, then child row) would otherwise cycle with
+    // the anchor rows taken here. Take no row lock in this hook.
+    await options.afterAnchors?.(tx);
     // Owner rows precede child rows, matching rename/transfer cascades. SHARE
     // (rather than KEY SHARE) makes a SERIALIZABLE waiter fail with 40001 if a
     // revoker soft-deleted or re-roled an anchor row before the lock arrived.
@@ -147,6 +152,7 @@ export async function withAuthorizedMemoryTx<T>(
   authorize: (txCtx: Context) => Promise<void>,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
   options: {
+    afterAnchors?: (tx: Prisma.TransactionClient) => Promise<void>;
     afterLock?: (tx: Prisma.TransactionClient) => Promise<void>;
     lockMode?: 'shared' | 'exclusive';
     isolationLevel?: Prisma.TransactionIsolationLevel;

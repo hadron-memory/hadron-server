@@ -36,6 +36,8 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { deserializeTags } from '../db/provider.js';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
+import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
+import type { MirrorObligationRef } from './mirrorObligations.js';
 import { removeNodeFile, writeNodeFile, nodePayloadHasCiphertext, type NodeForGit } from './writeNodeToGit.js';
 
 /** One relocated node: its stable id and the loc it occupied before the move. */
@@ -58,11 +60,10 @@ export interface MovedNodeRef {
  * `node.written` subscriber, so a duplicate call just mirrors the same latest
  * state.
  *
- * ENCRYPTED memories are punted on the WRITE side only: rendering a node's file
- * needs plaintext, and this runs after the request that held the session key.
- * The REMOVE side has no such need — deleting a stale path requires no
- * decryption — so a node leaving an encrypted git-backed memory still stops
- * being re-minted by the next sync.
+ * ENCRYPTED memories take no part in either direction (R206, cor:sec:040:05):
+ * not as the destination of a write, and not as the source of a path-only
+ * removal. Each refusal is logged as ENCRYPTED_GIT_SYNC_UNAVAILABLE; the move
+ * itself stands.
  */
 export async function mirrorNodeMoveToGit(
   db: PrismaClient,
@@ -114,8 +115,13 @@ async function mirrorMove(
   // `source != null` records which repo a memory BELONGS to, not that a mirror
   // is currently running — withMirrorCheckout still skips (loudly) when the
   // clone is absent. Bail early only when neither side claims a repo at all.
+  // R206: an encrypted memory takes no part in Git sync in either direction —
+  // not as the destination of a write, and not as the source of a path-only
+  // removal. Each refusal is an observable typed skip.
   const writesToRepo = destination?.source != null && !destination.isEncrypted;
-  const removesFromRepo = srcMem?.source != null;
+  const removesFromRepo = srcMem?.source != null && !srcMem.isEncrypted;
+  if (destination?.source != null && destination.isEncrypted) logEncryptedGitSyncRefusal('[mirrorNodeMove] write', destMemoryId);
+  if (srcMem?.source != null && srcMem.isEncrypted) logEncryptedGitSyncRefusal('[mirrorNodeMove] removal', srcMemoryId);
   if (!writesToRepo && !removesFromRepo) return;
 
   const label = moved.length === 1
@@ -126,14 +132,17 @@ async function mirrorMove(
     await withMirrorCheckout(
       {
         memoryId: destMemoryId,
-        // Background move rendering carries no request key. Source-path
-        // deletion below deliberately omits this flag because it writes no bytes.
-        nodeWriteKeyAvailable: false,
         clientId,
         commitSubject: crossMemory
           ? `Move in ${label} from ${srcMem?.urn ?? 'another memory'}`
           : `Move ${label}`,
         logPrefix: '[mirrorNodeMove]',
+        // #430: the destination owes each moved node's file at its new loc, and (same memory) the removal of every old loc,
+        // one REMOVE row per (node, old loc) so a node moved twice while a push keeps failing owes both vacated paths.
+        obligations: [
+          ...moved.map((m): MirrorObligationRef => ({ nodeId: m.id, kind: 'WRITE' })),
+          ...(crossMemory ? [] : removals(moved)),
+        ],
       },
       async ({ localPath, memoryUrn }) => {
         // Re-read only after the checkout lock is held. A later Node/Edge
@@ -182,12 +191,19 @@ async function mirrorMove(
         clientId,
         commitSubject: `Move out ${label} to ${destination?.urn ?? 'another memory'}`,
         logPrefix: '[mirrorNodeMove]',
+        // #430: the source repository still owes the removal of each old path.
+        obligations: removals(moved),
       },
       ({ localPath, memoryUrn }) => {
         for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id, memoryUrn);
       },
     );
   }
+}
+
+/** The REMOVE obligations of a move. A root has no loc to vacate (removeNodeFile refuses it), so it owes nothing. */
+function removals(moved: readonly MovedNodeRef[]): MirrorObligationRef[] {
+  return moved.filter((m) => m.previousLoc !== '').map((m) => ({ nodeId: m.id, kind: 'REMOVE', removeLoc: m.previousLoc }));
 }
 
 /** Project a loaded node row onto the mirror's write payload. */

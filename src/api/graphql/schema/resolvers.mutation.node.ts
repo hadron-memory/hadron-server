@@ -1,3 +1,4 @@
+import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { currentActor } from '../../../lib/requestActor.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
@@ -15,7 +16,7 @@ import {
   type ProtectedLoc,
   type ProtectedSource,
 } from '../../../lib/protectedLoc.js';
-import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { lockMemoriesForChannelChange, lockMemoryForChannelChange } from '../../../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { assertNoGovernedRemoval, governedRemovalError } from '../../../lib/governedRemoval.js';
 import {
@@ -64,6 +65,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
+import type { WriteDestination } from '../../../lib/appWriteGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import {
   validateLoc,
@@ -107,7 +109,6 @@ import {
   deserializeTags,
   serializeTags,
 } from '../../../integrations/db/provider.js';
-import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { mirrorEdgeSourceAfterCommit } from '../../../integrations/github/mirrorEdgeSource.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import {
@@ -163,6 +164,46 @@ import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js'
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
+
+
+/**
+ * #2517 — writes one `NodeEdgeRemoval` per live edge that points INTO `targetIds` from a node outside
+ * them, just before a hard delete cascades those edges away. Governed edges are skipped (comment
+ * threads go with the target, cor:dmo:110:04; derived INCLUDE edges are not recorded, cor:dmo:010:04) and so are edges already soft-deleted (they left the live
+ * graph earlier). Runs inside the delete's transaction.
+ */
+async function recordEdgeRemovals(tx: Prisma.TransactionClient, targetIds: string[], removedBy: string | null) {
+  const edges = await tx.edge.findMany({
+    where: {
+      targetId: { in: targetIds },
+      sourceId: { notIn: targetIds },
+      // Governed edges are skipped: comment edges go with their threads, and a derived INCLUDE edge (#2040) is
+      // not recorded (Vera, cor:dmo:010:04 Proposed: its tag stays in the source's content and reads as broken).
+      governedKind: null,
+      deletedAt: null,
+    },
+    select: {
+      id: true, loc: true, name: true, targetId: true, sourceId: true,
+      source: { select: { memoryId: true } },
+      target: { select: { loc: true, memoryId: true } },
+    },
+  });
+  if (edges.length === 0) return;
+  await tx.nodeEdgeRemoval.createMany({
+    data: edges.map((e) => ({
+      sourceId: e.sourceId,
+      memoryId: e.source.memoryId,
+      edgeId: e.id,
+      edgeLoc: e.loc,
+      edgeName: e.name,
+      targetId: e.targetId,
+      targetMemoryId: e.target.memoryId,
+      targetLoc: e.target.loc,
+      reason: 'TARGET_HARD_DELETED',
+      removedBy,
+    })),
+  });
+}
 
 /**
  * #1606 (cor:dmo:110:01/04) — no generic edge write alters or removes a
@@ -347,8 +388,17 @@ async function writeNodeCoreRaw(
       // memory without record-read access. Internal callers pass no
       // concealUnreadable and keep the bare denial.
       const conceal = opts?.concealUnreadable;
+      // #2484: the destination an App's write grant for its userless runs is judged against — this create or update, at
+      // this loc. Named only when the write carries no inline edges: a grant permits node create/update under a
+      // prefix and "no edges outside the prefix", and an `edges` list (even an empty one, which replaces the node's
+      // edges) reaches beyond it. Content with an include tag is the same thing by another road: the write derives an
+      // INCLUDE edge to every node the tag names (#2040), wherever it lives. Without a destination the grant arm
+      // never answers.
+      const carriesIncludeTag = typeof input.content === 'string' && input.content.includes('{{>');
+      const grantDestination: WriteDestination | undefined =
+        input.edges === undefined && !carriesIncludeTag ? { loc: input.loc, verb: mode } : undefined;
       const authorizeWrite = async (authCtx: Context) => {
-        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId);
+        const gate = () => requireMemoryWriteAccess(authCtx, resolvedMemoryId, grantDestination);
         if (!conceal) {
           await gate();
         } else if (conceal.entity === 'node') {
@@ -501,6 +551,18 @@ async function writeNodeCoreRaw(
           ? { id: opts.targetNodeId }
           : { loc_memoryId: { loc: input.loc, memoryId: input.memoryId } },
       });
+
+      // #1200 (Holger's ruling A, 2026-10-24): an update by address means "the
+      // node I found there". Anchor the rest of the write on the probed row's
+      // immutable id, exactly as the id selector does, so a replacement that
+      // takes the address between this probe and the write is refused
+      // (NODE_WRITE_CONFLICT, via `assertTargetStillWritable` and the write's own
+      // predicate) instead of being written with a snapshot, authorization and
+      // schema decision taken from the original (cor:dmo:060:04). A missing or
+      // tombstoned probe keeps its NODE_NOT_FOUND below.
+      if (mode === 'update' && !opts?.targetNodeId && existing && !existing.deletedAt) {
+        opts = { ...opts, targetNodeId: existing.id };
+      }
 
       // #1201 — the GOVERNED-KIND gate, on the RESULTING STATE.
       //
@@ -871,8 +933,10 @@ async function writeNodeCoreRaw(
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /
       // empty sibling list leaves seq null (nextSiblingSeq returns null).
+      // #443: roots retain the old behavior; nested allocation waits for the
+      // existing parent lock inside the writing transaction below.
       const seqForCreate =
-        existing == null && input.seq == null
+        existing == null && input.seq == null && !input.loc.includes(':')
           ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
           : undefined;
 
@@ -944,6 +1008,7 @@ async function writeNodeCoreRaw(
       const readableForIncludes = typeof input.content === 'string' && input.content.includes('{{>')
         ? await getAccessibleMemoryIds(ctx)
         : null;
+      let writeEmbeddingWorkToken: string | null = null;
       // #2041 S2b — `storedPlaintext` is the includer's plaintext from the row
       // this write locked and revalidated, before its update; null for a create
       // or a resurrected tombstone, whose old text is not the includer's.
@@ -952,6 +1017,7 @@ async function writeNodeCoreRaw(
         writtenNode: T,
         storedPlaintext: string | null,
       ): Promise<T> {
+        writeEmbeddingWorkToken = await stampEmbeddingObligation(tx, writtenNode.id, writtenNode.memoryId);
         if (input.content !== undefined) {
           const stored = { storedPlaintext };
           const tags = await assertIncludesWritable(tx, writtenNode, input.content, readableForIncludes, undefined, stored);
@@ -1432,11 +1498,12 @@ async function writeNodeCoreRaw(
             // meant create never held two keys at all: no new edge, nothing to
             // order against.
             //
-            // #1187 established the order (`acquireLockSet` / `compareLockKeys`)
-            // and merge and move now declare their full sets through it, so
-            // that constraint is GONE: ancestors-then-own-loc is already the
-            // global order (length-ascending), and taking this lock
-            // unconditionally would be safe today.
+            // #1187 made merge and move declare complete lock sets. #1214
+            // orders those sets by resolved advisory keys, not loc length:
+            // any additional key must join the complete set before acquisition.
+            // Ancestors-then-own-loc is no longer a safe acquisition order.
+            // This create/upsert branch still takes the own-loc key ONLY when
+            // there are no ancestors, as the condition below makes explicit.
             //
             // It stays root-level-only for the ORIGINAL, narrower reason —
             // redundancy. Two creates at one NESTED loc already serialize on
@@ -1597,8 +1664,13 @@ async function writeNodeCoreRaw(
             if (authoritative) {
               await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
+            // #443: the existing ancestor set includes the immediate parent.
+            // READ COMMITTED now sees the prior parent's holder commit.
+            const nestedSeq = existing == null && input.seq == null && input.loc.includes(':')
+              ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
+              create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
               update: {
                 ...upsertArgs.update,
                 // #1326 — this arm OVERWRITES an existing row. For a copy
@@ -1684,9 +1756,9 @@ async function writeNodeCoreRaw(
       const finalNode = node;
 
       // Event pivot: the write core announces the fact; subscribers (git
-      // mirror, embedding wake, whatever comes next) act on it. Encrypted
-      // memories keep the direct git write below — the subscriber can't
-      // decrypt without this request's session key, and finalNode is plaintext.
+      // mirror, embedding wake, whatever comes next) act on it. An encrypted
+      // memory never syncs to Git (R206): the git subscriber records a typed
+      // skip for it, whatever key this request carries.
       // When the caller owns the transaction, delay every effect until its
       // commit succeeds. The callback uses the pooled client, never the tx.
       const afterCommit = () => {
@@ -1697,47 +1769,11 @@ async function writeNodeCoreRaw(
           ownerRepo: input.ownerRepo ?? '',
           clientId: ctx.clientId,
         });
-        if (memEncInfo.isEncrypted) {
-          // reserveSpecCitation marks the new row AFTER writeNodeCore returns,
-          // in its enclosing transaction. The direct encrypted mirror path is
-          // the only exporter for that memory, so read the committed marker
-          // rather than serializing finalNode's pre-reservation false value.
-          void (async () => {
-            const committed = await pooledDb.node.findUnique({
-              where: { id: finalNode.id }, select: { isPlaceholder: true },
-            });
-            if (!committed) return;
-            await writeNodeToGit({
-              id: finalNode.id,
-              loc: finalNode.loc,
-              name: finalNode.name,
-              nodeType: finalNode.nodeType,
-              alias: finalNode.alias,
-              description: finalNode.description,
-              abstract: finalNode.abstract,
-              abstractOriginHash: finalNode.abstractOriginHash,
-              contentHash: finalNode.contentHash,
-              content: finalNode.content,
-              tags: deserializeTags(finalNode.tags) as string[],
-              seq: finalNode.seq,
-              data: finalNode.data,
-              properties: finalNode.properties,
-              // #1218 — the mirror carries the governed signals.
-              role: finalNode.role ?? null,
-              isRunnable: finalNode.isRunnable ?? null,
-              isPlaceholder: committed.isPlaceholder,
-              outgoingEdges: finalNode.outgoingEdges ?? [],
-              mirrorRevSeq: finalNode.revSeq,
-            }, input.ownerRepo ?? '', ctx.clientId, input.memoryId);
-          })().catch((err) => {
-            console.error('[writeNodeCore] git write error:', err);
-          });
-        }
-
         // 033 — (re-)embed on write. finalNode is decrypted (plaintext) here,
         // so the prompt-drain embeds correctly on encrypted memories (FR-027).
         void enqueueNodeEmbedding(pooledDb, {
           nodeId: finalNode.id,
+          workToken: writeEmbeddingWorkToken,
           memoryId: input.memoryId,
           plaintext: { content: finalNode.content, abstract: finalNode.abstract },
         });
@@ -2867,9 +2903,7 @@ export const nodeMutations = {
         // Channel had existed at selection time; no snapshot or update for
         // them may reach the Channel-owned address (#1298).
         const channelMemoryIds = [...new Set([...nodeById.values()].map((row) => row.memoryId))].sort();
-        for (const memoryId of channelMemoryIds) {
-          await lockMemoryForChannelChange(tx, memoryId);
-        }
+        await lockMemoriesForChannelChange(tx, channelMemoryIds);
         const newlyProtected = new Set<string>();
         const currentProtected = new Map<string, ProtectedLoc[]>();
         for (const row of scannedNodes) {
@@ -3006,6 +3040,9 @@ export const nodeMutations = {
 
           Object.assign(data, clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
+          if (p.contentChanged || p.abstractChanged) {
+            raw.embeddingWorkToken = await stampEmbeddingObligation(tx, raw.id, raw.memoryId);
+          }
           // #2040 — a replace that rewrites content re-checks its include tags; a
           // refusal throws and rolls the whole batch back with it.
           if (p.contentChanged) {
@@ -3032,59 +3069,20 @@ export const nodeMutations = {
         if (p.contentChanged || p.abstractChanged) {
           void enqueueNodeEmbedding(ctx.db, {
             nodeId: p.raw.id,
+            workToken: p.raw.embeddingWorkToken,
             memoryId: p.raw.memoryId,
             plaintext: { content: p.plaintext.content, abstract: p.plaintext.abstract },
           });
         }
         // Announce the write (git mirror rides the event — so a later
-        // repo-wins sync can't revert the edit). Encrypted memories keep the
-        // direct decrypt-and-mirror below: the subscriber has no session key.
+        // repo-wins sync can't revert the edit). An encrypted memory never
+        // syncs to Git (R206); the subscriber records a typed skip for it.
         void publishNodeWritten({
           nodeId: p.raw.id,
           memoryId: p.raw.memoryId,
           ownerRepo: p.ownerRepo,
           clientId: ctx.clientId,
         });
-        if (p.isEncrypted) {
-          void (async () => {
-            const fresh = await ctx.db.node.findUnique({
-              where: { id: p.raw.id },
-              include: { outgoingEdges: { include: { target: true } } },
-            });
-            if (!fresh) return;
-            const memEnc = await getMemEnc(fresh.memoryId);
-            decryptNodeFields(fresh, memEnc);
-            await writeNodeToGit(
-              {
-                id: fresh.id,
-                loc: fresh.loc,
-                name: fresh.name,
-                nodeType: fresh.nodeType,
-                alias: fresh.alias,
-                description: fresh.description,
-                abstract: fresh.abstract,
-                abstractOriginHash: fresh.abstractOriginHash,
-                contentHash: fresh.contentHash,
-                content: fresh.content,
-                tags: deserializeTags(fresh.tags) as string[],
-                seq: fresh.seq,
-                data: fresh.data,
-                properties: fresh.properties,
-                // #1218 — the mirror carries the governed signals.
-                role: fresh.role ?? null,
-                isRunnable: fresh.isRunnable ?? null,
-                isPlaceholder: fresh.isPlaceholder,
-                outgoingEdges: fresh.outgoingEdges ?? [],
-                mirrorRevSeq: fresh.revSeq,
-              },
-              p.ownerRepo,
-              ctx.clientId,
-              fresh.memoryId,
-            );
-          })().catch((err) => {
-            console.error('[searchReplaceInNodes] git write error:', err);
-          });
-        }
       }
 
       return buildResult();
@@ -3284,6 +3282,11 @@ export const nodeMutations = {
             for (const other of await foreignEdgeMemoryIds(tx, affectedIds, memoryId)) {
               await requireMemoryWriteAccess(ctx, other);
             }
+            // #2517 (cor:dmo:010:04, Proposed) — the FK cascade below removes each edge an outside node held
+            // to the deleted set without a word on that node. Record the removal on every such SOURCE, in this
+            // transaction, as its own audit entry (never a NodeRevision). Judged after every refusal above, so
+            // a refused delete leaves nothing. Edges whose source goes in the same delete need no trace.
+            await recordEdgeRemovals(tx, affectedIds, deletedBy);
             // PendingEdge.targetId is intentionally NOT a foreign key, so the FK
             // cascade misses pending rows aimed at the deleted nodes — clean them
             // up explicitly (PR-189 pattern), in both node-keyed forms (#449).
@@ -4050,6 +4053,7 @@ export const nodeMutations = {
       let changed: Record<string, unknown>;
       let abstractChanged: boolean;
       let contentChanged: boolean;
+      let mergedWorkToken: string | null = null;
       try {
         ({ changed, abstractChanged, contentChanged } = mergeNodeFields(
           {
@@ -4243,6 +4247,7 @@ export const nodeMutations = {
               ...placeholderFillPatch(lockedTarget, 'content' in changed ? changed.content : undefined),
             },
           });
+          if (contentChanged || abstractChanged) mergedWorkToken = await stampEmbeddingObligation(tx, target.id, target.memoryId);
           // #2040 — the folded plaintext is re-checked for include tags (a merge
           // can combine two nodes' tags into a cycle); a refusal rolls it back.
           if ('content' in changed) {
@@ -4391,52 +4396,19 @@ export const nodeMutations = {
       }
 
       // Announce the write (git mirror rides the event — so a later
-      // repo-wins sync can't revert the merge). Encrypted memories keep the
-      // direct mirror below, using whatever plaintext this request could
-      // decrypt. The shared checkout defers a keyless encrypted export
-      // without touching the existing mirror (#1273).
+      // repo-wins sync can't revert the merge). An encrypted memory never
+      // syncs to Git (R206); the subscriber records a typed skip for it.
       void publishNodeWritten({
         nodeId: finalNode.id,
         memoryId: target.memoryId,
         ownerRepo: (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
         clientId: ctx.clientId,
       });
-      if (tgtEnc.isEncrypted) {
-        writeNodeToGit(
-          {
-            id: finalNode.id,
-            loc: finalNode.loc,
-            name: finalNode.name,
-            nodeType: finalNode.nodeType,
-            alias: finalNode.alias,
-            description: finalNode.description,
-            abstract: finalNode.abstract,
-            abstractOriginHash: finalNode.abstractOriginHash,
-            contentHash: finalNode.contentHash,
-            content: finalNode.content,
-            tags: deserializeTags(finalNode.tags) as string[],
-            seq: finalNode.seq,
-            data: finalNode.data,
-            properties: finalNode.properties,
-            // #1218 — the mirror carries the governed signals.
-            role: finalNode.role ?? null,
-            isRunnable: finalNode.isRunnable ?? null,
-            isPlaceholder: finalNode.isPlaceholder,
-            outgoingEdges: finalNode.outgoingEdges ?? [],
-            mirrorRevSeq: finalNode.revSeq,
-          },
-          (finalNode as { ownerRepo?: string | null }).ownerRepo ?? '',
-          ctx.clientId,
-          target.memoryId,
-        ).catch((err) => {
-          console.error('[mergeNodes] git write error:', err);
-        });
-      }
-
       // Re-embed when the embedded text (content/abstract) changed.
       if (contentChanged || abstractChanged) {
         void enqueueNodeEmbedding(ctx.db, {
           nodeId: finalNode.id,
+          workToken: mergedWorkToken,
           memoryId: target.memoryId,
           plaintext: { content: finalNode.content, abstract: finalNode.abstract },
         });
@@ -4783,6 +4755,7 @@ export const nodeMutations = {
           const tags = await assertIncludesWritable(tx, current, text, readable, undefined, stored);
           await syncDerivedIncludesEdges(tx, current, tags, readable, stored);
         }
+        restored.embeddingWorkToken = await stampEmbeddingObligation(tx, restored.id, restored.memoryId);
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted };
       });
       // 033 — re-embed the restored content (revision snapshots are plaintext on
@@ -4790,6 +4763,7 @@ export const nodeMutations = {
       // #206 permanent-fail path).
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: restored.id,
+        workToken: restored.embeddingWorkToken,
         memoryId: restored.memoryId,
         plaintext: { content: restoredPlaintext.content, abstract: restoredPlaintext.abstract },
       });

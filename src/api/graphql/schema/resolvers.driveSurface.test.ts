@@ -156,7 +156,7 @@ describe('drive reads route through the tool with the google-drive provider', ()
     expect(vi.mocked(runEmailOperation)).toHaveBeenCalledWith(
       'google-drive',
       'list-files',
-      expect.objectContaining({ connectionId: 'tool-drive-1', top: 50 }),
+      expect.objectContaining({ connectionId: 'tool-drive-1', top: 20 }),
     );
   });
 

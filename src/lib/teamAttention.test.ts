@@ -968,7 +968,16 @@ describe('MCP parity and discovery gate', () => {
       expect(teamRead).toContain('the transcript survives');
       expect(teamRead).not.toContain('cursor store unavailable');
       expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
-      expect(warn).toHaveBeenCalledTimes(2);
+      // Footer omission diagnostics may also warn; pin the two cursor failures
+      // this test induces without coupling to independent best-effort features.
+      const cursorWarnings = warn.mock.calls.filter(([message]) =>
+        message === '[hadron_channel_read] pilot read-state advance failed:' ||
+        message === '[hadron_team_chat_read] pilot read-state advance failed:',
+      );
+      expect(cursorWarnings.map(([message]) => message)).toEqual([
+        '[hadron_channel_read] pilot read-state advance failed:',
+        '[hadron_team_chat_read] pilot read-state advance failed:',
+      ]);
     } finally {
       queryRaw.mockRestore();
       warn.mockRestore();

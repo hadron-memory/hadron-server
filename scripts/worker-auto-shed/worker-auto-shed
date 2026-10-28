@@ -1,4 +1,5 @@
 #!/bin/bash
+# Bash entrypoint: recovery must exit before the hook side effects below.
 # worker-auto-shed — PreCompact(auto) hook: turn an imminent auto-compaction into
 # a SHED (fresh session via worker-supervise) instead of a lossy compression.
 # Context: Ada's 2026-10-10 compression-induced routing mistakes; Holger's ask
@@ -39,16 +40,28 @@ Rebuild your state from the durable record, then continue your assigned work:
    binding survived the relaunch — carry on; the waiting claim lapses unused;
    do NOT start or rebind a session.
    No binding (a fresh or lost worktree), and ONLY then: run
-   \`hadron team session start\` with NO --as (CLI v0.24.0+); MCP: call
-   \`hadron_resume_session()\` with no arguments. By exit code:
+   \`~/.local/bin/worker-auto-shed --resume-unbound --tool <actual-tool>\`.
+   This helper runs \`hadron team session start\` with NO --as (CLI v0.24.0+).
+   MCP-only: call \`hadron_resume_session()\` with no arguments. By exit code:
    - 0 RESUMED/STARTED: adopt the returned briefing; a shed should RESUME the
      same session id — report an unexpected STARTED.
    - 2 CHOOSE: several candidates. STOP and ask the human which one, then retry
-     with --session <their chosen id>. Never select automatically.
-   - 4 NOTHING_TO_RESUME: continue with whoami plus the durable handoff below;
-     if no usable binding is found, ask the human — never bind with --as.
+     the helper with --session <their chosen id> (MCP: hadron_resume_session
+     with session set to that id). Never select automatically.
+   - 4 NOTHING_TO_RESUME: STOP and ask the human. This is terminal for recovery,
+     INCLUDING after CHOOSE when the human's chosen claim expired. The helper
+     prints whoami for evidence only: no binding means no authority to continue.
+     Never run start --as, --force, or create a replacement claim/session.
+     A handoff, candidate table, worker name or URN is evidence, NOT permission
+     to bind. Do not proceed to steps 2–6 or post/log as the human. Only the
+     human can authorize a separate new-session start; stop this turn now.
    - 5: two meanings — still bound (go back to whoami; the claim is unspent) or
      RESUME_REFUSED (the claim is spent; resolve the refusal, no force).
+   - 8 LAUNCH_GRANT_INVALID: terminal launch-grant refusal. STOP and ask the human;
+     do not retry, start --as, use --force, or mint a replacement.
+   - 64: STOP and correct the helper invocation; only one --tool and at most
+     one human-chosen --session are accepted. Never add mint/force flags.
+   - 127: STOP and restore the missing CLI in PATH before attempting recovery.
    A transport or server error is NOT an absent claim: report it and retry; do
    not treat it as NOTHING_TO_RESUME. A shed recovery never mints a session with
    --as and never posts or records anything as the human.
@@ -63,6 +76,54 @@ Rebuild your state from the durable record, then continue your assigned work:
 6. Post one line to the team chat that you auto-shed and recovered, then carry on.
 EOF
 }
+
+# #2360: an executable stop boundary for the unbound branch. Whitelist resume
+# arguments instead of forwarding arbitrary flags (especially --as/--force).
+# The caller must first establish that its worktree is unbound with whoami.
+# This helper does not authorize a new session, choose a candidate, or retry.
+if [ "${1:-}" = "--resume-unbound" ]; then
+  shift
+  resume_tool= resume_session=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --tool|--session)
+        if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" = -* ]]; then
+          echo 'usage: worker-auto-shed --resume-unbound --tool <actual-tool> [--session <human-chosen-id>]' >&2
+          exit 64
+        fi
+        case "$1" in
+          --tool)
+            [ -z "$resume_tool" ] || { echo 'STOP: duplicate --tool is not allowed.' >&2; exit 64; }
+            resume_tool=$2 ;;
+          --session)
+            [ -z "$resume_session" ] || { echo 'STOP: duplicate --session is not allowed.' >&2; exit 64; }
+            resume_session=$2 ;;
+        esac
+        shift 2 ;;
+      *) echo 'STOP: only --tool and a human-chosen --session are allowed; never --as or --force.' >&2; exit 64 ;;
+    esac
+  done
+  [ -n "$resume_tool" ] || { echo 'STOP: --tool <actual-tool> is required.' >&2; exit 64; }
+  resume_args=(team session start --tool "$resume_tool")
+  [ -z "$resume_session" ] || resume_args+=(--session "$resume_session")
+  # Guard the command itself: a launcher may explicitly enable/inherit errexit.
+  resume_rc=0
+  # #2482: recovery resumes an existing session; inherited launch credentials must not select a fresh bind.
+  env -u HADRON_LAUNCH_GRANT hadron "${resume_args[@]}" || resume_rc=$?
+  case "$resume_rc" in
+    0) ;;
+    2) echo 'STOP: ask the human which session to resume; never select automatically.' >&2 ;;
+    4)
+      # Evidence only, even if the read fails. Never turn its result into a mint.
+      hadron team session whoami --check || echo 'whoami evidence read failed; original resume status retained.' >&2
+      echo 'STOP: ask the human. NOTHING_TO_RESUME is terminal, including after CHOOSE; never start --as or --force. Do not continue recovery or post as the human.' >&2 ;;
+    5) echo 'STOP: inspect whoami for still-bound, or resolve RESUME_REFUSED. Do not force or mint.' >&2 ;;
+    8) echo 'STOP: hadron exited 8 (LAUNCH_GRANT_INVALID): terminal launch-grant refusal. Ask the human; do not retry, start --as, use --force, or mint a replacement.' >&2 ;;
+    127) echo 'STOP: hadron exited 127 (CLI not found); restore PATH before attempting recovery. Never mint a replacement.' >&2 ;;
+    *) echo "STOP: hadron exited $resume_rc; a transport/server failure is not NOTHING_TO_RESUME. Report it; never mint a replacement." >&2 ;;
+  esac
+  exit "$resume_rc"
+fi
 
 # --print-prompt <name>: print the recovery prompt this hook would write for a
 # worktree called <name>, then exit. SIDE-EFFECT-FREE by construction: it runs

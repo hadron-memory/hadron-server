@@ -25,7 +25,7 @@ import { countedDueAt } from '../agentTasks/stall.js';
 import { __matcherTesting } from '../agentTasks/matcher.js';
 import { loadPendingReasons } from '../tickers/checkPending.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
-import { pendingStopNotices, s6NoticesAvailable, setS6NoticesAvailableForTest } from './delivery.js';
+import { declareAllStopLanes } from '../../test/stopLanes.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -91,12 +91,10 @@ beforeEach(async () => {
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(max.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [{ worker: ada.id, family: 'claude' }, { worker: dan.id, family: 'claude' }] } }, keyCtx(orca1));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude' }] } }, keyCtx(orca2));
-  // #2173: setting a signal is refused while the notice lane is off. This file tests signals themselves, so the lane is ON
-  // here; the S6d describe at the end switches it off to test the refusal.
-  setS6NoticesAvailableForTest(true);
+  // #2173/#2169: setting a signal is refused while a lane has no fresh stop-consumer declaration. This file tests signals
+  // themselves, so every lane is declared here; consumerLane2169.test.ts tests the refusal.
+  await declareAllStopLanes(db, app.id);
 });
-
-afterEach(() => setS6NoticesAvailableForTest(false));
 
 const set = (c: Context, input: Record<string, unknown>) => M.setTeamStopSignal({}, { input: { appRef: app.id, ...input } }, c);
 const lift = (c: Context, id: string) => M.liftTeamStopSignal({}, { appRef: app.id, id }, c);
@@ -648,64 +646,5 @@ describe('fix head of #2166 cycle 2 (Ralion §10)', () => {
     expect(await db.hostOperation.count({ where: { workerId: dan.id, type: 'worker.start' } })).toBe(0);
     await lift(ctx(max.id), s.id);
     expect(await launchForAssignment(db, { appId: app.id, taskId: t1.id, workerId: dan.id })).toEqual(expect.any(String));
-  });
-});
-
-describe('#2173 S6d — no stop signal is set until the notice lane is in effect (R95)', () => {
-  const LEVELS = ['PAUSE_DISPATCH', 'PAUSE', 'HALT'] as const;
-  const signals = () => db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*)::bigint AS n FROM team_stop_signals WHERE app_id = ${app.id}`.then((r) => Number(r[0]!.n));
-
-  it('every level at every scope is refused with STOP_SIGNAL_UNAVAILABLE, and nothing is recorded', async () => {
-    setS6NoticesAvailableForTest(false);
-    for (const level of LEVELS) {
-      expect(await code(set(ctx(max.id), { level, scope: 'WORKER', worker: 'Dan' }))).toBe('STOP_SIGNAL_UNAVAILABLE');
-      expect(await code(set(ctx(max.id), { level, scope: 'TEAM', worker: 'Ada' }))).toBe('STOP_SIGNAL_UNAVAILABLE');
-      expect(await code(set(ctx(max.id), { level, scope: 'HOST', host: 'orca1' }))).toBe('STOP_SIGNAL_UNAVAILABLE');
-    }
-    expect(await signals()).toBe(0);
-  });
-
-  it('the refusal names why and the way forward', async () => {
-    setS6NoticesAvailableForTest(false);
-    const e = await refusal(set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }));
-    expect(e.extensions?.code).toBe('STOP_SIGNAL_UNAVAILABLE');
-    expect(e.message).toMatch(/notice/i);
-    expect(e.message).toMatch(/#2169/);
-  });
-
-  it('a host key is refused too, and its refusal is RECORDED as a stop use (cor:agt:070:07)', async () => {
-    setS6NoticesAvailableForTest(false);
-    expect(await code(set(keyCtx(orca1), { level: 'HALT', scope: 'HOST' }))).toBe('STOP_SIGNAL_UNAVAILABLE');
-    expect(await db.hostKeyUse.count({ where: { appKeyId: orca1.id, action: 'stop', refusedCode: 'STOP_SIGNAL_UNAVAILABLE' } })).toBe(1);
-    expect(await db.hostKeyUse.count({ where: { appKeyId: orca1.id, action: 'stop', refusedCode: null } })).toBe(0);
-    expect(await signals()).toBe(0);
-  });
-
-  it('the earlier gates still answer first: a non-manager and a host key outside its scope see their own refusal, not the lane state', async () => {
-    setS6NoticesAvailableForTest(false);
-    expect(await code(set(ctx(mia.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }))).not.toBe('STOP_SIGNAL_UNAVAILABLE');
-    expect(await code(set(keyCtx(orca1), { level: 'PAUSE', scope: 'HOST' }))).toBe('STOP_SIGNAL_SCOPE_FORBIDDEN');
-    expect(await code(set(keyCtx(orca1), { level: 'HALT', scope: 'HOST', host: 'orca2' }))).toBe('HOST_SCOPE_REQUIRED');
-  });
-
-  it('lifting stays allowed while the lane is off, and a signal recorded before is left exactly as it is', async () => {
-    const before = await set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }); // lane on: recorded
-    setS6NoticesAvailableForTest(false);
-    expect(await covered()).toEqual(ids(ada, liam, dan));
-    const r = await lift(ctx(max.id), before.id);
-    expect(r.changed).toBe(true);
-    expect(r.signal).toMatchObject({ live: false, endKind: 'LIFTED' });
-    expect(await covered()).toEqual([]);
-  });
-
-  it('ONE switch governs both: the same flag that makes notices offered lifts the refusal', async () => {
-    expect(s6NoticesAvailable()).toBe(true);
-    setS6NoticesAvailableForTest(false);
-    expect(await code(set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' }))).toBe('STOP_SIGNAL_UNAVAILABLE');
-    expect((await pendingStopNotices(db, app.id, [liam.id])).size).toBe(0);
-    setS6NoticesAvailableForTest(true);
-    const s = await set(ctx(max.id), { level: 'PAUSE', scope: 'TEAM', worker: 'Ada' });
-    expect(s).toMatchObject({ live: true });
-    expect((await pendingStopNotices(db, app.id, [liam.id])).size).toBe(1);
   });
 });

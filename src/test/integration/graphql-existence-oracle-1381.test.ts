@@ -467,7 +467,9 @@ describe('#1381 — controls: what concealment must not change', () => {
       const result = await gql('outsider', probe.query, probe.vars(target.memId!.existing, 'outsider'));
       expect(fault).toHaveBeenCalled();
       expect(code(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected classification db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     } finally {
       fault.mockRestore();
     }
@@ -510,7 +512,9 @@ describe('#1381 — controls: what concealment must not change', () => {
       const result = await gql('outsider', q, { r: target.memUrn!.existing, o: `oracle-1381-neutral-${suffix}` });
       expect(fault).toHaveBeenCalled();
       expect(code(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected org-resolution db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     } finally {
       fault.mockRestore();
     }
@@ -529,7 +533,9 @@ describe('#1381 — controls: what concealment must not change', () => {
       const result = await gql('outsider', probe.query, probe.vars(target.memUrn!.existing, 'outsider'));
       expect(fault).toHaveBeenCalled();
       expect(code(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected write-authorization db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     } finally {
       fault.mockRestore();
     }

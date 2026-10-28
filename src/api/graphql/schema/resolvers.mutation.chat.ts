@@ -67,6 +67,8 @@ import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js'
 import { refuseDecisionFamily } from '../../../lib/decisions/index.js';
 import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -569,7 +571,10 @@ export const chatMutations = {
           },
           update: {},
         });
-      } catch { /* exists */ }
+      } catch (err) {
+        // #2476: only the cold-path race loss means the parent exists.
+        if (!isNodeLocUniqueViolation(err)) throw err;
+      }
 
       // Look up the conversation's goal for the initial goal stack entry
       const convGoals = (convData.goalDescriptions as string[]) ?? [];
@@ -1667,7 +1672,7 @@ export const chatMutations = {
       { chatId, title }: { chatId: string; title: string },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can
@@ -1708,7 +1713,7 @@ export const chatMutations = {
     },
 
     deleteChat: async (_: unknown, { chatId }: { chatId: string }, ctx: Context) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
       // `loc` is unique per memory, so an attacker who learns a chat id could
       // plant a node at that loc; filtering by entitlement first means it can

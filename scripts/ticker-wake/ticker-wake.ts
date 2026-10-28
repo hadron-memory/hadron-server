@@ -70,6 +70,11 @@
  *    (Ada #26165; any covered task must also be STARTED by it). A timeout alone never resolves it: after 2
  *    cadences without evidence, a strictly newer tick may get ONE fresh request under the same guards; the old entry
  *    is retained in needs-person.json, never certified by elapsed time, retyped as a fresh request or acked by itself.
+ *  - #2275: a different receiver may replace a local ambiguous receipt only when a complete successful current terminal
+ *    inventory proves the old handle/incarnation absent. Unknown identity, partial/failed inventory or a still-present
+ *    old incarnation holds. The old request is archived before normal replacement intent is atomically saved; retirement
+ *    alone acknowledges nothing. It never proves the old prompt was not executed: a new notification can be delivered
+ *    at least once again, under the existing composer/timing/identity checks and server cursor/task protocol.
  *  - a STRANDED DRAFT (#2138, Ada #26150) is DETECTED, never submitted: Orca accepted our text but the Enter never
  *    submitted it, so the composer holds exactly that text and neither the reissue (an idempotent replay of the stored
  *    receipt, Hugo #26146) nor the evidence path can run. When the draft equals the recorded text, the rest of the
@@ -96,6 +101,7 @@ import {
   readScreen, promptIsEmptyFromTerm, screenAgentFamily, isIdle, idleProofAbovePrompt,
   CALL_TIMEOUT_MS, type Config, type RosterEntry, type Runner, type RunResult,
 } from '../orca-attention-router/router.js';
+import { openTaskLine } from '../lib/openTaskLine.js';
 
 /** A runner that does not block: the sends of different workers overlap. */
 export type AsyncRunner = (argv: string[]) => Promise<RunResult>;
@@ -266,6 +272,58 @@ function saveReceipts(dir: string, r: Receipts, file = 'receipts.json'): void {
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(r));
   renameSync(tmp, path);
+}
+
+/** Orca execution-host identity grammar, used by its hostScopeCensusIsComplete contract. */
+function executionHostKind(raw: unknown): 'local' | 'ssh' | 'runtime' | null {
+  if (typeof raw !== 'string') return null;
+  const id = raw.trim();
+  if (id === 'local') return 'local';
+  const kind = id.startsWith('ssh:') ? 'ssh' : id.startsWith('runtime:') ? 'runtime' : null;
+  if (!kind) return null;
+  const encoded = id.slice(kind.length + 1);
+  if (!encoded || encoded.includes('|')) return null;
+  try { return decodeURIComponent(encoded) ? kind : null; } catch { return null; }
+}
+
+/** Missing host coverage is not completeness; omitted runtime peers own their separate control plane. */
+function hostScopeCensusComplete(scope: any): boolean {
+  return scope !== null && typeof scope === 'object' && !Array.isArray(scope)
+    && Array.isArray(scope.hostIds) && scope.hostIds.some((id: unknown) => executionHostKind(id) !== null)
+    && Array.isArray(scope.omittedHostIds) && scope.omittedHostIds.every((id: unknown) => executionHostKind(id) === 'runtime');
+}
+
+/** A successful unpaginated host inventory; explicit truncation or unknown row identity is not absence proof. */
+function terminalInventory(cfg: Config, run: Runner) {
+  let envelope: any;
+  let succeeded = false;
+  const terminals = listTerminals(cfg, (argv) => {
+    const r = run(argv);
+    succeeded = r.code === 0;
+    try { envelope = JSON.parse(r.stdout); } catch { /* listTerminals owns the read error */ }
+    return r;
+  });
+  if (!Array.isArray(terminals)) throw new SafeError('terminal inventory has no list');
+  const result = envelope?.result;
+  const metadata = [envelope, result, result?.pageInfo].filter((v) => v !== undefined);
+  const complete = succeeded && envelope?.ok === true && hostScopeCensusComplete(result?.hostScope) && metadata.every((v) => v && typeof v === 'object'
+    && !['hasNextPage', 'hasMore', 'partial', 'truncated', 'incomplete'].some((k) => v[k] !== undefined && v[k] !== false)
+    && (v.complete === undefined || v.complete === true)
+    && (v.nextCursor === undefined || v.nextCursor === null)
+    && ['total', 'totalCount'].every((k) => v[k] === undefined || v[k] === terminals.length))
+    && terminals.every((t) => t && typeof t.handle === 'string' && t.handle !== '')
+    && new Set(terminals.map((t) => t.handle)).size === terminals.length;
+  return { terminals, complete };
+}
+
+/** Presence, even disconnected/unwritable, does not prove a prior prompt never executed. */
+function priorReceiverGone(p: Ambiguous, inventory: ReturnType<typeof terminalInventory>): boolean {
+  const prefix = `${p.handle}#`;
+  const incarnation = p.receiver.startsWith(prefix) ? p.receiver.slice(prefix.length) : '';
+  if (!inventory.complete || !p.handle || !incarnation || incarnation.includes('#')) return false;
+  const sameHandle = inventory.terminals.find((t) => t.handle === p.handle) as any;
+  return !sameHandle || (typeof sameHandle.incarnationId === 'string' && sameHandle.incarnationId !== ''
+    && sameHandle.incarnationId !== incarnation && typeof sameHandle.worktreePath === 'string' && sameHandle.worktreePath !== '');
 }
 
 /**
@@ -663,7 +721,8 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
   // The receivers come from the server's subscribers and this host's bound terminals, never from a hand-kept list alone
   // (#2138). Every subscriber or due worker with no receiver here is logged once per pass, with why.
   const subscribers = fetchSubscribers(cfg, run);
-  const terminals = listTerminals(cfg, run);
+  const inventory = terminalInventory(cfg, run);
+  const { terminals } = inventory;
   const receivers = hostRoster(cfg, terminals, run);
   const wanted = new Map(subscribers);
   for (const w of due) if (typeof w.worker?.id === 'string' && !wanted.has(w.worker.id)) wanted.set(w.worker.id, String(w.worker.name));
@@ -689,6 +748,8 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
       if (!work) { log(`${ts} ${name}: held (the proof's tick coverage cannot be established)`); return; }
       let prior: Receipt | undefined = receipts[id];
       let displaced: Ambiguous | undefined;
+      let retiredReceiver: Ambiguous | undefined;
+      let firstRetirement = false;
 
       // The server owns the timing (R63): anchor, floor and busy deadline come with the wake and are never recomputed or
       // remembered here, so a re-offer, a join or a restart cannot restart them. Missing/unparsable timing holds.
@@ -758,10 +819,10 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         };
 
         // An unreconciled earlier request is reconciled with ITS OWN identity. Reissuing it can still perform input, so it
-        // needs the same receiver and composer safety. An id-less accepted request may only be displaced by NEW ticks
+        // needs the same receiver and composer safety. An unresolved request may only be displaced by NEW ticks
         // after two cadences; the old request is never replayed without its id.
         const allowFreshTick = (p: Ambiguous): boolean => {
-          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS || !wasAccepted(p.detail)
+          if (dry || now - p.at < NEEDS_PERSON_AFTER_MS
             || p.receiver !== receiver || typeof term0?.incarnationId !== 'string' || !term0.incarnationId) return false;
           const old = [...unresolved, ...p.coverage];
           if (!work.some((t) => tickParts(t) && !unresolvedCovers(t, old))) return false;
@@ -773,7 +834,18 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         };
         if (prior?.state === 'ambiguous') {
           if (dry) { log(`${ts} ${name}: an earlier send is unreconciled (${safeDetail(prior.detail)}); not retyped, not acked`); return; }
-          if (prior.receiver !== receiver) { log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`); return; }
+          if (prior.receiver !== receiver) {
+            if (typeof term0?.incarnationId !== 'string' || !term0.incarnationId || !priorReceiverGone(prior, inventory)) {
+              log(`${ts} ${name}: an earlier send is unreconciled for another receiver (${prior.receiver}); held for a human`);
+              return;
+            }
+            // An absent incarnation allows a new notification, not a delivery certification.
+            // Keep the disk receipt until the replacement intent is safely persisted below.
+            retiredReceiver = prior;
+            prior = undefined;
+          }
+        }
+        if (prior?.state === 'ambiguous') {
           // Reissue by its own id first: a confirmation from Orca settles it.
           const unsafe = prior.requestId ? safeToType() : null;
           const r = unsafe || !prior.requestId ? null : await submit(cfg, runAsync, prior.handle, prior.text, prior.requestId);
@@ -844,9 +916,12 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           t.rule = alarm.type;
         }
 
+        // The count is a network read, so it comes BEFORE the final gates: nothing slow sits between the last idle and
+        // composer proof and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
+        const openLine = dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id, undefined, clock, deadline, (why) => log(`${ts} ${name}: open-task count unknown (${why}); the wake goes without the line`));
         const unsafe = safeToType();
         if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks);
+        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...newWork])].sort();
         // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task
@@ -886,6 +961,26 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
             return;
           }
         }
+        if (retiredReceiver) {
+          // Revalidate both identities after all evidence reads, before replacing durable state.
+          const latest = terminalInventory(cfg, run);
+          const [currentHandle] = resolveTerminal(entry, latest.terminals, cfg, run);
+          const current = latest.terminals.find((t) => t.handle === currentHandle) as any;
+          if (currentHandle !== handle || `${currentHandle}#${current?.incarnationId ?? ''}` !== receiver
+              || !priorReceiverGone(retiredReceiver, latest) || safeToType()) {
+            log(`${ts} ${name}: held (receiver replacement no longer safe); nothing sent`);
+            return;
+          }
+          // Archive first, then atomically replace only this worker's receipt with normal send intent.
+          // A crash between writes retains the original ambiguity; no read mark/task/wake is acked here.
+          const key = JSON.stringify([id, retiredReceiver.receiver, retiredReceiver.at, retiredReceiver.requestId ?? null]);
+          firstRetirement = needsPerson[key] === undefined;
+          needsPerson[key] = { ...retiredReceiver, workerId: id };
+          try { saveReceipts(stateDir, needsPerson, NEEDS_PERSON_FILE); } catch (e) {
+            log(`${ts} ${name}: held (the old request could not be retained: ${errno(e)}); nothing sent`);
+            return;
+          }
+        }
         const before = receipts[id];
         const restore = (): void => { if (before) receipts[id] = before; else delete receipts[id]; };
         receipts[id] = { state: 'ambiguous', coverage, receiver, at: now, detail: 'send intent recorded before submission; outcome unknown', text, handle, tasks, checkedBefore };
@@ -894,6 +989,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
           log(`${ts} ${name}: held (the send intent could not be recorded: ${errno(e)}); nothing sent`);
           return;
         }
+        if (firstRetirement) log(`${ts} ${name}: retired ambiguity for absent receiver; prior execution unknown, recovery may redeliver`);
         const r = await submit(cfg, runAsync, handle, text);
         if (r.kind === 'refused') {
           // Orca says nothing was typed: the intent is withdrawn so the next pass retries. If that write fails, the intent stays
@@ -954,7 +1050,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
  * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
-export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): string {
+export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>, openTasks = ''): string {
   const tagged = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
     + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
@@ -966,14 +1062,14 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
     : tagged;
   const rule = 'No unfiltered chat catch-up.';
   // #2138 (Diego #28498): a tick lands mid-build too, so it never tells the worker to stop; it resumes what was running.
-  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}`;
+  if (!tasks.length) return `Hadron ticker wake (${tickers.join(', ')}): ${check}; then continue your in-progress work; end your turn only if you have none. ${rule}${openTasks}`;
   const all = tasks.map((t): NudgeTask => (typeof t === 'string' ? { id: t, event: 'ASSIGNED' } : t));
   const assigned = [...new Set(all.filter((t) => t.event === 'ASSIGNED').map((t) => t.id))];
   const alarms = all.filter((t) => t.event === 'ALARM');
   const children = all.filter((t) => t.event === 'CHILD_FINISHED');
   const ticker = tickers.length ? `; ticker ${tickers.join(', ')}` : '';
   const which = assigned.length === 1 ? `hadron team task get ${assigned[0]}` : 'hadron team task list';
-  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}`;
+  if (!alarms.length && !children.length) return `Hadron task assigned (${assigned.join(', ')}${ticker}): ${check}; then start the task (\`${which}\`). ${rule}${openTasks}`;
   // #1704: an alarm names its task and rule and how to acknowledge it, since delivery is never an acknowledgement
   // (cor:agt:050:20); a finished child names the child.
   const items = [
@@ -986,7 +1082,7 @@ export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>): 
     ...alarms.map((a) => `act on task ${a.id} (\`hadron team task get ${a.id}\`), then acknowledge its alarm with \`hadron team alarm ack ${a.eventId}\` (this message is not an acknowledgement)`),
     ...children.map((c) => `review the finished child task (\`hadron team task get ${c.id}\`)`),
   ];
-  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}`;
+  return `Hadron task wake (${items.join('; ')}${ticker}): ${check}; then ${actions.join('; ')}. ${rule}${openTasks}`;
 }
 
 /**

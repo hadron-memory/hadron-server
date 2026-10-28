@@ -40,7 +40,7 @@ export interface AbstractVectorRow {
  * `null` is a real value: it matches a node whose marker is cleared, which is
  * why the comparison is `IS NOT DISTINCT FROM` rather than `=`.
  */
-export type PendingAtGuard = Date | null | undefined;
+export type PendingAtGuard = Date | string | null | undefined;
 
 /**
  * `AT TIME ZONE 'UTC'` is load-bearing, not decoration. The column is
@@ -54,7 +54,9 @@ export type PendingAtGuard = Date | null | undefined;
 const pendingGuard = (expected: PendingAtGuard) =>
   expected === undefined
     ? Prisma.sql`TRUE`
-    : Prisma.sql`(n.embedding_pending_at AT TIME ZONE 'UTC') IS NOT DISTINCT FROM ${expected}`;
+    : typeof expected === 'string'
+      ? Prisma.sql`n.embedding_work_token = ${expected}::uuid AND n.deleted_at IS NULL`
+      : Prisma.sql`(n.embedding_pending_at AT TIME ZONE 'UTC') IS NOT DISTINCT FROM ${expected}`;
 
 /**
  * Replace a node's abstract vector — a REAL upsert (#1025).
@@ -122,8 +124,17 @@ export async function upsertAbstractVector(
 }
 
 /** Delete all of a node's vectors (re-index / disable / cleared abstract). */
-export async function deleteNodeVectors(db: PrismaClient, nodeId: string): Promise<void> {
-  await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+export async function deleteNodeVectors(db: PrismaClient, nodeId: string, expected?: PendingAtGuard): Promise<void> {
+  if (expected === undefined) {
+    await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+    return;
+  }
+  await db.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT n.id FROM nodes n WHERE n.id = ${nodeId} AND ${pendingGuard(expected)} FOR NO KEY UPDATE
+    `);
+    if (rows.length) await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+  });
 }
 
 /**
@@ -144,6 +155,24 @@ export async function deleteNodeChunkVectors(
   nodeId: string,
   expectedPendingAt?: PendingAtGuard,
 ): Promise<boolean> {
+  return deleteNodeKindVectors(db, nodeId, 'chunk', expectedPendingAt);
+}
+
+/** The empty abstract arm needs the same authoritative token guard as an UPSERT. */
+export async function deleteNodeAbstractVector(
+  db: PrismaClient,
+  nodeId: string,
+  expectedPendingAt?: PendingAtGuard,
+): Promise<boolean> {
+  return deleteNodeKindVectors(db, nodeId, 'abstract', expectedPendingAt);
+}
+
+async function deleteNodeKindVectors(
+  db: PrismaClient,
+  nodeId: string,
+  kind: 'chunk' | 'abstract',
+  expectedPendingAt?: PendingAtGuard,
+): Promise<boolean> {
   return db.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
       SELECT n.id FROM nodes n
@@ -151,7 +180,7 @@ export async function deleteNodeChunkVectors(
       FOR NO KEY UPDATE
     `);
     if (locked.length === 0) return false;
-    await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = 'chunk'`;
+    await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = ${kind}::"EmbeddingKind"`;
     return true;
   });
 }
@@ -238,6 +267,7 @@ export async function upsertChunkVectors(
 
 /** Delete every vector for a memory (revoke / disable). */
 export async function deleteMemoryVectors(db: PrismaClient, memoryId: string): Promise<void> {
+  await db.node.updateMany({ where: { memoryId }, data: { embeddingPendingAt: null, embeddingWorkToken: null } });
   await db.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId}`;
 }
 
@@ -316,6 +346,9 @@ export async function vectorSearchNodes(
     queryEmbedding: number[];
     limit: number;
     candidateFactor?: number;
+    /** #2421: constrain summary search before ANN ranking. */
+    abstractOnly?: boolean;
+    candidateNodeIds?: string[];
     /** #1345 — told whether the raw ANN window was exhausted (see below). */
     onWindow?: (w: { exhausted: boolean }) => void;
     /** #1608 — content, comments or both (see the doc above). Absent = ALL (no restriction). */
@@ -326,6 +359,9 @@ export async function vectorSearchNodes(
     opts.onWindow?.({ exhausted: true });
     return [];
   }
+  const candidateSql = opts.candidateNodeIds == null ? Prisma.empty : opts.candidateNodeIds.length
+    ? Prisma.sql`AND ne.node_id IN (${Prisma.join(opts.candidateNodeIds)})` : Prisma.sql`AND FALSE`;
+  const abstractSql = opts.abstractOnly ? Prisma.sql`AND ne.kind = 'abstract'` : Prisma.empty;
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   if (opts.scope === 'COMMENTS') {
@@ -333,7 +369,7 @@ export async function vectorSearchNodes(
       SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}
       GROUP BY ne.node_id
       ORDER BY distance ASC
       LIMIT ${k}`;
@@ -356,7 +392,7 @@ export async function vectorSearchNodes(
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}
       ORDER BY ne.embedding <=> ${qvec}::vector
       LIMIT ${candidateK}
     )
@@ -377,7 +413,7 @@ export async function vectorSearchNodes(
       const [c] = await db.$queryRaw<{ n: number }[]>`
         SELECT count(*)::int AS n FROM node_embeddings ne
         JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB}`;
+        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}`;
       const eligibleRows = Number(c?.n ?? 0);
       exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
     }

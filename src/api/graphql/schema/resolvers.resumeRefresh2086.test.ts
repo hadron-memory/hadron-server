@@ -113,6 +113,23 @@ describe('refresh on each open-session path', () => {
     expect(await row(s.id)).toMatchObject({ family: 'glm' });
   });
 
+  it('#2252: a resumed model is a report (modelReportedAt stamped, refreshed on a repeat); a model-less resume leaves it alone', async () => {
+    const reportedAt = (id: string) => db.session.findUniqueOrThrow({ where: { id }, select: { modelReportedAt: true } }).then((r) => r.modelReportedAt);
+    const s = await start(holder, ada);
+    expect(await reportedAt(s.id)).toBeNull();
+    await resume(ctx(holder), { family: 'claude' });
+    expect(await reportedAt(s.id)).toBeNull();
+    await resume(ctx(holder), model);
+    const first = await reportedAt(s.id);
+    expect(first).toBeInstanceOf(Date);
+    const old = new Date(Date.now() - 3_600_000);
+    await db.session.update({ where: { id: s.id }, data: { modelReportedAt: old } });
+    await resume(ctx(holder), { llmModel: null });
+    expect(await reportedAt(s.id)).toEqual(old);
+    await resume(ctx(holder), model);
+    expect((await reportedAt(s.id))!.getTime()).toBeGreaterThan(old.getTime());
+  });
+
   it('a model nothing classifies keeps the existing family rather than guessing', async () => {
     const s = await start(holder, ada, { family: 'claude' });
     await resume(ctx(holder), { llmModel: 'mystery-7' });

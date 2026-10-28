@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 /**
  * 033-rag-vector-retrieval US5 — encrypted-memory opt-in, disclosed (FR-026).
  *
@@ -8,17 +9,9 @@
  *     CHECK is the structural backstop; the resolver gate is the friendly error.
  *   - With the ack, the update succeeds AND `vectorIndexEncryptedAckAt` is
  *     stamped.
- *   - Un-acked encrypted memories store NO vectors — the embedNode sweep
- *     path treats ciphertext-at-rest as a #206 permanent failure (T024).
- *   - Revoke (vectorIndexEnabled → false) deletes the memory's vectors and
- *     clears every node's embedding markers (so the worker stops selecting
- *     orphaned pending tasks).
- *
- * T056 (verification, no new code): the encrypted-via-GraphQL permanent-failure
- * path from T024 (`encrypted-no-plaintext (#206)`) is exercised by the
- * "un-acked encrypted memory stores no vectors" scenario below — the test
- * writes through the GraphQL upsertNode (which encrypts at rest), then runs
- * the sweep and asserts `embedding_failed_at` is set without further retries.
+ *   - R132 ciphertext-only pending work is excluded from keyless recovery;
+ *     it retains its token and explicit fresh-plaintext diagnostic.
+ *   - Revoking vector indexing deletes vectors and cancels durable obligations.
  */
 
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
@@ -31,6 +24,7 @@ import {
   resetEmbeddingClientForTests,
 } from '../../lib/embedding/index.js';
 import { resolvers, type Context as GqlContext } from '../../api/graphql/schema/resolvers.js';
+import { FRESH_PLAINTEXT_REQUIRED, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { drainEmbeddingQueue } from '../../jobs/embedNodes.js';
 import { EncryptedVectorIndexNotAcknowledgedError } from '../../lib/entityRef/errors.js';
 import { generateDataKey, parseDataKey } from '../../lib/crypto.js';
@@ -217,7 +211,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
         name: 'rev1',
         abstract: 'an abstract',
         content: 'body',
-        embeddingPendingAt: new Date(),
+        embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
         embeddingAttempts: 0,
       },
     });
@@ -248,7 +242,7 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
     expect(node?.embeddingAttempts).toBe(0);
   });
 
-  it('T056: encrypted-via-GraphQL write → sweep permanent-fails (encrypted-no-plaintext) without retry', async () => {
+  it('R132: ciphertext-only work stays visibly pending without a keyless sweep attempt', async () => {
     // Goal: pin the T024 `encrypted-no-plaintext (#206)` branch in embedNode.
     // The sweep path can't decrypt (MCP read asymmetry, #206), so when a
     // ciphertext-at-rest row is selected with no in-closure plaintext AND
@@ -306,23 +300,22 @@ describe('US5 — encrypted-memory vector index opt-in (FR-026)', () => {
         // Re-enabling the index would have stamped this already; the
         // backfill in updateMemory runs over LIVE nodes at the moment it
         // executes. This node was created AFTER, so stamp manually.
-        embeddingPendingAt: new Date(),
+        embeddingPendingAt: new Date(), embeddingWorkToken: randomUUID(),
       },
     });
 
+    const capturedToken = await db.$transaction(tx => stampEmbeddingObligation(tx, nodeId, mem.id));
     await drainEmbeddingQueue(db);
 
     const after = await db.node.findUnique({ where: { id: nodeId } });
-    // Permanent failure shape per markPermanentFailure:
-    //   embeddingPendingAt: null  (so the sweep never re-selects)
-    //   embeddingFailedAt:  set    (record of the failure)
-    //   embeddingError:     includes #206 marker
-    //   embeddingAttempts:  0      (markPermanentFailure does NOT bump attempts —
-    //                               the failure is terminal, not retried)
-    expect(after?.embeddingPendingAt).toBeNull();
-    expect(after?.embeddingFailedAt).not.toBeNull();
-    expect(after?.embeddingError).toMatch(/encrypted-no-plaintext/);
-    expect(after?.embeddingError).toContain('#206');
+    // R132 replaces the old terminal encrypted-no-plaintext behavior. The sweep
+    // cannot obtain a new holder/key, and must leave this obligation recoverable
+    // only by fresh authorized plaintext.
+    expect(after?.embeddingPendingAt).not.toBeNull();
+    expect(after?.embeddingWorkToken).toBe(capturedToken);
+    expect(after?.embeddingFailedAt).toBeNull();
+    expect(after?.embeddingError).toBe(FRESH_PLAINTEXT_REQUIRED);
+    expect(after?.abstract).toBe(enc.abstract);
     expect(after?.embeddingAttempts).toBe(0);
   });
 });

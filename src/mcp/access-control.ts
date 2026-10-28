@@ -37,6 +37,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
 
@@ -896,6 +897,13 @@ export interface MemoryGateOptions {
    * App, so a forgotten option fails closed.
    */
   explicitRef?: boolean;
+  /**
+   * #2484: the node the caller is about to create or update, and where. Named ONLY by the node write door and the run
+   * write pre-check; every other verb (delete, move, edges, settings, stored files) leaves it unset. It is what lets
+   * an App's prefix-scoped write grant ({@link userlessRunHoldsWriteGrant}) answer at all, so a forgotten option
+   * fails closed.
+   */
+  destination?: WriteDestination;
 }
 
 /** {@link MemoryGateOptions} for a gate on a caller-supplied memory or node reference. */
@@ -979,6 +987,13 @@ export async function canWriteToMemory(
   // Writes to it go through the GraphQL door (`install: { app, agent }`), which holds the
   // authority fence (Diego P2 on #2064); an inline MCP writer cannot, so it gets no write.
   if (isInstallMemoryRow(memory)) return false;
+
+  // #2484 (cor:agt:010:01): the one way a USERLESS run principal writes outside what it already could — an App's
+  // prefix-scoped, live-checked write grant on THIS destination. Additive and fail-closed: a miss falls through to
+  // every rule below unchanged. It sits before the personal/private branch because that branch answers a run
+  // principal with no user false, and a private memory is otherwise "categorically unavailable to every AppRun"
+  // (#1719 R5a): Holger's 2026-10-27 ruling lets the memory's OWNER lift that for one prefix, never an encrypted one.
+  if (opts.destination && await userlessRunHoldsWriteGrant(db, auth, memoryId, opts.destination)) return true;
 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId || auth.impersonation) return false;

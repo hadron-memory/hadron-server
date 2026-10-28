@@ -1,4 +1,5 @@
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
+import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
 // GraphQL resolver map — thin assembler.
 //
 // The implementation was split out of this file (originally ~11k lines) into
@@ -56,9 +57,11 @@ import { memoryTransferMutations } from './resolvers.mutation.memoryTransfer.js'
 import { appMemoryMutations } from './resolvers.mutation.appMemory.js';
 import { orgMutations } from './resolvers.mutation.org.js';
 import { agentMutations } from './resolvers.mutation.agent.js';
+import { agentCloneMutations } from './resolvers.mutation.agentClone.js';
 import { workerMutations, workerQueries, workerFieldResolvers } from './resolvers.worker.js';
 import { bootPromptPointerFieldResolvers } from './resolvers.bootPromptPointer.js';
 import { bootPromptPointerMutations } from './resolvers.mutation.bootPromptPointer.js';
+import { compileBootPromptMutations } from './resolvers.mutation.compileBootPrompt.js';
 import { teamRoleMutations, teamRoleQueries } from './resolvers.teamRole.js';
 import { teamSpecQueries } from './resolvers.teamSpec.js';
 import { teamChatMutations, teamChatQueries } from './resolvers.teamChat.js';
@@ -66,6 +69,7 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
+import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
@@ -83,6 +87,8 @@ import { memoryConfigApplyMutations } from './resolvers.memoryConfigApply.js';
 import { nodeApprovalFieldResolvers, nodeApprovalMutations, nodeApprovalQueries } from './resolvers.nodeApproval.js';
 import { nodeAttributionFieldResolvers } from './resolvers.nodeAttribution.js';
 import { agentExtendedByFieldResolvers } from './resolvers.agentExtendedBy.js';
+import { agentOfferReadinessFieldResolvers } from './resolvers.agentOfferReadiness.js';
+import { agentClonedFromFieldResolvers } from './resolvers.agentClonedFrom.js';
 import { signingFieldResolvers, signingMutations, signingQueries } from './resolvers.signing.js';
 import { commentFieldResolvers, commentMutations, commentQueries } from './resolvers.comments.js';
 import { decisionFieldResolvers, decisionMutations, decisionQueries } from './resolvers.decisions.js';
@@ -118,6 +124,7 @@ export const resolvers = {
   ...workerFieldResolvers,
   ...agentTaskFieldResolvers,
   ...tickerFieldResolvers,
+  AgentTickerTemplate: agentTickerTemplateFieldResolvers.AgentTickerTemplate,
   ...appKeyScopeFieldResolvers,
   ...hostOperationFieldResolvers,
   // #1706 — alarm wakes and availability. AgentTeamEvent already has a block
@@ -131,7 +138,7 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
-  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent },
+  Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
   Worker: { ...workerFieldResolvers.Worker, ...bootPromptPointerFieldResolvers.Worker },
@@ -181,6 +188,7 @@ export const resolvers = {
     ...teamWorkQueries,
     ...agentTaskQueries,
     ...tickerQueries,
+    ...agentTickerTemplateQueries,
     ...deliverySettingsQueries,
     ...wakeQueries,
     ...stopSignalQueries,
@@ -206,6 +214,7 @@ export const resolvers = {
     ...dashboardQueries,
     ...appRunQueries,
     ...automationPinQueries,
+    ...appWriteGrantQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...meteringQueries,
@@ -218,6 +227,7 @@ export const resolvers = {
     ...dashboardMutations,
     ...appRunMutations,
     ...automationPinMutations,
+    ...appWriteGrantMutations,
     ...meteringMutations,
     ...connectionGrantMutations,
     ...principalGrantMutations,
@@ -228,14 +238,17 @@ export const resolvers = {
     ...appMemoryMutations,
     ...orgMutations,
     ...agentMutations,
+    ...agentCloneMutations,
     ...workerMutations,
     ...bootPromptPointerMutations,
+    ...compileBootPromptMutations,
     ...teamRoleMutations,
     ...teamChatMutations,
     ...teamAttentionMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
     ...tickerMutations,
+    ...agentTickerTemplateMutations,
     ...deliverySettingsMutations,
     ...stopSignalMutations,
     ...wakeMutations,
