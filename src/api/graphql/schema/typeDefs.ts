@@ -1442,6 +1442,8 @@ export const typeDefs = `#graphql
     contentHash: String!
     "Whether this compile wrote the pointer."
     pointerSet: Boolean!
+    "Current warnings for the revision just compiled; null when unavailable."
+    lintWarnings(first: Int = 50, after: String): LintWarningPage
     "Always false: a compile never approves or signs."
     approvalIssued: Boolean!
   }
@@ -2271,6 +2273,10 @@ export const typeDefs = `#graphql
 
   "#2048 (hrn:node:hadronmemory.com:specs:cor:agt:040:13) — what link lint warns about."
   enum LintKind {
+    "A recompile would select a newer revision; shown only to a compiler, without hidden target details."
+    RECOMPILE_AVAILABLE
+    "An install-memory node replaces an Agent node."
+    POLICY_OVERRIDE
     "The include's target is soft-deleted (hrn:node:hadronmemory.com:specs:cor:agt:040:13, R20 A)."
     RETIRED_TARGET
     "The target is readable but has no revision that meets the include's settings (approved and/or rev=N)."
@@ -2288,7 +2294,7 @@ export const typeDefs = `#graphql
   "#2048 — one link-lint warning. A fixed set of fields: there is no free-form detail."
   type LintWarning {
     kind: LintKind!
-    "0-based offset of the include tag in the node's source text."
+    "0-based source-tag offset, or immutable occurrence ordinal for compiled-revision lint."
     position: Int!
     text: String!
     "The target's URN, only for a target the caller can read; null for BROKEN_INCLUDE."
@@ -4772,6 +4778,8 @@ export const typeDefs = `#graphql
   chose it, that revision's own provenance and the values the platform variables were filled with. No composed text.
   """
   type ServedPrompt {
+    "Current warnings for this record's provenanceRevSeq, never the newest compile."
+    currentLint(first: Int = 50, after: String): LintWarningPage
     id: ID!
     kind: ServedPromptKind!
     pointerLevel: ServedPromptPointerLevel!
@@ -4953,6 +4961,8 @@ export const typeDefs = `#graphql
   by its id or by the computed \`urn\` below (#991).
   """
   type Worker {
+    "Current lint of the compiled revision recorded for the open session; null when unavailable."
+    promptLintWarnings(first: Int = 50, after: String): LintWarningPage
     id: ID!
     appId: ID!
     """
@@ -7766,6 +7776,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
+    All tag, source and date filters combine with the other selectors using AND.
     owner / assignee / creator name a party of the App (a ref naming nobody matches
     nothing; a retired worker is no party to name, so it matches nothing). creator is
     the task's creator as createdBy projects it: a worker, or a person for a task they created
@@ -7783,6 +7794,26 @@ export const typeDefs = `#graphql
       assignee: AgentTaskPartyInput
       creator: AgentTaskPartyInput
       tag: String
+      "Match at least one tag. Empty arrays do not narrow the list."
+      tagsAny: [String!]
+      "Match every tag. Empty arrays do not narrow the list."
+      tagsAll: [String!]
+      "Exact opaque source value, without interpretation or prefix matching."
+      source: String
+      "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
+      overdue: Boolean
+      "Inclusive creation-time lower bound."
+      createdAfter: DateTime
+      "Inclusive creation-time upper bound."
+      createdBefore: DateTime
+      "Inclusive start-time lower bound; tasks with no start time never match."
+      startedAfter: DateTime
+      "Inclusive start-time upper bound; tasks with no start time never match."
+      startedBefore: DateTime
+      "Inclusive finish-time lower bound; tasks with no finish time never match."
+      finishedAfter: DateTime
+      "Inclusive finish-time upper bound; tasks with no finish time never match."
+      finishedBefore: DateTime
       parentTaskId: ID
       rootsOnly: Boolean
       queued: Boolean

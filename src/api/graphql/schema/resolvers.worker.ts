@@ -16,7 +16,7 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // needs no Team Agent at all.
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
-import { lintWarningPageForNodeId, renderLintWarnings } from '../../../lib/bootPromptLint.js';
+import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
@@ -57,7 +57,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPlatformVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, legacyFromValues, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -2569,7 +2569,7 @@ async function readServedWorkerText(
       // The values the bind filled, not today's: a session finishes under the briefing it was given (a rename or a new
       // reports-to must not rewrite it). Today's values fill only a variable the record does not hold.
       const values = { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues;
-      return { text: applyPlatformVariables(content, values), refusal: null };
+      return { text: applyPlatformVariables(content, values, legacyFromValues(values)), refusal: null };
     }
     // An open session of THIS worker with no record began before serving was activated. It is never silently upgraded to
     // the current revision (Attach v3 §5): it reads no prompt and a typed notice until it rebinds.
@@ -2578,7 +2578,7 @@ async function readServedWorkerText(
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
-    return { text: applyPlatformVariables(served.content, platform), refusal: null };
+    return { text: applyPlatformVariables(served.content, platform, legacyFromValues(platform)), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
@@ -2589,7 +2589,7 @@ async function readServedWorkerText(
 /**
  * #2047 — what a worker would be served now, as the text `hadron_get_worker` prints: the pointer level that decides, the
  * revision served and the lint state of its root source, or the refusal a bind would get. Also the revision recorded for
- * the caller's own open session when it differs (a session finishes under the revision it was bound with). Empty with
+ * the worker's latest open session (a session finishes under the revision it was bound with). Empty with
  * serving OFF. Behind the worker read gate; ids only, never a loc or text beyond what `Worker.servedPrompt` already shows.
  */
 export async function describeServedWorker(
@@ -2603,17 +2603,17 @@ export async function describeServedWorker(
   try {
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
     line = `\nServed boot prompt: ${served.pointerLevel} pointer, compiled node ${served.compiledNodeId}, revision ${served.servedRevSeq} (provenance from compile revision ${served.provenanceRevSeq}).`;
-    const root = served.provenance[0]?.nodeId;
-    if (root) line += renderLintWarnings(await lintWarningPageForNodeId(ctx, root));
+    line += '\nCurrent prompt lint (compile revision ' + served.provenanceRevSeq + '):' + (renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, served.compiledNodeId, served.provenanceRevSeq)) || '\nNo lint warnings.');
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
     line = `\nServed boot prompt: NOT SERVEABLE — ${code}. A bind would be refused.`;
   }
-  const recorded = ctx.sessionId
-    ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' }, select: { servedRevSeq: true, pointerLevel: true } })
-    : null;
-  if (recorded) line += `\nThis session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
+  const recorded = await servedPromptOwnerFields.workerServedPrompt(worker, {}, ctx);
+  if (recorded) {
+    line += `\nThe worker's open session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
+    line += `\nServed prompt lint (compile revision ${recorded.provenanceRevSeq}):` + (renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, recorded.compiledNodeId, recorded.provenanceRevSeq)) || '\nNo lint warnings.');
+  }
   return line;
 }
 
@@ -2865,6 +2865,10 @@ export const workerFieldResolvers = {
   Worker: {
     /** #2047: the record of the open session, self-authorized (worker internals). */
     servedPrompt: servedPromptOwnerFields.workerServedPrompt,
+    promptLintWarnings: async (w: { id: string; appId: string }, args: { first?: number | null; after?: string | null }, ctx: Context) => {
+      const rec = await servedPromptOwnerFields.workerServedPrompt(w, {}, ctx);
+      return rec ? (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, rec.compiledNodeId, rec.provenanceRevSeq, args) : null;
+    },
     /**
      * Scalar App identity for cross-App worker pages (#1344). Unlike
      * `Worker.app`, this never returns an App object (and therefore cannot hand

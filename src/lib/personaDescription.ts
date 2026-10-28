@@ -41,6 +41,18 @@ export const PLATFORM_VARIABLE_KEYS = [
 const platformVariableKeysAreExhaustive: Exclude<keyof PlatformVariableValues, (typeof PLATFORM_VARIABLE_KEYS)[number]> extends never ? true : never = true;
 void platformVariableKeysAreExhaustive;
 
+/**
+ * #2702: the legacy `{{name}}` / `{{role}}` values for SERVED text, taken from the variable values that text is bound with
+ * (`worker.name` / `worker.role`), so a recorded replay binds the recorded identity, never today's. Converted prompts keep
+ * these tokens until the live-node token audit (#1772); without this they reached the briefing literally. A record whose
+ * stored values lack either key leaves the tokens as written rather than printing "undefined".
+ */
+export function legacyFromValues(values: Partial<Pick<PlatformVariableValues, 'worker.name' | 'worker.role'>>): { name: string; role: string } | undefined {
+  const name = values['worker.name'];
+  const role = values['worker.role'];
+  return typeof name === 'string' && typeof role === 'string' ? { name, role } : undefined;
+}
+
 export function applyPlatformVariables(
   template: string,
   values: PlatformVariableValues,
