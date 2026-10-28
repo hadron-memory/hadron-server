@@ -214,22 +214,18 @@ export const nodeQueries = {
         tx.node.findMany({ where: { id: { in: readableIds } }, select: { id: true, revSeq: true } }),
         readableOccurrences.length ? tx.nodeRevision.findMany({
           where: { OR: readableOccurrences.map((o) => ({ nodeId: o.nodeId, revNo: o.revNo })) },
-          orderBy: { id: 'desc' },
           select: { nodeId: true, revNo: true, memoryId: true },
         }) : Promise.resolve([]),
       ]);
       const currentRevs = new Map(current.map((n) => [n.id, n.revSeq]));
-      const retained = new Map<string, typeof history[number]>();
-      for (const row of history) {
-        const key = `${row.nodeId}:${row.revNo}`;
-        if (!retained.has(key)) retained.set(key, row);
-      }
+      // Numbered snapshots are unique by (nodeId, revNo); no row-order selection.
+      const retained = new Map(history.map((row) => [`${row.nodeId}:${row.revNo}`, row]));
       const pruningStatus = (o: typeof occurrences[number]) => {
         const sourceScope = sourceScopes.get(o.nodeId);
         if (!sourceScope) return null;
         if (currentRevs.get(o.nodeId) === o.revNo) return false;
         const snapshot = retained.get(`${o.nodeId}:${o.revNo}`);
-        if (snapshot?.memoryId && !sourceScope.canRead(snapshot.memoryId)) return null;
+        if (snapshot && (!snapshot.memoryId || !sourceScope.canRead(snapshot.memoryId))) return null;
         return !snapshot;
       };
       const items = occurrences.map((o) => ({
