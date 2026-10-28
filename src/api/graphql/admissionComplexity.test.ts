@@ -46,6 +46,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channels",
   "Query.chatHistory",
   "Query.commentThreads",
+  "Query.compiledPromptProvenance",
   "Query.connectionGrants",
   "Query.creditLedgerEntries",
   "Query.dashboardWidgetPresetsPage",
