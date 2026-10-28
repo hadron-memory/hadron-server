@@ -85,6 +85,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.recoveryEdges",
   "Query.recoveryNodes",
   "Query.registerEntries",
+  "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
   "Query.secrets",
