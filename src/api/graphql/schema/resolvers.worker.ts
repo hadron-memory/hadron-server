@@ -39,6 +39,7 @@ import {
 import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
+import { lintWorkerFields, pageLintWarnings } from '../../../lib/bootPromptLint.js';
 import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
 import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -2876,6 +2877,21 @@ export const workerFieldResolvers = {
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
     trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
+    /** #2048 S11c: current warnings of the stored signature and trailer, behind the same gate as the fields. */
+    signatureLint: async (
+      worker: { appId: string; slug?: string; signature: string; trailer: string },
+      args: { first?: number | null; after?: string | null },
+      ctx: Context,
+    ) => {
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      try {
+        const urn = worker.slug ? await resolveWorkerUrnField({ appId: worker.appId, slug: worker.slug }, ctx) : null;
+        return pageLintWarnings(lintWorkerFields(worker, urn ? portalUrlForUrn(urn) : null), args);
+      } catch (error) {
+        console.error('[bootPromptLint] worker signature lint unavailable:', error instanceof Error ? error.message : error);
+        return null;
+      }
+    },
     promptOverride: async (
       worker: { appId: string; promptOverride: string | null },
       _: unknown,

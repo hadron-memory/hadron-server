@@ -101,7 +101,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.validateMemory",
   "Query.workers",
   "Ticker.subscribers",
-  "User.sharedOrganizations"
+  "User.sharedOrganizations",
+  "Worker.signatureLint"
 ];
 const servers: Server[] = [];
 type Reply = Omit<Response, 'json'> & { json(): Promise<any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
