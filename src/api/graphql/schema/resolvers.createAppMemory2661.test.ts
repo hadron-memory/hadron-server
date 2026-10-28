@@ -45,6 +45,8 @@ beforeEach(async () => {
 describe('#2661 new free-standing app memory', () => {
   for (const role of ['admin','owner']) it(`${role} creates the ruled row with participant read/write and tenant isolation`, async () => {
     const row = await create(ctx(role === 'admin' ? admin.id : owner.id));
+    const listed = await (resolvers.Query as any).memories({}, { filter: { memoryClasses: ['app'] } }, ctx(participant.id));
+    expect(listed.items.map((m: any) => m.id)).toContain(row.id);
     expect(row).toMatchObject({ class: 'app', organizationId: org.id, appId: app.id, isInstallMemory: false,
       installOfAgentId: null, userId: null, userMemoryOfAgentId: null, sharedMemoryOfAgentId: null, visibility: null });
     expect(row.urn).toBe(`${org.urn}:app-notes`);
@@ -57,18 +59,22 @@ describe('#2661 new free-standing app memory', () => {
     await expect(requireMemoryWriteAccess(ctx(outsider.id), row.id)).rejects.toThrow();
     expect(await db.memory.count({ where: { organizationId: foreign.id } })).toBe(0);
   });
-  for (const principal of ['member','revoked','other-org','app-key','worker','impersonation','run','anonymous']) {
+  for (const principal of ['member','revoked','other-org','app-key','worker','impersonation','run','anonymous','invalid-session']) {
     it(`refuses ${principal} without writes`, async () => {
       const c: Record<string, Context> = {
         member: ctx(member.id), revoked: ctx(revoked.id), 'other-org': ctx(outsider.id),
-        'app-key': ctx(undefined, { appId: app.id, appKeyId: generateId() }),
+        'app-key': ctx(admin.id, { appId: app.id, appKeyId: generateId() }),
         worker: ctx(admin.id, { sessionId: generateId() }),
         impersonation: ctx(admin.id, { impersonation: { orgId: org.id } as any }),
-        run: ctx(admin.id, { clientId: 'run:test', appId: app.id }), anonymous: ctx(),
+        'invalid-session': ctx(admin.id, { sessionBindingRefused: true }),
+        run: ctx(admin.id, { clientId: 'run:test', appId: app.id }), anonymous: ctx(undefined, {roles:['ADMIN']}),
       };
       await refused(c[principal]);
     });
   }
+  it('refuses an empty name before writing', async () => {
+    await refused(ctx(admin.id), {name:'   '}, 'BAD_USER_INPUT');
+  });
   it('refuses a user-owned App with a typed answer even for its owner', async () => {
     const personal = await db.app.create({ data: { name: 'Own', urn: 'u2661:own', ownerUserId: admin.id } });
     await db.appAgent.create({ data: { appId: personal.id, agentId: agent.id } });
@@ -77,6 +83,14 @@ describe('#2661 new free-standing app memory', () => {
   it('refuses an App with no installed Agent', async () => {
     await db.appAgent.deleteMany({ where: { appId: app.id } });
     await refused(ctx(admin.id), {}, 'AGENT_NOT_INSTALLED');
+  });
+  it('MCP preserves the no-Agent and user-owned refusal answers', async () => {
+    const auth = { userId: admin.id, roles: [] as any[], clientId: `user:${admin.id}` };
+    await db.appAgent.deleteMany({where:{appId:app.id}});
+    expect(await createTestableMcpServer(auth).callToolText('hadron_create_app_memory', {app:app.id,name:'No Agent'})).toBe('Error: This App has no Agent installed.');
+    const own = await db.app.create({data:{name:'Own',urn:'u2661:own',ownerUserId:admin.id}});
+    expect(await createTestableMcpServer(auth).callToolText('hadron_create_app_memory', {app:own.id,name:'Own'})).toBe('Error: Creating an app memory for a user-owned App is not yet supported.');
+    expect(await db.memory.count()).toBe(0);
   });
   it('does not count a deleted Agent as an installation', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { deletedAt: new Date() } });
@@ -113,20 +127,26 @@ describe('#2661 new free-standing app memory', () => {
       expect(await db.memory.count()).toBe(count);
     }
   });
-  for (const race of ['uninstall','revoke']) it(`waits for concurrent ${race}, then refuses with no memory`, async () => {
+  for (const race of ['uninstall','revoke','transfer']) it(`waits for concurrent ${race}, then refuses with no memory`, async () => {
     expect(M.createAppMemory).toBeTypeOf('function');
     let release!: () => void, held!: () => void;
     const gate = new Promise<void>(r => release=r), ready = new Promise<void>(r => held=r);
     const revoker = db.$transaction(async tx => {
-      await lockAuthorityAnchors(tx, [{kind: race === 'uninstall' ? 'app':'org', id: race === 'uninstall' ? app.id:org.id}], 'exclusive');
+      await lockAuthorityAnchors(tx, [{kind: race !== 'revoke' ? 'app':'org', id: race !== 'revoke' ? app.id:org.id}], 'exclusive');
       if (race === 'uninstall') await tx.appAgent.deleteMany({where:{appId:app.id}});
+      else if (race === 'transfer') await tx.app.update({where:{id:app.id},data:{organizationId:foreign.id}});
       else await tx.orgMember.updateMany({where:{organizationId:org.id,userId:admin.id},data:{deletedAt:new Date()}});
       held(); await gate;
     });
     await ready;
-    const pending = create().then(() => 'created', e => e);
-    try { await waitForLockWaiters(db); } finally { release(); }
-    await revoker;
+    let settled = false;
+    const pending = create().then(() => 'created', (e: unknown) => e).finally(() => { settled = true; });
+    try {
+      // A bypass must fail an assertion, not leave a revoker hanging until
+      // the test timeout. Always release and join both transactions.
+      await waitForLockWaiters(db, 1, 1000).catch(() => undefined);
+      expect(settled, 'creator must wait for the authority revoker').toBe(false);
+    } finally { release(); await revoker; await pending; }
     expect(await pending).toMatchObject({extensions:{code:race === 'uninstall'?'AGENT_NOT_INSTALLED':'FORBIDDEN'}});
     expect(await db.memory.count()).toBe(0);
   });

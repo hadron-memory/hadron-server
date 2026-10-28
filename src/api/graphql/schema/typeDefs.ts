@@ -10846,6 +10846,27 @@ export const typeDefs = `#graphql
     ): Memory!
 
     """
+    Create a NEW free-standing app-class memory in an org-owned App with at
+    least one installed Agent. The caller must act as themselves, outside a
+    worker/session, App-key, headless-run or impersonation principal, through
+    the existing org ADMIN/OWNER gate. User-owned Apps are refused with
+    USER_OWNED_APP_UNSUPPORTED until ruled. App participants read and write it;
+    the installed Agent's owning org gains no access. Existing memories cannot
+    be attached through this operation. Name determines the slug as createMemory
+    does. Refusals: FORBIDDEN, AGENT_NOT_INSTALLED, USER_OWNED_APP_UNSUPPORTED,
+    BAD_USER_INPUT (empty name). Installation and membership are checked in the
+    inserting transaction, fenced against uninstall and revocation.
+    See hrn:node:hadronmemory.com:specs:cor:acl:010:01.
+    """
+    createAppMemory(
+      appRef: ID!
+      name: String!
+      shortDescription: String
+      description: String
+      tags: [String!]
+    ): Memory!
+
+    """
     Add a NEW memory to an App, born App-scoped.
 
     Unlike createMemory (which only makes free-standing memories), this scopes
