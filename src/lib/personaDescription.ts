@@ -36,6 +36,11 @@ export const PLATFORM_VARIABLE_KEYS = [
   'worker.name', 'worker.role', 'agent.name', 'worker.reportsTo.name', 'worker.signature', 'worker.trailer', 'worker.url', 'session.llmModel',
 ] as const satisfies readonly (keyof PlatformVariableValues)[];
 
+// Exhaustiveness (#2704): a variable added to PlatformVariableValues but not to the list above fails to compile here,
+// so the audit can never call a supported token unknown.
+const platformVariableKeysAreExhaustive: Exclude<keyof PlatformVariableValues, (typeof PLATFORM_VARIABLE_KEYS)[number]> extends never ? true : never = true;
+void platformVariableKeysAreExhaustive;
+
 export function applyPlatformVariables(
   template: string,
   values: PlatformVariableValues,

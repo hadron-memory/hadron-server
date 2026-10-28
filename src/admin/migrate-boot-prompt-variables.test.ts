@@ -7,7 +7,7 @@ import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { applyPlatformVariables } from '../lib/personaDescription.js';
 import { convertBootPrompts } from './convert-boot-prompts.js';
-import { auditBootPromptTokens, migrateBootPromptVariables, renameLegacyTokens } from './migrate-boot-prompt-variables.js';
+import { approveCheckedRevision, auditBootPromptTokens, migrateBootPromptVariables, renameLegacyTokens } from './migrate-boot-prompt-variables.js';
 
 // A mutant seam for the byte comparison: off unless a test turns it on.
 const drift = vi.hoisted(() => ({ on: false }));
@@ -136,7 +136,7 @@ describe('#2704 — migration', () => {
     await convert();
     const snapshot = async () => JSON.stringify(await db.node.findMany({ orderBy: { id: 'asc' }, select: { id: true, revSeq: true, approvedRevNo: true, content: true } }));
     const s0 = await snapshot();
-    expect(await migrate(false)).toMatchObject({ applied: false, migrated: 1 });
+    expect(await migrate(false)).toMatchObject({ applied: false, migrated: 0, candidates: 1 });
     expect(await snapshot()).toBe(s0);
     await migrate();
     const s1 = await snapshot();
@@ -172,6 +172,32 @@ describe('#2704 — migration', () => {
     const before = 'I am {{name}}, a {{role}}.';
     const legacy = { name: vars['worker.name'], role: vars['worker.role'] };
     expect(applyPlatformVariables(renameLegacyTokens(before), vars)).toBe(applyPlatformVariables(before, vars, legacy));
+  });
+
+  it('a dry run fails a row whose source drifted from the served text, as apply would', async () => {
+    const agent = await agentWith('coord', 'Hi {{name}}');
+    await convert();
+    const mem = agent.systemMemoryId!;
+    await db.node.updateMany({ where: { memoryId: mem, loc: 'boot:source' }, data: { content: 'Hi {{name}} and more' } });
+    const preview = await migrate(false);
+    expect(preview).toMatchObject({ migrated: 0, candidates: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' }] });
+    expect(await migrate()).toMatchObject({ migrated: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' }] });
+  });
+
+  it('reports a converted Agent whose source is gone while its served text still holds a legacy token', async () => {
+    const agent = await agentWith('coord', 'Hi {{name}}');
+    await convert();
+    await db.node.updateMany({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' }, data: { deletedAt: new Date() } });
+    expect(await migrate()).toMatchObject({ migrated: 0, failed: 1, rows: [{ kind: 'AGENT', id: agent.id, outcome: 'failed', reason: 'SOURCE_MISSING' }] });
+  });
+
+  it('approves only the revision whose text was checked', async () => {
+    const agent = await agentWith('coord', 'Hi {{name}}');
+    await convert();
+    const node = await compiledOf('agent', agent.id);
+    await db.node.update({ where: { id: node.id }, data: { content: 'edited after the check' } });
+    await expect(approveCheckedRevision(db, node.id, node.content ?? '')).rejects.toThrow();
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvedRevNo).toBe(node.approvedRevNo);
   });
 
   it('leaves an unconverted Agent and a source with no legacy token alone', async () => {
