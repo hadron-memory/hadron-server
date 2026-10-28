@@ -58,6 +58,17 @@ async function roleAgent(name: string, parent?: string) {
   const row = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
   return { id: a.id, memoryId: row.systemMemoryId as string };
 }
+
+/** A second-tenant Agent, optionally PUBLIC so the caller-side Agent read gate passes. */
+async function foreignAgent(visibility?: 'PUBLIC') {
+  const o = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: `foreign-${generateId().toLowerCase()}.example` } });
+  const owner = await db.user.create({ data: { handle: `owner-${generateId()}` } });
+  await db.orgMember.create({ data: { organizationId: o.id, userId: owner.id, role: 'ADMIN' } });
+  const a = await M.createAgent({}, { orgId: o.id, name: 'Foreign role' }, ctx(owner.id));
+  if (visibility) await db.agent.update({ where: { id: a.id }, data: { visibility } });
+  const row = await db.agent.findUniqueOrThrow({ where: { id: a.id } });
+  return { id: a.id, memoryId: row.systemMemoryId as string };
+}
 const mapTask = () => registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:finish');
 describe('#2608 register role candidates', () => {
   it('returns every tied nearest candidate, never chooses among ties; child override has depth zero', async () => {
@@ -90,6 +101,21 @@ describe('#2608 register role candidates', () => {
     await db.agent.update({ where: { id: a.id }, data: { extendsAgentId: teamAgentId } });
     await db.worker.updateMany({ where: { appId: app.id }, data: { retiredAt: new Date() } });
     await worker('Foreign', a.id); expect((await pick()).candidates).toEqual([]);
+  });
+  // #2672 seats: each of the two member gates is pinned as a SOLE defense — the pin above is
+  // satisfied by either gate alone, so a single-gate-strip mutant survived it (Axel/Riana/Caspian).
+  it('S1: a memory-less foreign Agent extending the readable Team Agent is omitted (Agent gate alone)', async () => {
+    await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    const f = await foreignAgent();
+    await db.agent.update({ where: { id: f.id }, data: { extendsAgentId: teamAgentId, systemMemoryId: null } });
+    await db.worker.updateMany({ where: { appId: app.id }, data: { retiredAt: new Date() } });
+    await worker('Foreign', f.id); expect((await pick()).candidates).toEqual([]);
+  });
+  it('S2: a PUBLIC foreign Agent whose own unreadable memory holds the task is omitted (memory gate alone)', async () => {
+    await mapTask(); const f = await foreignAgent('PUBLIC');
+    await node(f.memoryId, 'tasks:finish', { isRunnable: true });
+    await db.worker.updateMany({ where: { appId: app.id }, data: { retiredAt: new Date() } });
+    await worker('Foreign', f.id); expect((await pick()).candidates).toEqual([]);
   });
   it('refuses an App outsider through the roster gate and pages all ties without changing their minimum depth', async () => {
     await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
