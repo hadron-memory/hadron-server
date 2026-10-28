@@ -28,6 +28,8 @@ import {
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
+import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
   evaluateEdgeCondition,
   userMessageFor,
@@ -113,18 +115,37 @@ async function chatWriteTx(
  * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
  * so `session.llmModel` has no value here and is empty.
  */
-export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
-  const role = agent.personaRole ?? '';
-  return applyPlatformVariables(agent.systemPrompt ?? '', {
+export function agentPlatformValues(agent: { name: string; urn: string; personaRole: string | null }) {
+  return {
     'worker.name': agent.name,
-    'worker.role': role,
+    'worker.role': agent.personaRole ?? '',
     'agent.name': agent.name,
     'worker.reportsTo.name': '',
     'worker.signature': '',
     'worker.trailer': '',
     'worker.url': portalUrlForUrn(agent.urn) ?? '',
     'session.llmModel': '',
-  }, { name: agent.name, role });
+  };
+}
+
+export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
+  return applyPlatformVariables(agent.systemPrompt ?? '', agentPlatformValues(agent), { name: agent.name, role: agent.personaRole ?? '' });
+}
+
+/**
+ * #2047 (S10) — what a chat is served with serving ON: the compiled boot prompt (approved revision, as-is), its platform
+ * variables bound to the Agent (a chat binds no worker). Resolved BEFORE the chat is created or answered, so a refusal
+ * is the same typed refusal a bind gives and leaves no chat behind. The App is the one the chat's holding memory belongs
+ * to; a chat held in a memory with no App serves the Agent's own pointer and has no App to record under.
+ */
+export async function serveChatPrompt(
+  db: Context['db'],
+  agent: { id: string; name: string; urn: string; personaRole: string | null },
+  appId: string | null,
+): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
+  const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
+  const variables = agentPlatformValues(agent);
+  return { text: applyPlatformVariables(served.content, variables), served, variables };
 }
 
 export const chatMutations = {
@@ -512,6 +533,11 @@ export const chatMutations = {
       // personal memories); private chats retain the caller's read filter.
       // #1835 intersects either filter with targetMemoryId, so bare refs stay
       // in the holding memory without weakening the chat's authority gate.
+      // #2047 (S10): with serving ON the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
+      const chatAppId = bootPromptServingEnabled()
+        ? ((await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null)
+        : null;
+      const chatServed = bootPromptServingEnabled() ? await serveChatPrompt(ctx.db, agent, chatAppId) : null;
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -699,6 +725,10 @@ export const chatMutations = {
                 createdBy: ctx.userId ?? null,
               },
             });
+            // #2047: the chat's record, written with the chat so neither exists without the other (R37).
+            if (chatServed && chatAppId) {
+              await recordServedPrompt(tx, { kind: 'CHAT', chatId: chatNodeId, appId: chatAppId, agentId: resolvedAgentId }, chatServed.served, chatServed.variables);
+            }
             // Create the messages parent (so the chat subtree is well-formed)
             const messagesNodeId = generateId();
             startedNodes.push({
@@ -726,7 +756,9 @@ export const chatMutations = {
 
       // Bind the Agent's own identity on the chat path. Worker briefings bind
       // the same template to the Worker's name and role instead.
-      if (agent.systemPrompt) {
+      if (chatServed) {
+        systemMessage = chatServed.text + '\n\n' + systemMessage;
+      } else if (agent.systemPrompt) {
         systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
       }
 
@@ -1073,7 +1105,22 @@ export const chatMutations = {
         }
 
         // Rebind on each chat turn so edits to the Agent's prompt take effect.
-        if (agent?.systemPrompt) {
+        if (agent && bootPromptServingEnabled()) {
+          // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
+          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
+          if (memory?.appId) {
+            const last = await ctx.db.servedPrompt.findFirst({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true } });
+            if (!last || last.compiledNodeId !== chatServed.served.compiledNodeId || last.servedRevSeq !== chatServed.served.servedRevSeq) {
+              try {
+                await recordServedPrompt(ctx.db, { kind: 'CHAT', chatId: chatNode.id, appId: memory.appId, agentId: agent.id, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
+              } catch (err) {
+                // A concurrent turn already recorded this change: (chat, ordinal) is unique, and that record stands.
+                if ((err as { code?: string }).code !== 'P2002') throw err;
+              }
+            }
+          }
+          systemMessage = chatServed.text + '\n\n' + systemMessage;
+        } else if (agent?.systemPrompt) {
           systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
         }
 

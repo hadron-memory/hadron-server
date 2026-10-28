@@ -38,7 +38,8 @@ export interface ServedBootPrompt {
 
 export interface ServeTarget {
   surface: BootPromptSurface;
-  appId: string;
+  /** The serving App. A chat held in a memory with no App has none: it serves the Agent's pointer only. */
+  appId: string | null;
   agent: { id: string; name: string };
   /** Present on a bind (and a run that names a worker); a chat and an agent-only run have none. */
   workerId?: string | null;
@@ -63,7 +64,7 @@ async function decidingPointer(
     const w = await db.worker.findUnique({ where: { id: t.workerId }, select });
     if (w?.bootPromptNodeId) return { level: 'WORKER', stored: w };
   }
-  const install = await db.appAgent.findFirst({ where: { appId: t.appId, agentId: t.agent.id }, select });
+  const install = t.appId ? await db.appAgent.findFirst({ where: { appId: t.appId, agentId: t.agent.id }, select }) : null;
   if (install?.bootPromptNodeId) return { level: 'APP_AGENT', stored: install };
   const agent = await db.agent.findUnique({ where: { id: t.agent.id }, select });
   if (agent?.bootPromptNodeId) return { level: 'AGENT', stored: agent };
@@ -80,7 +81,7 @@ export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<S
 
   const { found } = await newestApprovedRevisionOf(db, resolved.nodeId);
   if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
-  if (await servingAppRequiresSignature(db, t.appId)) {
+  if (t.appId && (await servingAppRequiresSignature(db, t.appId))) {
     // Unreachable until #1614 supplies the signature check; fail closed rather than serve unsigned text.
     throw bootPromptRefusal('BOOT_PROMPT_NOT_SIGNED', where);
   }
