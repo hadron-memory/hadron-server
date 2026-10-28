@@ -79,14 +79,14 @@ describe('#2677 single pick over #2608 candidates', () => {
 
   it('skips workers the matcher skips: busy, paused, retired, unbound/not live; falls to the NEXT depth when the lowest is all ineligible', async () => {
     const base = await roleAgent('Base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
-    const child = await roleAgent('Child', base.id); await node(child.memoryId, 'tasks:finish', { isRunnable: true });
-    const near = await worker('Near', child.id); const far = await worker('Far', base.id);
-    await bind(near, child.id); await bind(far, base.id);
+    const child = await roleAgent('Child', base.id); // inherits the task: depth 1
+    const near = await worker('Zed', base.id); const far = await worker('Abe', child.id);
+    await bind(near, base.id); await bind(far, child.id);
     expect(ids(await pick(admin.id))).toEqual([`WORKER:${near.id}`]);
     await db.agentTask.create({ data: { appId: app.id, title: 'Busy', ownerUserId: member.id, assigneeWorkerId: near.id, assignedAt: at(0) } });
     expect(ids(await pick(admin.id))).toEqual([`WORKER:${far.id}`]);
     await db.workerAvailability.create({ data: { workerId: far.id, state: 'unavailable', reason: 'other', setAt: at(0), setBy: 'holder', setByUserId: admin.id } });
-    expect(ids(await pick(admin.id, { workerRef: undefined })).every((e) => e.startsWith('USER:'))).toBe(true); // no role holder, no coordinator: managers
+    expect(ids(await pick(admin.id)).every((e: string) => e.startsWith('USER:'))).toBe(true); // no role holder, no coordinator: managers
   });
 
   it('retired and not-live workers are never picked', async () => {
