@@ -11,7 +11,7 @@ import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
 import { resolvers, type Context } from './resolvers.js';
-import { composeWorkerPrompt } from './resolvers.worker.js';
+import { composeWorkerPrompt, describeServedWorker } from './resolvers.worker.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
@@ -124,5 +124,16 @@ describe('#2047 bind', () => {
     const read = await composeWorkerPrompt(ctx({ sessionId: first.id }), w as never);
     expect(read.refusal).toBe('BOOT_PROMPT_RECORDED_REVISION_DELETED');
     expect(read.text ?? '').not.toContain('v2');
+  });
+
+  it('hadron_get_worker describes the pointer level, the served revision and the refusal a bind would get', async () => {
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(await describeServedWorker(ctx(), w as never)).toContain('NOT SERVEABLE — BOOT_PROMPT_NOT_SET');
+    const node = await compiled('x');
+    await pointAgent(node);
+    const line = await describeServedWorker(ctx(), w as never);
+    expect(line).toContain(`AGENT pointer, compiled node ${node}, revision 1`);
+    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
+    expect(await describeServedWorker(ctx(), w as never)).toBe('');
   });
 });

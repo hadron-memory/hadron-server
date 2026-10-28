@@ -16,6 +16,7 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // needs no Team Agent at all.
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
+import { lintWarningPageForNodeId, renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
@@ -2169,8 +2170,21 @@ export const workerQueries = {
       'worker.url': '',
       'session.llmModel': '',
     }, WORKER_SIGNATURE_DEFAULTS);
-    const bound = template ? applyPlatformVariables(template, values, { name, role: previewRole }) : null;
-    const boundOverride = override ? applyPlatformVariables(override, values) : override;
+    // #2047 (S10): with serving ON the preview shows what a bind would be served now (no worker pointer exists yet), not the
+    // retired template and override; a prompt that could not be served previews as none rather than failing a cast it does not gate.
+    let servedTemplate: string | null | undefined;
+    if (bootPromptServingEnabled()) {
+      try {
+        servedTemplate = (await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId, agent: { id: agent.id, name: agent.name } })).content;
+      } catch (err) {
+        const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+        if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
+        servedTemplate = null;
+      }
+    }
+    const previewTemplate = servedTemplate !== undefined ? servedTemplate : template;
+    const bound = previewTemplate ? applyPlatformVariables(previewTemplate, values, { name, role: previewRole }) : null;
+    const boundOverride = servedTemplate !== undefined ? null : (override ? applyPlatformVariables(override, values) : override);
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
     // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
@@ -2190,7 +2204,7 @@ export const workerQueries = {
       prompt,
       teamPlacement: choice.kind,
       reportsToWorkerId: reportingHeadId,
-      hasNamePlaceholder: template ? templateBindsName(template) : null,
+      hasNamePlaceholder: previewTemplate ? templateBindsName(previewTemplate) : null,
       tickers: tickers.map((t) => ({
         name: t.name,
         templateId: t.templateId,
@@ -2560,6 +2574,37 @@ async function readServedWorkerText(
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
     throw err;
   }
+}
+
+/**
+ * #2047 — what a worker would be served now, as the text `hadron_get_worker` prints: the pointer level that decides, the
+ * revision served and the lint state of its root source, or the refusal a bind would get. Also the revision recorded for
+ * the caller's own open session when it differs (a session finishes under the revision it was bound with). Empty with
+ * serving OFF. Behind the worker read gate; ids only, never a loc or text beyond what `Worker.servedPrompt` already shows.
+ */
+export async function describeServedWorker(
+  ctx: Context,
+  worker: { id: string; appId: string; agentId: string },
+): Promise<string> {
+  if (!bootPromptServingEnabled() || !(await maySeeWorkerInternals(ctx, worker.appId))) return '';
+  const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId }, select: { name: true } });
+  const agentName = agent?.name ?? '';
+  let line: string;
+  try {
+    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
+    line = `\nServed boot prompt: ${served.pointerLevel} pointer, compiled node ${served.compiledNodeId}, revision ${served.servedRevSeq} (provenance from compile revision ${served.provenanceRevSeq}).`;
+    const root = served.provenance[0]?.nodeId;
+    if (root) line += renderLintWarnings(await lintWarningPageForNodeId(ctx, root));
+  } catch (err) {
+    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+    if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
+    line = `\nServed boot prompt: NOT SERVEABLE — ${code}. A bind would be refused.`;
+  }
+  const recorded = ctx.sessionId
+    ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' }, select: { servedRevSeq: true, pointerLevel: true } })
+    : null;
+  if (recorded) line += `\nThis session was served revision ${recorded.servedRevSeq} (${recorded.pointerLevel} pointer) and finishes under it.`;
+  return line;
 }
 
 /**

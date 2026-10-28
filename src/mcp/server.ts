@@ -246,7 +246,7 @@ import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptL
 const REPLACE_LINT_MAX_NODES = 100;
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
@@ -10886,7 +10886,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
                 `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
                 `\n\n${prompt}`
-              : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+              : briefing.refusal
+                ? `\n(No boot briefing: the boot prompt cannot be served — ${briefing.refusal}.)`
+                : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+            (await describeServedWorker(ctx, worker)) +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {
