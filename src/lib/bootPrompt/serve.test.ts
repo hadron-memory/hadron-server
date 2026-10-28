@@ -161,3 +161,37 @@ describe('#2047 the served revision (cor:agt:040:03/:09)', () => {
     expect(await serve()).toMatchObject({ content: 'v1 text', servedRevSeq: 2, provenanceRevSeq: 1 });
   });
 });
+
+describe('#2047 review fixes on PR-B', () => {
+  it('a recompile landing between selection and content read never pairs the old revision number with the new text', async () => {
+    const id = await compiled('a', 'v1 text');
+    await point.agent(id);
+    let fired = false;
+    const racing = new Proxy(db, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv);
+        if (prop !== 'node') return v;
+        return new Proxy(v as typeof db.node, {
+          get(nt, np, nr) {
+            if (np !== 'findUnique') return Reflect.get(nt, np, nr);
+            return async (args: { select?: { content?: boolean } }) => {
+              if (!fired && args?.select?.content) { fired = true; await recompile(id, 'v2 UNAPPROVED'); }
+              return (nt.findUnique as (a: unknown) => Promise<unknown>).call(nt, args);
+            };
+          },
+        });
+      },
+    }) as typeof db;
+    const served = await resolveServedBootPrompt(racing, { surface: 'bind', appId, agent: { id: agentId, name: 'Ada' }, workerId });
+    expect(fired).toBe(true);
+    expect(served).toMatchObject({ content: 'v1 text', servedRevSeq: 1 });
+  });
+
+  it('an install pointer set by another App is never served to this App (the App scope of the install lookup)', async () => {
+    const id = await compiled('inst', 'install text');
+    const otherApp = (await db.app.create({ data: { id: generateId(), name: 'Other', urn: 'sv-org:other', organizationId: orgId } })).id;
+    await db.appAgent.delete({ where: { appId_agentId: { appId, agentId } } });
+    await db.appAgent.create({ data: { appId: otherApp, agentId, bootPromptNodeId: id, bootPromptUrn: `sv-org:sys:${id}` } as never });
+    expect(await code(serve('chat', false))).toBe('BOOT_PROMPT_NOT_SET');
+  });
+});

@@ -79,16 +79,22 @@ export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<S
   const resolved = await resolveBootPromptPointer(db, pointer.stored);
   if (!resolved || resolved.deleted) throw bootPromptRefusal('BOOT_PROMPT_TARGET_DELETED', where);
 
-  const { found } = await newestApprovedRevisionOf(db, resolved.nodeId);
-  if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
   if (t.appId && (await servingAppRequiresSignature(db, t.appId))) {
     // Unreachable until #1614 supplies the signature check; fail closed rather than serve unsigned text.
     throw bootPromptRefusal('BOOT_PROMPT_NOT_SIGNED', where);
   }
 
-  // The text that qualified for approval: the live row, or the retained snapshot of the approved revision.
-  const content = await approvedContent(db, resolved.nodeId, found.revNo, found.source);
-  if (content === null) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
+  // Selection and retrieval are two reads, so a recompile between them could pair an old revision number with newer,
+  // unapproved text. The content is therefore read ONLY at the selected revision number (live row if it is still that
+  // revision, else its retained snapshot); when neither can be pinned the selection moved, so select again.
+  let found: NonNullable<Awaited<ReturnType<typeof newestApprovedRevisionOf>>['found']> | null = null;
+  let content: string | null = null;
+  for (let attempt = 0; attempt < APPROVED_READ_ATTEMPTS && content === null; attempt++) {
+    ({ found } = await newestApprovedRevisionOf(db, resolved.nodeId));
+    if (!found) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
+    content = await approvedContent(db, resolved.nodeId, found.revNo);
+  }
+  if (!found || content === null) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
 
   const provenanceRevSeq = await provenanceRevisionAtOrBelow(db, resolved.nodeId, found.revNo);
   if (provenanceRevSeq === null) throw bootPromptRefusal('BOOT_PROMPT_NOT_APPROVED', where);
@@ -105,8 +111,13 @@ export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<S
   };
 }
 
-async function approvedContent(db: Db, nodeId: string, revNo: number, source: 'live' | 'snapshot'): Promise<string | null> {
-  if (source === 'live') return (await db.node.findUnique({ where: { id: nodeId }, select: { content: true } }))?.content ?? '';
+/** How many times the approved revision is re-selected when a concurrent edit moves it between selection and read. */
+const APPROVED_READ_ATTEMPTS = 3;
+
+/** The content of revision `revNo` exactly, or null when it can no longer be pinned (the caller re-selects). */
+async function approvedContent(db: Db, nodeId: string, revNo: number): Promise<string | null> {
+  const live = await db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, content: true } });
+  if (live && live.revSeq === revNo) return live.content ?? '';
   const row = await db.nodeRevision.findFirst({ where: { nodeId, revNo }, orderBy: { id: 'desc' }, select: { content: true } });
   return row ? (row.content ?? '') : null;
 }

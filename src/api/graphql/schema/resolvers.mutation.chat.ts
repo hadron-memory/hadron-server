@@ -135,6 +135,32 @@ export async function serveChatPrompt(
   return { text: applyPlatformVariables(served.content, variables), served, variables: { ...variables } };
 }
 
+/**
+ * #2047 (R37) — a chat records what it was served again only when the served revision CHANGED. (chat, ordinal) is unique, so
+ * two concurrent turns can race for one ordinal; the loser must not assume the winner recorded ITS revision (the two may
+ * have resolved different revisions around an approval). It re-reads the latest record and retries at the next ordinal
+ * until the latest record matches what this turn served, so a served revision is never missing from the audit history.
+ */
+export async function recordChatServedIfChanged(
+  db: Context['db'],
+  chatId: string,
+  agentId: string,
+  appId: string | null,
+  chatServed: { served: ServedBootPrompt; variables: Record<string, string> },
+): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const last = await db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true } });
+    if (last && last.compiledNodeId === chatServed.served.compiledNodeId && last.servedRevSeq === chatServed.served.servedRevSeq) return;
+    try {
+      await recordServedPrompt(db, { kind: 'CHAT', chatId, appId, agentId, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
+      return;
+    } catch (err) {
+      if ((err as { code?: string }).code !== 'P2002') throw err;
+    }
+  }
+  throw new Error('chat served-prompt record kept conflicting');
+}
+
 export const chatMutations = {
     startChat: async (
       _: unknown,
@@ -1095,17 +1121,7 @@ export const chatMutations = {
         if (agent && bootPromptServingEnabled()) {
           // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
           const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
-          {
-            const last = await ctx.db.servedPrompt.findFirst({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true } });
-            if (!last || last.compiledNodeId !== chatServed.served.compiledNodeId || last.servedRevSeq !== chatServed.served.servedRevSeq) {
-              try {
-                await recordServedPrompt(ctx.db, { kind: 'CHAT', chatId: chatNode.id, appId: memory?.appId ?? null, agentId: agent.id, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
-              } catch (err) {
-                // A concurrent turn already recorded this change: (chat, ordinal) is unique, and that record stands.
-                if ((err as { code?: string }).code !== 'P2002') throw err;
-              }
-            }
-          }
+          await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
         } else if (agent?.systemPrompt) {
           systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;

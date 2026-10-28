@@ -2566,7 +2566,16 @@ async function readServedWorkerText(
     if (recorded) {
       const content = await readRecordedRevisionContent(ctx.db, recorded.compiledNodeId, recorded.servedRevSeq);
       if (content === null) throw bootPromptRefusal('BOOT_PROMPT_RECORDED_REVISION_DELETED', where);
-      return { text: applyPlatformVariables(content, platform), refusal: null };
+      // The values the bind filled, not today's: a session finishes under the briefing it was given (a rename or a new
+      // reports-to must not rewrite it). Today's values fill only a variable the record does not hold.
+      const values = { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues;
+      return { text: applyPlatformVariables(content, values), refusal: null };
+    }
+    // An open session of THIS worker with no record began before serving was activated. It is never silently upgraded to
+    // the current revision (Attach v3 §5): it reads no prompt and a typed notice until it rebinds.
+    if (ctx.sessionId) {
+      const own = await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: worker.id, endedAt: null }, select: { id: true } });
+      if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
     return { text: applyPlatformVariables(served.content, platform), refusal: null };

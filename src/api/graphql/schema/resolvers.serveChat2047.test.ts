@@ -11,6 +11,7 @@ import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
 import { resolvers, type Context } from './resolvers.js';
+import { recordChatServedIfChanged, serveChatPrompt } from './resolvers.mutation.chat.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -136,5 +137,19 @@ describe('#2047 chat', () => {
     expect((await (resolvers as any).Chat.servedPrompts({ id: chatNode.id }, {}, asAdmin(['ADMIN']))).total).toBe(1);
     expect(await (resolvers as any).Chat.servedPrompts({ id: chatNode.id }, {}, asAdmin(['READER']))).toEqual({ items: [], total: 0 });
     expect(await (resolvers as any).Chat.servedPrompts({ id: chatNode.id }, {}, asAdmin(['ADMIN'], { impersonation: {} as never }))).toEqual({ items: [], total: 0 });
+  });
+
+  it('overlapping turns that resolved DIFFERENT revisions both reach the audit history (a lost ordinal race is retried, not dropped)', async () => {
+    const node = await compiled('v1 {{agent.name}}');
+    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    const chatNode = await chatNodeByLocOrThrow(db, start.chatId);
+    await recompileApproved(node, 'v2 {{agent.name}}');
+    const s2 = await serveChatPrompt(db, agent, app.id);
+    await recompileApproved(node, 'v3 {{agent.name}}');
+    const s3 = await serveChatPrompt(db, agent, app.id);
+    await Promise.all([recordChatServedIfChanged(db, chatNode.id, agent.id, app.id, s2), recordChatServedIfChanged(db, chatNode.id, agent.id, app.id, s3)]);
+    const recs = await db.servedPrompt.findMany({ where: { chatId: chatNode.id }, orderBy: { ordinal: 'asc' } });
+    expect(recs.map((r) => r.servedRevSeq).sort()).toEqual([1, 2, 3]);
+    expect(new Set(recs.map((r) => r.ordinal)).size).toBe(3);
   });
 });

@@ -21,7 +21,7 @@ import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../li
  */
 
 import { runAsActor } from '../lib/requestActor.js';
-import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
+import type { PrismaClient, Prisma, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
@@ -50,6 +50,7 @@ import type { ResolvedAiConfig } from '../lib/aiConfig.js';
 import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
 import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
+import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
 import { applyPlatformVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
@@ -590,6 +591,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
 
   // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
   // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
+  // cor:agt:040:07 (R74): a headless run with NO Agent has no boot prompt to serve and is refused the same way.
+  if (bootPromptServingEnabled() && !args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
   const runServing = bootPromptServingEnabled() && args.agentId
     ? await (async () => {
         const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
@@ -630,12 +633,17 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       createdBy: args.createdBy ?? null,
     },
   });
+  const createAndRecord = async (client: Prisma.TransactionClient) => {
+    const created = await createRun(client);
+    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, runServing!.served, { ...agentPlatformValues(runServing!.agent) });
+    return created;
+  };
+  // A caller already inside a transaction (the webfetch event ingress) passes its transaction client, which cannot open
+  // another: the run and its record then join the caller's transaction and commit or roll back with it.
   const run = runServing
-    ? await db.$transaction(async (tx) => {
-        const created = await createRun(tx);
-        await recordServedPrompt(tx, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing.agent.id }, runServing.served, { ...agentPlatformValues(runServing.agent) });
-        return created;
-      })
+    ? ('$transaction' in db && typeof db.$transaction === 'function'
+        ? await db.$transaction(createAndRecord)
+        : await createAndRecord(db as unknown as Prisma.TransactionClient))
     : await createRun(db);
   if (args.triggerKind === 'MANUAL' && automationPin) {
     await db.manualAutomationPin.create({ data: { runId: run.id, pin: automationPin as never, adoptedBy: args.userId ?? args.createdBy ?? null } });

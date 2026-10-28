@@ -136,4 +136,25 @@ describe('#2047 bind', () => {
     delete process.env.BOOT_PROMPT_SERVE_ENABLED;
     expect(await describeServedWorker(ctx(), w as never)).toBe('');
   });
+
+  it('a recorded session keeps the variables its bind filled: a rename after the bind does not rewrite its briefing', async () => {
+    const node = await compiled('Hello {{worker.name}}.');
+    await pointAgent(node);
+    const first = await bind();
+    await db.worker.update({ where: { id: worker.id }, data: { name: 'Renamed' } });
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect((await composeWorkerPrompt(ctx({ sessionId: first.id }), w as never)).text).toContain('Hello Iris.');
+  });
+
+  it('an open session with no record (bound before serving was on) is not silently upgraded: no prompt, SESSION_UNRECORDED', async () => {
+    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
+    const first = await bind();
+    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+    const node = await compiled('current text');
+    await pointAgent(node);
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const read = await composeWorkerPrompt(ctx({ sessionId: first.id }), w as never);
+    expect(read.refusal).toBe('SESSION_UNRECORDED');
+    expect(read.text ?? '').not.toContain('current text');
+  });
 });

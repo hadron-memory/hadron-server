@@ -71,12 +71,24 @@ afterEach(() => {
 });
 
 describe('#2047 run', () => {
-  it('a run that names no Agent is served nothing and records nothing', async () => {
-    const run = await mint({ userId });
+  it('a run that names no Agent is refused BOOT_PROMPT_NOT_SET and no run is created (R74)', async () => {
+    const runs = await db.appRun.count();
+    expect(await code(mint({ userId }))).toBe('BOOT_PROMPT_NOT_SET');
+    expect(await db.appRun.count()).toBe(runs);
     expect(await db.servedPrompt.count()).toBe(0);
-    const { deps: d, llm } = deps();
-    await executeAppRun(db, run.id, d);
-    expect(llm.mock.calls[0]![1].system).not.toContain('Runner');
+  });
+
+  it('a run minted inside the caller\'s transaction (webfetch ingress) records with the run and rolls back with it', async () => {
+    const node = await compiledPointer('v1');
+    const run = await db.$transaction(async (tx) => mintAppRun(tx as never, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never));
+    expect(await db.servedPrompt.count({ where: { runId: run.id, compiledNodeId: node } })).toBe(1);
+    const runs = await db.appRun.count();
+    await expect(db.$transaction(async (tx) => {
+      await mintAppRun(tx as never, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never);
+      throw new Error('boom');
+    })).rejects.toThrow('boom');
+    expect(await db.appRun.count()).toBe(runs);
+    expect(await db.servedPrompt.count()).toBe(1);
   });
 
   it('no pointer: the launch is refused with the typed refusal and no run is created', async () => {
