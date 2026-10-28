@@ -244,7 +244,10 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     const body = sdl.slice(sdl.indexOf('\n  type Node {'), sdl.indexOf('\n  }', sdl.indexOf('\n  type Node {')));
     const fields = [...body.matchAll(/^    ([a-zA-Z]+)[:(]/gm)].map((m) => m[1]);
     const CONTENT = [
-      'id', 'revision', 'memoryId', 'nodeType', 'objectType', 'loc', 'urn', 'portalUrl', 'inheritedFrom',
+      // actionUrn (#2610) is the node's own address class, like urn/portalUrl: it
+      // names the entry under its HOLDING (base) Agent's slug — an identifier the
+      // served `urn` already discloses more of — and carries no record or person.
+      'id', 'revision', 'memoryId', 'nodeType', 'objectType', 'loc', 'urn', 'portalUrl', 'actionUrn', 'inheritedFrom',
       'isPlaceholder', 'isLink', 'name', 'alias', 'description', 'abstract', 'abstractOriginHash',
       'embeddingPendingAt', 'embeddingFailedAt', 'embeddingError', 'embeddingAttempts', 'content', 'tokens',
       'tags', 'properties', 'data', 'seq', 'ownerRepo', 'isRunnable', 'role', 'llmModel', 'aiAgent',
