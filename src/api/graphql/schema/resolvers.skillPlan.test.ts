@@ -308,7 +308,7 @@ describe('includes in an exported body (#2041, cor:dmo:150:03 R9)', () => {
 });
 
 describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)', () => {
-  const rule = (entry: { findings: Array<{ rule: string }> }) => entry.findings.filter(f => f.rule === 'skill-include-broken');
+  const rule = (entry: { findings: Array<{ rule: string; severity: string; message: string }> }) => entry.findings.filter(f => f.rule === 'skill-include-broken');
 
   it('warns, once, position-only, and the export still ships', async () => {
     await mkNode('tasks:declared', { properties: declaration(), content: '# Body\n\n{{> nope}} and {{> also-nope}}' });
