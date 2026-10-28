@@ -3283,13 +3283,7 @@ export function createMcpServerInstance(
   server.tool(
     'hadron_create_app_memory',
     'Create a NEW app-class memory in an org-owned App with an installed Agent. Requires the owning org ADMIN/OWNER acting as themselves, outside a worker session. App keys, runs, impersonation and user-owned Apps are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
-    {
-      app: z.string().describe('App ID or URN.'),
-      name: z.string().min(1).describe('Memory name; determines its slug.'),
-      shortDescription: z.string().optional(),
-      description: z.string().optional(),
-      tags: z.array(z.string()).optional(),
-    },
+    SHAPE_HADRON_CREATE_APP_MEMORY,
     async ({ app, name, shortDescription, description, tags }) => {
       const ctx: Context = {
         db, userId: auth.userId, clientId: auth.clientId,
@@ -12388,6 +12382,15 @@ const SHAPE_HADRON_SEARCH = {
 
 const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
   memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
+};
+
+// #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_CREATE_APP_MEMORY = {
+  app: z.string().describe('App ID or URN.'),
+  name: z.string().min(1).describe('Memory name; determines its slug.'),
+  shortDescription: z.string().optional(),
+  description: z.string().optional(),
+  tags: z.array(z.string()).optional(),
 };
 
 const SHAPE_HADRON_CREATE_MEMORY = {
