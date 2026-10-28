@@ -87,7 +87,7 @@ describe('#2608 register role candidates', () => {
   it('returns empty for unmapped code, missing task and an install-memory-only task', async () => {
     expect((await pick()).candidates).toEqual([]); await mapTask();
     expect((await pick()).total).toBe(0);
-    const install = await db.memory.create({ data: { id: generateId(), name: 'Install', urn: `${org.urn}:install`, class: 'app', appId: app.id, organizationId: org.id } });
+    const install = await db.memory.create({ data: { id: generateId(), name: 'Install', urn: `${org.urn}:install`, class: 'system', appId: app.id, isInstallMemory: true, installOfAgentId: teamAgentId, organizationId: org.id } });
     await node(install.id, 'tasks:finish', { isRunnable: true }); expect((await pick()).candidates).toEqual([]);
   });
   it('omits a second-tenant unreadable agent even when it holds the exact task loc', async () => {
