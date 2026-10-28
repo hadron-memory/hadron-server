@@ -110,10 +110,20 @@ describe('#2677 matchable and named-retired pins', () => {
 });
 
 describe('#2677 routing order: named, role holder, coordinator, managers, empty', () => {
-  it('a named worker wins over everything and need not be free', async () => {
-    const holder = await worker('Holder'); const named = await worker('Named', teamAgentId, 'engineer'); await bind(holder);
-    await db.agentTask.create({ data: { appId: app.id, title: 'Busy', ownerUserId: member.id, assigneeWorkerId: named.id, assignedAt: at(0) } });
+  it('a named worker wins over the least-recently-assigned holder only when it is a candidate AND free (cor:agt:110:05)', async () => {
+    const holder = await worker('Holder'); const named = await worker('Named', teamAgentId, 'engineer'); await bind(holder); await bind(named);
+    await lastAssigned(named, 9); // the pick would choose Holder
+    expect(ids(await pick(admin.id))).toEqual([`WORKER:${holder.id}`]);
     expect(ids(await pick(admin.id, { workerRef: named.id }))).toEqual([`WORKER:${named.id}`]);
+    await db.agentTask.create({ data: { appId: app.id, title: 'Busy', ownerUserId: member.id, assigneeWorkerId: named.id, assignedAt: at(0) } });
+    expect(await pick(admin.id, { workerRef: named.id })).toEqual(await pick(admin.id));
+  });
+
+  it('a named worker without the code task in its chain does not get the event and reads like naming nobody', async () => {
+    const holder = await worker('Holder'); await bind(holder);
+    const other = await roleAgent('Other'); const outside = await worker('Outside', other.id, 'engineer'); await bind(outside, other.id);
+    expect(await pick(admin.id, { workerRef: outside.id })).toEqual(await pick(admin.id));
+    expect(ids(await pick(admin.id, { workerRef: outside.id }))).toEqual([`WORKER:${holder.id}`]);
   });
 
   it('no role holder: the coordinator role holders, picked by compareRank, role read case-insensitively from the open session placement', async () => {

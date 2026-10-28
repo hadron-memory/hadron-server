@@ -28,10 +28,11 @@ export const registerRolePickQueries = {
         return best ? [{ kind: 'WORKER', id: best.id }] : [];
       };
 
-      // 1. A named worker: of this App, live row not retired, readable; it need not be free.
-      if (args.workerRef) {
-        const w = await tx.worker.findFirst({ where: { id: args.workerRef, appId, retiredAt: null }, select: { id: true, agentId: true } });
-        if (w && await agentReadable(tx, c, w.agentId)) return result([{ kind: 'WORKER', id: w.id }]);
+      // 1. A named worker wins only as a candidate for this code (the task in its chain; readable and
+      //    not retired by #2608's gate) AND free (cor:agt:110:05); otherwise it reads as naming nobody.
+      if (args.workerRef && candidates.some((x) => x.worker.id === args.workerRef)) {
+        const hit = pickOne([args.workerRef]);
+        if (hit.length) return result(hit);
       }
       // 2. The role holders: lowest depth with an eligible worker, then the next depth.
       for (const depth of [...new Set(candidates.map((x) => x.depth))].sort((a, b) => a - b)) {
