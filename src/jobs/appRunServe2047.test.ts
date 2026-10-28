@@ -139,4 +139,15 @@ describe('#2047 run', () => {
     const rec = await db.servedPrompt.findFirstOrThrow({ where: { runId: some.id } });
     expect(JSON.stringify(rec)).not.toContain('ATTENTION BLOCK');
   });
+
+  it('session.llmModel is the model the run resolves: recorded at the mint and substituted into the served text', async () => {
+    await db.aiServiceConfig.create({ data: { id: generateId(), name: 'default', organizationId: orgId, provider: 'anthropic', model: 'run-model-7' } });
+    await compiledPointer('Model={{session.llmModel}}.');
+    const run = await mint({ userId, agentId });
+    const rec = await db.servedPrompt.findFirstOrThrow({ where: { runId: run.id } });
+    expect(rec.variables).toMatchObject({ 'session.llmModel': 'run-model-7' });
+    const { deps: d, llm } = deps();
+    await executeAppRun(db, run.id, d);
+    expect(llm.mock.calls[0]![1].system!.startsWith('Model=run-model-7.\n\n')).toBe(true);
+  });
 });

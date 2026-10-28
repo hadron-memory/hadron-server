@@ -599,6 +599,17 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
         return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
       })()
     : null;
+  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
+  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
+  let runModel = '';
+  if (runServing) {
+    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
+    try {
+      runModel = (await resolveAiConfigWithFallback(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, organizationId: args.organizationId })).config.model ?? '';
+    } catch (err) {
+      if (!(err instanceof NoAiConfigAvailableError)) throw err;
+    }
+  }
   const runId = generateId();
   const createRun = (client: Pick<PrismaClient, 'appRun'>) => client.appRun.create({
     data: {
@@ -635,7 +646,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   });
   const createAndRecord = async (client: Prisma.TransactionClient) => {
     const created = await createRun(client);
-    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, runServing!.served, { ...agentPlatformValues(runServing!.agent) });
+    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, runServing!.served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
     return created;
   };
   // A caller already inside a transaction (the webfetch event ingress) passes its transaction client, which cannot open
