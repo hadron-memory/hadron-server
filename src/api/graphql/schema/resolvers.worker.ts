@@ -2883,8 +2883,9 @@ export const workerFieldResolvers = {
       args: { first?: number | null; after?: string | null },
       ctx: Context,
     ) => {
-      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       try {
+        // The gate's own lookup can fault too: inside the boundary, so a fault is the advertised null, never a field error.
+        if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
         const urn = worker.slug ? await resolveWorkerUrnField({ appId: worker.appId, slug: worker.slug }, ctx) : null;
         return pageLintWarnings(lintWorkerFields(worker, urn ? portalUrlForUrn(urn) : null), args);
       } catch (error) {

@@ -100,6 +100,20 @@ describe('#2048 S11c Worker.signatureLint', () => {
     spy.mockRestore();
   });
 
+  it('a fault in the read-gate lookup is null too, and a committed update stays saved', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await update({ signature: 'no link' });
+    const spy = vi.spyOn(db.app, 'findUnique').mockRejectedValueOnce(new Error('GATE_LOOKUP_FAULT'));
+    try {
+      await expect(W.signatureLint(await row(), {}, ctx())).resolves.toBeNull();
+    } finally {
+      spy.mockRestore();
+      errors.mockRestore();
+    }
+    expect((await row()).signature).toBe('no link');
+    expect(fields(await lint())).toEqual(['WORKER_LINK_MISSING:signature']);
+  });
+
   it('a retired worker still reads its lint (history is readable)', async () => {
     await update({ signature: 'no link' });
     await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
