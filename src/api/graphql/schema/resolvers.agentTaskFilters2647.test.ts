@@ -53,10 +53,14 @@ it.each(['created', 'started', 'finished'])('inclusive %s ranges exclude null da
 it('overdue is strictly past database now, never backlog, started or ended', async () => {
   await db.$transaction(async tx => {
     const [{ now }] = await tx.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
+    await tx.agentTask.create({ data: { appId, ownerUserId: userId, title: 'already-started', status: 'started', assigneeUserId: userId, assignedAt: day(1), startedAt: day(1), startBy: day(1) } });
+    await tx.agentTask.create({ data: { appId, ownerUserId: userId, title: 'ended', status: 'cancelled', cancelledAt: day(1), startBy: day(1) } });
     for (const [title, status, time] of [['past', 'pending', -1000], ['exact', 'pending', 0], ['future', 'pending', 1000], ['parked', 'backlog', -1000]] as const)
       await tx.agentTask.create({ data: { appId, ownerUserId: userId, title, status, startBy: new Date(now.getTime() + time) } });
     const c = { ...ctx(), db: tx } as unknown as Context;
-    expect(titles(await list({ overdue: true }, c))).toEqual(['past']);
+    const appClock = vi.spyOn(Date, 'now').mockReturnValue(0);
+    try { expect(titles(await list({ overdue: true }, c))).toEqual(['past']); }
+    finally { appClock.mockRestore(); }
     const notOverdue = titles(await list({ overdue: false }, c));
     expect(notOverdue).toEqual(expect.arrayContaining(['exact', 'future', 'parked', 'none']));
     expect(notOverdue).not.toContain('past');
@@ -85,6 +89,18 @@ it('exposes the filters in executable GraphQL and real MCP argument parsing', as
     if (result.body.kind === 'single') { expect(result.body.singleResult.errors).toBeUndefined(); expect(result.body.singleResult.data).toEqual({ agentTasks: [{ title: 'both' }] }); }
     const response = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, tagsAny: ['red'], tagsAll: ['blue'], source: 'issue:exact', createdAfter: day(3).toISOString(), createdBefore: day(3).toISOString() } });
     const text = (response.content as any[]).map(item => item.text).join('\n');
-    expect(text).toContain('both'); expect(text).not.toContain('title: red'); expect(text).not.toContain('title: none');
+    const ids = (value: string) => [...value.matchAll(/\(id: ([0-9a-z]+)\)/g)].map(match => match[1]);
+    expect(ids(text)).toEqual((await list({ tagsAll: ['blue'] })).map((row: any) => row.id));
+    for (const args of [{ overdue: true }, { startedAfter: day(1).toISOString() }, { startedBefore: day(9).toISOString() }, { finishedAfter: day(1).toISOString() }, { finishedBefore: day(9).toISOString() }, { source: 'issue:' }]) {
+      const r = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, ...args } });
+      expect((r.content as any[])[0].text).toBe('No tasks match.');
+    }
   } finally { await client.close(); await server.close(); await api.stop(); }
+});
+
+it('refuses invalid or reversed date ranges after the same read gate', async () => {
+  for (const args of [{ createdAfter: 'not-a-date' }, { finishedAfter: day(3), finishedBefore: day(2) }]) {
+    await expect(list(args)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(list(args, { db, userId: outsiderId, roles: ['READER'] })).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+  }
 });

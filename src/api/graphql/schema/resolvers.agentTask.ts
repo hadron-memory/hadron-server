@@ -1536,6 +1536,16 @@ type ListArgs = {
   assignee?: PartyInput;
   creator?: PartyInput;
   tag?: string | null;
+  tagsAny?: string[] | null;
+  tagsAll?: string[] | null;
+  source?: string | null;
+  overdue?: boolean | null;
+  createdAfter?: unknown;
+  createdBefore?: unknown;
+  startedAfter?: unknown;
+  startedBefore?: unknown;
+  finishedAfter?: unknown;
+  finishedBefore?: unknown;
   parentTaskId?: string | null;
   rootsOnly?: boolean | null;
   queued?: boolean | null;
@@ -1568,6 +1578,32 @@ export const agentTaskQueries = {
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
   agentTasks: async (_: unknown, args: ListArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
+    // Narrow only after the existing App read gate. All filters run in SQL before paging.
+    const filters: Prisma.AgentTaskWhereInput[] = [];
+    if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
+    if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
+    if (args.source != null) filters.push({ source: args.source });
+    for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
+      const range: { gte?: Date; lte?: Date } = {};
+      for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
+        const value = args[`${prefix}${suffix}`];
+        if (value == null) continue;
+        const date = value instanceof Date ? value : new Date(String(value));
+        if (!Number.isFinite(date.getTime())) throw badInput(`${prefix}${suffix} is not a valid date-time.`);
+        range[op] = date;
+      }
+      if (range.gte && range.lte && range.gte > range.lte) throw badInput(`${prefix}After must not be later than ${prefix}Before.`);
+      if (range.gte || range.lte) filters.push({ [field]: range });
+    }
+    if (args.overdue != null) {
+      // Match the millisecond precision exposed by DateTime, using the database clock.
+      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
+      const late: Prisma.AgentTaskWhereInput = {
+        status: 'pending', startBy: { lt: now }, startedAt: null, finishedAt: null, cancelledAt: null,
+      };
+      // SQL NOT over a nullable startBy alone would also discard tasks with no deadline.
+      filters.push(args.overdue ? late : { OR: [{ startBy: null }, { NOT: late }] });
+    }
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
       appId: app.id,
@@ -1587,7 +1623,7 @@ export const agentTaskQueries = {
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
     const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
     return c.db.agentTask.findMany({
-      where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere] },
+      where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
