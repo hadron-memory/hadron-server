@@ -4736,14 +4736,7 @@ export const typeDefs = `#graphql
     effectiveApiStyle: AiApiStyle
   }
 
-  """
-  A saved chat in one of the chat-scope tiers.
-
-  Per spec 017, scope is set at chat creation and immutable
-  thereafter. private chats live in the author's personal-class
-  memory; shared chats live in the App's app-class memory and are
-  readable by every AppMember of that App.
-  """
+  "The kind of served prompt: bind, chat, or run."
   enum ServedPromptKind {
     BIND
     CHAT
@@ -4803,6 +4796,14 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  """
+  A saved chat in one of the chat-scope tiers.
+
+  Per spec 017, scope is set at chat creation and immutable
+  thereafter. private chats live in the author's personal-class
+  memory; shared chats live in the App's app-class memory and are
+  readable by every AppMember of that App.
+  """
   type Chat {
     id: ID!
     loc: String!
