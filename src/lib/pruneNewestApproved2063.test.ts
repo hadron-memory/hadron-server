@@ -4,6 +4,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { revisionsExemptFromPruning } from './nodeRevisionSnapshot.js';
+import { resolveNodeContent, BROKEN_INCLUDE_NOTICE } from './includes/resolveNodeContent.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -59,4 +60,42 @@ it('never-approved revisions add no exemption and ordinary history still prunes'
   for (let i = 0; i < 4; i++) await edit(n.id, { content: `ordinary ${i}` });
   expect((await revisionsExemptFromPruning(db, n.id, memoryId)).size).toBe(0);
   expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(1);
+});
+
+it('retention does not mistake the serving scan budget for no approved revision', async () => {
+  const n = await node('beyond-budget');
+  await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
+  await edit(n.id, { tags: ['covered'] });
+  await edit(n.id, { content: 'unapproved' }); // approved non-carrier snapshot 2
+  // Seed unrelated retained revisions directly: the helper must examine more
+  // than the read surface's 100-candidate budget without changing that default.
+  await db.nodeRevision.createMany({ data: Array.from({ length: 105 }, (_, i) => ({
+    id: generateId(), nodeId: n.id, memoryId, loc: n.loc, name: n.name,
+    content: `not approved ${i}`, tags: [], revNo: i + 10,
+  })) });
+  await db.node.update({ where: { id: n.id }, data: { revSeq: 120 } });
+  expect(await newestApprovedRevisionOf(db, n.id)).toEqual({ found: null, truncated: true });
+  expect([...await revisionsExemptFromPruning(db, n.id, memoryId)]).toContain(2);
+});
+it('encrypted qualification is not revived by the new exemption', async () => {
+  const n = await node('encrypted');
+  await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
+  await edit(n.id, { tags: ['covered'] });
+  await edit(n.id, { content: 'unapproved' });
+  await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true, vectorIndexEnabled: false } });
+  const exempt = [...await revisionsExemptFromPruning(db, n.id, memoryId)];
+  expect(exempt).toContain(1); // carrier rule remains independent
+  expect(exempt).not.toContain(2); // no decryption/qualification scan
+});
+
+it('a live or soft-deleted plain-pin includer grants no exemption and a pruned pin is broken', async () => {
+  const target = await node('plain-target');
+  const source = await db.node.create({ data: { id: generateId(), memoryId, loc: 'plain-source', name: 'Source', content: '{{> plain-target rev=1}}' } });
+  await db.memory.update({ where: { id: memoryId }, data: { maxRevCount: 1 } });
+  await edit(target.id, { content: 'second' });
+  await db.node.update({ where: { id: source.id }, data: { deletedAt: new Date() } });
+  await edit(target.id, { content: 'third' });
+  expect(await db.nodeRevision.count({ where: { nodeId: target.id, revNo: 1 } })).toBe(0);
+  await db.node.update({ where: { id: source.id }, data: { deletedAt: null } });
+  expect(await resolveNodeContent(ctx(), source)).toContain(BROKEN_INCLUDE_NOTICE);
 });

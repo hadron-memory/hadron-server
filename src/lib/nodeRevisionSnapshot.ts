@@ -25,6 +25,7 @@ import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
+import { newestApprovedRevisionOf } from './nodeApproval.js';
 import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
 
 /**
@@ -434,13 +435,17 @@ export async function createNodeRevision(
 
 /**
  * The revision numbers of a node that automatic cap-pruning must keep: the ONE
- * seam every retention reason joins (#1838; #2063's include-relied revisions
- * and #2047's served revisions add their sets here, never a second prune rule).
+ * seam every retention reason joins (#1838, #2063 replacement P4; #2047's
+ * served revisions add their set here, never a second prune rule).
  *
  * - #1632 (cor:dmo:130:05, Holger #9901): a revision a signature was made on.
  * - #1838 (cor:dmo:060:04, R7): a revision whose row carries a recorded
  *   approval (a hash), because that row is the evidence identical-content
  *   revisions are judged approved by.
+ *
+ * - #2063 (hrn:node:hadronmemory.com:specs:cor:dmo:150:07): the newest
+ *   revision the existing approval predicate qualifies, including a covered
+ *   non-carrier. Includes themselves add no retention exemption.
  *
  * Deliberate deletion (`deleteNodeRevision`, `clearNodeHistory`, restore) is
  * not governed by this and stays allowed. A legacy row with no revNo can carry
@@ -448,7 +453,7 @@ export async function createNodeRevision(
  * stays prunable.
  */
 export async function revisionsExemptFromPruning(
-  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision'> | Prisma.TransactionClient,
+  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision' | 'node' | 'memory'> | Prisma.TransactionClient,
   nodeId: string,
   memoryId: string,
 ): Promise<Set<number>> {
@@ -461,6 +466,13 @@ export async function revisionsExemptFromPruning(
   ]);
   const out = new Set<number>(signed.map((s) => s.revision));
   for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
+  // The serving helper's default scan cap is an answer budget, not permission
+  // to prune an older qualifying revision. Examine the entire retained set
+  // plus the live candidate here; keep exactly the helper's current/historical
+  // qualification (including capture-memory and encryption boundaries).
+  const retained = await db.nodeRevision.count({ where: { nodeId, revNo: { not: null } } });
+  const newest = await newestApprovedRevisionOf(db, nodeId, retained + 1);
+  if (newest.found) out.add(newest.found.revNo);
   return out;
 }
 
