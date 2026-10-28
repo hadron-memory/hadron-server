@@ -3078,12 +3078,12 @@ export const typeDefs = `#graphql
     """
     appAgents: [AppAgent!]!
     """
-    023-app-shape: convenience that returns every installed Agent
-    (equivalent to App.appAgents.map(aa => aa.agent)). Previously was
-    a soft-deprecated single-element synthesis; now returns the FULL
-    multi-Agent set per spec 023 US1. Only the installed Agents this caller may
-    read: the list may be PARTIAL, an unreadable Agent is left out, and its length
-    is not the install count (use \`appAgents\`, one entry per install).
+    023-app-shape: convenience list of the installed Agents this caller may
+    read: the non-null Agent entries of \`appAgents\`. A withheld install is
+    omitted here and appears in \`appAgents\` with \`agent: null\`. Only the
+    installed Agents this caller may read: the list may be PARTIAL, an unreadable
+    Agent is left out, and its length is not the install count (use \`appAgents\`,
+    one entry per install).
     """
     agents: [Agent!]!
     "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."

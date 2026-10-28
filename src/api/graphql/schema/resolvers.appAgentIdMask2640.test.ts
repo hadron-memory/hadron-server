@@ -122,6 +122,24 @@ describe('App.agentId and installedAgentUrn answer as the Agent read does (#2640
     expect(data).toEqual({ agentId: null, agent: null, agents: [], installedAgentUrn: null, appAgents: [] });
   });
 
+  // Ticker.app and AppGrant.app load the App without `appAgents`, so readablePrimaryAgent re-fetches the primary.
+  describe('re-fetch branch (parent carries no appAgents)', () => {
+    const appResolvers = (resolvers as any).App;
+    const parent = () => ({ id: app.id, urn: app.urn });
+
+    it('hidden primary + readable secondary: agentId and installedAgentUrn are null, never the secondary', async () => {
+      await install(hidden.id); await install(readable.id);
+      expect(await appResolvers.agentId(parent(), {}, ctx(member.id))).toBeNull();
+      expect(await appResolvers.installedAgentUrn(parent(), {}, ctx(member.id))).toBeNull();
+    });
+
+    it('readable primary: the control returns the primary, not the secondary', async () => {
+      await install(readable.id); await install(readable2.id);
+      expect(await appResolvers.agentId(parent(), {}, ctx(member.id))).toBe(readable.id);
+      expect(await appResolvers.installedAgentUrn(parent(), {}, ctx(member.id))).toBe(`hrn:agent:${readable.urn.split(':')[0]}:readable-p`);
+    });
+  });
+
   it('the App itself stays unreadable to a non-participant; no Agent id rides along', async () => {
     await install(hidden.id); await install(readable.id);
     const res = await server.executeOperation({ query: QUERY, variables: { ref: app.urn } }, { contextValue: ctx(outsider.id) });
