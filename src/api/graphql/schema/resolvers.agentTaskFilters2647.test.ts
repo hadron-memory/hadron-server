@@ -104,3 +104,31 @@ it('refuses invalid or reversed date ranges after the same read gate', async () 
     await expect(list(args, { db, userId: outsiderId, roles: ['READER'] })).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
   }
 });
+
+it('rejects lenient date strings on the resolver, GraphQL and MCP paths', async () => {
+  const api = new ApolloServer<Context>({ typeDefs, resolvers });
+  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
+  const client = new Client({ name: 'strict-dates2647', version: '1' });
+  const [local, remote] = InMemoryTransport.createLinkedPair();
+  await api.start();
+  await server.connect(remote); await client.connect(local);
+  try {
+    for (const field of ['createdAfter', 'createdBefore', 'startedAfter', 'startedBefore', 'finishedAfter', 'finishedBefore']) {
+      for (const value of ['1', '2026', 'Jan 3 2026', '2026-01-03T00:00:00', '2026-02-30T00:00:00Z']) {
+        await expect(list({ [field]: value })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+        await expect(list({ [field]: value }, { db, userId: outsiderId, roles: ['READER'] })).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+        const gql = await api.executeOperation({ query: `query($app:ID!,$date:DateTime!){agentTasks(appRef:$app,${field}:$date){id}}`, variables: { app: appId, date: value } }, { contextValue: ctx() });
+        expect(gql.body.kind).toBe('single');
+        if (gql.body.kind === 'single') expect(gql.body.singleResult.errors?.length).toBeGreaterThan(0);
+        // SDKs can report parameter validation as either an error result or a rejected call.
+        const mcp = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, [field]: value } }).catch(() => ({ isError: true }));
+        expect(mcp.isError).toBe(true);
+      }
+    }
+    const equivalent = '2026-01-03T02:00:00+02:00';
+    expect(titles(await list({ createdAfter: equivalent, createdBefore: equivalent }))).toEqual(['both']);
+    const mcp = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, createdAfter: equivalent, createdBefore: equivalent } });
+    expect(mcp.isError).not.toBe(true);
+    expect((mcp.content as any[])[0].text).toContain('both');
+  } finally { await client.close(); await server.close(); await api.stop(); }
+});
