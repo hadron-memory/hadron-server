@@ -21,6 +21,7 @@ import {
 const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
   "AppKey.hostUses",
+  "Chat.servedPrompts",
   "Mutation.collectHostOperations",
   "Node.lintWarnings",
   "Node.signingRequests",
@@ -100,6 +101,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.users",
   "Query.validateMemory",
   "Query.workers",
+  "ServedPrompt.provenance",
+  "Session.servedPrompts",
   "Ticker.subscribers",
   "User.sharedOrganizations"
 ];
