@@ -157,6 +157,8 @@ describe('#2704 — migration', () => {
     const now = await compiledOf('agent', agent.id);
     expect(now.approvedRevNo).toBe(was.approvedRevNo);
     expect(approved(now)).toBe(false);
+    // The approved revision still served holds the legacy token, so the audit must not call the binder removable.
+    expect((await auditBootPromptTokens(db)).legacyBindingRemovable).toBe(false);
     // The text a worker is served is still the approved revision, unedited.
     const served = await db.nodeRevision.findFirst({ where: { nodeId: now.id, revNo: now.approvedRevNo! }, select: { content: true } });
     expect(served?.content ?? now.content).toBe('Hi {{name}}');

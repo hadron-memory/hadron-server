@@ -90,7 +90,11 @@ export async function auditBootPromptTokens(db: PrismaClient): Promise<TokenAudi
     select: { id: true, promptOverride: true, bootPromptNodeId: true }, orderBy: { id: 'asc' },
   })) push('WORKER_PROMPT_OVERRIDE', w.id, w.promptOverride, w.bootPromptNodeId !== null);
   for (const n of await db.node.findMany({ where: { role: 'boot-prompt', deletedAt: null }, select: { id: true, content: true, nodeType: true }, orderBy: { id: 'asc' } })) {
-    push(n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE ? 'COMPILED_NODE' : 'SOURCE_NODE', n.id, n.content);
+    if (n.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) { push('SOURCE_NODE', n.id, n.content); continue; }
+    // Serving reads the approved revision, which can still hold a legacy token after a failed apply left newer
+    // renamed text unapproved: scan both, as one row, so the binder is never declared removable while either holds one.
+    const served = (await servedText(db, n.id))?.text;
+    push('COMPILED_NODE', n.id, hasText(served) && served !== n.content ? `${n.content ?? ''}\n${served}` : n.content);
   }
   const zero = (): Record<TokenSurface, number> => ({ AGENT_SYSTEM_PROMPT: 0, WORKER_PROMPT_OVERRIDE: 0, SOURCE_NODE: 0, COMPILED_NODE: 0 });
   const legacyBySurface = zero();
