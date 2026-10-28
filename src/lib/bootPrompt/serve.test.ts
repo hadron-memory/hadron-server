@@ -195,3 +195,48 @@ describe('#2047 review fixes on PR-B', () => {
     expect(await code(serve('chat', false))).toBe('BOOT_PROMPT_NOT_SET');
   });
 });
+
+describe('#2047 PR-C: selection and cap-pruning serialize on the compiled node (two connections)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('serve first: a revision write on the node (what a prune rides on) waits for the serving transaction', async () => {
+    const id = await compiled('c', 'v1 text');
+    await point.agent(id);
+    let writeDone = false;
+    let writing: Promise<unknown> | undefined;
+    await db.$transaction(async (tx) => {
+      expect(await resolveServedBootPrompt(tx, { surface: 'bind', appId, agent: { id: agentId, name: 'Ada' }, workerId })).toMatchObject({ servedRevSeq: 1 });
+      writing = db.node.update({ where: { id }, data: { revSeq: { increment: 1 } } }).then(() => { writeDone = true; });
+      await sleep(400);
+      expect(writeDone).toBe(false);
+    });
+    await writing;
+    expect(writeDone).toBe(true);
+  });
+
+  it('prune first: serving started while a prune holds the node waits, then never serves the removed revision', async () => {
+    const id = await compiled('c2', 'v1 text');
+    await recompile(id, 'v2 UNAPPROVED'); // rev 1 (approved) is now a history row
+    await point.agent(id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const pruner = db.$transaction(async (tx) => {
+      await tx.node.update({ where: { id }, data: { revSeq: { increment: 1 } } }); // takes the row lock first, as a revision write does
+      await tx.nodeRevision.deleteMany({ where: { nodeId: id, revNo: 1 } }); // the prune
+      locked();
+      await held;
+    });
+    await lockedP;
+    let served: unknown = 'PENDING';
+    const serving = db.$transaction((tx) => resolveServedBootPrompt(tx, { surface: 'bind', appId, agent: { id: agentId, name: 'Ada' }, workerId }))
+      .then((r) => { served = r; }, (e) => { served = e; });
+    await sleep(400);
+    expect(served).toBe('PENDING'); // parked behind the prune
+    release();
+    await pruner;
+    await serving;
+    expect(served).not.toMatchObject({ servedRevSeq: 1 });
+  });
+});
