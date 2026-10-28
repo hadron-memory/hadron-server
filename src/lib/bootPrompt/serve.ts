@@ -79,6 +79,13 @@ export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<S
   const resolved = await resolveBootPromptPointer(db, pointer.stored);
   if (!resolved || resolved.deleted) throw bootPromptRefusal('BOOT_PROMPT_TARGET_DELETED', where);
 
+  // #2047 PR-C: share-lock the compiled node BEFORE selecting the revision, and hold it to the end of the caller's
+  // transaction (a bind and a run select and record in one). Cap-pruning takes the node's row lock first, so a prune that
+  // started earlier finishes before this selects (the revision it removed is no longer a candidate) and one that starts
+  // later waits until the record commits and then sees it. Outside a transaction (a preview, a chat) the lock is released
+  // at once, which is harmless: those retain nothing.
+  await db.$queryRaw`SELECT id FROM nodes WHERE id = ${resolved.nodeId} FOR SHARE`;
+
   if (t.appId && (await servingAppRequiresSignature(db, t.appId))) {
     // Unreachable until #1614 supplies the signature check; fail closed rather than serve unsigned text.
     throw bootPromptRefusal('BOOT_PROMPT_NOT_SIGNED', where);

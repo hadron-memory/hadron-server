@@ -645,8 +645,12 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
     },
   });
   const createAndRecord = async (client: Prisma.TransactionClient) => {
+    // #2047 PR-C: the revision is selected HERE, in the transaction that records it, under the compiled node's share lock
+    // (resolveServedBootPrompt), so cap-pruning cannot remove it between selection and record. The early resolve above
+    // is only the refusal preflight: a refused launch writes nothing.
+    const served = await resolveServedBootPrompt(client, { surface: 'run', appId: args.appId, agent: { id: runServing!.agent.id, name: runServing!.agent.name } });
     const created = await createRun(client);
-    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, runServing!.served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
+    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
     return created;
   };
   // A caller already inside a transaction (the webfetch event ingress) passes its transaction client, which cannot open
