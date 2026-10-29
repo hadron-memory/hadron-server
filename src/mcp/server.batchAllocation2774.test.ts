@@ -168,6 +168,7 @@ it.each([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all'
   expect(result.hash).toBe(baseline[scope]);
   expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
   if (scope === 'abstract') {
+    expect.soft(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
     expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
     expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.bytes, 0)).toBeLessThanOrEqual(1_310_720);
     expect(result.text).toContain('returned 12 node(s)');
