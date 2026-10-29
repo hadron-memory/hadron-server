@@ -737,11 +737,14 @@ async function writeWorkerIsolation(
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
       // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
-      const running = await tx.workerWakeSettings.findFirst({ where: { workerId: w.id, isolatedUntil: { gt: now } }, select: { workerId: true } });
+      // An isolation that already expired keeps its own expiry as the end (the latest anchor wins).
+      const prior = await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { isolatedUntil: true, exemptEndedAt: true } });
+      const ended = prior?.isolatedUntil ? (prior.isolatedUntil.getTime() > now.getTime() ? now : prior.isolatedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
         create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(running ? { exemptEndedAt: now } : {}) },
+        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(kept ? { exemptEndedAt: kept } : {}) },
       });
     }
     const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
@@ -927,13 +930,16 @@ const wakeAndGrantMutations = {
       // #2755: clearing a pause that is still running erases when the exemption ended; keep that moment (a clear
       // of a pause that already ended, or of none, restarts nothing).
       const clearedNow = new Date();
-      const running = input.clearPause && pausedUntil === undefined
-        ? await tx.workerWakeSettings.findFirst({ where: { workerId: w.id, pausedUntil: { gt: clearedNow } }, select: { workerId: true } })
+      const prior = input.clearPause && pausedUntil === undefined
+        ? await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { pausedUntil: true, exemptEndedAt: true } })
         : null;
+      // A pause that already expired keeps its own expiry as the end (the latest anchor wins).
+      const ended = prior?.pausedUntil ? (prior.pausedUntil.getTime() > clearedNow.getTime() ? clearedNow : prior.pausedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       const change = {
         ...(input.mentions != null ? { mentions: input.mentions } : {}),
         ...(pausedUntil !== undefined ? { pausedUntil } : input.clearPause ? { pausedUntil: null } : {}),
-        ...(running ? { exemptEndedAt: clearedNow } : {}),
+        ...(kept ? { exemptEndedAt: kept } : {}),
       };
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },

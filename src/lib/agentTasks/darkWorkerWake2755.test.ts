@@ -207,12 +207,48 @@ describe('#2755 an exemption ended on purpose, or by isolation expiring, restart
     expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(1);
   });
 
-  it('clearPause on a pause that already ended restarts nothing', async () => {
+  it('clearPause on a pause that already ended keeps that expiry as the resume anchor', async () => {
     await bind('Tove', after(200));
     await say('hello @tove', ['tove']);
-    await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, pausedUntil: after(-5) } });
-    await runAsActor({ workerId: w.Tove.id, agentId: agent.id }, () => M.setWorkerWakeSettings({}, { workerRef: w.Tove.id, input: { clearPause: true } }, holderCtx()));
-    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt).toBeNull();
+    await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, pausedUntil: after(20) } });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(after(45));
+      await runAsActor({ workerId: w.Tove.id, agentId: agent.id }, () => M.setWorkerWakeSettings({}, { workerRef: w.Tove.id, input: { clearPause: true } }, holderCtx()));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(20).getTime());
+    expect(await evaluateDarkWorkers(db, after(35))).toEqual([]); // 15 minutes since the pause ended, window 30
+    expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(1);
+  });
+
+  it('clearWorkerIsolation keeps an expired isolation end, and stamps now for a running one', async () => {
+    setS7AvailableForTest(true);
+    try {
+      await bind('Tove', after(200));
+      await say('hello @tove', ['tove']);
+      await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, isolatedUntil: after(20) } });
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(after(45));
+        await M.clearWorkerIsolation({}, { workerRef: w.Tove.id }, holderCtx());
+      } finally {
+        vi.useRealTimers();
+      }
+      expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(20).getTime());
+      await db.workerWakeSettings.update({ where: { workerId: w.Tove.id }, data: { isolatedUntil: after(120), exemptEndedAt: null } });
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(after(50));
+        await M.clearWorkerIsolation({}, { workerRef: w.Tove.id }, holderCtx());
+      } finally {
+        vi.useRealTimers();
+      }
+      expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(50).getTime());
+    } finally {
+      setS7AvailableForTest(false);
+    }
   });
 
   it('an isolation that expires, and one that is cleared early, each restart the age', async () => {
