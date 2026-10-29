@@ -122,10 +122,19 @@ async function writeInApp<T>(
 
 // ── Validation ────────────────────────────────────────────────────────────
 
+/**
+ * C0 (incl. NUL, TAB, LF, CR, ESC), DEL, C1 (incl. NEL), and the Unicode line/paragraph
+ * separators. The wake nudge types a ticker name into a worker's terminal header, so a
+ * name that spans lines or carries an escape sequence would read as separate input. (#2756)
+ */
+// eslint-disable-next-line no-control-regex
+const NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/;
+
 export function cleanName(raw: unknown): string {
   const name = typeof raw === 'string' ? raw.trim() : '';
   if (name === '') throw badInput('A ticker needs a name.');
   if (name.length > TICKER_NAME_MAX) throw badInput(`A ticker name is at most ${TICKER_NAME_MAX} characters.`);
+  if (NAME_CONTROL_CHARS.test(name)) throw badInput('A ticker name cannot contain control characters or line breaks.');
   return name;
 }
 

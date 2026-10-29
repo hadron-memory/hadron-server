@@ -595,3 +595,22 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     expect(await db.agentTickerTemplate.count({ where: { agentId } })).toBe(0);
   });
 });
+
+describe('#2756 template names refuse control characters', () => {
+  const BAD = ['a\nb', 'a\rb', 'a\tb', 'a\u001b[2Jb', 'a\u0000b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a\u2029b'];
+
+  it('create refuses each class with BAD_USER_INPUT and stores nothing; Unicode still passes', async () => {
+    for (const name of BAD) expect(await refusal(declare(name))).toBe('BAD_USER_INPUT');
+    expect(await db.agentTickerTemplate.count({ where: { agentId } })).toBe(0);
+    await expect(declare('Équipe 工程 🚀')).resolves.toMatchObject({ name: 'Équipe 工程 🚀' });
+  });
+
+  it('update refuses each class and leaves the template unchanged', async () => {
+    const t = await declare('Heartbeat');
+    for (const name of BAD) {
+      expect(await refusal(M.updateAgentTickerTemplate({}, { id: t.id, expectedRevision: 1, input: { name, cadenceSeconds: 3600 } }, ctx))).toBe('BAD_USER_INPUT');
+    }
+    const row = await db.agentTickerTemplate.findUniqueOrThrow({ where: { id: t.id } });
+    expect(row).toMatchObject({ name: 'Heartbeat', revision: 1, cadenceSeconds: 600 });
+  });
+});

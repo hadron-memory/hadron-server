@@ -31,6 +31,7 @@
 import { resolveInheritedEdges, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { isMemoryReadableCached } from './resolvers.helpers.js';
 import type { Context } from './resolvers.js';
+import { batchReadEdgeOverflow, loadBatchReadEdges, markBatchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
 
 type Resolver = (parent: any, args?: any, ctx?: any, info?: any) => unknown;
 
@@ -41,17 +42,27 @@ const empty = () => [];
 async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFrom }, ctx: Context, direction: 'out' | 'in') {
   const via = parent.inheritedFrom?.via;
   if (!via) return [];
-  const resolved = await resolveInheritedEdges(ctx.db, {
-    nodeId: parent.id,
-    via,
-    direction,
-    canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
-  });
-  // Both endpoints are set, so Edge.source/target never re-load them by FK:
-  // the parent and a resolved endpoint are admitted through the child.
-  return resolved.map(({ edge, endpoint }) => direction === 'out'
-    ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }
-    : { ...edge, sourceId: endpoint.id, source: endpoint, targetId: parent.id, target: parent });
+  const load = async (remaining?: number) => {
+    const resolved = await resolveInheritedEdges(ctx.db, {
+      nodeId: parent.id, via, direction,
+      canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
+      maxResults: remaining, identityOnly: remaining !== undefined,
+      onLimit: batchReadEdgeOverflow,
+    });
+    return resolved.map(({ edge, endpoint }) => {
+      if (remaining === undefined) return direction === 'out'
+        ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id, target: endpoint }
+        : { ...edge, sourceId: endpoint.id, source: endpoint, targetId: parent.id, target: parent };
+      // Retain admitted identities, not bodies. Edge.source/target lazily
+      // recheck the effective identity if that endpoint object is selected.
+      const result = direction === 'out'
+        ? { ...edge, sourceId: parent.id, source: parent, targetId: endpoint.id }
+        : { ...edge, sourceId: endpoint.id, targetId: parent.id, target: parent };
+      markBatchInheritedEndpoint(result, direction === 'out' ? 'target' : 'source', endpoint, via);
+      return result;
+    });
+  };
+  return loadBatchReadEdges(parent as { id: string; memoryId: string }, direction, load) ?? load();
 }
 
 /** Field → what an inherited node returns, given the field's normal value. */
