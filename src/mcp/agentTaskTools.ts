@@ -639,8 +639,8 @@ const SHAPE_HADRON_TASK_CREATE = {
   session: SESSION_WRITE,
 };
 
-const SHAPE_HADRON_TASK_BLOCKER = { taskId, blockerTaskId: z.string(), session: SESSION_WRITE };
-const SHAPE_HADRON_TASK_PRIORITY = { taskId, priority: z.number().int(), session: SESSION_WRITE };
+const SHAPE_HADRON_TASK_BLOCKER = { taskRef: taskId, blockerTaskRef: z.string(), session: SESSION_WRITE };
+const SHAPE_HADRON_TASK_PRIORITY = { taskRef: taskId, priority: z.number().int(), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_ASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional().describe('Omitted keeps the task\'s stored value (cor:agt:050:10).'), session: SESSION_WRITE };
 

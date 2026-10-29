@@ -233,9 +233,9 @@ describe('#2644 MCP blocker and priority parity', () => {
       const t = idOf(await call('hadron_task_create', { appRef: app.id, title: 'dependent', priority: 4, blockedBy: [b], assignee: { user: member.id } }));
       expect(await call('hadron_task_get', { taskId: t, dependencyLimit: 0 })).toMatch(/blocked by \(1 total, more pages\)/);
       expect(code(await call('hadron_task_start', { taskId: t }))).toBe('TASK_BLOCKED');
-      expect(await call('hadron_task_priority_set', { taskId: t, priority: 2 })).toMatch(/priority: 2/);
-      expect(await call('hadron_task_blocker_remove', { taskId: t, blockerTaskId: b })).toMatch(/blocked: false/);
-      expect(await call('hadron_task_blocker_add', { taskId: t, blockerTaskId: b })).toMatch(/blocked: true/);
+      expect(await call('hadron_task_priority_set', { taskRef: t, priority: 2 })).toMatch(/priority: 2/);
+      expect(await call('hadron_task_blocker_remove', { taskRef: t, blockerTaskRef: b })).toMatch(/blocked: false/);
+      expect(await call('hadron_task_blocker_add', { taskRef: t, blockerTaskRef: b })).toMatch(/blocked: true/);
     } finally { await client.close(); await server.close(); }
   });
 });

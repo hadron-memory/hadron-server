@@ -1107,7 +1107,7 @@ export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx:
 }
 
 export const agentTaskMutations = {
-  setAgentTaskPriority: async (_: unknown, { taskId, priority }: { taskId: string; priority: number }, ctx: Context) => {
+  setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority }: { taskRef: string; priority: number }, ctx: Context) => {
     const value = taskPriority(priority);
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await setTaskPriorityInTx(tx, txCtx, app, actor, task, value);
@@ -1115,13 +1115,13 @@ export const agentTaskMutations = {
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
-  addAgentTaskBlocker: async (_: unknown, { taskId, blockerTaskId }: { taskId: string; blockerTaskId: string }, ctx: Context) => {
+  addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add');
     });
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
-  removeAgentTaskBlocker: async (_: unknown, { taskId, blockerTaskId }: { taskId: string; blockerTaskId: string }, ctx: Context) => {
+  removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove');
     });

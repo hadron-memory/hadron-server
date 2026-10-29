@@ -14,15 +14,15 @@ const F = resolvers as any;
 let appId: string, ownerId: string, memberId: string;
 const ctx = (userId = ownerId): Context => ({ db, userId, roles: ['READER'] });
 const create = (input = {}, c = ctx()) => M.createAgentTask(null, { input: { appRef: appId, title: 'Synthetic task', ...input } }, c);
-const add = (taskId: string, blockerTaskId: string, c = ctx()) => M.addAgentTaskBlocker(null, { taskId, blockerTaskId }, c);
-const remove = (taskId: string, blockerTaskId: string) => M.removeAgentTaskBlocker(null, { taskId, blockerTaskId }, ctx());
+const add = (taskId: string, blockerTaskId: string, c = ctx()) => M.addAgentTaskBlocker(null, { taskRef: taskId, blockerTaskRef: blockerTaskId }, c);
+const remove = (taskId: string, blockerTaskId: string) => M.removeAgentTaskBlocker(null, { taskRef: taskId, blockerTaskRef: blockerTaskId }, ctx());
 const code = async (fn: () => Promise<unknown>) => { try { await fn(); return 'SUCCESS'; } catch (e) { return (e as any).extensions?.code ?? (e as Error).message; } };
 beforeEach(async () => {
   await cleanDb(db);
-  ownerId = (await db.user.create({ data: { id: generateId(), name: 'Owner' } })).id;
-  memberId = (await db.user.create({ data: { id: generateId(), name: 'Member' } })).id;
-  const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: ownerId, name: 'Synthetic', urn: '@owner:agent' } });
-  appId = (await db.app.create({ data: { id: generateId(), ownerUserId: ownerId, name: 'Synthetic', urn: '@owner:app' } })).id;
+  ownerId = (await db.user.create({ data: { id: generateId(), name: 'Owner', handle: 'syntheticowner' } })).id;
+  memberId = (await db.user.create({ data: { id: generateId(), name: 'Member', handle: 'syntheticmember' } })).id;
+  const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: ownerId, name: 'Synthetic', urn: 'syntheticowner:agent' } });
+  appId = (await db.app.create({ data: { id: generateId(), ownerUserId: ownerId, name: 'Synthetic', urn: 'syntheticowner:app' } })).id;
   await db.appMember.create({ data: { appId, userId: memberId, role: 'member' } });
 });
 describe('#2644 blockers and priority', () => {
@@ -99,7 +99,7 @@ describe('#2644 blockers and priority', () => {
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).toMatchObject({ blocked: false });
   });
   it('refuses cross-App and unknown blocker refs identically, atomically on create too', async () => {
-    const foreignApp = await db.app.create({ data: { ownerUserId: memberId, name: 'Foreign', urn: '@member:foreign' } });
+    const foreignApp = await db.app.create({ data: { ownerUserId: memberId, name: 'Foreign', urn: 'syntheticmember:foreign' } });
     const foreign = await db.agentTask.create({ data: { appId: foreignApp.id, title: 'Foreign', ownerUserId: memberId } });
     const t = await create();
     for (const blockerTaskId of [foreign.id, generateId()]) {
@@ -113,10 +113,10 @@ describe('#2644 blockers and priority', () => {
     const t = await create({ owner: { user: memberId } });
     await db.appMember.create({ data: { appId, userId: ownerId, role: 'member' } });
     const stale = ctx();
-    await M.setAgentTaskPriority(null, { taskId: t.id, priority: 2 }, stale);
+    await M.setAgentTaskPriority(null, { taskRef: t.id, priority: 2 }, stale);
     await db.app.update({ where: { id: appId }, data: { ownerUserId: memberId } });
-    expect(await code(() => M.setAgentTaskPriority(null, { taskId: t.id, priority: 3 }, stale))).toBe('TASK_NOT_OWNER');
-    expect(await code(() => M.setAgentTaskPriority(null, { taskId: t.id, priority: 3 }, { db, appId, roles: [] }))).toBe('TASK_NOT_FOUND');
+    expect(await code(() => M.setAgentTaskPriority(null, { taskRef: t.id, priority: 3 }, stale))).toBe('TASK_NOT_OWNER');
+    expect(await code(() => M.setAgentTaskPriority(null, { taskRef: t.id, priority: 3 }, { db, appId, roles: [] }))).toBe('TASK_NOT_FOUND');
   });
   it('uses worker ownership/reporting authority without inheriting the driver management role', async () => {
     const agent = await db.agent.findFirstOrThrow({ where: { ownerUserId: ownerId } });
@@ -124,10 +124,10 @@ describe('#2644 blockers and priority', () => {
     const worker = await db.worker.create({ data: { appId, agentId: agent.id, name: 'Junior', slug: 'junior', signature: '', trailer: '', reportsToWorkerId: senior.id } });
     const as = (id: string, fn: () => Promise<any>) => runAsActor({ workerId: id, agentId: agent.id }, fn);
     const t = await as(worker.id, () => create());
-    expect(await as(worker.id, () => M.setAgentTaskPriority(null, { taskId: t.id, priority: 2 }, ctx()))).toMatchObject({ priority: 2 });
-    expect(await as(senior.id, () => M.setAgentTaskPriority(null, { taskId: t.id, priority: 3 }, ctx()))).toMatchObject({ priority: 3 });
+    expect(await as(worker.id, () => M.setAgentTaskPriority(null, { taskRef: t.id, priority: 2 }, ctx()))).toMatchObject({ priority: 2 });
+    expect(await as(senior.id, () => M.setAgentTaskPriority(null, { taskRef: t.id, priority: 3 }, ctx()))).toMatchObject({ priority: 3 });
     const humanOwned = await create();
-    expect(await code(() => as(senior.id, () => M.setAgentTaskPriority(null, { taskId: humanOwned.id, priority: 4 }, ctx())))).toBe('TASK_NOT_OWNER');
+    expect(await code(() => as(senior.id, () => M.setAgentTaskPriority(null, { taskRef: humanOwned.id, priority: 4 }, ctx())))).toBe('TASK_NOT_OWNER');
   });
   it('finishing the last blocker releases and explicit assignment/park/ready remain available', async () => {
     const b = await create({ assignee: { user: ownerId } });
@@ -145,7 +145,7 @@ describe('#2644 blockers and priority', () => {
     await expect(db.agentTaskBlocker.create({ data: { taskId: a.id, blockerTaskId: b.id } })).rejects.toThrow();
     await expect(db.agentTask.update({ where: { id: b.id }, data: { status: 'started', startedAt: new Date() } })).rejects.toThrow();
     await expect(db.agentTask.update({ where: { id: a.id }, data: { priority: 0 } })).rejects.toThrow();
-    const foreignApp = await db.app.create({ data: { ownerUserId: memberId, name: 'Other', urn: '@member:other' } });
+    const foreignApp = await db.app.create({ data: { ownerUserId: memberId, name: 'Other', urn: 'syntheticmember:other' } });
     const foreign = await db.agentTask.create({ data: { appId: foreignApp.id, title: 'Other', ownerUserId: memberId } });
     await expect(db.agentTaskBlocker.create({ data: { taskId: a.id, blockerTaskId: foreign.id } })).rejects.toThrow();
     await expect(db.agentTask.update({ where: { id: a.id }, data: { appId: foreignApp.id } })).rejects.toThrow();
@@ -180,6 +180,18 @@ describe('#2644 blockers and priority', () => {
         expect(response.body.singleResult.errors).toBeUndefined();
         expect(response.body.singleResult.data).toMatchObject({ createAgentTask: { priority: 4, blocked: true,
           blockedBy: { items: [], total: 1, hasMore: true } } });
+        const t = (response.body.singleResult.data as any).createAgentTask;
+        const stored = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
+        const changed = await server.executeOperation({ query: `mutation($t:ID!,$b:ID!) {
+          priority: setAgentTaskPriority(taskRef:$t,priority:2) { priority }
+          unlink: removeAgentTaskBlocker(taskRef:$t,blockerTaskRef:$b) { blocked }
+          relink: addAgentTaskBlocker(taskRef:$t,blockerTaskRef:$b) { blocked }
+        }`, variables: { t: `hrn:agenttask:syntheticowner:app:${stored.handle}`, b: b.handle } }, { contextValue: ctx() });
+        expect(changed.body.kind).toBe('single');
+        if (changed.body.kind === 'single') {
+          expect(changed.body.singleResult.errors).toBeUndefined();
+          expect(changed.body.singleResult.data).toMatchObject({ priority: { priority: 2 }, unlink: { blocked: false }, relink: { blocked: true } });
+        }
       }
     } finally { await server.stop(); }
   });
@@ -195,10 +207,10 @@ describe('#2644 blockers and priority', () => {
   });
   it('priority range is1..5 and assignee-only creators/setters cannot bypass assigner authority', async () => {
     const t = await create({ assignee: { user: memberId } });
-    expect(await code(() => M.setAgentTaskPriority(null, { taskId: t.id, priority: 5 }, ctx(memberId)))).toBe('TASK_NOT_OWNER');
+    expect(await code(() => M.setAgentTaskPriority(null, { taskRef: t.id, priority: 5 }, ctx(memberId)))).toBe('TASK_NOT_OWNER');
     expect(await code(() => add(t.id, t.id, ctx(memberId)))).toBe('TASK_NOT_OWNER');
-    for (const priority of [0, 6]) expect(await code(() => M.setAgentTaskPriority(null, { taskId: t.id, priority }, ctx()))).toBe('BAD_USER_INPUT');
-    expect(await M.setAgentTaskPriority(null, { taskId: t.id, priority: 5 }, ctx())).toMatchObject({ priority: 5 });
+    for (const priority of [0, 6]) expect(await code(() => M.setAgentTaskPriority(null, { taskRef: t.id, priority }, ctx()))).toBe('BAD_USER_INPUT');
+    expect(await M.setAgentTaskPriority(null, { taskRef: t.id, priority: 5 }, ctx())).toMatchObject({ priority: 5 });
     const before = await db.agentTask.count();
     expect(await code(() => create({ priority: 1, owner: { user: ownerId } }, ctx(memberId)))).toBe('TASK_NOT_OWNER');
     expect(await db.agentTask.count()).toBe(before);

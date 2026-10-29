@@ -9684,11 +9684,11 @@ export const typeDefs = `#graphql
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1."
-    setAgentTaskPriority(taskId: ID!, priority: Int!): AgentTask!
+    setAgentTaskPriority(taskRef: ID!, priority: Int!): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority."
-    addAgentTaskBlocker(taskId: ID!, blockerTaskId: ID!): AgentTask!
+    addAgentTaskBlocker(taskRef: ID!, blockerTaskRef: ID!): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — remove a blocker from a backlog/pending task. Last-blocker release restarts stall clocks and preserves status/assignee. Assigner authority."
-    removeAgentTaskBlocker(taskId: ID!, blockerTaskId: ID!): AgentTask!
+    removeAgentTaskBlocker(taskRef: ID!, blockerTaskRef: ID!): AgentTask!
 
     """
     #1747 — create a ticker in an App (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :18). Any App participant, or a
