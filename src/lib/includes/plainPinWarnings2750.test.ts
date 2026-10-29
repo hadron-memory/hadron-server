@@ -84,7 +84,10 @@ it('the ordinary operator has no reader role and cannot use unrestricted history
   expect(await plainPinWarnings(operator, { memoryId }, '{{> target rev=1}}')).toEqual([]);
 });
 
-it.each([undefined, []])('missing/empty roles stay silent for an existing target: %j', async roles => {
+it.each([
+  { label: 'missing', roles: undefined },
+  { label: 'empty', roles: [] },
+])('$label roles stay silent for an existing target', async ({ roles }) => {
   const { target } = await movedCapture(memoryId);
   const principal = { ...reader, roles };
   // This is why the advisory precheck is retained: history admission throws,
@@ -132,7 +135,7 @@ describe('one moved-snapshot defense at a time, with real PostgreSQL row lookups
 
 it('a platform ADMIN stays restricted and cannot learn a foreign private capture', async () => {
   const { target } = await movedCapture(foreignId);
-  const admin = { ...reader, roles: ['ADMIN'] };
+  const admin: Context = { ...reader, roles: ['ADMIN'] };
   const scope = await history.nodeRevisionsScope(admin, target.id);
   expect(scope?.accessible).not.toBeNull();
   expect(scope?.canRead(foreignId)).toBe(false);
