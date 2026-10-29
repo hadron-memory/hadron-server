@@ -339,6 +339,10 @@ function parseLogData(row: LogRow): DecisionLogData {
  * ({@link lockDecision}).
  */
 async function lockLog(tx: Tx, logId: string, memoryId: string, ref: string, expectedRevision?: number): Promise<{ row: LogRow; data: DecisionLogData }> {
+  // The channel-host key before the first row lock, as createLog takes it: the drift
+  // reconcile below writes a revision that may name a worker (F(W)), and writeNodeCore
+  // asks for this key only after, which closes a cycle through the root-seq key (#2805).
+  await lockEdgeEndpointMemories(tx, [memoryId]);
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${logId} FOR NO KEY UPDATE`;
   const seen = await tx.node.findUnique({ where: { id: logId }, select: LOG_ROW_SELECT });
   if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== DECISION_LOG_ROLE) throw logMissing(ref);
@@ -384,6 +388,7 @@ function logContentOf(name: string, data: DecisionLogData) {
  * decision renders evaluates TAMPERED and is refused by the caller.
  */
 async function lockDecision(tx: Tx, id: string, memoryId: string, ref: string, expectedRevision?: number): Promise<DecisionRow> {
+  await lockEdgeEndpointMemories(tx, [memoryId]); // before any row lock or fence write, as lockLog (#2805)
   await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${id} FOR UPDATE`;
   const seen = await tx.node.findUnique({ where: { id }, select: { memoryId: true, role: true, deletedAt: true, revSeq: true } });
   if (!seen || seen.deletedAt || seen.memoryId !== memoryId || seen.role !== DECISION_ROLE) throw decisionMissing(ref);
