@@ -46,26 +46,27 @@ beforeEach(async () => {
 afterEach(() => { setS7AvailableForTest(false); vi.restoreAllMocks(); });
 
 describe('#2660 capability differential', () => {
-  it.each(['admin', 'holder', 'owner member', 'participant', 'different holder', 'own worker', 'manager worker', 'holder other worker', 'impersonation'] as const)(
+  it.each(['admin', 'holder', 'owner member', 'participant', 'different holder', 'own worker', 'manager worker', 'holder other worker', 'impersonation', 'impersonated holder'] as const)(
     '%s equals whether the writer admits this actor', async kind => {
       const ids = { admin: adminId, holder: holderId, 'owner member': ownerMemberId,
         participant: memberId, 'different holder': memberId, 'own worker': holderId,
-        'manager worker': adminId, 'holder other worker': holderId, impersonation: adminId };
-      const c = ctx(ids[kind], kind === 'impersonation' ? { impersonation: {
+        'manager worker': adminId, 'holder other worker': holderId, impersonation: adminId, 'impersonated holder': holderId };
+      const c = ctx(ids[kind], kind.startsWith('impersonat') ? { impersonation: {
         sessionId: generateId(), actorUserId: outsiderId, orgId, expiresAt: new Date(Date.now() + 3600_000),
       } } as never : {});
       const run = async () => {
         const allowed = await cap(c);
         expect(allowed).toBe(['admin', 'holder', 'owner member'].includes(kind));
+        const before = await db.workerWakeSettings.findUnique({ where: { workerId: targetId } });
         let succeeded = false;
         try { await M.isolateWorker({}, { workerRef: targetId }, c); succeeded = true; } catch (e) {
           expect((e as any).extensions.code).toMatch(/^(WORKER_ISOLATION_FORBIDDEN|FORBIDDEN)$/);
         }
         expect(allowed).toBe(succeeded);
-        const before = await db.workerWakeSettings.findUnique({ where: { workerId: targetId } });
+        if (!allowed) expect(await db.workerWakeSettings.findUnique({ where: { workerId: targetId } })).toEqual(before);
         if (allowed) await M.clearWorkerIsolation({}, { workerRef: targetId }, c);
         else {
-          await expect(M.clearWorkerIsolation({}, { workerRef: targetId }, c)).rejects.toBeTruthy();
+          await expect(M.clearWorkerIsolation({}, { workerRef: targetId }, c)).rejects.toMatchObject({ extensions: { code: expect.stringMatching(/^(WORKER_ISOLATION_FORBIDDEN|FORBIDDEN)$/) } });
           expect(await db.workerWakeSettings.findUnique({ where: { workerId: targetId } })).toEqual(before);
         }
       };
@@ -85,11 +86,14 @@ describe('#2660 capability differential', () => {
   });
 
   it('outsiders and App keys keep the existing concealed read refusal', async () => {
+    const row = await Q.workerWakeSettings({}, { workerRef: targetId }, ctx(adminId));
     for (const c of [ctx(outsiderId), ctx(undefined, { appId } as never)]) {
       await expect(cap(c)).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
+      await expect(F.canManageIsolation(row, {}, c)).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
     }
     await db.appMember.delete({ where: { appId_userId: { appId, userId: holderId } } });
     await expect(cap(ctx(holderId))).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
+    await expect(F.canManageIsolation(row, {}, ctx(holderId))).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
   });
 
   it('retired workers and invalid session bindings do not advertise write permission', async () => {
@@ -108,6 +112,7 @@ describe('#2660 capability differential', () => {
         expect(r.body.singleResult.data?.workerWakeSettings).toEqual({ canManageIsolation: true });
       }
       const cleared = await server.executeOperation({ query: 'mutation($ref:String!){clearWorkerIsolation(workerRef:$ref){canManageIsolation}}', variables: { ref: targetId } }, { contextValue: ctx(holderId) });
+      expect(cleared.body.kind).toBe('single');
       if (cleared.body.kind === 'single') {
         expect(cleared.body.singleResult.errors).toBeUndefined();
         expect(cleared.body.singleResult.data?.clearWorkerIsolation).toEqual({ canManageIsolation: true });
@@ -125,8 +130,15 @@ describe('#2660 capability differential', () => {
 
   it('propagates a capability lookup failure instead of silently advertising a denial', async () => {
     const s = await Q.workerWakeSettings({}, { workerRef: targetId }, ctx(adminId));
-    const failure = new Error('synthetic worker lookup failure');
-    vi.spyOn(db.worker, 'findUnique').mockRejectedValueOnce(failure);
+    const failure = new Error('synthetic manager lookup failure');
+    const lookup = db.orgMember.findFirst.bind(db.orgMember);
+    const managerLookup = vi.spyOn(db.orgMember, 'findFirst').mockImplementation((args: any) => {
+      if (args?.where?.role) throw failure;
+      return lookup(args);
+    });
+    // The same injected fault must leave the parent read guard usable.
+    await expect(Q.workerWakeSettings({}, { workerRef: targetId }, ctx(adminId))).resolves.toBeDefined();
     await expect(F.canManageIsolation(s, {}, ctx(adminId))).rejects.toBe(failure);
+    expect(managerLookup.mock.calls.some(([args]: any[]) => args?.where?.role)).toBe(true);
   });
 });
