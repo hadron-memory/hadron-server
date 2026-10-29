@@ -6,6 +6,8 @@ import { appRunMutations } from '../api/graphql/schema/resolvers.appRun.js';
 import { automationPinQueries } from '../api/graphql/schema/resolvers.automationPin.js';
 import { mintAppRun } from './appRuns.js';
 import { schedulerTick } from './scheduler.js';
+import express from 'express';
+import { mountWebhookRoutes } from '../api/webhooks.js';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => {
@@ -88,4 +90,44 @@ it('shows effective budget in the existing plain approval projection after a pla
   expect(limits).toContain('200'); expect(limits).toContain('3');
   expect(limits).toMatch(/tokens/i); expect(limits).toMatch(/actions/i);
   expect(limits).not.toMatch(/hrn:|[0-9a-f]{24}/);
+});
+
+
+it('webhook HTTP payload cannot widen setup limits, including after defaults are lowered', async () => {
+  const f = await fixture();
+  const made = await M.createAgentWebhook({}, { input: { ...f.input, ...requested } }, f.ctx);
+  const api = express(); api.use(express.json()); mountWebhookRoutes(api, db);
+  const server = api.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const address = server.address() as { port: number };
+  const launch = async () => {
+    const res = await fetch(`http://127.0.0.1:${address.port}${made.path}?hpt=${made.token}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ budgetTokens: 100000, budgetActions: 50 }) });
+    expect(res.status).toBe(202);
+    const body = await res.json() as { runId: string };
+    return db.appRun.findUniqueOrThrow({ where: { id: body.runId } });
+  };
+  try {
+    amounts(await launch());
+    vi.stubEnv('RUN_DEFAULT_TOKEN_BUDGET', '200'); vi.stubEnv('RUN_DEFAULT_ACTION_BUDGET', '2');
+    amounts(await launch(), 200, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+});
+
+it('narrowed budgets do not bypass daily token quota or launch a run on refusal', async () => {
+  const f = await fixture();
+  await M.triggerAppRun({}, { input: { ...f.input, ...requested } }, f.ctx);
+  await db.quotaCounter.updateMany({ where: { scopeKind: 'app', scopeId: f.app.id, action: 'llm.tokens' }, data: { limit: 1, used: 1 } });
+  await expect(M.triggerAppRun({}, { input: { ...f.input, budgetTokens: 1, budgetActions: 1 } }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'QUOTA_EXCEEDED' } });
+  expect(await db.appRun.count()).toBe(1);
+});
+
+it('existing manual run snapshots and live decrements remain separate from later trigger changes', async () => {
+  const f = await fixture();
+  const old = await M.triggerAppRun({}, { input: { ...f.input, ...requested } }, f.ctx);
+  await db.appRun.update({ where: { id: old.id }, data: { budgetTokens: { decrement: 20 }, budgetActions: { decrement: 1 } } });
+  const next = await M.triggerAppRun({}, { input: { ...f.input, budgetTokens: 100, budgetActions: 1 } }, f.ctx);
+  amounts(next, 100, 1);
+  expect(await db.appRun.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ budgetTokens: 480, budgetActions: 2, budgetTokensInitial: 500, budgetActionsInitial: 3 });
 });

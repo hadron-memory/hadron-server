@@ -119,9 +119,10 @@ async function storedConsent(db: Context['db'], kind: AutomationTriggerKind, id:
 }
 type Facts = { facts: TriggerFacts; name: string | null };
 function factsOf(kind: AutomationTriggerKind, row: Record<string, unknown>): Facts {
-  if (kind === 'SCHEDULE') return { name: String(row.name), facts: { kind, schedule: { cron: (row.cron as string | null) ?? null, timezone: String(row.timezone ?? 'UTC'), runAt: (row.runAt as Date | null) ?? null, enabled: row.enabled !== false } } };
-  if (kind === 'WEBHOOK') return { name: String(row.name), facts: { kind } };
-  return { name: null, facts: { kind } };
+  const budgets = { budgetTokens: (row.budgetTokensInitial ?? row.budgetTokens) as number | null, budgetActions: (row.budgetActionsInitial ?? row.budgetActions) as number | null };
+  if (kind === 'SCHEDULE') return { name: String(row.name), facts: { kind, budgets, schedule: { cron: (row.cron as string | null) ?? null, timezone: String(row.timezone ?? 'UTC'), runAt: (row.runAt as Date | null) ?? null, enabled: row.enabled !== false } } };
+  if (kind === 'WEBHOOK') return { name: String(row.name), facts: { kind, budgets } };
+  return { name: null, facts: { kind, budgets } };
 }
 
 const MAX_PAGE = 50;
