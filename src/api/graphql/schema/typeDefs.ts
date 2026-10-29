@@ -7892,6 +7892,10 @@ export const typeDefs = `#graphql
     One bounded RepeatableRead snapshot per call; no hierarchy rollups or role exclusions.
     """
     teamComposition(appRef: ID!): TeamComposition!
+    "Experimental register role picker: all readable workers tied at the nearest task depth, paged. Never assigns or routes."
+    registerRoleCandidates(appRef: ID!, code: String!, limit: Int = 20, offset: Int = 0): RegisterRoleCandidatePage!
+    "Experimental: the routed pick for a register code: the named worker, else one role holder (matcher least-recently-assigned), else one coordinator-role holder, else the App's managers (shown only to a manager). Empty when nothing matches. Never assigns or delivers."
+    registerRolePick(appRef: ID!, code: String!, workerRef: ID): RegisterRolePick!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -8017,7 +8021,9 @@ export const typeDefs = `#graphql
       expand: Int
       granularity: SearchGranularity
       orgId: ID
+      "#437 — primary page size, default 20 (also null), clamped to 1–200. Expansion neighbors are additional. hrn:node:hadronmemory.com:specs:cor:api:090"
       limit: Int
+      "#437 — page offset, default 0 (also null); negative values become 0. No offset ceiling. hrn:node:hadronmemory.com:specs:cor:api:090"
       offset: Int
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
@@ -9703,6 +9709,12 @@ export const typeDefs = `#graphql
     already see it on the roster.
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
+    "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1."
+    setAgentTaskPriority(taskRef: ID!, priority: Int!): AgentTask!
+    "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority."
+    addAgentTaskBlocker(taskRef: ID!, blockerTaskRef: ID!): AgentTask!
+    "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — remove a blocker from a backlog/pending task. Last-blocker release restarts stall clocks and preserves status/assignee. Assigner authority."
+    removeAgentTaskBlocker(taskRef: ID!, blockerTaskRef: ID!): AgentTask!
 
     """
     #1747 — create a ticker in an App (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :18). Any App participant, or a
@@ -11035,6 +11047,27 @@ export const typeDefs = `#graphql
       any memory.
       """
       draftCorpus: Boolean
+    ): Memory!
+
+    """
+    Create a NEW free-standing app-class memory in an org-owned App with at
+    least one installed Agent. The caller must act as themselves, outside a
+    worker/session, App-key, headless-run or impersonation principal, through
+    the existing org ADMIN/OWNER gate. User-owned Apps are refused with
+    USER_OWNED_APP_UNSUPPORTED until ruled. App participants read and write it;
+    the installed Agent's owning org gains no access. Existing memories cannot
+    be attached through this operation. Name determines the slug as createMemory
+    does. Refusals: FORBIDDEN, AGENT_NOT_INSTALLED, USER_OWNED_APP_UNSUPPORTED,
+    BAD_USER_INPUT (empty name). Installation and membership are checked in the
+    inserting transaction, fenced against uninstall and revocation.
+    See hrn:node:hadronmemory.com:specs:cor:acl:010:01.
+    """
+    createAppMemory(
+      appRef: ID!
+      name: String!
+      shortDescription: String
+      description: String
+      tags: [String!]
     ): Memory!
 
     """
@@ -13750,6 +13783,8 @@ export const typeDefs = `#graphql
   "#1747 — a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03)."
   type WorkerWakeSettings {
     worker: Worker!
+    "Whether this caller, acting as a person, may set or clear isolation: whoever manages the App or holds the worker. False for worker sessions and impersonation. Reports permission even while isolation is unavailable; does not grant read access. hrn:node:hadronmemory.com:specs:cor:agt:080:29"
+    canManageIsolation: Boolean!
     mentions: MentionWake!
     "A pause belongs to the worker, not to a session."
     pausedUntil: DateTime
@@ -13873,7 +13908,16 @@ export const typeDefs = `#graphql
   ended; it never reads what the work is. Readable by the App's participants,
   workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
+  type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
   type AgentTask {
+    "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
+    priority: Int!
+    "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
+    blocked: Boolean!
+    "Same-App tasks this task waits for, including ended blockers."
+    blockedBy(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
+    "Same-App tasks that name this task as a blocker."
+    blocks(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
     id: ID!
     appId: ID!
     """
@@ -14390,6 +14434,35 @@ export const typeDefs = `#graphql
     status: AgentTaskStatus!
   }
 
+  "Experimental action register role-picking projection. No routing or assignment."
+  type RegisterRoleCandidatePage {
+    appId: ID!
+    code: String!
+    taskLoc: String
+    depth: Int
+    "Total nearest-depth ties, independent of the requested page."
+    total: Int!
+    candidates: [RegisterRoleCandidate!]!
+  }
+  type RegisterRolePick {
+    appId: ID!
+    code: String!
+    "Worker arms carry exactly one WORKER entry; the managers arm one USER entry per manager, nearest first."
+    entries: [RegisterRouteEntry!]!
+  }
+  type RegisterRouteEntry {
+    kind: RegisterRouteKind!
+    id: ID!
+  }
+  enum RegisterRouteKind { WORKER USER }
+  type RegisterRoleCandidate {
+    worker: AgentTaskParty!
+    role: String
+    "Own Agent is zero; each base link adds one."
+    depth: Int!
+    taskUrn: String!
+  }
+
   "#2061 — active roster workers grouped by their direct reportsTo claim."
   type TeamComposition {
     appId: ID!
@@ -14586,6 +14659,9 @@ export const typeDefs = `#graphql
   parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
   """
   input CreateAgentTaskInput {
+    "#2644 — naming priority or blockers requires the task assigner authority; otherwise creation refuses atomically."
+    priority: Int
+    blockedBy: [ID!]
     "The team App (id or URN). Required for a root task; for a child task it is taken from the parent and, if given, must match."
     appRef: ID
     parentTaskId: ID

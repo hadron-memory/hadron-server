@@ -5708,6 +5708,11 @@ model AgentTask {
   /// 'backlog' | 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
   /// 'backlog' (#1754): parked — no assignee, not matched, never waited on, no alarms.
   status               String    @default("pending")
+  /// #2644: 1 is highest; existing tasks retain FIFO within default priority1.
+  priority             Int       @default(1) @db.SmallInt
+  /// Maintained transactionally with the blocker graph, never caller supplied.
+  blocked              Boolean   @default(false)
+  releasedAt           DateTime? @map("released_at")
   startBy              DateTime? @map("start_by")
   startedAt            DateTime? @map("started_at")
   finishedAt           DateTime? @map("finished_at")
@@ -5743,14 +5748,16 @@ model AgentTask {
   children       AgentTask[]         @relation("AgentTaskParent")
   /// #2553: the counter of the numbers issued under this task.
   childCounters  AgentTaskCounter[]
+  blockerLinks AgentTaskBlocker[] @relation("TaskBlockedBy")
+  dependentLinks AgentTaskBlocker[] @relation("TaskBlocks")
   ownerWorker    Worker?             @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
   ownerUser      User?               @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
   assigneeWorker Worker?             @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
   assigneeUser   User?               @relation("AgentTaskAssigneeUser", fields: [assigneeUserId], references: [id], onDelete: NoAction)
-  events         AgentTeamEvent[]
   /// #2022 — times stop signals kept this task from being assigned.
   stopHolds      AgentTaskStopHold[]
 
+  @@index([appId, status, priority, createdAt, id])
   @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
@@ -5765,6 +5772,18 @@ model AgentTask {
 /// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
 /// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
 /// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
+/// #2644: same-App acyclic dependency graph, guarded by task-blocker-invariants.sql.
+model AgentTaskBlocker {
+  taskId String @map("task_id")
+  blockerTaskId String @map("blocker_task_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  task AgentTask @relation("TaskBlockedBy", fields: [taskId], references: [id], onDelete: Cascade)
+  blocker AgentTask @relation("TaskBlocks", fields: [blockerTaskId], references: [id], onDelete: Cascade)
+  @@id([taskId, blockerTaskId])
+  @@index([blockerTaskId])
+  @@map("agent_task_blockers")
+}
+
 model AgentTaskCounter {
   id           String  @id @default(cuid())
   appId        String  @map("app_id")
@@ -5823,7 +5842,6 @@ model AgentTeamEvent {
   episodeStart           DateTime? @map("episode_start")
 
   app        App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
-  task       AgentTask?                @relation(fields: [taskId], references: [id], onDelete: Cascade)
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
 

@@ -31,6 +31,16 @@ export interface PlatformVariableValues {
   'session.llmModel': string;
 }
 
+/** The closed set's keys, in one place for the audit (#2704). */
+export const PLATFORM_VARIABLE_KEYS = [
+  'worker.name', 'worker.role', 'agent.name', 'worker.reportsTo.name', 'worker.signature', 'worker.trailer', 'worker.url', 'session.llmModel',
+] as const satisfies readonly (keyof PlatformVariableValues)[];
+
+// Exhaustiveness (#2704): a variable added to PlatformVariableValues but not to the list above fails to compile here,
+// so the audit can never call a supported token unknown.
+const platformVariableKeysAreExhaustive: Exclude<keyof PlatformVariableValues, (typeof PLATFORM_VARIABLE_KEYS)[number]> extends never ? true : never = true;
+void platformVariableKeysAreExhaustive;
+
 /**
  * #2702: the legacy `{{name}}` / `{{role}}` values for SERVED text, taken from the variable values that text is bound with
  * (`worker.name` / `worker.role`), so a recorded replay binds the recorded identity, never today's. Converted prompts keep

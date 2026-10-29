@@ -2050,8 +2050,10 @@ export async function updateNodePropertiesWith(
     });
   }
   // #1316: a node in a memory the caller cannot read answers as a missing one.
+  // #2701: an install memory's write answer on the pooled client is a pre-flight only; writeNodeCore re-decides it
+  // inside its own fenced transaction, so this door says so, as writeNodeCore's own pre-gate does (#2044).
   await concealUnreadableNodeDenial(ctx, meta.memoryId, () => nodeNotFoundError(nodeRef), () =>
-    requireMemoryWriteAccess(ctx, meta.memoryId),
+    requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, meta.memoryId),
   );
   // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
   await assertLocWritable(
@@ -2087,6 +2089,9 @@ export async function updateNodePropertiesWith(
   // pooled client rather than a closed transaction client.
   const effects: Array<() => void> = [];
   const written = await ctx.db.$transaction(async (lockTx) => {
+    // This path owns its transaction, so it takes the write authority first, as writeNodeCore's own-transaction path
+    // does: the authority anchors before the node lock, the memory row and the write (the documented lock order).
+    await lockInstallAuthorityFirst(lockTx, ctx, meta.memoryId);
     await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${meta.id}))`;
 
     // Fresh read UNDER the lock — the merge base can't be stale. `properties`
@@ -2476,8 +2481,9 @@ export const nodeMutations = {
         });
       }
       // #1316: a node in a memory the caller cannot read answers as a missing one.
+      // #2701: pre-flight only on an install memory; writeNodeCore re-decides it in its fenced transaction (#2044).
       await concealUnreadableNodeDenial(ctx, meta.memoryId, () => nodeNotFoundError(nodeRef), () =>
-        requireMemoryWriteAccess(ctx, meta.memoryId),
+        requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, meta.memoryId),
       );
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
       await assertLocWritable(

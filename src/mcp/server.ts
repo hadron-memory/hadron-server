@@ -3355,6 +3355,29 @@ export function createMcpServerInstance(
     },
   );
 
+  // #2661: one creation policy, delegated to the GraphQL resolver.
+  server.tool(
+    'hadron_create_app_memory',
+    'Create a NEW app-class memory in an org-owned App with an installed Agent. Requires the owning org ADMIN/OWNER acting as themselves, outside a worker session. App keys, runs, impersonation and user-owned Apps are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
+    SHAPE_HADRON_CREATE_APP_MEMORY,
+    async ({ app, name, shortDescription, description, tags }) => {
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...mcpRequestSessionContext(auth),
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
+        return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
+      } catch (e) {
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+      }
+    },
+  );
+
   // ── hadron_server_info ────────────────────────────────────────────────────────
   //
   // #187 / #190 — exposes the bound deployment URL + hadron-server
@@ -12561,6 +12584,15 @@ const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
   memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
 };
 
+// #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_CREATE_APP_MEMORY = {
+  app: z.string().describe('App ID or URN.'),
+  name: z.string().min(1).describe('Memory name; determines its slug.'),
+  shortDescription: z.string().optional(),
+  description: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+};
+
 const SHAPE_HADRON_CREATE_MEMORY = {
   name: z.string().min(1).describe('Memory name; its slug becomes the URN tail (e.g. "My Notes" -> my-notes).'),
   memoryClass: z
@@ -12696,7 +12728,7 @@ const SHAPE_HADRON_FIND_NODES = {
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
   brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
-  limit: z.number().optional().describe('Max results (default 10 for a query; 20 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
+  limit: z.number().int().optional().describe('Max primary results: integer clamped to 1–200 (default 10 for a query; 20 for survey mode "*"/""). Expansion neighbors are additional.'),
   minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
   expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
   granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),

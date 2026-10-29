@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import * as ts from 'typescript';
 
 const DIRECT = [
+  ['resolvers.mutation.appMemory.ts', 'createAppMemory'], // #2661: new app-class authority writer.
   ['resolvers.mutation.org.ts', 'updateUserRoles'],
   ['resolvers.mutation.org.ts', 'createUserInvitation'],
   ['resolvers.mutation.org.ts', 'acceptInvitation'],

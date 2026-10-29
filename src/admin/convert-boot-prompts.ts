@@ -110,7 +110,7 @@ async function reusableNode(
 }
 
 /** Approve the node's current revision as the operator conversion (the existing approval record, info only). */
-async function approveAsOperator(db: PrismaClient, nodeId: string): Promise<void> {
+export async function approveAsOperator(db: PrismaClient, nodeId: string): Promise<void> {
   const node = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { memoryId: true } });
   await db.$transaction((tx) => approveNodeInTransaction(tx, nodeId, {
     memoryId: node.memoryId,
