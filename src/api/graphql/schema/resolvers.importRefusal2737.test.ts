@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import * as busClient from '../../../lib/bus/index.js';
+import * as nodeEvents from '../../../lib/events/nodeWritten.js';
+import * as runKernel from '../../../jobs/appRuns.js';
 import * as manualRun from './resolvers.appRun.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { setQuotaLimit } from '../../../jobs/appRuns.js';
@@ -72,6 +75,44 @@ describe('#2737 importNode run refusal',()=>{
     await expect(resolvers.Mutation.importNode({}, {input:{...input(),appRef:app.id}},ctx)).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT'}});
     expect(mint).not.toHaveBeenCalled();
     expect(await db.node.findUnique({where:{loc_memoryId:{loc:'clips:refused',memoryId}}})).toBeNull();
+  });
+
+  it('refusal publishes neither node nor run wake effects', async()=>{
+    const nodeWritten=vi.spyOn(nodeEvents,'publishNodeWritten');
+    const runRequested=vi.spyOn(runKernel,'publishRunRequested');
+    vi.stubEnv('BOOT_PROMPT_SERVE_ENABLED','true');
+    await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_NOT_SET'}});
+    expect(nodeWritten).not.toHaveBeenCalled();
+    expect(runRequested).not.toHaveBeenCalled();
+  });
+  it('publishes effects only when the committed node and run are visible', async()=>{
+    const observed: boolean[]=[];
+    const runRequested=vi.spyOn(runKernel,'publishRunRequested').mockImplementation(async (pooled,id)=>{
+      observed.push(!!await pooled.appRun.findUnique({where:{id}}) && !!await pooled.node.findUnique({where:{loc_memoryId:{loc:'clips:refused',memoryId}}}));
+    });
+    const nodeWritten=vi.spyOn(nodeEvents,'publishNodeWritten');
+    await resolvers.Mutation.importNode({}, {input:input()},ctx);
+    expect(runRequested).toHaveBeenCalledTimes(1);
+    expect(observed).toEqual([true]);
+    expect(nodeWritten).toHaveBeenCalledTimes(1);
+  });
+  it('a node write refusal creates no run and preserves quota', async()=>{
+    await expect(resolvers.Mutation.importNode({}, {input:{...input(),name:'',nodeType:'comment'}},ctx)).rejects.toThrow();
+    expect(await db.appRun.count()).toBe(0);
+    expect(await db.quotaCounter.count({where:{scopeId:appId}})).toBe(0);
+  });
+
+  it('the broker never receives a run wake for uncommitted state', async()=>{
+    const observed: boolean[]=[];
+    const publish=vi.fn(async(subject:string, event:unknown)=>{
+      if(subject===runKernel.RUN_REQUESTED_SUBJECT) {
+        const {runId}=event as {runId:string};
+        observed.push(!!await db.appRun.findUnique({where:{id:runId}}));
+      }
+    });
+    vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish} as never);
+    await resolvers.Mutation.importNode({}, {input:input()},ctx);
+    expect(observed).toEqual([true]);
   });
 
 });
