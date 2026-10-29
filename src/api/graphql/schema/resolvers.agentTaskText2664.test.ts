@@ -74,7 +74,7 @@ it('ANDs with status, tag and assignee', async () => {
   await task('other', { tags: ['red'] });
   expect(titles(await list({ text: 'login', tag: 'red' }))).toEqual(['login a', 'login c']);
   expect(titles(await list({ text: 'login', status: ['STARTED'] }))).toEqual(['login c']);
-  expect(titles(await list({ text: 'login', assignee: { userId } }))).toEqual(['login c']);
+  expect(titles(await list({ text: 'login', assignee: { user: userId } }))).toEqual(['login c']);
   expect(titles(await list({ text: 'login', tag: 'blue', status: ['STARTED'] }))).toEqual([]);
 });
 
