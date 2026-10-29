@@ -44,6 +44,7 @@ import { generateId } from '../lib/id.js';
 import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
+import { AmbiguousLegacyUrnError } from '../lib/entityRef/errors.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -282,8 +283,11 @@ describe('#2610 — Action URN projection line', () => {
 
   // (A soft-deleted Agent's system memory refuses the READ itself — "Memory
   // not found" — so the mutant-G line-omission observable is masked by
-  // construction on this surface; the helpers keep the deletedAt filter for
-  // parity with Node.actionUrn, which does see the row.)
+  // construction on this surface (GraphQL's node read still serves the entry;
+  // the two surfaces' memory gates differ here, pre-existing); the helpers
+  // keep the deletedAt filter for parity with Node.actionUrn, and the ACTION
+  // address's own deleted-agent refusal IS pinned, in the delta-review
+  // describe below.)
 
   it('is omitted, never a throw, for an unemittable STORED code atom', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -321,5 +325,97 @@ describe('#2610 — hadron_get_nodes batch parity (cor:api:040:01)', () => {
     expect(blocks[0]).toContain(`Action URN: ${actionUrn(teamAgent.urn, CODE)}`);
     expect(blocks[1]).not.toMatch(/^Action URN: /m);
     expect(batch).not.toContain('Unavailable');
+  });
+});
+
+describe('#2711 delta review — D-1 impersonation, D-2 pins', () => {
+  it('D-1: an impersonation session whose shared org is not the Agent\'s org is refused by the agent gate', async () => {
+    await registerEntry(teamMemoryId, CODE);
+    const otherOrg = await db.organization.create({
+      data: { id: generateId(), name: 'mcp-au-other-org', urn: `${org.urn}-imp-scope` },
+    });
+    // The admin behind the curtain, scoped to a DIFFERENT single org than the
+    // Agent's — isOrgMemberOrAdmin's impersonation narrowing must refuse. The
+    // fix carries auth.impersonation into the gate; scopeCtx() alone dropped it.
+    const impersonated: AuthContext = {
+      ...auth(admin.id),
+      impersonation: { sessionId: 'sess-imp', actorUserId: admin.id, orgId: otherOrg.id, expiresAt: new Date('2099-01-01') },
+    };
+    const byAction = await createTestableMcpServer(impersonated)
+      .callToolText('hadron_get_node', { urn: actionUrn(teamAgent.urn, CODE) });
+    expect(byAction).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    // The same impersonated caller still reads the entry by NODE address —
+    // the memory gate's org fold is the pre-existing, separately-routed
+    // surface (Rico D-1: "exposes nothing new"). This boundary is what makes
+    // D-1 a gate-parity fix rather than a leak fix; pin it so a future
+    // tightening of the memory fold turns this assertion red deliberately.
+    const byNode = await createTestableMcpServer(impersonated)
+      .callToolText('hadron_get_node', { urn: emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`) });
+    expect(byNode).toContain(`hrn:node:${teamMemoryUrn}:register:${CODE}`);
+  });
+
+  it('D-2: a soft-deleted Agent\'s action address refuses (mutant-kill masked — see comments)', async () => {
+    await registerEntry(teamMemoryId, CODE);
+    await db.agent.update({ where: { id: teamAgent.id }, data: { deletedAt: new Date() } });
+    // The action address: the uniform refusal, indistinguishable from an
+    // unknown agent. NOTE (mutant pass): an includeDeleted mutant on
+    // resolveAgentRef SURVIVES this pin — the memory gate refuses a
+    // soft-deleted Agent's system memory downstream, so the refusal fires
+    // either way and this surface cannot tell which gate spoke. The
+    // liveness filter's own kill lives in the GraphQL file (mutant G there
+    // is unmasked: GraphQL's node read still serves the entry). The pin
+    // keeps value here as a behavior pin: uniform not-found, never an error
+    // or a partial leak.
+    const byAction = await getNode(actionUrn(teamAgent.urn, CODE));
+    expect(byAction).toBe(`Node "${actionUrn(teamAgent.urn, CODE)}" not found.`);
+    // The node address's read refuses too ("Memory not found") — so the
+    // line-omission observable ("the entry served WITHOUT its Action URN
+    // line") is unreachable on MCP by construction (documented in the
+    // projection describe's header note). Pin the refusal so a memory-gate
+    // change that starts serving these memories fails here loudly and the
+    // masked pins get written.
+    const byNode = await getNode(emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`));
+    expect(byNode).toBe(`Memory not found: "${teamMemoryUrn}".`);
+  });
+
+  it('D-2: an unminted PLAIN node\'s rename leaves no alias — only register: entries widen (#1591 + #2610)', async () => {
+    // The register entry's rename keeps the old code resolving (pinned above,
+    // the alias heal). The widening mutant — every unminted loc leaves an
+    // alias on move — is killed by this NEGATIVE: the plain node's old
+    // address must die with the move.
+    const plain = await node(teamMemoryId, 'plain-old-loc');
+    await M.moveNode(
+      {},
+      { sourceRef: plain.id, targetUrn: emitNodeUrnV2(teamMemoryUrn, 'plain-new-loc') },
+      gqlCtx(admin.id),
+    );
+    const old = await getNode(emitNodeUrnV2(teamMemoryUrn, 'plain-old-loc'));
+    expect(old).toBe(`Node "${emitNodeUrnV2(teamMemoryUrn, 'plain-old-loc')}" not found.`);
+    const moved = await getNode(emitNodeUrnV2(teamMemoryUrn, 'plain-new-loc'));
+    expect(moved).toContain('ID: ');
+  });
+
+  it('D-2: a globally-ambiguous historical code stays a LOUD refusal (the rethrow)', async () => {
+    // Two minted entries renamed away from the same code leave two aliases
+    // from one address (#697 ambiguity). The arm's contract: the ambiguity
+    // escapes rather than folding into the uniform not-found.
+    const amb = 'task.amb.duplicated';
+    for (const renamed of ['task.amb.first', 'task.amb.second']) {
+      const entry = await registerEntry(teamMemoryId, amb);
+      await db.node.update({ where: { id: entry.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
+      await M.moveNode(
+        {},
+        { sourceRef: entry.id, targetUrn: emitNodeUrnV2(teamMemoryUrn, `register:${renamed}`) },
+        gqlCtx(admin.id),
+      );
+    }
+    await expect(getNode(actionUrn(teamAgent.urn, amb))).rejects.toBeInstanceOf(AmbiguousLegacyUrnError);
+  });
+
+  it('D-2: an action URN with too many segments (arity) is the uniform refusal', async () => {
+    await registerEntry(teamMemoryId, CODE);
+    const tooLong = `${actionUrn(teamAgent.urn, CODE)}:extra`;
+    const text = await getNode(tooLong);
+    expect(text).toBe(`Node "${tooLong}" not found.`);
   });
 });

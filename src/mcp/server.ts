@@ -4888,7 +4888,16 @@ export function createMcpServerInstance(
       select: { organizationId: true, visibility: true, ownerUserId: true, systemMemoryId: true },
     });
     if (!agent?.systemMemoryId) return null;
-    if (agent.visibility !== 'PUBLIC' && !(await isOwnerOrOrgMember(scopeCtx(), agent))) return null;
+    // D-1 (Rico §10 delta): carry impersonation into the gate — scopeCtx()
+    // alone omits it, so an impersonated session's org-membership check would
+    // admit what the GraphQL arm (ctx.impersonation-aware) refuses.
+    // recoveryCtx() is the established shape for this.
+    if (
+      agent.visibility !== 'PUBLIC' &&
+      !(await isOwnerOrOrgMember({ ...scopeCtx(), impersonation: auth.impersonation ?? undefined }, agent))
+    ) {
+      return null;
+    }
     if (!(await canReadMemory(db, auth, agent.systemMemoryId, EXPLICIT_REF))) return null;
     let entryId: string;
     try {
