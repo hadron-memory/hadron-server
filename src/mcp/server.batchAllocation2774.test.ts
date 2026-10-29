@@ -1,37 +1,20 @@
 /**
- * Spec cor:api:040 — batch node read (hadron_get_nodes). Behavioral coverage for
- * the MCP surface, driving the production closure via createTestableMcpServer.
- *
- * What this file pins:
- *   - Explicit-set form: full per-node projection (content + edges) for many
- *     refs in one call, returned in INPUT order (cor:api:040:01).
- *   - A ref is a PK or a fully-qualified node URN (cor:api:140, #822): both read
- *     in the SAME call and produce the same projection, dedup happens on the
- *     RESOLVED node so one node named two ways renders (and bills) once, and a
- *     ref whose SHAPE is wrong is a loud error rather than an Unavailable entry.
- *   - Prefix-subtree form: every readable node under a loc-prefix, in LOC order.
- *   - Per-node projection parity with hadron_get_node — the batch block for a node
- *     is byte-identical to a single hadron_get_node of that node (the shared
- *     renderNodeReadProjection contract).
- *   - contentScope: 'abstract' returns abstracts, omits bodies.
- *   - Per-node authorization + partial success (cor:api:040:03): a mix of
- *     readable / denied / not-found returns the readable subset and lists the
- *     rest as Unavailable — denied and not-found indistinguishable, no content
- *     leak, the batch never fails wholesale.
- *   - Hard caps (cor:api:040:02): over the node-count cap is a LOUD error;
- *     over the response-size cap returns a partial result flagged `truncated`
- *     with the omitted refs — never a silent short read.
- *   - Form validation: exactly one of (refs) XOR (memoryUrn + locPrefix).
+ * #2774 — initial/current MCP projection allocation with byte-identical output.
+ * Drives the production closure on real Postgres fixtures: PK/URN/prefix,
+ * single/batch parity, stale markers, encryption, provenance and output caps.
+ * General batch form/validation coverage lives in server.batchRead.test.ts.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHash } from 'node:crypto';
+import * as contentHash from '../lib/contentHash.js';
+import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
-import { BATCH_READ_MAX_NODES } from '../lib/batchRead.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -97,9 +80,6 @@ beforeEach(async () => {
 });
 
 
-import { createHash } from 'node:crypto';
-import * as contentHash from '../lib/contentHash.js';
-import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 afterEach(() => sessionKeyCache.clear());
 
 async function denseFixture() {
@@ -158,7 +138,6 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
 it.each([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const)('#2774 bounds endpoint/root payloads with byte-identical %s/%s output', async (scope, form) => {
   const nodes = await denseFixture();
   const result = await measuredRead(scope, nodes.map(n => n.id), form);
-  console.log(JSON.stringify({ probe: 'mcpBatch2774', scope, ...result, text: undefined }));
   expect(result.text).not.toMatch(/^Error/);
   expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
   expect(result.loads.filter(l => l.phase === 'current').length).toBeGreaterThanOrEqual(12);
@@ -269,21 +248,46 @@ it.each(['pk', 'prefix'] as const)('#2774 preserves first-oversized progress and
 });
 
 
-it.each([[true, false], [false, false], [true, true], [false, true]] as const)('#2774 omits an unused body when no abstract exists (raw=%s encrypted=%s)', async (raw, encrypted) => {
+it.each([[true, false, false], [false, false, false], [true, true, false], [false, true, false], [true, true, true], [false, true, true]] as const)('#2774 omits an unused body when no abstract exists (raw=%s encrypted=%s locked=%s)', async (raw, encrypted, locked) => {
   const home = await db.memory.findUniqueOrThrow({ where: { id: fx.memory.id } });
   const memory = await db.memory.create({ data: { organizationId: home.organizationId, class: 'private', userId: fx.admin.id, name: 'noabstract', urn: 'batch-org:noabstract' } });
   const node = await db.node.create({ data: { memoryId: memory.id, loc: 'no-abstract', name: 'No abstract', content: 'UNNEEDED'.repeat(16_384), abstract: null, data: { note: 'VISIBLE DATA' } } });
   const server = createTestableMcpServer(adminAuth(), { sessionId: 'batch2774-empty' });
   if (encrypted) {
     await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.admin.id } as Context);
-    expect(await server.callToolText('hadron_unlock_memory', { memoryUrn: memory.urn, passphrase: 'synthetic2774' })).toContain('unlocked');
+    if (!locked) expect(await server.callToolText('hadron_unlock_memory', { memoryUrn: memory.urn, passphrase: 'synthetic2774' })).toContain('unlocked');
+    else sessionKeyCache.clear();
   }
   const result = await measuredRead('abstract', [node.id], 'pk', raw);
   const single = await server.callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:noabstract:no-abstract', contentScope: 'abstract', raw });
   expect(result.text).toContain(single);
   expect(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
   expect(result.text).not.toContain('UNNEEDED');
-  expect(result.text).toContain('VISIBLE DATA');
+  if (locked) {
+    expect(result.text).toContain('Locked:');
+    expect(result.text).not.toContain('VISIBLE DATA');
+  } else expect(result.text).toContain('VISIBLE DATA');
+});
+
+it.each(['pk', 'urn', 'prefix'] as const)('#2774 pins SQL presence for null/empty/nonempty unfingerprinted bodies (%s)', async (form) => {
+  const rows = [];
+  for (const [suffix, content] of [['null', null], ['empty', ''], ['body', 'CURRENT BODY']] as const) {
+    rows.push(await db.node.create({ data: { memoryId: fx.memory.id, loc: `presence:${suffix}`, name: suffix, content, abstract: `${suffix} summary`, abstractOriginHash: null } }));
+  }
+  const server = createTestableMcpServer(adminAuth());
+  const options = { contentScope: 'abstract', raw: true };
+  const output = await server.callToolText('hadron_get_nodes', {
+    ...(form === 'prefix' ? { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'presence:' }
+      : { refs: rows.map(row => form === 'pk' ? row.id : `hrn:node:batch-org:batchmem:${row.loc}`) }),
+    ...options,
+  });
+  for (const row of rows) {
+    const single = await server.callToolText('hadron_get_node', { urn: `hrn:node:batch-org:batchmem:${row.loc}`, ...options });
+    expect(single.includes('Source: abstract-stale')).toBe(row.content === 'CURRENT BODY');
+    expect(output).toContain(single);
+  }
+  expect(output.match(/Source: abstract-stale/g)).toHaveLength(1);
+  expect(output).not.toContain('CURRENT BODY');
 });
 
 it('#2774 preserves denied/deleted root and endpoint concealment with narrowed projections', async () => {
