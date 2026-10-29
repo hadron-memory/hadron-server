@@ -37,6 +37,8 @@ describe('#2666 task-number SQL', () => {
     const c = new Client({ connectionString: process.env.DATABASE_URL });
     await c.connect();
     try {
+      await c.query(`INSERT INTO agent_tasks (id, app_id, title, status, owner_user_id, task_number, handle, close_session_when_done)
+        VALUES ('numbered',$1,'Existing project','pending',$2,7,'AT7',false)`, [a.id, u.id]);
       // Simulate the pre-numbering schema after db push: nullable new columns, no numbering triggers.
       // No authorization constraints or gates are changed.
       await c.query(`DROP TRIGGER trg_agent_tasks_assign_number ON agent_tasks;
@@ -47,8 +49,6 @@ describe('#2666 task-number SQL', () => {
         await c.query(`INSERT INTO agent_tasks (id, app_id, title, status, owner_user_id, parent_task_id, close_session_when_done, created_at)
           VALUES ($1,$2,$1,'pending',$3,$4,false,'2026-01-01')`, [id, a.id, u.id, parent]);
       }
-      await c.query(`INSERT INTO agent_tasks (id, app_id, title, status, owner_user_id, task_number, handle, close_session_when_done)
-        VALUES ('numbered',$1,'Existing project','pending',$2,7,'AT7',false)`, [a.id, u.id]);
       await postPush();
       const snapshot = async () => ({
         tasks: (await c.query('SELECT id,parent_task_id,task_number::text,handle FROM agent_tasks ORDER BY id')).rows,
@@ -57,6 +57,7 @@ describe('#2666 task-number SQL', () => {
       const once = await snapshot();
       expect(Object.fromEntries(once.tasks.map(t => [t.id, t.handle]))).toMatchObject({ 'legacy-root': 'AT0.1', 'legacy-child': 'AT0.1.1', 'legacy-leaf': 'AT0.1.1.1', numbered: 'AT7' });
       expect(once.tasks.filter(t => t.handle === 'AT0')).toHaveLength(1);
+      expect(once.counters.find(t => t.parent_task_id === null)?.last_number).toBe('7');
       expect((await c.query(`SELECT column_name,is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_tasks' AND column_name IN ('task_number','handle') ORDER BY column_name`)).rows)
         .toEqual([{ column_name: 'handle', is_nullable: 'NO' }, { column_name: 'task_number', is_nullable: 'NO' }]);
       await postPush();
@@ -66,6 +67,45 @@ describe('#2666 task-number SQL', () => {
       await db.app.delete({ where: { id: a.id } });
       await postPush();
       await c.end();
+    }
+  }, 120_000);
+
+  it.each([false, true])('new migration preflight through Prisma: legacy invalid AT0=%s', async invalid => {
+    const name = `task2666_${generateId().toLowerCase()}`;
+    const admin = new Client({ connectionString: maintenanceUrl() });
+    const url = withDbName(maintenanceUrl(), name);
+    const dir = mkdtempSync(join(tmpdir(), 'task2666-check-'));
+    const migrations = join(dir, 'migrations');
+    await admin.connect();
+    let c: Client | undefined;
+    try {
+      await admin.query(`CREATE DATABASE "${name}"`);
+      c = new Client({ connectionString: url }); await c.connect();
+      mkdirSync(join(migrations, '000_baseline'), { recursive: true });
+      const schema = join(dir, 'schema.prisma');
+      writeFileSync(schema, 'datasource db {\n provider = "postgresql"\n url = env("DATABASE_URL")\n}\n');
+      writeFileSync(join(migrations, 'migration_lock.toml'), 'provider = "postgresql"\n');
+      writeFileSync(join(migrations, '000_baseline/migration.sql'), `CREATE TABLE agent_tasks (id text PRIMARY KEY, task_number bigint NOT NULL, status text NOT NULL);
+        INSERT INTO agent_tasks VALUES ('zero',0,'${invalid ? 'pending' : 'backlog'}'),('ordinary',1,'pending');`);
+      const deploy = () => run(resolve('node_modules/.bin/prisma'), ['migrate', 'deploy', '--schema', schema], { cwd: dir, env: { ...process.env, DATABASE_URL: url }, timeout: 60_000 });
+      await deploy();
+      const before = (await c.query('SELECT * FROM agent_tasks ORDER BY id')).rows;
+      const forward = '20261029010000_agent_task_zero_backlog';
+      mkdirSync(join(migrations, forward));
+      writeFileSync(join(migrations, forward, 'migration.sql'), readFileSync(resolve('prisma/migrations', forward, 'migration.sql')));
+      if (invalid) {
+        await expect(deploy()).rejects.toThrow(/1 task_number=0 rows are outside backlog; no rows changed/);
+        expect((await c.query(`SELECT conname FROM pg_constraint WHERE conname='chk_agent_tasks_zero_backlog'`)).rows).toEqual([]);
+      } else {
+        await deploy();
+        await expect(c.query(`INSERT INTO agent_tasks VALUES ('bad',0,'pending')`)).rejects.toThrow(/chk_agent_tasks_zero_backlog/);
+        await deploy(); // real runner no-op, same migration history
+      }
+      expect((await c.query('SELECT * FROM agent_tasks ORDER BY id')).rows).toEqual(before);
+    } finally {
+      await c?.end();
+      await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+      await admin.end(); rmSync(dir, { recursive: true, force: true });
     }
   }, 120_000);
 

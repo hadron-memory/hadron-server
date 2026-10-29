@@ -361,3 +361,21 @@ describe('agent-task-matching-invariants.sql (#1707)', () => {
     );
   });
 });
+
+// #2666: the forward-only migration and push path enforce the same AT0 rule.
+describe('task-number SQL parity (#2666)', () => {
+  it('the new migration carries the exact AT0 preflight and CHECK from current invariants', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8');
+    const zero = '-- #2666:' + source.split('-- #2666:')[1];
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261029010000_agent_task_zero_backlog/migration.sql', import.meta.url), 'utf8');
+    expect(migration).toBe(zero);
+  });
+  it('post-push reuses the original numbering backfill before applying NOT NULL', () => {
+    const original = readFileSync(new URL('../../../prisma/migrations/20261027100000_agent_task_number/migration.sql', import.meta.url), 'utf8');
+    const backfill = original.slice(original.indexOf('-- AT0,'), original.indexOf('-- #2553 (Task Management T12): the hierarchical task handle AT<n>(.<n>)* —'));
+    const pushBackfill = readFileSync(new URL('../../../prisma/agent-task-number-backfill.sql', import.meta.url), 'utf8');
+    expect(pushBackfill).toContain(backfill);
+    const push = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
+    expect(push.indexOf('\\ir agent-task-number-backfill.sql')).toBeLessThan(push.indexOf('\\ir agent-task-number-invariants.sql'));
+  });
+});
