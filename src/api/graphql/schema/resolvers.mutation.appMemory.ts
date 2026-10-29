@@ -45,6 +45,7 @@ import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
+import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
 
@@ -220,8 +221,9 @@ export const appMemoryMutations = {
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
     // #2730: the root node's loc is `name`; refuse an unprojectable one after the gate.
     assertMemoryRootLoc(name);
-    return withAuthorizedTx(ctx, [
-      { kind: 'org', id: observed.organizationId }, { kind: 'app', id },
+    const observedOrgId = observed.organizationId; // narrowed here; the closure below loses it
+    return withFsProjectionRollback(() => withAuthorizedTx(ctx, [
+      { kind: 'org', id: observedOrgId }, { kind: 'app', id },
     ], async txCtx => {
       const current = await txCtx.db.app.findUniqueOrThrow({ where: { id } });
       if (current.organizationId !== observed.organizationId || current.ownerUserId !== observed.ownerUserId) {
@@ -250,7 +252,7 @@ export const appMemoryMutations = {
       await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
         description: 'Root node for this memory.' }, tx);
       return memory;
-    });
+    }));
   },
 
   createMemoryInApp: async (
@@ -356,7 +358,7 @@ export const appMemoryMutations = {
 
     let memory;
     try {
-      memory = await withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
+      memory = await withFsProjectionRollback(() => withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
       const created = await tx.memory.create({
         data: {
           id: generateId(),
@@ -409,7 +411,7 @@ export const appMemoryMutations = {
       await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
         description: 'Root node for this memory.' }, tx);
       return created;
-      });
+      }));
     } catch (err) {
       // Race backstop: a concurrent create claimed the just-minted urn between
       // the mint probe and this insert (mintMemoryUrnV2 aliases around known

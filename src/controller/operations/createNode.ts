@@ -8,6 +8,7 @@ import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { projectionCleanupFor, registerFsProjectionCleanup, runCleanups } from '../../lib/fsProjectionRollback.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
@@ -36,9 +37,13 @@ const createNodeAsSystem = async (
   const loc = node.loc;
   const name = node.name;
 
-  // Save to filesystem
+  // Save to filesystem. #2731: a projection this call creates is undone when
+  // the database write does not commit.
+  const undoProjection = projectionCleanupFor(loc, GRAPHS_PATH);
   const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
   if (fsResult.error) {
+    // A partial write (directory made, file refused) is ours to undo too.
+    if (undoProjection) runCleanups([undoProjection]);
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
@@ -135,8 +140,20 @@ const createNodeAsSystem = async (
   };
   // New-memory callers can include scaffolding in their authority transaction:
   // a root failure then rolls back the memory row as well. Existing callers
-  // retain their own transaction. Filesystem projection still precedes the DB write.
-  const saved = transaction ? await write(transaction) : await db.$transaction(write);
+  // retain their own transaction. Filesystem projection still precedes the DB write (#2731 undoes it on failure).
+  let saved;
+  if (transaction) {
+    // The caller's transaction outlives this call: its resolver runs the cleanup on failure.
+    if (undoProjection) registerFsProjectionCleanup(undoProjection);
+    saved = await write(transaction);
+  } else {
+    try {
+      saved = await db.$transaction(write);
+    } catch (err) {
+      if (undoProjection) runCleanups([undoProjection]);
+      throw err;
+    }
+  }
 
   return saved as unknown as Node;
 };
