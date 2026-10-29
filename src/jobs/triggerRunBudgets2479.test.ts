@@ -131,3 +131,12 @@ it('existing manual run snapshots and live decrements remain separate from later
   amounts(next, 100, 1);
   expect(await db.appRun.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ budgetTokens: 480, budgetActions: 2, budgetTokensInitial: 500, budgetActionsInitial: 3 });
 });
+
+it('legacy manual approval does not interpret exhausted live counters as trigger setup limits', async () => {
+  const f = await fixture();
+  const run = await M.triggerAppRun({}, { input: f.input }, f.ctx);
+  await db.appRun.update({ where: { id: run.id }, data: { budgetTokensInitial: null, budgetActionsInitial: null, budgetTokens: 0, budgetActions: 0 } });
+  const detail = await (automationPinQueries as any).automationApproval({}, { triggerKind: 'MANUAL', triggerRef: run.id }, f.ctx);
+  expect(detail.summary.limits.join(' ')).toContain('100000');
+  expect(await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ budgetTokensInitial: null, budgetActionsInitial: null, budgetTokens: 0, budgetActions: 0 });
+});
