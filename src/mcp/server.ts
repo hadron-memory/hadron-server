@@ -1828,7 +1828,7 @@ async function renderNodeReadProjection(
     const canRead = (memoryId: string) =>
       opts.auth ? canReadMemory(db, opts.auth, memoryId, EXPLICIT_REF) : Promise.resolve(false);
     const resolve = (direction: 'out' | 'in') => via
-      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead })
+      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead, endpointMetadataOnly: true })
       : Promise.resolve([]);
     const [outgoing, incoming] = await Promise.all([resolve('out'), resolve('in')]);
     node = {

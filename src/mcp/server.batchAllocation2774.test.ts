@@ -249,3 +249,18 @@ it('#2774 refreshes provenance if the body revision changes after metadata prefe
     expect(output).toContain('new');
   } finally { spy.mockRestore(); }
 });
+
+it.each(['pk', 'prefix'] as const)('#2774 preserves first-oversized progress and omitted order (%s)', async (form) => {
+  const rows: Array<{ id: string }> = [];
+  for (let i = 0; i < 3; i++) rows.push(await db.node.create({ data: { memoryId: fx.memory.id, loc: `oversize:${i}`, name: `Large${i}`, content: 'x'.repeat(1_200_000) } }));
+  const output = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', {
+    ...(form === 'pk' ? { refs: rows.map(n => n.id) } : { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'oversize:' }),
+    contentScope: 'all', raw: true,
+  });
+  expect(output).toContain('returned 1 node(s)');
+  expect(output).toContain('truncated: response-size cap reached, 2 omitted');
+  expect(output).toContain('**Large0**');
+  expect(output).not.toContain('**Large1**');
+  expect(output).not.toContain('**Large2**');
+  expect(output).toMatch(/hrn:node:batch-org:batchmem:oversize:1[\s\S]*hrn:node:batch-org:batchmem:oversize:2/);
+});

@@ -413,16 +413,19 @@ export async function resolveInheritedEdges(
     via: string;
     direction: 'out' | 'in';
     canReadMemory: (memoryId: string) => Promise<boolean>;
+    /** MCP projections render endpoint identity/name, never endpoint bodies. */
+    endpointMetadataOnly?: boolean;
   },
 ) {
   const chain = await systemMemoryChain(db as Db, args.via);
   const inChain = new Set(chain.map((l) => l.memoryId));
   const far = args.direction === 'out' ? 'target' : 'source';
+  const endpointMetadata = { id: true, memoryId: true, loc: true, name: true, role: true, deletedAt: true } as const;
   const edges = await db.edge.findMany({
     where: args.direction === 'out'
       ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
       : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
-    include: { [far]: true } as { target: true } | { source: true },
+    include: { [far]: args.endpointMetadataOnly ? { select: endpointMetadata } : true } as unknown as { target: true } | { source: true },
     orderBy: { loc: 'asc' },
   });
   type EdgeRow = (typeof edges)[number];
@@ -436,7 +439,9 @@ export async function resolveInheritedEdges(
     }
     const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
     if (!effective) continue;
-    const row = effective.id === endpoint.id ? endpoint : await db.node.findUnique({ where: { id: effective.id } });
+    const row = effective.id === endpoint.id ? endpoint : args.endpointMetadataOnly
+      ? await db.node.findUnique({ where: { id: effective.id }, select: endpointMetadata }) as NodeRow | null
+      : await db.node.findUnique({ where: { id: effective.id } });
     if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
     out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
   }
