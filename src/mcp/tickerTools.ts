@@ -323,7 +323,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   server.tool(
     'hadron_worker_wake_settings',
     'Read a worker\'s wake settings, or set them (cor:agt:080:03, :21). With nothing to set, reads: whether mentions wake ' +
-      'it (IMMEDIATE or OFF), its pause, its subscriptions and its effective cadence. With mentions, pausedUntil or ' +
+      'it (IMMEDIATE or OFF), its pause, its subscriptions, its effective cadence and canManageIsolation (the caller\'s permission, independent of availability). With mentions, pausedUntil or ' +
       'clearPause, sets them (needs session): the worker itself, its holder, or whoever manages the App. The ' +
       'may-subscribe-workers grant never changes these. A pause belongs to the worker, not a session.',
     SHAPE_HADRON_WORKER_WAKE_SETTINGS,
@@ -344,6 +344,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
             `${s.pausedUntil ? `, paused until ${iso(s.pausedUntil)}` : ', not paused'}` +
             `${FW.isolated(s as never) ? `, isolated by ${s.isolatedByUserId ? await FW.isolatedByHandle(s as never, {}, ctx) ?? 'unknown' : 'unknown'} until ${iso(s.isolatedUntil)}` : ''}`,
           `subscriptions: ${names.length ? names.join(', ') : 'none'} · effective cadence ${cadence ? `${cadence}s` : 'none'}`,
+          `canManageIsolation: ${await FW.canManageIsolation(s as never, {}, ctx)}`,
         ].join('\n');
       };
       const sets = input.mentions != null || input.pausedUntil != null || input.clearPause != null;
@@ -361,7 +362,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'Isolate a worker (S7, #2023): until the time you give (default 2 hours, at most 7 days; a later time extends, an earlier one shortens). ' +
       'While isolated it gets no chat batches or ordinary wakes and is not matched for work; at the end everything held comes as one batch. ' +
       'Needs session. ONLY a person managing the App or holding the worker, acting as themselves with a plain session: a worker session ' +
-      '(even a manager\'s), an App key or an impersonation is refused WORKER_ISOLATION_FORBIDDEN. The worker\'s own pause is untouched.',
+      '(even a manager\'s), an App key or an impersonation is refused. The worker\'s own pause is untouched.',
     SHAPE_HADRON_ISOLATE_WORKER,
     async ({ session, workerRef: w, until }) =>
       write('hadron_isolate_worker', session, async (ctx) =>
