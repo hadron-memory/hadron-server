@@ -7850,6 +7850,8 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
+      "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
+      text: String
       "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
       overdue: Boolean
       "Inclusive creation-time lower bound."
@@ -8170,6 +8172,9 @@ export const typeDefs = `#graphql
     templates are NOT compiled (unlike the single-node 'node' read), since this
     is a bulk source read for lint / audit / migration and compiling per node
     would re-introduce the N+1 it eliminates.
+    Requested edge fields share a 2000-row budget for this batch result; exceeding
+    it returns BAD_USER_INPUT. Read large edge sets through the paged edges query.
+    Unselected edges and endpoint bodies are not prefetched by the batch read.
     """
     nodeBatch(refs: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
 

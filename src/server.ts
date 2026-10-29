@@ -5,6 +5,7 @@ import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
 import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
+import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -1192,7 +1193,7 @@ export async function createServer(): Promise<Express> {
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission)],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
