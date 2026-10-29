@@ -44,13 +44,14 @@ beforeEach(async () => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-async function movedCapture(captureMemoryId: string) {
+async function movedCapture(captureMemoryId: string | null) {
   const target = await db.node.create({ data: {
     id: generateId(), memoryId, loc: 'target', name: 'Private capture title', content: 'Current body', revSeq: 2,
   } });
   const snapshot = await db.nodeRevision.create({ data: {
     id: generateId(), revNo: 1,
-    ...buildNodeRevisionSnapshot({ ...target, memoryId: captureMemoryId, content: 'Captured body' }, { userId: reader.userId }),
+    ...buildNodeRevisionSnapshot({ ...target, content: 'Captured body' }, { userId: reader.userId }),
+    memoryId: captureMemoryId,
   } });
   return { target, snapshot };
 }
@@ -73,6 +74,20 @@ it('warns an unrestricted history reader about a readable plain foreign capture 
   expect(revisions).toEqual([expect.objectContaining({ id: snapshot.id, content: 'Captured body' })]);
   expect(await plainPinWarnings(principal, { memoryId }, '{{> target rev=1}}')).toEqual(EXPECTED);
 });
+
+it.each(['current', 'readable foreign', 'null'] as const)(
+  'warns a restricted history reader about a plain %s-memory capture', async kind => {
+    const captureId = kind === 'current' ? memoryId : kind === 'readable foreign' ? readableForeignId : null;
+    const { target, snapshot } = await movedCapture(captureId);
+    const scope = await history.nodeRevisionsScope(reader, target.id);
+    expect(scope?.accessible).toEqual(expect.any(Array));
+    expect(scope?.canRead(captureId ?? memoryId)).toBe(true);
+    if (captureId) expect(scope?.accessible).toContain(captureId);
+    const revisions = await history.nodeQueries.nodeRevisions(null, { nodeRef: target.id }, reader);
+    expect(revisions).toEqual([expect.objectContaining({ id: snapshot.id, memoryId: captureId })]);
+    expect(await plainPinWarnings(reader, { memoryId }, '{{> target rev=1}}')).toEqual(EXPECTED);
+  },
+);
 
 it('the ordinary operator has no reader role and cannot use unrestricted history advice', async () => {
   const { target } = await movedCapture(foreignId);
