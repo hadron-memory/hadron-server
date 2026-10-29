@@ -91,6 +91,25 @@ describe('#2644 blockers and priority', () => {
     } finally { unlock(); await holder; }
     expect((await Promise.all([first, second])).sort()).toEqual(['SUCCESS', 'TASK_BLOCKER_CYCLE']);
   });
+  it('concurrent creates with blockers serialize without shared-to-exclusive deadlocks', async () => {
+    const blocker = await create();
+    for (let round = 0; round < 3; round++) {
+      const results = await Promise.allSettled(Array.from({ length: 4 }, () => create({ blockedBy: [blocker.id] })));
+      expect(results.map((r) => r.status)).toEqual(Array(4).fill('fulfilled'));
+      for (const result of results) {
+        if (result.status !== 'fulfilled') throw result.reason;
+        expect(result.value).toMatchObject({ blocked: true, status: 'pending' });
+        expect(await db.agentTaskBlocker.count({ where: { taskId: result.value.id, blockerTaskId: blocker.id } })).toBe(1);
+      }
+    }
+  }, 15000);
+  it('adding the same blocker twice is idempotent and emits one added event', async () => {
+    const blocker = await create(), task = await create();
+    await add(task.id, blocker.id);
+    await add(task.id, blocker.id);
+    expect(await db.agentTaskBlocker.count({ where: { taskId: task.id } })).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'task.blocker-added' } })).toBe(1);
+  });
   it('preserves append-only history when physical deletion releases a dependent', async () => {
     const b = await create(), t = await create({ blockedBy: [b.id] });
     const events = await db.agentTeamEvent.findMany({ where: { taskId: b.id } });
