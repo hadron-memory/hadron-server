@@ -368,9 +368,12 @@ export async function mintManualRun(
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
   },
+  options: { publish?: boolean } = {},
 ) {
   try {
     return await mintAppRun(ctx.db, {
+      // #2737: a composed import publishes only after its outer transaction commits.
+      publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
