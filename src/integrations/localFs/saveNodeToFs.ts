@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { pathUnderGraphsRoot } from './pathUnderGraphsRoot.js';
 import { stringify } from 'yaml';
 import type { Node } from '../../index.d.js';
 
@@ -19,7 +20,7 @@ export const saveNodeToFs = async (
 
   try {
     // Derive directory path: micromentor-org:mmdata:services → micromentor-org/mmdata/services
-    const dirPath = join(sourcesPath, ...node.loc.split(':'));
+    const dirPath = pathUnderGraphsRoot(sourcesPath, ...node.loc.split(':'));
     const nodeDir = join(dirPath, '.node');
 
     mkdirSync(nodeDir, { recursive: true });

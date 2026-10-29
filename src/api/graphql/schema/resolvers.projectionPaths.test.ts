@@ -78,3 +78,10 @@ it('writer refusal alone preserves the documented persistence limit', async () =
     expect(await db.memory.count()).toBe(1);
   } finally { input.mockRestore(); }
 });
+
+it.each(['other', 'level/graphs-neighbor'])('refuses an absolute direct destination (%s)', async sibling => {
+  const target = join(projection.base, sibling);
+  const result = await saveNodeToFs({ loc: target, name: 'synthetic' }, projection.root);
+  expect(result.error).toBeDefined();
+  expect(existsSync(join(target, '.node'))).toBe(false);
+});
