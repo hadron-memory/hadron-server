@@ -2,7 +2,7 @@
 import { decryptJson } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { Prisma } from '../generated/prisma/index.js';
-import { SELF_BOOKKEEPING_EVENT_TYPES } from './agentTasks/events.js';
+import { SELF_BOOKKEEPING_EVENT_TYPES, STAFFING_EVENT_TYPES } from './agentTasks/events.js';
 
 type Reader = Pick<Prisma.TransactionClient, '$queryRaw' | 'session' | 'node' | 'asset'>;
 const quoted = (name: string) => Prisma.raw(`"${name.replaceAll('"', '""')}"`);
@@ -19,12 +19,15 @@ const JSON_REFERENCES = [
 ] as const;
 
 /**
- * #2766: the cast and retirement events recorded about THIS worker (it is their subject) are the casting's own
- * bookkeeping, like a pristine generated ticker: they say the worker was made or ended, never that it was used. Without
- * this carve-out, recording them would make every cast worker count as referenced and `deleteWorker` would refuse
- * workers it admits today. Events where the worker is the ACTOR, or named inside another worker's event, still count.
+ * #2766: the member and staffing events are the acts' own bookkeeping, not use of the worker, so recording them must
+ * not change what `deleteWorker` admits (gate: admission unchanged). Two shapes are exempt: the cast / retirement
+ * events about THIS worker (it is their subject), and any staffing event THIS worker performed (it is the actor).
+ * Written null-safe: a NULL subject must not turn the exclusion into NULL and drop the row from the census.
+ * Everything else still counts, including a worker named inside another event's payload.
  */
-const selfBookkeeping = (workerId: string) => Prisma.sql`type IN (${Prisma.join([...SELF_BOOKKEEPING_EVENT_TYPES])}) AND subject_worker_id = ${workerId}`;
+const selfBookkeeping = (workerId: string) => Prisma.sql`(
+  (type IN (${Prisma.join([...SELF_BOOKKEEPING_EVENT_TYPES])}) AND subject_worker_id IS NOT DISTINCT FROM ${workerId})
+  OR (type IN (${Prisma.join([...STAFFING_EVENT_TYPES])}) AND actor_worker_id IS NOT DISTINCT FROM ${workerId}))`;
 
 async function jsonReferences(db: Reader, table: string, column: string, ids: string[], workerId: string): Promise<boolean> {
   const predicates = ids.map((id) => Prisma.sql`jsonb_path_exists(${quoted(column)}, '$.** ? (@ == $identity)', jsonb_build_object('identity', ${id}::text))`);
@@ -100,8 +103,8 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
       : ref.table === 'tickers' ? Prisma.sql` AND id NOT IN (${Prisma.join(pristine)})`
       : ref.table === 'ticker_subscriptions' ? Prisma.sql` AND ticker_id NOT IN (${Prisma.join(pristine)})`
       : Prisma.empty;
-    // #2766: this worker's own cast / retirement events are bookkeeping, not use (see `selfBookkeeping`).
-    const skipEvents = ref.table === 'agent_team_events' && ref.column === 'subject_worker_id'
+    // #2766: the staffing acts' own events are bookkeeping, not use (see `selfBookkeeping`).
+    const skipEvents = ref.table === 'agent_team_events'
       ? Prisma.sql` AND NOT (${selfBookkeeping(worker.id)})` : Prisma.empty;
     const rows = await db.$queryRaw<Array<{ present: boolean }>>(Prisma.sql`
       SELECT EXISTS (SELECT 1 FROM ${quoted(ref.table)} WHERE ${quoted(ref.column)} = ${worker.id}${skip}${skipEvents}) AS present`);

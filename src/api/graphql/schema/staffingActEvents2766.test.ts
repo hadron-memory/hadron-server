@@ -227,9 +227,18 @@ describe('#2766 admission is unchanged: the census treats the cast\'s own events
     await expect(M.deleteWorker({}, { workerRef: r.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
   });
 
-  it('a worker that ACTED through a door is attributed in the history, so it is not removable (disclosed, fail closed)', async () => {
+  it('a worker that ACTED through a door is still removable: acting adds no refusal main did not have', async () => {
     await asWorker(() => cast(ctxOf(admin.id), 'Iris'));
-    await expect(M.deleteWorker({}, { workerRef: caster.id, confirmNoExternalAttribution: true }, ctxOf(admin.id)))
+    await asWorker(() => ensure(ctxOf(admin.id), target.id, 'member'));
+    await asWorker(() => removeMember(ctxOf(admin.id), target.id));
+    expect((await events()).filter((e) => e.actorWorkerId === caster.id).length).toBeGreaterThan(0);
+    await expect(M.deleteWorker({}, { workerRef: caster.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
+  });
+
+  it('a NULL-subject staffing-typed event that names the worker in its payload still counts (null-safe exclusion)', async () => {
+    const w = await cast(ctxOf(admin.id), 'Iris');
+    await db.agentTeamEvent.create({ data: { appId: app.id, type: 'worker.cast', actorUserId: admin.id, subjectWorkerId: null, payload: { workerId: w.id } } });
+    await expect(M.deleteWorker({}, { workerRef: w.id, confirmNoExternalAttribution: true }, ctxOf(admin.id)))
       .rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
   });
 });
