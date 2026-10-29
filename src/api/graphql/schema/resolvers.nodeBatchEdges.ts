@@ -24,7 +24,7 @@ export function batchReadEdgeLimit(parent: object): number | undefined {
 }
 
 export function batchReadEdgeOverflow(): never {
-  throw new GraphQLError(`nodeBatch: selected edges exceed the ${BATCH_READ_MAX_EDGES}-edge cap. Read edges in pages instead.`, {
+  throw new GraphQLError(`nodeBatch: more than ${BATCH_READ_MAX_EDGES} selected edges exceeds the edge cap. Read edges in pages with edges(filter, limit, offset).`, {
     extensions: { code: 'BAD_USER_INPUT', limit: 'edges', max: BATCH_READ_MAX_EDGES },
   });
 }

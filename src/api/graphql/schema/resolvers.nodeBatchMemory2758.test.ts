@@ -165,6 +165,8 @@ it('bounds total edge rows before concurrent sibling fields and aliases material
   const response = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{a:outgoingEdges{id} b:outgoingEdges{id} incomingEdges{id}}}}', { refs: rows.map(n => n.id) });
   await Promise.allSettled(reads);
   expect(response.errors?.some(e => e.extensions?.code === 'BAD_USER_INPUT')).toBe(true);
+  expect(response.errors?.[0]?.message).toContain('more than 2000');
+  expect(response.errors?.[0]?.message).toContain('edges(filter, limit, offset)');
   expect(materializedRows).toBeLessThanOrEqual(2001);
 }, 60_000);
 
