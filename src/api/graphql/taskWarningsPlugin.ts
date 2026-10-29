@@ -8,7 +8,7 @@
 import { beginIncludeWarningPath, responseIncludePinWarnings, resetIncludePinWarnings } from '../../lib/includes/plainPinWarnings.js';
 import type { ApolloServerPlugin } from '@apollo/server';
 import type { Context } from './schema/resolvers.helpers.js';
-import { flushTaskWarningHistory, shapeResponseWarnings } from './schema/resolvers.taskWarnings.js';
+import { flushTaskWarningHistory, MAX_WARNINGS_PER_RESPONSE, shapeResponseWarnings } from './schema/resolvers.taskWarnings.js';
 
 export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
   async requestDidStart(requestContext) {
@@ -34,7 +34,7 @@ export const taskWarningsPlugin: ApolloServerPlugin<Context> = {
           if (typeof head === 'string') errored.add(head);
         }
         await flushTaskWarningHistory(ctx, errored);
-        const warnings = [...shapeResponseWarnings(collected ?? [], errored), ...await responseIncludePinWarnings(ctx, errored)].slice(0, 20);
+        const warnings = [...shapeResponseWarnings(collected ?? [], errored), ...await responseIncludePinWarnings(ctx, errored)].slice(0, MAX_WARNINGS_PER_RESPONSE);
         if (warnings.length === 0) return;
         body.singleResult.extensions = { ...body.singleResult.extensions, warnings };
       },

@@ -1,3 +1,4 @@
+import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
@@ -198,6 +199,7 @@ export const resolvers = {
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...registerRoleCandidateQueries,
+    ...registerRolePickQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
     ...scopeQueries,
