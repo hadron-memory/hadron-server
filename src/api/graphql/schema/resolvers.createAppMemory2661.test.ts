@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -10,6 +10,9 @@ import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
 import { buildSchema, graphql } from 'graphql';
 
+import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
+
+afterEach(() => vi.restoreAllMocks());
 const M = resolvers.Mutation as any;
 let org: any, foreign: any, app: any, agent: any;
 let admin: any, owner: any, member: any, revoked: any, outsider: any, participant: any;
@@ -44,7 +47,10 @@ beforeEach(async () => {
 
 describe('#2661 new free-standing app memory', () => {
   for (const role of ['admin','owner']) it(`${role} creates the ruled row with participant read/write and tenant isolation`, async () => {
-    const row = await create(ctx(role === 'admin' ? admin.id : owner.id));
+    const creator = role === 'admin' ? admin.id : owner.id;
+    const row = await create(ctx(creator), {shortDescription: 'Short notes', description: 'Full notes', tags: ['team']});
+    expect(await db.memory.findUniqueOrThrow({where:{id:row.id}})).toMatchObject({createdBy:creator, shortDescription:'Short notes', description:'Full notes', tags:['team']});
+    expect(await db.node.findMany({where:{memoryId:row.id}})).toMatchObject([{loc:'App Notes',name:'App Notes',description:'Root node for this memory.'}]);
     const listed = await (resolvers.Query as any).memories({}, { filter: { memoryClasses: ['app'] } }, ctx(participant.id));
     expect(listed.items.map((m: any) => m.id)).toContain(row.id);
     expect(row).toMatchObject({ class: 'app', organizationId: org.id, appId: app.id, isInstallMemory: false,
@@ -79,6 +85,16 @@ describe('#2661 new free-standing app memory', () => {
     const personal = await db.app.create({ data: { name: 'Own', urn: 'u2661:own', ownerUserId: admin.id } });
     await db.appAgent.create({ data: { appId: personal.id, agentId: agent.id } });
     await refused(ctx(admin.id), { appRef: personal.id }, 'USER_OWNED_APP_UNSUPPORTED');
+  });
+  it('conceals the user-owned refusal from a stranger', async () => {
+    const personal = await db.app.create({data:{name:'Own',urn:'u2661:own',ownerUserId:admin.id}});
+    await refused(ctx(outsider.id), {appRef:personal.id});
+  });
+  it('rolls back the memory if creating its root fails', async () => {
+    vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValue({error:'injected root failure'});
+    await expect(create()).rejects.toThrow('injected root failure');
+    expect(await db.memory.count()).toBe(0);
+    expect(await db.node.count()).toBe(0);
   });
   it('refuses an App with no installed Agent', async () => {
     await db.appAgent.deleteMany({ where: { appId: app.id } });
@@ -127,14 +143,16 @@ describe('#2661 new free-standing app memory', () => {
       expect(await db.memory.count()).toBe(count);
     }
   });
-  for (const race of ['uninstall','revoke','transfer']) it(`waits for concurrent ${race}, then refuses with no memory`, async () => {
+  for (const race of ['uninstall','revoke','transfer','delete','demote']) it(`waits for concurrent ${race}, then refuses with no memory`, async () => {
     expect(M.createAppMemory).toBeTypeOf('function');
     let release!: () => void, held!: () => void;
     const gate = new Promise<void>(r => release=r), ready = new Promise<void>(r => held=r);
     const revoker = db.$transaction(async tx => {
-      await lockAuthorityAnchors(tx, [{kind: race !== 'revoke' ? 'app':'org', id: race !== 'revoke' ? app.id:org.id}], 'exclusive');
+      await lockAuthorityAnchors(tx, [{kind: ['revoke','demote'].includes(race) ? 'org':'app', id: ['revoke','demote'].includes(race) ? org.id:app.id}], 'exclusive');
       if (race === 'uninstall') await tx.appAgent.deleteMany({where:{appId:app.id}});
       else if (race === 'transfer') await tx.app.update({where:{id:app.id},data:{organizationId:foreign.id}});
+      else if (race === 'delete') await tx.app.update({where:{id:app.id},data:{deletedAt:new Date()}});
+      else if (race === 'demote') await tx.orgMember.updateMany({where:{organizationId:org.id,userId:admin.id},data:{role:'CONTRIBUTOR'}});
       else await tx.orgMember.updateMany({where:{organizationId:org.id,userId:admin.id},data:{deletedAt:new Date()}});
       held(); await gate;
     });
@@ -144,7 +162,7 @@ describe('#2661 new free-standing app memory', () => {
     try {
       // A bypass must fail an assertion, not leave a revoker hanging until
       // the test timeout. Always release and join both transactions.
-      await waitForLockWaiters(db, 1, 1000).catch(() => undefined);
+      await waitForLockWaiters(db, 1, 1000);
       expect(settled, 'creator must wait for the authority revoker').toBe(false);
     } finally { release(); await revoker; await pending; }
     expect(await pending).toMatchObject({extensions:{code:race === 'uninstall'?'AGENT_NOT_INSTALLED':'FORBIDDEN'}});
