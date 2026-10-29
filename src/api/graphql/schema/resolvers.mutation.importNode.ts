@@ -26,7 +26,9 @@ import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
-import { type Context, requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { publishRunRequested } from '../../../jobs/appRuns.js';
+import { lockInstallAuthorityFirst } from './installMemory.js';
+import { type Context, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
   // Target — (memoryId + loc) XOR nodeUrn. The URN may name a
@@ -216,7 +218,7 @@ export const importNodeMutations = {
     // eagerly, so an upsert without the required `name` column would reject
     // even though only the update branch could run (the same constraint
     // that shaped updateNode in Phase 0).
-    const node = await writeNodeCore(
+    const store = (writeCtx: Context, transaction?: NonNullable<Parameters<typeof writeNodeCore>[3]>['transaction']) => writeNodeCore(
       {
         memoryId,
         loc,
@@ -226,28 +228,52 @@ export const importNodeMutations = {
         nodeType: input.nodeType ?? defaultNodeType,
         properties,
       },
-      ctx,
+      writeCtx,
       name === undefined ? 'update' : 'upsert',
+      { transaction },
     );
 
-    // ── #528 — post-import task run ────────────────────────────────────
-    // The full launch prerequisites (auth gate, App, cross-org, on-behalf-of
-    // relationship) were validated pre-write via assertManualRunAllowed; now
-    // that the node exists, mint the run directly against the pre-resolved App
-    // (mintManualRun — no re-running the gate, #566). Async: return
-    // FETCH_PENDING + the run id as jobId (poll appRun(ref:) for status +
-    // output). The imported node's URN is passed in eventData so the task can
-    // target it (e.g. distill).
-    if (taskRun) {
-      const importedNodeUrn = emitNodeUrnV2(taskRun.importedMemoryUrn, node.loc);
-      const run = await mintManualRun(ctx, taskRun.app, {
-        entryNodeUrn: taskRun.entryNodeUrn,
-        eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
-        runAsSelf: taskRun.runAsSelf,
-      });
-      return { node, status: 'FETCH_PENDING', jobId: run.id };
+    if (!taskRun) {
+      const node = await store(ctx);
+      return { node, status: 'STORED', jobId: null };
     }
 
-    return { node, status: 'STORED', jobId: null };
+    // #2737 / cor:agt:040:10: mint-time refusals (including boot serving and
+    // dynamic quota) must roll back the import, its revision and run together.
+    // Keep the pre-fetch assertManualRunAllowed above; never compensate with a
+    // delete, which could erase a prior node or another concurrent writer.
+    const launch = taskRun;
+    const effects: Array<() => void> = [];
+    const result = await ctx.db.$transaction(async tx => {
+      // The write core's caller-owned transaction follows its normal lock order.
+      await lockInstallAuthorityFirst(tx, ctx, memoryId);
+      const txCtx = withoutRequestCaches(ctx, tx);
+      const node = await store(txCtx, {tx, pooledDb:ctx.db, afterCommit:effect=>effects.push(effect)});
+      const importedNodeUrn = emitNodeUrnV2(launch.importedMemoryUrn, node.loc);
+      const run = await mintManualRun(txCtx, launch.app, {
+        entryNodeUrn: launch.entryNodeUrn,
+        eventData: { ...(input.taskArgs ?? {}), importedNodeUrn },
+        runAsSelf: launch.runAsSelf,
+      }, {publish:false});
+      return { node, status: 'FETCH_PENDING', jobId: run.id };
+    }, {timeout:30_000});
+    // No event, git/embedding wake or run wake escapes a rolled-back import.
+    // #2737: persistence has committed. An effect failure must not turn this
+    // success into a retryable error or prevent another effect from running.
+    for (const effect of effects) {
+      try {
+        await effect();
+      } catch {
+        console.error('[import-node] committed node effect failed');
+      }
+    }
+    try {
+      await publishRunRequested(ctx.db, result.jobId);
+    } catch {
+      // Defense at the commit boundary even if the publisher's own catch
+      // changes later. PENDING/unpublished runs are recovered by the sweep.
+      console.error('[import-node] committed run wake failed; sweep will recover');
+    }
+    return result;
   },
 };

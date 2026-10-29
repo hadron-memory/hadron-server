@@ -56,7 +56,7 @@ import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { type Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
+import { PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEventType, type TaskParty } from './events.js';
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 
@@ -122,11 +122,12 @@ import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const TASK_SELECT = {
-  id: true, appId: true, status: true, parentTaskId: true,
+  id: true, appId: true, status: true, parentTaskId: true, blocked: true, releasedAt: true,
   ownerWorkerId: true, ownerUserId: true, assigneeWorkerId: true, assigneeUserId: true,
   startBy: true, assignedAt: true, startedAt: true, createdAt: true,
 } as const;
-type TaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
+type SelectedTaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
+type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt'>>;
 
 /** Everything one task's rules read. */
 export type StallInputs = {
@@ -235,7 +236,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
         by: ['appId', 'actorUserId'],
         // actorWorkerId null: a worker-bound call made under the person's credential
         // carries their user id too, but it is the WORKER's activity, not theirs.
-        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.' } },
+        where: { actorUserId: { in: ownerUserIds }, actorWorkerId: null, taskId: { not: null }, type: { startsWith: 'task.', notIn: [...PASSIVE_EVENT_TYPES] } },
         _max: { createdAt: true },
       })
       : Promise.resolve([]),
@@ -360,6 +361,8 @@ export function stallCandidates(
   options: { episodesRunning?: boolean } = {},
 ): StallCandidate[] {
   const { task } = inputs;
+  if (task.blocked) return [];
+  const floor = (d: Date) => latest(d, task.releasedAt) as Date;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
   const running = options.episodesRunning === true;
@@ -382,25 +385,26 @@ export function stallCandidates(
   // no queue event (seeded past the resolvers) fall back to creation, the
   // pre-#1754 start.
   if (task.status === 'pending' && !assignee) {
-    const queuedAt = inputs.queuedAt ?? task.createdAt;
+    const queuedAt = floor(inputs.queuedAt ?? task.createdAt);
     add('unassignable', queuedAt, countedDueAt(queuedAt, windows.assignmentMinutes * MINUTE, inputs.stopHolds), {}, inputs.stopHolds);
   }
 
   // cor:agt:050:14 — assigned and still pending. A still-working note does not
   // stop it (S3): only starting, reassigning or cancelling the task does.
   if (task.status === 'pending' && assignee && task.assignedAt) {
-    const deadline = task.startBy && task.startBy.getTime() > task.assignedAt.getTime()
+    const assignedAt = floor(task.assignedAt);
+    const deadline = task.startBy && task.startBy.getTime() > assignedAt.getTime()
       ? task.startBy
-      : plus(task.assignedAt, windows.notStartedMinutes);
+      : plus(assignedAt, windows.notStartedMinutes);
     // #2022: a `pause` or `halt` on the assignee holds the clock, startBy's included (Vera's receipt §5).
     const stopped = stopOf(inputs, task.assigneeWorkerId);
-    add('not-started', task.assignedAt, countedDueAt(task.assignedAt, deadline.getTime() - task.assignedAt.getTime(), stopped), {}, stopped);
+    add('not-started', assignedAt, countedDueAt(assignedAt, deadline.getTime() - assignedAt.getTime(), stopped), {}, stopped);
   }
 
   // cor:agt:050:15 — started, not waiting on children, no assignee activity.
   if (task.status === 'started' && inputs.openChildCount === 0 && task.startedAt) {
     const since = latest(
-      task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt,
+      task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt, task.releasedAt,
     ) as Date;
     const stopped = stopOf(inputs, task.assigneeWorkerId);
     add('no-progress', since, countedDueAt(since, windows.noProgressMinutes * MINUTE, stopped), {}, stopped);
@@ -411,7 +415,7 @@ export function stallCandidates(
   const first = assignee ? unreactedChild(inputs) : null;
   if (first) {
     const stopped = stopOf(inputs, first.ownerWorkerId);
-    add('owner-unreactive', first.endedAt, countedDueAt(first.endedAt, windows.ownerReactionMinutes * MINUTE, stopped), {
+    add('owner-unreactive', floor(first.endedAt), countedDueAt(floor(first.endedAt), windows.ownerReactionMinutes * MINUTE, stopped), {
       childTaskId: first.id,
     }, stopped);
   }
@@ -457,7 +461,9 @@ export async function ownerChain(db: Db, taskId: string): Promise<AlarmChain> {
       -- Same App only (#1720 review, Rook P3-4): T1 refuses a cross-App
       -- parent at create; this keeps another tenant's owners out of a chain
       -- even if a later move ever relinked one.
-      WHERE up.depth < 64 AND t.app_id = up.app_id
+      -- #2553: the walk stops below AT0, the reserved "No project" row: its owner is a bookkeeping fallback, not a
+      -- parent who owns the task.
+      WHERE up.depth < 64 AND t.app_id = up.app_id AND t.handle <> 'AT0'
     )
     SELECT owner_worker_id AS "ownerWorkerId", owner_user_id AS "ownerUserId" FROM up ORDER BY depth`;
   const chain: AlarmChain = [];

@@ -68,7 +68,7 @@ describe('the due rule — cor:agt:080:08–:12', () => {
     expect(run([channel('c1', [msg(3)])], [{ ...ticker(), lastAckedTick: 4 }], late)?.anchorAtMs).toBe(t0 + 5 * 600_000);
     // Mixed: the earlier of a task event and a mention.
     const w = workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: true, channels: [channel('c1', [post(5, t0 + 9000)])], subscriptions: [], now: NOW,
-      tasks: [{ taskId: 't', eventId: 'e', chainIndex: 0, event: 'ASSIGNED', title: 'x', atMs: t0 + 2000 }] });
+      tasks: [{ taskId: 't', eventId: 'e', chainIndex: 0, event: 'ASSIGNED', title: 'x', handle: 'AT0.1', atMs: t0 + 2000 }] });
     expect(w?.anchorAtMs).toBe(t0 + 2000);
     // Nothing carries a time (pure fixtures): null, never invented.
     expect(run([channel('c1', [msg(6, { mentions: ['liam'] })])])?.anchorAtMs).toBeNull();

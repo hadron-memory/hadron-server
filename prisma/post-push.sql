@@ -674,6 +674,11 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
 
+-- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
+-- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
+\ir agent-task-number-backfill.sql
+\ir agent-task-number-invariants.sql
+
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
 -- 20261024100200_context_reset_availability (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
@@ -683,6 +688,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- verbatim with migration 20261010010000_agent_task_matching (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-matching-invariants.sql
+\ir task-blocker-invariants.sql
 
 -- #1747: tickers, subscriptions, wake settings, the may-subscribe-workers grant
 -- and the App ticker-settings bounds. One source, shared verbatim with migration
@@ -793,3 +799,10 @@ CREATE TRIGGER agent_clone_audits_immutable
 \ir worker-team-choice-invariants.sql
 -- #423: outgoing-edge lookup/delete must not scan every tenant’s edges.
 CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
+-- #2047: the served-prompt record — one owner, owner-consistent identity, immutable, deleted only with its owner. After
+-- the #1162 fence file: it puts the record's worker/session columns under that fence function.
+\ir served-prompt-invariants.sql
+\ir served-prompt-app-invariants.sql
+
+-- #2479: per-trigger run budget limits.
+\ir trigger-run-budget-invariants.sql

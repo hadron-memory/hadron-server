@@ -244,10 +244,12 @@ import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptL
 
 /** Most changed nodes whose lint one hadron_replace_text result checks; the rest are disclosed, never silently dropped. */
 const REPLACE_LINT_MAX_NODES = 100;
+import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
+import { renderTerminal } from '../lib/workerTerminal.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
 
@@ -1540,6 +1542,8 @@ type ReadProjectionNode = {
   properties: unknown;
   data: unknown;
   content: string | null;
+  /** Only plaintext, raw abstract reads without an origin fingerprint use this. */
+  contentPresent?: boolean;
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
@@ -1548,8 +1552,8 @@ type ReadProjectionNode = {
 };
 
 const readProjectionInclude = {
-  outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-  incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } } },
+  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } } },
   memory: { select: { isEncrypted: true } },
 } as const;
 
@@ -1559,6 +1563,7 @@ async function loadCurrentReadProjection(
   authorizedMemoryId: string,
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
+  mode: 'body' | 'metadata' | 'abstract-raw' | 'abstract-expanded' = 'body',
 ): Promise<ReadProjectionNode | null> {
   return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
     let fresh: Context;
@@ -1572,10 +1577,24 @@ async function loadCurrentReadProjection(
     }
     return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
   }, async (tx) => {
-    return tx.node.findFirst({
-      where: { id: nodeId, deletedAt: null },
-      include: readProjectionInclude,
-    }) as Promise<ReadProjectionNode | null>;
+    const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
+    // The batch provenance pass retains only metadata. Its render pass reads
+    // one current body under the same reconciliation and authorization gate.
+    if (mode === 'body') return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
+    const row = await tx.node.findFirst({ ...args, omit: { content: true } });
+    if (!row) return null;
+    if (mode === 'metadata' || !row.abstract) return { ...row, content: null };
+    if (mode === 'abstract-raw' && !row.memory.isEncrypted && row.abstractOriginHash == null) {
+      // Presence is enough for the existing missing-fingerprint marker. Read
+      // it under this node's lock; never trust the earlier metadata snapshot.
+      const presence = await tx.$queryRaw<Array<{ present: boolean }>>`
+        SELECT (content IS NOT NULL AND octet_length(content) > 0) AS present
+        FROM nodes WHERE id = ${nodeId} AND memory_id = ${authorizedMemoryId} AND deleted_at IS NULL`;
+      return presence[0] ? { ...row, content: null, contentPresent: presence[0].present } : null;
+    }
+    // Fingerprinted, encrypted and expanded abstracts retain their exact
+    // plaintext predicate. Only one such body survives to the next render.
+    return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
   }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
 
@@ -1824,7 +1843,7 @@ async function renderNodeReadProjection(
     const canRead = (memoryId: string) =>
       opts.auth ? canReadMemory(db, opts.auth, memoryId, EXPLICIT_REF) : Promise.resolve(false);
     const resolve = (direction: 'out' | 'in') => via
-      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead })
+      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead, endpointMetadataOnly: true })
       : Promise.resolve([]);
     const [outgoing, incoming] = await Promise.all([resolve('out'), resolve('in')]);
     node = {
@@ -1874,7 +1893,7 @@ async function renderNodeReadProjection(
   // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
   const includeStaleMarker =
-    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent);
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
@@ -3279,6 +3298,29 @@ export function createMcpServerInstance(
     },
   );
 
+  // #2661: one creation policy, delegated to the GraphQL resolver.
+  server.tool(
+    'hadron_create_app_memory',
+    'Create a NEW app-class memory in an org-owned App with an installed Agent. Requires the owning org ADMIN/OWNER acting as themselves, outside a worker session. App keys, runs, impersonation and user-owned Apps are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
+    SHAPE_HADRON_CREATE_APP_MEMORY,
+    async ({ app, name, shortDescription, description, tags }) => {
+      const ctx: Context = {
+        db, userId: auth.userId, clientId: auth.clientId,
+        appId: auth.appId, appKeyId: auth.appKeyId,
+        ...mcpRequestSessionContext(auth),
+        apiKeyId: auth.apiKeyId, signInId: auth.signInId,
+        roles: auth.roles, organizationId: auth.organizationId,
+        impersonation: auth.impersonation,
+      };
+      try {
+        const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
+        return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
+      } catch (e) {
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+      }
+    },
+  );
+
   // ── hadron_server_info ────────────────────────────────────────────────────────
   //
   // #187 / #190 — exposes the bound deployment URL + hadron-server
@@ -4156,6 +4198,8 @@ export function createMcpServerInstance(
       // spec 049 S4 protected-loc gate, and a root-level Channel address
       // was otherwise overwritable here (Codex P1 on PR #1165).
       let sectionId: string;
+      let sectionContentSaved = false;
+      let sectionPinStoredContent: string | null = null;
       try {
         sectionId = await db.$transaction(async (tx) => {
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
@@ -4241,6 +4285,8 @@ export function createMcpServerInstance(
             update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
+          sectionContentSaved = true;
+          sectionPinStoredContent = storedForIncludes;
           return row.id;
         });
       } catch (e) {
@@ -4264,7 +4310,7 @@ export function createMcpServerInstance(
       recordNodeWrite(db, { id: sectionId, loc, memoryId }, auth);
 
       const urn = await nodeUrn(loc, memoryId);
-      return textResult(`Node saved: ${urn}`);
+      return textResult(`Node saved: ${urn}${sectionContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId }, content, sectionPinStoredContent)) : ''}`);
     },
   );
 
@@ -4800,24 +4846,7 @@ export function createMcpServerInstance(
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
-      const nodeReadInclude = {
-        // Filter edges whose other-end node is soft-deleted; dangling
-        // tombstones in the Related / Referenced-by section are no
-        // more useful than the deleted node itself.
-        outgoingEdges: {
-          include: { target: true },
-          where: { target: { deletedAt: null } },
-        },
-        incomingEdges: {
-          include: { source: true },
-          where: { source: { deletedAt: null } },
-        },
-        // Spec 032 — encryption gate for the abstract-stale predicate
-        // (FR-010). Riding the node fetch avoids a second round-trip
-        // (PR-210 review). resolveMemoryByUrn above doesn't carry
-        // `isEncrypted` and changing it has a wider blast radius.
-        memory: { select: { isEncrypted: true } },
-      } as const;
+      const nodeReadInclude = readProjectionInclude;
 
       // A LITERAL match wins over the fragment reading. `#data` decomposes to
       // parent + fragment, but a row's stored loc can BE `foo#data` (it
@@ -5056,6 +5085,7 @@ export function createMcpServerInstance(
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
           include: readProjectionInclude,
+          omit: { content: true },
         });
         markInherited(rows, inheritance.inheritedFrom);
         if (rows.length > BATCH_READ_MAX_NODES) {
@@ -5162,7 +5192,7 @@ export function createMcpServerInstance(
           }
           const rows = await db.node.findMany({
             where: { memoryId: mem.id, loc: { in: [...wanted] }, deletedAt: null },
-            include: projectionInclude,
+            include: projectionInclude, omit: { content: true },
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
@@ -5228,7 +5258,7 @@ export function createMcpServerInstance(
         const movedRows = allowedProbes.length
           ? await db.node.findMany({
               where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
-              include: projectionInclude,
+              include: projectionInclude, omit: { content: true },
             })
           : [];
         const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
@@ -5250,7 +5280,7 @@ export function createMcpServerInstance(
           const childId = childReadable.get(r.memoryUrn);
           const effective = childId ? await findEffectiveNodeIdByLoc(db, childId, r.literalLoc ?? r.loc) : null;
           const inherited = effective?.inheritedFrom
-            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude })
+            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude, omit: { content: true } })
             : null;
           if (inherited && effective?.inheritedFrom) {
             markInherited([inherited], new Map([[inherited.memoryId, effective.inheritedFrom]]));
@@ -5286,7 +5316,7 @@ export function createMcpServerInstance(
             (allowedIds.length > 0
               ? await db.node.findMany({
                   where: { id: { in: allowedIds } },
-                  include: projectionInclude,
+                  include: projectionInclude, omit: { content: true },
                 })
               : []
             ).map((r) => [r.id, r]),
@@ -5335,7 +5365,7 @@ export function createMcpServerInstance(
       for (const selected of ordered) {
         // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, 'metadata');
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
@@ -5382,11 +5412,28 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
-      for (const n of visible) {
+      for (const metadata of visible) {
         if (truncated) {
-          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
+          omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
           continue;
         }
+        const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        const via = inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId;
+        const mode = scope === 'abstract' ? (raw ? 'abstract-raw' : 'abstract-expanded') : 'body';
+        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, mode);
+        if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
+          || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
+          || (inheritedFrom && !(inheritedFrom.via
+            ? await stillInherited(db, inheritedFrom, n)
+            : prefixInheritance !== null && (await retainEffective(db, [n], prefixInheritance)).length === 1))) {
+          unavailable.push(echoByNodeId.get(metadata.id) ?? metadata.id);
+          continue;
+        }
+        if (inheritedFrom) markInherited([n], new Map([[n.memoryId, inheritedFrom]]));
+        // A concurrent revision after metadata prefetch must not pair the new
+        // body with provenance selected for an older revision. Only raced rows
+        // fall back to the single renderer's current provenance reads.
+        const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const served = lockState === 'locked' || raw
           ? n
@@ -5395,7 +5442,7 @@ export function createMcpServerInstance(
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
-          batch: batchProvenance,
+          batch: provenance,
           memoryUrnOf,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
@@ -5967,7 +6014,7 @@ export function createMcpServerInstance(
         ? await resolvers.Mutation.createNode({}, { input: input as never }, ctx)
         : await resolvers.Mutation.updateNode({}, { input: input as never }, ctx);
       const urn = await nodeUrn(node.loc, node.memoryId);
-      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})`);
+      return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
     }
@@ -6546,7 +6593,7 @@ export function createMcpServerInstance(
       // #322: return the stable PK too — edges/replies created against the URN
       // break if the node is later moved/renamed; the id never changes.
       // #2048 (cor:agt:040:13): a boot-prompt source's link-lint warnings ride on the result; they never block the write.
-      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), upserted.id))}`);
+      return textResult(`Node saved: ${savedUrn} (id: ${upserted.id})${renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId }, content))}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), upserted.id))}`);
     },
   );
 
@@ -6799,6 +6846,8 @@ export function createMcpServerInstance(
         if (data.data !== undefined) data.data = (enc.data ?? null) as never;
       }
 
+      let includePinContentSaved = false;
+      let includePinPriorContent: string | null = null;
       if (Object.keys(data).length > 0 || resolvedEdges !== null || expectedRevision !== undefined) {
         // Spec 049 S4: the write holds the address lock and the gate runs
         // under it — the check above is the fast refusal, this the
@@ -6905,7 +6954,11 @@ export function createMcpServerInstance(
               });
               if (edgeError) throw new InlineEdgeEndpointError(edgeError);
             }
-            if (content !== undefined) await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+            if (content !== undefined) {
+              await applyIncludesInTransaction(tx, updated, content, auth, (currentForDiff.content as string | null) ?? null);
+              includePinContentSaved = true;
+              includePinPriorContent = (currentForDiff.content as string | null) ?? null;
+            }
             existing.embeddingWorkToken = await stampEmbeddingObligation(tx, updated.id, updated.memoryId);
             const embeddedPlaintext = updKey ? decryptNodeFieldsWithKey({ ...updated }, updKey) : updated;
             existing.content = embeddedPlaintext.content;
@@ -6963,7 +7016,7 @@ export function createMcpServerInstance(
 
       const updatedUrn = await nodeUrn(loc, existing.memoryId);
       // #322: surface the stable PK (immutable across move/rename).
-      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
+      return textResult(`Node updated: ${updatedUrn} (id: ${existing.id})${includePinContentSaved ? renderIncludePinWarnings(await safePlainPinWarnings(scopeCtx(), { memoryId: existing.memoryId }, content, includePinPriorContent)) : ''}${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), existing.id))}`);
     },
   );
 
@@ -7097,14 +7150,15 @@ export function createMcpServerInstance(
     }
 
     try {
+      const ctx = doorCtx((k) => mcpDoorCanReplay(fields, k, mode));
       const node = await (
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
         { input: { memoryId: memory.id, loc, ...fields, ...signal } },
-        doorCtx((k) => mcpDoorCanReplay(fields, k, mode)),
+        ctx,
       );
-      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})`);
+      return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
       return toolErrorResult(e, () => {
         const code = (e as { extensions?: { code?: string } }).extensions?.code;
@@ -7372,6 +7426,10 @@ export function createMcpServerInstance(
         }
         // #2048: lint warnings of each boot-prompt source this call changed (a dry run changed nothing).
         const lintLines: string[] = [];
+        for (const item of result.results) {
+          const warning = renderIncludePinWarnings(await includePinWarningsFor(ctx, item));
+          if (warning) lintLines.push(warning);
+        }
         if (!result.dryRun) {
           const changed = result.results.filter((x: { replacements: number }) => x.replacements > 0);
           for (const r of changed.slice(0, REPLACE_LINT_MAX_NODES)) {
@@ -8953,7 +9011,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // the stamps describe the text printed below (one agent read — no
         // parallel lookup that could race a template edit).
         const briefing = worker
-          ? await composeWorkerPrompt(mcpCtx, worker, { llmModel: session.llmModel })
+          ? await composeWorkerPrompt({ ...mcpCtx, sessionId: session.id }, worker, { llmModel: session.llmModel }) // the session being returned, so its record (not the current approval) is read
           : { text: null as string | null, renderedAt: null as Date | null, roleAgentUpdatedAt: null as Date | null };
         const prompt = briefing.text;
         // #1029: the previous stint's handoff, delivered with the briefing
@@ -10740,7 +10798,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus, terminal] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10761,6 +10819,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.trailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
+          // #2771 — the same gate; the host's latest terminal report, null on deny or before a host reports.
+          resolvers.Worker.terminal(worker, {}, ctx),
         ]);
         // #2045: the boot-prompt pointer, through the SAME gated field resolvers
         // GraphQL serves (null on deny, and null when unset). A read only: R24
@@ -10866,6 +10926,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
+            (terminal ? `${renderTerminal(terminal, new Date())}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
@@ -10888,7 +10949,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
                 `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
                 `\n\n${prompt}`
-              : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+              : briefing.refusal
+                ? `\n(No boot briefing: the boot prompt cannot be served — ${briefing.refusal}.)`
+                : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+            (await describeServedWorker(ctx, worker)) +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
       } catch (e) {
@@ -12363,6 +12427,15 @@ const SHAPE_HADRON_SET_ACTIVE_MEMORY = {
   memoryUrn: z.string().describe('Memory URN, e.g. hrn:mem:hadronmemory.com:dev (bare hadronmemory.com:dev also accepted). Legacy hrn:memory: and :: forms still resolve.'),
 };
 
+// #2661 / #2260: immutable, principal-independent parameter schemas are shared.
+const SHAPE_HADRON_CREATE_APP_MEMORY = {
+  app: z.string().describe('App ID or URN.'),
+  name: z.string().min(1).describe('Memory name; determines its slug.'),
+  shortDescription: z.string().optional(),
+  description: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+};
+
 const SHAPE_HADRON_CREATE_MEMORY = {
   name: z.string().min(1).describe('Memory name; its slug becomes the URN tail (e.g. "My Notes" -> my-notes).'),
   memoryClass: z
@@ -12498,7 +12571,7 @@ const SHAPE_HADRON_FIND_NODES = {
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
   brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
-  limit: z.number().optional().describe('Max results (default 10 for a query; 20 for survey mode "*"/""). Raise it if the top hits do not cover what you need.'),
+  limit: z.number().int().optional().describe('Max primary results: integer clamped to 1–200 (default 10 for a query; 20 for survey mode "*"/""). Expansion neighbors are additional.'),
   minScore: z.number().optional().describe('Absolute relevance floor: drop hits scoring below this. Scores are NOT comparable across modes — keyword ranks run roughly 0..a-few, vector cosine similarity is 0..1, hybrid is a small RRF fraction — so read the (score …) values in a first unfiltered call, then set a floor for the mode in use. Prefer this (or a narrower query) over reading a long tail of weak hits. Returns fewer hits, never weaker ones; does not apply to survey mode.'),
   expand: z.number().int().min(0).max(3).optional().describe('Append undirected graph neighbors (all edge types) within depth N AFTER the ranked hits, unscored. Default 0 (no expansion). Max 3. Useful for context-stuffing — the ranked nodes plus their immediate graph context in one tool call. Spec 033 FR-020.'),
   granularity: z.enum(['node', 'chunk']).optional().describe('node (default): one entry per matching node, ranked by best-chunk similarity for content-chunk indexes. chunk: return matching passages (span text + character offsets + chunk index + parent node URN), useful for RAG context-stuffing. **chunk requires mode:vector** — hybrid + chunk is out of v1 (the design call for how RRF fuses with passage-level results was deferred). Spec 033 US2 FR-022.'),

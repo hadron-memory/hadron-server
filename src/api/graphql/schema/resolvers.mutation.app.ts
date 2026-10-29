@@ -1,4 +1,5 @@
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { appendMemberRemovedEvent, appendMemberSetEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
@@ -74,6 +75,7 @@ import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -559,6 +561,8 @@ export const appMutations = {
           },
           include: APP_INCLUDE,
         });
+          // #2553: the App's reserved project AT0, in the transaction that creates the App.
+          await ensureProjectZero(tx, app.id, { userId: app.ownerUserId ?? ctx.userId ?? null });
           // 009-install-agent-flow T015: the installer is auto-added as an
           // AppMember with role 'owner' when the Agent's installationPolicy
           // permits it, routed through ensureAppMember so the memberRoles +
@@ -704,7 +708,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
-              return tx.app.create({
+              const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,
                   name: `${depAgent.name} (cascaded from ${name})`,
@@ -717,6 +721,9 @@ export const appMutations = {
                   },
                 },
               });
+              // #2553: the cascaded App's reserved project AT0, in the same transaction.
+              await ensureProjectZero(tx, cascaded.id, { userId: ctx.userId ?? null });
+              return cascaded;
             },
           );
           // #951: a cascaded dependency App is an App like any other — it gets
@@ -1114,9 +1121,13 @@ export const appMutations = {
               throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
           },
-          (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
-            actorId: ctx.userId ?? null,
-          }),
+          async (tx) => {
+            const { priorRole } = await ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
+              actorId: ctx.userId ?? null,
+            });
+            // #2766: the act is recorded in its own transaction, after every refusal above.
+            await appendMemberSetEvent(tx, { appId: resolvedAppId, actor: eventActor(ctx.userId), userId: resolvedUserId, priorRole, role });
+          },
           { afterLock: async (tx) => {
             await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
             await tx.$queryRaw`
@@ -1205,9 +1216,18 @@ export const appMutations = {
             throw forbidRemove();
           }
         },
-        (tx) => tx.appMember.deleteMany({
-          where: { appId: resolvedAppId, userId: resolvedUserId },
-        }).then(() => undefined),
+        async (tx) => {
+          // The row is held FOR UPDATE by afterLock, so the role read here is the one deleted.
+          const existing = await tx.appMember.findUnique({
+            where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
+            select: { role: true },
+          });
+          const { count } = await tx.appMember.deleteMany({ where: { appId: resolvedAppId, userId: resolvedUserId } });
+          // #2766: an idempotent no-op (no row) records nothing.
+          if (count > 0 && existing) {
+            await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: eventActor(ctx.userId), userId: resolvedUserId, role: existing.role });
+          }
+        },
         { lockMode: 'exclusive', afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
           await tx.$queryRaw`

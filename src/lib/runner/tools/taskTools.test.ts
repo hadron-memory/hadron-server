@@ -44,7 +44,8 @@ const toolCtx = (run: AppRun): RunToolContext => ({ log: vi.fn(), db, run, princ
 async function code(p: Promise<unknown>): Promise<string | undefined> {
   try { await p; return undefined; } catch (e) { return e instanceof GraphQLError ? String(e.extensions?.code) : `non-graphql:${(e as Error).message}`; }
 }
-const tasks = () => db.agentTask.findMany({ where: { appId } });
+// #2553: AT0, the App's reserved "No project" row, is not a task a run made.
+const tasks = () => db.agentTask.findMany({ where: { appId, handle: { not: 'AT0' } }, orderBy: { createdAt: 'asc' } });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -74,7 +75,9 @@ describe('hadron_task_create (#1756)', () => {
     const out = (await hadronTaskCreate.execute(toolCtx(run), { title: 'Fix the failing build' })) as { id: string };
     const [t] = await tasks();
     expect(t!.id).toBe(out.id);
-    expect(t).toMatchObject({ appId, parentTaskId: null, title: 'Fix the failing build', createdByRunId: run.id, createdBy: null, createdByWorkerId: null, createdByAgentId: null });
+    const zero = await db.agentTask.findFirstOrThrow({ where: { appId, handle: 'AT0' } });
+    // #2553: a run's root task has no project, so its parent is the App's AT0.
+    expect(t).toMatchObject({ appId, parentTaskId: zero.id, handle: 'AT0.1', title: 'Fix the failing build', createdByRunId: run.id, createdBy: null, createdByWorkerId: null, createdByAgentId: null });
     const ev = await db.agentTeamEvent.findMany({ where: { taskId: t!.id }, orderBy: { createdAt: 'asc' } });
     expect(ev.map((e) => e.type)).toContain('task.created');
     expect(ev.every((e) => e.actorRunId === run.id && e.actorUserId === null && e.actorWorkerId === null)).toBe(true);
@@ -102,7 +105,7 @@ describe('hadron_task_create (#1756)', () => {
     const other = await db.app.findUniqueOrThrow({ where: { id: otherAppId } });
     expect(await code(hadronTaskCreate.execute(toolCtx(run), { title: 'x', appRef: otherAppId }))).toBe('APP_NOT_FOUND');
     expect(await code(hadronTaskCreate.execute(toolCtx(run), { title: 'x', appRef: other.urn }))).toBe('APP_NOT_FOUND');
-    expect(await db.agentTask.count()).toBe(0);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(0);
     // Naming its own App is fine.
     await hadronTaskCreate.execute(toolCtx(run), { title: 'x', appRef: appId });
     expect(await tasks()).toHaveLength(1);
@@ -112,14 +115,14 @@ describe('hadron_task_create (#1756)', () => {
     const run = await mintRun({ userId: person.id });
     const { id } = (await hadronTaskCreate.execute(toolCtx(run), { title: 'root' })) as { id: string };
     expect(await code(hadronTaskCreate.execute(toolCtx(run), { title: 'child', parentTaskId: id }))).toBe('BAD_USER_INPUT');
-    expect(await db.agentTask.count()).toBe(1);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(1);
   });
 
   it('the run row decides the App, not the object the tool was handed', async () => {
     const run = await mintRun({ userId: person.id }, otherAppId);
     // A stale or forged in-memory run claiming this App, while the stored run belongs to the other.
     expect(await code(hadronTaskCreate.execute(toolCtx({ ...run, appId }), { title: 'x', owner: { worker: anne.id } }))).toBe('APP_NOT_FOUND');
-    expect(await db.agentTask.count()).toBe(0);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(0);
   });
 
   it('a run that is no longer running creates nothing', async () => {
@@ -264,7 +267,7 @@ describe('follow-ups to #1756 (#1832, #1833)', () => {
     for (const status of ['backlog', 'pending', 'BACKLOG', 'finished']) {
       expect(await code(createRootTaskForRun(runContext(db, run), run, { title: 'x', status } as any))).toBe('BAD_USER_INPUT');
     }
-    expect(await db.agentTask.count()).toBe(0);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(0);
     // A typed caller cannot pass a status at all (Colin P2): this line fails to compile if the type admits one.
     // @ts-expect-error status is `never` on the helper's input
     void (() => createRootTaskForRun(runContext(db, run), run, { title: 'x', status: 'backlog' }));
@@ -278,7 +281,7 @@ describe('follow-ups to #1756 (#1832, #1833)', () => {
     for (const status of ['BACKLOG', 'backlog', 'pending', 'PENDING', 'finished', '']) {
       expect(await code(hadronTaskCreate.execute(toolCtx(run), { title: 'x', status }))).toBe('BAD_USER_INPUT');
     }
-    expect(await db.agentTask.count()).toBe(0);
+    expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(0);
   });
 
   it('#1833: a run-created event names its run on the event read; the SDL declares the field', async () => {

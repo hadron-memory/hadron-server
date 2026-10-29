@@ -16,6 +16,7 @@ import { generateId } from '../../../lib/id.js';
 import { splitNodeUrn } from '../../../lib/urn.js';
 import { revisionStateHashRefreshMarker } from '../../../lib/nodeRevisionSnapshot.js';
 import { hash } from '../../../lib/skilldoc/hash.js';
+import { MAX_RESOLVE_DEPTH } from '../../../lib/includes/spliceIncludes.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -304,6 +305,103 @@ describe('includes in an exported body (#2041, cor:dmo:150:03 R9)', () => {
     const second = await plan({ intent: 'EXPORT', files: [] });
     const headerHash = (body: string) => /hash=([0-9a-f]{16})/.exec(body)![1];
     expect(headerHash(second.entries[0].renderedBody)).not.toBe(headerHash(entry.renderedBody));
+  });
+});
+
+describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)', () => {
+  const rule = (entry: { findings: Array<{ rule: string; severity: string; message: string }> }) => entry.findings.filter(f => f.rule === 'skill-include-broken');
+
+  it('warns, once, position-only, and the export still ships', async () => {
+    await mkNode('tasks:declared', { properties: declaration(), content: '# Body\n\n{{> nope}} and {{> also-nope}}' });
+    for (const intent of ['LINT', 'EXPORT']) {
+      const got = await plan({ intent, files: [] });
+      const found = rule(got.entries[0]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ severity: 'warning' });
+      expect(found[0].message).toContain('2 includes');
+      expect(found[0].message).not.toContain('nope');
+    }
+    const exported = await plan({ intent: 'EXPORT', files: [] });
+    expect(exported.entries[0].exportPlan.action).toBe('WRITE');
+    expect(exported.entries[0].renderedBody).toContain('[Include unavailable]');
+  });
+
+  it('an unreadable target answers byte-identically to a missing one', async () => {
+    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `sp-secret-${Date.now()}` }, ctx());
+    await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'secret', name: 'secret', content: 'hidden' } });
+    await mkNode('tasks:a', { properties: declaration({ name: 'skill-a' }), content: `{{> ${other.urn}:secret}}` });
+    await mkNode('tasks:b', { properties: declaration({ name: 'skill-b' }), content: '{{> missing-loc}}' });
+    const got = await plan({ intent: 'LINT' });
+    const messages = got.entries.map((e: any) => rule(e).map((f: any) => f.message));
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toHaveLength(1);
+    expect(messages[0]).toEqual(messages[1]);
+  });
+
+  it('a readable include and a plain node raise nothing', async () => {
+    await mkNode('policies:conduct', { content: 'Be kind.', isRunnable: false });
+    await mkNode('tasks:ok', { properties: declaration({ name: 'skill-ok' }), content: '{{> policies:conduct}}' });
+    await mkNode('tasks:plain', { properties: declaration({ name: 'skill-plain' }), content: 'no includes' });
+    const got = await plan({ intent: 'LINT' });
+    expect(got.entries.flatMap(rule)).toEqual([]);
+  });
+
+  it("an author's own literal notice is not a broken include", async () => {
+    await mkNode('tasks:literal', { properties: declaration(), content: 'The text says [Include unavailable] on purpose.' });
+    const got = await plan({ intent: 'LINT' });
+    expect(rule(got.entries[0])).toEqual([]);
+  });
+
+  it('a successful include whose target holds a literal notice is not broken, directly or nested', async () => {
+    await mkNode('policies:leaf', { content: 'Leaf says [Include unavailable] on purpose.', isRunnable: false });
+    await mkNode('policies:mid', { content: 'Mid {{> policies:leaf}}', isRunnable: false });
+    await mkNode('tasks:direct', { properties: declaration({ name: 'skill-direct' }), content: '{{> policies:leaf}}' });
+    await mkNode('tasks:nested', { properties: declaration({ name: 'skill-nested' }), content: '{{> policies:mid}}' });
+    const got = await plan({ intent: 'LINT' });
+    expect(got.entries).toHaveLength(2);
+    expect(got.entries.flatMap(rule)).toEqual([]);
+  });
+
+  it('counts only the failed include when a literal-notice target and a missing one sit together', async () => {
+    await mkNode('policies:leaf', { content: 'Leaf says [Include unavailable].', isRunnable: false });
+    await mkNode('tasks:mixed', { properties: declaration(), content: '{{> policies:leaf}} and {{> missing-loc}}' });
+    const got = await plan({ intent: 'LINT' });
+    const found = rule(got.entries[0]);
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
+  });
+
+  // #2757 (Ruth's #2680 P3 1): every site that fails an include counts it. Each case is one failure, so reverting a
+  // site to the bare notice leaves the rendered body as it was and drops the finding, which only these pins see.
+  // The notice and finding name no target (cor:dmo:150:05), so each failure class answers like a missing loc.
+  const brokenOne = async (content: string) => {
+    await mkNode('tasks:probe', { properties: declaration(), content });
+    return rule((await plan({ intent: 'LINT' })).entries[0]);
+  };
+
+  it('an unresolvable URN identity counts, with the same finding as a missing loc', async () => {
+    const byUrn = await brokenOne('{{> hrn:node:nowhere.example:nomemory:nonode}}');
+    expect(byUrn).toHaveLength(1);
+    expect(byUrn[0].message).toContain('1 include ');
+    await db.node.deleteMany({ where: { memoryId: mem.id } });
+    const byLoc = await brokenOne('{{> missing-loc}}');
+    expect(byUrn).toEqual(byLoc);
+  });
+
+  it('the depth cap counts: a chain past MAX_RESOLVE_DEPTH breaks once, at the cap', async () => {
+    for (let i = 0; i <= MAX_RESOLVE_DEPTH + 1; i++) {
+      await mkNode(`policies:d${i}`, { content: i > MAX_RESOLVE_DEPTH ? 'end' : `{{> policies:d${i + 1}}}`, isRunnable: false });
+    }
+    const found = await brokenOne('{{> policies:d0}}');
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
+  });
+
+  it('a target with no qualifying revision counts: approved, and none is approved', async () => {
+    await mkNode('policies:unapproved', { content: 'Never approved.', isRunnable: false });
+    const found = await brokenOne('{{> policies:unapproved approved}}');
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
   });
 });
 

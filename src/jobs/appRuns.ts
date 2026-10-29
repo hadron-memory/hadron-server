@@ -1,3 +1,4 @@
+import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
 import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../lib/automation/pins.js';
 /**
@@ -21,7 +22,7 @@ import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../li
  */
 
 import { runAsActor } from '../lib/requestActor.js';
-import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
+import type { PrismaClient, Prisma, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
@@ -47,6 +48,11 @@ import {
 } from '../lib/llm/index.js';
 import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
+import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
+import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
+import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
+import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
+import { applyPlatformVariables, legacyFromValues } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -54,8 +60,6 @@ export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
 export const RUN_QUEUE_GROUP = 'run-worker';
 
 // Tunables (env-overridable where operations will want dials).
-const DEFAULT_RUN_TOKEN_BUDGET = intEnv('RUN_DEFAULT_TOKEN_BUDGET', 100_000);
-const DEFAULT_RUN_ACTION_BUDGET = intEnv('RUN_DEFAULT_ACTION_BUDGET', 50);
 const DEFAULT_RUN_TIMEOUT_MS = intEnv('RUN_DEFAULT_TIMEOUT_MS', 120_000);
 // D-MN-3: bound for hops the token/action budgets can't see (a routing-only
 // cycle costs nothing) — budgetActions is the REAL ceiling for LLM hops.
@@ -375,7 +379,8 @@ export async function consumeActionTicket(
 
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
-export interface MintAppRunArgs {
+/** Budget fields apply only to MANUAL; SCHEDULE/WEBHOOK always read durable setup, ignoring caller amounts. */
+export interface MintAppRunArgs extends TriggerRunBudgets {
   /** Internal interactive caller; never accepted from trigger/event data. */
   consentPrincipal?: import('../middleware/auth.js').AuthContext;
   organizationId: string;
@@ -524,6 +529,18 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // The snapshot stores only PRESENT links — an absent layer contributes
   // nothing to the conjunction, then or later.
   const presentLinks = chainLinks.filter((l): l is NonNullable<typeof l> => l != null);
+  // Read trigger budgets from durable setup, never eventData or webhook arguments.
+  // MANUAL has no reusable trigger row: its validated input is persisted in the run's initial snapshot.
+  const requestedBudgets = args.triggerKind === 'SCHEDULE'
+    ? await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
+    : args.triggerKind === 'WEBHOOK'
+      ? await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
+      : args.triggerKind === 'MANUAL' ? triggerBudgetPatch(args) : null;
+  if ((args.triggerKind === 'SCHEDULE' || args.triggerKind === 'WEBHOOK') && !requestedBudgets) {
+    throw new RunLaunchDeniedError('Trigger not found or no longer active in this App.', 'TRIGGER_DISABLED');
+  }
+  const budgets = effectiveRunBudgets(requestedBudgets ?? {});
+
   // Quota tier 1: runs/day per App AND per org (both must pass — consume
   // app first, refund on org denial to keep the counters truthful).
   if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', QUOTA_RUNS_PER_DAY_APP))) {
@@ -584,9 +601,31 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       : (await db.appRun.findUnique({ where: { id: args.parentRunId } }))?.automationPin;
   }
 
-  const run = await db.appRun.create({
+  // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
+  // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
+  // cor:agt:040:07 (R74): a headless run with NO Agent has no boot prompt to serve and is refused the same way.
+  if (bootPromptServingEnabled() && !args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  const runServing = bootPromptServingEnabled() && args.agentId
+    ? await (async () => {
+        const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
+        return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
+      })()
+    : null;
+  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
+  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
+  let runModel = '';
+  if (runServing) {
+    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
+    try {
+      runModel = (await resolveAiConfigWithFallback(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, organizationId: args.organizationId })).config.model ?? '';
+    } catch (err) {
+      if (!(err instanceof NoAiConfigAvailableError)) throw err;
+    }
+  }
+  const runId = generateId();
+  const createRun = (client: Pick<PrismaClient, 'appRun'>) => client.appRun.create({
     data: {
-      id: generateId(),
+      id: runId,
       organizationId: args.organizationId,
       appId: args.appId,
       agentId: args.agentId ?? null,
@@ -606,22 +645,50 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
       scopeSnapshot: (scopeSnapshot ?? undefined) as never,
       registerSnapshot: (registerSnapshot ?? undefined) as never,
-      budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
-      budgetActions: DEFAULT_RUN_ACTION_BUDGET,
+      budgetTokens: budgets.budgetTokens,
+      budgetActions: budgets.budgetActions,
       // #832: snapshot the MINTED budget so a client can render "spent vs
       // budget" — the two columns above are live-decremented remainders.
-      budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
-      budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
+      budgetTokensInitial: budgets.budgetTokens,
+      budgetActionsInitial: budgets.budgetActions,
       costMicroCents: 0n,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
     },
   });
+  const createAndRecord = async (client: Prisma.TransactionClient) => {
+    // #2047 PR-C: the revision is selected HERE, in the transaction that records it, under the compiled node's share lock
+    // (resolveServedBootPrompt), so cap-pruning cannot remove it between selection and record. The early resolve above
+    // is only the refusal preflight: a refused launch writes nothing.
+    const served = await resolveServedBootPrompt(client, { surface: 'run', appId: args.appId, agent: { id: runServing!.agent.id, name: runServing!.agent.name } });
+    const created = await createRun(client);
+    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
+    return created;
+  };
+  // A caller already inside a transaction (the webfetch event ingress) passes its transaction client, which cannot open
+  // another: the run and its record then join the caller's transaction and commit or roll back with it.
+  const run = runServing
+    ? ('$transaction' in db && typeof db.$transaction === 'function'
+        ? await db.$transaction(createAndRecord)
+        : await createAndRecord(db as unknown as Prisma.TransactionClient))
+    : await createRun(db);
   if (args.triggerKind === 'MANUAL' && automationPin) {
     await db.manualAutomationPin.create({ data: { runId: run.id, pin: automationPin as never, adoptedBy: args.userId ?? args.createdBy ?? null } });
   }
   if (args.publish !== false) await publishRunRequested(db, run.id);
   return run;
+}
+
+/** #2047 — append one `{hop, blocks}` entry to the run's derived-block log when the blocks differ from the last entry. */
+async function logDerivedBlocks(db: PrismaClient, runId: string, hop: number, blocks: string[]): Promise<void> {
+  const row = await db.appRun.findUnique({ where: { id: runId }, select: { derivedLog: true } });
+  const log = Array.isArray(row?.derivedLog) ? (row!.derivedLog as Array<{ hop: number; blocks: string[] }>) : [];
+  const last = log[log.length - 1];
+  // A run with no block yet and none now has nothing to record: the first entry exists to show what was seen.
+  if (last ? JSON.stringify(last.blocks) === JSON.stringify(blocks) : blocks.length === 0) return;
+  await db.$executeRaw`
+    UPDATE app_runs SET derived_log = COALESCE(derived_log, '[]'::jsonb) || ${JSON.stringify([{ hop, blocks }])}::jsonb
+    WHERE id = ${runId} AND status = 'RUNNING'`;
 }
 
 /** Publish + stamp publishedAt on success; NULL keeps the sweep republishing. */
@@ -827,6 +894,20 @@ async function executeAppRunInner(
       throw err;
     }
 
+    // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
+    // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
+    let servedText: string | null = null;
+    if (bootPromptServingEnabled() && run.agentId) {
+      const record = await db.servedPrompt.findFirst({ where: { runId } });
+      if (record) {
+        const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
+        if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
+        const values = record.variables as unknown as Parameters<typeof applyPlatformVariables>[1];
+        servedText = applyPlatformVariables(content, values, legacyFromValues(values));
+      }
+    }
+    const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);
+
     for (let hop = 0; ; hop++) {
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
@@ -882,6 +963,10 @@ async function executeAppRunInner(
       // checkpoint advances, so a message landing in between is never skipped.
       const attention = await renderAttentionSection(db, run);
       if (attention.text) instructions = `${instructions}\n\n${attention.text}`;
+      // #2047: the derived blocks this hop saw, appended to the run's log only when they differ from the last entry (an
+      // empty list is an entry too, so a block going away is recorded). Guarded on RUNNING, before the hop's LLM call, so
+      // a hop that fails or is aborted still shows what it saw.
+      if (servedText !== null) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
 
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
@@ -937,10 +1022,10 @@ async function executeAppRunInner(
             run,
             resolved,
             {
-              system:
+              system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
                 'Use the available tools as the step instructions direct, ' +
-                'then reply with a concise result of what you did.',
+                'then reply with a concise result of what you did.'),
               prompt: instructions,
               ...maxTokens,
             },
@@ -968,9 +1053,9 @@ async function executeAppRunInner(
           const objectResult = await deps.llmObject(
             resolved,
             {
-              system:
+              system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
-                'Extract the requested fields from the task context below.',
+                'Extract the requested fields from the task context below.'),
               prompt: instructions,
               ...maxTokens,
             },
@@ -986,9 +1071,9 @@ async function executeAppRunInner(
           };
         } else {
           result = await deps.llm(resolved, {
-            system:
+            system: serve(
               'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
-              'Produce ONLY the requested output document — no preamble, no meta-commentary.',
+              'Produce ONLY the requested output document — no preamble, no meta-commentary.'),
             prompt: instructions,
             ...maxTokens,
           });

@@ -3,9 +3,11 @@
  *
  * `createMemory` (resolvers.mutation.memory.ts) deliberately creates only
  * FREE-STANDING memories (app_id / agent stay NULL) and rejects class='app'.
- * These two mutations are the explicit, caller-invokable way to add every
+ * The mutations below are the explicit, caller-invokable way to add every
  * App-associable memory class to a chosen App:
  *
+ *   - createAppMemory (#2661) — new org-admin-only app-class creation without
+ *     selecting an Agent; no existing memory attachment.
  *   - createMemoryInApp — create a new memory born App-scoped (app | knowledge |
  *     personal | private).
  *   - attachMemoryToApp — bind an existing free-standing personal/private memory
@@ -29,6 +31,8 @@
  * columns correctly per class.
  */
 import { GraphQLError } from 'graphql';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
@@ -42,7 +46,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
-import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -188,6 +192,67 @@ async function withAppMemoryAuthorityTx<T>(
 }
 
 export const appMemoryMutations = {
+  /**
+   * #2661 / cor:acl:010:01: NEW free-standing app memory, not an Agent's
+   * install memory. The org-admin gate is shared; the principal restriction
+   * admits only a person acting as themselves. App/org authority anchors order
+   * both installation removal and membership revocation before the decision.
+   */
+  createAppMemory: async (
+    _: unknown,
+    { appRef, name, shortDescription, description, tags }: {
+      appRef: string; name: string; shortDescription?: string; description?: string; tags?: string[];
+    },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId || ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
+    if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
+    const { id } = await resolveAppRef(ctx.db, appRef);
+    const observed = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+    if (!observed.organizationId) {
+      if (observed.ownerUserId !== ctx.userId) throw authorizationDenied();
+      throw new GraphQLError('Creating an app memory for a user-owned App is not yet supported.', {
+        extensions: { code: 'USER_OWNED_APP_UNSUPPORTED' },
+      });
+    }
+    await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
+    // #2730: the root node's loc is `name`; refuse an unprojectable one after the gate.
+    assertMemoryRootLoc(name);
+    return withAuthorizedTx(ctx, [
+      { kind: 'org', id: observed.organizationId }, { kind: 'app', id },
+    ], async txCtx => {
+      const current = await txCtx.db.app.findUniqueOrThrow({ where: { id } });
+      if (current.organizationId !== observed.organizationId || current.ownerUserId !== observed.ownerUserId) {
+        throw authorizationDenied();
+      }
+      await requireOrgRole(txCtx, observed.organizationId!, 'ADMIN');
+      // Uninstall takes the App anchor exclusively. Its committed removal is
+      // observed here after any wait, and cannot pass this writer until commit.
+      const installed = await txCtx.db.appAgent.findFirst({
+        where: { appId: id, agent: { deletedAt: null } }, select: { agentId: true },
+      });
+      if (!installed) throw new GraphQLError('This App has no Agent installed.', {
+        extensions: { code: 'AGENT_NOT_INSTALLED' },
+      });
+    }, async tx => {
+      const org = await tx.organization.findUniqueOrThrow({ where: { id: observed.organizationId! }, select: { urn: true } });
+      const urn = await mintMemoryUrnV2(tx, {
+        root: org.urn, desiredSlug: deriveSlugFromName(name), authorRoot: observed.urn.split(':').pop()!,
+      });
+      const memory = await tx.memory.create({ data: {
+        id: generateId(), organizationId: observed.organizationId, appId: id,
+        urn, name, shortDescription, description, tags: tags ?? [], class: 'app',
+        visibility: null, isInstallMemory: false, installOfAgentId: null,
+        createdBy: ctx.userId,
+      }, include: MEMORY_INCLUDE });
+      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
+        description: 'Root node for this memory.' }, tx);
+      return memory;
+    });
+  },
+
   createMemoryInApp: async (
     _: unknown,
     {
@@ -240,6 +305,9 @@ export const appMemoryMutations = {
 
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
+    // #2730: the root node's loc is `name`; refuse an unprojectable one after the
+    // gates and before the tombstone reclaim or any create.
+    assertMemoryRootLoc(name);
     const agentSlug = agentSlugFromUrn(agent.urn);
     const slug = deriveSlugFromName(name);
 
@@ -336,6 +404,10 @@ export const appMemoryMutations = {
           },
         });
       }
+      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
+      // the Memory back and a retry cannot mint a second one.
+      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
+        description: 'Root node for this memory.' }, tx);
       return created;
       });
     } catch (err) {
@@ -349,10 +421,6 @@ export const appMemoryMutations = {
       }
       throw err;
     }
-
-    // Root node, as createMemory does.
-    const rootName = name.split(':').pop() ?? name;
-    await createNode({ memoryId: memory.id, loc: name, name: rootName });
 
     return memory;
   },

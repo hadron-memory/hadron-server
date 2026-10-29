@@ -3383,6 +3383,7 @@ model App {
   workers                 Worker[]
   /// #1705 — the App's agent tasks and their append-only event stream.
   agentTasks              AgentTask[]
+  agentTaskCounters       AgentTaskCounter[]
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
   appGrants               AppGrant[]
@@ -3899,6 +3900,13 @@ model Worker {
   reportsToWorkerId String?   @map("reports_to_worker_id")
   /// S12: explicit human choice; false + null reportsTo is UNSET, never inferred NO_TEAM.
   explicitNoTeam Boolean @default(false) @map("explicit_no_team")
+  /// #2771 (proposed cor:agt:070:09) — the latest terminal report a HOST made for this worker, built by the server
+  /// (`src/lib/workerTerminal.ts`): host {id,label}, status, prompt, reason (a closed code), lastTurnAt, checkedAt,
+  /// reportedAt. Null until a host first reports. A stored report that DECIDES NOTHING: it feeds no `checkStatus`,
+  /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
+  /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
+  /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
+  terminal Json? @map("terminal")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an
@@ -4659,6 +4667,12 @@ model AppRun {
   /// Bounded by RUN_MAX_HOPS. A hop that FAILS mid-execution has no
   /// element; `curNodeUrn` + `failure` identify it.
   hops                 Json?
+  /// #2047 (S10, cor:agt:040:03): the derived blocks each hop of the run saw, append-only, `[{hop, blocks}]`, where
+  /// `blocks` is the full list and may be EMPTY (so a block going away is recorded too). An entry is written, guarded on
+  /// RUNNING, before the hop's LLM call and only when the blocks differ from the last entry, so a hop that fails or is
+  /// aborted (it gets no `hops` element) still shows what it saw. The blocks seen by hop n are the last entry with
+  /// hop <= n. Run progress, readable by the run read gate; deliberately NOT part of the immutable boot record.
+  derivedLog           Json?             @map("derived_log")
   /// PARENT-side fan-out state (plan-spawn D-SP-1): set by hadron_spawn —
   /// {processItem, itemKey, callback?, itemCallback?, total, dispatching?,
   /// callbackFiredAt?}. Its own column, NOT `data`: the parent's envelope
@@ -4763,6 +4777,9 @@ model AgentSchedule {
   /// launch) — a same-memory rename/move of the entry keeps the trigger
   /// working; entryNodeUrn stays the immutable display/audit address.
   entryNodeId     String?   @map("entry_node_id")
+  /// #2479: optional per-run limits; NULL uses the current platform default.
+  budgetTokens   Int?      @map("budget_tokens")
+  budgetActions  Int?      @map("budget_actions")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).
   policy         Json?
@@ -4936,6 +4953,9 @@ model AgentWebhook {
   /// launch) — a same-memory rename/move of the entry keeps the trigger
   /// working; entryNodeUrn stays the immutable display/audit address.
   entryNodeId     String?   @map("entry_node_id")
+  /// #2479: optional per-run limits; NULL uses the current platform default.
+  budgetTokens   Int?      @map("budget_tokens")
+  budgetActions  Int?      @map("budget_actions")
   eventData      Json?     @map("event_data")
   policy         Json?
   aiConfigName   String?   @map("ai_config_name")
@@ -5676,6 +5696,14 @@ model AutomationVersion {
 model AgentTask {
   id                   String    @id @default(cuid())
   appId                String    @map("app_id")
+  /// #2553: this task's own segment of its handle: the project number (counted per App) for a top-level row, else the
+  /// number counted within its parent. Assigned once at creation from `agent_task_counters`, never changed or reissued.
+  /// 0 is the reserved project `AT0` ("no project"). NOT NULL in the database (prisma/agent-task-number-invariants.sql,
+  /// which also fills it for any writer that leaves it out); optional here only so a writer need not state it.
+  taskNumber           BigInt?   @map("task_number")
+  /// #2553: the full dotted handle (`AT3.405.16`), composed once at creation from the parent's handle and never
+  /// recomputed: parentage is fixed at creation (a trigger refuses UPDATE of parent_task_id), so it always matches the tree.
+  handle               String?
   /// What is asked, in the team's own words. Never read by the platform.
   title                String
   description          String?
@@ -5693,6 +5721,11 @@ model AgentTask {
   /// 'backlog' | 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
   /// 'backlog' (#1754): parked — no assignee, not matched, never waited on, no alarms.
   status               String    @default("pending")
+  /// #2644: 1 is highest; existing tasks retain FIFO within default priority1.
+  priority             Int       @default(1) @db.SmallInt
+  /// Maintained transactionally with the blocker graph, never caller supplied.
+  blocked              Boolean   @default(false)
+  releasedAt           DateTime? @map("released_at")
   startBy              DateTime? @map("start_by")
   startedAt            DateTime? @map("started_at")
   finishedAt           DateTime? @map("finished_at")
@@ -5726,14 +5759,19 @@ model AgentTask {
   app            App                 @relation(fields: [appId], references: [id], onDelete: Cascade)
   parent         AgentTask?          @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
   children       AgentTask[]         @relation("AgentTaskParent")
+  /// #2553: the counter of the numbers issued under this task.
+  childCounters  AgentTaskCounter[]
+  blockerLinks AgentTaskBlocker[] @relation("TaskBlockedBy")
+  dependentLinks AgentTaskBlocker[] @relation("TaskBlocks")
   ownerWorker    Worker?             @relation("AgentTaskOwnerWorker", fields: [ownerWorkerId], references: [id], onDelete: NoAction)
   ownerUser      User?               @relation("AgentTaskOwnerUser", fields: [ownerUserId], references: [id], onDelete: NoAction)
   assigneeWorker Worker?             @relation("AgentTaskAssigneeWorker", fields: [assigneeWorkerId], references: [id], onDelete: NoAction)
   assigneeUser   User?               @relation("AgentTaskAssigneeUser", fields: [assigneeUserId], references: [id], onDelete: NoAction)
-  events         AgentTeamEvent[]
   /// #2022 — times stop signals kept this task from being assigned.
   stopHolds      AgentTaskStopHold[]
 
+  @@index([appId, status, priority, createdAt, id])
+  @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
   @@index([ownerWorkerId])
@@ -5741,6 +5779,36 @@ model AgentTask {
   @@index([assigneeWorkerId])
   @@index([assigneeUserId])
   @@map("agent_tasks")
+}
+
+/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
+/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
+/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
+/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
+/// #2644: same-App acyclic dependency graph, guarded by task-blocker-invariants.sql.
+model AgentTaskBlocker {
+  taskId String @map("task_id")
+  blockerTaskId String @map("blocker_task_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  task AgentTask @relation("TaskBlockedBy", fields: [taskId], references: [id], onDelete: Cascade)
+  blocker AgentTask @relation("TaskBlocks", fields: [blockerTaskId], references: [id], onDelete: Cascade)
+  @@id([taskId, blockerTaskId])
+  @@index([blockerTaskId])
+  @@map("agent_task_blockers")
+}
+
+model AgentTaskCounter {
+  id           String  @id @default(cuid())
+  appId        String  @map("app_id")
+  parentTaskId String? @map("parent_task_id")
+  lastNumber   BigInt  @map("last_number")
+
+  app        App        @relation(fields: [appId], references: [id], onDelete: Cascade)
+  parentTask AgentTask? @relation(fields: [parentTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, parentTaskId])
+
+  @@map("agent_task_counters")
 }
 
 /// #1705 — one append-only record of something that happened in a team App's
@@ -5787,7 +5855,6 @@ model AgentTeamEvent {
   episodeStart           DateTime? @map("episode_start")
 
   app        App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
-  task       AgentTask?                @relation(fields: [taskId], references: [id], onDelete: Cascade)
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
 
@@ -6676,6 +6743,56 @@ model WorkerReferenceFence {
   version   BigInt @default(0)
 
   @@map("worker_reference_fences")
+}
+
+enum ServedPromptKind {
+  BIND
+  CHAT
+  RUN
+}
+
+enum ServedPromptPointerLevel {
+  WORKER
+  APP_AGENT
+  AGENT
+}
+
+/// #2047 (S10, cor:agt:040:03): what a bind, a chatbot chat or a headless run was given. IMMUTABLE platform data, not
+/// memory content: it names the compiled revision served, the pointer level that chose it, that revision's own
+/// provenance (copied from the revision at serve time, so a recompile never rewrites it, R38) and the values the
+/// platform variables were filled with. No composed text, no derived blocks (run progress holds those), no export.
+///
+/// Identity of a revision is `(compiledNodeId, servedRevSeq)`: `Node.revSeq`, never `contentRevSeq`. `compiledNodeId` is
+/// deliberately not a foreign key: the record outlives a deliberately deleted node and shows it as pruned.
+///
+/// Owner (exactly one of session / chat node / run), the owner-consistency foreign keys, immutability and the
+/// owner-absence delete gate are database facts Prisma cannot model: prisma/served-prompt-invariants.sql.
+model ServedPrompt {
+  id                  String                   @id
+  kind                ServedPromptKind
+  sessionId           String?                  @map("session_id")
+  chatId              String?                  @map("chat_id")
+  runId               String?                  @map("run_id")
+  /// 1 for a bind or a run; a chat records again when its served revision changes (R37), counting up.
+  ordinal             Int                      @default(1)
+  /// Null only for a chat held in a memory no App owns (chk_served_prompts_app, prisma/served-prompt-app-invariants.sql).
+  appId               String?                  @map("app_id")
+  agentId             String                   @map("agent_id")
+  workerId            String?                  @map("worker_id")
+  pointerLevel        ServedPromptPointerLevel @map("pointer_level")
+  compiledNodeId      String                   @map("compiled_node_id")
+  servedRevSeq        Int                      @map("served_rev_seq")
+  /// The compile revision that owns the provenance: the greatest compile revSeq at or below the served one (a
+  /// metadata-only revision above a compile advances revSeq but not the provenance).
+  provenanceRevSeq    Int                      @map("provenance_rev_seq")
+  compiledContentHash String                   @map("compiled_content_hash")
+  /// `[{nodeId, revSeq, hash}]`, read through its own cursor field, never in one response.
+  provenance          Json                     @default("[]")
+  variables           Json                     @default("{}")
+  servedAt            DateTime                 @default(now()) @map("served_at")
+
+  @@index([compiledNodeId, servedRevSeq])
+  @@map("served_prompts")
 }
 
 /// #2245 (R170.6): one append-only record per Agent clone. Written in the clone's own transaction, so the audit and

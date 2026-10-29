@@ -20,7 +20,11 @@ import {
 
 const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
+  "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
+  "AgentTask.blocks", // Same shared dependency page resolver.
   "AppKey.hostUses",
+  "Chat.servedPrompts",
+  "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
   "Mutation.collectHostOperations",
   "Node.lintWarnings",
   "Node.signingRequests",
@@ -35,6 +39,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appMemoryScope",
   "Query.appNodes",
   "Query.appRuns",
   "Query.apps",
@@ -45,6 +50,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channels",
   "Query.chatHistory",
   "Query.commentThreads",
+  "Query.compiledPromptProvenance",
   "Query.connectionGrants",
   "Query.creditLedgerEntries",
   "Query.dashboardWidgetPresetsPage",
@@ -82,6 +88,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.recoveryEdges",
   "Query.recoveryNodes",
   "Query.registerEntries",
+  "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
   "Query.secrets",
@@ -100,8 +107,13 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.users",
   "Query.validateMemory",
   "Query.workers",
+  "ServedPrompt.currentLint", // #2048: default 50, cap 100; shared pageLintWarnings.
+  "ServedPrompt.provenance",
+  "Session.servedPrompts",
   "Ticker.subscribers",
-  "User.sharedOrganizations"
+  "User.sharedOrganizations",
+  "Worker.promptLintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
+  "Worker.signatureLint"
 ];
 const servers: Server[] = [];
 type Reply = Omit<Response, 'json'> & { json(): Promise<any> }; // eslint-disable-line @typescript-eslint/no-explicit-any

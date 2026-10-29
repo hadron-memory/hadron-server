@@ -155,6 +155,7 @@ import {
   resolveMemoryRefArg,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
+  assertMemoryRootLoc,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
@@ -691,6 +692,11 @@ export const memoryMutations = {
         );
       }
 
+      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
+      // after the gates and before ensureUserHandle, the tombstone reclaim or
+      // any create.
+      assertMemoryRootLoc(name);
+
       // The URN root is the owner principal's bare namespace atom — an org
       // domain (`baragaun.com`) or, for the user-owned path, the caller's
       // handle (`holger`). ensureUserHandle mints+persists a handle if the
@@ -807,16 +813,16 @@ export const memoryMutations = {
             },
           });
         }
+        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
+        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
+        const rootName = name.split(':').pop() ?? name;
+        await createNode({
+          memoryId: created.id,
+          loc: name,
+          name: rootName,
+          description: 'Root node for this memory.',
+        }, tx);
         return created;
-      });
-
-      // Create the root node for this memory
-      const rootName = name.split(':').pop() ?? name;
-      await createNode({
-        memoryId: memory.id,
-        loc: name,
-        name: rootName,
-        description: 'Root node for this memory.',
       });
 
       return memory;
@@ -1983,13 +1989,19 @@ export const memoryMutations = {
       if (memory.visibility !== 'PUBLIC') {
         // Reached only by a caller who can open the memory (#1381 refused the
         // rest above), so this refusal discloses nothing they did not know.
-        throw new Error('Only public memories can be subscribed to by other organizations');
+        throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
       }
 
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
       if (memory.organizationId === resolvedOrgId) {
-        throw new Error('Owner organization has implicit access and cannot subscribe');
+        throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
       }
 
       return withAuthorizedMemoryTx(
@@ -1999,10 +2011,16 @@ export const memoryMutations = {
           await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           if (current.visibility !== 'PUBLIC') {
-            throw new Error('Only public memories can be subscribed to by other organizations');
+            throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
           }
           if (current.organizationId === resolvedOrgId) {
-            throw new Error('Owner organization has implicit access and cannot subscribe');
+            throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
           }
         },
         (tx) => tx.memorySubscription.create({

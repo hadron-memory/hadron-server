@@ -1,3 +1,4 @@
+import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
 import { captureSetupConsent } from '../../../lib/automation/pins.js';
 // Headless-run surfaces (spec 040 plan §9): schedule CRUD, the run audit
@@ -103,7 +104,7 @@ export function buildAppRunOrderBy(
   }
 }
 
-export interface CreateAgentScheduleInput {
+export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
   appRef: string;
   name: string;
@@ -236,6 +237,25 @@ export async function mayReadAppRunWithoutOrgRole(
 }
 
 /**
+ * The run read gate as one boolean (#1577): the narrow own-run arm, else an org READER. `appRun` answers null on false,
+ * and a nested field that must be authorized on its own (`AppRun.servedPrompt`, #2047) asks the SAME predicate instead of
+ * leaning on the parent query. Only an authorization denial is false; any other error still surfaces.
+ */
+export async function canReadAppRun(
+  ctx: Context,
+  run: { appId: string; organizationId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+): Promise<boolean> {
+  if (await mayReadAppRunWithoutOrgRole(ctx, run)) return true;
+  try {
+    await requireOrgRole(ctx, run.organizationId, 'READER');
+    return true;
+  } catch (err) {
+    if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return false;
+    throw err;
+  }
+}
+
+/**
  * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
  * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
  * end-user features these paths exist for, so — unlike schedules and webhooks,
@@ -348,15 +368,21 @@ export async function mintManualRun(
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
   },
+  options: { publish?: boolean } = {},
 ) {
   try {
     return await mintAppRun(ctx.db, {
+      // #2737: a composed import publishes only after its outer transaction commits.
+      publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
       consentPrincipal: ctx,
+      ...triggerBudgetPatch(input),
       entryNodeUrn: input.entryNodeUrn,
       eventData: {
         ...(input.eventData ?? {}),
@@ -380,6 +406,8 @@ export async function triggerManualRun(
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
   },
 ) {
   const app = await assertManualRunAllowed(ctx, input);
@@ -429,6 +457,7 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
@@ -475,6 +504,7 @@ export const appRunMutations = {
         entryNodeUrn: input.entryNodeUrn,
         entryNodeId,
         automationPin: automationPin as never,
+        ...budgets,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
@@ -557,6 +587,7 @@ export const appRunMutations = {
         return tx.agentSchedule.update({
           where: { id },
           data: {
+            ...triggerBudgetPatch(input),
             ...(input.name != null ? { name: input.name } : {}),
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
@@ -614,6 +645,8 @@ export const appRunMutations = {
         eventData?: Record<string, unknown> | null;
         runAsSelf?: boolean | null;
         aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
       };
     },
     ctx: Context,
@@ -657,6 +690,8 @@ export const appRunMutations = {
         eventData?: Record<string, unknown> | null;
         policy?: unknown;
         aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
         enabled?: boolean | null;
         scopeRef?: string | null;
       };
@@ -664,6 +699,7 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
@@ -709,6 +745,7 @@ export const appRunMutations = {
         entryNodeUrn: input.entryNodeUrn,
         entryNodeId: consent != null && typeof consent === 'object' && 'entryId' in consent
           ? (consent as { entryId: string }).entryId : null,
+        ...budgets,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
@@ -1057,19 +1094,12 @@ export const appRunQueries = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) return null;
-    if (await mayReadAppRunWithoutOrgRole(ctx, run)) return run;
     // #1577 — an unreadable run reads as MISSING, never Forbidden: the
     // difference was an existence oracle over run ids. The platform's
     // concealment posture (#1316, #1381; Ada #5919) and what MCP
     // hadron_get_run already does. Only an authorization denial is concealed;
     // any other error still surfaces.
-    try {
-      await requireOrgRole(ctx, run.organizationId, 'READER');
-    } catch (err) {
-      if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return null;
-      throw err;
-    }
-    return run;
+    return (await canReadAppRun(ctx, run)) ? run : null;
   },
 
   /**

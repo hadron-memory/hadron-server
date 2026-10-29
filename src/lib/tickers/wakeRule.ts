@@ -57,6 +57,8 @@ export type TaskWakeReason = {
   chainIndex: number;
   event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
   title: string;
+  /** #2553: the task's handle, printed first in the nudge. */
+  handle: string;
   /** S7 (R90): messages held from a standby worker and passed at this assignment; rides the event, so returned once. */
   standbyHeld?: number;
 };
@@ -194,7 +196,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

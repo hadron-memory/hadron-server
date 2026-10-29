@@ -122,10 +122,19 @@ async function writeInApp<T>(
 
 // ── Validation ────────────────────────────────────────────────────────────
 
+/**
+ * C0 (incl. NUL, TAB, LF, CR, ESC), DEL, C1 (incl. NEL), and the Unicode line/paragraph
+ * separators. The wake nudge types a ticker name into a worker's terminal header, so a
+ * name that spans lines or carries an escape sequence would read as separate input. (#2756)
+ */
+// eslint-disable-next-line no-control-regex
+const NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/;
+
 export function cleanName(raw: unknown): string {
   const name = typeof raw === 'string' ? raw.trim() : '';
   if (name === '') throw badInput('A ticker needs a name.');
   if (name.length > TICKER_NAME_MAX) throw badInput(`A ticker name is at most ${TICKER_NAME_MAX} characters.`);
+  if (NAME_CONTROL_CHARS.test(name)) throw badInput('A ticker name cannot contain control characters or line breaks.');
   return name;
 }
 
@@ -693,6 +702,15 @@ const isolationForbidden = () => taskError(
   'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
 );
 
+/** #2660 / cor:agt:080:29: the same person-manager-or-holder predicate for the writer and its capability. S7 availability is separate. */
+async function canManageWorkerIsolation(
+  ctx: Context, app: TaskApp, actor: TaskActor | null,
+  worker: { heldByUserId: string | null; retiredAt: Date | null },
+): Promise<boolean> {
+  if (!actor || actor.kind !== 'user' || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
+  return await actorManagesApp(ctx, app, actor) || worker.heldByUserId === actor.userId;
+}
+
 /**
  * The ONE isolation writer (GraphQL and MCP both reach it). Its only audience is a human acting as themselves who manages the
  * App or holds the worker: a worker session (even a manager's), an App key and an impersonation are refused, and the row
@@ -712,8 +730,7 @@ async function writeWorkerIsolation(
   const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    const manages = await actorManagesApp(txCtx, fresh, actor);
-    if (!manages && w.heldByUserId !== actor.userId) throw isolationForbidden();
+    if (!(await canManageWorkerIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
@@ -1034,6 +1051,12 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
+    canManageIsolation: async (w: { workerId: string }, _: unknown, ctx: Context) => {
+      // Keep the existing read refusal before computing a permission; never reveal an unreadable worker.
+      const worker = await workerForRead(ctx, w.workerId);
+      const app = await appOf(ctx, worker.appId);
+      return canManageWorkerIsolation(ctx, app, await resolveTaskActor(ctx, app), worker);
+    },
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({
