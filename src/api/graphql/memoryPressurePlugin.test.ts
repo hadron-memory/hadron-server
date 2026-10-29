@@ -7,7 +7,7 @@ it('logs the allocating in-flight operation at threshold, without query, variabl
   vi.useFakeTimers();
   let release!: () => void;
   const blocked = new Promise<void>(resolve => { release = resolve; });
-  const memory = { heapUsed: 1, rss: 1 };
+  const memory = { heapUsed: 1, heapTotal: 2, external: 3, arrayBuffers: 4, rss: 1 };
   const log = vi.fn();
   const api = new ApolloServer({
     typeDefs: 'type Query { allocate(secret:String): String }',
@@ -38,7 +38,7 @@ it('bounds tracked operations and emitted entries; cleans up overflow and omitte
   vi.useFakeTimers();
   let t = 0;
   const log = vi.fn();
-  const plugin = memoryPressurePlugin({ heapBytes: 1, rssBytes: 1 }, { memory: () => ({ heapUsed: 1, rss: 1 }), now: () => t, log });
+  const plugin = memoryPressurePlugin({ heapBytes: 1, rssBytes: 1 }, { memory: () => ({ heapUsed: 1, heapTotal: 2, external: 3, arrayBuffers: 4, rss: 1 }), now: () => t, log });
   const listeners: any[] = [];
   for (let i = 0; i < 1005; i++) {
     const listener = await plugin.requestDidStart!({} as any);
@@ -68,7 +68,7 @@ it('bounds tracked operations and emitted entries; cleans up overflow and omitte
 
 it('a logging failure does not fail a request; RSS alone triggers; config refuses invalid input without echoing it', async () => {
   const log = vi.fn(() => { throw new Error('sink unavailable'); });
-  const plugin = memoryPressurePlugin({ heapBytes: 100, rssBytes: 100 }, { memory: () => ({ heapUsed: 1, rss: 101 }), log });
+  const plugin = memoryPressurePlugin({ heapBytes: 100, rssBytes: 100 }, { memory: () => ({ heapUsed: 1, heapTotal: 2, external: 3, arrayBuffers: 4, rss: 101 }), log });
   const listener = await plugin.requestDidStart!({} as any);
   await expect(listener!.didResolveOperation!({ operationName: 'Read', contextValue: {} } as any)).resolves.toBeUndefined();
   await listener!.willSendResponse!({} as any);
