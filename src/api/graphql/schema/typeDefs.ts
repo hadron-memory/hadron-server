@@ -8882,7 +8882,7 @@ export const typeDefs = `#graphql
     """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
     reads for this caller, one row per memory with every reason it is in scope,
-    ordered by memoryUrn and paged (default 50, cap 200; over the cap returns a
+    ordered by memoryUrn and paged (default 20, cap 200; over the cap returns a
     page of the cap). Same entry and admission as appNodes, so an external App
     participant appNodes admits is answered here too, and a refused caller gets
     appNodes' error. Every memory in the caller's scope is listed, including
