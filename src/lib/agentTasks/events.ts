@@ -410,6 +410,86 @@ export async function appendWorkerCastingEvent(
   });
 }
 
+// ── #2766 (S2a of #2483): who staffed or changed the team ──────────────────
+
+/**
+ * The member and staffing acts the five doors record (cor:agt:050:11, Proposed). Each is appended in the act's own
+ * transaction, after every refusal and before commit, by a person and a worker session alike (`actorWorkerId` is null
+ * for a person). Ids and role words only: no name, email, signature, message text or key.
+ */
+export const STAFFING_EVENT_TYPES = [
+  'member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted',
+] as const;
+export type StaffingEventType = (typeof STAFFING_EVENT_TYPES)[number];
+
+/** The census (`miscastHasReferences`) treats these on the subject worker as the cast's own bookkeeping, not use. */
+export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired'] as const;
+
+async function appendStaffingEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; type: StaffingEventType; subjectWorkerId?: string; payload: Prisma.InputJsonObject },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.subjectWorkerId ?? null,
+      payload: args.payload,
+    },
+  });
+}
+
+/** `member.added` (a new membership) or `member.role-changed` (an existing member's role changed); nothing for an unchanged role. */
+export async function appendMemberSetEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; userId: string; priorRole: string | null; role: string },
+): Promise<void> {
+  if (args.priorRole === args.role) return;
+  if (args.priorRole === null) {
+    return appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.added', payload: { userId: args.userId, role: args.role } });
+  }
+  return appendStaffingEvent(tx, {
+    appId: args.appId, actor: args.actor, type: 'member.role-changed',
+    payload: { userId: args.userId, fromRole: args.priorRole, toRole: args.role },
+  });
+}
+
+export async function appendMemberRemovedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; userId: string; role: string },
+): Promise<void> {
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.removed', payload: { userId: args.userId, role: args.role } });
+}
+
+export async function appendWorkerCastEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; agentId: string; role: string | null; reportsToWorkerId: string | null },
+): Promise<void> {
+  await appendStaffingEvent(tx, {
+    appId: args.appId, actor: args.actor, type: 'worker.cast', subjectWorkerId: args.workerId,
+    payload: { workerId: args.workerId, agentId: args.agentId, role: args.role, reportsToWorkerId: args.reportsToWorkerId },
+  });
+}
+
+export async function appendWorkerRetiredEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string },
+): Promise<void> {
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.retired', subjectWorkerId: args.workerId, payload: { workerId: args.workerId } });
+}
+
+export async function appendWorkerDeletedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string },
+): Promise<void> {
+  // The id rides the payload only: a `subject_worker_id` naming a worker that no longer exists is refused by the
+  // worker-reference fence (#1162), and this event is written after the row is gone.
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId } });
+}
+
 /**
  * Append one `worker.reports-to` event: a set, handover or clear. The Worker
  * row holds only the current value; these events are its history. Ids and a
