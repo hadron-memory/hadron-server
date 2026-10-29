@@ -2050,8 +2050,10 @@ export async function updateNodePropertiesWith(
     });
   }
   // #1316: a node in a memory the caller cannot read answers as a missing one.
+  // #2701: an install memory's write answer on the pooled client is a pre-flight only; writeNodeCore re-decides it
+  // inside its own fenced transaction, so this door says so, as writeNodeCore's own pre-gate does (#2044).
   await concealUnreadableNodeDenial(ctx, meta.memoryId, () => nodeNotFoundError(nodeRef), () =>
-    requireMemoryWriteAccess(ctx, meta.memoryId),
+    requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, meta.memoryId),
   );
   // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
   await assertLocWritable(
@@ -2476,8 +2478,9 @@ export const nodeMutations = {
         });
       }
       // #1316: a node in a memory the caller cannot read answers as a missing one.
+      // #2701: pre-flight only on an install memory; writeNodeCore re-decides it in its fenced transaction (#2044).
       await concealUnreadableNodeDenial(ctx, meta.memoryId, () => nodeNotFoundError(nodeRef), () =>
-        requireMemoryWriteAccess(ctx, meta.memoryId),
+        requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, meta.memoryId),
       );
       // Spec 049 S4: an in-place update takes no lock, so the gate is explicit here.
       await assertLocWritable(
