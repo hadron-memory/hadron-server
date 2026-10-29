@@ -64,6 +64,10 @@ describe('#2737 importNode run refusal',()=>{
     const run=await db.appRun.findUniqueOrThrow({where:{id:result.jobId!}});
     expect(run).toMatchObject({appId,triggerKind:'MANUAL',status:'PENDING',eventData:{tone:'brief',importedNodeUrn:'hrn:node:import2737.test:imports:clips:refused'}});
     expect(result.node.content).toBe('# Imported');
+    // Positive control for the zero-count rollback assertions below.
+    const quotaWhere={scopeKind:'app',scopeId:appId,action:'run.execute'};
+    expect(await db.quotaCounter.count({where:quotaWhere})).toBe(1);
+    expect((await db.quotaCounter.findFirstOrThrow({where:quotaWhere})).used).toBe(1);
   });
   it('import without task still returns STORED and creates no run', async()=>{
     const result=await resolvers.Mutation.importNode({}, {input:{...input(),taskRef:null}},ctx);
@@ -130,10 +134,12 @@ describe('#2737 importNode run refusal',()=>{
   });
   for(const asyncEffect of [false,true]) it(`a failing ${asyncEffect?'async':'sync'} committed effect does not reject the import or skip its wake`, async()=>{
     const write=nodeWrite.writeNodeCore;
+    let injectedEffects=0;
     vi.spyOn(console,'error').mockImplementation(()=>{});
     vi.spyOn(nodeWrite,'writeNodeCore').mockImplementation((node,context,mode,options)=>{
       const transaction=options!.transaction!;
       transaction.afterCommit(()=>{
+        injectedEffects++;
         if(asyncEffect) return Promise.reject(new Error('injected effect failure'));
         throw new Error('injected effect failure');
       });
@@ -144,6 +150,7 @@ describe('#2737 importNode run refusal',()=>{
     const result=await resolvers.Mutation.importNode({}, {input:input()},ctx);
     expect(result.status).toBe('FETCH_PENDING');
     expect(await db.appRun.count()).toBe(1);
+    expect(injectedEffects, 'the injected failing callback must actually run').toBe(1);
     expect(wake).toHaveBeenCalledTimes(1);
     expect(written).toHaveBeenCalledTimes(1);
   });
