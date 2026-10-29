@@ -266,8 +266,11 @@ describe('#2610 — Action URN projection line', () => {
   });
 
   it('is absent for a non-register node, and for a register:<code> node no live Agent holds', async () => {
-    await node(teamMemoryId, 'plain-loc');
-    const plain = await getNode(emitNodeUrnV2(teamMemoryUrn, 'plain-loc'));
+    // Dan's carry P2: the non-register loc must carry a slug-valid tail past
+    // 'register:'.length — a short or hyphen-leading tail (e.g. plain-loc -> '', plain-loc-node -> '-node', both invalid atoms) makes the emitter throw, and a mutant
+    // that drops the startsWith predicate survives this pin vacuously.
+    await node(teamMemoryId, 'abcdefghijklmn');
+    const plain = await getNode(emitNodeUrnV2(teamMemoryUrn, 'abcdefghijklmn'));
     expect(plain).not.toMatch(/^Action URN: /m);
 
     const strayMem = await db.memory.create({
@@ -312,7 +315,9 @@ describe('#2610 — Action URN projection line', () => {
 describe('#2610 — hadron_get_nodes batch parity (cor:api:040:01)', () => {
   it('renders the same Action URN line per node as the single read', async () => {
     const entry = await registerEntry(teamMemoryId, CODE);
-    const plain = await node(teamMemoryId, 'plain-loc');
+    // Slug-valid tail past 'register:'.length (Dan's carry P2 — see the
+    // projection describe's non-register pin for why).
+    const plain = await node(teamMemoryId, 'abcdefghijklmn');
     const single = await getNode(emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`));
     const batch = await createTestableMcpServer(auth(admin.id)).callToolText('hadron_get_nodes', {
       refs: [entry.id, plain.id],
