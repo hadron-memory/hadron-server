@@ -1,11 +1,11 @@
 /** #2608 experimental register role picking; a read only, never assignment or routing. */
 import { GraphQLError } from 'graphql';
 import { Prisma, type Agent } from '../../../generated/prisma/index.js';
-import { type Context, clampListTake, isMemoryReadableCached, requireReadableAgent, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, clampListTake, getAccessibleMemoryIds, isMemoryReadableCached, requireReadableAgent, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveParticipatedApp } from './resolvers.agentTask.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { registerTaskLoc } from './resolvers.taskWarnings.js';
-import { findEffectiveNodeIdByLoc } from '../../../lib/effectiveSystemMemory.js';
+import { findEffectiveNodeIdByLoc, findEffectiveNodeIdsByLoc, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { agentBaseChains } from '../../../lib/agentBase.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
@@ -21,25 +21,29 @@ type RoleTask = { depth: number; taskUrn: string };
  * The per-Agent evaluation, batched set-wise (Atilla's BLIND P2): the tie
  * minimum needs every roster Agent evaluated, so the WORK is bounded instead of
  * the roster walk — the caller passes in the one-shot reads (Agent rows, all
- * chains, chain-member memories) and the memo tables shared by Agents that
- * resolve through the same base memory. Gate ORDER and semantics are the
- * reviewed ones: Agent gate, then the first contributing memory's read gate,
- * then the licensed-inheritance lookup; nothing re-orders a refusal.
+ * chains, chain-member memories, every root's effective hit in one lookup, the
+ * hit rows in one read, one read-gate answer for every memory) and this closes
+ * over them. Gate ORDER and semantics are the reviewed ones: Agent gate, then
+ * the first contributing memory's read gate, then the licensed-inheritance
+ * result; nothing re-orders a refusal.
  */
+/** One roster Agent's first contributing memory, as a root the batched lookup asks. */
+type RootEntry = { key: string; memoryId: string; firstId: string; inheritRoot: boolean };
+
 function batchedRoleTasks(
-  tx: Prisma.TransactionClient,
   c: Context,
   taskLoc: string,
+  rootOf: Map<string, RootEntry | null>,
+  hits: Map<string, { id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null>,
+  taskByHit: Map<string, { isRunnable: boolean | null; memory: { urn: string; deletedAt: Date | null } } | undefined>,
+  canRead: (memoryId: string) => boolean,
 ) {
   const roleTaskByAgent = new Map<string, RoleTask | null>();
-  const hitByMemory = new Map<string, Awaited<ReturnType<typeof findEffectiveNodeIdByLoc>>>();
-  const taskByHit = new Map<string, { isRunnable: boolean | null; memory: { urn: string; deletedAt: Date | null } } | null>();
 
   const roleTask = async (
     agentId: string,
     agentRows: Map<string, Pick<Agent, 'id' | 'visibility' | 'deletedAt' | 'organizationId' | 'ownerUserId'> | undefined>,
     chainOf: (id: string) => string[],
-    memoryOf: (id: string) => string | undefined,
   ): Promise<RoleTask | null> => {
     const cached = roleTaskByAgent.get(agentId);
     if (cached !== undefined) return cached;
@@ -48,36 +52,24 @@ function batchedRoleTasks(
     try { await requireReadableAgent(c, agent, agentId); }
     catch (e) { if (e instanceof AgentNotFoundError) return miss(); throw e; }
     if (!agent) return miss();
-    const chain = chainOf(agentId);
     // Missing system memories contribute no nodes, but do not erase an Agent link's depth.
-    const firstId = chain.find((id) => memoryOf(id));
-    const firstMemory = firstId ? memoryOf(firstId) : undefined;
-    if (!firstId || !firstMemory || !(await isMemoryReadableCached(c, firstMemory))) return miss();
+    const root = rootOf.get(agentId);
+    if (!root || !canRead(root.memoryId)) return miss();
     // Effective inherited nodes are admitted through the child's readable system memory, as Query.node does.
     // Re-gating the base's memory would incorrectly drop licensed inherited definitions.
-    const memoKey = `${firstMemory}:${firstId !== agentId}`;
-    if (!hitByMemory.has(memoKey)) {
-      hitByMemory.set(memoKey, await findEffectiveNodeIdByLoc(tx, firstMemory, taskLoc, { inheritRoot: firstId !== agentId }));
-    }
-    const hit = hitByMemory.get(memoKey);
+    const hit = hits.get(root.key);
     if (!hit) return miss();
-    if (!taskByHit.has(hit.id)) {
-      taskByHit.set(hit.id, await tx.node.findUnique({
-        where: { id: hit.id },
-        select: { isRunnable: true, memory: { select: { urn: true, deletedAt: true } } },
-      }));
-    }
-    const task = taskByHit.get(hit.id) ?? null;
+    const task = taskByHit.get(hit.id);
     if (!task?.isRunnable || task.memory.deletedAt) return miss();
     // Count Agent links, not contributed memories: an intermediate Agent with no memory still has depth.
-    const depth = chain.indexOf(hit.inheritedFrom?.agentId ?? firstId);
+    const depth = chainOf(agentId).indexOf(hit.inheritedFrom?.agentId ?? root.firstId);
     if (depth < 0) return miss();
     const out = { depth, taskUrn: `hrn:node:${task.memory.urn}:${taskLoc}` };
     roleTaskByAgent.set(agentId, out);
     return out;
   };
 
-  return { roleTask, roleTaskByAgent };
+  return { roleTask };
 }
 
 export const registerRoleCandidateQueries = {
@@ -123,13 +115,38 @@ export const registerRoleCandidateQueries = {
             select: { id: true, systemMemoryId: true },
           })).flatMap((a) => (a.systemMemoryId ? [[a.id, a.systemMemoryId] as const] : [])),
         );
-        const { roleTask } = batchedRoleTasks(tx, c, taskLoc);
+        const chainOf = (id: string): string[] => [id, ...(chains.get(id) ?? [])];
+        // Every roster Agent's first contributing memory, as ONE root set (Atilla's
+        // #2724 BLIND P2: distinct roots must not fan out into per-memory reads).
+        // A root is keyed by its flag too — one memory is its owner's own root and a
+        // memory-less child's inherited root at once, and the two answer differently.
+        const rootOf = new Map<string, RootEntry | null>();
+        const roots = new Map<string, { memoryId: string; inheritRoot: boolean }>();
+        for (const agentId of agentIds) {
+          const firstId = chainOf(agentId).find((id) => memoryOf.get(id));
+          const memoryId = firstId !== undefined ? memoryOf.get(firstId) : undefined;
+          if (firstId === undefined || memoryId === undefined) { rootOf.set(agentId, null); continue; }
+          const inheritRoot = firstId !== agentId;
+          const key = `${memoryId}:${inheritRoot}`;
+          rootOf.set(agentId, { key, memoryId, firstId, inheritRoot });
+          roots.set(key, { memoryId, inheritRoot });
+        }
+        // One statement per fact for the whole roster: every root's effective hit in
+        // one walk, every hit row in one read, one read-gate answer for every memory
+        // (the shared full-set gate, as the list surfaces use it).
+        const hits = await findEffectiveNodeIdsByLoc(tx, [...roots.values()], taskLoc);
+        const hitIds = [...new Set([...hits.values()].flatMap((h) => (h ? [h.id] : [])))];
+        const taskByHit = new Map(hitIds.length
+          ? (await tx.node.findMany({
+              where: { id: { in: hitIds } },
+              select: { id: true, isRunnable: true, memory: { select: { urn: true, deletedAt: true } } },
+            })).map((n) => [n.id, n] as const)
+          : []);
+        const accessible = await getAccessibleMemoryIds(c);
+        const canRead = (memoryId: string): boolean => accessible === null || accessible.includes(memoryId);
+        const { roleTask } = batchedRoleTasks(c, taskLoc, rootOf, hits, taskByHit, canRead);
         for (const w of workers) {
-          const match = await roleTask(
-            w.agentId, agentRows,
-            (id) => [id, ...(chains.get(id) ?? [])],
-            (id) => memoryOf.get(id),
-          );
+          const match = await roleTask(w.agentId, agentRows, chainOf);
           if (!match) continue;
           candidates.push({
             worker: { kind: 'WORKER', id: w.id, name: w.name, urn: composeWorkerUrn(app.urn, w.slug) },

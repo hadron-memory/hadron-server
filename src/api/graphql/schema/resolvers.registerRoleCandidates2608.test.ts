@@ -220,6 +220,100 @@ describe('#2608 register role candidates', () => {
     expect(calls.filter((c) => c === 'raw:$queryRaw:up')).toHaveLength(1);
   });
 
+  // Atilla P2, residual (#2724 BLIND delta at df7e1da6): the shared-base fixture
+  // above bounds nothing once every roster Agent contributes its OWN memory —
+  // the effective-loc and hit reads were still one per DISTINCT root, sequential,
+  // before pagination. This pin gives 30 Agents 30 distinct memories, each
+  // holding its own runnable task: the set-wise rewrite answers every root with
+  // ONE walk (memup) and every hit row with ONE read; the only singular effective
+  // walk left in the request is the register entry's own lookup.
+  it('resolves independent contributing memories set-wise: one effective walk, one hit read', async () => {
+    await mapTask();
+    for (let i = 0; i < 30; i++) {
+      const a = await roleAgent(`Solo ${i}`);
+      await node(a.memoryId, 'tasks:finish', { isRunnable: true });
+      await worker(`Solo ${i}a`, a.id); await worker(`Solo ${i}b`, a.id);
+    }
+    const calls: string[] = [];
+    const mark = (args: unknown): string => {
+      const s = JSON.stringify(args) ?? '';
+      return s.includes('WITH RECURSIVE memup') ? 'memup'
+        : s.includes('WITH RECURSIVE chain') ? 'chain'
+        : s.includes('WITH RECURSIVE up') ? 'up' : '';
+    };
+    const traced = db.$extends({ query: { $allOperations: async ({ model, operation, args, query }) => {
+      calls.push(`${model ?? 'raw'}:${operation}:${model ? '' : mark(args)}`);
+      return query(args);
+    } } }) as unknown as typeof db;
+    const r = await (resolvers.Query as any).registerRoleCandidates({}, { appRef: app.id, code: 'task.finish.open-children' }, { db: traced, userId: admin.id, roles: ['READER'] } as Context);
+    expect(r.total).toBe(60); expect(r.depth).toBe(0);
+    expect(calls.filter((c) => c === 'raw:$queryRaw:memup')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'raw:$queryRaw:chain')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'Node:findMany:')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'Node:findUnique:')).toHaveLength(1);
+    expect(calls.filter((c) => c.startsWith('Agent:')).length).toBeLessThanOrEqual(4);
+  });
+
+  // Axel M9 (#2724 LOCAL delta): the root is keyed by its inheritRoot flag — one
+  // memory can be its owner's OWN root and a memory-less child's INHERITED root
+  // at once, and the two answers must not collapse into one. A boot-prompt task
+  // at the shared memory decides it: an own pos-1 node is exempt from the role
+  // filter, an inherited pos-1 node is not.
+  it('keys a shared first memory by its inheritRoot flag: the owner sees a boot-prompt task, the memory-less child does not', async () => {
+    await mapTask();
+    const owner = await roleAgent('Owner');
+    await node(owner.memoryId, 'tasks:finish', { isRunnable: true, role: 'boot-prompt' });
+    const child = await roleAgent('Flag child', owner.id);
+    await db.agent.update({ where: { id: child.id }, data: { systemMemoryId: null } });
+    const ow = await worker('Aowner worker', owner.id);
+    // Name-sorted AFTER the owner: a dropped flag lets whichever Agent the roster
+    // reaches LAST win the shared key, and only this order makes the wrong answer
+    // observable (the owner would silently inherit the child's filtered lookup).
+    await worker('Zflag child worker', child.id);
+    const r = await pick();
+    expect(r.depth).toBe(0);
+    expect(r.candidates.map((x: any) => x.worker.id)).toEqual([ow.id]);
+  });
+
+  // Axel M11: `agentBaseChains` carries its own MAX_WALK, and no fixture held a
+  // chain AT the cap, so drift between the batched and singular walks was
+  // unobserved. A full 4-Agent chain (the cap counts the Agent itself) with the
+  // task at the farthest base pins parity with the singular walk and the depth
+  // it reports through the resolver.
+  it('walks a full-cap chain identically to the singular walk: the farthest base still contributes at depth 3', async () => {
+    await mapTask();
+    const base = await roleAgent('Cap base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const m1 = await roleAgent('Cap m1', base.id);
+    const m2 = await roleAgent('Cap m2', m1.id);
+    const child = await roleAgent('Cap child', m2.id);
+    const w = await worker('Cap child worker', child.id);
+    expect((await agentBaseChains(db, [child.id])).get(child.id)).toEqual(await agentBaseChain(db, child.id));
+    const r = await pick();
+    expect(r.depth).toBe(3);
+    expect(r.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
+  });
+
+  // Axel M12: the chain-member memory lookup keeps `deletedAt: null`, so a
+  // soft-deleted Agent never contributes a memory — here as the FIRST memory a
+  // memory-less child would read. A soft-deleted base directly under the child is
+  // defense-in-depth (the org read gate refuses its memory too, proven while
+  // pinning), so the sole-defense shape carries a LIVE grand-base with the task:
+  // the correct code skips the deleted Agent and roots at the grand-base (hit,
+  // depth 2); a dropped filter roots at the deleted Agent's own memory and dies at
+  // its read gate — the wrong root, observable as zero.
+  it('a soft-deleted intermediate is skipped for the first memory: the nearest live base contributes', async () => {
+    await mapTask();
+    const grand = await roleAgent('Del grand'); await node(grand.memoryId, 'tasks:finish', { isRunnable: true });
+    const base = await roleAgent('Del base', grand.id);
+    const child = await roleAgent('Del child', base.id);
+    await db.agent.update({ where: { id: child.id }, data: { systemMemoryId: null } });
+    const w = await worker('Del child worker', child.id);
+    await db.agent.update({ where: { id: base.id }, data: { deletedAt: new Date() } });
+    const r = await pick();
+    expect(r.total).toBe(1); expect(r.depth).toBe(2);
+    expect(r.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
+  });
+
   it('exposes only the closed paginated projection in the GraphQL schema', () => {
     const query = parse('{ registerRoleCandidates(appRef: "app", code: "code", limit: 20, offset: 0) { appId code taskLoc depth total candidates { role depth taskUrn worker { id kind name urn } } } }');
     expect(validate(buildSchema(typeDefs), query)).toEqual([]);
