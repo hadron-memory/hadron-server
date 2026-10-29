@@ -18,7 +18,9 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 let userId: string, outsiderId: string, appId: string, otherAppId: string, keyId: string, otherKeyId: string;
 const at = (day: number) => new Date(`2026-01-${String(day).padStart(2, '0')}T00:00:00Z`);
 const userContext = (): Context => ({ db, userId, roles: ['READER'] });
-const keyContext = (own = true): Context => ({ db, appId: own ? appId : otherAppId, appKeyId: own ? keyId : otherKeyId, roles: [] });
+const keyAuth = (own = true): AuthContext => ({ appId: own ? appId : otherAppId, appKeyId: own ? keyId : otherKeyId,
+  clientId: `app:${own ? appId : otherAppId}`, roles: [] });
+const keyContext = (own = true): Context => ({ db, ...keyAuth(own) });
 const list = (args: Record<string, unknown> = {}, c = userContext()) =>
   resolvers.Query.agentTasks({}, { appRef: appId, ...args }, c);
 const ids = (rows: Array<{ id: string }>) => rows.map(row => row.id);
@@ -71,14 +73,16 @@ it('distinguishes exact empty source from omitted/null/nonempty and filters befo
   await task('nonempty prefix collision', { tags: ['red', 'blue'], source: 'issue:exact-more' });
   const first = await task('empty older', { tags: ['red', 'blue'], source: '', createdAt: at(2) });
   const second = await task('empty newer', { tags: ['red', 'blue'], source: '', createdAt: at(3) });
-  await task('empty but wrong tags', { tags: ['red'], source: '', createdAt: at(4) });
+  await task('empty but missing tagsAll', { tags: ['red'], source: '', createdAt: at(4) });
+  await task('empty but missing tagsAny', { tags: ['blue'], source: '', createdAt: at(4) });
   await db.agentTask.createMany({ data: Array.from({ length: 25 }, (_, i) => ({ appId, ownerUserId: userId,
     title: `newer distractor ${i}`, source: 'not empty', tags: ['red', 'blue'], createdAt: at(5) })) });
   const foreign = await task('foreign exact match', { appId: otherAppId, source: '', tags: ['red', 'blue'], createdAt: at(6) });
   expect(ids(await list(compound))).toEqual([second.id, first.id]);
   expect(ids(await list({ ...compound, limit: 1, offset: 1 }))).toEqual([first.id]);
   const omitted = await list({ tagsAll: ['red', 'blue'], limit: 200 });
-  expect(ids(omitted)).toEqual(ids(await list({ tagsAll: ['red', 'blue'], source: null, limit: 200 })));
+  // Omission and null select the same set; createdAt ties do not promise stable order.
+  expect(ids(omitted).sort()).toEqual(ids(await list({ tagsAll: ['red', 'blue'], source: null, limit: 200 })).sort());
   expect(ids(omitted)).toEqual(expect.arrayContaining([absent.id, nonempty.id, first.id, second.id]));
   expect(ids(omitted)).not.toContain(foreign.id);
   expect(ids(await list({ tagsAll: ['red', 'blue'], source: 'issue:exact' }))).toEqual([nonempty.id]);
@@ -89,6 +93,16 @@ it.each(['foreign key', 'revoked key', 'removed member'] as const)('%s conceals 
   const foreign = await task('foreign matching row', { appId: otherAppId, source: '', tags: ['red', 'blue'] });
   expect(ids(await list(compound, keyContext()))).toEqual([own.id]);
   expect(ids(await list({ ...compound, appRef: otherAppId }, keyContext(false)))).toEqual([foreign.id]);
+  const auth: AuthContext = mode === 'removed member'
+    ? { userId, clientId: `user:${userId}`, roles: ['READER'] } : keyAuth(mode !== 'foreign key');
+  const admittedRef = mode === 'foreign key' ? otherAppId : appId;
+  const admittedId = mode === 'foreign key' ? foreign.id : own.id;
+  // The same MCP identity must list its admitted App before its denial can prove concealment.
+  await surfaces(auth, async (_api, client) => {
+    const admitted = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: admittedRef, ...compound } });
+    expect(admitted.isError).not.toBe(true);
+    expect(renderedIds(text(admitted))).toEqual([admittedId]);
+  });
   let c: Context;
   if (mode === 'foreign key') c = keyContext(false);
   else if (mode === 'revoked key') {
@@ -105,7 +119,7 @@ it.each(['foreign key', 'revoked key', 'removed member'] as const)('%s conceals 
       });
     }
   }
-  await surfaces(c as AuthContext, async (api, client) => {
+  await surfaces(auth, async (api, client) => {
     for (const ref of [appId, generateId()]) {
       // Calendar-invalid ISO is accepted by the global DateTime scalar, so this reaches the resolver gate.
       const gql = await api.executeOperation({ query, variables: { app: ref, source: '', after: invalidCalendar } }, { contextValue: c });
@@ -126,11 +140,12 @@ it.each(['created', 'started', 'finished'] as const)('pins each single inclusive
   const rows = [];
   for (const d of [2, 3, 4]) rows.push(await task(`day ${d}`, { createdAt: at(d),
     ...(field === 'created' ? {} : { status: field === 'started' ? 'started' : 'finished', assigneeUserId: userId,
-      assignedAt: at(d), startedAt: at(d), ...(field === 'finished' ? { finishedAt: at(d), resultOutcome: 'succeeded' } : {}) }),
+      assignedAt: at(d + 1), startedAt: at(d + 5), ...(field === 'finished' ? { finishedAt: at(d + 10), resultOutcome: 'succeeded' } : {}) }),
   }));
   if (field !== 'created') await task('null dated row', { createdAt: at(5) });
-  expect(ids(await list({ [`${field}After`]: at(3).toISOString() }))).toEqual([rows[2].id, rows[1].id]);
-  expect(ids(await list({ [`${field}Before`]: at(3).toISOString() }))).toEqual([rows[1].id, rows[0].id]);
+  const boundary = at(field === 'created' ? 3 : field === 'started' ? 8 : 13).toISOString();
+  expect(ids(await list({ [`${field}After`]: boundary }))).toEqual([rows[2].id, rows[1].id]);
+  expect(ids(await list({ [`${field}Before`]: boundary }))).toEqual([rows[1].id, rows[0].id]);
 });
 
 it('pins overdue against one PostgreSQL instant even when both JS Date clocks are false', async () => {
