@@ -98,6 +98,7 @@ beforeEach(async () => {
 
 
 import { createHash } from 'node:crypto';
+import * as contentHash from '../lib/contentHash.js';
 
 async function denseFixture() {
   const nodes: Array<{ id: string; loc: string }> = [];
@@ -115,9 +116,19 @@ async function denseFixture() {
 
 async function measuredRead(scope: 'abstract' | 'all', refs: string[]) {
   const loads: Array<{phase: string; rows: number; bytes: number; rootBodyBytes: number; endpointBodyBytes: number}> = [];
+  let pendingBodies = 0, maxPendingBodies = 0;
+  const staleCheck = contentHash.isAbstractUnverified;
+  const renderSpy = vi.spyOn(contentHash, 'isAbstractUnverified').mockImplementation((node) => {
+    pendingBodies = 0;
+    return staleCheck(node);
+  });
   function record(value: any, phase: string) {
     const rows = Array.isArray(value) ? value : value ? [value] : [];
     const projected = rows.filter((n: any) => Array.isArray(n.outgoingEdges) && Array.isArray(n.incomingEdges));
+    if (phase === 'current') {
+      pendingBodies += projected.filter((n: any) => !!n.content).length;
+      maxPendingBodies = Math.max(maxPendingBodies, pendingBodies);
+    }
     if (projected.length) loads.push({ phase, rows: projected.length,
       bytes: Buffer.byteLength(JSON.stringify(projected)),
       rootBodyBytes: projected.reduce((n: number, r: any) => n + Buffer.byteLength(r.content ?? ''), 0),
@@ -138,8 +149,8 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[]) {
   }) as typeof db.$transaction);
   try {
     const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { refs, contentScope: scope, raw: true });
-    return { text, hash: createHash('sha256').update(text).digest('hex'), loads };
-  } finally { many.mockRestore(); txSpy.mockRestore(); }
+    return { text, hash: createHash('sha256').update(text).digest('hex'), loads, maxPendingBodies };
+  } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
 
 it.each(['abstract', 'all'] as const)('#2774 bounds endpoint/root payloads with byte-identical %s output', async (scope) => {
@@ -148,14 +159,15 @@ it.each(['abstract', 'all'] as const)('#2774 bounds endpoint/root payloads with 
   console.log(JSON.stringify({ probe: 'mcpBatch2774', scope, ...result, text: undefined }));
   expect(result.text).not.toMatch(/^Error/);
   expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
-  expect(result.loads.filter(l => l.phase === 'current')).toHaveLength(12);
+  expect(result.loads.filter(l => l.phase === 'current').every(l => l.rows === 1)).toBe(true);
+  expect.soft(result.maxPendingBodies).toBeLessThanOrEqual(1);
   // The main-source output hashes are captured on these same deterministic rows before the fix.
   const baseline = { abstract: '8a33ebc7bc8d148e45a9b7ed590d8cd79a79a2e4f213ecae21fb9d5598c8d952', all: 'ee49b72e6151cf6c1b2717d0ca18d3b6f5b5c1af60a19c7ae15bbe8b60e6c94e' };
   expect(result.hash).toBe(baseline[scope]);
   expect.soft(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
   if (scope === 'abstract') {
-    expect.soft(result.loads.reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
-    expect.soft(result.loads.reduce((n, l) => n + l.bytes, 0)).toBeLessThanOrEqual(1_310_720);
+    expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
+    expect.soft(result.loads.filter(l => l.phase === 'initial').reduce((n, l) => n + l.bytes, 0)).toBeLessThanOrEqual(1_310_720);
     expect(result.text).toContain('returned 12 node(s)');
   } else expect(result.text).toContain('truncated: response-size cap reached');
 }, 60_000);
