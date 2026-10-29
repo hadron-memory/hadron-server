@@ -159,3 +159,16 @@ it.each(['abstract', 'all'] as const)('#2774 bounds endpoint/root payloads with 
     expect(result.text).toContain('returned 12 node(s)');
   } else expect(result.text).toContain('truncated: response-size cap reached');
 }, 60_000);
+
+it.each(['abstract', 'all'] as const)('#2774 preserves PK/URN/prefix and single/batch %s projections', async (contentScope) => {
+  const nodes = await denseFixture();
+  const server = createTestableMcpServer(adminAuth());
+  const options = { contentScope, raw: true };
+  const byPk = await server.callToolText('hadron_get_nodes', { refs: nodes.map(n => n.id), ...options });
+  const byUrn = await server.callToolText('hadron_get_nodes', { refs: nodes.map(n => `hrn:node:batch-org:batchmem:${n.loc}`), ...options });
+  const byPrefix = await server.callToolText('hadron_get_nodes', { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'dense:', ...options });
+  expect(byUrn).toBe(byPk);
+  expect(byPrefix).toBe(byPk);
+  const single = await server.callToolText('hadron_get_node', { urn: `hrn:node:batch-org:batchmem:${nodes[0].loc}`, ...options });
+  expect(byPk).toContain(single);
+});
