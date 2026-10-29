@@ -9,6 +9,9 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { ensureChannelWithRoot } from '../channels.js';
+import { GraphQLError } from 'graphql';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { mergeUsers } from '../../test/mergeConsent.js';
 import { evaluateDarkWorkers } from './darkWorker.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -360,5 +363,23 @@ describe('#2755 one worker failing does not stop the App\'s pass', () => {
       spy.mockRestore();
     }
     expect(await db.darkWorkerEpisode.count({ where: { endedAt: null } })).toBe(1);
+  });
+});
+
+describe('#2755 a task-less alarm through the real acknowledge and merge paths', () => {
+  it('is acknowledged by its manager, and holds a merge of a chain member open until then (episode_start is NULL)', async () => {
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    const [alarm] = await alarms('Liam');
+    expect(alarm.episodeStart).toBeNull();
+    const other = await db.user.create({ data: { id: generateId(), githubId: 99_500 + Math.floor(Math.random() * 1000), githubUsername: `dark-o-${generateId()}`, roles: ['READER'] } });
+    const admin = await db.user.create({ data: { id: generateId(), githubId: 99_600 + Math.floor(Math.random() * 1000), githubUsername: `dark-a-${generateId()}`, roles: ['ADMIN'] } });
+    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).rejects.toSatisfy(
+      (e) => e instanceof GraphQLError && e.extensions?.code === 'MERGE_USER_IN_OPEN_ALARMS' && e.extensions?.alarmCount === 1,
+    );
+    const ctx: Context = { db, userId: user.id, roles: ['READER'] };
+    const acked = await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: alarm.id }, ctx);
+    expect(acked).toMatchObject({ acknowledgedByUserId: user.id });
+    await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).resolves.toBeDefined();
   });
 });

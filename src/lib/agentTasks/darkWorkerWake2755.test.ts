@@ -164,4 +164,21 @@ describe('#2755 the evaluator\'s read of the due wakes writes nothing', () => {
     expect(await db.appWakeReservation.count()).toBe(0);
     expect(await db.appWakeDay.count()).toBe(0);
   });
+
+  it('touches no other delivery, read-state or episode row when no alarm is due (the evaluator itself writes nothing then)', async () => {
+    await bind('Tove', after(5));
+    await say('hello @tove', ['tove']);
+    const snapshot = async () => JSON.stringify([
+      await db.channelReadState.findMany({ orderBy: { workerId: 'asc' } }),
+      await db.workerDeliveryTick.findMany(),
+      await db.workerDeliveryTaskEvent.findMany(),
+      await db.appWakeReservation.findMany(),
+      await db.appWakeDay.findMany(),
+      await db.darkWorkerEpisode.findMany(),
+      await db.agentTeamEvent.findMany(),
+    ]);
+    const before = await snapshot();
+    expect(await evaluateDarkWorkers(db, after(10))).toEqual([]);
+    expect(await snapshot()).toBe(before);
+  });
 });
