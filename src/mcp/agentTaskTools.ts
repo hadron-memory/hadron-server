@@ -677,6 +677,7 @@ const SHAPE_HADRON_TASK_LIST = {
   tagsAny: z.array(z.string()).optional().describe('Match at least one tag; empty does not narrow.'),
   tagsAll: z.array(z.string()).optional().describe('Match every tag; empty does not narrow.'),
   source: z.string().optional().describe('Exact opaque source, not a prefix.'),
+  text: z.string().optional().describe('Case-insensitive substring of the title or description, 1 to 200 characters after trimming. ANDed with the other filters.'),
   overdue: z.boolean().optional().describe('True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks; not an alarm.'),
   createdAfter: taskListDateTime.optional().describe('Inclusive creation-time lower bound (ISO date-time).'),
   createdBefore: taskListDateTime.optional().describe('Inclusive creation-time upper bound (ISO date-time).'),
