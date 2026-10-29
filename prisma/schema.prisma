@@ -3294,6 +3294,9 @@ model App {
   deliveryCheckPeriodSeconds        Int                  @default(600) @map("delivery_check_period_seconds")
   /// #2138 §3.2 — OVERDUE after this many missed periods (+5 min slack, hard-coded); at least 1.
   deliveryFailedChecksToOverdue     Int                  @default(2) @map("delivery_failed_checks_to_overdue")
+  /// #2755 — a worker's unacknowledged due wake raises the dark-worker alarm after this many seconds (300..86400;
+  /// default 1800). Not `deliveryStuckWindowSeconds` (deprecated, cor:agt:050:26's window).
+  deliveryDarkAlarmWindowSeconds    Int                  @default(1800) @map("delivery_dark_alarm_window_seconds")
   /// #2138 §3.6 — a TEAM pause, separate from every worker's own `pausedUntil`: a worker cannot lift
   /// it, and ending it never clears a self-pause. NULL = not paused.
   teamPausedAt                      DateTime?            @map("team_paused_at")

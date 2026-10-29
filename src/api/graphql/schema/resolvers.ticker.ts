@@ -137,7 +137,7 @@ type TickerSettings = {
 };
 export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
-  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true, deliveryDarkAlarmWindowSeconds: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
@@ -613,6 +613,7 @@ export async function writeAppSettings(
       standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
+      darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
     validateDeliverySettings(delivery, patch);
     await tx.app.update({
@@ -625,6 +626,7 @@ export async function writeAppSettings(
         deliveryStandbyEnabled: delivery.standbyEnabled,
         deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
         deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
+        deliveryDarkAlarmWindowSeconds: delivery.darkAlarmWindowSeconds,
       },
     });
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };

@@ -13796,6 +13796,8 @@ export const typeDefs = `#graphql
     checkPeriodSeconds: Int!
     "#2138: a worker with a task is OVERDUE after this many missed periods plus 5 minutes. Whole number, 1..100; default 2."
     failedChecksToOverdue: Int!
+    "#2755: a worker's due wake left unacknowledged this long raises the dark-worker alarm. Whole seconds, 300..86400; default 1800. Independent of stuckWindowSeconds."
+    darkAlarmWindowSeconds: Int!
     "Stored configuration; default false. Enabling is refused until standby behavior ships."
     standbyEnabled: Boolean!
     "False until S7 supplies standby behavior; configuration alone has no effect."
@@ -13813,6 +13815,8 @@ export const typeDefs = `#graphql
     checkPeriodSeconds: Int
     "#2138: whole number, 1..100."
     failedChecksToOverdue: Int
+    "#2755: whole seconds, 300..86400."
+    darkAlarmWindowSeconds: Int
   }
 
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
