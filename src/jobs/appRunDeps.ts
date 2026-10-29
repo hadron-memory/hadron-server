@@ -15,7 +15,9 @@ import { verifyAutomationPin, checkAutomationRevisions, assertPinnedAiIdentity, 
  *  - resolveConfig: trigger override name → spec-036 registry walk.
  *  - writeOutput: the CURRENT node's data.output { writeTo, mode } →
  *    node-write core under the run principal ('replace' default; 'append'
- *    folds onto existing content). No output spec → runs:<runId> beside
+ *    folds onto existing content). A writeTo may carry {runId}/{runTime}
+ *    destination tokens (#2437) — expanded at write time, then
+ *    grant-checked (writeToPattern.ts). No output spec → runs:<runId> beside
  *    that node.
  */
 
@@ -27,6 +29,7 @@ import { generateText, generateExtraction, generateWithTools, type ExtractionFie
 import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js';
 import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
 import { loadFlowNode, resolveFlowMemory } from '../lib/runner/loadFlowNode.js';
+import { expandWriteTo } from '../lib/runner/writeToPattern.js';
 import { resolveRunTools } from '../lib/runner/tools/index.js';
 import {
   isMcpRunToolName,
@@ -39,6 +42,7 @@ import {
   unknownHaToolNames,
 } from '../lib/runner/tools/haTools.js';
 import { splitNodeUrn } from '../lib/urn.js';
+import { canWriteToMemory } from '../mcp/access-control.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import type { RunExecutionDeps, RunNodeSpec } from './appRuns.js';
 import { dispatchRunCallback } from '../api/webhooks.js';
@@ -185,7 +189,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       const haTools = await materializeHaRunTools(db, run, toolNames.filter(isHaRunToolName));
       return generateWithTools(resolved, req, [...tools, ...mcpTools, ...haTools], {
         onToolCall: opts.onToolCall,
-        toolCtx: { log: opts.log, db, run, principal: runContext(db, run) },
+        toolCtx: { log: opts.log, db, run, principal: runContext(db, run), nodeUrn: opts.nodeUrn },
       });
     },
 
@@ -202,12 +206,31 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       let targetMemoryId = memory.id;
       let targetLoc: string;
       if (spec.writeTo) {
-        const split = splitNodeUrn(spec.writeTo);
+        // #2437 (cor:agt:010:01, Vera's ruling on the issue): expand the
+        // destination pattern FIRST — a closed token set ({runId},
+        // {runTime}), so no eventData or user text rides into the
+        // destination — then resolve and grant-check the RESULTING URN at
+        // write time, never the pattern at authoring: writeTo is data, not
+        // the automation, so the grant check is the only control on where a
+        // run writes.
+        const expanded = expandWriteTo(spec.writeTo, run);
+        const split = splitNodeUrn(expanded);
         // Shared guards (tenant scope + encrypted-memory denial) — a writeTo
         // into an encrypted memory is denied like every other flow touch.
         const targetMemory = await resolveFlowMemory(
-          db, split.memoryUrn, run.organizationId, spec.writeTo,
+          db, split.memoryUrn, run.organizationId, expanded,
         );
+        // #2437 acceptance 2: the register-grant check (a memory-level
+        // grant covers any node under it) through the same shared predicate
+        // requireMemoryWriteAccess applies — surfaced here, before any
+        // write, as a plain message naming the destination and the next
+        // step instead of the generic Forbidden.
+        if (!(await canWriteToMemory(db, ctx, targetMemory.id, { destination: { loc: split.loc, verb: 'upsert' } }))) {
+          throw new Error(
+            `Output destination "${targetMemory.urn}" is not granted to this app — ` +
+              `grant the app read-write access to that memory (or a write grant for this location), or change the flow's output destination.`,
+          );
+        }
         targetMemoryId = targetMemory.id;
         targetLoc = split.loc;
       } else {

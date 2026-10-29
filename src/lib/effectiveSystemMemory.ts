@@ -203,7 +203,10 @@ export async function findEffectiveNodeIdByLoc(
   db: Db,
   memoryId: string,
   loc: string,
+  options: { inheritRoot?: boolean } = {},
 ): Promise<{ id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null> {
+  // A memory-less child starts at its first contributing base; that root is inherited too.
+  const inheritRoot = options.inheritRoot ?? false;
   const chain = await systemMemoryChain(db, memoryId);
   const links = chain.length > 0 ? chain : [{ agentId: '', agentUrn: '', memoryId }];
   const memIds = links.map((l) => l.memoryId);
@@ -212,13 +215,81 @@ export async function findEffectiveNodeIdByLoc(
     FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
     JOIN nodes n ON n.memory_id = c.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
-      AND (c.pos = 1 OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
-      AND (c.pos = 1 OR n.node_type <> ${COMMENT_NODE_TYPE})
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY c.pos LIMIT 1`;
   const hit = rows[0];
   if (!hit) return null;
   const link = links[hit.pos - 1]!;
   return { id: hit.id, memoryId: hit.memory_id, inheritedFrom: hit.pos === 1 ? null : { agentId: link.agentId, agentUrn: link.agentUrn, via: memoryId } };
+}
+
+/**
+ * `findEffectiveNodeIdByLoc` for many roots at once (#2608 / #2724, Atilla's
+ * BLIND P2): one walk seeds every root memory, chains kept apart by the root
+ * column, and one nearest-hit selection resolves every root — a roster's worth
+ * of per-memory lookups becomes one statement. Same edges, same
+ * {@link AGENT_BASE_CHAIN_CAP}, same nearest-first pos numbering (memory-less
+ * Agents are skipped, exactly as {@link systemMemoryChain} skips them), and
+ * the same per-root `inheritRoot` rule: a root flagged inherited filters its
+ * own pos-1 nodes by role and node type, one flagged own does not. Results
+ * are keyed `"<memoryId>:<inheritRoot>"`, mirroring the flag the singular
+ * would have received, so one memory can be asked both ways in one call.
+ */
+export async function findEffectiveNodeIdsByLoc(
+  db: Db,
+  roots: Array<{ memoryId: string; inheritRoot: boolean }>,
+  loc: string,
+): Promise<Map<string, { id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null>> {
+  const out = new Map<string, { id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null>(
+    roots.map((r) => [`${r.memoryId}:${r.inheritRoot}`, null]),
+  );
+  if (!roots.length) return out;
+  const rootIds = roots.map((r) => r.memoryId);
+  const rootFlags = roots.map((r) => r.inheritRoot);
+  const rows = await db.$queryRaw<
+    Array<{ root: string; inherit_root: boolean; node_id: string; memory_id: string; pos: number; agent_id: string; agent_urn: string }>
+  >`
+    WITH RECURSIVE memup(root, agent_id, depth) AS (
+      SELECT r.memory_id, a.id, 1 FROM unnest(${rootIds}::text[]) AS r(memory_id)
+      JOIN agents a ON a.system_memory_id = r.memory_id
+      WHERE a.deleted_at IS NULL
+      UNION ALL
+      SELECT memup.root, b.extends_agent_id, memup.depth + 1
+      FROM agents b JOIN memup ON b.id = memup.agent_id
+      WHERE b.extends_agent_id IS NOT NULL AND memup.depth < ${AGENT_BASE_CHAIN_CAP}
+    ),
+    walked AS (
+      SELECT root, a.id AS agent_id, a.urn AS agent_urn, a.system_memory_id AS memory_id, depth
+      FROM memup JOIN agents a ON a.id = memup.agent_id
+      WHERE a.deleted_at IS NULL AND a.system_memory_id IS NOT NULL
+      UNION ALL
+      -- A root no live Agent claims is its own only link, as in the singular.
+      SELECT r.memory_id, '', '', r.memory_id, 0 FROM unnest(${rootIds}::text[]) AS r(memory_id)
+      WHERE NOT EXISTS (SELECT 1 FROM memup mu WHERE mu.root = r.memory_id)
+    ),
+    links AS (
+      SELECT root, agent_id, agent_urn, memory_id,
+             ROW_NUMBER() OVER (PARTITION BY root ORDER BY depth) AS pos
+      FROM walked
+    ),
+    ask(root, inherit_root) AS (SELECT * FROM unnest(${rootIds}::text[], ${rootFlags}::boolean[]) AS a(root, inherit_root))
+    SELECT DISTINCT ON (l.root, ask.inherit_root) l.root, ask.inherit_root, n.id AS node_id, l.memory_id, l.pos::int AS pos, l.agent_id, l.agent_urn
+    FROM links l
+    JOIN ask ON ask.root = l.root
+    JOIN nodes n ON n.memory_id = l.memory_id
+    WHERE n.loc = ${loc} AND n.deleted_at IS NULL
+      AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.node_type <> ${COMMENT_NODE_TYPE})
+    ORDER BY l.root, ask.inherit_root, l.pos`;
+  for (const r of rows) {
+    out.set(`${r.root}:${r.inherit_root}`, {
+      id: r.node_id,
+      memoryId: r.memory_id,
+      inheritedFrom: r.pos === 1 ? null : { agentId: r.agent_id, agentUrn: r.agent_urn, via: r.root },
+    });
+  }
+  return out;
 }
 
 /**
@@ -370,4 +441,68 @@ export async function resolveInheritedEdges(
     out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
   }
   return out;
+}
+
+/**
+ * #2044 (S7), cor:agt:040:16 / cor:dmo:050:14 (R8) — the chain a COMPILE reads for
+ * an App's installed Agent, nearest first: the App's INSTALL MEMORY (when the App
+ * has customised the Agent and is live), then the Agent's own system memory, then
+ * each base. ONE resolver for inheritance and install overrides, so the two cannot
+ * drift into different notions of "nearest".
+ *
+ * Deliberately NOT {@link systemMemoryChain}: ordinary reads of the Agent's system
+ * memory never see an install memory (#1840 stays deferred), and only a compile
+ * calls this. `exemptThrough` is how many leading links are NOT bases: the install
+ * memory and the Agent's own memory are the App's and the Agent's own, so their
+ * boot prompts and comments stay candidates; only a base's boot prompt is dropped
+ * (cor:agt:040:05), and it hides nothing (it isn't a candidate at all).
+ *
+ * A full node URN names exactly that node and never goes through this chain.
+ */
+export async function compileChain(
+  db: Db,
+  target: { appId: string; agentId: string },
+): Promise<{ links: ChainLink[]; exemptThrough: number; installMemoryId: string | null }> {
+  const agent = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ urn: string; system_memory_id: string | null }>>`
+    SELECT urn, system_memory_id FROM agents WHERE id = ${target.agentId} AND deleted_at IS NULL`;
+  const own = agent[0];
+  if (!own) return { links: [], exemptThrough: 0, installMemoryId: null };
+  const install = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string }>>`
+    SELECT m.id FROM memories m JOIN apps a ON a.id = m.app_id
+    WHERE m.app_id = ${target.appId} AND m.install_of_agent_id = ${target.agentId}
+      AND m.class = 'system' AND m.deleted_at IS NULL
+      AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
+      AND EXISTS (SELECT 1 FROM app_agents aa WHERE aa.app_id = a.id AND aa.agent_id = ${target.agentId})`;
+  const links: ChainLink[] = [];
+  if (install[0]) links.push({ agentId: target.agentId, agentUrn: own.urn, memoryId: install[0].id });
+  const base = own.system_memory_id ? await systemMemoryChain(db, own.system_memory_id) : [];
+  links.push(...base);
+  // The install memory and the Agent's own memory (first of `base`) are not bases.
+  return { links, exemptThrough: (install[0] ? 1 : 0) + (base.length > 0 ? 1 : 0), installMemoryId: install[0]?.id ?? null };
+}
+
+/**
+ * The node a bare `loc` names in a COMPILE for `(App, Agent)`: the nearest of
+ * {@link compileChain}'s links that holds a live node there. Null when none does.
+ * A link past `exemptThrough` is a base, so its boot prompts and comments don't count.
+ */
+export async function findCompileNodeIdByLoc(
+  db: Db,
+  target: { appId: string; agentId: string },
+  loc: string,
+): Promise<{ id: string; memoryId: string; fromInstall: boolean } | null> {
+  const { links, exemptThrough, installMemoryId } = await compileChain(db, target);
+  if (links.length === 0) return null;
+  const memIds = links.map((l) => l.memoryId);
+  const rows = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string; memory_id: string; pos: number }>>`
+    SELECT n.id, n.memory_id, c.pos::int AS pos
+    FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
+    JOIN nodes n ON n.memory_id = c.memory_id
+    WHERE n.loc = ${loc} AND n.deleted_at IS NULL
+      AND (c.pos <= ${exemptThrough} OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND (c.pos <= ${exemptThrough} OR n.node_type <> ${COMMENT_NODE_TYPE})
+    ORDER BY c.pos LIMIT 1`;
+  const hit = rows[0];
+  if (!hit) return null;
+  return { id: hit.id, memoryId: hit.memory_id, fromInstall: hit.memory_id === installMemoryId };
 }

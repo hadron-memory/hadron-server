@@ -68,7 +68,7 @@ describe('the due rule — cor:agt:080:08–:12', () => {
     expect(run([channel('c1', [msg(3)])], [{ ...ticker(), lastAckedTick: 4 }], late)?.anchorAtMs).toBe(t0 + 5 * 600_000);
     // Mixed: the earlier of a task event and a mention.
     const w = workerWake({ workerId: W, workerTokens: tokens, mentionsImmediate: true, channels: [channel('c1', [post(5, t0 + 9000)])], subscriptions: [], now: NOW,
-      tasks: [{ taskId: 't', eventId: 'e', chainIndex: 0, event: 'ASSIGNED', title: 'x', atMs: t0 + 2000 }] });
+      tasks: [{ taskId: 't', eventId: 'e', chainIndex: 0, event: 'ASSIGNED', title: 'x', handle: 'AT0.1', atMs: t0 + 2000 }] });
     expect(w?.anchorAtMs).toBe(t0 + 2000);
     // Nothing carries a time (pure fixtures): null, never invented.
     expect(run([channel('c1', [msg(6, { mentions: ['liam'] })])])?.anchorAtMs).toBeNull();
@@ -201,5 +201,16 @@ describe('#2138 §3.3 — channel checks and the ticker', () => {
 
   it('every-tick ignores freshness (its meaning is unconditional)', () => {
     expect(run([checked(5)], [ticker({ reasons: ['every-tick'] })])?.reasons).toEqual([{ kind: 'TICK', tickerId: 't1', k: 1 }]);
+  });
+});
+
+describe('S3 versioned subtree wake routing', () => {
+  it('uses only immutable recipient IDs/global stamp and excludes own posts', () => {
+    const team = msg(1,{mentions:['team.head.all','all'],teamTagsVersion:1,teamBroadcastWorkerIds:[W]});
+    expect(run([channel('c',[team],true)])?.reasons).toEqual([{kind:'MENTION'}]);
+    expect(run([channel('c',[{...team,teamBroadcastWorkerIds:['elsewhere']}],true)])).toBeNull();
+    expect(run([channel('c',[{...team,authorWorkerId:W}],true)])).toBeNull();
+    expect(run([channel('c',[msg(2,{mentions:['team'],broadcastWakes:true,teamTagsVersion:1,teamBroadcastWorkerIds:[]})],true)])).toBeNull();
+    expect(run([channel('c',[msg(3,{mentions:['team'],broadcastWakes:true})],true)])).not.toBeNull();
   });
 });

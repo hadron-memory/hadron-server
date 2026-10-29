@@ -1,11 +1,12 @@
-import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
+import { includeUrnTarget } from './includeUrnTarget.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
 import { revisionApprovalOf, newestApprovedRevisionOf } from '../nodeApproval.js';
-import { locateIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
+import { locateIncludeTags, locateLiteralIncludeTags, IncludeSyntaxError, type IncludeTag } from './parseIncludeTags.js';
+import { LiteralGuardCollision } from './literalGuard.js';
 
-/** Deepest include chain a read follows: the same cap a write enforces (#2040). */
+/** Deepest include chain a read follows; past it a reader sees the notice (cor:dmo:150:06). Writes don't enforce it (#2134). */
 export const MAX_RESOLVE_DEPTH = 10;
 
 /**
@@ -18,7 +19,8 @@ export const BROKEN_INCLUDE_NOTICE = '[Include unavailable]';
 export const INCLUDE_LITERAL_NODE_TYPES: ReadonlySet<string> = new Set(['chat-message', 'record']);
 
 /** `content` is the live row's decrypted text; `memory` is kept so a past revision can be decrypted with the same authorized context. */
-interface Target { id: string; memoryId: string; content: string | null; revSeq: number; memory: { id: string; isEncrypted: boolean } }
+export interface IncludeTarget { id: string; memoryId: string; content: string | null; revSeq: number; memory: { id: string; isEncrypted: boolean } }
+type Target = IncludeTarget;
 
 /**
  * Per-request lookups, and nothing else. It holds a reader's authorized
@@ -27,7 +29,7 @@ interface Target { id: string; memoryId: string; content: string | null; revSeq:
  * belongs to one request's principal; it is never shared across callers.
  */
 export class IncludeReadMemo {
-  readonly memoryByUrn = new Map<string, Promise<string | null>>();
+  readonly targetIdentityByUrn = new Map<string, ReturnType<typeof includeUrnTarget>>();
   readonly targetByAddress = new Map<string, Promise<Target | null>>();
   readonly revisionByKey = new Map<string, Promise<string | null>>();
 }
@@ -40,18 +42,23 @@ export interface SpliceOptions {
    */
   foreign?: boolean;
   memo?: IncludeReadMemo;
+  /**
+   * #2135 — when set, the `{{>` of every include tag written as code is replaced by this guard in the
+   * spliced text, so a later Mustache render cannot treat it as a partial; the caller restores it. Each
+   * source text is judged on its own, before assembly. Unset leaves literal tags as written.
+   */
+  literalGuard?: string;
+  /**
+   * Incremented once for each include that resolved to the notice (missing, unreadable, cyclic, too deep, no
+   * qualifying revision). The resolver's own verdict, so a caller never has to infer failure by searching the
+   * spliced text for the notice, which a successful target may legitimately contain.
+   */
+  broken?: { count: number };
 }
 
-type Db = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision'>;
+export type IncludeDb = Pick<PrismaClient, 'node' | 'memory' | 'nodeRevision' | 'urnAlias'>;
+type Db = IncludeDb;
 
-async function memoryIdOfUrn(db: Db, memo: IncludeReadMemo, urn: string): Promise<string | null> {
-  let hit = memo.memoryByUrn.get(urn);
-  if (!hit) {
-    hit = db.memory.findUnique({ where: { urn }, select: { id: true } }).then(m => m?.id ?? null);
-    memo.memoryByUrn.set(urn, hit);
-  }
-  return hit;
-}
 
 /**
  * Decrypt one sealed field with the memory's cached key. A failure (a key that
@@ -68,14 +75,14 @@ function openSealed(content: string | null, memory: { id: string; isEncrypted: b
 
 /** The stored text of a node the reader may read, or null for missing, deleted, unreadable and keyless-encrypted alike. */
 async function lookupTarget(
-  db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string,
+  db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, memoryId: string, loc: string, targetId?: string,
 ): Promise<Target | null> {
-  const key = `${memoryId}\u0000${loc}`;
+  const key = targetId ?? `${memoryId}\u0000${loc}`;
   let hit = memo.targetByAddress.get(key);
   if (!hit) {
     hit = (async () => {
       const node = await db.node.findFirst({
-        where: { memoryId, loc, deletedAt: null, AND: [access] },
+        where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, AND: [access, { memory: { deletedAt: null } }] },
         select: { id: true, memoryId: true, content: true, revSeq: true, memory: { select: { id: true, isEncrypted: true } } },
       });
       if (!node) return null;
@@ -128,13 +135,37 @@ async function lookupRevision(db: Db, memo: IncludeReadMemo, target: Target, rev
  * null; neither is evidence about approval. A snapshot captured in another memory is not this target's to serve, and
  * an encrypted memory is NOT_APPLICABLE.
  */
-async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<string | null> {
+async function approvedText(db: Db, target: Target, pinned: number | undefined): Promise<{ revNo: number; text: string } | null> {
   const revNo = pinned ?? (await newestApprovedRevisionOf(db, target.id)).found?.revNo;
   if (revNo === undefined) return null;
   const verdict = await revisionApprovalOf(db, target.id, revNo);
   if (verdict.state !== 'APPROVED' || !verdict.served) return null;
   if (verdict.served.memoryId !== target.memoryId) return null;
-  return verdict.served.content ?? '';
+  return { revNo, text: verdict.served.content ?? '' };
+}
+
+/**
+ * #2046 — THE include selector (cor:dmo:150:02), shared by every read and by the
+ * boot-prompt compile so the two cannot disagree about which revision a tag
+ * serves. `approved` (pinned or not) serves the revision the shared approval
+ * predicate qualifies; `rev=N` alone serves stored revision N; no settings
+ * serves the latest. `signed` is ignored until signing ships (D7), as before.
+ * Null when no revision qualifies: a reader shows the notice, a compile refuses.
+ */
+export async function selectIncludeRevision(
+  db: IncludeDb, memo: IncludeReadMemo, target: IncludeTarget, settings: IncludeTag['settings'],
+): Promise<{ revNo: number; text: string } | null> {
+  if (settings.approved) return approvedText(db, target, settings.rev);
+  if (settings.rev !== undefined) {
+    const text = await lookupRevision(db, memo, target, settings.rev);
+    return text == null ? null : { revNo: settings.rev, text };
+  }
+  return { revNo: target.revSeq, text: target.content ?? '' };
+}
+
+function unresolved(opts: SpliceOptions): string {
+  if (opts.broken) opts.broken.count += 1;
+  return BROKEN_INCLUDE_NOTICE;
 }
 
 async function expandTag(
@@ -143,53 +174,66 @@ async function expandTag(
 ): Promise<string> {
   // `signed` is stored and ignored until the signing ceremony ships (cor:dmo:150:02,
   // Vera's D7): it serves as if absent, and `approved signed` as `approved`.
-  if (level > MAX_RESOLVE_DEPTH) return BROKEN_INCLUDE_NOTICE;
+  if (level > MAX_RESOLVE_DEPTH) return unresolved(opts);
   let memoryId = includerMemoryId;
   let loc = tag.target;
+  let targetId: string | undefined;
   if (tag.kind === 'urn') {
-    let parts: { memoryUrn: string; loc: string };
-    try { parts = splitNodeUrn(tag.target); } catch { return BROKEN_INCLUDE_NOTICE; }
-    const id = await memoryIdOfUrn(db, memo, parts.memoryUrn);
-    if (!id || (id !== includerMemoryId && !opts.foreign)) return BROKEN_INCLUDE_NOTICE;
-    memoryId = id;
-    loc = parts.loc;
+    let identity = memo.targetIdentityByUrn.get(tag.target);
+    if (!identity) {
+      identity = includeUrnTarget(db, tag.target);
+      memo.targetIdentityByUrn.set(tag.target, identity);
+    }
+    const resolved = await identity;
+    if (!resolved || (resolved.memoryId !== includerMemoryId && !opts.foreign)) return unresolved(opts);
+    memoryId = resolved.memoryId;
+    loc = resolved.loc;
+    targetId = resolved.id;
   }
-  const target = await lookupTarget(db, access, memo, memoryId, loc);
-  if (!target || trail.has(target.id)) return BROKEN_INCLUDE_NOTICE;
-  let stored: string | null;
-  if (tag.settings.approved) {
-    stored = await approvedText(db, target, tag.settings.rev);
-    if (stored === null) return BROKEN_INCLUDE_NOTICE;
-  } else {
-    stored = tag.settings.rev !== undefined
-      ? await lookupRevision(db, memo, target, tag.settings.rev)
-      : target.content;
-  }
-  if (stored == null) return tag.settings.rev !== undefined ? BROKEN_INCLUDE_NOTICE : '';
+  const target = await lookupTarget(db, access, memo, memoryId, loc, targetId);
+  if (!target || trail.has(target.id)) return unresolved(opts);
+  const selected = await selectIncludeRevision(db, memo, target, tag.settings);
+  if (!selected) return unresolved(opts);
+  if (!tag.settings.approved && tag.settings.rev === undefined && target.content == null) return '';
   // Rendered per traversal: this node's ancestors and depth travel with it.
-  return spliceWithin(db, access, memo, opts, stored, target.memoryId, new Set([...trail, target.id]), level + 1);
+  return spliceWithin(db, access, memo, opts, selected.text, target.memoryId, new Set([...trail, target.id]), level + 1);
 }
 
 async function spliceWithin(
   db: Db, access: Record<string, unknown>, memo: IncludeReadMemo, opts: SpliceOptions,
   content: string, memoryId: string, trail: ReadonlySet<string>, level: number,
 ): Promise<string> {
+  const guard = opts.literalGuard;
+  // The guard must be absent from every text it will be restored out of, whether or not that text has a tag.
+  if (guard && content.includes(guard)) throw new LiteralGuardCollision();
   if (!content.includes('{{>')) return content;
+  const literal = guard ? locateLiteralIncludeTags(content) : [];
+  // Copy `content[from, to)`, guarding the opener of each literal tag inside it.
+  const copy = (from: number, to: number): string => {
+    let text = '';
+    let at = from;
+    for (const l of literal) {
+      if (l.index < from || l.index >= to) continue;
+      text += content.slice(at, l.index) + guard + content.slice(l.index + 3, l.index + l.raw.length);
+      at = l.index + l.raw.length;
+    }
+    return text + content.slice(at, to);
+  };
   let tags: Array<IncludeTag & { index: number }>;
   try {
     tags = locateIncludeTags(content);
   } catch (e) {
-    if (e instanceof IncludeSyntaxError) return content; // a stored malformed tag renders as it always did
+    if (e instanceof IncludeSyntaxError) return copy(0, content.length); // a stored malformed tag renders as it always did
     throw e;
   }
   let out = '';
   let cursor = 0;
   for (const tag of tags) {
-    out += content.slice(cursor, tag.index);
+    out += copy(cursor, tag.index);
     out += await expandTag(db, access, memo, opts, tag, memoryId, trail, level);
     cursor = tag.index + tag.raw.length;
   }
-  return out + content.slice(cursor);
+  return out + copy(cursor, content.length);
 }
 
 /**

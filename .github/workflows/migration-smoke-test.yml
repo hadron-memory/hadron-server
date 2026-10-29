@@ -16,12 +16,18 @@ on:
       - 'prisma/migrations/**'
       - 'prisma/schema.prisma'
       - '.github/workflows/migration-smoke-test.yml'
+      - '.github/scripts/migration-baseline.sh'
+      - 'prisma/runtime-role.sql'
+      - 'scripts/db/**'
   push:
     branches: [main]
     paths:
       - 'prisma/migrations/**'
       - 'prisma/schema.prisma'
       - '.github/workflows/migration-smoke-test.yml'
+      - '.github/scripts/migration-baseline.sh'
+      - 'prisma/runtime-role.sql'
+      - 'scripts/db/**'
 
 jobs:
   smoke-test:
@@ -60,51 +66,7 @@ jobs:
 
       - name: Stash PR's prisma/ and apply main's schema
         id: baseline
-        run: |
-          # Save PR state, restore main's prisma/ for baseline setup.
-          # Note: `git checkout origin/main -- prisma/` only restores files
-          # that exist on main. Migration directories newly added on the PR
-          # branch would survive and pollute the seeding loop below — they'd
-          # be pre-marked as applied and `migrate deploy` would no-op.
-          # `rm -rf prisma` first so only main's files remain.
-          mkdir -p /tmp/pr-prisma
-          cp -r prisma /tmp/pr-prisma/
-          rm -rf prisma
-          git checkout origin/main -- prisma/
-          pnpm prisma db push --skip-generate --accept-data-loss
-          # db push omits functions/triggers/CHECKs from already-applied SQL
-          # migrations. Restore MAIN's invariants before claiming its migration
-          # list is applied, so a new migration may depend on those objects.
-          # This must run before restoring the PR tree below: replaying PR SQL
-          # here would mask defects in the migration being tested.
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql
-
-          # Seed `_prisma_migrations` with main's migration list so
-          # Prisma considers them already-applied. PSQL is available
-          # via the postgres service.
-          psql "$DATABASE_URL" -c "
-            CREATE TABLE IF NOT EXISTS \"_prisma_migrations\" (
-              id VARCHAR(36) PRIMARY KEY NOT NULL,
-              checksum VARCHAR(64) NOT NULL,
-              finished_at TIMESTAMPTZ,
-              migration_name VARCHAR(255) NOT NULL,
-              logs TEXT,
-              rolled_back_at TIMESTAMPTZ,
-              started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-              applied_steps_count INTEGER NOT NULL DEFAULT 0
-            );"
-          for m in prisma/migrations/*/; do
-            name=$(basename "$m")
-            [ "$name" = "migration_lock.toml" ] && continue
-            checksum=$(sha256sum "$m/migration.sql" | awk '{print $1}')
-            psql "$DATABASE_URL" -c \
-              "INSERT INTO \"_prisma_migrations\" (id, checksum, finished_at, migration_name, applied_steps_count)
-               VALUES (gen_random_uuid()::text, '$checksum', now(), '$name', 1);" >/dev/null
-          done
-
-          # Restore PR's prisma/ for the deploy step
-          rm -rf prisma
-          mv /tmp/pr-prisma/prisma .
+        run: .github/scripts/migration-baseline.sh
 
       - name: Apply PR's new migrations via prisma migrate deploy
         run: pnpm prisma migrate deploy
@@ -139,6 +101,17 @@ jobs:
           #     GIN(jsonb_path_ops) indexes Prisma can't express, so the diff wants
           #     to DROP them. Same rationale (prod needs them, no post-push.sql on
           #     prod); both are whitelisted.
+          #   - #2553: `agent_tasks.task_number` / `handle` are NOT NULL in the DB
+          #     (the invariants file, so no row ever lacks its identity) but optional
+          #     in schema.prisma, so a writer that states neither still type-checks
+          #     and the assign-number trigger fills them. The diff wants to DROP
+          #     NOT NULL; both lines are whitelisted.
+          #   - #2047: `served_prompts` owner-consistency foreign keys (chat, run
+          #     and session owner) and the `app_runs` / `sessions` unique indexes
+          #     they target are database facts (prisma/served-prompt-invariants.sql,
+          #     composite keys Prisma cannot model against a polymorphic owner), so
+          #     the diff wants to DROP them; the five lines and their
+          #     `-- DropForeignKey` comment are whitelisted.
           # Any OTHER line in the diff is real drift and must fail CI.
           # Invoke the prisma bin directly (not `pnpm prisma`): pnpm 11's
           # verify-deps-before-run preamble ("Already up to date" / "Done
@@ -149,7 +122,7 @@ jobs:
             --script 2>&1 \
             | grep -vE "^Loaded|^Prisma config|^$" \
             | grep -vE '^(Already up to date|Done in .*)$' \
-            | grep -vE '^-- (CreateIndex|DropIndex|AlterTable)$' \
+            | grep -vE '^-- (CreateIndex|DropIndex|AlterTable|DropForeignKey)$' \
             | grep -vE '^CREATE INDEX "memories_user_id_idx" ON "memories"\("user_id"\);$' \
             | grep -vE '^CREATE UNIQUE INDEX "users_external_app_id_external_id_key" ON "users"\("external_app_id", "external_id"\);$' \
             | grep -vE '^DROP INDEX "node_embeddings_embedding_hnsw";$' \
@@ -157,6 +130,10 @@ jobs:
             | grep -vE '^ALTER TABLE "nodes" DROP COLUMN "tsv";$' \
             | grep -vE '^DROP INDEX "nodes_properties_gin";$' \
             | grep -vE '^DROP INDEX "nodes_data_gin";$' \
+            | grep -vE '^ALTER TABLE "agent_tasks" ALTER COLUMN "task_number" DROP NOT NULL,$' \
+            | grep -vE '^ALTER COLUMN "handle" DROP NOT NULL;$' \
+            | grep -vE '^ALTER TABLE "served_prompts" DROP CONSTRAINT "served_prompts_(chat|run_owner|session_owner)_fkey";$' \
+            | grep -vE '^DROP INDEX "(app_runs|sessions)_served_prompt_owner_uniq";$' \
             || true)
           # `|| true`: when every diff line is whitelisted the final grep matches
           # nothing and exits 1, which under `bash -e` would fail the job. An empty
@@ -167,3 +144,86 @@ jobs:
             exit 1
           fi
           echo "OK — migrations produce schema.prisma (modulo known partial-index drift)."
+
+  # #2413 S3 (plan section 3.6): the same production path (`migrate deploy`), but the database is owned by a
+  # NON-SUPERUSER migrator and served by a NON-OWNER role, so a migration that adds a table or object the serve
+  # role cannot use fails here, before production. The grants file refuses a superuser runner, so `postgres` is
+  # used only to create roles and databases; everything else runs as the migrator.
+  serve-role-smoke:
+    runs-on: ubuntu-latest
+    env:
+      ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      # The migrator: owns every relation. DATABASE_URL is what baseline/migrate/prisma read.
+      DATABASE_URL: postgresql://hadron_owner:owner_pw@localhost:5432/hadron_serve_smoke
+      MIGRATE_DATABASE_URL: postgresql://hadron_owner:owner_pw@localhost:5432/hadron_serve_smoke
+      OWNER_URL: postgresql://hadron_owner:owner_pw@localhost:5432/hadron_serve_smoke
+      SERVE_URL: postgresql://hadron_app:serve_pw@localhost:5432/hadron_serve_smoke
+      SERVE_DATABASE_URL: postgresql://hadron_app:serve_pw@localhost:5432/hadron_serve_smoke
+      SERVE_ROLE: hadron_app
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Create the migrator, the serve role and the database (as postgres)
+        run: |
+          psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -q \
+            -c "CREATE ROLE hadron_owner LOGIN NOSUPERUSER PASSWORD 'owner_pw'" \
+            -c "CREATE ROLE hadron_app LOGIN NOSUPERUSER PASSWORD 'serve_pw'" \
+            -c "CREATE DATABASE hadron_serve_smoke OWNER hadron_owner"
+          # CREATE EXTENSION vector needs a superuser; the migrator never does it in production either.
+          psql "postgresql://postgres:postgres@localhost:5432/hadron_serve_smoke" -v ON_ERROR_STOP=1 -q \
+            -c 'CREATE EXTENSION IF NOT EXISTS vector'
+
+      - name: Stash PR's prisma/ and apply main's schema (as the migrator)
+        run: .github/scripts/migration-baseline.sh
+
+      # Role BEFORE the PR's migrations: the grants file and its default privileges are already in place when
+      # `migrate deploy` creates anything new, which is exactly the production order after cutover.
+      - name: Apply the grants as the migrator, then verify
+        run: |
+          psql "$MIGRATE_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f prisma/runtime-role.sql
+          pnpm -s tsx scripts/db/verify-runtime-role.ts
+
+      - name: Apply PR's new migrations via prisma migrate deploy (as the migrator)
+        run: pnpm prisma migrate deploy
+
+      - name: Verify the serve role after the migrations
+        run: pnpm -s tsx scripts/db/verify-runtime-role.ts
+
+      - name: Serve-role smoke (role before migrate)
+        run: pnpm -s tsx scripts/db/serve-role-smoke.ts
+
+      # Migrate-before-role: the order of a database that was migrated first. The grants file is idempotent.
+      - name: Re-apply the grants after migrate, verify and smoke again
+        run: |
+          psql "$MIGRATE_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f prisma/runtime-role.sql
+          pnpm -s tsx scripts/db/verify-runtime-role.ts
+          pnpm -s tsx scripts/db/serve-role-smoke.ts
+
+      - name: Fresh database, role before the first migrate (ledger hazard)
+        run: scripts/db/serve-role-lane.sh fresh-order
+
+      - name: Mutation proof (the lane must fail when the grants file is weakened)
+        run: scripts/db/serve-role-lane.sh mutants

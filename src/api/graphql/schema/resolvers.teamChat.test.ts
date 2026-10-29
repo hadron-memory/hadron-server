@@ -1,3 +1,4 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #939 — createTeamChatMessage + teamChatMessages: the team-chat platform
@@ -185,6 +186,8 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.nodeType).toBe('chat-message');
+    expect(isRawChatNode(row!)).toBe(true);
+    expect(isRawChatNode(root!)).toBe(false);
     expect(row!.seq).toBe(1);
     expect(row!.content).toBe('first!');
     expect(row!.createdBy).toBe(appMember.id);
@@ -1332,9 +1335,9 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
 
     const newest = await read(ctx(admin.id));
     expect(newest.total).toBe(205);
-    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 156));
-    expect((await read(ctx(admin.id), { beforeSeq: 156 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 106));
-    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 186));
+    expect((await read(ctx(admin.id), { beforeSeq: 186 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 166));
+    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
     // The old portal's second request remains correct during rollout.
     expect((await read(ctx(admin.id), { offset: 5, limit: 200 })).items.at(-1)?.seq).toBe(205);
   });

@@ -23,7 +23,8 @@ import {
   publishEmbedWake,
   restampFailedEmbeddings,
 } from '../../../services/embedding/enqueue.js';
-import { deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { deleteMemoryChunkVectors, deleteMemoryVectors } from '../../../services/embedding/vectors.js';
+import { embeddingKindsWanted, memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
 import {
   createMemoryShare,
   InvalidMemoryClassForShareError,
@@ -152,10 +153,14 @@ import {
   resolveUserRefArg,
   resolveOrgRefArg,
   resolveMemoryRefArg,
+  getAccessibleMemoryIds,
   type MergeMemoriesInput,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
+import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
+import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -632,6 +637,16 @@ export const memoryMutations = {
         // Owner is the authenticated caller (verified above); no org, no
         // membership to check. The memory is theirs outright.
       } else if (isUserOwned) {
+        // #2511: a personal/private memory belongs to a USER. An App-key caller
+        // has none, and `userId: undefined` below would drop the filter from the
+        // membership lookup, admitting any member of the org to a gate meant
+        // for the caller alone (the create then died on a CHECK constraint).
+        if (!ctx.userId) {
+          throw new GraphQLError(
+            'Creating a personal/private memory requires an authenticated user (the creator is the owner).',
+            { extensions: { code: 'UNAUTHENTICATED' } },
+          );
+        }
         // NOT requireOrgRole, whose global ADMIN/OWNER bypass would let a
         // platform admin create a personal/private memory in an org they don't
         // belong to.
@@ -801,6 +816,7 @@ export const memoryMutations = {
         memoryId: memory.id,
         loc: name,
         name: rootName,
+        description: 'Root node for this memory.',
       });
 
       return memory;
@@ -1146,6 +1162,19 @@ export const memoryMutations = {
         (chunkOverlap !== undefined && chunkOverlap !== memory.chunkOverlap) ||
         (forceFixedSize !== undefined && forceFixedSize !== memory.forceFixedSize);
       const chunkConfigChanged = chunkDialsChanged && sourceUsesChunks;
+      if (updated.class === 'system') {
+        // #2199 (cor:rag:010:01 r17): a system memory's summary index cannot be switched off, so the setting and the
+        // source only add or drop PASSAGES. Summary vectors survive every change; only chunk rows are managed.
+        const wasChunks = embeddingKindsWanted(memory).chunks;
+        const nowChunks = embeddingKindsWanted(updated).chunks;
+        if (wasChunks && !nowChunks) {
+          await deleteMemoryChunkVectors(ctx.db, id);
+        } else if (nowChunks && (!wasChunks || sourceChanged || chunkConfigChanged)) {
+          if (wasChunks) await deleteMemoryChunkVectors(ctx.db, id); // dials/source moved the boundaries
+          await backfillMemoryEmbeddings(ctx.db, id);
+        }
+        return updated;
+      }
       if (nowEnabled && (!wasEnabled || sourceChanged || chunkConfigChanged)) {
         // When the source itself changes (abstract ↔ contentChunks ↔ both),
         // the previously-stored vectors are now the wrong KIND. vectorSearch
@@ -1174,6 +1203,7 @@ export const memoryMutations = {
           where: { memoryId: id },
           data: {
             embeddingPendingAt: null,
+            embeddingWorkToken: null,
             embeddingFailedAt: null,
             embeddingError: null,
             embeddingAttempts: 0,
@@ -1213,7 +1243,7 @@ export const memoryMutations = {
         await concealUnreadableDenial(txCtx, memoryId, memoryRef, () =>
           requireMemoryManageAccess(txCtx, current),
         );
-        if (!current.vectorIndexEnabled) return 0;
+        if (!memoryIsVectorIndexed(current)) return 0;
         return restampFailedEmbeddings(tx, memoryId);
       });
       if (count > 0) void publishEmbedWake({});
@@ -1240,14 +1270,23 @@ export const memoryMutations = {
       // miss — the owner-only refusals below also named the memory's class.
       const authorizeDelete = (authCtx: Context, current: typeof memory) =>
         concealUnreadableDenial(authCtx, resolvedId, id, async () => {
+          if (isInstallMemoryRow(current)) {
+            // #2044, R45: whoever manages the App (its owner, an OWNER-role member,
+            // an org admin) deletes its install memory by hand, also after the App
+            // was soft-deleted. Not content access: the record is all this opens.
+            if (!(await installDeleteAllowed(authCtx, current))) {
+              throw forbiddenError('Forbidden: only whoever manages the App can delete its install memory');
+            }
+            return;
+          }
           if (current.class === 'personal' || current.class === 'private') {
             if (!authCtx.userId || current.userId !== authCtx.userId) {
-              throw new Error(`Forbidden: only the owner can delete a ${current.class} memory`);
+              throw forbiddenError(`Forbidden: only the owner can delete a ${current.class} memory`);
             }
           } else if (current.ownerUserId !== null) {
             // spec 047: a user-owned memory is deletable only by its owner.
             if (authCtx.userId !== current.ownerUserId) {
-              throw new Error('Forbidden: only the owner can delete this memory');
+              throw forbiddenError('Forbidden: only the owner can delete this memory');
             }
           } else {
             // Org-owned (the XOR CHECK guarantees ownerUserId is null here ⇒ org is
@@ -1263,10 +1302,12 @@ export const memoryMutations = {
       // System-class memories are owned by their agent and can only be
       // removed by deleting the agent. This prevents the agent from ending
       // up with no brain via a stray deleteMemory call.
-      if (memory.class === 'system') {
+      if (memory.class === 'system' && !isInstallMemoryRow(memory)) {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
       await ctx.db.$transaction(async (tx) => {
+        // #2044: an install memory's authority before the memory row lock below.
+        await lockInstallAuthorityFirst(tx, ctx, resolvedId);
         // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
         // the Channel — delete the Channel through its own operation first.
         // Checked and tombstoned under the memory-level lock Channel creation
@@ -1280,7 +1321,7 @@ export const memoryMutations = {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
         const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedId } });
         await authorizeDelete({ ...ctx, db: tx } as Context, current);
-        if (current.class === 'system') {
+        if (current.class === 'system' && !isInstallMemoryRow(current)) {
           throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
         }
         const hosted = await tx.channel.findFirst({
@@ -1347,7 +1388,7 @@ export const memoryMutations = {
         } else if (source.ownerUserId !== null) {
           // spec 047: a user-owned source memory is cloneable only by its owner.
           if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can clone this memory');
+            throw forbiddenError('Forbidden: only the owner can clone this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
@@ -1466,6 +1507,8 @@ export const memoryMutations = {
         ownerUserId: isUserOwned ? ctx.userId! : null,
         groupOwnerUserId: source.class === 'group' ? (ctx.userId ?? null) : null,
         actorId: ctx.userId ?? ctx.clientId ?? null,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // 033 — the clone carries the source's vector-index config but no
@@ -1625,7 +1668,7 @@ export const memoryMutations = {
         // gates the same way. spec 047: a user-owned source is gated by its owner.
         if (source.ownerUserId !== null) {
           if (ctx.userId !== source.ownerUserId) {
-            throw new Error('Forbidden: only the owner can copy from this memory');
+            throw forbiddenError('Forbidden: only the owner can copy from this memory');
           }
         } else {
           // Org-owned (XOR ⇒ org set here); assert rather than fall back to ''.
@@ -1695,6 +1738,8 @@ export const memoryMutations = {
         move,
         actorId: ctx.userId ?? ctx.clientId ?? null,
         principal: ctx,
+        // #2167 — every copied include tag is checked against the copier's reads.
+        copierReadableMemoryIds: await getAccessibleMemoryIds(ctx),
       });
 
       // The extract carries the subtree's content but no vectors; stamp every
@@ -1938,13 +1983,19 @@ export const memoryMutations = {
       if (memory.visibility !== 'PUBLIC') {
         // Reached only by a caller who can open the memory (#1381 refused the
         // rest above), so this refusal discloses nothing they did not know.
-        throw new Error('Only public memories can be subscribed to by other organizations');
+        throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
       }
 
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
       if (memory.organizationId === resolvedOrgId) {
-        throw new Error('Owner organization has implicit access and cannot subscribe');
+        throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
       }
 
       return withAuthorizedMemoryTx(
@@ -1954,10 +2005,16 @@ export const memoryMutations = {
           await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           if (current.visibility !== 'PUBLIC') {
-            throw new Error('Only public memories can be subscribed to by other organizations');
+            throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
           }
           if (current.organizationId === resolvedOrgId) {
-            throw new Error('Owner organization has implicit access and cannot subscribe');
+            throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
           }
         },
         (tx) => tx.memorySubscription.create({
@@ -2080,7 +2137,7 @@ export const memoryMutations = {
         chosen,
         async () => {
           if (!(await isOwnerAdmin()) && !(await isSubscriberAdmin())) {
-            throw new Error('Forbidden');
+            throw forbiddenError();
           }
         },
         () => refArgNotFoundError('memory', chosen),
@@ -2106,7 +2163,7 @@ export const memoryMutations = {
                   role: { in: ['ADMIN', 'OWNER'] } }, select: { id: true },
               })
             : null;
-          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw new Error('Forbidden');
+          if (!platformAdmin && !ownerAdmin && !subscriberAdmin) throw forbiddenError();
           await requireMemorySubscription(txCtx, resolvedMemoryId, resolvedOrgId, chosen);
         },
         (tx) => tx.memorySubscription.delete({
@@ -2128,9 +2185,13 @@ export const memoryMutations = {
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
       const result = await syncGraphFromGithub(memory);
+      // `fault` is judged on its own: an exception with an empty message must not read as success.
+      if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
-        throw new Error(result.error);
+        // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
+        // of its own to be a typed refusal rather than a fault.
+        throw new GraphQLError(result.error, { extensions: { code: 'SYNC_FAILED' } });
       }
 
       // #1061 — one write per node the sync actually wrote. This mutation and
@@ -2152,6 +2213,7 @@ export const memoryMutations = {
 
       const { pushMemoryToGit: push } = await import('../../../integrations/github/pushMemoryToGit.js');
       const result = await push(id);
+      if (result.errorCode) throw new GraphQLError(result.error ?? result.errorCode, { extensions: { code: result.errorCode } });
       if (result.error) throw new Error(result.error);
       return true;
     },
@@ -2164,7 +2226,7 @@ export const memoryMutations = {
       { memoryId, externalUserId }: { memoryId: string; externalUserId: string },
       ctx: Context,
     ) => {
-      if (!ctx.appId) throw new Error('Forbidden: App Key required');
+      if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: ctx.appId } });
@@ -2242,13 +2304,10 @@ export const memoryMutations = {
       // plaintext branch below leaves the App-scoped class untouched.
       if (suppliedKey && !memory.isEncrypted) {
         const key = suppliedKey;
-        const nodes = await ctx.db.node.findMany({
-          where: { memoryId: resolvedMemoryId, deletedAt: null },
-          // abstract encrypts alongside content since spec 031 — selecting only
-          // content+data here would leave abstracts plaintext on a memory marked
-          // encrypted (matches the encryptMemory fix below).
-          select: { id: true, content: true, abstract: true, data: true },
-        });
+        // #1346: reconciliation adds per-row work to this atomic conversion.
+        // Match the bulk node writers' explicit processing budget instead of
+        // inheriting Prisma's five-second default. This is not a node limit
+        // or an end-to-end latency guarantee (completion runs after commit).
         await ctx.db.$transaction(async (tx) => {
           await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedMemoryId} FOR UPDATE`;
           const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2260,7 +2319,40 @@ export const memoryMutations = {
               extensions: { code: 'MEMORY_WRITE_CONFLICT', memoryId: resolvedMemoryId },
             });
           }
-          for (const node of nodes) {
+          // #1346: Memory precedes Node locks (#1776). Read the deciding
+          // live set only after that fence, then lock every row in id order.
+          // Values read before the fence can overwrite a committed late edit.
+          const nodes = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id FROM nodes
+            WHERE memory_id = ${resolvedMemoryId} AND deleted_at IS NULL
+            ORDER BY id FOR UPDATE
+          `;
+          for (const candidate of nodes) {
+            const before = await tx.node.findUniqueOrThrow({ where: { id: candidate.id } });
+            const revision = await ensureCurrentNodeRevisionInTransaction(tx, candidate.id, {
+              expectedMemoryId: resolvedMemoryId,
+            });
+            const node = await tx.node.findUniqueOrThrow({ where: { id: candidate.id } });
+            // As in encryptMemory (#1435), reconciliation creates a snapshot
+            // of raw plaintext drift. Encrypt it before the flag flips in this
+            // transaction, even if the later history completion is interrupted.
+            if (revision != null && revision > before.revSeq) {
+              const reconciled = await tx.nodeRevision.findFirst({
+                where: { nodeId: node.id, memoryId: resolvedMemoryId,
+                  revNo: revision - 1, editedByInfo: RECONCILE_EDITOR_INFO },
+              });
+              if (reconciled) {
+                const encryptedRevision = encryptNodeFieldsWithKey(
+                  { content: reconciled.content, abstract: reconciled.abstract, data: reconciled.data }, key,
+                );
+                await tx.nodeRevision.update({
+                  where: { id: reconciled.id },
+                  data: { content: encryptedRevision.content ?? null,
+                    abstract: encryptedRevision.abstract ?? null,
+                    data: (encryptedRevision.data ?? null) as InputJsonValue },
+                });
+              }
+            }
             const encrypted = encryptNodeFieldsWithKey(
               { content: node.content, abstract: node.abstract, data: node.data },
               key,
@@ -2288,10 +2380,12 @@ export const memoryMutations = {
           });
           // A second promotion may have read the same anonymous row and
           // supplied a different key. Claim the flag and verifier together;
-          // if another writer won after our pre-transaction scan, roll back
-          // every stale Node rewrite and alias in this transaction.
+          // if another writer won, roll back every Node rewrite, reconcile,
+          // and alias in this transaction.
           // Evaluate expiry in the claim statement, not against an application
           // clock or the transaction's start time (a lock wait can outlive it).
+          // R206: this flip is serialized against an in-flight Git mirror's KEY SHARE
+          // fence by the memory row FOR UPDATE this transaction took on entry.
           const claimed = await tx.$executeRaw`
             UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
               anonymous_expires_at = NULL, is_encrypted = true,
@@ -2313,7 +2407,7 @@ export const memoryMutations = {
           // transaction, so an interrupted completion pass below cannot leave
           // a live or copied hash behind. Who/when/revision stay.
           await endApprovalsOnEncryptedEntry(tx, { memoryId: resolvedMemoryId });
-        });
+        }, { timeout: 120_000 });
         // Promotion's live-node rewrite does not cover tombstones or prior
         // snapshots. Reuse the bounded completion pass under the verifier we
         // just installed. The owning App can recover an interrupted pass by

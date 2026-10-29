@@ -13,7 +13,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { deriveFamily, normalizeFamily } from './family.js';
+import { deriveFamily, normalizeFamily, tierOf } from './family.js';
 import { backfillSessionFamilies } from './familyBackfill.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
@@ -61,6 +61,13 @@ describe('deriveFamily (Proposed, cor:agt:060:04): llmModel first, then tool, el
     expect(normalizeFamily('not a family')).toBeNull();
     expect(normalizeFamily('-x')).toBeNull();
   });
+
+  it('#2191 canonicalizes provider aliases and preserves custom family identity', () => {
+    expect(normalizeFamily(' AnTHropic ')).toBe('claude');
+    expect(normalizeFamily(' OPENAI ')).toBe('codex');
+    expect(normalizeFamily(' Private.Model-7 ')).toBe('private.model-7');
+    expect(normalizeFamily('claude-opus')).toBe('claude-opus');
+  });
 });
 
 describe('startSession family, and Worker.family following the binding', () => {
@@ -90,6 +97,13 @@ describe('startSession family, and Worker.family following the binding', () => {
   it('an explicit family is stored, normalized; Worker.family reads it while bound', async () => {
     const s = await start({ family: 'Codex', tool: 'claude-code', llmModel: 'claude-opus-5-5' });
     expect(s.family).toBe('codex'); // explicit wins over the derivation
+    expect(await familyOf()).toBe('codex');
+  });
+
+  it('#2191 aliases use the same canonical storage on start and update', async () => {
+    const s = await start({ family: ' Anthropic ' });
+    expect(s.family).toBe('claude');
+    expect((await M.updateSession({}, { id: s.id, family: ' OpenAI ' }, ctx(mia.id))).family).toBe('codex');
     expect(await familyOf()).toBe('codex');
   });
 
@@ -187,4 +201,29 @@ describe('startSession family, and Worker.family following the binding', () => {
   it('the database refuses a family in no token shape (chk_sessions_family)', async () => {
     await expect(db.session.create({ data: { id: generateId(), family: 'Claude' } })).rejects.toThrow(/chk_sessions_family/);
   });
+});
+
+describe('#2252 tierOf (R189: one server-owned mapping)', () => {
+  it.each([
+    ['claude-opus-5-5', 'high'], ['claude-opus-4-6', 'high'], ['Claude-Opus-5-5', 'high'],
+    ['claude-sonnet-5-5', 'mid'], ['claude-3-5-sonnet-20241022', 'mid'],
+    ['claude-haiku-5-5', 'low'], ['claude-3-5-haiku-latest', 'low'],
+  ])('%s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
+
+  it.each([
+    ['claude-opus-5-5[1m]', 'high'], ['us.anthropic.claude-sonnet-5-5-v1:0', 'mid'], ['anthropic.claude-3-haiku-20240307-v1:0', 'low'],
+    ['claude-3-opus-20240229', 'high'], ['claude-3-7-sonnet-latest', 'mid'],
+  ])('deliberate id shapes: %s is %s', (model, tier) => expect(tierOf(model)).toBe(tier));
+
+  // A tier is a deliberate model-id entry, never a substring: an embedded word, another vendor's name, or a prefix
+  // that merely contains a tier word is null (gate 6345905367: unknown mapping returns null).
+  it.each([
+    'octopus-v1', 'claude-octopus-1', 'my-sonnet-finetune', 'claude-fable-5-1', 'claude-sonnetx-5', 'claude-opus', 'claude-opus-',
+    'opus', 'sonnet', 'haiku', 'notclaude-opus-5-5', 'glm-sonnet-1', 'gpt-opus-5', 'claude-haikus-1',
+  ])('embedded or partial %j is null', (model) => expect(tierOf(model)).toBeNull());
+
+  it.each(['gpt-5.1-codex', 'glm-4.6', 'gemini-2.5-pro', 'claude-fable-5-1', 'opus-like-glm-5', '', '  ', null, undefined])(
+    'unmapped or unknown %j is null: no guessed tier for another family or an unlisted model', (model) => {
+      expect(tierOf(model as string | null | undefined)).toBeNull();
+    });
 });

@@ -347,7 +347,7 @@ export async function renderAttentionSection(
       const mentions = (
         await db.$queryRaw<Array<{ n: number }>>`
           SELECT count(*)::int AS n
-          ${othersInWindow(c, seen, Prisma.sql`AND ${mentionReachSql(Prisma.sql`node.data`, Prisma.sql`${tokens}::text[]`)}`)}`
+          ${othersInWindow(c, seen, Prisma.sql`AND ${mentionReachSql(Prisma.sql`node.data`, Prisma.sql`${tokens}::text[]`, Prisma.sql`${ownWorkerIds}::text[]`)}`)}`
       )[0]?.n ?? 0;
       lines.push(
         mentions > 0

@@ -212,9 +212,11 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     expect(served.map((e: any) => e.target.id)).toEqual([ids.backOpenPr]); // the child's override (#1893)
     expect(await N.incomingEdges(got, {}, ctx(reader))).toEqual([]);
     expect(await N.memory(got, {}, ctx(reader))).toBeNull();
+    expect(await N.deletedAt(got, {}, ctx(reader))).toBeNull();
     expect(await N.authorship(got, {}, ctx(reader))).toBeNull();
     expect(await N.createdByWorker(got, {}, ctx(reader))).toBeNull();
     expect(await N.signingRequests(got, {}, ctx(reader))).toEqual([]);
+    expect(await N.lintWarnings(got, { first: 50 }, ctx(reader))).toBeNull(); // #2048: unavailable, never the base owner's link state
     expect(await N.commentSummary(got, {}, ctx(reader))).toEqual({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null });
     const approval = await N.approvalStatus(got, {}, ctx(reader));
     expect(approval.approval).toBeNull();

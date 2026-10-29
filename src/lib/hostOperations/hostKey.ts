@@ -17,8 +17,8 @@ type Db = PrismaClient | Prisma.TransactionClient;
 /** An App key operating as one host of its App. */
 export type HostKey = { appKeyId: string; appId: string; hostId: string };
 
-/** What a host key did, for the use record (cor:agt:070:07). */
-export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability' | 'read' | 'session' | 'issue' | 'deliver' | 'stop';
+/** What a host key did, for the use record (cor:agt:070:07). #2162: `reset` is a context reset's protocol step. */
+export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability' | 'read' | 'session' | 'issue' | 'deliver' | 'stop' | 'reset';
 
 /**
  * The host this key operates as RIGHT NOW: the host id on its live

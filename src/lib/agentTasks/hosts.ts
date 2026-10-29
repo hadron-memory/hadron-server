@@ -25,7 +25,7 @@ import { toNaiveUtc } from '../sessionActivity.js';
 import { appendHostEvent } from './events.js';
 import { FAMILY_PATTERN } from './availability.js';
 import { normalizeFamily } from './family.js';
-import { HOST_WORKTREES_MAX, isHostToken } from '../hostOperations/types.js';
+import { HOST_CAPABILITIES, HOST_WORKTREES_MAX, isHostCapability, isHostToken } from '../hostOperations/types.js';
 
 /**
  * cor:agt:070:01 (#1763; Holger, team chat #10405) — a registration lapses
@@ -79,6 +79,11 @@ export type HostRegistrationInput = {
   pollIntervalSeconds: number;
   /** #1709: `worktrees` are the worker's existing worktrees on this host (cor:agt:070:06, :08); none when omitted. */
   workers: { workerId: string; family: string; worktrees?: string[] }[];
+  /**
+   * #2162 (cor:agt:070:01, Proposed): the capability-gated operation types this host performs. Every refresh states
+   * them in full; omitted means none, so a host that stops declaring one is never issued it again.
+   */
+  capabilities?: string[];
 };
 
 /** #1709: hooks a key-authenticated caller runs inside the registration's transaction, after the App's anchor. */
@@ -117,6 +122,12 @@ export async function registerHost(
   }
   if (input.workers.length > HOST_WORKERS_MAX) {
     throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host registers at most ${HOST_WORKERS_MAX} workers.`);
+  }
+  const capabilities = [...new Set(input.capabilities ?? [])].sort();
+  for (const c of capabilities) {
+    if (!isHostCapability(c)) {
+      throw new HostRegistrationError('BAD_HOST_REGISTRATION', `A host declares only these capabilities: ${HOST_CAPABILITIES.join(', ')}.`);
+    }
   }
   const workers = new Map<string, { family: string; worktrees: string[] }>();
   for (const w of input.workers) {
@@ -189,7 +200,7 @@ export async function registerHost(
     const wasLapsed = !isNew && (cur.lostAt !== null || !isRegistrationLive(cur, now, checkIns));
     await tx.hostRegistration.update({
       where: { id: cur.id },
-      data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null },
+      data: { label, pollIntervalSeconds: input.pollIntervalSeconds, refreshedAt: now, lostAt: null, capabilities },
     });
     await tx.hostRegistrationWorker.deleteMany({ where: { registrationId: cur.id } });
     if (workers.size) {
@@ -239,8 +250,10 @@ export async function loadLaunchableFamilies(
     ORDER BY 1, 2`;
   const out = new Map<string, string[]>();
   for (const r of rows) {
+    const family = normalizeFamily(r.family);
+    if (!family) continue;
     const list = out.get(r.workerId) ?? [];
-    list.push(r.family);
+    if (!list.includes(family)) list.push(family);
     out.set(r.workerId, list);
   }
   return out;

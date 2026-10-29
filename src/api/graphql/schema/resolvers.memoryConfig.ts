@@ -69,6 +69,7 @@ import { EntityNotFoundError, MemoryNotFoundError, NodeNotFoundError } from '../
 import { assertValidRuleRole, lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export type Writers = 'ALL' | 'OWNER' | 'ADMIN';
 export type Validator = 'AGENT' | 'PLATFORM';
@@ -232,8 +233,8 @@ async function managedRule(ctx: Context, ref: string): Promise<NodeRoleRule & { 
 
 /** Mutations stamp the actor; impersonation is read-only (#876). */
 export function requireWriter(ctx: Context): string {
-  if (ctx.impersonation) throw new Error('Forbidden');
-  if (!ctx.userId) throw new Error('Unauthenticated');
+  if (ctx.impersonation) throw forbiddenError();
+  if (!ctx.userId) throw unauthenticatedError();
   return ctx.userId;
 }
 

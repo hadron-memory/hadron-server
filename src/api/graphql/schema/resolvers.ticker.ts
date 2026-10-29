@@ -36,7 +36,7 @@ import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError } from 'graphql';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
-import { type Context, getAccessibleMemoryIds } from './resolvers.helpers.js';
+import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import {
   type TaskApp,
   type TaskActor,
@@ -122,7 +122,7 @@ async function writeInApp<T>(
 
 // ── Validation ────────────────────────────────────────────────────────────
 
-function cleanName(raw: unknown): string {
+export function cleanName(raw: unknown): string {
   const name = typeof raw === 'string' ? raw.trim() : '';
   if (name === '') throw badInput('A ticker needs a name.');
   if (name.length > TICKER_NAME_MAX) throw badInput(`A ticker name is at most ${TICKER_NAME_MAX} characters.`);
@@ -135,7 +135,7 @@ type TickerSettings = {
   tickerLiveCap: number;
   wakeDailyBudget: number | null;
 };
-const SETTINGS_SELECT = {
+export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
   deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
@@ -155,7 +155,7 @@ function checkCadence(cadence: unknown, settings: TickerSettings): number {
   return cadence;
 }
 
-function checkQuietHours(input: unknown): Prisma.InputJsonObject {
+export function checkQuietHours(input: unknown): Prisma.InputJsonObject {
   const v = validateQuietHours(input);
   if (!v.ok) throw taskError('TICKER_QUIET_HOURS_INVALID', v.reason);
   return v.value as unknown as Prisma.InputJsonObject;
@@ -163,7 +163,7 @@ function checkQuietHours(input: unknown): Prisma.InputJsonObject {
 
 /** The closed set of ticker reasons (cor:agt:080:01). Stored kebab-case; the GraphQL enum spells them in capitals. */
 export const TICKER_REASONS = ['read-team-channel', 'every-tick', 'live-check'] as const;
-function checkReasons(list: unknown): string[] {
+export function checkReasons(list: unknown): string[] {
   if (!Array.isArray(list) || list.length === 0) throw badInput('reasons must name at least one reason: a ticker with none would never fire.');
   const out = new Set<string>();
   for (const x of list) {
@@ -173,9 +173,9 @@ function checkReasons(list: unknown): string[] {
   }
   return TICKER_REASONS.filter((k) => out.has(k));
 }
-const reasonEnum = (k: string) => k.toUpperCase().replace(/-/g, '_');
+export const reasonEnum = (k: string) => k.toUpperCase().replace(/-/g, '_');
 
-function checkRelevance(r: unknown): string {
+export function checkRelevance(r: unknown): string {
   if (typeof r !== 'string' || !(TICKER_RELEVANCE as readonly string[]).includes(r)) {
     throw badInput(`relevance is one of ${TICKER_RELEVANCE.join(', ')}.`);
   }
@@ -280,11 +280,11 @@ async function liveGrantFor(tx: Prisma.TransactionClient, appId: string, actor: 
  * race. Taken BEFORE the ticker row everywhere (create and settings hold no ticker
  * row; subscribe takes the ticker row and never this), so there is no cycle.
  */
-async function lockAppTickers(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+export async function lockAppTickers(tx: Prisma.TransactionClient, appId: string): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`;
 }
 
-async function assertNameFree(tx: Prisma.TransactionClient, appId: string, name: string, exceptId?: string): Promise<void> {
+export async function assertNameFree(tx: Prisma.TransactionClient, appId: string, name: string, exceptId?: string): Promise<void> {
   const clash = await tx.ticker.findFirst({
     where: { appId, deletedAt: null, name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
     select: { id: true },
@@ -310,6 +310,18 @@ export const tickerQueries = {
   tickers: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     const { app } = await resolveParticipatedApp(ctx, appRef);
     return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  },
+
+  /** #2213 — `tickers` as a page: the same gate, rows and order, counted and read in one snapshot. */
+  tickersPage: async (_: unknown, args: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+    const where = { appId: app.id, deletedAt: null };
+    const { take, skip } = pageArgs(args);
+    const [total, items] = await ctx.db.$transaction([
+      ctx.db.ticker.count({ where }),
+      ctx.db.ticker.findMany({ where, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take, skip }),
+    ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+    return pageEnvelope(items, total, skip);
   },
 
   ticker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
@@ -428,6 +440,8 @@ const crudMutations = {
           ...(relevance !== undefined ? { relevance } : {}),
           ...(reasons !== undefined ? { reasons } : {}),
           ...(input.enabled != null ? { enabled: input.enabled } : {}),
+          // #2429: any accepted edit of a generated ticker, even a no-op, takes it out of the miscast repair's bookkeeping.
+          ...(t.generatedForWorkerId !== null ? { editedAt: new Date() } : {}),
           ...updatedStamp(txCtx),
         },
       });
@@ -679,6 +693,15 @@ const isolationForbidden = () => taskError(
   'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
 );
 
+/** #2660 / cor:agt:080:29: the same person-manager-or-holder predicate for the writer and its capability. S7 availability is separate. */
+async function canManageWorkerIsolation(
+  ctx: Context, app: TaskApp, actor: TaskActor | null,
+  worker: { heldByUserId: string | null; retiredAt: Date | null },
+): Promise<boolean> {
+  if (!actor || actor.kind !== 'user' || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
+  return await actorManagesApp(ctx, app, actor) || worker.heldByUserId === actor.userId;
+}
+
 /**
  * The ONE isolation writer (GraphQL and MCP both reach it). Its only audience is a human acting as themselves who manages the
  * App or holds the worker: a worker session (even a manager's), an App key and an impersonation are refused, and the row
@@ -698,8 +721,7 @@ async function writeWorkerIsolation(
   const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    const manages = await actorManagesApp(txCtx, fresh, actor);
-    if (!manages && w.heldByUserId !== actor.userId) throw isolationForbidden();
+    if (!(await canManageWorkerIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
@@ -1000,7 +1022,7 @@ export const tickerFieldResolvers = {
     },
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {
-      const take = Math.min(Math.max(a.first ?? 50, 1), 200);
+      const take = Math.min(Math.max(a.first ?? 20, 1), 200);
       const rows = await ctx.db.tickerSubscription.findMany({
         where: { tickerId: t.id, endedAt: null },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -1020,6 +1042,12 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
+    canManageIsolation: async (w: { workerId: string }, _: unknown, ctx: Context) => {
+      // Keep the existing read refusal before computing a permission; never reveal an unreadable worker.
+      const worker = await workerForRead(ctx, w.workerId);
+      const app = await appOf(ctx, worker.appId);
+      return canManageWorkerIsolation(ctx, app, await resolveTaskActor(ctx, app), worker);
+    },
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({

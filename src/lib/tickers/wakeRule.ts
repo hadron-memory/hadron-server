@@ -6,6 +6,7 @@
 // moves the read position (cor:agt:080:16), and counts only what is above BOTH
 // the read position and the delivered-through seq.
 
+import { mentionReach } from '../mentionReach.js';
 import { BROADCAST_MENTION_TOKENS } from '../mentionToken.js';
 import { currentTick, oldestUnackedTickAt, type TickerSchedule } from './ticks.js';
 
@@ -13,9 +14,11 @@ import { currentTick, oldestUnackedTickAt, type TickerSchedule } from './ticks.j
 export type RoutedMessage = {
   seq: number;
   authorWorkerId: string | null;
-  mentions: string[];
+  mentions: readonly string[];
   /** Server-written at post time (cor:agt:080:14, N3): the author could wake everyone. */
   broadcastWakes: boolean;
+  teamTagsVersion?: number;
+  teamBroadcastWorkerIds?: readonly string[];
   /** Server-written at post time: the author manages the App (cor:agt:080:15 budget exemption). */
   managerPost: boolean;
   /** S7 (#2023): a person, not a worker or the system, wrote it. Read only for a worker on standby (standby.ts). */
@@ -54,6 +57,8 @@ export type TaskWakeReason = {
   chainIndex: number;
   event: 'ASSIGNED' | 'REASSIGNED' | 'MATCHED' | 'CHILD_FINISHED' | 'ALARM' | 'END_SESSION';
   title: string;
+  /** #2553: the task's handle, printed first in the nudge. */
+  handle: string;
   /** S7 (R90): messages held from a standby worker and passed at this assignment; rides the event, so returned once. */
   standbyHeld?: number;
 };
@@ -103,15 +108,15 @@ function statsOf(ch: ChannelInput, workerId: string, workerTokens: readonly stri
   const immediate: RoutedMessage[] = [];
   for (const m of ch.messages) {
     if (m.authorWorkerId === workerId) continue;
-    const direct = m.mentions.some((t) => workerTokens.includes(t));
-    const broadcast = !direct && m.mentions.some((t) => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
-    const mentioned = direct || broadcast;
+    const direct = m.mentions.some(t => workerTokens.includes(t));
+    const legacyBroadcast = m.teamTagsVersion !== 1 && m.mentions.some(t => (BROADCAST_MENTION_TOKENS as readonly string[]).includes(t));
+    const mentioned = m.teamTagsVersion === 1 ? mentionReach(m, workerTokens, [workerId]) !== null : direct || legacyBroadcast;
     // In a mention-only channel only mentions count (#8088).
     if (ch.mentionOnly && !mentioned) continue;
     relevant.push(m);
     if (mentioned) {
       mentions.push(m);
-      if (direct || m.broadcastWakes) immediate.push(m);
+      if (m.teamTagsVersion === 1 || direct || m.broadcastWakes) immediate.push(m);
     }
   }
   return { relevant, mentions, immediate };
@@ -191,7 +196,7 @@ export function workerWake(args: {
   }
 
   for (const t of args.tasks ?? []) {
-    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
+    reasons.push({ kind: 'TASK', taskId: t.taskId, eventId: t.eventId, chainIndex: t.chainIndex, event: t.event, title: t.title, handle: t.handle, ...(t.standbyHeld ? { standbyHeld: t.standbyHeld } : {}) });
     if (t.atMs !== undefined) anchors.push(t.atMs);
   }
 

@@ -105,4 +105,12 @@ describe('#1599 bound identity labels', () => {
     expect(text).not.toContain('worker id:');
     expect((await srv.callToolText('hadron_whoami', {}))).toContain('working as: nobody');
   });
+
+  it('the receipt composes the briefing under the session being returned, so its immutable record (not the current approval) is read', async () => {
+    const spy = vi.spyOn(workerResolvers, 'composeWorkerPrompt');
+    await server().callToolText('hadron_start_session', { description: 'work', workerRef: workerId });
+    const sessionId = await boundSessionId();
+    expect(spy).toHaveBeenCalled();
+    expect(spy.mock.calls[0]![0].sessionId).toBe(sessionId);
+  });
 });

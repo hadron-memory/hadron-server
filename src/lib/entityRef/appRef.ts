@@ -6,7 +6,7 @@
  * uniformity with the convention.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
 import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
 import { AppNotFoundError } from './errors.js';
@@ -16,7 +16,7 @@ import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
 export async function resolveAppRef(
   db: Pick<PrismaClient, 'app' | 'urnAlias'>,
   ref: string,
-  options?: { includeDeleted?: boolean },
+  options?: { includeDeleted?: boolean; scope?: Prisma.AppWhereInput },
 ): Promise<{ id: string }> {
   const isId = isIdFunc(ref);
   if (!isId) {
@@ -31,15 +31,19 @@ export async function resolveAppRef(
   // + `::`→`:`) is a no-op on an ID, so it runs only on the URN path. Excluded
   // by default; `{ includeDeleted: true }` opts in (matches memoryRef).
   const deletedFilter = options?.includeDeleted ? {} : { deletedAt: null as null };
+  // Reference resolution can narrow an already-authorized set without ever
+  // reading an App outside it. Preserve the default resolver unchanged.
+  const scoped = (where: Prisma.AppWhereInput): Prisma.AppWhereInput =>
+    options?.scope ? { AND: [where, options.scope] } : where;
   const lookupUrn = isId ? null : normalizeUrnForLookup(parseUrnInput(ref).value);
   const app =
     lookupUrn === null
       ? await db.app.findFirst({
-          where: { id: ref, ...deletedFilter },
+          where: scoped({ id: ref, ...deletedFilter }),
           select: { id: true },
         })
       : await db.app.findFirst({
-          where: { urn: lookupUrn, uninstalledAt: null, ...deletedFilter },
+          where: scoped({ urn: lookupUrn, uninstalledAt: null, ...deletedFilter }),
           select: { id: true },
         });
   if (app) {
@@ -56,16 +60,32 @@ export async function resolveAppRef(
   if (lookupUrn !== null) {
     const live = (ids: string[]) =>
       db.app.findMany({
-        where: { id: { in: ids }, uninstalledAt: null, ...deletedFilter },
+        where: scoped({ id: { in: ids }, uninstalledAt: null, ...deletedFilter }),
         select: { id: true },
       });
     const [legacyRows, aliasRows] = await Promise.all([
       db.app.findMany({
-        where: { legacyUrn: lookupUrn, uninstalledAt: null, ...deletedFilter },
+        where: scoped({ legacyUrn: lookupUrn, uninstalledAt: null, ...deletedFilter }),
         select: { id: true },
         take: 2,
       }),
-      findLiveUrnAliasTargets(db, 'APP', lookupUrn, live),
+      options?.scope
+        ? (async () => {
+            // Constrain alias-map reads too: foreign history must not affect
+            // paging, ambiguity, or the alias walk's corruption guard.
+            const eligible = await db.app.findMany({
+              where: scoped({ uninstalledAt: null, ...deletedFilter }),
+              select: { id: true },
+            });
+            if (!eligible.length) return [];
+            const aliases = await db.urnAlias.findMany({
+              where: { urn: lookupUrn, entityType: 'APP', entityId: { in: eligible.map(row => row.id) } },
+              select: { entityId: true },
+              take: 2,
+            });
+            return aliases.map(row => ({ id: row.entityId }));
+          })()
+        : findLiveUrnAliasTargets(db, 'APP', lookupUrn, live),
     ]);
     // Deduplicate before the ambiguity check — the migration backfilled the map
     // FROM `legacy_urn`, so the two sources overlap by construction and a bare

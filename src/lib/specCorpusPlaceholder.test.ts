@@ -13,7 +13,7 @@ import { lockEdgeEndpointMemories } from './edgeEndpointLock.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
-import { archiveTombstone } from './tombstoneArchive.js';
+import { archiveTombstone, discoverArchivePlan, validateArchivePlan } from './tombstoneArchive.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -51,15 +51,16 @@ beforeEach(async () => {
 });
 
 describe('reserveSpecCitation (#1450)', () => {
-  it('exports the committed marker through the direct encrypted mirror path', async () => {
+  it('commits the marker in an encrypted memory and never mirrors it to Git (R206)', async () => {
     await db.memory.update({ where: { id: draft.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });
     sessionKeyCache.set('placeholder-encrypted-mirror', draft.id, generateDataKey());
     const mirror = vi.mocked(writeNodeToGit);
     mirror.mockClear();
     try {
       const reserved = await reserve(draft.id, 'pas:010:09');
-      await vi.waitFor(() => expect(mirror).toHaveBeenCalled());
-      expect(mirror.mock.calls.at(-1)?.[0]).toMatchObject({ id: reserved.id, isPlaceholder: true });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(mirror).not.toHaveBeenCalled();
+      expect(reserved).toMatchObject({ isPlaceholder: true });
       expect(await row(draft.id, 'pas:010:09')).toMatchObject({ isPlaceholder: true });
     } finally {
       sessionKeyCache.clear();
@@ -364,7 +365,9 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
     const pause = new Promise<void>((resolve) => { resume = resolve; });
     const archive = db.$transaction(async (tx) => {
       await lockEdgeEndpointMemories(tx, [draft.id]);
-      await acquireLockSet(tx, [...ancestorLocs(parent.loc), parent.loc].map((loc) => ({ memoryId: draft.id, loc })));
+      const plan = await discoverArchivePlan(tx, draft.id, parent.loc);
+      await acquireLockSet(tx, [...ancestorLocs(parent.loc), parent.loc, ...plan.descendantLocs].map((loc) => ({ memoryId: draft.id, loc })));
+      await validateArchivePlan(tx, plan);
       const gatedTx = new Proxy(tx, {
         get(target, key, receiver) {
           if (key !== 'node') return Reflect.get(target, key, receiver);
@@ -381,7 +384,7 @@ describe('reserving over a deleted spec (@codex P2 on #1452)', () => {
           });
         },
       });
-      await archiveTombstone(gatedTx, { id: parent.id, loc: parent.loc, memoryId: draft.id });
+      await archiveTombstone(gatedTx, { id: parent.id, loc: parent.loc, memoryId: draft.id }, plan);
     }, { timeout: 20_000 });
     await scannedPromise;
     try {
@@ -624,7 +627,7 @@ describe('a placeholder over a tombstone is indistinguishable from a fresh one (
     'deletedAt', 'deletedBy', 'revSeq', 'revisionContentHash', 'lastAccessedAt',
     // Embedding-queue bookkeeping, not authored content: with no content there
     // is nothing to embed, so a stale pending stamp only means an empty pass.
-    'embeddingPendingAt',
+    'embeddingPendingAt', 'embeddingWorkToken',
   ]);
 
   it('inherits nothing from the deleted spec: every other column matches a fresh reservation', async () => {

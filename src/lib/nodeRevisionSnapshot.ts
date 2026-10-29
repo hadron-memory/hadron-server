@@ -25,6 +25,8 @@ import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
 import { isDecisionFamilyRole } from './decisions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
+import { newestApprovedRevisionOf } from './nodeApproval.js';
+import { includeHistoryClient, type IncludeHistoryTransaction } from './includes/includeHistoryFence.js';
 
 /**
  * The curated subset of Node fields every snapshot captures. On encrypted
@@ -204,6 +206,17 @@ export function revisionStateHashRefreshMarker(): string {
 /** `NodeRevision.editedByInfo` of a server-authored drift reconcile — one spelling for writer and reader. */
 export const RECONCILE_EDITOR_INFO = 'system:revision-reconcile';
 
+/** #2063 caller cut: a reconciliation read must carry the outer fence's live context.
+ * Existing writer callers are migrated in later cuts; this entry has no raw-client fallback.
+ */
+export async function reconcileNodeWithIncludeHistory(
+  history: IncludeHistoryTransaction,
+  nodeId: string,
+  opts: { expectedMemoryId: string },
+): Promise<number | null> {
+  return ensureCurrentNodeRevisionInTransaction(includeHistoryClient(history), nodeId, opts);
+}
+
 /**
  * Row-lock and reconcile one node inside the caller's transaction. Callers that
  * render or hash node fields use this and then re-read those fields in the SAME
@@ -336,7 +349,7 @@ function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
  * pre-move history belonged there).
  */
 export async function createNodeRevision(
-  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node' | 'nodeSignature'>,
+  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node' | 'nodeSignature' | '$queryRaw'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
   // #696/#1323: Node.revSeq names the LIVE state. Snapshot the pre-edit state
@@ -422,13 +435,20 @@ export async function createNodeRevision(
 
 /**
  * The revision numbers of a node that automatic cap-pruning must keep: the ONE
- * seam every retention reason joins (#1838; #2063's include-relied revisions
- * and #2047's served revisions add their sets here, never a second prune rule).
+ * seam every retention reason joins (#1838, #2063 replacement P4; #2047's
+ * served revisions add their set here, never a second prune rule).
  *
  * - #1632 (cor:dmo:130:05, Holger #9901): a revision a signature was made on.
  * - #1838 (cor:dmo:060:04, R7): a revision whose row carries a recorded
  *   approval (a hash), because that row is the evidence identical-content
  *   revisions are judged approved by.
+ *
+ * - #2063 (hrn:node:hadronmemory.com:specs:cor:dmo:150:07): the newest
+ *   revision the existing approval predicate qualifies, including a covered
+ *   non-carrier. Includes themselves add no retention exemption.
+ * - #2047 (cor:dmo:150:07, cor:dmo:060:04): the compiled revision an open
+ *   session or an unfinished run was served (`served_prompts`). Revision
+ *   identity there is `Node.revSeq`, which is `NodeRevision.revNo`.
  *
  * Deliberate deletion (`deleteNodeRevision`, `clearNodeHistory`, restore) is
  * not governed by this and stays allowed. A legacy row with no revNo can carry
@@ -436,19 +456,37 @@ export async function createNodeRevision(
  * stays prunable.
  */
 export async function revisionsExemptFromPruning(
-  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision'> | Prisma.TransactionClient,
+  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision' | 'node' | 'memory' | '$queryRaw'> | Prisma.TransactionClient,
   nodeId: string,
   memoryId: string,
 ): Promise<Set<number>> {
-  const [signed, carriers] = await Promise.all([
+  const [signed, carriers, servedOpen] = await Promise.all([
     db.nodeSignature.findMany({ where: { nodeId }, select: { revision: true }, distinct: ['revision'] }),
     db.nodeRevision.findMany({
       where: { nodeId, memoryId, approvalHash: { not: null }, revNo: { not: null } },
       select: { revNo: true },
     }),
+    // #2047 (cor:dmo:150:07): the compiled revision an OPEN session or an unfinished run was served. A chat's record
+    // retains nothing (the rule names sessions and runs), and an owner that has ended releases its own revision only.
+    db.$queryRaw<Array<{ rev: number }>>`
+      SELECT DISTINCT sp.served_rev_seq AS rev
+      FROM served_prompts sp
+      LEFT JOIN sessions s ON sp.kind = 'BIND' AND s.id = sp.session_id
+      LEFT JOIN app_runs r ON sp.kind = 'RUN' AND r.id = sp.run_id
+      WHERE sp.compiled_node_id = ${nodeId}
+        AND ((sp.kind = 'BIND' AND s.id IS NOT NULL AND s.ended_at IS NULL)
+          OR (sp.kind = 'RUN' AND r.status IN ('PENDING', 'RUNNING')))`,
   ]);
   const out = new Set<number>(signed.map((s) => s.revision));
   for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
+  for (const sv of servedOpen) out.add(Number(sv.rev));
+  // The serving helper's default scan cap is an answer budget, not permission
+  // to prune an older qualifying revision. Examine the entire retained set
+  // plus the live candidate here; keep exactly the helper's current/historical
+  // qualification (including capture-memory and encryption boundaries).
+  const retained = await db.nodeRevision.count({ where: { nodeId, revNo: { not: null } } });
+  const newest = await newestApprovedRevisionOf(db, nodeId, retained + 1);
+  if (newest.found) out.add(newest.found.revNo);
   return out;
 }
 

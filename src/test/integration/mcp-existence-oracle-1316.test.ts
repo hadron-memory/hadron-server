@@ -415,7 +415,9 @@ describe('#1316 GraphQL: the delegated resolvers conceal too', () => {
       const result = await gql('outsider', UPDATE_DATA.query, UPDATE_DATA.vars(victimSlug, PROBE));
       expect(fault).toHaveBeenCalled();
       expect(gqlCode(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected classification db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
       expect(await sideEffects()).toEqual(before);
     } finally {
       fault.mockRestore();
@@ -430,7 +432,9 @@ describe('#1316 GraphQL: the delegated resolvers conceal too', () => {
       const result = await gql('outsider', UPDATE_DATA.query, UPDATE_DATA.vars(victimSlug, PROBE));
       expect(fault).toHaveBeenCalled();
       expect(gqlCode(result)).toBe('INTERNAL_SERVER_ERROR');
-      expect(result.errors![0]!.message).toContain('injected authorization db failure');
+      // #1789: a fault is the generic envelope (detail goes to the log), and never NOT_FOUND/FORBIDDEN (Pin 1).
+      expect(result.errors![0]!.message).toBe('Internal server error.');
+      expect(result.errors![0]!.extensions).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', requestId: expect.any(String) });
     } finally {
       fault.mockRestore();
     }

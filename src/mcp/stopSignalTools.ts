@@ -1,3 +1,4 @@
+import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #2022 (S6) — stop signals on the MCP surface (cor:agt:090): set, lift and list. Each tool is a thin call into the
  * SAME resolvers GraphQL serves (`resolvers.stopSignal.ts`), so the gates and refusal codes are one.
@@ -20,6 +21,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import type { StopSignalView } from '../api/graphql/schema/resolvers.stopSignal.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { stopNames } from '../lib/stopSignals/names.js';
+import { isTrustedRefusal } from '../api/graphql/formatError.js';
 
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
@@ -42,7 +44,7 @@ function textResult(text: string, isError = false) {
 
 /** A resolver refusal as `[<code>] <message>` plus its extensions; anything else is a server fault. */
 function refusal(e: unknown) {
-  if (e instanceof GraphQLError) {
+  if (e instanceof GraphQLError && isTrustedRefusal(e)) {
     const { code, ...rest } = publicErrorExtensions(e.extensions ?? {});
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
@@ -103,11 +105,10 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     transport: 'mcp',
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
-    apiKeyId: auth.apiKeyId ?? undefined,
+    apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
     appId: auth.appId ?? undefined,
     appKeyId: auth.appKeyId ?? undefined,
-    sessionId: (auth.requestSession ? auth.requestSession.sessionId : auth.sessionId) ?? undefined,
-    sessionBindingRefused: auth.requestSession ? auth.requestSession.refused : auth.sessionBindingRefused,
+    ...mcpRequestSessionContext(auth),
     roles: auth.roles as Context['roles'],
     organizationId: auth.organizationId ?? undefined,
     impersonation: auth.impersonation,
@@ -153,19 +154,11 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
   server.tool(
     'hadron_stop_signal_set',
     'Set a STOP SIGNAL on an App (cor:agt:090): PAUSE_DISPATCH stops assignment; PAUSE also stops ticks and stall time; ' +
-      'HALT also interrupts (its notices are recorded but not yet delivered, so no interrupt happens yet). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
+      'HALT also tells the worker to save its work and write a hand-off now (typed as an ordinary notice into a verified-empty input; no interrupt key is sent). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
       'host registration lists). Whoever manages the App, any level and scope; a host key, a HALT on its own host only. ' +
-      'Never replaces another signal. NOT AVAILABLE YET (R95, #2173): until the stop-notice lane is in effect (#2169) every set is refused with ' +
-      'STOP_SIGNAL_UNAVAILABLE, because a stopped worker would not be told; lifting and listing still work.',
-    {
-      appRef,
-      level: z.enum(['PAUSE_DISPATCH', 'PAUSE', 'HALT']),
-      scope: z.enum(['WORKER', 'TEAM', 'HOST']),
-      worker: z.string().optional().describe('WORKER / TEAM: the target worker (id, name or URN; a team by its head).'),
-      host: z.string().optional().describe('HOST: the host id. A host key may omit it.'),
-      until: z.string().optional().describe('ISO time it ends on its own; later than now. Omitted: until lifted.'),
-      session: SESSION_WRITE,
-    },
+      'Never replaces another signal. Refused with STOP_SIGNAL_UNAVAILABLE (R95, #2173/#2169) while a worker it would cover is on a lane no stop-notice consumer ' +
+      'has declared fresh (a consumer declares by polling hadron_due_wakes with accepts including STOP), because a stopped worker would not be told; lifting and listing still work.',
+    SHAPE_HADRON_STOP_SIGNAL_SET,
     async ({ session, ...input }) => write('hadron_stop_signal_set', session, async (ctx) => {
       const s = await M.setTeamStopSignal({}, { input }, ctx);
       return renderSignal(s, await namesFor(db, input.appRef, [s]));
@@ -176,7 +169,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     'hadron_stop_signal_lift',
     'Lift a stop signal (cor:agt:090:05). Lifting one never ends another; lifting one that already ended changes nothing ' +
       'and tells nobody again. Whoever manages the App, any; a host key, a HALT on its own host.',
-    { appRef, id: z.string().describe('The stop signal id.'), session: SESSION_WRITE },
+    SHAPE_HADRON_STOP_SIGNAL_LIFT,
     async ({ appRef: a, id, session }) => write('hadron_stop_signal_lift', session, async (ctx) => {
       const r = await M.liftTeamStopSignal({}, { appRef: a, id }, ctx);
       return `${r.changed ? 'lifted' : 'unchanged (already ended)'}\n${renderSignal(r.signal, await namesFor(db, a, [r.signal]))}`;
@@ -187,14 +180,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     'hadron_stop_signal_list',
     'List an App\'s stop signals (cor:agt:090:07), oldest set first. A person in the App sees all of them; a worker\'s ' +
       'session sees the live ones covering it; a host key sees its own host\'s.',
-    {
-      appRef,
-      worker: z.string().optional().describe('Only the signals covering this worker now.'),
-      includeEnded: z.boolean().optional().describe('Add ended signals (not for a worker\'s session).'),
-      first: z.number().int().optional().describe('Page size, default 50, at most 200.'),
-      after: z.string().optional().describe('The endCursor of the previous page.'),
-      session: SESSION_READ,
-    },
+    SHAPE_HADRON_STOP_SIGNAL_LIST,
     async ({ session, ...args }) => read(session, async (ctx) => {
       const page = await Q.teamStopSignals({}, args, ctx);
       const names = await namesFor(db, args.appRef, page.signals);
@@ -205,3 +191,29 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     }),
   );
 }
+
+// ── #2260: parameter shapes, built ONCE per process ──────────────────────────
+// A shape is pure data (no session state: moved here only because nothing in it resolves to a
+// function- or block-scoped binding, so `tsc` rejects one that captures `auth` or any other
+// per-session value). Every MCP session registers these same objects instead of rebuilding ~15 MB.
+
+const SHAPE_HADRON_STOP_SIGNAL_SET = {
+  appRef,
+  level: z.enum(['PAUSE_DISPATCH', 'PAUSE', 'HALT']),
+  scope: z.enum(['WORKER', 'TEAM', 'HOST']),
+  worker: z.string().optional().describe('WORKER / TEAM: the target worker (id, name or URN; a team by its head).'),
+  host: z.string().optional().describe('HOST: the host id. A host key may omit it.'),
+  until: z.string().optional().describe('ISO time it ends on its own; later than now. Omitted: until lifted.'),
+  session: SESSION_WRITE,
+};
+
+const SHAPE_HADRON_STOP_SIGNAL_LIFT = { appRef, id: z.string().describe('The stop signal id.'), session: SESSION_WRITE };
+
+const SHAPE_HADRON_STOP_SIGNAL_LIST = {
+  appRef,
+  worker: z.string().optional().describe('Only the signals covering this worker now.'),
+  includeEnded: z.boolean().optional().describe('Add ended signals (not for a worker\'s session).'),
+  first: z.number().int().optional().describe('Page size, default 20, at most 200.'),
+  after: z.string().optional().describe('The endCursor of the previous page.'),
+  session: SESSION_READ,
+};

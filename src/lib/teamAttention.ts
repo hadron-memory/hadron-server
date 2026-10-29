@@ -762,7 +762,7 @@ export async function aggregatePlaintextWindow(
     ),
     j AS (
       SELECT t.idx, t.mention_only, m.seq,
-        ${mentionReachSql(Prisma.sql`m.data`, Prisma.sql`t.tokens`)} AS mentioned
+        ${mentionReachSql(Prisma.sql`m.data`, Prisma.sql`t.tokens`, Prisma.sql`ARRAY[t.worker_id]::text[]`)} AS mentioned
       FROM m
       JOIN t ON m.seq > t.seen AND m.seq <= t.head
         AND COALESCE(m.data ->> 'authorWorkerId', '') <> t.worker_id
@@ -989,7 +989,7 @@ async function pagedScanStep(
         anyCounted = true;
         state.aUnread[ti]++;
         state.aFirst[ti] = state.aFirst[ti] === 0 ? row.seq : Math.min(state.aFirst[ti], row.seq);
-        const mentioned = mentionReach(reach, mentionTokensByTarget[ti]) !== null;
+        const mentioned = mentionReach(reach, mentionTokensByTarget[ti], [target.workerId]) !== null;
         if (mentioned) state.aMent[ti]++;
         if (!target.mentionOnly || mentioned) {
           state.aLast[ti] = Math.max(state.aLast[ti], row.seq);
@@ -1716,6 +1716,8 @@ export async function maybeAdvanceOwnChannelRead(
     sinceSeq?: number | null;
     beforeSeq?: number | null;
     mentionsRef?: string | null;
+    teamHeadRef?: string | null;
+    untagged?: boolean | null;
     limit?: number | null;
     offset?: number | null;
     /** #2181: the incarnation the page was pinned to; when set, every effect below runs in ONE fenced transaction. */
@@ -1755,6 +1757,8 @@ export async function maybeAdvanceOwnChannelRead(
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
+  // S3: a team-head filtered read is a window, not the contiguous tail: it never advances the mark.
+  if (args.teamHeadRef != null || args.untagged != null) return null;
   if (args.mentionsRef) return advanceOwnMentionsRead(ctx, session, args);
   if (args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when

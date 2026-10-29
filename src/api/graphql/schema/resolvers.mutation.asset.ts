@@ -13,6 +13,7 @@ import {
 import { setAgentAssetUploadEnabled, SetAssetEnabledError } from '../../../controller/operations/setAgentAssetUploadEnabled.js';
 import { AssetUploadError } from '../../../controller/operations/beginAssetUpload.js';
 import { softDeleteAsset } from '../../../controller/operations/softDeleteAsset.js';
+import { setAssetPublicLink } from '../../../lib/asset/publicLink.js';
 import { restoreAsset } from '../../../controller/operations/restoreAsset.js';
 import {
   type Context,
@@ -20,6 +21,7 @@ import {
   isOrgAdminFor,
   requireReadableAgentForAssetOp,
 } from './resolvers.helpers.js';
+import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export const assetMutations = {
     beginAssetUpload: async (
@@ -27,7 +29,7 @@ export const assetMutations = {
       { input }: { input: AssetUploadInput },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #1946: an Agent the caller can't read answers the op's own "agent not found".
       await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new AssetUploadError('NOT_FOUND', 'agent not found'));
       const ticket = await beginAssetUpload(
@@ -53,7 +55,7 @@ export const assetMutations = {
       { input }: { input: BeginAssetUploadV2Input },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       const ticket = await beginAssetUploadV2(
         ctx.db,
         {
@@ -86,8 +88,8 @@ export const assetMutations = {
       { input }: { input: CreateAssetReferenceNodeInput },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (!ctx.userId) throw unauthenticatedError();
+      if (ctx.impersonation) throw forbiddenError();
       return createAssetReferenceNode(
         ctx.db,
         {
@@ -106,7 +108,7 @@ export const assetMutations = {
       { input }: { input: { uploadId: string } },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       return completeAssetUpload(
         ctx.db,
         { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId, sessionId: ctx.sessionId, impersonation: ctx.impersonation },
@@ -119,7 +121,7 @@ export const assetMutations = {
       { input }: { input: { agentUrn: string; enabled: boolean } },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       // #1946: an Agent the caller can't read answers the op's own "agent not
       // found", never PERMISSION_DENIED or the user-owned message.
       await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new SetAssetEnabledError('NOT_FOUND', 'agent not found'));
@@ -131,12 +133,18 @@ export const assetMutations = {
       );
     },
 
+    setAssetPublicLink: async (
+      _: unknown,
+      { assetRef, enabled }: { assetRef: string; enabled: boolean },
+      ctx: Context,
+    ) => setAssetPublicLink(ctx, assetRef, enabled),
+
     softDeleteAsset: async (
       _: unknown,
       { assetId }: { assetId: string },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       return softDeleteAsset(
         ctx.db,
         { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId, sessionId: ctx.sessionId, impersonation: ctx.impersonation },
@@ -150,7 +158,7 @@ export const assetMutations = {
       { assetId }: { assetId: string },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('Unauthenticated');
+      if (!ctx.userId) throw unauthenticatedError();
       return restoreAsset(
         ctx.db,
         { userId: ctx.userId, appId: ctx.appId, roles: ctx.roles, organizationId: ctx.organizationId, sessionId: ctx.sessionId, impersonation: ctx.impersonation },

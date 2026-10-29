@@ -1,4 +1,5 @@
 import { memoryAccessFilter, type Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import { isBootPromptRole } from '../bootPrompt.js';
 import { compileTemplate } from '../template.js';
 import { IncludeReadMemo, INCLUDE_LITERAL_NODE_TYPES, spliceIncludes } from './spliceIncludes.js';
 
@@ -11,6 +12,7 @@ export interface ResolvableNode {
   content: string | null;
   data?: unknown;
   nodeType?: string | null;
+  role?: string | null;
 }
 
 export interface ResolveContentOptions {
@@ -19,9 +21,12 @@ export interface ResolveContentOptions {
   /**
    * `full` (default) is the ordinary read: includes plus data variables.
    * `includes` resolves include tags only and leaves `{{var}}` as written, for
-   * exports that must ship variables verbatim.
+   * exports that must ship variables verbatim. A boot-prompt node (role family,
+   * #2043) always reads as `includes`.
    */
   mode?: 'full' | 'includes';
+  /** Counts the includes that could not be resolved (see `SpliceOptions.broken`). */
+  broken?: { count: number };
 }
 
 interface RequestState {
@@ -54,8 +59,11 @@ export async function resolveNodeContent(
   if (node.nodeType && INCLUDE_LITERAL_NODE_TYPES.has(node.nodeType)) return stored;
   const { access, memo } = stateOf(ctx);
   const filter = await access;
-  const options = { foreign: true, memo };
-  if (opts.mode === 'includes') {
+  const options = { foreign: true, memo, ...(opts.broken ? { broken: opts.broken } : {}) };
+  // #2043 (cor:dmo:150:08) — a direct read of a boot-prompt node, source or
+  // compiled, shows the platform variables as written: includes resolve, the
+  // Mustache render over data is skipped. The bind fills them, never a read.
+  if (opts.mode === 'includes' || isBootPromptRole(node.role)) {
     return spliceIncludes(ctx.db, filter, stored, node, options);
   }
   return compileTemplate(

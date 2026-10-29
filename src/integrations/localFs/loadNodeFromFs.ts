@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'fs';
+import { validateNodeDataExtractionSpecs } from '../../lib/edge-conditions/reserved-names.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { join, relative, sep, basename, dirname } from 'path';
 import { parse } from 'yaml';
@@ -40,6 +41,7 @@ interface NodeYaml {
   name: string;
   urn?: string;
   type?: string;
+  data?: unknown;
   /** YAML may carry any scalar here; only a non-blank string is read (#1348). */
   objectType?: unknown;
   description?: string;
@@ -84,6 +86,36 @@ interface NodeYaml {
   alias?: string;
   author?: string;
   contentHash?: string;
+}
+
+/** #2556: omitted keys preserve stored values; explicit JSON null clears data. */
+function typedPayloadFromMeta(meta: NodeYaml): Pick<Partial<Node>, 'nodeType' | 'data'> {
+  const result: Pick<Partial<Node>, 'nodeType' | 'data'> = {};
+  // Gate6434957685: blank/foreign values are absent; link is the legacy isLink marker.
+  if (typeof meta.type === 'string' && meta.type.trim() !== '' && meta.type !== 'link') {
+    // cor:dmo:020:04: all other words are open vocabulary, retained exactly.
+    result.nodeType = meta.type;
+  }
+  if ('data' in meta) {
+    const active = new Set<object>();
+    const check = (value: unknown): void => {
+      if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+      if (typeof value === 'number' && Number.isFinite(value)) return;
+      if (typeof value !== 'object' || value === null || active.has(value)
+        || (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+        throw new Error('Node data must be finite, acyclic JSON');
+      }
+      active.add(value);
+      for (const child of Object.values(value)) check(child);
+      active.delete(value);
+    };
+    check(meta.data);
+    // Import is a write surface: share the API's reserved extraction namespace gate.
+    const extraction = validateNodeDataExtractionSpecs(meta.data);
+    if (!extraction.ok) throw new Error(extraction.error.message);
+    result.data = meta.data as Node['data'];
+  }
+  return result;
 }
 
 function placeholderFromMeta(meta: NodeYaml, source: string): { isPlaceholder: true } | Record<string, never> {
@@ -294,6 +326,26 @@ export const loadNodeFromFs = async (
   return loadLegacyNode(source, graphRoot, ownerRepo, memoryUrn);
 };
 
+/** ASCII whitespace only, so the CLI's Go parser can apply the identical set (#2391). */
+const ASCII_WHITESPACE_ONLY = /^[ \t\n\r\v\f]*$/;
+
+/**
+ * #2391 (hrn:node:hadronmemory.com:specs:cor:int:020:01, F1): the node content of
+ * a frontmatter file's body, i.e. the text after the closing `---` line. The
+ * writers (`pushMemoryToGit`, `writeNodeFile`, `nodeExport`) frame content as
+ * `\n<content>\n`, so this removes ONE leading `\n` and ONE trailing `\n` if
+ * present and nothing else. Authored boundary whitespace survives, and a
+ * written file reads back as the stored text (approval hash unchanged,
+ * cor:dmo:120:01). A body left empty or ASCII-whitespace-only is null (Holger,
+ * 2026-10-26). Expects CRLF already normalized. Shared cases with hadron-cli#945:
+ * `markdownBodyFraming.fixture.json`.
+ */
+export function markdownBodyContent(body: string): string | null {
+  let content = body.startsWith('\n') ? body.slice(1) : body;
+  if (content.endsWith('\n')) content = content.slice(0, -1);
+  return ASCII_WHITESPACE_ONLY.test(content) ? null : content;
+}
+
 /**
  * Load a frontmatter markdown node (Obsidian vault format).
  */
@@ -317,7 +369,7 @@ async function loadFrontmatterNode(
   if (!fmMatch) throw new Error(`No frontmatter found in ${mdPath}`);
 
   const meta = parseNodeYaml(fmMatch[1], `frontmatter in ${mdPath}`);
-  const content = fmMatch[2]?.trim() || null;
+  const content = markdownBodyContent(fmMatch[2] ?? '');
   const loc = deriveValidatedLoc(mdPath, graphRoot, true, meta.id, memoryUrn);
 
   // Sidecar edges take precedence over frontmatter `nodes:` array
@@ -342,6 +394,7 @@ async function loadFrontmatterNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      ...typedPayloadFromMeta(meta),
       // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
       ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,
@@ -401,6 +454,7 @@ async function loadLegacyNode(
       loc,
       name: meta.name,
       isLink: meta.type === 'link',
+      ...typedPayloadFromMeta(meta),
       // #725 / #1348 — spread, NOT `?? null`: see objectTypeFromMeta.
       ...objectTypeFromMeta(meta),
       alias: meta.alias ?? null,

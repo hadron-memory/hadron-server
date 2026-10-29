@@ -10,7 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { bindAgentPrompt } from './resolvers.mutation.chat.js';
-import { applyPlatformVariables, templateBindsName } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -60,9 +60,9 @@ describe('one pass over the authored source (blind review P2-1, P3-1)', () => {
     );
   });
 
-  it('templateBindsName also recognises the exact {{worker.name}} token', () => {
-    expect(templateBindsName('You are {{worker.name}}.')).toBe(true);
-    expect(templateBindsName('You are {{ worker.name }}.')).toBe(false);
+  it('binds only the exact {{worker.name}} token', () => {
+    expect(applyPlatformVariables('You are {{worker.name}}.', values)).toBe(`You are ${values['worker.name']}.`);
+    expect(applyPlatformVariables('You are {{ worker.name }}.', values)).toBe('You are {{ worker.name }}.');
   });
 });
 
@@ -105,8 +105,12 @@ describe('composeWorkerPrompt — filled at each bind', () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  const cast = (name: string, role?: string) =>
-    M.castWorker({}, { appRef: appId, agentRef: agentId, name, ...(role ? { role } : {}) }, ctx(userId));
+  // #2458 / R222: a cast can no longer override the agent's role, so a worker with its own stored role (one cast
+  // before R222) is set up by writing the role after the cast.
+  const cast = async (name: string, role?: string) => {
+    const w = await M.castWorker({}, { appRef: appId, agentRef: agentId, name }, ctx(userId));
+    return role ? db.worker.update({ where: { id: w.id }, data: { role } }) : w;
+  };
   const prompt = async (id: string, opts?: { llmModel?: string | null }) =>
     (await composeWorkerPrompt(ctx(userId), await db.worker.findUniqueOrThrow({ where: { id } }), opts)).text;
 

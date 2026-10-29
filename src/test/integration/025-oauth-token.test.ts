@@ -505,10 +505,55 @@ describe('POST /oauth/token — expiry', () => {
   });
 });
 
+// ── #155: client lifetime ────────────────────────────────────────────
+
+describe('POST /oauth/token — soft-deleted client (#155)', () => {
+  it('refuses with the unknown-code answer, mints nothing, and leaves the code burned', async () => {
+    const { rawCode, verifier, authCodeId } = await seedAuthCode();
+    await db.oAuthClient.update({
+      where: { clientId: TEST_CLIENT_ID },
+      data: { deletedAt: new Date(), deletedBy: 'system:gc' },
+    });
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(400);
+    // The same answer as a lost race (R: Xabat's CHECKED Q2), so /token is no
+    // oracle for client state.
+    expect(await res.json()).toEqual({ error: 'invalid_grant', error_description: 'code is unknown' });
+    expect(await db.userApiKey.count()).toBe(0);
+    await assertCodeRedeemed(authCodeId);
+  });
+});
+
+describe('POST /oauth/token — redemption extends the client (#155)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('moves an expiring client to 30 days from the redemption', async () => {
+    await db.oAuthClient.update({
+      where: { clientId: TEST_CLIENT_ID },
+      data: { expiresAt: new Date(Date.now() + 2 * DAY) },
+    });
+    const { rawCode, verifier } = await seedAuthCode();
+    const before = Date.now();
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(200);
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: TEST_CLIENT_ID } });
+    expect(row.expiresAt!.getTime()).toBeGreaterThanOrEqual(before + 30 * DAY - 5_000);
+    expect(row.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + 30 * DAY + 5_000);
+  });
+
+  it('leaves a client that never expires (NULL) at NULL', async () => {
+    const { rawCode, verifier } = await seedAuthCode();
+    const res = await postToken(defaultFields(rawCode, verifier));
+    expect(res.status).toBe(200);
+    const row = await db.oAuthClient.findUniqueOrThrow({ where: { clientId: TEST_CLIENT_ID } });
+    expect(row.expiresAt).toBeNull();
+  });
+});
+
 // ── DB failure containment ───────────────────────────────────────────
 
 describe('POST /oauth/token — DB failure containment', () => {
-  it('key mint transaction throws → 500 server_error (not a crash, AuthCode stays claimed)', async () => {
+  it('claim+mint transaction throws → 500 server_error (not a crash, nothing claimed or minted)', async () => {
     // Same posture as Phase 2B/2C: Express 4 doesn't auto-forward
     // async rejections; the try/catch keeps the failure local to
     // the request.
@@ -522,10 +567,11 @@ describe('POST /oauth/token — DB failure containment', () => {
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.error).toBe('server_error');
       expect(JSON.stringify(body)).not.toMatch(/simulated DB outage/);
-      // The claim happened (race-safety; the code is gone) but no
-      // token was minted. User must restart the dance — documented
-      // tradeoff vs. risk of un-claim race.
-      await assertCodeRedeemed(authCodeId);
+      // #1897: claim and mint are ONE anchored transaction, so a failed
+      // transaction leaves the code unclaimed (no un-claim race exists any
+      // more) and no token minted; the client may retry the same code.
+      const row = await db.authCode.findUniqueOrThrow({ where: { id: authCodeId } });
+      expect(row.redeemedAt).toBeNull();
       expect(await db.userApiKey.count()).toBe(0);
     } finally {
       spy.mockRestore();

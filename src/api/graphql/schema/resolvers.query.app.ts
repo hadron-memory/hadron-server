@@ -4,6 +4,9 @@ import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { DEFAULT_AI_CONFIG_NAME } from '../../../lib/aiConfig.js';
 import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
+import { readableNestedAgent } from './resolvers.types.js';
 import { GraphQLError } from 'graphql';
 import {
   type Context,
@@ -13,6 +16,7 @@ import {
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
+import { forbiddenError } from '../../../lib/refusals.js';
 
 export const appQueries = {
     serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
@@ -30,7 +34,7 @@ export const appQueries = {
         limit,
         offset,
       }: {
-        filter?: { ownedByMe?: boolean | null } | null;
+        filter?: { ownedByMe?: boolean | null; agentId?: string | null } | null;
         orgId?: string | null;
         limit?: number | null;
         offset?: number | null;
@@ -40,6 +44,29 @@ export const appQueries = {
       const take = clampListTake(limit);
       const skip = Math.max(0, offset ?? 0);
       const f = filter ?? {};
+      // #2343: apps that install an Agent. The match is the AppAgent join
+      // (there is no primary-agent column), so `App.agents`' read-gate drops
+      // cannot hide the target. The VALUE goes through the Agent read gate
+      // first: an unreadable, deleted, malformed or nonexistent agent all
+      // answer the same empty page, so the filter is no existence oracle.
+      // Only "this ref names nothing" is swallowed; a database error is not.
+      let agentClause: Record<string, unknown> = {};
+      // Omitted and null skip the filter; an explicit value, including the empty
+      // string, must resolve or answer the empty page.
+      if (f.agentId != null) {
+        let target: { id: string } | null = null;
+        try {
+          const { id } = await resolveAgentRef(ctx.db, f.agentId);
+          target = await readableNestedAgent(ctx, await ctx.db.agent.findUnique({
+            where: { id },
+            select: { id: true, deletedAt: true, visibility: true, organizationId: true, ownerUserId: true },
+          }));
+        } catch (error) {
+          if (!(error instanceof AgentNotFoundError || error instanceof UrnNotQualifiedError || error instanceof AmbiguousLegacyUrnError)) throw error;
+        }
+        if (!target) return { items: [], total: 0 };
+        agentClause = { appAgents: { some: { agentId: target.id } } };
+      }
       let where: Record<string, unknown>;
       if (f.ownedByMe) {
         // #782 — the caller's OWN user-owned (org-less) Apps only, for ALL
@@ -52,7 +79,7 @@ export const appQueries = {
         // sharper payload: a leaked App handed over its own scalar fields;
         // keys and members now also enforce their own read gate (#1521).
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
-        where = { deletedAt: null, organizationId: null, ownerUserId: ctx.userId };
+        where = { deletedAt: null, organizationId: null, ownerUserId: ctx.userId, ...agentClause };
       } else {
         const scope = await resolveOrgScope(ctx, orgId);
         if (!scope) return { items: [], total: 0 };
@@ -68,6 +95,7 @@ export const appQueries = {
           where = {
             deletedAt: null,
             OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
+            ...agentClause,
           };
         } else {
           // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
@@ -81,7 +109,7 @@ export const appQueries = {
           if (!scopedToOrg && ctx.userId && !ctx.impersonation) {
             ownerClauses.push({ ownerUserId: ctx.userId });
           }
-          where = { deletedAt: null, OR: ownerClauses };
+          where = { deletedAt: null, OR: ownerClauses, ...agentClause };
         }
       }
       const [total, items] = await Promise.all([
@@ -172,7 +200,7 @@ export const appQueries = {
     // `id desc` tiebreaker on createdAt ties (cuid is monotonic-ish so
     // this is effectively a fingerprint); guarantees deterministic
     // ordering regardless of millisecond ties.
-    myUserApiKeys: async (_: unknown, __: unknown, ctx: Context) => {
+    myUserApiKeys: async (_: unknown, { includeHidden }: { includeHidden?: boolean } = {}, ctx: Context) => {
       if (!ctx.userId) {
         throw new GraphQLError(
           'myUserApiKeys requires a user-scoped credential.',
@@ -182,9 +210,10 @@ export const appQueries = {
       // #876 class sweep: the target's personal API-credential inventory
       // (previews, labels, last-used stamps, active AND revoked) is
       // identity-scoped — never part of a shared-org support view.
-      if (ctx.impersonation) throw new Error('Forbidden');
+      if (ctx.impersonation) throw forbiddenError();
       return ctx.db.userApiKey.findMany({
-        where: { userId: ctx.userId },
+        // #2298: keys the owner hid stay out of the default list.
+        where: { userId: ctx.userId, ...(includeHidden ? {} : { hiddenAt: null }) },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       });
     },

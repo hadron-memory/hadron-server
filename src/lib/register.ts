@@ -36,6 +36,7 @@ import { resolveOrgRef } from './entityRef/orgRef.js';
 import { resolveWorkerRef } from './entityRef/workerRef.js';
 import { resolveAgentRef } from './entityRef/agentRef.js';
 import { LIVE_ORG_MEMBERSHIP } from './auth/liveOrgMembership.js';
+import { forbiddenError } from './refusals.js';
 
 export type RegisterOwnerType = 'ORGANIZATION' | 'APP';
 
@@ -103,7 +104,7 @@ export async function requireRegisterOwnerWrite(ctx: Context, owner: RegisterOwn
     where: { id: owner.appId!, deletedAt: null, uninstalledAt: null },
     select: { organizationId: true, ownerUserId: true },
   });
-  if (!app) throw new Error('Forbidden');
+  if (!app) throw forbiddenError();
   return requireOwnerOrOrgRole(ctx, app, 'ADMIN');
 }
 

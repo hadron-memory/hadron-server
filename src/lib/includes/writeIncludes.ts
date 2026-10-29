@@ -1,6 +1,6 @@
 import { GraphQLError } from 'graphql';
-import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
 import type { Prisma } from '../../generated/prisma/index.js';
+import { includeUrnTarget } from './includeUrnTarget.js';
 import { generateId } from '../id.js';
 import { decryptNodeFields } from '../nodeCrypto.js';
 import { sessionKeyCache } from '../sessionKeyCache.js';
@@ -42,16 +42,17 @@ async function resolveTarget(
 ): Promise<Resolved | null> {
   let memoryId = from.memoryId;
   let loc = tag.target;
+  let targetId: string | undefined;
   if (tag.kind === 'urn') {
-    const parts = splitNodeUrn(tag.target);
-    const mem = await tx.memory.findUnique({ where: { urn: parts.memoryUrn }, select: { id: true } });
-    if (!mem) return null;
-    memoryId = mem.id;
-    loc = parts.loc;
+    const target = await includeUrnTarget(tx, tag.target);
+    if (!target) return null;
+    memoryId = target.memoryId;
+    loc = target.loc;
+    targetId = target.id;
   }
   if (readable !== null && !readable.includes(memoryId)) return null;
   const node = await tx.node.findFirst({
-    where: { memoryId, loc, deletedAt: null },
+    where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, memory: { deletedAt: null } },
     select: { id: true, memoryId: true, loc: true, content: true, memory: { select: { id: true, isEncrypted: true } } },
   });
   if (overlay && memoryId === overlay.memoryId && overlay.contents.has(loc)) {
@@ -72,19 +73,86 @@ export function includeRefusal(code: string, message: string, extra: Record<stri
 }
 
 /**
- * Refuse content whose include tags are malformed or reach the writing node
- * again (a cycle). Depth is not a write refusal: a chain deeper than the read
- * cap saves and shows the broken-include notice at read (#2134, cor:dmo:150:06).
- * Run inside the writer's transaction on the PLAINTEXT content, before the node
- * row is written, so a refusal leaves nothing behind. The walk follows only
- * nodes the principal can read (`readable`); an unreadable or missing target
- * ends its branch silently, so a cycle through one cannot be learned from the
- * error. A node already walked on another branch is not re-walked (diamonds are
- * fine): everything it reaches was walked with it, and did not reach the writer.
+ * How a writer's include tags are judged (#2041 S2b). `storedPlaintext` is the
+ * includer's plaintext from the row the writer locked and revalidated in its
+ * own transaction, read before its update; absent for a create or a resurrected
+ * tombstone. `includeSystemWrite` is for git sync and the root-node seam only,
+ * which have no writing person: they keep the syntax and cycle checks and skip
+ * the read check (cor:dmo:150:04 applies to GraphQL, the CLI, the portal and MCP).
+ */
+export interface IncludeWriteOptions {
+  storedPlaintext?: string | null;
+  includeSystemWrite?: true;
+}
+
+/**
+ * A tag's identity for "added or changed": kind, target and settings, never its
+ * spelling. `rev` is keyed as a string: JSON would write a rev too large for a
+ * number (Infinity) as null, the same as no rev (Gene, #2226).
+ */
+export function includeTagKey(tag: IncludeTag): string {
+  const { rev, approved, signed } = tag.settings;
+  return JSON.stringify([tag.kind, tag.target, rev === undefined ? null : String(rev), approved === true, signed === true]);
+}
+
+/** Keys of the tags in the stored text; text that no longer parses has none, so every tag is checked. */
+function storedIncludeKeys(storedPlaintext: string | null | undefined): Set<string> {
+  return new Set(storedIncludeTags(storedPlaintext).map(includeTagKey));
+}
+
+/**
+ * Does the tag's target exist, live, in a memory the writer may read? Access
+ * only, never decryption: an encrypted target the writer may read counts with
+ * no session key (cor:dmo:150:04). A same-batch overlay file counts as existing.
+ */
+async function targetIsReadable(
+  tx: Tx, tag: IncludeTag, from: IncludeWriteNode, readable: ReadableMemoryIds, overlay?: IncludeOverlay,
+): Promise<boolean> {
+  const id = await targetIdOf(tx, tag, from, readable);
+  if (id) return true;
+  if (!overlay) return false;
+  const loc = tag.kind === 'loc' ? tag.target : null;
+  return loc !== null && from.memoryId === overlay.memoryId && overlay.contents.has(loc);
+}
+
+/** The id of a tag's live target in a memory `readable` admits, without reading its content. */
+async function targetIdOf(
+  tx: Tx, tag: IncludeTag, from: { memoryId: string }, readable: ReadableMemoryIds,
+): Promise<string | null> {
+  let memoryId = from.memoryId;
+  let loc = tag.target;
+  let targetId: string | undefined;
+  if (tag.kind === 'urn') {
+    const target = await includeUrnTarget(tx, tag.target);
+    if (!target) return null;
+    memoryId = target.memoryId;
+    loc = target.loc;
+    targetId = target.id;
+  }
+  if (readable !== null && !readable.includes(memoryId)) return null;
+  const node = await tx.node.findFirst({ where: { ...(targetId ? { id: targetId } : { loc }), memoryId, deletedAt: null, memory: { deletedAt: null } }, select: { id: true } });
+  return node?.id ?? null;
+}
+
+/**
+ * Refuse content whose include tags are malformed, name a target the writer
+ * can't read, or reach the writing node again (a cycle). Only tags the write
+ * ADDS or CHANGES against `opts.storedPlaintext` are checked for access and
+ * start the cycle walk (R110): a tag already stored is not re-checked, and a
+ * cycle that formed later through one is a broken include at read, not a
+ * refusal of an unrelated save. Depth is not a write refusal: a chain deeper
+ * than the read cap saves and shows the notice at read (#2134, cor:dmo:150:06).
+ * Run inside the writer's transaction on the PLAINTEXT content, so a refusal
+ * leaves nothing behind. A missing, deleted or unreadable target gets one
+ * error naming only the authored tag (cor:dmo:150:05). The walk follows only
+ * nodes the principal can read; an unreadable or missing target ends its
+ * branch silently, so a cycle through one cannot be learned from the error. A
+ * node already walked is not re-walked (diamonds are fine): everything it
+ * reaches was walked with it, and did not reach the writer.
  */
 export async function assertIncludesWritable(
   tx: Tx, node: IncludeWriteNode, plaintextContent: string | null | undefined, readable: ReadableMemoryIds,
-  overlay?: IncludeOverlay,
+  overlay?: IncludeOverlay, opts: IncludeWriteOptions = {},
 ): Promise<IncludeTag[]> {
   if (!plaintextContent || !plaintextContent.includes('{{>')) return [];
   let tags: IncludeTag[];
@@ -113,7 +181,17 @@ export async function assertIncludesWritable(
       await walk(target, nested);
     }
   };
-  for (const tag of tags) {
+  const stored = storedIncludeKeys(opts.storedPlaintext);
+  const touched = tags.filter(tag => !stored.has(includeTagKey(tag)));
+  if (!opts.includeSystemWrite) {
+    for (const tag of touched) {
+      if (!(await targetIsReadable(tx, tag, node, readable, overlay))) {
+        throw includeRefusal('INCLUDE_TARGET_UNAVAILABLE',
+          `Include ${tag.raw} can't be used: the target doesn't exist or you can't read it.`, { tag: tag.raw });
+      }
+    }
+  }
+  for (const tag of touched) {
     try {
       await walk(node, [tag]);
     } catch (e) {
@@ -130,23 +208,34 @@ export async function assertIncludesWritable(
 
 /**
  * Replace the node's derived INCLUDE edges with exactly the targets its tags
- * name (one edge per distinct, live, readable target). Idempotent; only INCLUDE
- * rows are touched, so a client's own edges are never disturbed. The caller is
- * the node's content writer, inside its transaction.
+ * name (one edge per distinct, live, readable target). A tag already in
+ * `opts.storedPlaintext` keeps its existing edge even when the writer can no
+ * longer read its target (R110); no edge is ever created to a target the
+ * writer can't read. Idempotent; only INCLUDE rows are touched, so a client's
+ * own edges are never disturbed. The caller is the node's content writer,
+ * inside its transaction.
  */
 export async function syncDerivedIncludesEdges(
   tx: Tx, node: { id: string; memoryId: string; loc: string }, tags: IncludeTag[], readable: ReadableMemoryIds,
+  opts: Pick<IncludeWriteOptions, 'storedPlaintext'> = {},
 ): Promise<void> {
   const wanted = new Map<string, string>();
+  const kept = new Set<string>();
+  const stored = storedIncludeKeys(opts.storedPlaintext);
   for (const tag of tags) {
     const target = await resolveTarget(tx, tag, node, readable);
-    if (target && target.id !== node.id) wanted.set(target.id, includeEdgeLoc(node.id, target.id));
+    if (target && target.id !== node.id) {
+      wanted.set(target.id, includeEdgeLoc(node.id, target.id));
+    } else if (!target && stored.has(includeTagKey(tag))) {
+      const id = await targetIdOf(tx, tag, node, null);
+      if (id) kept.add(id);
+    }
   }
   const existing = await tx.edge.findMany({
     where: { sourceId: node.id, governedKind: 'INCLUDE' },
     select: { id: true, targetId: true },
   });
-  const stale = existing.filter(e => !wanted.has(e.targetId)).map(e => e.id);
+  const stale = existing.filter(e => !wanted.has(e.targetId) && !kept.has(e.targetId)).map(e => e.id);
   if (stale.length) await tx.edge.deleteMany({ where: { id: { in: stale } } });
   const have = new Set(existing.map(e => e.targetId));
   for (const [targetId, loc] of wanted) {
@@ -157,13 +246,24 @@ export async function syncDerivedIncludesEdges(
   }
 }
 
-/** The text an MCP tool returns for an include refusal, or null for any other error. */
-export function includeRefusalText(e: unknown): string | null {
+/** The public codes of an include refusal. One declaration: the sync report's `invalid_include` row is checked against it at compile time. */
+export const INCLUDE_REFUSAL_CODES = ['INVALID_INCLUDE', 'INCLUDE_CYCLE', 'INCLUDE_TARGET_UNAVAILABLE'] as const;
+export type IncludeRefusalCode = typeof INCLUDE_REFUSAL_CODES[number];
+
+/** The code of an include refusal, or null for any other error. */
+export function includeRefusalCode(e: unknown): IncludeRefusalCode | null {
   if (!(e instanceof GraphQLError)) return null;
   const code = e.extensions?.code;
-  if (code !== 'INVALID_INCLUDE' && code !== 'INCLUDE_CYCLE') return null;
-  const tag = typeof e.extensions?.tag === 'string' ? ` Tag: ${e.extensions.tag}` : '';
-  return `[${String(code).toLowerCase()}] ${e.message}${tag}`;
+  return (INCLUDE_REFUSAL_CODES as readonly unknown[]).includes(code) ? code as IncludeRefusalCode : null;
+}
+
+/** The text an MCP tool returns for an include refusal, or null for any other error. */
+export function includeRefusalText(e: unknown): string | null {
+  const code = includeRefusalCode(e);
+  if (!code) return null;
+  const extensions = (e as GraphQLError).extensions;
+  const tag = typeof extensions?.tag === 'string' ? ` Tag: ${extensions.tag}` : '';
+  return `[${code.toLowerCase()}] ${(e as GraphQLError).message}${tag}`;
 }
 
 /** Tags of content already stored: a malformed one yields no edges rather than failing the caller. */
@@ -181,6 +281,28 @@ export function storedIncludeTags(content: string | null | undefined): IncludeTa
  * the content was valid where it came from. Encrypted memories re-derive only
  * while their key is cached; otherwise the edges wait for the next content write.
  */
+/**
+ * #2167 — a copy (clone, extract) is an includer write: every tag in every
+ * copied node counts as added, so each is checked for the copier's read access
+ * and as a cycle root against where it landed (cor:dmo:150:04, :06). Run on the
+ * inserted rows inside the copy's transaction, after any content rewrite, so a
+ * refusal rolls the whole copy back. The copier owns the destination it is
+ * creating, so the destination joins `readable`. Copies are plaintext: both
+ * copy paths refuse an encrypted source.
+ */
+export async function assertCopiedIncludesWritable(
+  tx: Tx, nodeIds: string[], destinationMemoryId: string, readable: ReadableMemoryIds,
+): Promise<void> {
+  if (nodeIds.length === 0) return;
+  const withDestination = readable === null ? null : [...readable, destinationMemoryId];
+  const nodes = await tx.node.findMany({
+    where: { id: { in: nodeIds }, deletedAt: null },
+    select: { id: true, memoryId: true, loc: true, content: true },
+    orderBy: { loc: 'asc' },
+  });
+  for (const node of nodes) await assertIncludesWritable(tx, node, node.content, withDestination);
+}
+
 export async function resyncDerivedIncludesForNodes(tx: Tx, nodeIds: string[]): Promise<void> {
   if (nodeIds.length === 0) return;
   const nodes = await tx.node.findMany({

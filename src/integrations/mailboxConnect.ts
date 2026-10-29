@@ -14,10 +14,11 @@
 import crypto from 'crypto';
 import type { Express } from 'express';
 import { issueExchangeStartNonce, redeemExchangeStartNonce } from '../auth/authHandoff.js';
-import { verifyJwt } from '../auth/index.js';
+import { verifyAuthenticatedJwt } from '../auth/index.js';
 import { requireOrgRole } from '../api/graphql/schema/resolvers.helpers.js';
 import { createToolConnection, deleteToolConnection, subscribeToolFolder } from '../lib/emailClient.js';
 import { db } from './db/client.js';
+import { respondInternalFault } from '../lib/internalFault.js';
 
 export interface MailboxConnectConfig {
   /** emailClient PROVIDER_TOOLS key; stored on ExchangeConnection.provider. */
@@ -69,7 +70,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     let userId: string;
     let roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
     try {
-      const payload = await verifyJwt(authHeader.slice(7));
+      const payload = await verifyAuthenticatedJwt(authHeader.slice(7), db);
       // Admin impersonation: read-only sessions cannot start a mailbox
       // connection (a state-changing OAuth flow as the target).
       if (payload.imp) {
@@ -113,8 +114,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         res.status(403).json({ error: 'Forbidden: you must be an admin of this organization.' });
         return;
       }
-      console.error(`${cfg.routeName}/start authorization error:`, err);
-      res.status(500).json({ error: 'Internal error' });
+      respondInternalFault(res, `${cfg.routeName}/start`, err);
       return;
     }
 

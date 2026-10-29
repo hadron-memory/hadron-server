@@ -264,11 +264,11 @@ describe('chatHistory returns the most recent window (#1111)', () => {
     ]);
   });
 
-  it('applies the same tail window to the default limit of 100', async () => {
+  it('applies the same tail window to the default limit of 20', async () => {
     await seedTranscript(130);
     const rows = await read(undefined);
-    expect(rows).toHaveLength(100);
-    expect(rows[0].seq).toBe(31);
+    expect(rows).toHaveLength(20);
+    expect(rows[0].seq).toBe(111);
     expect(rows[rows.length - 1].seq).toBe(130);
   });
 });
