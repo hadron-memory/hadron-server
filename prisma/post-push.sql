@@ -806,3 +806,6 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
+
+-- #2479: per-trigger run budget limits.
+\ir trigger-run-budget-invariants.sql

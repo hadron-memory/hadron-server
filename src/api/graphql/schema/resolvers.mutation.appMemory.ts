@@ -404,6 +404,10 @@ export const appMemoryMutations = {
           },
         });
       }
+      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
+      // the Memory back and a retry cannot mint a second one.
+      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
+        description: 'Root node for this memory.' }, tx);
       return created;
       });
     } catch (err) {
@@ -417,10 +421,6 @@ export const appMemoryMutations = {
       }
       throw err;
     }
-
-    // Root node, as createMemory does.
-    const rootName = name.split(':').pop() ?? name;
-    await createNode({ memoryId: memory.id, loc: name, name: rootName });
 
     return memory;
   },

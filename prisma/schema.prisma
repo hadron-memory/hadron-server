@@ -4775,6 +4775,9 @@ model AgentSchedule {
   /// launch) — a same-memory rename/move of the entry keeps the trigger
   /// working; entryNodeUrn stays the immutable display/audit address.
   entryNodeId     String?   @map("entry_node_id")
+  /// #2479: optional per-run limits; NULL uses the current platform default.
+  budgetTokens   Int?      @map("budget_tokens")
+  budgetActions  Int?      @map("budget_actions")
   eventData      Json?     @map("event_data")
   /// Trigger-layer allow-list (chain link; plan §4).
   policy         Json?
@@ -4948,6 +4951,9 @@ model AgentWebhook {
   /// launch) — a same-memory rename/move of the entry keeps the trigger
   /// working; entryNodeUrn stays the immutable display/audit address.
   entryNodeId     String?   @map("entry_node_id")
+  /// #2479: optional per-run limits; NULL uses the current platform default.
+  budgetTokens   Int?      @map("budget_tokens")
+  budgetActions  Int?      @map("budget_actions")
   eventData      Json?     @map("event_data")
   policy         Json?
   aiConfigName   String?   @map("ai_config_name")
