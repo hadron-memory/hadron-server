@@ -138,3 +138,70 @@ it('lazy batch endpoints keep the cross-memory read gate', async () => {
   expect((response.data as any).nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: null }]);
   expect(JSON.stringify(response)).not.toContain('NEVER_DISCLOSE');
 });
+
+it.each(['prefix', 'refs'] as const)('returns the first oversized node and echoes all later omissions (%s)', async (form) => {
+  const rows = Array.from({ length: 3 }, (_, i) => ({ id: generateId(), memoryId, loc: `oversize:${i}`, name: 'large', content: 'x'.repeat(1_200_000) }));
+  await db.node.createMany({ data: rows });
+  const query = form === 'prefix'
+    ? 'query($memory:ID!){nodeBatch(memory:$memory,locPrefix:"oversize:"){nodes{id content} truncated omitted unavailable}}'
+    : 'query($refs:[ID!]){nodeBatch(refs:$refs){nodes{id content} truncated omitted unavailable}}';
+  const response = await run(query, form === 'prefix' ? { memory: memoryId } : { refs: rows.map(n => n.id) });
+  expect(response.errors).toBeUndefined();
+  expect((response.data as any).nodeBatch).toEqual({ nodes: [{ id: rows[0].id, content: rows[0].content }], truncated: true, omitted: rows.slice(1).map(n => n.id), unavailable: [] });
+});
+
+it('bounds total edge rows before concurrent sibling fields and aliases materialize them', async () => {
+  const rows = Array.from({ length: 200 }, (_, i) => ({ id: generateId(), memoryId, loc: `concurrent:${i}`, name: 'n' }));
+  await db.node.createMany({ data: rows });
+  await db.edge.createMany({ data: rows.flatMap((a, i) => rows.map((b, j) => ({ id: generateId(), memoryId, sourceId: a.id, targetId: b.id, loc: `concurrent-edge:${i}:${j}` }))) });
+  const original = db.edge.findMany.bind(db.edge);
+  const reads: Promise<unknown>[] = [];
+  let materializedRows = 0;
+  vi.spyOn(db.edge, 'findMany').mockImplementation(((args: any) => {
+    const pending = original(args).then(result => { materializedRows += result.length; return result; });
+    reads.push(pending);
+    return pending;
+  }) as typeof db.edge.findMany);
+  const response = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{a:outgoingEdges{id} b:outgoingEdges{id} incomingEdges{id}}}}', { refs: rows.map(n => n.id) });
+  await Promise.allSettled(reads);
+  expect(response.errors?.some(e => e.extensions?.code === 'BAD_USER_INPUT')).toBe(true);
+  expect(materializedRows).toBeLessThanOrEqual(2001);
+}, 60_000);
+
+it('explicit inherited refs preserve child-only admission without loading unselected endpoint bodies', async () => {
+  const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+  const make = async (name: string, extendsAgentId?: string) => {
+    const memory = await db.memory.create({ data: { organizationId: home.organizationId, class: 'system', name, urn: `oom2758.example:${name}` } });
+    const agent = await db.agent.create({ data: { organizationId: home.organizationId, name, urn: `oom2758.example:${name}`, visibility: 'ORGANIZATION', systemMemoryId: memory.id, extendsAgentId } });
+    return { memory, agent };
+  };
+  const base = await make('base'); const child = await make('child', base.agent.id);
+  const reader = await db.user.create({ data: { handle: 'child-only', roles: ['READER'] } });
+  await db.orgMember.create({ data: { organizationId: home.organizationId!, userId: reader.id, role: 'READER' } });
+  const app = await db.app.create({ data: { organizationId: home.organizationId, name: 'Child app', urn: 'oom2758.example:child-app' } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: child.agent.id } });
+  await db.appMember.create({ data: { appId: app.id, userId: reader.id, role: 'member' } });
+  const a = await createDbNode(db, { memoryId: base.memory.id, loc: 'a', content: 'A' });
+  const b = await createDbNode(db, { memoryId: base.memory.id, loc: 'b', content: 'UNSELECTED'.repeat(16_384) });
+  await db.edge.createMany({ data: Array.from({ length: 20 }, (_, i) => ({ id: generateId(), memoryId: base.memory.id, sourceId: a.id, targetId: b.id, loc: `inherited-edge:${i}` })) });
+  userId = reader.id;
+  expect(await (resolvers.Query as any).memory({}, { ref: base.memory.id }, context())).toBeNull();
+  const original = db.node.findUnique.bind(db.node);
+  let endpointBodyBytes = 0;
+  vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: any) => {
+    const row = await original(args);
+    if (row?.id === b.id) endpointBodyBytes += Buffer.byteLength(row.content ?? '');
+    return row;
+  }) as typeof db.node.findUnique);
+  const refs = [`hrn:node:${child.memory.urn}:a`];
+  const response = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{id inheritedFrom{agentId} outgoingEdges{id}} unavailable}}', { refs });
+  expect(response.errors).toBeUndefined();
+  expect((response.data as any).nodeBatch.unavailable).toEqual([]);
+  expect((response.data as any).nodeBatch.nodes[0]).toMatchObject({ id: a.id, inheritedFrom: { agentId: base.agent.id } });
+  expect((response.data as any).nodeBatch.nodes[0].outgoingEdges).toHaveLength(20);
+  expect(endpointBodyBytes).toBe(0);
+  const override = await createDbNode(db, { memoryId: child.memory.id, loc: 'b', content: 'CHILD OVERRIDE' });
+  const selected = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{target{id content}}}}}', { refs });
+  expect(selected.errors).toBeUndefined();
+  expect((selected.data as any).nodeBatch.nodes[0].outgoingEdges).toEqual(Array.from({ length: 20 }, () => ({ target: { id: override.id, content: 'CHILD OVERRIDE' } })));
+}, 60_000);
