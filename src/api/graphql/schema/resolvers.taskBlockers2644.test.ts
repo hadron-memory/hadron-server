@@ -148,6 +148,8 @@ describe('#2644 blockers and priority', () => {
     const foreignApp = await db.app.create({ data: { ownerUserId: memberId, name: 'Other', urn: '@member:other' } });
     const foreign = await db.agentTask.create({ data: { appId: foreignApp.id, title: 'Other', ownerUserId: memberId } });
     await expect(db.agentTaskBlocker.create({ data: { taskId: a.id, blockerTaskId: foreign.id } })).rejects.toThrow();
+    await expect(db.agentTask.update({ where: { id: a.id }, data: { appId: foreignApp.id } })).rejects.toThrow();
+    await expect(db.agentTask.update({ where: { id: b.id }, data: { appId: foreignApp.id } })).rejects.toThrow();
   });
   it('the real stall loader and final raise recheck suppress a newly blocked candidate and floor release', async () => {
     const b = await create({ status: 'BACKLOG' });

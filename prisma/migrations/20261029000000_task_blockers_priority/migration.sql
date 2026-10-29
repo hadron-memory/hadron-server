@@ -84,3 +84,16 @@ DROP TRIGGER IF EXISTS task_end_releases ON agent_tasks;
 CREATE TRIGGER task_end_releases AFTER UPDATE OF status ON agent_tasks FOR EACH ROW EXECUTE FUNCTION hadron_task_end_releases();
 ALTER TABLE agent_tasks DROP CONSTRAINT IF EXISTS chk_started_not_blocked;
 ALTER TABLE agent_tasks ADD CONSTRAINT chk_started_not_blocked CHECK (NOT (status = 'started' AND blocked));
+
+-- Updating either endpoint App must not invalidate an existing same-App link.
+-- There is no task-transfer API; this also protects future internal writers.
+CREATE OR REPLACE FUNCTION hadron_task_blocker_app_fixed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.app_id IS DISTINCT FROM OLD.app_id AND EXISTS (
+    SELECT 1 FROM agent_task_blockers WHERE task_id = OLD.id OR blocker_task_id = OLD.id
+  ) THEN RAISE EXCEPTION 'A linked task cannot change App' USING ERRCODE = '23514'; END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS task_blocker_app_fixed ON agent_tasks;
+CREATE TRIGGER task_blocker_app_fixed BEFORE UPDATE OF app_id ON agent_tasks
+FOR EACH ROW EXECUTE FUNCTION hadron_task_blocker_app_fixed();
