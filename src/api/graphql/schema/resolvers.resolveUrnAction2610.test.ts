@@ -292,4 +292,43 @@ describe('#2610 action URN — review-driven pins (PR #2711 LOCAL/§10 mutation 
       warn.mockRestore();
     }
   });
+
+  /**
+   * Rico's §10 allow-list mutant (line ~675): an UNMINTEd entry moved out of
+   * the system memory still heals there through its NODE alias (the rename
+   * widening), so without the `node` arm's content gate the arm would hand
+   * back the entry to a caller who cannot read where it now lives. The
+   * caller shape that isolates the allow-list: a PUBLIC Agent (agent gate
+   * passes) + App participant (memory gate passes) whose accessible set does
+   * NOT include the org knowledge memory the admin moved the entry into.
+   * The admin companion also pins the healed-memory report: entry.memoryId,
+   * the memory the entry lives in now — `node`-arm parity (§10 P3-2).
+   */
+  it('refuses a healed entry that moved OUT of the system memory when the caller cannot read where it lives (allow-list mutant F)', async () => {
+    const entry = await registerEntry(teamMemoryId, CODE);
+    await db.agent.update({ where: { id: teamAgent.id }, data: { visibility: 'PUBLIC' } });
+    const { app } = await createDbAppWithKey(db, 'au-app2', org.id);
+    await createDbAppAgent(db, app.id, teamAgent.id);
+    await createDbAppMember(db, app.id, outsider.id, 'member');
+    const movedMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:moved-mem`,
+        name: 'moved-mem', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    await M.moveNode(
+      {},
+      { sourceRef: entry.id, targetUrn: emitNodeUrnV2(`${org.urn}:moved-mem`, `register:${CODE}`) },
+      ctx(admin.id),
+    );
+    const out = ctx(outsider.id);
+    // the participant passes the agent gate (PUBLIC) and the system-memory
+    // read gate (the #2206 fold) — the allow-list on the entry's CURRENT
+    // memory is what refuses them.
+    expect(await resolve(out, actionUrn(teamAgent.urn, CODE))).toBeNull();
+    // …while the org admin, whose accessible set includes the target memory,
+    // still resolves — and is told the memory the entry lives in NOW.
+    const byAdmin = await resolve(ctx(admin.id), actionUrn(teamAgent.urn, CODE));
+    expect(byAdmin).toEqual({ kind: 'action', id: entry.id, memoryId: movedMem.id });
+  });
 });

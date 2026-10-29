@@ -1526,6 +1526,16 @@ export const typeDefs = `#graphql
     never stored — and a second address beside urn: the node URN keeps
     resolving. An unemittable stored code atom (charset/length) also reads as
     null; the stored loc needs repair.
+
+    Two deliberate asymmetries with resolveUrn's action arm (PR #2711 §10
+    review): (1) this field computes for ANY caller who can read the node —
+    including an App participant of an install — while the arm resolves only
+    under the agent arm's gate, so such a caller can SEE an address that does
+    not resolve FOR them (it resolves for the Agent's own tenant); the field
+    leaks nothing the node read didn't already grant. (2) After an Agent
+    rename this field shows the CURRENT slug (computed from the live Agent's
+    urn) while the urn field still shows the stored node URN until alias
+    healing catches up — the computed address is the fresher one on purpose.
     """
     actionUrn: String
     """

@@ -675,7 +675,11 @@ export const nodeQueries = {
           if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
             if (!(access.memoryId.in as string[]).includes(entry.memoryId)) return null;
           }
-          return { kind: 'action', id: entryId, memoryId: agent.systemMemoryId };
+          // The memory the ENTRY actually lives in (PR #2711 §10, P3-2): an
+          // alias heal can cross memories, and the `node` arm reports
+          // node.memoryId — parity here means a caller holding both addresses
+          // sees one memory, not the system memory the ref STARTED from.
+          return { kind: 'action', id: entryId, memoryId: entry.memoryId };
         }
         case 'app': {
           let id: string;
