@@ -15,6 +15,9 @@ export const DELIVERY_CHECK_PERIOD_MIN_SECONDS = 60;
 export const DELIVERY_CHECK_PERIOD_MAX_SECONDS = 86_400;
 export const DELIVERY_FAILED_CHECKS_MIN = 1;
 export const DELIVERY_FAILED_CHECKS_MAX = 100;
+/** #2755 — the dark-worker alarm's window: 5 minutes to a day. Independent of the stuck window (no relation). */
+export const DELIVERY_DARK_ALARM_MIN_SECONDS = 300;
+export const DELIVERY_DARK_ALARM_MAX_SECONDS = 86_400;
 export const DELIVERY_SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true,
   deliveryBusyDelaySeconds: true,
@@ -22,6 +25,7 @@ export const DELIVERY_SETTINGS_SELECT = {
   deliveryStandbyEnabled: true,
   deliveryCheckPeriodSeconds: true,
   deliveryFailedChecksToOverdue: true,
+  deliveryDarkAlarmWindowSeconds: true,
 } as const;
 export type DeliverySettings = {
   batchWindowSeconds: number;
@@ -33,16 +37,18 @@ export type DeliverySettings = {
   checkPeriodSeconds: number;
   /** #2138 §3.2: OVERDUE after this many missed periods (+5 minutes slack). At least 1. Default 2. */
   failedChecksToOverdue: number;
+  /** #2755: a due wake unacknowledged this long raises the dark-worker alarm (seconds). Default 1800. */
+  darkAlarmWindowSeconds: number;
 };
 export type DeliverySettingsPatch = Partial<Pick<DeliverySettings,
-  'batchWindowSeconds' | 'busyDelaySeconds' | 'stuckWindowSeconds' | 'standbyEnabled' | 'checkPeriodSeconds' | 'failedChecksToOverdue'>>;
+  'batchWindowSeconds' | 'busyDelaySeconds' | 'stuckWindowSeconds' | 'standbyEnabled' | 'checkPeriodSeconds' | 'failedChecksToOverdue' | 'darkAlarmWindowSeconds'>>;
 const error = (code: string, message: string, details: Record<string, unknown> = {}) =>
   new GraphQLError(message, { extensions: { code, ...details } });
 
 /** Both transports call this inside the deciding manager transaction; no unknown/null input is silently ignored. */
 export function parseDeliverySettingsPatch(raw: unknown): DeliverySettingsPatch {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw error('BAD_USER_INPUT', 'input must be a settings object.');
-  const allowed = ['batchWindowSeconds', 'busyDelaySeconds', 'stuckWindowSeconds', 'standbyEnabled', 'checkPeriodSeconds', 'failedChecksToOverdue'];
+  const allowed = ['batchWindowSeconds', 'busyDelaySeconds', 'stuckWindowSeconds', 'standbyEnabled', 'checkPeriodSeconds', 'failedChecksToOverdue', 'darkAlarmWindowSeconds'];
   for (const [field, value] of Object.entries(raw)) {
     if (!allowed.includes(field)) throw error('BAD_USER_INPUT', 'Unknown delivery setting.');
     if (value === null || value === undefined) throw error('BAD_USER_INPUT', `${field} cannot be null; omit it to preserve its value.`);
@@ -65,6 +71,7 @@ export function validateDeliverySettings(settings: DeliverySettings, patch: Deli
   for (const [field, min, max] of [
     ['checkPeriodSeconds', DELIVERY_CHECK_PERIOD_MIN_SECONDS, DELIVERY_CHECK_PERIOD_MAX_SECONDS],
     ['failedChecksToOverdue', DELIVERY_FAILED_CHECKS_MIN, DELIVERY_FAILED_CHECKS_MAX],
+    ['darkAlarmWindowSeconds', DELIVERY_DARK_ALARM_MIN_SECONDS, DELIVERY_DARK_ALARM_MAX_SECONDS],
   ] as const) {
     const value = settings[field];
     if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
@@ -90,5 +97,6 @@ export async function loadDeliverySettings(db: Pick<Prisma.TransactionClient, 'a
     standbyEffective: s7Available() && s.deliveryStandbyEnabled, // inert until S7b (s7Availability.ts)
     checkPeriodSeconds: s.deliveryCheckPeriodSeconds,
     failedChecksToOverdue: s.deliveryFailedChecksToOverdue,
+    darkAlarmWindowSeconds: s.deliveryDarkAlarmWindowSeconds,
   };
 }

@@ -92,7 +92,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   const assignedTypes = Prisma.join([...ASSIGNED_EVENT_TYPES]);
 
   type Row = { workerId: string; taskId: string; eventId: string; type: string; title: string; handle: string; at: Date; standbyHeld?: number };
-  const [assigned, finished, alarms, endSession] = await Promise.all([
+  const [assigned, finished, alarms, endSession, darkAlarms] = await Promise.all([
     // The task's LATEST assignment event, to its current worker assignee, who has not acted on the task since
     // (an assignment the worker made itself counts as acting: `>=` includes the event).
     db.$queryRaw<Row[]>(Prisma.sql`
@@ -154,6 +154,22 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND q.requested_by_worker_id IS DISTINCT FROM q.worker_id
         AND ${liveApp('t')}
         AND ${undelivered('q.worker_id', 'q.event_id', '0')}`),
+    // #2755: a dark-worker alarm is task-less. Its episode must still be open; the nudge is built from the worker's
+    // name and the reason (words only, never evidence). `taskId` carries the ALARM's id and the handle is `DARK`.
+    db.$queryRaw<(Row & { chainIndex: number })[]>(Prisma.sql`
+      SELECT (e.chain -> s.idx ->> 'workerId') AS "workerId", e.id AS "taskId", e.id AS "eventId", e.type,
+             sw.name || ' has gone dark (' || COALESCE(e.payload ->> 'reason', 'dark') || ')' AS title, 'DARK' AS handle,
+             e.created_at AS at, s.idx AS "chainIndex"
+      FROM agent_team_events e
+      JOIN dark_worker_episodes d ON d.event_id = e.id AND d.ended_at IS NULL
+      JOIN workers sw ON sw.id = e.subject_worker_id
+      JOIN LATERAL (SELECT max(chain_index) AS idx FROM agent_team_alarm_schedule
+                    WHERE event_id = e.id AND woken_at IS NOT NULL) s ON s.idx IS NOT NULL
+      JOIN workers w ON w.id = (e.chain -> s.idx ->> 'workerId') AND w.app_id = e.app_id
+      WHERE e.type = 'alarm.dark-worker' AND e.severity = 'alarm' AND e.acknowledged_at IS NULL
+        AND (e.chain -> s.idx ->> 'workerId') IN (${ids})
+        AND ${liveApp('e')}
+        AND ${undelivered("(e.chain -> s.idx ->> 'workerId')", 'e.id', 's.idx')}`),
   ]);
 
   const current = await currentAlarmEpisodes(db, alarms, now);
@@ -166,6 +182,9 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
   for (const r of endSession) push({ ...r, chainIndex: 0, event: 'END_SESSION' });
   for (const r of alarms) {
     if (!r.episodeStart || !current.has(alarmEpisodeKey(r.taskId, r.type, r.episodeStart))) continue;
+    push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
+  }
+  for (const r of darkAlarms) {
     push({ workerId: r.workerId, taskId: r.taskId, eventId: r.eventId, title: r.title, handle: r.handle, at: r.at, chainIndex: r.chainIndex, event: 'ALARM' });
   }
   for (const list of out.values()) {

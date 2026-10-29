@@ -182,6 +182,8 @@ export const ALARM_EVENT_TYPES = [
   'stall.no-progress',
   'stall.owner-unreactive',
   'assignment.unassignable',
+  // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
+  'alarm.dark-worker',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 

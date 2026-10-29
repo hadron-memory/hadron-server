@@ -365,6 +365,8 @@ export async function computeDueWakes(args: {
   /** #2169: the reason kinds this call can deliver. A STOP notice is offered only to a call that lists STOP. */
   acceptsStop?: boolean;
   onWorkersSelected?: (workerIds: string[]) => void;
+  /** #2755: derive the due wakes and return them without reserving, charging the budget or writing anything. */
+  preview?: boolean;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
   const now = args.now ?? new Date();
@@ -432,13 +434,15 @@ export async function computeDueWakes(args: {
   const channelOf = new Map(channelRows.map((c) => [c.id, c]));
 
   // R1/B3: the caller's reading right, and each distinct holder's.
-  const callerIds = await getAccessibleMemoryIds(ctx);
+  // #2755: a PREVIEW is the platform's own read (the dark-worker alarm), which may read every channel and every task; the
+  // holder's right, below, still applies.
+  const callerIds = args.preview ? null : await getAccessibleMemoryIds(ctx);
   const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
   const holderOf = new Map<string, Set<string> | 'all' | null>();
 
   // #1708: task reasons, only for a caller who may read the App's tasks (cor:agt:050:21). App-wide, so one check.
-  const taskReader = await mayReadAppTasks(ctx, app.id);
+  const taskReader = args.preview ? true : await mayReadAppTasks(ctx, app.id);
   const pendingTasks = taskReader ? await pendingTaskWakes(db, ids, now) : new Map<string, PendingTaskWake[]>();
   /** A held worker's task reasons need its holder to be a participant still (the channels' holder test). */
   const tasksFor = (workerId: string): PendingTaskWake[] => (holderOf.get(workerId) === null ? [] : pendingTasks.get(workerId) ?? []);
@@ -641,6 +645,12 @@ export async function computeDueWakes(args: {
       : { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) };
     wakes.push({ ...out, timing });
   };
+  // #2755: a PREVIEW is the pure derivation above and nothing else: no reservation, no budget slot, no proof
+  // acknowledgement state touched. The dark-worker alarm reads it as the platform, so it must not spend the budget.
+  if (args.preview) {
+    for (const i of issued) passes(i);
+    return { status: 'OK', withheld: 0, wakes, dormant: [], nextAfter, budgetNotice: null };
+  }
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
       // #1708 (Riana P2-1 on #1859): task reasons are decided again HERE, under the authority anchors a revoker takes
