@@ -5,6 +5,8 @@ import { cleanDb, createDbOrgAndGraph, createDbNode } from '../../../test/helper
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { chargeBatchReadEdges } from './resolvers.nodeBatchEdges.js';
+import { resolveInheritedEdges } from '../../../lib/effectiveSystemMemory.js';
 
 let memoryId: string, userId: string;
 beforeEach(async () => {
@@ -31,11 +33,11 @@ it('NodeLiveRevisionsMinted does not materialize unselected edge endpoints befor
   await db.edge.createMany({ data: nodes.flatMap(a => nodes.map(b => ({ id: generateId(), memoryId, sourceId: a.id, targetId: b.id, loc: `e:${a.loc}:${b.loc}` }))) });
   const original = db.node.findMany.bind(db.node);
   let materializedBytes = 0;
-  vi.spyOn(db.node, 'findMany').mockImplementation(async (args: any) => {
+  vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
     const rows = await original(args);
     materializedBytes += Buffer.byteLength(JSON.stringify(rows));
     return rows as any;
-  });
+  }) as typeof db.node.findMany);
   const before = process.memoryUsage();
   const response = await run(`query NodeLiveRevisionsMinted($memory:ID!){
     nodeBatch(memory:$memory,locPrefix:"dense:"){truncated omitted unavailable nodes{
@@ -64,10 +66,75 @@ it('selected edges still resolve their endpoints, including aliases and fragment
   expect((response.data as any).nodeBatch.nodes[0].out).toEqual([{ target: { id: b.id, content: 'B' } }]);
 });
 
+it('scalar byte spillover is selected without materializing every oversized body', async () => {
+  const nodes = Array.from({ length: 40 }, (_, i) => ({ id: generateId(), memoryId, loc: `large:${i}`, name: 'large', content: 'x'.repeat(256 * 1024) }));
+  await db.node.createMany({ data: nodes });
+  const original = db.node.findMany.bind(db.node);
+  let bulkBytes = 0;
+  vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
+    const rows = await original(args);
+    bulkBytes += Buffer.byteLength(JSON.stringify(rows));
+    return rows;
+  }) as typeof db.node.findMany);
+  const response = await run(`query($memory:ID!){nodeBatch(memory:$memory,locPrefix:"large:"){nodes{id} omitted truncated}}`, { memory: memoryId });
+  expect(response.errors).toBeUndefined();
+  expect((response.data as any).nodeBatch).toMatchObject({ truncated: true });
+  expect((response.data as any).nodeBatch.nodes).toHaveLength(3);
+  expect((response.data as any).nodeBatch.omitted).toHaveLength(37);
+  expect(bulkBytes).toBeLessThan(2 * 1024 * 1024);
+}, 60_000);
+
 it('a selected oversized edge projection refuses loudly instead of materializing unlimited endpoints', async () => {
   const a = await createDbNode(db, { memoryId, loc: 'a' });
   const b = await createDbNode(db, { memoryId, loc: 'b' });
   await db.edge.createMany({ data: Array.from({ length: 2001 }, (_, i) => ({ id: generateId(), memoryId, loc: `edge:${i}`, sourceId: a.id, targetId: b.id })) });
+  const reads = vi.spyOn(db.edge, 'findMany');
   const response = await run(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{id}}}}`, { refs: [a.id] });
   expect(response.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+  expect(reads.mock.calls.some(([args]) => args?.take === 2001 && !args.include)).toBe(true);
+});
+
+it('both directions and all returned nodes share the edge budget', async () => {
+  const a = await createDbNode(db, { memoryId, loc: 'a' });
+  const b = await createDbNode(db, { memoryId, loc: 'b' });
+  await db.edge.createMany({ data: Array.from({ length: 1001 }, (_, i) => ({ id: generateId(), memoryId, loc: `edge:${i}`, sourceId: a.id, targetId: b.id })) });
+  const response = await run(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{id} incomingEdges{id}}}}`, { refs: [a.id, b.id] });
+  expect(response.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+});
+
+it('inherited batch edges page metadata before endpoint bodies and participate in the same budget', async () => {
+  const c = context();
+  const org = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+  const create = (resolvers.Mutation as any).createAgent;
+  const base = await create({}, { orgId: org.organizationId, name: 'Base' }, c);
+  const child = await create({}, { orgId: org.organizationId, name: 'Child' }, c);
+  await db.agent.update({ where: { id: child.id }, data: { extendsAgentId: base.id } });
+  const baseMemory = (await db.agent.findUniqueOrThrow({ where: { id: base.id } })).systemMemoryId!;
+  const childMemory = (await db.agent.findUniqueOrThrow({ where: { id: child.id } })).systemMemoryId!;
+  const a = await createDbNode(db, { memoryId: baseMemory, loc: 'a' });
+  const b = await createDbNode(db, { memoryId: baseMemory, loc: 'b' });
+  await db.edge.createMany({ data: [0, 1].map(i => ({ id: generateId(), memoryId: baseMemory, loc: `edge:${i}`, sourceId: a.id, targetId: b.id })) });
+  const edgeReads = vi.spyOn(db.edge, 'findMany');
+  await expect(resolveInheritedEdges(db, { nodeId: a.id, via: childMemory, direction: 'out', canReadMemory: async () => true, maxResults: 1 })).rejects.toThrow('Inherited edge result limit exceeded');
+  expect(edgeReads.mock.calls[0]![0]).toMatchObject({ take: 128 });
+  expect(edgeReads.mock.calls[0]![0]).not.toHaveProperty('include');
+  const result = await (resolvers.Query as any).nodeBatch({}, { memory: childMemory, locPrefix: 'a' }, c);
+  const parent = result.nodes[0];
+  expect(parent.inheritedFrom).toBeDefined();
+  chargeBatchReadEdges(parent, 1999);
+  await expect((resolvers.Node as any).outgoingEdges(parent, {}, c)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  expect(edgeReads.mock.calls.at(-1)![0]).toMatchObject({ take: 128 });
+});
+
+it('lazy batch endpoints keep the cross-memory read gate', async () => {
+  const source = await createDbNode(db, { memoryId, loc: 'source' });
+  const outsider = await db.user.create({ data: { handle: 'private-owner' } });
+  const home = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+  const hidden = await db.memory.create({ data: { organizationId: home.organizationId, urn: 'oom2758.example:hidden', name: 'Hidden', class: 'personal', userId: outsider.id } });
+  const target = await createDbNode(db, { memoryId: hidden.id, loc: 'secret', content: 'NEVER_DISCLOSE' });
+  await db.edge.create({ data: { memoryId, loc: 'cross', sourceId: source.id, targetId: target.id } });
+  const response = await run(`query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{target{id content}}}}}`, { refs: [source.id] });
+  expect(response.errors).toBeUndefined();
+  expect((response.data as any).nodeBatch.nodes[0].outgoingEdges).toEqual([{ target: null }]);
+  expect(JSON.stringify(response)).not.toContain('NEVER_DISCLOSE');
 });

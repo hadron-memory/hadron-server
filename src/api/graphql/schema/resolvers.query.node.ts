@@ -2,6 +2,7 @@ import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
+import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -1915,21 +1916,16 @@ export const nodeQueries = {
       }
 
       const access = await memoryAccessFilter(ctx);
-      const include = {
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
-      };
-
+      // Select identities before reconciliation and packing. A response-size cap
+      // checked AFTER loading every body does not bound the allocating read.
+      const identity = { id: true, loc: true, memoryId: true, deletedAt: true, revSeq: true, role: true } as const;
       let ordered: Array<{
         id: string;
         loc: string;
         memoryId: string;
         deletedAt: Date | null;
         revSeq: number;
-        content: string | null;
-        abstract: string | null;
-        data?: unknown;
-        properties?: unknown;
+        role: string | null;
       }> = [];
       const unavailable: string[] = [];
       let batchInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
@@ -2027,7 +2023,7 @@ export const nodeQueries = {
           where: explicitInherited.size > 0
             ? { id: { in: [...refByNodeId.keys()] }, deletedAt: null, OR: [access, { id: { in: [...explicitInherited.keys()] } }] }
             : { id: { in: [...refByNodeId.keys()] }, deletedAt: null, ...access },
-          include,
+          select: identity,
         });
         const byId = new Map(rows.map((n) => [n.id, n]));
         for (const [id, ref] of refByNodeId) {
@@ -2058,7 +2054,7 @@ export const nodeQueries = {
           },
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
-          include,
+          select: identity,
         });
         if (rows.length > BATCH_READ_MAX_NODES) {
           throw new GraphQLError(
@@ -2069,25 +2065,11 @@ export const nodeQueries = {
         ordered = rows;
       }
 
-      // Reconcile each selected row in its OWN short transaction. Accumulating
-      // all FOR UPDATE locks until one batch transaction commits deadlocks
-      // against multi-node writers (notably Git sync) that necessarily visit
-      // rows in a different order. The final access-filtered refetch returns
-      // an atomic row state and rechecks the selected address.
+      // Recheck selected identities before packing. Bodies are reconciled and
+      // authorized in separate short transactions only when about to be packed;
+      // no batch transaction accumulates locks against multi-node writers.
       const selectedById = new Map(ordered.map((n) => [n.id, n]));
-      const liveIds: string[] = [];
-      for (const id of [...selectedById.keys()].sort()) {
-        const live = await withReconciledNodeRead(ctx.db, id, selectedById.get(id)!.memoryId,
-          async (tx, mayReconcile) => {
-            const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
-            const via = explicitInherited.get(id)?.via ?? readViaMemoryId ?? selectedById.get(id)!.memoryId;
-            return isMemoryReadableCached(fresh, via);
-          },
-          (tx) => tx.node.findUnique({ where: { id }, select: { revSeq: true } }),
-          { timeoutMs: 60_000, maxWaitMs: 15_000 },
-        );
-        if (live != null) liveIds.push(id);
-      }
+      const liveIds = [...selectedById.keys()];
       // #1885 — inherited rows were admitted through the child's memory, so
       // the re-check admits exactly those ids alongside the caller's access.
       const inheritedIds = [
@@ -2098,7 +2080,7 @@ export const nodeQueries = {
         where: inheritedIds.length > 0
           ? { id: { in: liveIds }, deletedAt: null, OR: [access, { id: { in: inheritedIds } }] }
           : { id: { in: liveIds }, deletedAt: null, ...access },
-        include,
+        select: identity,
       });
       if (batchInheritance) {
         const kept = new Set((await retainEffective(ctx.db, currentRows, batchInheritance)).map((n) => n.id));
@@ -2125,8 +2107,6 @@ export const nodeQueries = {
         }
         return [current];
       });
-      await decryptNodesBatch(ctx.db, ordered);
-
       // Response-size cap (cor:api:040:02) — pack until the byte ceiling, then
       // stop and flag `truncated` with the omitted nodes. At least one node
       // always returns (a single oversize node still comes back). Size is
@@ -2139,11 +2119,33 @@ export const nodeQueries = {
       const echo = (id: string) => refByNodeId?.get(id) ?? id;
       let bytes = 0;
       let truncated = false;
-      for (const n of ordered) {
+      for (const selected of ordered) {
         if (truncated) {
-          omitted.push(echo(n.id));
+          omitted.push(echo(selected.id));
           continue;
         }
+        // Hydrate only the next row being packed, pinned to the authorized
+        // identity. Recheck inherited eligibility on the actual hydrated row.
+        const from = (selected as typeof selected & { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        const n = await withReconciledNodeRead(ctx.db, selected.id, selected.memoryId,
+          async (tx, mayReconcile) => {
+            const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
+            return isMemoryReadableCached(fresh, from?.via ?? readViaMemoryId ?? selected.memoryId);
+          },
+          async (tx) => {
+            const row = await tx.node.findFirst({
+              where: { id: selected.id, memoryId: selected.memoryId, loc: selected.loc, deletedAt: null },
+            });
+            return row && (!from || await stillInherited(tx, from, row)) ? row : null;
+          },
+          { timeoutMs: 60_000, maxWaitMs: 15_000 },
+        );
+        if (!n) {
+          unavailable.push(echo(selected.id));
+          continue;
+        }
+        if (from) Object.assign(n, { inheritedFrom: from });
+        await decryptNodesBatch(ctx.db, [n]);
         // Approximate the serialized payload from the heavy scalar fields a
         // client is likely to select — content + abstract + the JSON columns.
         // Edges are relational + client-selected, so they aren't measured here.
@@ -2167,6 +2169,7 @@ export const nodeQueries = {
       // not `ordered`: a node the byte cap omitted was never handed to the
       // caller, so counting it would credit a read that didn't happen.
       recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(nodes), ctx);
+      markBatchReadNodes(nodes as object[]);
 
       return { nodes, unavailable, truncated, omitted };
     },

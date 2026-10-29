@@ -1,4 +1,5 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { batchReadEdges } from './resolvers.nodeBatchEdges.js';
 import { plainRunFailure } from '../../../lib/automation/plainReason.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
@@ -950,6 +951,8 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),
+    incomingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'in'),
     /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */
     lintWarnings: (
       n: { id: string; memoryId: string; content: string | null; role?: string | null; nodeType?: string | null },

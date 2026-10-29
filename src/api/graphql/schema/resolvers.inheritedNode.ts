@@ -31,6 +31,7 @@
 import { resolveInheritedEdges, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { isMemoryReadableCached } from './resolvers.helpers.js';
 import type { Context } from './resolvers.js';
+import { batchReadEdgeLimit, batchReadEdgeOverflow, chargeBatchReadEdges } from './resolvers.nodeBatchEdges.js';
 
 type Resolver = (parent: any, args?: any, ctx?: any, info?: any) => unknown;
 
@@ -46,7 +47,10 @@ async function inheritedEdges(parent: { id: string; inheritedFrom?: InheritedFro
     via,
     direction,
     canReadMemory: (memoryId) => isMemoryReadableCached(ctx, memoryId),
+    maxResults: batchReadEdgeLimit(parent),
+    onLimit: batchReadEdgeOverflow,
   });
+  chargeBatchReadEdges(parent, resolved.length);
   // Both endpoints are set, so Edge.source/target never re-load them by FK:
   // the parent and a resolved endpoint are admitted through the child.
   return resolved.map(({ edge, endpoint }) => direction === 'out'
