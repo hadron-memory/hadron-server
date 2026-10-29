@@ -231,7 +231,7 @@ describe('#2704 — migration', () => {
     await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'parts:a', name: 'a', content: 'Part {{name}}' } });
     await db.node.updateMany({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' }, data: { content: 'Hi {{name}} {{> parts:a}}', revSeq: { increment: 1 } } });
     const compiled = await compileBootPrompt(createOperatorConversionContext(db), { kind: 'AGENT', agentId: agent.id }, { setPointer: false });
-    await approveCheckedRevision(db, compiled.node.id, compiled.node.content ?? '');
+    await approveCheckedRevision(db, compiled.node.id, compiled.node.content ?? '', compiled.node.approvedRevNo);
     expect(compiled.node.content).toBe('Hi {{name}} Part {{name}}');
     const preview = await migrate(false);
     expect(preview).toMatchObject({ migrated: 0, candidates: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' }] });
@@ -248,7 +248,7 @@ describe('#2704 — migration', () => {
     const install = await db.memory.findFirstOrThrow({ where: { appId: app.id, installOfAgentId: agent.id, isInstallMemory: true } });
     await db.node.updateMany({ where: { memoryId: install.id, loc: `boot:workers:${w.id}:source` }, data: { content: `{{> boot:source rev=${agentSource.revSeq}}}\n\nOverride {{role}}`, revSeq: { increment: 1 } } });
     const compiled = await compileBootPrompt(createOperatorConversionContext(db), { kind: 'WORKER', workerId: w.id }, { setPointer: false });
-    await approveCheckedRevision(db, compiled.node.id, compiled.node.content ?? '');
+    await approveCheckedRevision(db, compiled.node.id, compiled.node.content ?? '', compiled.node.approvedRevNo);
     const preview = await migrate(false);
     expect(preview.rows.find((r) => r.kind === 'WORKER')).toMatchObject({ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' });
     expect((await migrate()).rows.find((r) => r.kind === 'WORKER')).toMatchObject({ outcome: 'failed' });
@@ -266,8 +266,18 @@ describe('#2704 — migration', () => {
     await convert();
     const node = await compiledOf('agent', agent.id);
     await db.node.update({ where: { id: node.id }, data: { content: 'edited after the check' } });
-    await expect(approveCheckedRevision(db, node.id, node.content ?? '')).rejects.toThrow();
+    await expect(approveCheckedRevision(db, node.id, node.content ?? '', node.approvedRevNo)).rejects.toThrow();
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvedRevNo).toBe(node.approvedRevNo);
+  });
+
+  it('refuses to approve over an approval that moved after the check', async () => {
+    const agent = await agentWith('coord', 'Hi {{name}}');
+    await convert();
+    const node = await compiledOf('agent', agent.id);
+    // Same text, but a concurrent approver moved the approved revision after the migration read it.
+    await db.node.update({ where: { id: node.id }, data: { approvedRevNo: (node.approvedRevNo ?? 0) + 1 } });
+    await expect(approveCheckedRevision(db, node.id, node.content ?? '', node.approvedRevNo)).rejects.toThrow('CHANGED_BEFORE_APPROVAL');
+    expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvedRevNo).toBe((node.approvedRevNo ?? 0) + 1);
   });
 
   it('leaves an unconverted Agent and a source with no legacy token alone', async () => {

@@ -144,25 +144,26 @@ function reasonOf(e: unknown): string {
 interface SourceRow { id: string; memoryId: string; loc: string; content: string | null; revSeq: number; approvedRevNo: number | null }
 
 /** The text a worker is served from this compiled node today: its approved revision. */
-async function servedText(db: PrismaClient, nodeId: string): Promise<{ text: string; approved: boolean; current: string } | null> {
+async function servedText(db: PrismaClient, nodeId: string): Promise<{ text: string; approved: boolean; current: string; approvedRevNo: number } | null> {
   const node = await db.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { content: true, revSeq: true, approvedRevNo: true, nodeType: true } });
   if (!node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
   if (node.approvedRevNo === null) return null;
   const text = await readRecordedRevisionContent(db, nodeId, node.approvedRevNo);
-  return text === null ? null : { text, approved: node.approvedRevNo === node.revSeq, current: node.content ?? '' };
+  return text === null ? null : { text, approved: node.approvedRevNo === node.revSeq, current: node.content ?? '', approvedRevNo: node.approvedRevNo };
 }
 
 /**
  * Approve exactly the revision whose text was checked. Locks the node row, refuses when its text is no longer the
- * text that was validated (a concurrent edit between the check and the approval), and approves in the same
- * transaction, so an unchecked revision is never approved.
+ * text that was validated (a concurrent edit between the check and the approval) or when its approved revision is no
+ * longer the one read with that check (a concurrent approval, which this would otherwise overwrite), and approves in
+ * the same transaction, so an unchecked revision is never approved.
  */
-export async function approveCheckedRevision(db: PrismaClient, nodeId: string, checkedContent: string): Promise<void> {
+export async function approveCheckedRevision(db: PrismaClient, nodeId: string, checkedContent: string, expectedApprovedRevNo: number | null): Promise<void> {
   const node = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { memoryId: true } });
   await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR UPDATE`;
-    const live = await tx.node.findUniqueOrThrow({ where: { id: nodeId }, select: { content: true } });
-    if (live.content !== checkedContent) throw new RowFailure('CHANGED_BEFORE_APPROVAL');
+    const live = await tx.node.findUniqueOrThrow({ where: { id: nodeId }, select: { content: true, approvedRevNo: true } });
+    if (live.content !== checkedContent || live.approvedRevNo !== expectedApprovedRevNo) throw new RowFailure('CHANGED_BEFORE_APPROVAL');
     await approveNodeInTransaction(tx, nodeId, {
       memoryId: node.memoryId,
       approver: { userId: null, info: OPERATOR_CONVERSION_INFO },
@@ -205,11 +206,11 @@ async function migrateSource(
       if (fresh.content !== wanted) throw new RowFailure('SOURCE_TEXT_CHANGED_ON_WRITE');
       source = fresh;
     }
-    if (source.approvedRevNo !== source.revSeq) await approveCheckedRevision(db, source.id, wanted);
+    if (source.approvedRevNo !== source.revSeq) await approveCheckedRevision(db, source.id, wanted, source.approvedRevNo);
     const compiled = await compileBootPrompt(ctx, p.compile, { setPointer: false });
     if (compiled.node.id !== p.compiledNodeId) throw new RowFailure('COMPILED_NODE_CHANGED');
     if (compiled.node.content !== expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
-    await approveCheckedRevision(db, compiled.node.id, expected);
+    await approveCheckedRevision(db, compiled.node.id, expected, served.approvedRevNo);
     return row('migrated');
   } catch (e) {
     return row('failed', reasonOf(e));
