@@ -132,3 +132,42 @@ it('rejects lenient date strings on the resolver, GraphQL and MCP paths', async 
     expect((mcp.content as any[])[0].text).toContain('both');
   } finally { await client.close(); await server.close(); await api.stop(); }
 });
+
+// #2696: tagsAny/tagsAll obey the same bounds a task's own tags do (32 elements, 64 characters each).
+it.each(['tagsAny', 'tagsAll'])('%s accepts 32 tags and a 64-character tag, refuses 33 and 65, on resolver, GraphQL and MCP', async field => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`);
+  const api = new ApolloServer<Context>({ typeDefs, resolvers });
+  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
+  const client = new Client({ name: 'tag-caps2696', version: '1' });
+  const [local, remote] = InMemoryTransport.createLinkedPair();
+  await api.start();
+  await server.connect(remote); await client.connect(local);
+  const gql = async (value: string[]) => {
+    const r = await api.executeOperation({ query: `query($app:ID!,$v:[String!]){agentTasks(appRef:$app,${field}:$v){id}}`, variables: { app: appId, v: value } }, { contextValue: ctx() });
+    if (r.body.kind !== 'single') throw new Error('unexpected body');
+    return r.body.singleResult.errors?.[0]?.extensions?.code;
+  };
+  const mcp = async (value: string[]) => {
+    const r = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, [field]: value } });
+    return { isError: r.isError, text: (r.content as any[])[0].text as string };
+  };
+  try {
+    const ok = [many(32), ['x'.repeat(64)]];
+    const refused = [many(33), ['x'.repeat(65)]];
+    for (const value of ok) {
+      await expect(list({ [field]: value })).resolves.toBeDefined();
+      expect(await gql(value)).toBeUndefined();
+      expect((await mcp(value)).isError).not.toBe(true);
+    }
+    for (const value of refused) {
+      await expect(list({ [field]: value })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+      // After the read gate: an outsider is told the App is not found, never the bound.
+      await expect(list({ [field]: value }, { db, userId: outsiderId, roles: ['READER'] })).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+      expect(await gql(value)).toBe('BAD_USER_INPUT');
+      const m = await mcp(value);
+      expect(m.isError).toBe(true);
+      expect(m.text).toMatch(/^\[bad_user_input\]/);
+    }
+    expect(await list({ [field]: [] })).toEqual(await list());
+  } finally { await client.close(); await server.close(); await api.stop(); }
+});
