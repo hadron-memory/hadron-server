@@ -102,12 +102,16 @@ function isTeamSpaceOf(app: GrantApp, memory: GrantMemory): boolean {
  * Can this App hold a write grant on this memory at all, whoever asks and whenever? The part of the rule that does
  * not depend on a person: encrypted is never grantable, an install memory has its own audience, a shared memory
  * must be one the App's own org or team space already holds (no tenancy change), and a personal or private memory
- * has an owner to be judged against. Returns the refusal reason, or null. Used when a grant is SET and again, live,
- * at every write, so a memory that stops qualifying stops taking writes.
+ * has an owner to be judged against, and a `system` memory is never a target (#2710: an Agent's system memory, its
+ * boot-prompt source included, is written only by whoever manages the Agent; hrn:node:hadronmemory.com:specs:cor:agt:010:01,
+ * hrn:node:hadronmemory.com:specs:cor:agt:040:11). Returns the refusal reason, or null. Used when a grant is SET and
+ * again, live, at every write, so a memory that stops qualifying stops taking writes, and a grant made on a `system`
+ * memory before #2710 authorizes nothing.
  */
 export function grantTargetRefusal(app: GrantApp, memory: GrantMemory): string | null {
   if (memory.isEncrypted) return 'encrypted';
   if (memory.isInstallMemory) return 'install-memory';
+  if (memory.class === 'system') return 'system';
   if (isStrictOwnerClass(memory.class)) return memory.userId ? null : 'no-owner';
   if (isTeamSpaceOf(app, memory)) return null;
   if (memory.class !== 'app' && app.organizationId !== null && memory.organizationId === app.organizationId &&
