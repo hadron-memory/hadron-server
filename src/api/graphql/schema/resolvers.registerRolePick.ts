@@ -18,7 +18,7 @@ export const registerRolePickQueries = {
   registerRolePick: async (_: unknown, args: { appRef: string; code: string; workerRef?: string | null }, ctx: Context) =>
     ctx.db.$transaction(async (tx) => {
       const c = withoutRequestCaches(ctx, tx);
-      const { appId, app, candidates } = await loadRoleCandidates(tx, c, args.appRef, args.code);
+      const { appId, app, candidates, agentOf } = await loadRoleCandidates(tx, c, args.appRef, args.code, { bySession: true });
       const result = (entries: Entry[]) => ({ appId, code: args.code, entries });
       // Eligibility is the matcher's own predicate (cor:agt:060:05), role from the open session's placement (#2458).
       const states = (await loadWorkerWorkStates(tx as never, appId, new Date(), { bySession: true })).filter((w) => w.free && matchable(w));
@@ -43,8 +43,8 @@ export const registerRolePickQueries = {
       const coordinators: string[] = [];
       for (const w of states) {
         if ((w.role ?? '').toLowerCase() !== 'coordinator') continue;
-        const row = await tx.worker.findUnique({ where: { id: w.id }, select: { agentId: true } });
-        if (row && await agentReadable(tx, c, row.agentId)) coordinators.push(w.id);
+        const agentId = agentOf.get(w.id);
+        if (agentId && await agentReadable(tx, c, agentId)) coordinators.push(w.id);
       }
       const coord = pickOne(coordinators);
       if (coord.length) return result(coord);

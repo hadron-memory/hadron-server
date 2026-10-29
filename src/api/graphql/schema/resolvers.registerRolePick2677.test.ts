@@ -136,6 +136,44 @@ describe('#2677 routing order: named, role holder, coordinator, managers, empty'
     expect(ids(await pick(admin.id))).toEqual([`WORKER:${c1.id}`]);
   });
 
+  // Gate ruling 3 (#2458): a worker with an open session is judged on that session's Agent, not the live row.
+  const bindAs = (w: { id: string }, agentId: string, role = 'engineer') =>
+    db.session.create({ data: { id: generateId(), appId: app.id, workerId: w.id, agentId, role, family: 'codex', startedAt: new Date(), updatedAt: new Date() }, select: { id: true } });
+  async function foreignAgent() {
+    const o = await db.organization.create({ data: { id: generateId(), name: 'F', urn: `f-${generateId().toLowerCase()}.example` } });
+    const owner = await db.user.create({ data: { handle: `o-${generateId()}` } });
+    await db.orgMember.create({ data: { organizationId: o.id, userId: owner.id, role: 'ADMIN' } });
+    const a = await M.createAgent({}, { orgId: o.id, name: 'Foreign' }, ctx(owner.id));
+    return a.id as string;
+  }
+
+  it('session placement: the open session Agent holds the task, the live row moved to one without it: the worker still wins (both named and unnamed)', async () => {
+    const taskless = await roleAgent('Taskless');
+    const w = await worker('Moved', taskless.id); // live row recast away from the task
+    await bindAs(w, teamAgentId);
+    expect(ids(await pick(admin.id))).toEqual([`WORKER:${w.id}`]);
+    expect(ids(await pick(admin.id, { workerRef: w.id }))).toEqual([`WORKER:${w.id}`]);
+  });
+
+  it('session placement: the live row holds the task but the open session Agent does not: the worker is not picked (falls to managers)', async () => {
+    const taskless = await roleAgent('Taskless');
+    const w = await worker('Moved', teamAgentId);
+    await bindAs(w, taskless.id);
+    expect((await pick(admin.id)).entries.every((e: any) => e.kind === 'USER')).toBe(true);
+    expect((await pick(admin.id, { workerRef: w.id })).entries.every((e: any) => e.kind === 'USER')).toBe(true);
+  });
+
+  it('session placement: the coordinator read gate is applied to the session Agent, in both directions', async () => {
+    const taskless = await roleAgent('Taskless');
+    const foreign = await foreignAgent();
+    const a = await worker('Cora', teamAgentId, 'coordinator'); await bindAs(a, foreign, 'coordinator'); // session Agent unreadable
+    expect((await pick(admin.id)).entries.every((e: any) => e.kind === 'USER')).toBe(true);
+    await db.session.updateMany({ where: { workerId: a.id }, data: { endedAt: new Date() } });
+    await db.worker.update({ where: { id: a.id }, data: { retiredAt: at(0) } });
+    const b = await worker('Dina', foreign, 'coordinator'); await bindAs(b, taskless.id, 'coordinator'); // live row unreadable, session Agent readable
+    expect(ids(await pick(admin.id))).toEqual([`WORKER:${b.id}`]);
+  });
+
   it('no coordinator either: every App manager as USER entries in the helper order, only for a manager caller', async () => {
     await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
     const r = await pick(admin.id);

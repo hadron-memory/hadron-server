@@ -8,6 +8,7 @@ import { registerTaskLoc } from './resolvers.taskWarnings.js';
 import { findEffectiveNodeIdByLoc, findEffectiveNodeIdsByLoc, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { agentBaseChains } from '../../../lib/agentBase.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { OPEN_SESSION_PLACEMENT_JOIN } from '../../../lib/sessionPlacement.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 
 export type Candidate = {
@@ -72,13 +73,13 @@ function batchedRoleTasks(
   return { roleTask };
 }
 
-type RoleCandidateSet = { appId: string; app: { id: string; urn: string }; taskLoc: string | null; candidates: Candidate[] };
+type RoleCandidateSet = { appId: string; app: { id: string; urn: string }; taskLoc: string | null; candidates: Candidate[]; agentOf: Map<string, string> };
 
 /** The #2608 candidates at EVERY depth for one register code, under the caller's gate (the #2677 pick falls through depths). */
-export async function loadRoleCandidates(tx: Prisma.TransactionClient, c: Context, appRef: string, code: string): Promise<RoleCandidateSet> {
+export async function loadRoleCandidates(tx: Prisma.TransactionClient, c: Context, appRef: string, code: string, opts?: { bySession?: boolean }): Promise<RoleCandidateSet> {
   // Same admission as the roster; no App or worker is disclosed before this gate.
   const { app } = await resolveParticipatedApp(c, appRef);
-  const none = { appId: app.id, app, taskLoc: null, candidates: [] };
+  const none = { appId: app.id, app, taskLoc: null, candidates: [], agentOf: new Map<string, string>() };
   let team: Awaited<ReturnType<typeof locateTeamAgent>>;
   try { team = await locateTeamAgent(c, app.id, undefined); }
   catch (e) {
@@ -91,10 +92,19 @@ export async function loadRoleCandidates(tx: Prisma.TransactionClient, c: Contex
   const data = await tx.node.findUnique({ where: { id: entry.id }, select: { data: true } });
   const taskLoc = registerTaskLoc(data?.data, code);
   if (!taskLoc) return none;
-  const workers = await tx.worker.findMany({
+  const rows = await tx.worker.findMany({
     where: { appId: app.id, retiredAt: null }, orderBy: [{ name: 'asc' }, { id: 'asc' }],
     select: { id: true, name: true, slug: true, role: true, agentId: true },
   });
+  // #2677 gate ruling 3: the pick judges a worker with an open session on that session's Agent (the matcher's
+  // placement, #2458); the manager-facing candidates read keeps the live row (cor:dmo:050:11).
+  const placed = opts?.bySession && rows.length
+    ? new Map((await tx.$queryRaw<{ id: string; agentId: string }[]>`
+        SELECT w.id, os.agent_id AS "agentId" FROM workers w
+        ${OPEN_SESSION_PLACEMENT_JOIN}
+        WHERE w.id = ANY(${rows.map((w) => w.id)}::text[]) AND os.agent_id IS NOT NULL`).map((r) => [r.id, r.agentId]))
+    : new Map<string, string>();
+  const workers = rows.map((w) => ({ ...w, agentId: placed.get(w.id) ?? w.agentId }));
   const candidates: Candidate[] = [];
   if (workers.length) {
     // One read per fact, not per Agent: gate rows for every roster Agent, every
@@ -154,7 +164,7 @@ export async function loadRoleCandidates(tx: Prisma.TransactionClient, c: Contex
       });
     }
   }
-  return { appId: app.id, app, taskLoc, candidates };
+  return { appId: app.id, app, taskLoc, candidates, agentOf: new Map(workers.map((w) => [w.id, w.agentId])) };
 }
 
 export const registerRoleCandidateQueries = {
