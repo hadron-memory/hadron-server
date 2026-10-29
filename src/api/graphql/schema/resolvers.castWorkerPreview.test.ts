@@ -1,3 +1,5 @@
+import { buildSchema, type GraphQLObjectType } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #964 — castWorkerPreview: the dry-run for the one IRREVERSIBLE act in the
@@ -164,6 +166,22 @@ describe('#964 — castWorkerPreview', () => {
     );
   });
 
+  it('binds {{worker.name}} in the preview prompt with the new variable set (#2049)', async () => {
+    await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: 'You are {{worker.name}}, the {{worker.role}}.' } });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
+    expect(p.prompt).toBe('You are Gwen, the backend-engineer.');
+    expect(p.hasNamePlaceholder).toBeNull();
+  });
+
+  it('the SDL keeps hasNamePlaceholder on TeamRole and CastWorkerPreview, deprecated (#2049)', () => {
+    const schema = buildSchema(typeDefs.replace('#graphql', ''), { assumeValidSDL: true });
+    for (const type of ['TeamRole', 'CastWorkerPreview']) {
+      const field = (schema.getType(type) as GraphQLObjectType).getFields().hasNamePlaceholder;
+      expect(field.deprecationReason).toMatch(/#2049/);
+      expect(String(field.type)).toBe('Boolean');
+    }
+  });
+
   it('typed refusals behave identically to the cast (the point of a preview)', async () => {
     // Unknown role → the agent resolution refusal, not a silent guess.
     await expectCode(
@@ -181,26 +199,23 @@ describe('#964 — castWorkerPreview', () => {
     );
   });
 
-  it('flags a nameless template before the name is burned', async () => {
+  it('binds a template without a name token as written; hasNamePlaceholder is retired and null (#2049)', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
       data: { systemPrompt: 'You are a {{role}}.' },
     });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
-    expect(p.hasNamePlaceholder).toBe(false);
+    expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
 
-  it('detection shares the composer\'s exact token: "{{ name }}" is NOT bound (#985 review)', async () => {
-    // applyPersonaTemplate substitutes the exact token {{name}} only — a
-    // whitespace-tolerant probe would bless precisely the template that
-    // silently produces a nameless worker.
+  it('binds only the exact token: "{{ name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
       data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
     });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
-    expect(p.hasNamePlaceholder).toBe(false);
+    expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are {{ name }}, a backend-engineer.');
   });
 
