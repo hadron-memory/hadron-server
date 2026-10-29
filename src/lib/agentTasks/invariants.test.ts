@@ -372,7 +372,13 @@ describe('task-number SQL parity (#2666)', () => {
   });
   it('post-push reuses the original numbering backfill before applying NOT NULL', () => {
     const original = readFileSync(new URL('../../../prisma/migrations/20261027100000_agent_task_number/migration.sql', import.meta.url), 'utf8');
-    const backfill = original.slice(original.indexOf('-- AT0,'), original.indexOf('-- #2553 (Task Management T12): the hierarchical task handle AT<n>(.<n>)* —'));
+    const start = original.indexOf('-- AT0,');
+    const end = original.indexOf('-- #2553 (Task Management T12): the hierarchical task handle AT<n>(.<n>)* —');
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const backfill = original.slice(start, end);
+    expect(backfill).toContain('CREATE TEMP TABLE _agent_task_walk');
+    expect(backfill).toContain('RAISE EXCEPTION');
     const pushBackfill = readFileSync(new URL('../../../prisma/agent-task-number-backfill.sql', import.meta.url), 'utf8');
     expect(pushBackfill).toContain(backfill);
     const push = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');

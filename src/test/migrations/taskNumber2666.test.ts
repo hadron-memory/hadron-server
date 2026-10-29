@@ -32,7 +32,7 @@ describe('#2666 task-number SQL', () => {
     await expect(db.agentTask.create({ data: { appId: a.id, title: 'No project', ownerUserId: u.id, status: 'backlog', taskNumber: 0n, handle: 'AT0' } })).resolves.toMatchObject({ handle: 'AT0' });
   });
 
-  it('full post-push backfills a populated legacy tree, preserves numbered rows, sets NOT NULL and reruns unchanged', async () => {
+  it.each([3, 16])('full post-push on a %i-deep legacy tree preserves data or refuses atomically', async depth => {
     const { u, a } = await fixture();
     const c = new Client({ connectionString: process.env.DATABASE_URL });
     await c.connect();
@@ -45,9 +45,21 @@ describe('#2666 task-number SQL', () => {
         DROP TRIGGER trg_agent_tasks_number_immutable ON agent_tasks;
         ALTER TABLE agent_tasks ALTER COLUMN task_number DROP NOT NULL;
         ALTER TABLE agent_tasks ALTER COLUMN handle DROP NOT NULL;`);
-      for (const [id, parent] of [['legacy-root', null], ['legacy-child', 'legacy-root'], ['legacy-leaf', 'legacy-child']] as const) {
+      // A push-created counter table can be empty even with numbered tasks.
+      await c.query('DELETE FROM agent_task_counters WHERE app_id=$1', [a.id]);
+      const ids = depth === 3 ? ['legacy-root', 'legacy-child', 'legacy-leaf'] : Array.from({ length: depth }, (_, i) => `legacy-${i}`);
+      for (const [i, id] of ids.entries()) {
+        const parent = i === 0 ? null : ids[i - 1];
         await c.query(`INSERT INTO agent_tasks (id, app_id, title, status, owner_user_id, parent_task_id, close_session_when_done, created_at)
           VALUES ($1,$2,$1,'pending',$3,$4,false,'2026-01-01')`, [id, a.id, u.id, parent]);
+      }
+      if (depth === 16) {
+        const before = (await c.query('SELECT * FROM agent_tasks ORDER BY id')).rows;
+        await expect(postPush()).rejects.toThrow(/would get handle.*16 levels/);
+        expect((await c.query('SELECT * FROM agent_tasks ORDER BY id')).rows).toEqual(before);
+        expect((await c.query('SELECT * FROM agent_task_counters')).rows).toEqual([]);
+        expect((await c.query(`SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='agent_tasks' AND column_name IN ('handle','task_number')`)).rows).toEqual([{ is_nullable: 'YES' }, { is_nullable: 'YES' }]);
+        return;
       }
       await postPush();
       const snapshot = async () => ({
@@ -64,9 +76,11 @@ describe('#2666 task-number SQL', () => {
       expect(await snapshot()).toEqual(once);
     } finally {
       // The failed red run may leave legacy NULLs: remove synthetic tasks with their App, then restore current SQL.
-      await db.app.delete({ where: { id: a.id } });
-      await postPush();
-      await c.end();
+      try {
+        await db.app.delete({ where: { id: a.id } });
+      } finally {
+        try { await postPush(); } finally { await c.end(); }
+      }
     }
   }, 120_000);
 
