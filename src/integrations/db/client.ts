@@ -19,6 +19,7 @@ const MODELS_WITHOUT_ID = new Set<string>([
   'GitMirrorObligation',
   // #2046 — keyed by (compiled node, compiled revision).
   'CompiledPromptRevision',
+  'AgentTaskBlocker',
   'AgentSubscription',
   'WorkerReferenceFence',
   'ManualAutomationPin',

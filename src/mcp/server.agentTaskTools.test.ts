@@ -217,3 +217,25 @@ describe('agent-task tools: backlog (#1754)', () => {
     expect(list).toMatch(/Later/);
   });
 });
+
+
+describe('#2644 MCP blocker and priority parity', () => {
+  it('round-trips all three mutations and create fields through SDK argument parsing', async () => {
+    const server = createMcpServerInstance(authOf(member.id), () => undefined, { kind: 'multi-app' });
+    const client = new Client({ name: 'blockers2644', version: '1' });
+    const [local, remote] = InMemoryTransport.createLinkedPair();
+    await server.connect(remote); await client.connect(local);
+    try {
+      const plain = await session({ userId: member.id });
+      const call = async (name: string, args: Record<string, unknown>) =>
+        ((await client.callTool({ name, arguments: { session: plain.id, ...args } })) as any).content[0].text as string;
+      const b = idOf(await call('hadron_task_create', { appRef: app.id, title: 'blocker', status: 'BACKLOG' }));
+      const t = idOf(await call('hadron_task_create', { appRef: app.id, title: 'dependent', priority: 4, blockedBy: [b], assignee: { user: member.id } }));
+      expect(await call('hadron_task_get', { taskId: t, dependencyLimit: 0 })).toMatch(/blocked by \(1 total, more pages\)/);
+      expect(code(await call('hadron_task_start', { taskId: t }))).toBe('TASK_BLOCKED');
+      expect(await call('hadron_task_priority_set', { taskId: t, priority: 2 })).toMatch(/priority: 2/);
+      expect(await call('hadron_task_blocker_remove', { taskId: t, blockerTaskId: b })).toMatch(/blocked: false/);
+      expect(await call('hadron_task_blocker_add', { taskId: t, blockerTaskId: b })).toMatch(/blocked: true/);
+    } finally { await client.close(); await server.close(); }
+  });
+});

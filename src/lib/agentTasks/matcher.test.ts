@@ -686,17 +686,18 @@ describe('concurrent runs never double-assign a task or a worker', () => {
     expect(await db.agentTask.count({ where: { assigneeWorkerId: baloo.id } })).toBe(1);
   });
 
-  it('the guarded update: two workers racing for one task — the loser matches no row and changes nothing', async () => {
+  it('the App graph decision: two workers racing for one task serialize and the loser changes nothing', async () => {
     await bind(baloo, 'codex', at('11:00'));
     await bind(liam, 'glm', at('11:00'));
     const t = await queued('10:00');
     const g = gate();
     const first = __matcherTesting.tryAssign(db, await row(t.id), baloo.id, 'codex', at('11:01'), { afterWorkerCheck: g.hook });
     await g.arrived;
-    expect(await __matcherTesting.tryAssign(db, await row(t.id), liam.id, 'glm', at('11:01'), {})).toBe('assigned');
+    const second = __matcherTesting.tryAssign(db, await row(t.id), liam.id, 'glm', at('11:01'), {});
     g.open();
-    expect(await first).toBe('task-gone');
-    expect(await assigneeOf(t.id)).toBe(liam.id);
+    expect(await first).toBe('assigned');
+    expect(await second).toBe('task-gone');
+    expect(await assigneeOf(t.id)).toBe(baloo.id);
     expect(await db.agentTeamEvent.count({ where: { type: 'assignment.matched' } })).toBe(1);
   });
 });
@@ -863,4 +864,30 @@ describe('#2191 deciding checks after real lock waits', () => {
       expect(await assigneeOf(task.id)).toBeNull();
     });
   }
+});
+
+// #2644: priority is a queue ordering input, never matching eligibility.
+describe('#2644 blocker and priority queue', () => {
+  it('skips an open blocker, chooses lowest priority then FIFO, and retains later pages', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    const blocker = await queued('09:00', null, { status: 'backlog' });
+    const blocked = await queued('09:01', null, { priority: 1 });
+    await db.agentTaskBlocker.create({ data: { taskId: blocked.id, blockerTaskId: blocker.id } });
+    const low = await queued('09:02', null, { priority: 5 });
+    const high = await queued('09:03', null, { priority: 2 });
+    const tie = await queued('09:04', null, { priority: 2 });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toMatchObject([{ taskId: high.id }]);
+    expect(await assigneeOf(blocked.id)).toBeNull();
+    expect(await assigneeOf(low.id)).toBeNull();
+    expect(await assigneeOf(tie.id)).toBeNull();
+  });
+  it('passes more than one page of mixed priorities and ties that nobody can take', async () => {
+    await bind(baloo, 'codex', at('11:00'));
+    await db.agentTask.createMany({ data: Array.from({ length: 501 }, (_, i) => ({
+      id: generateId(), appId: app.id, title: 'Synthetic ineligible', ownerUserId: mia.id,
+      priority: i < 250 ? 1 : 2, createdAt: at('10:00'), requirements: { role: 'unmatched-role' },
+    })) });
+    const target = await queued('09:00', { role: 'reviewer' }, { priority: 3 });
+    expect(await matchQueuedTasks(db, at('11:01'), { appId: app.id })).toMatchObject([{ taskId: target.id, workerId: baloo.id }]);
+  });
 });

@@ -122,11 +122,12 @@ import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const TASK_SELECT = {
-  id: true, appId: true, status: true, parentTaskId: true,
+  id: true, appId: true, status: true, parentTaskId: true, blocked: true, releasedAt: true,
   ownerWorkerId: true, ownerUserId: true, assigneeWorkerId: true, assigneeUserId: true,
   startBy: true, assignedAt: true, startedAt: true, createdAt: true,
 } as const;
-type TaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
+type SelectedTaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
+type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt'>>;
 
 /** Everything one task's rules read. */
 export type StallInputs = {
@@ -360,6 +361,8 @@ export function stallCandidates(
   options: { episodesRunning?: boolean } = {},
 ): StallCandidate[] {
   const { task } = inputs;
+  if (task.blocked) return [];
+  const floor = (d: Date) => latest(d, task.releasedAt) as Date;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
   const running = options.episodesRunning === true;
@@ -382,25 +385,26 @@ export function stallCandidates(
   // no queue event (seeded past the resolvers) fall back to creation, the
   // pre-#1754 start.
   if (task.status === 'pending' && !assignee) {
-    const queuedAt = inputs.queuedAt ?? task.createdAt;
+    const queuedAt = floor(inputs.queuedAt ?? task.createdAt);
     add('unassignable', queuedAt, countedDueAt(queuedAt, windows.assignmentMinutes * MINUTE, inputs.stopHolds), {}, inputs.stopHolds);
   }
 
   // cor:agt:050:14 — assigned and still pending. A still-working note does not
   // stop it (S3): only starting, reassigning or cancelling the task does.
   if (task.status === 'pending' && assignee && task.assignedAt) {
-    const deadline = task.startBy && task.startBy.getTime() > task.assignedAt.getTime()
+    const assignedAt = floor(task.assignedAt);
+    const deadline = task.startBy && task.startBy.getTime() > assignedAt.getTime()
       ? task.startBy
-      : plus(task.assignedAt, windows.notStartedMinutes);
+      : plus(assignedAt, windows.notStartedMinutes);
     // #2022: a `pause` or `halt` on the assignee holds the clock, startBy's included (Vera's receipt §5).
     const stopped = stopOf(inputs, task.assigneeWorkerId);
-    add('not-started', task.assignedAt, countedDueAt(task.assignedAt, deadline.getTime() - task.assignedAt.getTime(), stopped), {}, stopped);
+    add('not-started', assignedAt, countedDueAt(assignedAt, deadline.getTime() - assignedAt.getTime(), stopped), {}, stopped);
   }
 
   // cor:agt:050:15 — started, not waiting on children, no assignee activity.
   if (task.status === 'started' && inputs.openChildCount === 0 && task.startedAt) {
     const since = latest(
-      task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt,
+      task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt, task.releasedAt,
     ) as Date;
     const stopped = stopOf(inputs, task.assigneeWorkerId);
     add('no-progress', since, countedDueAt(since, windows.noProgressMinutes * MINUTE, stopped), {}, stopped);
@@ -411,7 +415,7 @@ export function stallCandidates(
   const first = assignee ? unreactedChild(inputs) : null;
   if (first) {
     const stopped = stopOf(inputs, first.ownerWorkerId);
-    add('owner-unreactive', first.endedAt, countedDueAt(first.endedAt, windows.ownerReactionMinutes * MINUTE, stopped), {
+    add('owner-unreactive', floor(first.endedAt), countedDueAt(floor(first.endedAt), windows.ownerReactionMinutes * MINUTE, stopped), {
       childTaskId: first.id,
     }, stopped);
   }
