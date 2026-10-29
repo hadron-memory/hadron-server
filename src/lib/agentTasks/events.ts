@@ -1,5 +1,7 @@
 /**
- * #1705 — the ONLY writer of `agent_team_events` (cor:agt:050:11).
+ * #1705 — the application writer of `agent_team_events` (cor:agt:050:11).
+ * #2644: SQL emits only the fixed empty platform task.released event when
+ * its blocker-state transition commits, including physical FK cascades.
  *
  * An event is append-only in the database (prisma/agent-task-invariants.sql),
  * so this module's job is the half the trigger cannot check: what goes into
@@ -29,6 +31,7 @@ export const TASK_EVENT_TYPES = [
   'task.parked',
   'task.ready',
   'task.warning',
+  'task.released', 'task.priority', 'task.blocker-added', 'task.blocker-removed',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -70,6 +73,9 @@ export type TaskEventPayload =
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.warning'; code: RecordedTaskWarningCode }
+  | { type: 'task.released' }
+  | { type: 'task.priority'; priority: number }
+  | { type: 'task.blocker-added' | 'task.blocker-removed'; blockerTaskId: string }
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
@@ -106,6 +112,10 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { assignee: partyJson(e.assignee), closeSessionWhenDone: e.closeSessionWhenDone };
     case 'task.reassigned':
       return { from: partyJson(e.from), to: partyJson(e.to), closeSessionWhenDone: e.closeSessionWhenDone };
+    case 'task.priority': return { priority: e.priority };
+    case 'task.blocker-added':
+    case 'task.blocker-removed': return { blockerTaskId: e.blockerTaskId };
+    case 'task.released':
     case 'task.started':
     case 'task.progress':
       return {};

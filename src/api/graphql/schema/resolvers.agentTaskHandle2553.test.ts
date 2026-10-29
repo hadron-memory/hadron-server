@@ -149,7 +149,8 @@ describe('numbering', () => {
     const update = typeDefs.match(/input \w*(?:Update|Edit|Move|Reparent)\w*AgentTask\w* \{[^}]*\}/g) ?? [];
     for (const block of update) expect(block).not.toMatch(/parentTaskId/);
     const ops = Object.keys(M).filter((n) => /agenttask/i.test(n));
-    expect(ops.filter((n) => /(move|reparent|update|edit)/i.test(n))).toEqual([]);
+    // Match the operation verb: removeAgentTaskBlocker unlinks a dependency, never reparents a task.
+    expect(ops.filter((n) => /^(move|reparent|update|edit)/i.test(n))).toEqual([]);
   });
 
   it('an explicit number spends its counter: the next allocation never repeats it; an explicit handle must match its parent', async () => {

@@ -48,7 +48,7 @@
     "@azure/msal-node": "^5.1.2",
     "@hadron-memory/access-control": "0.3.0",
     "@hadron-memory/urn-lib-js": "0.0.17",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@mozilla/readability": "^0.6.0",
     "@nats-io/jetstream": "^3.4.0",
     "@nats-io/transport-node": "^3.4.0",
