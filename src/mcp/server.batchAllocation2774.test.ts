@@ -234,18 +234,19 @@ it('#2774 refreshes provenance if the body revision changes after metadata prefe
     if (changed || !args?.select?.handle) return result;
     return result.then(async (rows) => {
       changed = true;
-      await db.node.update({ where: { id: node.id }, data: { content: 'new', revSeq: 2 } });
+      await db.node.update({ where: { id: node.id }, data: { content: 'new', abstract: 'new summary', revSeq: 2 } });
       await db.nodeContentValidationReport.create({ data: { nodeId: node.id, memoryId: fx.memory.id, nodeRevSeq: 2, validationTaskId: task.id, validationTaskRevSeq: 1, outcome: 'PASS' } });
       return rows;
     });
   }) as typeof db.user.findMany);
   try {
-    const output = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { refs: [node.id], raw: true });
+    const output = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { refs: [node.id], contentScope: 'abstract', raw: true });
     expect(changed, output).toBe(true);
     // Reconciliation advances the directly edited row once more; report r2
     // is the latest eligible report, rather than the prefetched r1 FAIL.
     expect(output).toContain('Validation: stale (node revision 2;');
     expect(output).not.toContain('Validation: fail');
+    expect(output).toContain('Source: abstract-stale');
     expect(output).toContain('new');
   } finally { spy.mockRestore(); }
 });
@@ -266,11 +267,44 @@ it.each(['pk', 'prefix'] as const)('#2774 preserves first-oversized progress and
 });
 
 
-it.each([true, false])('#2774 omits a plaintext body when an abstract-only read has no abstract (raw=%s)', async (raw) => {
-  const node = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'no-abstract', name: 'No abstract', content: 'UNNEEDED'.repeat(16_384), abstract: null } });
+it.each([[true, false], [false, false], [true, true], [false, true]] as const)('#2774 omits an unused body when no abstract exists (raw=%s encrypted=%s)', async (raw, encrypted) => {
+  const home = await db.memory.findUniqueOrThrow({ where: { id: fx.memory.id } });
+  const memory = await db.memory.create({ data: { organizationId: home.organizationId, class: 'private', userId: fx.admin.id, name: 'noabstract', urn: 'batch-org:noabstract' } });
+  const node = await db.node.create({ data: { memoryId: memory.id, loc: 'no-abstract', name: 'No abstract', content: 'UNNEEDED'.repeat(16_384), abstract: null, data: { note: 'VISIBLE DATA' } } });
+  const server = createTestableMcpServer(adminAuth(), { sessionId: 'batch2774-empty' });
+  if (encrypted) {
+    await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.admin.id } as Context);
+    expect(await server.callToolText('hadron_unlock_memory', { memoryUrn: memory.urn, passphrase: 'synthetic2774' })).toContain('unlocked');
+  }
   const result = await measuredRead('abstract', [node.id], 'pk', raw);
-  const single = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:batchmem:no-abstract', contentScope: 'abstract', raw });
+  const single = await server.callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:noabstract:no-abstract', contentScope: 'abstract', raw });
   expect(result.text).toContain(single);
   expect(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
   expect(result.text).not.toContain('UNNEEDED');
+  expect(result.text).toContain('VISIBLE DATA');
+});
+
+it('#2774 preserves denied/deleted root and endpoint concealment with narrowed projections', async () => {
+  const root = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'safe-root', name: 'Safe root', abstract: 'Summary', content: 'ROOT' } });
+  const live = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'visible-end', name: 'Visible end', content: 'UNSELECTED ENDPOINT'.repeat(8192) } });
+  const deadTarget = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'dead-target', name: 'DELETED TARGET', content: 'DELETED CONTENT', deletedAt: new Date() } });
+  const deadSource = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'dead-source', name: 'DELETED SOURCE', content: 'DELETED CONTENT', deletedAt: new Date() } });
+  const deadRoot = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'dead-root', name: 'DELETED ROOT', content: 'DELETED ROOT CONTENT', deletedAt: new Date() } });
+  const hidden = await db.node.create({ data: { memoryId: fx.pmem.id, loc: 'hidden-end', name: 'DENIED ENDPOINT', content: 'DENIED CONTENT' } });
+  await db.edge.createMany({ data: [
+    { sourceId: root.id, targetId: live.id, loc: 'live' },
+    { sourceId: root.id, targetId: deadTarget.id, loc: 'deleted-out' },
+    { sourceId: deadSource.id, targetId: root.id, loc: 'deleted-in' },
+    { sourceId: root.id, targetId: hidden.id, loc: 'denied-out' },
+    { sourceId: hidden.id, targetId: root.id, loc: 'denied-in' },
+  ].map(edge => ({ id: generateId(), memoryId: fx.memory.id, ...edge })) });
+  const server = createTestableMcpServer(adminAuth());
+  const single = await server.callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:batchmem:safe-root', contentScope: 'abstract', raw: true });
+  const result = await measuredRead('abstract', [root.id, deadRoot.id], 'pk');
+  expect(result.text).toContain(single);
+  expect(result.text).toContain('Visible end');
+  expect(result.text).toContain('1 unavailable');
+  expect(result.text).toContain(deadRoot.id);
+  expect(result.text).not.toMatch(/DELETED|DENIED|hidden-end|dead-target|dead-source/);
+  expect(result.loads.reduce((n, l) => n + l.endpointBodyBytes, 0)).toBe(0);
 });

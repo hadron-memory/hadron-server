@@ -1577,9 +1577,11 @@ async function loadCurrentReadProjection(
     const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
     // The batch provenance pass retains only metadata. Its render pass reads
     // one current body under the same reconciliation and authorization gate.
-    return metadataOnly
-      ? tx.node.findFirst({ ...args, omit: { content: true } }) as unknown as Promise<ReadProjectionNode | null>
-      : tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
+    if (metadataOnly) {
+      const row = await tx.node.findFirst({ ...args, omit: { content: true } });
+      return row ? { ...row, content: null } : null;
+    }
+    return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
   }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
 
@@ -5403,7 +5405,14 @@ export function createMcpServerInstance(
           continue;
         }
         const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId);
+        const via = inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId;
+        const omitBody = scope === 'abstract' && !metadata.abstract;
+        let n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, omitBody);
+        // A concurrently added abstract (including an encrypted one) can make
+        // the body necessary for its stale marker after metadata prefetch.
+        if (omitBody && n?.abstract) {
+          n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via);
+        }
         if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
           || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
           || (inheritedFrom && !(inheritedFrom.via
