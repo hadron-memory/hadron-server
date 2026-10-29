@@ -1,5 +1,5 @@
 /** Session metadata reads must not materialize unselected usage history (#2758). */
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
@@ -24,6 +24,10 @@ async function execute(query: string) {
   });
   if (result.body.kind !== 'single') throw new Error('Unexpected incremental response');
   expect(result.body.singleResult.errors).toBeUndefined();
+  // Prisma query events are delivered asynchronously from its engine. Flush
+  // a later query through that channel before asserting absence of eager SQL.
+  await logged.$queryRaw`SELECT 'session-projection-log-barrier'`;
+  await vi.waitFor(() => expect(queries.some((sql) => sql.includes('session-projection-log-barrier'))).toBe(true));
   return result.body.singleResult.data as any;
 }
 
