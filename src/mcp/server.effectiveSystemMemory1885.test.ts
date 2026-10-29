@@ -236,3 +236,33 @@ describe('the Signatures line: inherited sanitization and the #1902 switch, comb
     expect(loaded()).toEqual([]);
   });
 });
+
+it('#2774 renders inherited edge endpoint metadata without loading their bodies', async () => {
+  const release = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'processes:release' } });
+  const ship = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'tasks:ship' } });
+  const override = await db.node.findFirstOrThrow({ where: { memoryId: backend.mem, loc: 'tasks:open-pr' } });
+  const endpointIds = new Set([ship.id, override.id]);
+  await db.node.updateMany({ where: { id: { in: [...endpointIds] } }, data: { content: 'UNSELECTED'.repeat(16_384) } });
+  await db.edge.create({ data: { memoryId: engineer.mem, sourceId: ship.id, targetId: release.id, name: 'before', loc: 'ship-before-release' } });
+  const single = await call('hadron_get_node', { urn: childUrn('processes:release'), contentScope: 'abstract', raw: true });
+  let bytes = 0;
+  const edges = db.edge.findMany.bind(db.edge);
+  const edgeSpy = vi.spyOn(db.edge, 'findMany').mockImplementation((async (args: any) => {
+    const rows = await edges(args);
+    for (const row of rows as any[]) for (const endpoint of [row.source, row.target]) bytes += Buffer.byteLength(endpoint?.content ?? '');
+    return rows;
+  }) as typeof db.edge.findMany);
+  const unique = db.node.findUnique.bind(db.node);
+  const nodeSpy = vi.spyOn(db.node, 'findUnique').mockImplementation((async (args: any) => {
+    const row = await unique(args);
+    if (row && endpointIds.has(row.id)) bytes += Buffer.byteLength(row.content ?? '');
+    return row;
+  }) as typeof db.node.findUnique);
+  try {
+    const batch = await call('hadron_get_nodes', { refs: [childUrn('processes:release')], contentScope: 'abstract', raw: true });
+    expect(batch).toContain(single);
+    expect(batch).toContain(childUrn('tasks:open-pr'));
+    expect(batch).toContain(baseUrn('tasks:ship'));
+    expect(bytes).toBe(0);
+  } finally { edgeSpy.mockRestore(); nodeSpy.mockRestore(); }
+});
