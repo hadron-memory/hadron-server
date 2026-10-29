@@ -5,6 +5,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
 let memoryId: string, agentId: string, reader: string, outsider: string;
@@ -29,13 +31,38 @@ beforeEach(async () => {
   agentId = (await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'prov2046:agent', organizationId: org.id, systemMemoryId: memoryId } })).id;
   reader = (await db.user.create({ data: { id: generateId(), name: 'reader' } })).id;
   outsider = (await db.user.create({ data: { id: generateId(), name: 'outsider' } })).id;
-  await db.orgMember.create({ data: { organizationId: org.id, userId: reader, role: 'READER' } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: reader, role: 'ADMIN' } });
 });
 describe('#2046 compiled provenance read', () => {
   it('returns recorded metadata without loading source nodes or their text', async () => {
     const n = await fixture();
     expect(await field(n)).toMatchObject({ revision: 1, contentHash: sha256Hex('compiled'), total: 2,
       items: [occurrence(0), occurrence(1)], hasMore: false });
+  });
+  it('exposes the typed field through the executable GraphQL schema', async () => {
+    const n = await fixture();
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    try {
+      const result = await server.executeOperation({ query: `query($ref: ID!) { node(ref: $ref) {
+        compiledProvenance { revision total hasMore items { nodeId revNo hash pruned selection { rev approved signed } } }
+      } }`, variables: { ref: n.id } }, { contextValue: ctx() });
+      expect(result.body.kind).toBe('single');
+      if (result.body.kind === 'single') {
+        expect(result.body.singleResult.errors).toBeUndefined();
+        expect(result.body.singleResult.data).toMatchObject({ node: { compiledProvenance: { revision: 1, total: 2 } } });
+      }
+    } finally { await server.stop(); }
+  });
+  it('reports a missing source revision as pruned without losing recorded metadata', async () => {
+    const n = await fixture();
+    expect((await field(n)).items[0]).toMatchObject({ ...occurrence(0), pruned: true });
+    await db.node.create({ data: { id: 'recorded-source-0', memoryId, loc: 'source', name: 'Source', revSeq: 3 } });
+    expect((await field(n)).items[0].pruned).toBe(false);
+    await db.node.update({ where: { id: 'recorded-source-0' }, data: { revSeq: 4 } });
+    await db.nodeRevision.create({ data: { nodeId: 'recorded-source-0', memoryId, loc: 'source', name: 'Source', revNo: 3, tags: [] } });
+    expect((await field(n)).items[0].pruned).toBe(false);
+    await db.nodeRevision.deleteMany({ where: { nodeId: 'recorded-source-0' } });
+    expect((await field(n)).items[0].pruned).toBe(true);
   });
   it('conceals denied and nonexistent nodes identically, even with a forged parent memory', async () => {
     const n = await fixture();

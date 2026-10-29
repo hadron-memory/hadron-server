@@ -1446,7 +1446,34 @@ export const typeDefs = `#graphql
     approvalIssued: Boolean!
   }
 
+  "#2046 (hrn:node:hadronmemory.com:specs:cor:agt:040:12) — immutable source-revision metadata, without source text or objects."
+  type CompiledPromptSelection { rev: Int, approved: Boolean!, signed: Boolean! }
+  type CompiledPromptPosition { line: Int!, column: Int! }
+  type CompiledPromptOccurrence {
+    "Whether the selected source revision is no longer retained. Recorded identity/hash/settings stay available."
+    pruned: Boolean!
+    order: Int!
+    depth: Int!
+    parent: Int
+    kind: String!
+    nodeId: ID!
+    revNo: Int!
+    hash: String!
+    replacesNodeId: ID
+    position: CompiledPromptPosition
+    selection: CompiledPromptSelection!
+  }
+  type CompiledPromptProvenance {
+    revision: Int!
+    contentHash: String!
+    items: [CompiledPromptOccurrence!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   type Node {
+    "#2046 (hrn:node:hadronmemory.com:specs:cor:agt:040:12) — this compiled revision's recorded provenance, gated by this node's current read access. Omitted revision selects the current revision; older records survive source pruning and recompilation. No live source lookup or text. Null for an ordinary, denied, deleted node or unavailable record. Occurrences retain expansion order; default limit 20, cap 200; limit 0 returns only the total."
+    compiledProvenance(revision: Int, limit: Int = 20, offset: Int = 0): CompiledPromptProvenance
     "Deletion marker. Ordinary reads still omit tombstones; explicit recovery is writer-only."
     deletedAt: DateTime
     id: ID!

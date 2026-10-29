@@ -367,6 +367,7 @@ type ConcealResolver = (parent: any, args?: any, ctx?: any, info?: any) => unkno
 const CONCEALED_FIELDS: Record<string, () => unknown> = {
   memory: () => null,
   moveLinkWarnings: () => null,
+  compiledProvenance: () => null,
   authorship: () => null,
   createdByWorker: () => null,
   createdByAgent: () => null,

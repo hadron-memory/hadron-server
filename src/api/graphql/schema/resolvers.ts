@@ -1,3 +1,4 @@
+import { compiledProvenanceFieldResolvers } from './resolvers.compiledProvenance.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
 // GraphQL resolver map — thin assembler.
@@ -149,7 +150,7 @@ export const resolvers = {
   // #1885: an inherited node shows its content and nothing of the base
   // tenant's records (resolvers.inheritedNode.ts).
   // #2064: a non-participant's install-memory write response reads empty (installMemory.ts).
-  Node: withInstallConcealment(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node })),
+  Node: withInstallConcealment(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node, ...compiledProvenanceFieldResolvers.Node })),
   // #1632: signing requests and signatures.
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
