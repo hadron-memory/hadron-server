@@ -803,3 +803,6 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- the #1162 fence file: it puts the record's worker/session columns under that fence function.
 \ir served-prompt-invariants.sql
 \ir served-prompt-app-invariants.sql
+
+-- #2479: per-trigger run budget limits.
+\ir trigger-run-budget-invariants.sql
