@@ -362,9 +362,9 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
 
 describe('the migration', () => {
   const migrationSql = () => readFileSync(new URL('../../../../prisma/migrations/20261027100000_agent_task_number/migration.sql', import.meta.url), 'utf8');
-  const invariants = () => readFileSync(new URL('../../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8');
+  const invariants = () => readFileSync(new URL('../../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8').split('\n-- #2666:')[0]!;
 
-  it('carries a byte-identical copy of the invariants file', () => {
+  it('carries a byte-identical copy of the original invariants file', () => {
     expect(migrationSql().endsWith(invariants())).toBe(true);
   });
 
