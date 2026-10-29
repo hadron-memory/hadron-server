@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../../prisma/worker-reference-invariants.sq
 // A table created AFTER the closed #1162 migration cannot be added to it (the migration replays in order, so a trigger on
 // a later table would fail a fresh deploy). Such a table puts its fence trigger in its own invariants file; the inventory
 // is the union.
-const laterFences = ['served-prompt-invariants.sql'].map((f) => readFileSync(new URL(`../../prisma/${f}`, import.meta.url), 'utf8'));
+const laterFences = ['served-prompt-invariants.sql', 'dark-alarm-invariants.sql'].map((f) => readFileSync(new URL(`../../prisma/${f}`, import.meta.url), 'utf8'));
 const inventory = [source, ...laterFences].join('\n');
 describe('#1162 reference fence deployment', () => {
   it('ships byte-identical migration and post-push guards', () => {

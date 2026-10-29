@@ -21,3 +21,10 @@ ALTER TABLE dark_worker_episodes ADD CONSTRAINT chk_dark_worker_episodes_shape C
   reason IN ('overdue', 'wake-unacked') AND (ended_at IS NULL OR ended_at >= opened_at)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS dark_worker_episodes_one_open_uniq ON dark_worker_episodes (worker_id) WHERE ended_at IS NULL;
+
+-- #1162: the episode's worker column is a typed Worker reference, so it sits under the same writer fence as every
+-- other one. The #1162 invariants file is closed (a shipped migration), so the trigger is created here; the function
+-- is that file's.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "dark_worker_episodes";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "dark_worker_episodes"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');

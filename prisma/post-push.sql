@@ -696,7 +696,6 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir agent-ticker-template-invariants.sql
 \ir delivery-settings-invariants.sql
 \ir channel-checks-invariants.sql
-\ir dark-alarm-invariants.sql
 
 -- #2022: stop signals, their coverage history and the stop holds of queued tasks. One source, shared verbatim with
 -- migration 20261020030000_stop_signals (pinned by src/lib/stopSignals/invariants.test.ts).
@@ -803,3 +802,6 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- the #1162 fence file: it puts the record's worker/session columns under that fence function.
 \ir served-prompt-invariants.sql
 \ir served-prompt-app-invariants.sql
+
+-- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
+\ir dark-alarm-invariants.sql
