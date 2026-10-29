@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { existsSync, readdirSync, rmSync, rmdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /**
@@ -27,6 +27,9 @@ export const withFsProjectionRollback = async <T>(fn: () => Promise<T>): Promise
   }
 };
 
+/** True inside a `withFsProjectionRollback` scope. */
+export const hasFsProjectionScope = (): boolean => scope.getStore() !== undefined;
+
 /** Register a cleanup with the enclosing scope; false when there is none. */
 export const registerFsProjectionCleanup = (cleanup: () => void): boolean => {
   const cleanups = scope.getStore();
@@ -41,25 +44,44 @@ export const runCleanups = (cleanups: Array<() => void>): void => {
   }
 };
 
+type Files = { yaml?: string | null; topic?: string | null };
+
+const read = (path: string): string | null => (existsSync(path) ? readFileSync(path, 'utf-8') : null);
+
+/** The projection files as they are now, taken before the write so a rollback can put them back. */
+export const snapshotProjection = (loc: string, graphsPath: string): Files => {
+  const nodeDir = join(graphsPath, ...loc.split(':'), '.node');
+  return { yaml: read(join(nodeDir, 'node.yaml')), topic: read(join(nodeDir, 'topic.md')) };
+};
+
 /**
- * Cleanup for a projection this call created. Returns null when the node's
- * `node.yaml` already existed (an overwrite of an earlier projection is not
- * ours to delete).
+ * Cleanup for a projection this call wrote. Ownership is by BYTES, per file: a file is
+ * touched only while it still holds exactly what this call wrote (a concurrent create
+ * that overwrote it, or a file this call never wrote, is left alone), and is then put
+ * back to what it held before (deleted if it did not exist).
  */
-export const projectionCleanupFor = (loc: string, graphsPath: string): (() => void) | null => {
-  const parts = loc.split(':');
-  const dir = join(graphsPath, ...parts);
-  if (existsSync(join(dir, '.node', 'node.yaml'))) return null;
-  return () => {
-    rmSync(join(dir, '.node', 'node.yaml'), { force: true });
-    rmSync(join(dir, '.node', 'topic.md'), { force: true });
-    // Prune the directories this projection may have created, deepest first,
-    // stopping at the first one still holding anything else.
-    let current = join(dir, '.node');
-    while (current.length > graphsPath.length && current.startsWith(graphsPath)) {
-      if (!existsSync(current) || readdirSync(current).length > 0) break;
-      rmdirSync(current);
-      current = dirname(current);
-    }
+export const projectionCleanupFor = (
+  loc: string,
+  graphsPath: string,
+  prior: Files,
+  written: { yaml: string; topic?: string },
+): (() => void) => () => {
+  const nodeDir = join(graphsPath, ...loc.split(':'), '.node');
+  const restore = (file: string, wrote: string | undefined, before: string | null | undefined) => {
+    if (wrote === undefined) return;
+    const path = join(nodeDir, file);
+    if (read(path) !== wrote) return;
+    if (before == null) rmSync(path, { force: true });
+    else writeFileSync(path, before, 'utf-8');
   };
+  restore('node.yaml', written.yaml, prior.yaml);
+  restore('topic.md', written.topic, prior.topic);
+  // Prune the directories this projection may have created, deepest first,
+  // stopping at the first one still holding anything else.
+  let current = nodeDir;
+  while (current.length > graphsPath.length && current.startsWith(graphsPath)) {
+    if (!existsSync(current) || readdirSync(current).length > 0) break;
+    rmdirSync(current);
+    current = dirname(current);
+  }
 };

@@ -8,7 +8,7 @@ import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
-import { projectionCleanupFor, registerFsProjectionCleanup, runCleanups } from '../../lib/fsProjectionRollback.js';
+import { hasFsProjectionScope, projectionCleanupFor, registerFsProjectionCleanup, runCleanups, snapshotProjection } from '../../lib/fsProjectionRollback.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
@@ -39,11 +39,18 @@ const createNodeAsSystem = async (
 
   // Save to filesystem. #2731: a projection this call creates is undone when
   // the database write does not commit.
-  const undoProjection = projectionCleanupFor(loc, GRAPHS_PATH);
+  // A caller-supplied transaction outlives this call and its rollback is invisible here, so
+  // its creator must hold a rollback scope; refuse before writing anything rather than orphan a file.
+  if (transaction && !hasFsProjectionScope()) {
+    throw new Error('createNode: a caller-supplied transaction requires withFsProjectionRollback (#2731).');
+  }
+  const fsPrior = snapshotProjection(loc, GRAPHS_PATH);
   const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
+  // Ownership is by the bytes this call wrote (a failed write may have written none).
+  const undoProjection = fsResult.written ? projectionCleanupFor(loc, GRAPHS_PATH, fsPrior, fsResult.written) : null;
   if (fsResult.error) {
     // A partial write (directory made, file refused) is ours to undo too.
-    if (undoProjection) runCleanups([undoProjection]);
+    undoProjection?.();
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 

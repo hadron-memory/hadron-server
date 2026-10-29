@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { GRAPHS_PATH } from '../../../config.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { resolvers, type Context } from './resolvers.js';
+import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import * as locks from '../../../lib/nodeSubtreeLock.js';
 import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
 
@@ -28,8 +29,36 @@ beforeEach(async () => {
 });
 
 describe('createNode seam', () => {
+  it('a raw caller transaction with no rollback scope is refused before anything is written', async () => {
+    const loc = 'raw2731';
+    await expect(db.$transaction(async (tx) => {
+      await createNode({ memoryId: mem.id, loc, name: loc }, tx);
+    })).rejects.toThrow(/withFsProjectionRollback/);
+    expect(existsSync(yaml(loc))).toBe(false);
+  });
+  it('rollback never deletes a topic.md this call did not write', async () => {
+    const loc = 'topic2731';
+    mkdirSync(join(GRAPHS_PATH, loc, '.node'), { recursive: true });
+    writeFileSync(join(GRAPHS_PATH, loc, '.node', 'topic.md'), 'earlier topic');
+    await expect(createNode({ memoryId: 'does-not-exist', loc, name: loc })).rejects.toThrow();
+    expect(readFileSync(join(GRAPHS_PATH, loc, '.node', 'topic.md'), 'utf-8')).toBe('earlier topic');
+    expect(existsSync(yaml(loc))).toBe(false);
+  });
+  it("rollback leaves a projection another create overwrote (the winner's), and restores a failed re-save's prior bytes", async () => {
+    const loc = 'race2731';
+    await expect(withFsProjectionRollback(() => db.$transaction(async (tx) => {
+      await createNode({ memoryId: mem.id, loc, name: 'loser' }, tx);
+      writeFileSync(yaml(loc), 'id: winner\nname: winner\n'); // a concurrent commit's projection lands over ours
+      throw new Error('loser fails');
+    }))).rejects.toThrow('loser fails');
+    expect(readFileSync(yaml(loc), 'utf-8')).toBe('id: winner\nname: winner\n');
+    const loc2 = 'resave2731b';
+    await createNode({ memoryId: mem.id, loc: loc2, name: 'first' });
+    const first = readFileSync(yaml(loc2), 'utf-8');
+    await expect(createNode({ memoryId: 'does-not-exist', loc: loc2, name: 'second' })).rejects.toThrow();
+    expect(readFileSync(yaml(loc2), 'utf-8')).toBe(first);
+  });
   it('a caller transaction that rolls back leaves no node.yaml', async () => {
-    const { withFsProjectionRollback } = await import('../../../lib/fsProjectionRollback.js');
     const loc = 'rollback2731';
     await expect(withFsProjectionRollback(() => db.$transaction(async (tx) => {
       await createNode({ memoryId: mem.id, loc, name: loc }, tx);
@@ -65,10 +94,10 @@ describe('createNode seam', () => {
   it('the fs write happens before, not inside, the DB transaction', async () => {
     let seenAtInsert = false;
     const loc = 'order2731';
-    await db.$transaction(async (tx) => {
+    await withFsProjectionRollback(() => db.$transaction(async (tx) => {
       await createNode({ memoryId: mem.id, loc, name: loc }, tx);
       seenAtInsert = existsSync(yaml(loc));
-    });
+    }));
     expect(seenAtInsert).toBe(true);
   });
 });
