@@ -175,6 +175,9 @@ export interface Context {
   // Node.contentValidation and Node.authorship can all resolve on one GraphQL
   // Node object; share its locked read without mixing distinct parent states.
   nodeReconcileCache?: WeakMap<object, Promise<(SnapshotSourceNode & { revSeq: number }) | null>>;
+  // #2715 — request-scoped bound on those reconciles' transactions in flight (see withReconcileSlot): a list's fields
+  // queue here instead of past the pool's 2 s start deadline (P2028).
+  nodeReconcileSlots?: { active: number; waiting: Array<() => void> };
   // Request-scoped gated task URN lookup for repeated Node.authorship fields.
   readableTaskRefCache?: Map<string, Promise<string | null>>;
   // Request-scoped memo for AppRun.urn composition (#696) — a run-list response

@@ -20,6 +20,8 @@ import {
 
 const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
+  "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
+  "AgentTask.blocks", // Same shared dependency page resolver.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
