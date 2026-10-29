@@ -258,8 +258,22 @@ export const importNodeMutations = {
       return { node, status: 'FETCH_PENDING', jobId: run.id };
     }, {timeout:30_000});
     // No event, git/embedding wake or run wake escapes a rolled-back import.
-    for (const effect of effects) effect();
-    await publishRunRequested(ctx.db, result.jobId);
+    // #2737: persistence has committed. An effect failure must not turn this
+    // success into a retryable error or prevent another effect from running.
+    for (const effect of effects) {
+      try {
+        await effect();
+      } catch {
+        console.error('[import-node] committed node effect failed');
+      }
+    }
+    try {
+      await publishRunRequested(ctx.db, result.jobId);
+    } catch {
+      // Defense at the commit boundary even if the publisher's own catch
+      // changes later. PENDING/unpublished runs are recovered by the sweep.
+      console.error('[import-node] committed run wake failed; sweep will recover');
+    }
     return result;
   },
 };
