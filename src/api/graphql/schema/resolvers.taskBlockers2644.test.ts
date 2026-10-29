@@ -181,6 +181,16 @@ describe('#2644 blockers and priority', () => {
       }
     } finally { await server.stop(); }
   });
+  it('returns the actual matched assignee after releasing a queued task', async () => {
+    const agent = await db.agent.findFirstOrThrow({ where: { ownerUserId: ownerId } });
+    await db.agent.update({ where: { id: agent.id }, data: { usesTasks: true } });
+    const w = await db.worker.create({ data: { appId, agentId: agent.id, name: 'Ready', slug: 'ready', signature: '', trailer: '' } });
+    await db.session.create({ data: { id: generateId(), appId, agentId: agent.id, workerId: w.id, userId: ownerId, family: 'codex' } });
+    const b = await create({ status: 'BACKLOG' });
+    const t = await create({ blockedBy: [b.id] });
+    expect(t.assigneeWorkerId).toBeNull();
+    expect(await remove(t.id, b.id)).toMatchObject({ blocked: false, assigneeWorkerId: w.id });
+  });
   it('priority range is1..5 and assignee-only creators/setters cannot bypass assigner authority', async () => {
     const t = await create({ assignee: { user: memberId } });
     expect(await code(() => M.setAgentTaskPriority(null, { taskId: t.id, priority: 5 }, ctx(memberId)))).toBe('TASK_NOT_OWNER');

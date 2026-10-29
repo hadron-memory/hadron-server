@@ -1113,20 +1113,20 @@ export const agentTaskMutations = {
       await setTaskPriorityInTx(tx, txCtx, app, actor, task, value);
     });
     await matchAfterChange(ctx.db, task.appId);
-    return task;
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
   addAgentTaskBlocker: async (_: unknown, { taskId, blockerTaskId }: { taskId: string; blockerTaskId: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add');
     });
-    return task;
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
   removeAgentTaskBlocker: async (_: unknown, { taskId, blockerTaskId }: { taskId: string; blockerTaskId: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove');
     });
     await matchAfterChange(ctx.db, task.appId);
-    return task;
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
   /**
    * Create a task (cor:agt:050:06 root, :07 child). A root task: any App

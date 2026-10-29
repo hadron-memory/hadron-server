@@ -467,7 +467,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
           if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
-          return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx)))).join('\n'));
+          return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
         const t = await Q.agentTask({}, { id }, ctx);
         if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
