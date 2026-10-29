@@ -132,6 +132,19 @@ describe('#2608 register role candidates', () => {
     await db.memory.update({ where: { id: teamMemoryId }, data: { deletedAt: new Date() } });
     await expect(pick()).resolves.toMatchObject({ taskLoc: null, depth: null, total: 0, candidates: [] });
   });
+  // #2724 Riana P3-6 (her M16): the read gate checks the ROOT memory, not the hit's.
+  // S2 covers an own-memory hit (root and hit coincide) and S1 a memory-less foreign
+  // Agent (root is the Team memory); neither fixes WHICH memory `canRead` names. A
+  // PUBLIC foreign Agent with its own unreadable memory, EXTENDING the readable Team
+  // Agent that holds the task, inherits a readable hit — gating that instead of the
+  // root returns a cross-tenant role holder.
+  it('S4: the read gate names the root memory, never the inherited hit memory', async () => {
+    await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    const f = await foreignAgent('PUBLIC');
+    await db.agent.update({ where: { id: f.id }, data: { extendsAgentId: teamAgentId } });
+    await db.worker.updateMany({ where: { appId: app.id }, data: { retiredAt: new Date() } });
+    await worker('Foreign', f.id); expect((await pick()).candidates).toEqual([]);
+  });
   // Riana P3-2 (her M7): a resolved task sitting in a soft-deleted base memory is dropped.
   // The child's own live memory admits the lookup and the walk keys on agents and nodes,
   // never the memory row, so the deletedAt check on the resolved task is the sole drop;
@@ -273,6 +286,24 @@ describe('#2608 register role candidates', () => {
     const r = await pick();
     expect(r.depth).toBe(0);
     expect(r.candidates.map((x: any) => x.worker.id)).toEqual([ow.id]);
+  });
+
+  // #2724 Riana P3-5 (her M10): the mirror of the flag pin above — there the OWN ask
+  // resolves and the inherited one must not; here ONLY the inherited ask resolves to a
+  // runnable task. The base holds a non-runnable boot-prompt at the task loc: its own
+  // ask is exempt from the role filter and hits it (then drops on runnable), the
+  // memory-less child's inherited ask filters pos 1 and resolves the grand-base's task.
+  it('the inherited ask resolves through a base node the own ask would hit', async () => {
+    await mapTask();
+    const grand = await roleAgent('P3 grand'); await node(grand.memoryId, 'tasks:finish', { isRunnable: true });
+    const base = await roleAgent('P3 base', grand.id);
+    await node(base.memoryId, 'tasks:finish', { isRunnable: false, role: 'boot-prompt' });
+    const child = await roleAgent('P3 child', base.id);
+    await db.agent.update({ where: { id: child.id }, data: { systemMemoryId: null } });
+    const cw = await worker('A child', child.id); await worker('B base', base.id);
+    const r = await pick();
+    expect(r.depth).toBe(2);
+    expect(r.candidates.map((x: any) => x.worker.id)).toEqual([cw.id]);
   });
 
   // Axel M11: `agentBaseChains` carries its own MAX_WALK, and no fixture held a
