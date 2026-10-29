@@ -185,6 +185,16 @@ describe('successful-field history', () => {
     let clock = initial;
     const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
     const attempted: string[] = [];
+    const realFlush = warnings.flushTaskWarningHistory;
+    let flushedContext: Context | undefined;
+    let receivedQueue: Context['taskWarningHistory'];
+    let receivedRecords: warnings.TaskWarningHistory[] = [];
+    const observeFlush = vi.spyOn(warnings, 'flushTaskWarningHistory').mockImplementation(async (actual, errored) => {
+      flushedContext = actual;
+      receivedQueue = actual.taskWarningHistory;
+      receivedRecords = [...(receivedQueue ?? [])];
+      return realFlush(actual, errored);
+    });
     // Keep the real transaction, writer and SQL timeouts. Advance ONLY the
     // cooperative clock after the first event INSERT has actually succeeded.
     const transaction = vi.spyOn(db, '$transaction').mockImplementation(((fn: any, options: any) => real(async (tx: any) => {
@@ -206,6 +216,9 @@ describe('successful-field history', () => {
       expect(response.extensions?.warnings).toEqual(['first', 'second'].map(path => ({
         path, code: 'task.create.no-source', text: warnings.TASK_WARNING_TEXT['task.create.no-source'],
       })));
+      expect(observeFlush).toHaveBeenCalledTimes(1);
+      expect(receivedQueue).toBe(c.taskWarningHistory);
+      expect(receivedRecords.map(record => record.taskId)).toEqual(ids);
       const expected = elapsed < 1000 ? ids : ids.slice(0, 1);
       expect(attempted).toEqual(expected);
       // Query outside the completed history transaction: this proves COMMIT,
@@ -214,11 +227,12 @@ describe('successful-field history', () => {
       expect(await db.agentTask.count({ where: { id: { in: ids }, title: 'Synthetic task', status: 'backlog' } })).toBe(2);
       expect(c.taskWarningHistory).toEqual([]);
       const originalResponse = structuredClone(response);
-      await flush(c);
+      observeFlush.mockRestore();
+      await realFlush(flushedContext!);
       expect(attempted).toEqual(expected);
       expect((await history()).map(row => row.taskId)).toEqual(expected);
       expect(response).toEqual(originalResponse);
-    } finally { transaction.mockRestore(); now.mockRestore(); }
+    } finally { observeFlush.mockRestore(); transaction.mockRestore(); now.mockRestore(); }
   });
 
   it('the post-commit statement timeout cuts a stalled history write without rolling back the task', async () => {
