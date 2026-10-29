@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS dark_worker_episodes (
   event_id   TEXT NOT NULL UNIQUE REFERENCES agent_team_events(id) ON DELETE CASCADE,
   reason     TEXT NOT NULL,
   opened_at  TIMESTAMP(3) NOT NULL,
-  ended_at   TIMESTAMP(3)
+  ended_at   TIMESTAMP(3),
+  notice_posted_at TIMESTAMP(3)
 );
 CREATE INDEX IF NOT EXISTS dark_worker_episodes_app_id_ended_at_idx ON dark_worker_episodes (app_id, ended_at);
 ALTER TABLE dark_worker_episodes DROP CONSTRAINT IF EXISTS chk_dark_worker_episodes_shape;

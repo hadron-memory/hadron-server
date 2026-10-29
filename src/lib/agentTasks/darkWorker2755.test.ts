@@ -247,3 +247,48 @@ describe('#2755 escalation, acknowledgement and delivery', () => {
     expect((await pendingTaskWakes(db, [w.Ada.id], NOW)).get(w.Ada.id)).toBeUndefined();
   });
 });
+
+describe('#2755 one platform post per episode in the team channel', () => {
+  const posts = async () =>
+    (await db.node.findMany({ where: { messageChannelId: teamChannel.id, nodeType: 'chat-message' }, orderBy: { seq: 'asc' } }))
+      .filter((n) => (n.data as any)?.authorSystem === true);
+
+  it('posts once, as the platform, naming the worker and the reason and nothing else', async () => {
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    const [post, ...rest] = await posts();
+    expect(rest).toEqual([]);
+    expect(post.content).toBe('Liam has gone dark (overdue).');
+    expect((post.data as any).mentions ?? []).toEqual([]);
+    // evidence stays on the alarm: no times, no ages
+    expect(post.content).not.toMatch(/\d{2}:\d{2}|minute|second|checked/i);
+    await evaluateDarkWorkers(db, new Date(NOW.getTime() + 5 * MIN));
+    expect(await posts()).toHaveLength(1);
+  });
+
+  it('a later episode of the same worker posts again; an ended episode never posts late', async () => {
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    await checked('Liam', 0);
+    await evaluateDarkWorkers(db, NOW);
+    expect(await posts()).toHaveLength(1);
+    const later = new Date(NOW.getTime() + 60 * MIN);
+    await db.session.updateMany({ where: { workerId: w.Liam.id }, data: { updatedAt: later } });
+    await evaluateDarkWorkers(db, later);
+    expect(await posts()).toHaveLength(2);
+  });
+
+  it('retries a post that failed, on the next pass, without a second alarm', async () => {
+    const chat = await import('../../api/graphql/schema/resolvers.teamChat.js');
+    await liamOverdue();
+    await db.channel.update({ where: { id: teamChannel.id }, data: { deletedAt: new Date() } });
+    await evaluateDarkWorkers(db, NOW); // no live team chat: nothing posted, nothing claimed
+    expect(await posts()).toHaveLength(0);
+    expect(await alarms('Liam')).toHaveLength(1);
+    await db.channel.update({ where: { id: teamChannel.id }, data: { deletedAt: null } });
+    await evaluateDarkWorkers(db, new Date(NOW.getTime() + MIN));
+    expect(await posts()).toHaveLength(1);
+    expect(await alarms('Liam')).toHaveLength(1);
+    expect(chat.postSystemNotice).toBeTypeOf('function');
+  });
+});

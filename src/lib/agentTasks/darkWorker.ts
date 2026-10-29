@@ -155,6 +155,32 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
   }
 }
 
+const REASON_WORDS: Record<string, string> = { overdue: 'overdue', 'wake-unacked': 'wake unacknowledged' };
+
+/**
+ * The platform's ONE team-channel post per episode (H2, held on Holger): it names the worker and the reason and nothing
+ * else, and it carries no mention. The evidence stays on the alarm. The post is claimed in the append's own transaction
+ * (`notice_posted_at`, set once), so two passes post once; an open episode whose post failed or found no live chat is
+ * retried on the next pass. An episode that has ended never posts late.
+ */
+async function postEpisodeNotices(db: PrismaClient, appId: string, now: Date): Promise<void> {
+  const open = await db.darkWorkerEpisode.findMany({
+    where: { appId, endedAt: null, noticePostedAt: null },
+    select: { id: true, reason: true, worker: { select: { name: true } } },
+  });
+  if (open.length === 0) return;
+  // Lazy: resolvers.teamChat imports a long chain of resolvers.
+  const { postSystemNotice } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+  for (const e of open) {
+    try {
+      await postSystemNotice(db, appId, `${e.worker.name} has gone dark (${REASON_WORDS[e.reason] ?? e.reason}).`, async (tx) =>
+        (await tx.darkWorkerEpisode.updateMany({ where: { id: e.id, endedAt: null, noticePostedAt: null }, data: { noticePostedAt: now } })).count > 0);
+    } catch (err) {
+      console.error(`[dark-worker] posting the notice for episode ${e.id} failed:`, err);
+    }
+  }
+}
+
 /**
  * One pass: end the open episodes whose conditions have cleared, and open one for each dark worker that has none.
  * Returns the ids of the alarms this pass raised.
@@ -178,6 +204,7 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
         const id = await raise(db, app, d, app.deliveryDarkAlarmWindowSeconds * 1000, now);
         if (id) raised.push(id);
       }
+      await postEpisodeNotices(db, app.id, now);
     } catch (err) {
       console.error(`[dark-worker] evaluating App ${app.id} failed:`, err);
     }

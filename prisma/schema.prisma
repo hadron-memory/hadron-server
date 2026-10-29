@@ -5901,6 +5901,8 @@ model DarkWorkerEpisode {
   reason   String
   openedAt DateTime  @map("opened_at")
   endedAt  DateTime? @map("ended_at")
+  /// When the platform's one team-channel post for this episode was written; NULL until then (retried each pass while the episode is open).
+  noticePostedAt DateTime? @map("notice_posted_at")
 
   app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
