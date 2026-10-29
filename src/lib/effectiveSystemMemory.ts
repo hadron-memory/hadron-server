@@ -203,7 +203,10 @@ export async function findEffectiveNodeIdByLoc(
   db: Db,
   memoryId: string,
   loc: string,
+  options: { inheritRoot?: boolean } = {},
 ): Promise<{ id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null> {
+  // A memory-less child starts at its first contributing base; that root is inherited too.
+  const inheritRoot = options.inheritRoot ?? false;
   const chain = await systemMemoryChain(db, memoryId);
   const links = chain.length > 0 ? chain : [{ agentId: '', agentUrn: '', memoryId }];
   const memIds = links.map((l) => l.memoryId);
@@ -212,13 +215,81 @@ export async function findEffectiveNodeIdByLoc(
     FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
     JOIN nodes n ON n.memory_id = c.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
-      AND (c.pos = 1 OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
-      AND (c.pos = 1 OR n.node_type <> ${COMMENT_NODE_TYPE})
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY c.pos LIMIT 1`;
   const hit = rows[0];
   if (!hit) return null;
   const link = links[hit.pos - 1]!;
   return { id: hit.id, memoryId: hit.memory_id, inheritedFrom: hit.pos === 1 ? null : { agentId: link.agentId, agentUrn: link.agentUrn, via: memoryId } };
+}
+
+/**
+ * `findEffectiveNodeIdByLoc` for many roots at once (#2608 / #2724, Atilla's
+ * BLIND P2): one walk seeds every root memory, chains kept apart by the root
+ * column, and one nearest-hit selection resolves every root — a roster's worth
+ * of per-memory lookups becomes one statement. Same edges, same
+ * {@link AGENT_BASE_CHAIN_CAP}, same nearest-first pos numbering (memory-less
+ * Agents are skipped, exactly as {@link systemMemoryChain} skips them), and
+ * the same per-root `inheritRoot` rule: a root flagged inherited filters its
+ * own pos-1 nodes by role and node type, one flagged own does not. Results
+ * are keyed `"<memoryId>:<inheritRoot>"`, mirroring the flag the singular
+ * would have received, so one memory can be asked both ways in one call.
+ */
+export async function findEffectiveNodeIdsByLoc(
+  db: Db,
+  roots: Array<{ memoryId: string; inheritRoot: boolean }>,
+  loc: string,
+): Promise<Map<string, { id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null>> {
+  const out = new Map<string, { id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null>(
+    roots.map((r) => [`${r.memoryId}:${r.inheritRoot}`, null]),
+  );
+  if (!roots.length) return out;
+  const rootIds = roots.map((r) => r.memoryId);
+  const rootFlags = roots.map((r) => r.inheritRoot);
+  const rows = await db.$queryRaw<
+    Array<{ root: string; inherit_root: boolean; node_id: string; memory_id: string; pos: number; agent_id: string; agent_urn: string }>
+  >`
+    WITH RECURSIVE memup(root, agent_id, depth) AS (
+      SELECT r.memory_id, a.id, 1 FROM unnest(${rootIds}::text[]) AS r(memory_id)
+      JOIN agents a ON a.system_memory_id = r.memory_id
+      WHERE a.deleted_at IS NULL
+      UNION ALL
+      SELECT memup.root, b.extends_agent_id, memup.depth + 1
+      FROM agents b JOIN memup ON b.id = memup.agent_id
+      WHERE b.extends_agent_id IS NOT NULL AND memup.depth < ${AGENT_BASE_CHAIN_CAP}
+    ),
+    walked AS (
+      SELECT root, a.id AS agent_id, a.urn AS agent_urn, a.system_memory_id AS memory_id, depth
+      FROM memup JOIN agents a ON a.id = memup.agent_id
+      WHERE a.deleted_at IS NULL AND a.system_memory_id IS NOT NULL
+      UNION ALL
+      -- A root no live Agent claims is its own only link, as in the singular.
+      SELECT r.memory_id, '', '', r.memory_id, 0 FROM unnest(${rootIds}::text[]) AS r(memory_id)
+      WHERE NOT EXISTS (SELECT 1 FROM memup mu WHERE mu.root = r.memory_id)
+    ),
+    links AS (
+      SELECT root, agent_id, agent_urn, memory_id,
+             ROW_NUMBER() OVER (PARTITION BY root ORDER BY depth) AS pos
+      FROM walked
+    ),
+    ask(root, inherit_root) AS (SELECT * FROM unnest(${rootIds}::text[], ${rootFlags}::boolean[]) AS a(root, inherit_root))
+    SELECT DISTINCT ON (l.root, ask.inherit_root) l.root, ask.inherit_root, n.id AS node_id, l.memory_id, l.pos::int AS pos, l.agent_id, l.agent_urn
+    FROM links l
+    JOIN ask ON ask.root = l.root
+    JOIN nodes n ON n.memory_id = l.memory_id
+    WHERE n.loc = ${loc} AND n.deleted_at IS NULL
+      AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.node_type <> ${COMMENT_NODE_TYPE})
+    ORDER BY l.root, ask.inherit_root, l.pos`;
+  for (const r of rows) {
+    out.set(`${r.root}:${r.inherit_root}`, {
+      id: r.node_id,
+      memoryId: r.memory_id,
+      inheritedFrom: r.pos === 1 ? null : { agentId: r.agent_id, agentUrn: r.agent_urn, via: r.root },
+    });
+  }
+  return out;
 }
 
 /**

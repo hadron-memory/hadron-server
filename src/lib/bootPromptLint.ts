@@ -19,16 +19,18 @@ import { safeNodeUrnV2 } from './urnEmit.js';
  * cannot be opened are the SAME position-only {@link LintKind BROKEN_INCLUDE} (cor:dmo:150:05): a warning never
  * says whether such a target exists, is retired or is approved.
  *
- * Compiled/served warnings (S11b), the worker signature link (S11c) and the policy-override notice read other
- * inputs and are not produced here; {@link lintSourceWarnings} returns `null` (unavailable) for a compiled node
- * rather than an empty list that would pass for "no warnings".
+ * Compiled/served warnings (S11b) read immutable provenance through lintCompiledRevision.
+ * lintWarningPage routes by subject kind; lintSourceWarnings alone never scans a compiled artifact as source text.
  */
 export type LintKind =
   | 'RETIRED_TARGET'
   | 'NO_QUALIFYING_REVISION'
   | 'PINNED_NEWER_APPROVED'
   | 'SIGNING_NOT_CHECKED'
-  | 'BROKEN_INCLUDE';
+  | 'BROKEN_INCLUDE'
+  | 'WORKER_LINK_MISSING'
+  | 'RECOMPILE_AVAILABLE'
+  | 'POLICY_OVERRIDE';
 
 /** Every field a warning may carry; the serializer is an allowlist, there is no free-form detail (cor:api:120:04). */
 export interface LintWarning {
@@ -40,10 +42,10 @@ export interface LintWarning {
   targetUrn: string | null;
   pinnedRevision: number | null;
   newerRevision: number | null;
-  /** Reserved for the policy-override notice; never set by source lint. */
-  overriddenNodeLoc: null;
-  /** Reserved for the worker signature/trailer lint; never set by source lint. */
-  workerField: null;
+  /** The overridden address, only when both replacement and replaced node are readable; null for source lint. */
+  overriddenNodeLoc: string | null;
+  /** Which stored field lacks the worker link; set only by {@link lintWorkerFields}, null for source lint. */
+  workerField: 'signature' | 'trailer' | null;
 }
 
 export interface LintWarningPage {
@@ -61,6 +63,7 @@ const TARGET_BATCH = 100;
 
 const KIND_RANK: Record<LintKind, number> = {
   BROKEN_INCLUDE: 0, RETIRED_TARGET: 1, NO_QUALIFYING_REVISION: 2, PINNED_NEWER_APPROVED: 3, SIGNING_NOT_CHECKED: 4,
+  WORKER_LINK_MISSING: 5, RECOMPILE_AVAILABLE: 6, POLICY_OVERRIDE: 7,
 };
 
 /** What lint reads of a node: the stored (decrypted) source and how it is classified. */
@@ -70,6 +73,7 @@ export interface LintSubject {
   content: string | null;
   role?: string | null;
   nodeType?: string | null;
+  revSeq?: number;
 }
 
 const warning = (kind: LintKind, position: number, text: string, extra: Partial<LintWarning> = {}): LintWarning => ({
@@ -221,6 +225,29 @@ export async function lintSourceWarnings(ctx: Context, subject: LintSubject): Pr
   return warnings.sort((a, b) => a.position - b.position || KIND_RANK[a.kind] - KIND_RANK[b.kind]);
 }
 
+/** The platform variable that renders the worker's portal link (cor:agt:040:04). */
+const WORKER_LINK_VARIABLE = '{{worker.url}}';
+
+/**
+ * cor:agt:040:04 S3 / cor:agt:040:13 S5: a worker's signature or trailer that would not carry the worker link.
+ * The values are free-form templates, so the link is present when the stored text names the `worker.url` variable
+ * or holds this worker's own portal URL literally; a blank value delivers nothing and so lacks it. Pure: no
+ * reads, nothing to disclose, and the order is signature then trailer.
+ */
+export function lintWorkerFields(stored: { signature: string; trailer: string }, portalUrl: string | null): LintWarning[] {
+  const warnings: LintWarning[] = [];
+  for (const field of ['signature', 'trailer'] as const) {
+    const value = stored[field];
+    if (value.includes(WORKER_LINK_VARIABLE) || (portalUrl && value.includes(portalUrl))) continue;
+    warnings.push(warning(
+      'WORKER_LINK_MISSING', 0,
+      `The worker's ${field} does not carry the worker link (${WORKER_LINK_VARIABLE}).`,
+      { workerField: field },
+    ));
+  }
+  return warnings;
+}
+
 const encodeCursor = (offset: number) => Buffer.from(String(offset), 'utf8').toString('base64url');
 function decodeCursor(cursor: string | null | undefined): number {
   if (!cursor) return 0;
@@ -245,6 +272,10 @@ export async function lintWarningPage(
   ctx: Context, subject: LintSubject, args: { first?: number | null; after?: string | null } = {},
 ): Promise<LintWarningPage | null> {
   try {
+    if (subject.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+      const live = subject.revSeq ?? (await ctx.db.node.findUnique({ where: { id: subject.id }, select: { revSeq: true } }))?.revSeq;
+      return live ? (await import('./compiledBootPromptLint.js')).lintCompiledRevision(ctx, subject.id, live, args) : null;
+    }
     const all = await lintSourceWarnings(ctx, subject);
     return all === null ? null : pageLintWarnings(all, args);
   } catch (error) {
@@ -271,7 +302,7 @@ export async function lintWarningPageForNodeId(
     // The source's include structure is its content: a caller who may write or approve it but not read it (an
     // install memory's manager) gets unavailable, never warnings derived from text they cannot see.
     const readable = await ctx.db.node.count({ where: { AND: [await memoryAccessFilter(ctx), { memory: { deletedAt: null } }, { id: row.id }] } });
-    if (readable === 0) return null;
+    if (readable === 0 && row.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
     let content = row.content;
     if (row.memory?.isEncrypted) {
       if (!sessionKeyCache.getByMemoryId(row.memoryId)) return null;
@@ -286,7 +317,7 @@ export async function lintWarningPageForNodeId(
 
 /** Plain-text rendering for the MCP tools, which return text rather than a GraphQL node (cor:agt:040:13 R19). */
 export function renderLintWarnings(page: LintWarningPage | null): string {
-  if (page === null) return '\nLint warnings: unavailable right now.';
+  if (page === null) return '\nLint warnings: unavailable (the caller may lack read access, or lint could not be computed).';
   if (page.total === 0) return '';
   const lines = page.items.map(item => `- [${item.kind}] at position ${item.position}: ${item.text}`);
   const more = page.nextCursor ? [`- … ${page.total - page.items.length} more; read the node's lintWarnings to page through them.`] : [];

@@ -118,6 +118,7 @@ export const CONSENT_TEMPLATE = `<!doctype html>
   <main>
     <h1>Authorize {{clientName}}</h1>
     <p>The application <strong>{{clientName}}</strong> is requesting access to your Hadron account.</p>
+    <p>Returns to: <code>{{redirectAnchor}}</code></p>
     <ul>
       <li>Scope: <code>{{scope}}</code></li>
       <li>Resource: <code>{{resource}}</code></li>

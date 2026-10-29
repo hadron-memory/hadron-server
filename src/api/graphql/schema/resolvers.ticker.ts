@@ -693,6 +693,15 @@ const isolationForbidden = () => taskError(
   'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
 );
 
+/** #2660 / cor:agt:080:29: the same person-manager-or-holder predicate for the writer and its capability. S7 availability is separate. */
+async function canManageWorkerIsolation(
+  ctx: Context, app: TaskApp, actor: TaskActor | null,
+  worker: { heldByUserId: string | null; retiredAt: Date | null },
+): Promise<boolean> {
+  if (!actor || actor.kind !== 'user' || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
+  return await actorManagesApp(ctx, app, actor) || worker.heldByUserId === actor.userId;
+}
+
 /**
  * The ONE isolation writer (GraphQL and MCP both reach it). Its only audience is a human acting as themselves who manages the
  * App or holds the worker: a worker session (even a manager's), an App key and an impersonation are refused, and the row
@@ -712,8 +721,7 @@ async function writeWorkerIsolation(
   const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    const manages = await actorManagesApp(txCtx, fresh, actor);
-    if (!manages && w.heldByUserId !== actor.userId) throw isolationForbidden();
+    if (!(await canManageWorkerIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
@@ -1034,6 +1042,12 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
+    canManageIsolation: async (w: { workerId: string }, _: unknown, ctx: Context) => {
+      // Keep the existing read refusal before computing a permission; never reveal an unreadable worker.
+      const worker = await workerForRead(ctx, w.workerId);
+      const app = await appOf(ctx, worker.appId);
+      return canManageWorkerIsolation(ctx, app, await resolveTaskActor(ctx, app), worker);
+    },
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({

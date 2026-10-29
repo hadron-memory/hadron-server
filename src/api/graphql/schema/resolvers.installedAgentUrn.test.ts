@@ -20,7 +20,8 @@ async function makeOrg(urn: string, name: string = urn) {
 
 async function makeAgent(orgId: string, orgUrn: string, slug: string) {
   return db.agent.create({
-    data: { id: generateId(), organizationId: orgId, name: slug, urn: `${orgUrn}:${slug}` },
+    // PUBLIC: the resolver is called anonymously, and the URN answers as the Agent's own read does (#2640).
+    data: { id: generateId(), organizationId: orgId, name: slug, urn: `${orgUrn}:${slug}`, visibility: 'PUBLIC' },
   });
 }
 
@@ -90,7 +91,7 @@ describe('App.installedAgentUrn — author-rooted (v2, D10)', () => {
       data: { id: generateId(), handle: 'holger', email: `h-${generateId()}@x.test` },
     });
     const agent = await db.agent.create({
-      data: { id: generateId(), ownerUserId: user.id, name: 'helper', urn: '@holger:helper' },
+      data: { id: generateId(), ownerUserId: user.id, name: 'helper', urn: '@holger:helper', visibility: 'PUBLIC' },
     });
     const app = await makeApp(org.id, org.urn, 'my-app', agent.id);
 
@@ -120,7 +121,7 @@ describe('App.installedAgentUrn — author-rooted (v2, D10)', () => {
     // An un-emittable stored agent urn (empty root) makes emitInstalledAgentUrnV2
     // throw; the nullable field must return null, not error the whole app read.
     const badAgent = await db.agent.create({
-      data: { id: generateId(), organizationId: org.id, name: 'bad', urn: ':rootless' },
+      data: { id: generateId(), organizationId: org.id, name: 'bad', urn: ':rootless', visibility: 'PUBLIC' },
     });
     const app = await makeApp(org.id, org.urn, 'coding-app', badAgent.id);
 

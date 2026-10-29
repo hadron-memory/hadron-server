@@ -150,6 +150,10 @@ describe('grantTargetRefusal', () => {
     expect(grantTargetRefusal(userApp, mem({ organizationId: null }))).toBe('tenancy');
     expect(grantTargetRefusal(userApp, mem({ class: 'app', appId: 'app1', organizationId: null }))).toBeNull();
   });
+  it('#2710: a class=system memory is never a target, even one the App\'s own org holds', () => {
+    expect(grantTargetRefusal(app, mem({ class: 'system' }))).toBe('system');
+    expect(grantTargetRefusal({ id: 'app1', organizationId: null, ownerUserId: 'u' }, mem({ class: 'system', organizationId: null }))).toBe('system');
+  });
   it('a personal or private memory needs an owner', () => {
     expect(grantTargetRefusal(app, mem({ class: 'personal', userId: 'u', organizationId: null }))).toBeNull();
     expect(grantTargetRefusal(app, mem({ class: 'private', userId: 'u', organizationId: 'org2' }))).toBeNull();

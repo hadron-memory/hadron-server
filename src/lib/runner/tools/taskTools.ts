@@ -53,7 +53,7 @@ export const hadronTaskCreate: RunToolDef = {
       startBy: args.startBy,
       closeSessionWhenDone: args.closeSessionWhenDone as boolean | undefined,
     });
-    ctx.log(`created root task ${task.id}`);
+    ctx.log(`created root task ${task.handle ?? task.id}`);
     return { id: task.id, status: task.status, queued: !task.assigneeWorkerId && !task.assigneeUserId };
   },
 };

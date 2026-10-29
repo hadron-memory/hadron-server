@@ -56,6 +56,8 @@ import {
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
+import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
+import { redirectAnchor } from './redirectAnchor.js';
 import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
@@ -573,6 +575,7 @@ export function renderConsent(params: ConsentParams): string {
     resource: params.resource,
     clientId: params.clientId,
     redirectUri: params.redirectUri,
+    redirectAnchor: redirectAnchor(params.redirectUri),
     codeChallenge: params.codeChallenge,
     codeChallengeMethod: params.codeChallengeMethod,
     state: params.state,
@@ -986,6 +989,28 @@ function buildHandleAuthorizeGet(
           }),
         );
         return;
+      }
+      // #168 (Holger's scoped (b) ruling): an MCP connector flow that did not
+      // pick a provider gets an explanatory page instead of a silent bounce.
+      // EXACT string equality on both conditions: `login_provider` omitted
+      // (so the CLI's explicit/default flows stay one-click) and `resource`
+      // === `${origin}/mcp` (no normalizing, case-folding or prefix match).
+      // `getServerOrigin` null means no trustworthy origin: never prompt.
+      if (q.login_provider === undefined && typeof q.resource === 'string') {
+        const origin = getServerOrigin(req);
+        if (origin !== null && q.resource === `${origin}/mcp`) {
+          res.type('html').send(
+            renderTemplate(SIGNIN_PROMPT_TEMPLATE, {
+              clientName,
+              redirectAnchor: redirectAnchor(redirectUri),
+              signInUrl: `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
+              // Fixed local path + the original query: never derived from the
+              // request target's origin (an absolute-form request line).
+              emailUrl: `/oauth/authorize${req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '?'}&login_provider=email`,
+            }),
+          );
+          return;
+        }
       }
       // req.originalUrl is the path + query that hit Express
       // (e.g., `/oauth/authorize?client_id=…&state=…`). The

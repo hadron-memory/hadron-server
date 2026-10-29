@@ -236,6 +236,25 @@ export async function mayReadAppRunWithoutOrgRole(
 }
 
 /**
+ * The run read gate as one boolean (#1577): the narrow own-run arm, else an org READER. `appRun` answers null on false,
+ * and a nested field that must be authorized on its own (`AppRun.servedPrompt`, #2047) asks the SAME predicate instead of
+ * leaning on the parent query. Only an authorization denial is false; any other error still surfaces.
+ */
+export async function canReadAppRun(
+  ctx: Context,
+  run: { appId: string; organizationId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+): Promise<boolean> {
+  if (await mayReadAppRunWithoutOrgRole(ctx, run)) return true;
+  try {
+    await requireOrgRole(ctx, run.organizationId, 'READER');
+    return true;
+  } catch (err) {
+    if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return false;
+    throw err;
+  }
+}
+
+/**
  * Interactive / import MANUAL-run gate (#530, cor:acl). Ad-hoc runs
  * (`triggerAppRun`, `runTask(appRef:)`, `importNode(taskRef:)`) are the
  * end-user features these paths exist for, so — unlike schedules and webhooks,
@@ -349,9 +368,12 @@ export async function mintManualRun(
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
   },
+  options: { publish?: boolean } = {},
 ) {
   try {
     return await mintAppRun(ctx.db, {
+      // #2737: a composed import publishes only after its outer transaction commits.
+      publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
@@ -1057,19 +1079,12 @@ export const appRunQueries = {
     }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) return null;
-    if (await mayReadAppRunWithoutOrgRole(ctx, run)) return run;
     // #1577 — an unreadable run reads as MISSING, never Forbidden: the
     // difference was an existence oracle over run ids. The platform's
     // concealment posture (#1316, #1381; Ada #5919) and what MCP
     // hadron_get_run already does. Only an authorization denial is concealed;
     // any other error still surfaces.
-    try {
-      await requireOrgRole(ctx, run.organizationId, 'READER');
-    } catch (err) {
-      if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return null;
-      throw err;
-    }
-    return run;
+    return (await canReadAppRun(ctx, run)) ? run : null;
   },
 
   /**

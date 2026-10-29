@@ -1983,13 +1983,19 @@ export const memoryMutations = {
       if (memory.visibility !== 'PUBLIC') {
         // Reached only by a caller who can open the memory (#1381 refused the
         // rest above), so this refusal discloses nothing they did not know.
-        throw new Error('Only public memories can be subscribed to by other organizations');
+        throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
       }
 
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
       if (memory.organizationId === resolvedOrgId) {
-        throw new Error('Owner organization has implicit access and cannot subscribe');
+        throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
       }
 
       return withAuthorizedMemoryTx(
@@ -1999,10 +2005,16 @@ export const memoryMutations = {
           await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           if (current.visibility !== 'PUBLIC') {
-            throw new Error('Only public memories can be subscribed to by other organizations');
+            throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
           }
           if (current.organizationId === resolvedOrgId) {
-            throw new Error('Owner organization has implicit access and cannot subscribe');
+            throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
           }
         },
         (tx) => tx.memorySubscription.create({

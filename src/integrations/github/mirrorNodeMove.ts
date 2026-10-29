@@ -37,6 +37,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
 import { deserializeTags } from '../db/provider.js';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
 import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
+import type { MirrorObligationRef } from './mirrorObligations.js';
 import { removeNodeFile, writeNodeFile, nodePayloadHasCiphertext, type NodeForGit } from './writeNodeToGit.js';
 
 /** One relocated node: its stable id and the loc it occupied before the move. */
@@ -136,6 +137,12 @@ async function mirrorMove(
           ? `Move in ${label} from ${srcMem?.urn ?? 'another memory'}`
           : `Move ${label}`,
         logPrefix: '[mirrorNodeMove]',
+        // #430: the destination owes each moved node's file at its new loc, and (same memory) the removal of every old loc,
+        // one REMOVE row per (node, old loc) so a node moved twice while a push keeps failing owes both vacated paths.
+        obligations: [
+          ...moved.map((m): MirrorObligationRef => ({ nodeId: m.id, kind: 'WRITE' })),
+          ...(crossMemory ? [] : removals(moved)),
+        ],
       },
       async ({ localPath, memoryUrn }) => {
         // Re-read only after the checkout lock is held. A later Node/Edge
@@ -184,12 +191,19 @@ async function mirrorMove(
         clientId,
         commitSubject: `Move out ${label} to ${destination?.urn ?? 'another memory'}`,
         logPrefix: '[mirrorNodeMove]',
+        // #430: the source repository still owes the removal of each old path.
+        obligations: removals(moved),
       },
       ({ localPath, memoryUrn }) => {
         for (const m of moved) removeNodeFile(localPath, m.previousLoc, m.id, memoryUrn);
       },
     );
   }
+}
+
+/** The REMOVE obligations of a move. A root has no loc to vacate (removeNodeFile refuses it), so it owes nothing. */
+function removals(moved: readonly MovedNodeRef[]): MirrorObligationRef[] {
+  return moved.filter((m) => m.previousLoc !== '').map((m) => ({ nodeId: m.id, kind: 'REMOVE', removeLoc: m.previousLoc }));
 }
 
 /** Project a loaded node row onto the mirror's write payload. */
