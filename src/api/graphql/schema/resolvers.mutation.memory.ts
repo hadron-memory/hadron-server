@@ -155,6 +155,7 @@ import {
   resolveMemoryRefArg,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
+  assertMemoryRootLoc,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
@@ -690,6 +691,11 @@ export const memoryMutations = {
           { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
         );
       }
+
+      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
+      // after the gates and before ensureUserHandle, the tombstone reclaim or
+      // any create.
+      assertMemoryRootLoc(name);
 
       // The URN root is the owner principal's bare namespace atom — an org
       // domain (`baragaun.com`) or, for the user-owned path, the caller's
