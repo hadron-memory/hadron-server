@@ -88,7 +88,7 @@ describe('#2715 the Node.revision fan-out is bounded per request', () => {
     expect(res.errors).toBeUndefined();
     expect((res.data!.nodeBatch as any).nodes).toHaveLength(N);
     expect(track.max).toBeGreaterThan(0);
-    expect(track.max).toBeLessThanOrEqual(4);
+    expect(track.max).toBeLessThanOrEqual(4); // NODE_RECONCILE_CONCURRENCY
   });
 
   it(`a burst of 20 batches of ${N} at the production-equivalent pool P=${P} returns every node and revision, with no P2028`, { timeout: 180_000 }, async () => {
