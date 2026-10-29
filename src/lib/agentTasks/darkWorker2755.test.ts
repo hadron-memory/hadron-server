@@ -13,6 +13,7 @@ import { GraphQLError } from 'graphql';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { evaluateDarkWorkers } from './darkWorker.js';
+import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
@@ -99,8 +100,11 @@ describe('#2755 OVERDUE raises one task-less alarm per episode', () => {
     const open = await db.darkWorkerEpisode.findMany({ where: { workerId: w.Liam.id, endedAt: null } });
     expect(open).toHaveLength(1);
     expect(open[0]).toMatchObject({ reason: 'overdue', appId: app.id });
-    const [alarm] = await alarms('Liam');
-    await expect(db.darkWorkerEpisode.create({ data: { appId: app.id, workerId: w.Liam.id, eventId: alarm.id, reason: 'wake-unacked', openedAt: NOW } })).rejects.toThrow();
+    const second = await db.agentTeamEvent.create({ data: { appId: app.id, type: 'alarm.dark-worker', subjectWorkerId: w.Liam.id, severity: 'alarm', chain: [], payload: {} } });
+    // A DISTINCT event: only the one-open-episode-per-worker index can refuse this insert.
+    await expect(db.darkWorkerEpisode.create({ data: { appId: app.id, workerId: w.Liam.id, eventId: second.id, reason: 'wake-unacked', openedAt: NOW } })).rejects.toThrow();
+    await db.darkWorkerEpisode.updateMany({ where: { workerId: w.Liam.id, endedAt: null }, data: { endedAt: NOW } });
+    await expect(db.darkWorkerEpisode.create({ data: { appId: app.id, workerId: w.Liam.id, eventId: second.id, reason: 'wake-unacked', openedAt: NOW } })).resolves.toBeDefined();
   });
 
   it('ends the episode when it clears, and a later OVERDUE opens a NEW episode and alarm', async () => {
@@ -381,5 +385,41 @@ describe('#2755 a task-less alarm through the real acknowledge and merge paths',
     const acked = await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: alarm.id }, ctx);
     expect(acked).toMatchObject({ acknowledgedByUserId: user.id });
     await expect(mergeUsers(db, { sourceUserId: other.id, targetUserId: user.id, actorUserId: admin.id })).resolves.toBeDefined();
+  });
+});
+
+describe('#2755 the real tick settles a recovered episode before it escalates', () => {
+  it('a worker that checks again is not escalated to the next owner on the pass that ends its episode', async () => {
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    const later = new Date(NOW.getTime() + 31 * MIN);
+    await checked('Liam', -30); // checked at NOW + 30 minutes: OK again, and the next owner falls due at NOW + 30
+    await taskStallTick(db, later);
+    const [alarm] = await alarms('Liam');
+    const rows = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: alarm.id }, orderBy: { chainIndex: 'asc' } });
+    expect(rows.length).toBeGreaterThan(1);
+    expect(rows.slice(1).every((r) => r.wokenAt === null)).toBe(true);
+    expect((await db.darkWorkerEpisode.findFirstOrThrow({ where: { workerId: w.Liam.id } })).endedAt).not.toBeNull();
+  });
+});
+
+describe('#2755 a pass that derived "clear" cannot end an episode a concurrent pass opened', () => {
+  it('reads the open episodes before it derives the conditions', async () => {
+    await bind('Liam');
+    await assign('Liam', 100);
+    await checked('Liam', 5); // OK for pass A
+    const order: string[] = [];
+    const realOpen = db.darkWorkerEpisode.findMany.bind(db.darkWorkerEpisode);
+    const realStates = db.workerWakeSettings.findMany.bind(db.workerWakeSettings);
+    const s1 = vi.spyOn(db.darkWorkerEpisode, 'findMany').mockImplementation(((...a: unknown[]) => { order.push('open'); return (realOpen as (...x: unknown[]) => unknown)(...a); }) as never);
+    const s2 = vi.spyOn(db.workerWakeSettings, 'findMany').mockImplementation(((...a: unknown[]) => { order.push('derive'); return (realStates as (...x: unknown[]) => unknown)(...a); }) as never);
+    try {
+      await evaluateDarkWorkers(db, NOW);
+    } finally {
+      s1.mockRestore();
+      s2.mockRestore();
+    }
+    expect(order.indexOf('open')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('open')).toBeLessThan(order.indexOf('derive'));
   });
 });

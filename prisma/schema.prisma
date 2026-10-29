@@ -6425,6 +6425,9 @@ model WorkerWakeSettings {
   isolatedUntil     DateTime? @map("isolated_until")
   isolatedAt        DateTime? @map("isolated_at")
   isolatedByUserId  String?   @map("isolated_by_user_id")
+  /// #2755 — when an ACTIVE pause or isolation was ended on purpose (clearPause, clearWorkerIsolation), which erases
+  /// the only timestamp that said when the exemption ended. Natural expiry needs none (its own end stays stored).
+  exemptEndedAt     DateTime? @map("exempt_ended_at")
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
   updatedBy         String?   @map("updated_by")
   updatedByWorkerId String?   @map("updated_by_worker_id")

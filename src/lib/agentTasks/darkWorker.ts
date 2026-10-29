@@ -195,8 +195,11 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
   });
   for (const app of apps) {
     try {
-      const dark = await darkWorkersOf(db, app, now);
+      // The open episodes are read BEFORE the conditions are derived. Read after, a pass that derived "clear" could meet an
+      // episode a concurrent pass opened since, and end it on its older snapshot; read before, it can end only an episode
+      // that existed when its own derivation began, so a newer one is left to the pass that opened it.
       const open = await db.darkWorkerEpisode.findMany({ where: { appId: app.id, endedAt: null }, select: { id: true, workerId: true, openedAt: true } });
+      const dark = await darkWorkersOf(db, app, now);
       const openWorkers = new Set(open.map((e) => e.workerId));
       // One worker's failure (a fence or CHECK refusal, say) must not stop the App's other workers or its notices.
       for (const e of open) {

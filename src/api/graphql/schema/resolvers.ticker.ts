@@ -727,10 +727,12 @@ async function writeWorkerIsolation(
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
+      // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
+      const running = await tx.workerWakeSettings.findFirst({ where: { workerId: w.id, isolatedUntil: { gt: now } }, select: { workerId: true } });
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
         create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null },
+        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(running ? { exemptEndedAt: now } : {}) },
       });
     }
     const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
@@ -913,9 +915,16 @@ const wakeAndGrantMutations = {
         );
       }
       const u = updatedStamp(txCtx);
+      // #2755: clearing a pause that is still running erases when the exemption ended; keep that moment (a clear
+      // of a pause that already ended, or of none, restarts nothing).
+      const clearedNow = new Date();
+      const running = input.clearPause && pausedUntil === undefined
+        ? await tx.workerWakeSettings.findFirst({ where: { workerId: w.id, pausedUntil: { gt: clearedNow } }, select: { workerId: true } })
+        : null;
       const change = {
         ...(input.mentions != null ? { mentions: input.mentions } : {}),
         ...(pausedUntil !== undefined ? { pausedUntil } : input.clearPause ? { pausedUntil: null } : {}),
+        ...(running ? { exemptEndedAt: clearedNow } : {}),
       };
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },

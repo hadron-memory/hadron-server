@@ -1,6 +1,9 @@
 -- #2755 — the dark-worker alarm: its per-App window and its episode table.
 ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "delivery_dark_alarm_window_seconds" INTEGER NOT NULL DEFAULT 1800;
 
+-- #2755 — when an active pause or isolation was cleared on purpose (the end of an exemption a clear would erase).
+ALTER TABLE worker_wake_settings ADD COLUMN IF NOT EXISTS exempt_ended_at TIMESTAMP(3);
+
 -- #2755 — the dark-worker alarm's per-App window: 5 minutes to a day.
 ALTER TABLE apps DROP CONSTRAINT IF EXISTS chk_apps_delivery_dark_alarm_window;
 ALTER TABLE apps ADD CONSTRAINT chk_apps_delivery_dark_alarm_window CHECK (

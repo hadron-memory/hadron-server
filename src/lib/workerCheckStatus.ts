@@ -56,6 +56,10 @@ export type WorkerCheckInputs = {
   teamResumedAt?: Date | null;
   /** #2022: when the latest `pause` / `halt` stop signal coverage of the worker ended; restarts the clock likewise. */
   stopEndedAt?: Date | null;
+  /** #2755: when its isolation expired (an active one is PENDING ISOLATED); restarts the clock like a pause. */
+  isolatedUntil?: Date | null;
+  /** #2755: when an active pause or isolation was cleared on purpose (`WorkerWakeSettings.exemptEndedAt`). */
+  exemptEndedAt?: Date | null;
 };
 
 export type CheckSettings = { checkPeriodSeconds: number; failedChecksToOverdue: number };
@@ -68,6 +72,11 @@ export function overdueAfterMs(s: CheckSettings): number {
   return s.failedChecksToOverdue * s.checkPeriodSeconds * 1000 + OVERDUE_SLACK_MS;
 }
 
+/** The ends of the worker's own isolation and of a pause or isolation cleared on purpose, as far as they are past. */
+function ownExemptionEnds(i: WorkerCheckInputs, now: Date): number[] {
+  return [i.isolatedUntil, i.exemptEndedAt].map((d) => (d && d.getTime() <= now.getTime() ? d.getTime() : -Infinity));
+}
+
 /** The latest end of an exemption (or the live session's start); null when it has no live session. */
 function resumedAt(i: WorkerCheckInputs, now: Date): Date | null {
   if (!i.liveSessionStartedAt) return null;
@@ -76,6 +85,7 @@ function resumedAt(i: WorkerCheckInputs, now: Date): Date | null {
     i.pausedUntil && i.pausedUntil.getTime() <= now.getTime() ? i.pausedUntil.getTime() : -Infinity,
     i.teamResumedAt?.getTime() ?? -Infinity,
     i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
+    ...ownExemptionEnds(i, now),
   );
   return new Date(t);
 }
@@ -105,6 +115,8 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     i.teamResumedAt?.getTime() ?? -Infinity,
     // #2022: a stop signal's coverage that has ended (an active one is STOPPED above).
     i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
+    // #2755: an isolation that has ended, and a pause or isolation cleared on purpose.
+    ...ownExemptionEnds(i, now),
   );
   return out(now.getTime() - clockStart > overdueAfterMs(s) ? 'OVERDUE' : 'OK');
 }
@@ -148,7 +160,7 @@ export async function loadWorkerCheckStatuses(
     teamChannelId
       ? db.channelReadState.findMany({ where: { workerId: { in: ids }, channelId: teamChannelId }, select: { workerId: true, lastCheckedAt: true } })
       : Promise.resolve([]),
-    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true } }),
+    db.workerWakeSettings.findMany({ where: { workerId: { in: ids } }, select: { workerId: true, pausedUntil: true, isolatedUntil: true, exemptEndedAt: true } }),
     loadPendingReasons(db, appId, ids, now),
   ]);
   // #2022: the latest end of each worker's pause/halt coverage (the earliest of leaving it, its signal's end, its until).
@@ -183,6 +195,8 @@ export async function loadWorkerCheckStatuses(
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
+          isolatedUntil: wake.get(w.id)?.isolatedUntil ?? null,
+          exemptEndedAt: wake.get(w.id)?.exemptEndedAt ?? null,
           teamResumedAt: app.teamResumedAt,
           stopEndedAt: stopEndOf.get(w.id) ?? null,
         },

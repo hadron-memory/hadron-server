@@ -14,6 +14,9 @@ import { ensureChannelWithRoot } from '../channels.js';
 import { appendChatMessage } from '../chatRoot.js';
 import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { evaluateDarkWorkers } from './darkWorker.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { runAsActor } from '../requestActor.js';
+import { setS7AvailableForTest } from '../tickers/s7Availability.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
@@ -180,5 +183,52 @@ describe('#2755 the evaluator\'s read of the due wakes writes nothing', () => {
     const before = await snapshot();
     expect(await evaluateDarkWorkers(db, after(10))).toEqual([]);
     expect(await snapshot()).toBe(before);
+  });
+});
+
+describe('#2755 an exemption ended on purpose, or by isolation expiring, restarts the wake\'s age', () => {
+  const holderCtx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
+  const M = resolvers.Mutation as any;
+
+  it('clearPause on a running pause: the age runs from the clear, not from the old message', async () => {
+    await bind('Tove', after(200));
+    await say('hello @tove', ['tove']);
+    await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, pausedUntil: after(120) } });
+    expect(await evaluateDarkWorkers(db, after(10))).toEqual([]);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(after(20));
+      await runAsActor({ workerId: w.Tove.id, agentId: agent.id }, () => M.setWorkerWakeSettings({}, { workerRef: w.Tove.id, input: { clearPause: true } }, holderCtx()));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt?.getTime()).toBe(after(20).getTime());
+    expect(await evaluateDarkWorkers(db, after(35))).toEqual([]); // 15 minutes since the resume, window 30
+    expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(1);
+  });
+
+  it('clearPause on a pause that already ended restarts nothing', async () => {
+    await bind('Tove', after(200));
+    await say('hello @tove', ['tove']);
+    await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, pausedUntil: after(-5) } });
+    await runAsActor({ workerId: w.Tove.id, agentId: agent.id }, () => M.setWorkerWakeSettings({}, { workerRef: w.Tove.id, input: { clearPause: true } }, holderCtx()));
+    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w.Tove.id } })).exemptEndedAt).toBeNull();
+  });
+
+  it('an isolation that expires, and one that is cleared early, each restart the age', async () => {
+    setS7AvailableForTest(true);
+    try {
+      await bind('Tove', after(200));
+      await bind('Liam', after(200));
+      await say('hello @tove @liam', ['tove', 'liam']);
+      await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, isolatedUntil: after(20) } });
+      await db.workerWakeSettings.create({ data: { workerId: w.Liam.id, isolatedUntil: after(120) } });
+      expect(await evaluateDarkWorkers(db, after(10))).toEqual([]);
+      await db.workerWakeSettings.update({ where: { workerId: w.Liam.id }, data: { isolatedUntil: null, exemptEndedAt: after(20) } });
+      expect(await evaluateDarkWorkers(db, after(35))).toEqual([]);
+      expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(2);
+    } finally {
+      setS7AvailableForTest(false);
+    }
   });
 });

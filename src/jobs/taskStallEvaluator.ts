@@ -52,6 +52,13 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
   } catch (err) {
     console.error('[task-stall] evaluation failed:', err);
   }
+  // #2755: before the escalation below, so an episode whose conditions cleared is ended first and its next owner is not
+  // woken on a stale schedule (the task alarms re-derive that inside wakeDueOwners; the dark alarm settles it here).
+  try {
+    result.darkRaised = (await evaluateDarkWorkers(db, now)).length;
+  } catch (err) {
+    console.error('[task-stall] dark-worker evaluation failed:', err);
+  }
   try {
     result.woken = await wakeDueOwners(db, now);
   } catch (err) {
@@ -82,11 +89,6 @@ export async function taskStallTick(db: PrismaClient, now = new Date()): Promise
     result.contextResetsEnded = await sweepContextResets(db, now);
   } catch (err) {
     console.error('[task-stall] sweeping context resets failed:', err);
-  }
-  try {
-    result.darkRaised = (await evaluateDarkWorkers(db, now)).length;
-  } catch (err) {
-    console.error('[task-stall] dark-worker evaluation failed:', err);
   }
   return result;
 }
