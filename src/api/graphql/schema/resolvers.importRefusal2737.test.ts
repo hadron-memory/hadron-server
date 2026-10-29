@@ -5,6 +5,7 @@ import { generateId } from '../../../lib/id.js';
 import * as busClient from '../../../lib/bus/index.js';
 import * as nodeEvents from '../../../lib/events/nodeWritten.js';
 import * as runKernel from '../../../jobs/appRuns.js';
+import * as nodeWrite from './resolvers.mutation.node.js';
 import * as manualRun from './resolvers.appRun.js';
 import { writeNodeToGit } from '../../../integrations/github/writeNodeToGit.js';
 import { setQuotaLimit } from '../../../jobs/appRuns.js';
@@ -35,6 +36,7 @@ describe('#2737 importNode run refusal',()=>{
     await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_NOT_SET'}});
     expect(await db.node.findUnique({where:{loc_memoryId:{loc:'clips:refused',memoryId}}}),'refused import must not persist its node').toBeNull();
     expect(await db.appRun.count()).toBe(0);
+    expect(await db.quotaCounter.count()).toBe(0);
   });
   it('a quota refusal leaves no imported node or node-write side effect', async()=>{
     await setQuotaLimit(db,'app',appId,'run.execute',0);
@@ -113,6 +115,54 @@ describe('#2737 importNode run refusal',()=>{
     vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish} as never);
     await resolvers.Mutation.importNode({}, {input:input()},ctx);
     expect(observed).toEqual([true]);
+  });
+
+  it('an error after a real mint rolls back its run and consumed quota', async()=>{
+    const mint=manualRun.mintManualRun;
+    vi.spyOn(manualRun,'mintManualRun').mockImplementation(async (...args)=>{
+      await mint(...args);
+      throw new Error('injected after successful mint');
+    });
+    await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toThrow('injected after successful mint');
+    expect(await db.appRun.count()).toBe(0);
+    expect(await db.quotaCounter.count()).toBe(0);
+    expect(await db.node.findUnique({where:{loc_memoryId:{loc:'clips:refused',memoryId}}})).toBeNull();
+  });
+  for(const asyncEffect of [false,true]) it(`a failing ${asyncEffect?'async':'sync'} committed effect does not reject the import or skip its wake`, async()=>{
+    const write=nodeWrite.writeNodeCore;
+    vi.spyOn(console,'error').mockImplementation(()=>{});
+    vi.spyOn(nodeWrite,'writeNodeCore').mockImplementation((node,context,mode,options)=>{
+      const transaction=options!.transaction!;
+      transaction.afterCommit(()=>{
+        if(asyncEffect) return Promise.reject(new Error('injected effect failure'));
+        throw new Error('injected effect failure');
+      });
+      return write(node,context,mode,options);
+    });
+    const wake=vi.spyOn(runKernel,'publishRunRequested');
+    const written=vi.spyOn(nodeEvents,'publishNodeWritten');
+    const result=await resolvers.Mutation.importNode({}, {input:input()},ctx);
+    expect(result.status).toBe('FETCH_PENDING');
+    expect(await db.appRun.count()).toBe(1);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(written).toHaveBeenCalledTimes(1);
+  });
+  it('a rejected post-commit run wake preserves the successful result',async()=>{
+    vi.spyOn(console,'error').mockImplementation(()=>{});
+    const wake=vi.spyOn(runKernel,'publishRunRequested').mockRejectedValueOnce(new Error('injected wake failure'));
+    const result=await resolvers.Mutation.importNode({}, {input:input()},ctx);
+    expect(result.status).toBe('FETCH_PENDING');
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(await db.appRun.findUniqueOrThrow({where:{id:result.jobId!}})).toMatchObject({status:'PENDING',publishedAt:null});
+    expect(await db.appRun.count()).toBe(1);
+    expect(await db.node.findUnique({where:{loc_memoryId:{loc:'clips:refused',memoryId}}})).not.toBeNull();
+  });
+  it('a non-import manual run still publishes its wake by default',async()=>{
+    const observed:string[]=[];
+    vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish:async(subject:string)=>{observed.push(subject);}} as never);
+    const run=await manualRun.triggerManualRun(ctx,{appRef:appId,entryNodeUrn:'hrn:node:import2737.test:imports:tasks:import'});
+    expect(observed.filter(s=>s===runKernel.RUN_REQUESTED_SUBJECT)).toHaveLength(1);
+    expect((await db.appRun.findUniqueOrThrow({where:{id:run.id}})).publishedAt).not.toBeNull();
   });
 
 });
