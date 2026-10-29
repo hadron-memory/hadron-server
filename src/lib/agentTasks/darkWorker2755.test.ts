@@ -183,3 +183,67 @@ describe('#2755 the stall evaluator tick runs it', () => {
     expect(await taskStallTick(db, NOW)).toMatchObject({ darkRaised: 0 });
   });
 });
+
+describe('#2755 escalation, acknowledgement and delivery', () => {
+  const later = new Date(NOW.getTime() + 31 * MIN);
+  /** Keep Liam live and silent at `later`, so he is still OVERDUE then. */
+  const stillDark = () => db.session.updateMany({ where: { workerId: w.Liam.id }, data: { updatedAt: later } });
+  async function twoOwners() {
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Tove.id } });
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    return (await alarms('Liam'))[0];
+  }
+
+  it('wakes the next owner up the line after a further window while the episode lasts', async () => {
+    const { wakeDueOwners } = await import('./stall.js');
+    const alarm = await twoOwners();
+    await stillDark();
+    expect(await wakeDueOwners(db, new Date(NOW.getTime() + 29 * MIN))).toBe(0);
+    expect(await wakeDueOwners(db, later)).toBe(1);
+    const rows = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: alarm.id }, orderBy: { chainIndex: 'asc' } });
+    expect(rows.map((r) => r.wokenAt !== null)).toEqual([true, true, false]);
+  });
+
+  it('an acknowledged alarm wakes nobody further', async () => {
+    const { wakeDueOwners } = await import('./stall.js');
+    const alarm = await twoOwners();
+    await db.agentTeamEvent.update({ where: { id: alarm.id }, data: { acknowledgedAt: NOW, acknowledgedByWorkerId: w.Ada.id } });
+    await stillDark();
+    expect(await wakeDueOwners(db, later)).toBe(0);
+  });
+
+  it('closes the unwoken rows, waking nobody, once the episode has ended', async () => {
+    const { wakeDueOwners } = await import('./stall.js');
+    const alarm = await twoOwners();
+    await checked('Liam', -30); // checks at NOW + 30 min: OK again
+    await stillDark();
+    await evaluateDarkWorkers(db, later);
+    expect(await db.darkWorkerEpisode.count({ where: { workerId: w.Liam.id, endedAt: { not: null } } })).toBe(1);
+    expect(await wakeDueOwners(db, new Date(later.getTime() + 60 * MIN))).toBe(0);
+    const rows = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: alarm.id }, orderBy: { chainIndex: 'asc' } });
+    expect(rows[1].wokenAt).toBeNull();
+    expect(rows[1].endedAt).not.toBeNull();
+  });
+
+  it('delivers the alarm to the woken owner as an ALARM wake naming the dark worker, while the episode is open', async () => {
+    const { pendingTaskWakes } = await import('./taskWakes.js');
+    const alarm = await twoOwners();
+    const [wake] = (await pendingTaskWakes(db, [w.Ada.id], NOW)).get(w.Ada.id) ?? [];
+    expect(wake).toMatchObject({ workerId: w.Ada.id, eventId: alarm.id, chainIndex: 0, event: 'ALARM', handle: 'DARK' });
+    expect(wake.title).toContain('Liam');
+    expect(wake.title).toContain('overdue');
+    // the next owner is not woken yet
+    expect((await pendingTaskWakes(db, [w.Tove.id], NOW)).get(w.Tove.id)).toBeUndefined();
+    // acknowledging stops delivery
+    await db.agentTeamEvent.update({ where: { id: alarm.id }, data: { acknowledgedAt: NOW, acknowledgedByWorkerId: w.Ada.id } });
+    expect((await pendingTaskWakes(db, [w.Ada.id], NOW)).get(w.Ada.id)).toBeUndefined();
+  });
+
+  it('stops delivering once the episode has ended', async () => {
+    const { pendingTaskWakes } = await import('./taskWakes.js');
+    await twoOwners();
+    await db.darkWorkerEpisode.updateMany({ data: { endedAt: later } });
+    expect((await pendingTaskWakes(db, [w.Ada.id], NOW)).get(w.Ada.id)).toBeUndefined();
+  });
+});

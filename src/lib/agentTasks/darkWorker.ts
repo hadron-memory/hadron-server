@@ -25,6 +25,7 @@ import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckS
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { computeDueWakes } from '../tickers/dueWakes.js';
 import type { AlarmChain } from './events.js';
+import { isSerializationFailure } from './stall.js';
 
 export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
 export type DarkReason = 'overdue' | 'wake-unacked';
@@ -144,8 +145,11 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
         data: chain.map((_, i) => ({ eventId, chainIndex: i, dueAt: new Date(now.getTime() + i * windowMs), wokenAt: i === 0 ? now : null })),
       });
       return eventId;
-    });
+      // SERIALIZABLE like `raiseStallAlarm`: the chain names manager users, sealed, and `mergeUsers` refuses to merge an
+      // account named in an open alarm. A raise racing a merge is a read-write cycle Postgres aborts on one side.
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   } catch (err) {
+    if (isSerializationFailure(err)) return null; // lost a race (another pass, or a merge): the next pass decides again
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return null; // another pass opened it
     throw err;
   }
