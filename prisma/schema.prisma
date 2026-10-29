@@ -3393,6 +3393,7 @@ model App {
   wakeDays                AppWakeDay[]
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
+  darkWorkerEpisodes      DarkWorkerEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -3813,6 +3814,7 @@ model AppAgent {
 /// paths only ever remove agents without castings).
 model Worker {
   id                String    @id @default(cuid())
+  darkWorkerEpisodes DarkWorkerEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
@@ -5847,6 +5849,7 @@ model AgentTeamEvent {
   app        App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
+  darkEpisode DarkWorkerEpisode?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -5882,6 +5885,29 @@ model AgentTeamAlarmSchedule {
   @@id([eventId, chainIndex])
   @@index([wokenAt, dueAt])
   @@map("agent_team_alarm_schedule")
+}
+
+/// #2755 — one dark-worker episode (a worker that went OVERDUE or left a due wake unacknowledged past the App's
+/// window). The alarm event stream is append-only, so an episode's end lives here. At most one OPEN row per
+/// worker (partial unique index in prisma/dark-alarm-invariants.sql): the worker's single open episode across both
+/// reasons. `reason` is the trigger that opened it. The episode ends when BOTH conditions have cleared.
+model DarkWorkerEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  /// The task-less alarm raised with the episode (agent_team_events, type `alarm.dark-worker`).
+  eventId  String    @unique @map("event_id")
+  /// `overdue` | `wake-unacked`.
+  reason   String
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("dark_worker_episodes")
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one

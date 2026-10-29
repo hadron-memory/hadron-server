@@ -1,0 +1,138 @@
+/**
+ * #2755 — the dark-worker alarm (cor:agt:100:06, Proposed; the deferred "alarm on OVERDUE" of cor:agt:100:03).
+ *
+ * A worker goes dark when its check status is OVERDUE, or when a wake due to it has gone unacknowledged for longer
+ * than the App's `darkAlarmWindowSeconds`. Then the platform raises ONE task-less alarm for it per episode, across
+ * both reasons, and tells its reporting line, nearest first. The stall evaluator's pass calls `evaluateDarkWorkers`.
+ *
+ * EPISODES. The alarm stream is append-only (a trigger), so the end of an episode cannot be written on the alarm:
+ * it lives in `dark_worker_episodes`, whose partial unique index admits one OPEN row per worker. An episode opens on
+ * the first pass that sees either condition and ends on the first pass that sees both cleared, so a worker that
+ * checks again but still has an unacknowledged wake stays in its episode (no second alarm). Two passes, or two
+ * instances, race for the one open row: the loser's transaction rolls back and raises nothing.
+ *
+ * EXCEPTIONS (cor:agt:050:26's, kept): a worker with no live session (NO_SESSION), a retired worker, a worker of a
+ * dead App, and one that is PENDING because its team is paused, it is paused, isolated, on standby, or stopped
+ * (a `pause` / `halt` stop signal). `NO_TASK` exempts the OVERDUE trigger by itself (such a worker is never OVERDUE)
+ * and does NOT exempt the unacknowledged-wake trigger.
+ */
+
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { appManagerUserIds } from '../auth/appManagement.js';
+import { generateId } from '../id.js';
+import { toNaiveUtc } from '../sessionActivity.js';
+import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckStatus.js';
+import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import type { AlarmChain } from './events.js';
+
+export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
+export type DarkReason = 'overdue' | 'wake-unacked';
+
+/** The PENDING reasons that exempt a worker from every trigger (`NO_TASK` is not one of them). */
+const EXEMPT_PENDING = new Set(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'STOPPED']);
+
+type DarkWorker = { workerId: string; reason: DarkReason; status: WorkerCheckStatus; oldestWakeAgeSeconds: number | null };
+
+/**
+ * The workers of one App that are dark now, with the reason that would open an episode (OVERDUE first). The
+ * unacknowledged-wake trigger joins this set in `unackedWakeAges` (a read-only view of the due wakes).
+ */
+async function darkWorkersOf(db: PrismaClient, app: { id: string }, now: Date): Promise<Map<string, DarkWorker>> {
+  const workers = await db.worker.findMany({ where: { appId: app.id, retiredAt: null }, select: { id: true } });
+  const out = new Map<string, DarkWorker>();
+  if (workers.length === 0) return out;
+  // Dynamic: resolvers.teamChat imports modules that import this one.
+  const { locateTeamChatChannel } = await import('../../api/graphql/schema/resolvers.teamChat.js');
+  const channel = await locateTeamChatChannel({ db } as Context, app.id);
+  const statuses = await loadWorkerCheckStatuses(db, { appId: app.id, teamChannelId: channel?.channelId ?? null, workerIds: workers.map((w) => w.id), now });
+  for (const [workerId, status] of statuses) {
+    if (status.status === 'NO_SESSION') continue;
+    if (status.status === 'PENDING' && status.pendingReason && EXEMPT_PENDING.has(status.pendingReason)) continue;
+    if (status.status === 'OVERDUE') out.set(workerId, { workerId, reason: 'overdue', status, oldestWakeAgeSeconds: null });
+  }
+  return out;
+}
+
+/** The worker's reporting line, nearest first (cycle-safe, same App, retired workers skipped), then whoever manages the App. */
+export async function darkAlarmChain(db: Prisma.TransactionClient | PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, workerId: string): Promise<AlarmChain> {
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    WITH RECURSIVE up AS (
+      SELECT w.reports_to_worker_id AS id, 1 AS depth FROM workers w WHERE w.id = ${workerId} AND w.reports_to_worker_id IS NOT NULL
+      UNION ALL
+      SELECT w.reports_to_worker_id, up.depth + 1 FROM workers w JOIN up ON w.id = up.id
+      WHERE w.reports_to_worker_id IS NOT NULL AND up.depth < 64
+    )
+    SELECT up.id FROM up JOIN workers h ON h.id = up.id AND h.app_id = ${app.id} AND h.retired_at IS NULL ORDER BY up.depth`;
+  const chain: AlarmChain = [];
+  const seen = new Set<string>([workerId]);
+  for (const r of rows) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    chain.push({ workerId: r.id });
+  }
+  for (const userId of await appManagerUserIds(db, app)) chain.push({ userId, via: 'manager' });
+  return chain;
+}
+
+const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
+  p.workerId ? { workerId: p.workerId } : { userId: p.userId as string, ...(p.via ? { via: p.via } : {}) };
+
+/** Open one episode and raise its alarm, in one transaction. Null when the worker already has an open episode. */
+async function raise(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, dark: DarkWorker, windowMs: number, now: Date): Promise<string | null> {
+  try {
+    return await db.$transaction(async (tx) => {
+      const chain = await darkAlarmChain(tx, app, dark.workerId);
+      const eventId = generateId();
+      const payload: Prisma.InputJsonObject = {
+        reason: dark.reason,
+        windowMinutes: windowMs / 60_000,
+        lastCheckedAt: dark.status.lastCheckedAt ? dark.status.lastCheckedAt.toISOString() : null,
+        oldestWakeAgeSeconds: dark.oldestWakeAgeSeconds,
+      };
+      await tx.$executeRaw`
+        INSERT INTO agent_team_events (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
+        VALUES (${eventId}, ${app.id}, ${DARK_WORKER_EVENT_TYPE}, NULL, ${dark.workerId}, 'alarm', ${JSON.stringify(chain.map(partyJson))}::jsonb,
+                ${JSON.stringify(payload)}::jsonb, ${toNaiveUtc(now)}::timestamp, NULL)`;
+      // The one-open-episode-per-worker index decides a race: the loser's insert fails and this transaction rolls back.
+      await tx.darkWorkerEpisode.create({ data: { appId: app.id, workerId: dark.workerId, eventId, reason: dark.reason, openedAt: now } });
+      // cor:agt:050:19 — the nearest owner is woken now; owner i falls due i windows later, unless acknowledged first.
+      await tx.agentTeamAlarmSchedule.createMany({
+        data: chain.map((_, i) => ({ eventId, chainIndex: i, dueAt: new Date(now.getTime() + i * windowMs), wokenAt: i === 0 ? now : null })),
+      });
+      return eventId;
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return null; // another pass opened it
+    throw err;
+  }
+}
+
+/**
+ * One pass: end the open episodes whose conditions have cleared, and open one for each dark worker that has none.
+ * Returns the ids of the alarms this pass raised.
+ */
+export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): Promise<string[]> {
+  const raised: string[] = [];
+  const apps = await db.app.findMany({
+    where: { deletedAt: null, uninstalledAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true, deliveryDarkAlarmWindowSeconds: true },
+  });
+  for (const app of apps) {
+    try {
+      const dark = await darkWorkersOf(db, app, now);
+      const open = await db.darkWorkerEpisode.findMany({ where: { appId: app.id, endedAt: null }, select: { id: true, workerId: true } });
+      const openWorkers = new Set(open.map((e) => e.workerId));
+      for (const e of open) {
+        if (!dark.has(e.workerId)) await db.darkWorkerEpisode.updateMany({ where: { id: e.id, endedAt: null }, data: { endedAt: now } });
+      }
+      for (const d of dark.values()) {
+        if (openWorkers.has(d.workerId)) continue;
+        const id = await raise(db, app, d, app.deliveryDarkAlarmWindowSeconds * 1000, now);
+        if (id) raised.push(id);
+      }
+    } catch (err) {
+      console.error(`[dark-worker] evaluating App ${app.id} failed:`, err);
+    }
+  }
+  return raised;
+}
