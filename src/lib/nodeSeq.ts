@@ -87,7 +87,7 @@ async function takeRootSeqKey(tx: Prisma.TransactionClient, memoryId: string): P
 /**
  * Per-transaction state lives in a transaction-LOCAL setting, not a JS object, so every wrapper that forwards the same
  * database transaction sees it, and the check-and-set is ONE statement, so two concurrent calls on a transaction cannot
- * both read "no state". Values: '' none; '<memoryId>|1' reserved (one-use handoff); '<memoryId>|0' allocated.
+ * both read "no state". Values: '' none; '<memoryId>|2' reservation pending (K not yet held); '<memoryId>|1' reserved (K held, one-use handoff); '<memoryId>|0' allocated.
  */
 const STATE_SETTING = 'hadron.root_seq_state';
 
@@ -127,10 +127,11 @@ async function readState(tx: Prisma.TransactionClient): Promise<string> {
 async function swapState(tx: Prisma.TransactionClient, memoryId: string, reserve: boolean): Promise<string> {
   const reserved = `${memoryId}|1`;
   const taken = `${memoryId}|0`;
+  const pending = `${memoryId}|2`;
   const rows = await tx.$queryRaw<Array<{ v: string }>>`
     WITH prev AS (SELECT coalesce(current_setting(${STATE_SETTING}, true), '') AS v)
     SELECT v, set_config(${STATE_SETTING},
-      CASE WHEN v = '' THEN ${reserve ? reserved : taken} WHEN v = ${reserved} AND NOT ${reserve} THEN ${taken} ELSE v END,
+      CASE WHEN v = '' THEN ${reserve ? pending : taken} WHEN v = ${reserved} AND NOT ${reserve} THEN ${taken} ELSE v END,
       true) AS s FROM prev`;
   return rows[0]?.v ?? '';
 }
@@ -165,8 +166,10 @@ export async function lockRootSiblings(tx: Prisma.TransactionClient, memoryId: s
  * create core for its first and only root allocation.
  */
 export async function reserveRootSeqLock(tx: Prisma.TransactionClient, memoryId: string): Promise<void> {
+  // '<memoryId>|2' = reservation PENDING: not consumable, so a concurrent allocation is refused rather than returning before K is held.
   const prev = await swapState(tx, memoryId, true);
   if (prev !== '') throw new RootSeqAllocationError(SECOND);
   await assertNoPriorNodeWrite(tx);
   await takeRootSeqKey(tx, memoryId);
+  await tx.$executeRaw`SELECT set_config(${STATE_SETTING}, ${`${memoryId}|1`}, true)`;   // acquired: now a one-use handoff
 }

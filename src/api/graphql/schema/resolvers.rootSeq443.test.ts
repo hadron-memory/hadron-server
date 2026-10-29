@@ -280,6 +280,25 @@ describe('reserve seam and the one-use handoff #443', () => {
     })).rejects.toThrow(/after another node write/i);
   });
 
+  it('a reservation is not consumable until K is HELD: a concurrent allocation during a blocked reserve is refused, not let through', async () => {
+    const holder = holdRootSibling(memoryId, 'r2', 2);
+    await holder.held;
+    try {
+      await db.$transaction(async (tx) => {
+        const reserved = reserveRootSeqLock(tx, memoryId);    // blocks on K behind the holder
+        const consumer = lockRootSiblings(tx, memoryId).then(() => 'let-through', (e: Error) => e.message);
+        expect(await pollBlocked(memoryId)).toBe(true);
+        holder.release();
+        await reserved;
+        // Queued behind the blocked statement on the same connection, it ran while the reservation was still pending.
+        expect(await consumer).toMatch(/second root/i);
+      }, { timeout: 30000 });
+    } finally {
+      holder.release();
+      await holder.done.catch(() => {});
+    }
+  }, 40000);
+
   it('a reservation for another memory is not a handoff for this one', async () => {
     const other = await mkMemory('rootseq443o', false);
     await expect(db.$transaction(async (tx) => {
