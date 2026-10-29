@@ -68,6 +68,9 @@ import { sessionHasHandoff } from '../../../lib/hostOperations/settle.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { buildWorkerTerminal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
+import { loadPendingReasons, type PendingReason } from '../../../lib/tickers/checkPending.js';
+import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import {
   authorizeContextResetStop,
   cancelLiveReset,
@@ -186,6 +189,47 @@ export async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, o
     }
     throw e;
   }
+}
+
+/** The pause sources that excuse a coordinator from the alarm verdict (cor:agt:100:02): its own pause, a stop, a team pause. */
+const VERDICT_EXCUSES: ReadonlySet<PendingReason | null> = new Set<PendingReason | null>(['PAUSED', 'STOPPED', 'TEAM_PAUSED']);
+
+/**
+ * #2771 — the alarm verdict, computed from the rows just written and returned, never stored: the App's coordinators
+ * (role `coordinator`, case-insensitive, not retired) that THIS host's registration lists and whose stored terminal is
+ * `locked` or `dark`, leaving out a worker paused or stopped and a team paused or halted (`loadPendingReasons`, the
+ * same sources the ticker uses). `noCoordinator` is App-wide and names no one. A coordinator registered on no reporting
+ * host is in no verdict: that is the server-side alarm's (#2763), not this call's.
+ */
+async function terminalAlarmVerdict(
+  tx: Prisma.TransactionClient,
+  app: TaskApp,
+  registrationId: string | null,
+  now: Date,
+): Promise<{ alarm: { worker: { id: string; urn: string }; status: string; reason: string | null }[]; noCoordinator: boolean }> {
+  const coordinators = await tx.worker.findMany({
+    where: { appId: app.id, retiredAt: null, role: { equals: 'coordinator', mode: 'insensitive' } },
+    select: { id: true, slug: true, terminal: true },
+    orderBy: { id: 'asc' },
+  });
+  if (!registrationId || coordinators.length === 0) return { alarm: [], noCoordinator: coordinators.length === 0 };
+  const listed = new Set(
+    (await tx.hostRegistrationWorker.findMany({ where: { registrationId, workerId: { in: coordinators.map((c) => c.id) } }, select: { workerId: true } })).map((l) => l.workerId),
+  );
+  const down = coordinators.filter((c) => listed.has(c.id) && ['locked', 'dark'].includes((c.terminal as StoredWorkerTerminal | null)?.status ?? ''));
+  const pending = await loadPendingReasons(tx, app.id, down.map((c) => c.id), now);
+  return {
+    noCoordinator: false,
+    alarm: down
+      .filter((c) => {
+        const reason = pending.get(c.id) ?? null;
+        return !VERDICT_EXCUSES.has(reason);
+      })
+      .map((c) => {
+        const t = c.terminal as unknown as StoredWorkerTerminal;
+        return { worker: { id: c.id, urn: composeWorkerUrn(app.urn, c.slug) }, status: t.status, reason: t.reason };
+      }),
+  };
 }
 
 export const hostOperationMutations = {
@@ -457,6 +501,70 @@ export const hostOperationMutations = {
     });
     await matchAfterChange(ctx.db, app.id);
     return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId: workerId! } });
+  }),
+
+  /**
+   * #2771 (proposed cor:agt:070:09) — a host reports the terminal state of workers it registers. The host key's gate
+   * (cor:agt:070:04, #1749 order) runs once, in asHost. The WHOLE batch is validated before any lock, and a malformed
+   * one refuses everything (BAD_USER_INPUT, nothing stored). A worker the host may not report is refused for that item
+   * only, exactly `setHostWorkerAvailability`'s test (this App, not retired, listed in THIS host's registration; the
+   * registration's `lostAt` is irrelevant), so a worker retired between the host's refresh and its sweep does not blank
+   * the team's report. An older report than the stored one is skipped. Lock order: every batch worker FOR UPDATE in id
+   * order, then the registration FOR SHARE once (workers before registration, as registerHost, so no cycle).
+   *
+   * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
+   * `reportedAt` is the server's clock. The report decides nothing. The alarm verdict is computed from the stored
+   * rows after the write and returned, never stored, and names only coordinators THIS host registers.
+   */
+  setHostWorkerTerminals: async (
+    _: unknown,
+    { input }: { input: { appRef: string; reports: TerminalReportInput[] } },
+    ctx: Context,
+  ) => recordingRefusal(ctx, 'terminal', null, async () => {
+    if (!input) throw badInput('input is required.');
+    const now = new Date();
+    const checked = validateTerminalBatch(input.reports, now);
+    if (!checked.ok) throw badInput(checked.message);
+    return asHost(ctx, input.appRef, async (tx, app, host) => {
+      const refs = new Map<string, string | null>();
+      for (const r of checked.reports) refs.set(r.worker, await resolveTaskWorkerId(ctx, app.id, r.worker));
+      // Two refs naming one worker (an id and its name) are one report twice: sender's bug, nothing stored.
+      const named = [...refs.values()].filter((id): id is string => id !== null);
+      if (new Set(named).size !== named.length) throw badInput('A worker is reported at most once per call.');
+      const rows = new Map<string, { appId: string; retiredAt: Date | null; slug: string; terminal: StoredWorkerTerminal | null }>();
+      for (const id of [...named].sort()) {
+        const [w] = await tx.$queryRaw<{ appId: string; retiredAt: Date | null; slug: string; terminal: StoredWorkerTerminal | null }[]>`
+          SELECT app_id AS "appId", retired_at AS "retiredAt", slug, terminal FROM workers WHERE id = ${id} FOR UPDATE`;
+        if (w) rows.set(id, w);
+      }
+      const [reg] = await tx.$queryRaw<{ id: string; label: string }[]>`
+        SELECT id, label FROM host_registrations WHERE app_id = ${app.id} AND host_id = ${host.hostId} FOR SHARE`;
+      const listed = new Set(
+        reg && named.length
+          ? (await tx.hostRegistrationWorker.findMany({ where: { registrationId: reg.id, workerId: { in: named } }, select: { workerId: true } })).map((l) => l.workerId)
+          : [],
+      );
+      const stored: { id: string; urn: string }[] = [];
+      const refused: { worker: string; code: string }[] = [];
+      for (const r of checked.reports) {
+        const id = refs.get(r.worker) ?? null;
+        const w = id ? rows.get(id) : undefined;
+        if (!id || !w || !reg || w.appId !== app.id || w.retiredAt || !listed.has(id)) {
+          refused.push({ worker: r.worker, code: 'WORKER_NOT_FOUND' });
+          continue;
+        }
+        if (w.terminal && new Date(w.terminal.checkedAt).getTime() > r.checkedAt.getTime()) {
+          refused.push({ worker: r.worker, code: 'TERMINAL_REPORT_STALE' });
+          continue;
+        }
+        const terminal = buildWorkerTerminal(r, { id: host.hostId, label: reg.label }, now);
+        await tx.worker.update({ where: { id }, data: { terminal: terminal as unknown as Prisma.InputJsonObject } });
+        stored.push({ id, urn: composeWorkerUrn(app.urn, w.slug) });
+      }
+      const verdict = await terminalAlarmVerdict(tx, app, reg?.id ?? null, now);
+      await recordHostKeyUse(tx, host, 'terminal', { count: stored.length });
+      return { stored, refused, alarm: verdict.alarm, noCoordinator: verdict.noCoordinator };
+    });
   }),
 
   /**
