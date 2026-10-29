@@ -686,18 +686,17 @@ describe('concurrent runs never double-assign a task or a worker', () => {
     expect(await db.agentTask.count({ where: { assigneeWorkerId: baloo.id } })).toBe(1);
   });
 
-  it('the App graph decision: two workers racing for one task serialize and the loser changes nothing', async () => {
+  it('the guarded update: two workers racing for one task — the loser matches no row and changes nothing', async () => {
     await bind(baloo, 'codex', at('11:00'));
     await bind(liam, 'glm', at('11:00'));
     const t = await queued('10:00');
     const g = gate();
     const first = __matcherTesting.tryAssign(db, await row(t.id), baloo.id, 'codex', at('11:01'), { afterWorkerCheck: g.hook });
     await g.arrived;
-    const second = __matcherTesting.tryAssign(db, await row(t.id), liam.id, 'glm', at('11:01'), {});
+    expect(await __matcherTesting.tryAssign(db, await row(t.id), liam.id, 'glm', at('11:01'), {})).toBe('assigned');
     g.open();
-    expect(await first).toBe('assigned');
-    expect(await second).toBe('task-gone');
-    expect(await assigneeOf(t.id)).toBe(baloo.id);
+    expect(await first).toBe('task-gone');
+    expect(await assigneeOf(t.id)).toBe(liam.id);
     expect(await db.agentTeamEvent.count({ where: { type: 'assignment.matched' } })).toBe(1);
   });
 });

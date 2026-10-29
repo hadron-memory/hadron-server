@@ -372,7 +372,7 @@ async function tryAssign(
     // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
     // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
     await lockStopFence(tx, task.appId, 'shared');
-    await lockTaskGraph(tx, task.appId);
+    await lockTaskGraph(tx, task.appId, 'shared');
     // The per-worker lock (src/lib/agentTasks/workerLock.ts).
     await lockWorkersForAssignment(tx, [workerId]);
     const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });

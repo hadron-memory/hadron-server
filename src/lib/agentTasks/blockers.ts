@@ -2,8 +2,9 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
 
 /** #2644: after stop-fence, before reportsTo/worker/task rows, on every task decision. */
-export async function lockTaskGraph(tx: Prisma.TransactionClient, appId: string): Promise<void> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'task-blockers:' + appId}, 0))`;
+export async function lockTaskGraph(tx: Prisma.TransactionClient, appId: string, mode: 'shared' | 'exclusive' = 'exclusive'): Promise<void> {
+  if (mode === 'shared') await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtextextended(${'task-blockers:' + appId}, 0))`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'task-blockers:' + appId}, 0))`;
 }
 /** The single range rule used by creates, dedicated mutations and future edit calls. */
 export function taskPriority(value: number | null | undefined): number {

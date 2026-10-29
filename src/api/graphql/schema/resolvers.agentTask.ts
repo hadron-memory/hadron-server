@@ -745,6 +745,7 @@ export async function inTaskWriteTx<T>(
   options: {
     lockMode?: 'shared' | 'exclusive';
     stopFence?: 'shared' | 'exclusive';
+    taskGraph?: 'shared' | 'exclusive';
     /**
      * #2162: the workers whose per-worker assignment lock this write takes (src/lib/agentTasks/workerLock.ts), right
      * after the reportsTo graph and BEFORE the app_members and workers rows below, so every task write takes it in
@@ -781,7 +782,7 @@ export async function inTaskWriteTx<T>(
         lockMode: options.lockMode,
         afterLock: async (tx) => {
           await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
-          await lockTaskGraph(tx, app.id);
+          await lockTaskGraph(tx, app.id, options.taskGraph ?? 'shared');
           // #1726: the reportsTo graph, SHARED, before any membership or worker
           // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
           // of cor:agt:050:09 then reads a graph no writer can change before
@@ -823,7 +824,7 @@ async function mutateTask(
    * in between, the write is retried once, then refused TASK_CONFLICT. `workers` are named by the write itself (a new
    * assignee).
    */
-  locks: { assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
+  locks: { taskGraph?: 'shared' | 'exclusive'; assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskRef);
   if (!readable) throw notFound(taskRef);
@@ -846,7 +847,7 @@ async function mutateTask(
         if (!task || task.appId !== freshApp.id) throw notFound(taskRef);
         if (locks.assignee && task.assigneeWorkerId !== expected) throw new AssigneeMoved();
         await act(tx, task, actor, freshApp, txCtx, new Set([expected, ...named].filter((id): id is string => Boolean(id))));
-      }, { lockWorkerIds: [expected, ...named] });
+      }, { lockWorkerIds: [expected, ...named], taskGraph: locks.taskGraph });
       break;
     } catch (e) {
       if (!(e instanceof AssigneeMoved)) throw e;
@@ -1090,7 +1091,8 @@ export async function setTaskPriorityInTx(tx: Prisma.TransactionClient, txCtx: C
 }
 /**
  * #2644 / cor:agt:050:02: the in-transaction link door, also for #2645.
- * Same entry/lock contract as setTaskPriorityInTx. Never open a nested
+ * Enter inTaskWriteTx with taskGraph: 'exclusive', BEFORE locking the task.
+ * Never upgrade a shared graph lock after taking a task row. Never open a nested
  * transaction from an edit; post-commit matching is the outer caller's job.
  */
 export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, ref: string, operation: 'add' | 'remove') {
@@ -1118,13 +1120,13 @@ export const agentTaskMutations = {
   addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add');
-    });
+    }, { taskGraph: 'exclusive' });
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
   removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove');
-    });
+    }, { taskGraph: 'exclusive' });
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
@@ -1252,7 +1254,7 @@ export const agentTaskMutations = {
         await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
       }
       return made;
-    }, { lockWorkerIds: [lockedAssignee] });
+    }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
     if (made.queued) await matchAfterChange(ctx.db, app.id);
