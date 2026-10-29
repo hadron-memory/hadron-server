@@ -3,7 +3,7 @@
  * refusal, when its boot prompt cannot be served; an approved one is recorded with the run and prefixed to the run's system
  * prompt with the recorded variables; the run finishes under that revision; derived blocks go to the run's own log.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -27,7 +27,6 @@ vi.mock('../lib/aiConfig.js', async (orig) => {
 import { executeAppRun, mintAppRun, type RunExecutionDeps } from './appRuns.js';
 
 let orgId: string, appId: string, userId: string, agentId: string, memoryId: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 
 const deps = (llm = vi.fn(async (_c: unknown, _r: { system?: string; prompt: string }) => ({ text: 'out', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' }))) => ({
   llm,
@@ -62,7 +61,6 @@ beforeEach(async () => {
   vi.clearAllMocks();
   attention.text = '';
   aiConfigFault.error = null;
-  process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'run-org', urn: 'run-org' } })).id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'run-app', urn: 'run-org::run-app' } })).id;
@@ -71,10 +69,6 @@ beforeEach(async () => {
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'run-org:sys', organizationId: orgId } })).id;
   agentId = (await db.agent.create({ data: { id: generateId(), name: 'Runner', urn: 'run-org:runner', organizationId: orgId, systemMemoryId: memoryId } })).id;
   await db.appAgent.create({ data: { appId, agentId } as never });
-});
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
 });
 
 describe('#2047 run', () => {
@@ -102,13 +96,6 @@ describe('#2047 run', () => {
     const runs = await db.appRun.count();
     expect(await code(mint({ userId, agentId }))).toBe('BOOT_PROMPT_NOT_SET');
     expect(await db.appRun.count()).toBe(runs);
-  });
-
-  it('serving OFF: a run with an Agent launches with no pointer and no record', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    const run = await mint({ userId, agentId });
-    expect(run.id).toBeTruthy();
-    expect(await db.servedPrompt.count()).toBe(0);
   });
 
   it('#2047 PR-C: the revision is selected inside the launch transaction, so one approved after the preflight is the one recorded', async () => {

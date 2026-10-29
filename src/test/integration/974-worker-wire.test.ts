@@ -18,7 +18,7 @@ import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { serveAgentBootPrompt, servingOn } from '../servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -162,7 +162,6 @@ afterAll(async () => {
 });
 
 describe('the Worker surface on the wire (#974)', () => {
-  servingOn();
   let zoeId: string;
   let irisId: string;
 

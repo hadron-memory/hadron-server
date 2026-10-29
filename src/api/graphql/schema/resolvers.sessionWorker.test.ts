@@ -22,9 +22,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
-
-servingOn();
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({

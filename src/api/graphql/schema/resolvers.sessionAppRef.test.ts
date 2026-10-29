@@ -27,6 +27,7 @@ import type { Request } from 'express';
 import { db } from '../../../integrations/db/client.js';
 import { hashAppKey, resolveAuthContext } from '../../../middleware/auth.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -135,6 +136,7 @@ beforeEach(async () => {
       urn: `${outsider.handle}:solo`,
     },
   });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 describe('#943 acceptance — a user-started session can author in the team chat', () => {

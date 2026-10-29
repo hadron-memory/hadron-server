@@ -17,7 +17,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
-import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -43,7 +43,6 @@ async function expectCode(p: Promise<unknown>, code: string) {
   }
 }
 
-servingOn();
 let org: { id: string; urn: string };
 let admin: { id: string };
 let outsider: { id: string };

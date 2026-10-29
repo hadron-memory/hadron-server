@@ -27,7 +27,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { sessionActivityAt, loadLastEventBySession, isSessionLive } from '../../../lib/sessionActivity.js';
 import { lockWorkerNames } from '../../../lib/workerName.js';
-import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -1325,27 +1325,18 @@ describe('Worker field resolvers', () => {
     expect(resolvedApp?.id).toBe(app.id);
   });
 
-  describe('with serving ON (#2712: the prompt is the served node)', () => {
-    servingOn();
-
-    it('prompt binds {{name}}/{{role}} in the served text', async () => {
-      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
-      const prompt = await W.prompt(worker, {}, ctx(admin.id));
-      expect(prompt).toBe('You are Zoe, a backend-engineer on this team.\nWork from your own memories.');
-    });
-
-    it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {
-      // A casting role that differs from the agent's can no longer be cast (WORKER_ROLE_OVERRIDE_REFUSED); the
-      // prompt still binds the worker's stored role, so a worker cast with an override before R222 keeps its own.
-      const cast0 = await cast({ agentRef: roleAgent.id, name: 'Legacy' });
-      const legacy = await db.worker.update({ where: { id: cast0.id }, data: { role: 'debugger' } });
-      expect(await W.prompt(legacy, {}, ctx(admin.id))).toContain('You are Legacy, a debugger on this team.');
-    });
+  it('prompt binds {{name}}/{{role}} in the served text', async () => {
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+    const prompt = await W.prompt(worker, {}, ctx(admin.id));
+    expect(prompt).toBe('You are Zoe, a backend-engineer on this team.\nWork from your own memories.');
   });
 
-  it('serving OFF: no authored text reaches the prompt (#2712)', async () => {
-    const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
-    expect(await W.prompt(worker, {}, ctx(admin.id))).toBeNull();
+  it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {
+    // A casting role that differs from the agent's can no longer be cast (WORKER_ROLE_OVERRIDE_REFUSED); the
+    // prompt still binds the worker's stored role, so a worker cast with an override before R222 keeps its own.
+    const cast0 = await cast({ agentRef: roleAgent.id, name: 'Legacy' });
+    const legacy = await db.worker.update({ where: { id: cast0.id }, data: { role: 'debugger' } });
+    expect(await W.prompt(legacy, {}, ctx(admin.id))).toContain('You are Legacy, a debugger on this team.');
   });
 
   it('null when the agent serves no prompt', async () => {

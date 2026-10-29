@@ -1855,7 +1855,7 @@ export const typeDefs = `#graphql
     events: [UsageEvent!]!
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this session was served at its bind. Readable by whoever may read the
-    worker's internals; an empty page for anyone else, and while boot-prompt serving is off.
+    worker's internals; an empty page for anyone else.
     """
     servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
   }
@@ -4832,7 +4832,7 @@ export const typeDefs = `#graphql
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this chat was served, once at its start and again whenever its served
     revision changed. Readable only by whoever manages the App the chat runs in, never by its end user; everyone else
-    gets an empty page. Empty while boot-prompt serving is off.
+    gets an empty page.
     """
     servedPrompts(limit: Int, offset: Int): ServedPromptsPage!
   }
@@ -5181,7 +5181,7 @@ export const typeDefs = `#graphql
     retiredBy: String
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's
-    internals; null for anyone else, when no session is open, and while boot-prompt serving is off.
+    internals; null for anyone else, and when no session is open.
     """
     servedPrompt: ServedPrompt
   }
@@ -6243,7 +6243,7 @@ export const typeDefs = `#graphql
     entryNode: Node
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt this run was served. Readable by whoever may read the run; null for anyone
-    else, and while boot-prompt serving is off.
+    else.
     """
     servedPrompt: ServedPrompt
   }

@@ -1,7 +1,7 @@
 /**
  * #2047 (S10, cor:agt:040:03/:07/:09/:10) — the BIND surface: an unserveable boot prompt refuses the bind and rolls it
  * back whole, an approved one is served as-is and recorded in the bind's transaction, the retired columns are not read,
- * and an open session finishes under the revision it was bound with. With serving OFF no authored text is served (#2712).
+ * and an open session finishes under the revision it was bound with. #2712 retired the serving switch.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -16,7 +16,6 @@ import { composeWorkerPrompt, describeServedWorker } from './resolvers.worker.js
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
 let org: any, app: any, agent: any, admin: any, worker: any, memoryId: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 const ctx = (extra: Partial<Context> = {}): Context => ({ db, userId: admin.id, roles: ['READER'], ...extra });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 const bind = () => M.startSession({}, { input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: worker.id, force: true, llmModel: 'm-1' } }, ctx());
@@ -46,7 +45,6 @@ async function recompileApproved(nodeId: string, content: string) {
 const pointAgent = (id: string) => db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: id, bootPromptUrn: `u:${id}` } });
 
 beforeEach(async () => {
-  process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   const n = generateId().toLowerCase();
   org = await db.organization.create({ data: { name: 'Serve', urn: `serve-${n}.example` } });
@@ -59,20 +57,8 @@ beforeEach(async () => {
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: `${org.urn}:sys`, organizationId: org.id } })).id;
 });
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-});
 
 describe('#2047 bind', () => {
-  it('serving OFF: the bind needs no pointer, writes no record and reads no authored text (#2712)', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    expect(await code(bind())).toBe('RESOLVED');
-    expect(await records()).toEqual([]);
-    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect((await composeWorkerPrompt(ctx(), w as never)).text ?? '').not.toContain('LEGACY');
-  });
-
   it('no pointer: the bind is refused BOOT_PROMPT_NOT_SET and rolled back whole (no session, no record)', async () => {
     const sessions = await db.session.count();
     expect(await code(bind())).toBe('BOOT_PROMPT_NOT_SET');
@@ -133,8 +119,6 @@ describe('#2047 bind', () => {
     await pointAgent(node);
     const line = await describeServedWorker(ctx(), w as never);
     expect(line).toContain(`AGENT pointer, compiled node ${node}, revision 1`);
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    expect(await describeServedWorker(ctx(), w as never)).toBe('');
   });
 
   it('a recorded session keeps the variables its bind filled: a rename after the bind does not rewrite its briefing', async () => {
@@ -147,9 +131,8 @@ describe('#2047 bind', () => {
   });
 
   it('an open session with no record (bound before serving was on) is not silently upgraded: no prompt, SESSION_UNRECORDED', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    const first = await bind();
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+    // A session row bound before the switch existed carries no record; #2712 retired the switch, so make the row directly.
+    const first = await db.session.create({ data: { id: generateId(), workerId: worker.id, appId: app.id, userId: admin.id } });
     const node = await compiled('current text');
     await pointAgent(node);
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });

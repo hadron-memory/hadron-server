@@ -10,11 +10,10 @@
  *
  * Source-free by construction: a record names revisions by (node id, revSeq) and a hash. It never carries a loc, a title,
  * a node object or text, so reading it hands the caller no included part. Lists are cor:api:120:04 pages: `{items, total}`,
- * default 50, cap 200; provenance has its own page. With serving OFF (the BOOT_PROMPT_SERVE_ENABLED gate) every field is empty.
+ * default 50, cap 200; provenance has its own page.
  */
 import { lintCompiledRevision } from '../../../lib/compiledBootPromptLint.js';
 import { isPlatformAdmin, type Context } from './resolvers.helpers.js';
-import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { canReadAppRun } from './resolvers.appRun.js';
 
@@ -60,13 +59,13 @@ async function mayManageApp(ctx: Context, appId: string): Promise<boolean> {
 export const servedPromptOwnerFields = {
   /** `Session.servedPrompts` — a bind's record(s). */
   sessionServedPrompts: async (s: { id: string; appId: string | null }, args: PageArgs, ctx: Context) => {
-    if (!bootPromptServingEnabled() || !s.appId || !(await maySeeWorkerInternals(ctx, s.appId))) return EMPTY_PAGE;
+    if (!s.appId || !(await maySeeWorkerInternals(ctx, s.appId))) return EMPTY_PAGE;
     return recordsPage(ctx, { sessionId: s.id }, args);
   },
 
   /** `Worker.servedPrompt` — the record of the worker's open session; null when it has none. */
   workerServedPrompt: async (w: { id: string; appId: string }, _args: unknown, ctx: Context) => {
-    if (!bootPromptServingEnabled() || !(await maySeeWorkerInternals(ctx, w.appId))) return null;
+    if (!(await maySeeWorkerInternals(ctx, w.appId))) return null;
     const session = await ctx.db.session.findFirst({
       where: { workerId: w.id, endedAt: null },
       orderBy: { startedAt: 'desc' },
@@ -82,13 +81,12 @@ export const servedPromptOwnerFields = {
     _args: unknown,
     ctx: Context,
   ) => {
-    if (!bootPromptServingEnabled() || !(await canReadAppRun(ctx, r))) return null;
+    if (!(await canReadAppRun(ctx, r))) return null;
     return ctx.db.servedPrompt.findFirst({ where: { runId: r.id } });
   },
 
   /** `Chat.servedPrompts` — a chat's records (once at start, again when its served revision changed). */
   chatServedPrompts: async (c: { id: string }, args: PageArgs, ctx: Context) => {
-    if (!bootPromptServingEnabled()) return EMPTY_PAGE;
     // The chat's App is the one its records name; a chat with no record has nothing to read.
     // The authorized App is the chat's FIRST record's (deterministic: lowest ordinal), and only records under THAT App are
     // returned: authorizing one App's record must never hand over another App's rows for the same chat.

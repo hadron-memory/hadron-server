@@ -9,7 +9,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
-import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any, W = resolvers.Worker as any;
@@ -19,7 +19,6 @@ let org: any, app: any, agent: any, admin: any, staff: any, member: any, outside
 const ctx = (u = admin, extra: Partial<Context> = {}): Context => ({ db, userId: u.id, roles: ['READER'], ...extra });
 const update = (args: object, c = ctx()) => M.updateWorker({}, { workerRef: worker.id, ...args }, c);
 const row = () => db.worker.findUniqueOrThrow({ where: { id: worker.id } }) as Promise<any>;
-servingOn();
 beforeEach(async () => {
   await cleanDb(db);
   const n = generateId().toLowerCase();

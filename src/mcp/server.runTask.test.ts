@@ -492,8 +492,10 @@ describe('isRunnable write path (hadron_create_node / hadron_update_node / Graph
   });
 });
 
+// #2712: serving is always on, and a manual run names no Agent, so it is refused BOOT_PROMPT_NOT_SET (cor:agt:040:07,
+// R74), as production already does. These pin the refusal; a manual run that can name its Agent is a separate change.
 describe('hadron_run_task — execute mode (#529, appRef)', () => {
-  it('mints a MANUAL app run and returns the run id instead of rendering', async () => {
+  it('a MANUAL app run with no Agent is refused BOOT_PROMPT_NOT_SET and writes no run (R74)', async () => {
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'run-task-org' } });
     const app = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'rt-app', urn: 'run-task-org::rt-app' },
@@ -504,22 +506,13 @@ describe('hadron_run_task — execute mode (#529, appRef)', () => {
       urn,
       appRef: app.id,
     });
-    expect(text).toContain('Run started:');
+    expect(text).toContain('Could not start run: No boot prompt is set for this Agent, so it cannot be served.');
     // Executed, not rendered — the task body must NOT be inlined.
     expect(text).not.toContain('Add a note here');
-
-    const runs = await db.appRun.findMany();
-    expect(runs).toHaveLength(1);
-    // #542 — the resolver canonicalizes the ref (composeNodeUrn → `hrn:node:`
-    // prefixed form) before minting, so every run stores the same canonical
-    // entryNodeUrn regardless of the input ref shape. Previously only the
-    // fuzzy-resolution paths did this; the URN bypass passed the raw string.
-    expect(runs[0]!.entryNodeUrn).toContain('hrn:node:run-task-org:alpha:tasks:add-note');
-    expect(runs[0]!.triggerKind).toBe('MANUAL');
-    expect(runs[0]!.appId).toBe(app.id);
+    expect(await db.appRun.count()).toBe(0);
   });
 
-  it('starts a run via the task+memory hint path for a CANONICAL (org::mem) memory URN', async () => {
+  it('resolves the task+memory hint path for a CANONICAL (org::mem) memory URN, then refuses the run (R74)', async () => {
     // Codex #549 review: a memory row whose stored urn is the canonical
     // double-colon form (as migrations produce) must still be runnable in
     // execute mode. The hint path composes the nodeRef from memory.urn — a
@@ -545,12 +538,8 @@ describe('hadron_run_task — execute mode (#529, appRef)', () => {
       memory: 'Canon',
       appRef: app.id,
     });
-    expect(text).toContain('Run started:');
-
-    const runs = await db.appRun.findMany();
-    expect(runs).toHaveLength(1);
-    // Resolved + canonicalized to the same node — not a malformed triple-colon.
-    expect(runs[0]!.entryNodeUrn).not.toContain(':::');
-    expect(runs[0]!.entryNodeUrn).toContain('hrn:node:run-task-org:canon:tasks:ship');
+    // The hint resolved: a mangled `org:::mem::loc` would fail resolution before the run's boot-prompt refusal.
+    expect(text).toContain('Could not start run: No boot prompt is set for this Agent, so it cannot be served.');
+    expect(await db.appRun.count()).toBe(0);
   });
 });

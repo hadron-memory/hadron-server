@@ -18,7 +18,6 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 
 const M = resolvers.Mutation as any;
 let org: any, user: any, agent: any, app: any, systemMemoryId: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 const ctx = (): Context => ({ db, roles: ['READER'], userId: user.id });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 
@@ -46,7 +45,6 @@ async function recompileApproved(nodeId: string, content: string) {
 }
 
 beforeEach(async () => {
-  process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
@@ -64,22 +62,11 @@ beforeEach(async () => {
   ];
   for (const n of nodes) await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: n.loc, name: n.name, nodeType: n.nodeType, data: ((n as any).data ?? null) as any, content: ((n as any).content ?? null) as any } });
 });
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-});
 
 // loc-scope-ok: counts every chat in the fresh test database
 const chatNodes = () => db.node.count({ where: { loc: { startsWith: 'chats:' } } });
 
 describe('#2047 chat', () => {
-  it('serving OFF: no authored text is bound (#2712 deleted the literal prompt) and nothing is recorded', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
-    expect(start.systemMessage ?? '').not.toContain('LEGACY');
-    expect(await db.servedPrompt.count()).toBe(0);
-  });
-
   it('no pointer: startChat is refused with the typed refusal and creates no chat', async () => {
     const chats = await chatNodes();
     expect(await code(M.startChat({}, { agentId: agent.id }, ctx()))).toBe('BOOT_PROMPT_NOT_SET');

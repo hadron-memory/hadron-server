@@ -15,7 +15,6 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
-import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
@@ -2093,14 +2092,12 @@ export const workerQueries = {
     // #2047 (S10): the preview shows what a bind would be served now (no worker pointer exists yet); a prompt that could not
     // be served previews as none rather than failing a cast it does not gate. #2712: there is no other text to preview.
     let servedTemplate: string | null = null;
-    if (bootPromptServingEnabled()) {
-      try {
-        servedTemplate = (await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId, agent: { id: agent.id, name: agent.name } })).content;
-      } catch (err) {
-        const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
-        if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
-        servedTemplate = null;
-      }
+    try {
+      servedTemplate = (await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId, agent: { id: agent.id, name: agent.name } })).content;
+    } catch (err) {
+      const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+      if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
+      servedTemplate = null;
     }
     const prompt = servedTemplate ? applyPlatformVariables(servedTemplate, values, { name, role: previewRole }) : null;
 
@@ -2438,26 +2435,19 @@ export async function composeWorkerPrompt(
   // — evaluated for the Worker's durable holder, so an admin reading another
   // Worker's briefing sees that Worker's standing, not the admin's.
   const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE' }));
-  // #2047 (S10): with serving ON the prompt is the pointed-to compiled node's approved revision, as-is. A refusal reads
-  // as no briefing with its code, so a read never throws where a bind would have refused. #2712 deleted the authored
-  // literal prompts, so with serving OFF there is no authored text: only the derived blocks.
-  if (bootPromptServingEnabled()) {
-    const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform);
-    const text = served.text === null ? (derived || null) : !derived ? served.text : `${served.text}\n\n${derived}`;
-    return { text: served.text === null ? null : text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null, refusal: served.refusal };
-  }
-  const text = derived || null;
-  // #1090 review (Andi, P2): stamp the render time AFTER the text exists. A
-  // clock read taken up front could predate a concurrent template edit that
-  // the same query then picked up — an Agent stamp LATER than the claimed
-  // render time. Down here, renderedAt is a lower bound the printed text and
-  // its Agent stamp both satisfy.
-  return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null };
+  // #2047 (S10): the prompt is the pointed-to compiled node's approved revision, as-is (#2712 retired the serving switch
+  // and the literal prompts). A refusal reads as no briefing with its code, so a read never throws where a bind would
+  // have refused.
+  const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform);
+  const text = served.text === null ? null : !derived ? served.text : `${served.text}\n\n${derived}`;
+  // #1090 review (Andi, P2): stamp the render time AFTER the text exists, so renderedAt is a lower bound the printed
+  // text and its Agent stamp both satisfy.
+  return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null, refusal: served.refusal };
 }
 
 
 /**
- * #2047 — the text a read of a worker's briefing shows with serving ON. A worker's own OPEN session finishes under the
+ * #2047 — the text a read of a worker's briefing shows. A worker's own OPEN session finishes under the
  * revision it was bound with (its record), so a recompile approved mid-session reaches the NEXT bind, never this one;
  * a session whose recorded revision was deleted reads `BOOT_PROMPT_RECORDED_REVISION_DELETED` and nothing newer. With no
  * record to hold it to (a preview, a worker not bound) the read resolves what a bind would be served now, and records nothing.
@@ -2499,14 +2489,14 @@ async function readServedWorkerText(
 /**
  * #2047 — what a worker would be served now, as the text `hadron_get_worker` prints: the pointer level that decides, the
  * revision served and the lint state of its root source, or the refusal a bind would get. Also the revision recorded for
- * the worker's latest open session (a session finishes under the revision it was bound with). Empty with
- * serving OFF. Behind the worker read gate; ids only, never a loc or text beyond what `Worker.servedPrompt` already shows.
+ * the worker's latest open session (a session finishes under the revision it was bound with). Behind the worker
+ * read gate; ids only, never a loc or text beyond what `Worker.servedPrompt` already shows.
  */
 export async function describeServedWorker(
   ctx: Context,
   worker: { id: string; appId: string; agentId: string },
 ): Promise<string> {
-  if (!bootPromptServingEnabled() || !(await maySeeWorkerInternals(ctx, worker.appId))) return '';
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) return '';
   const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId }, select: { name: true } });
   const agentName = agent?.name ?? '';
   let line: string;
@@ -2530,14 +2520,13 @@ export async function describeServedWorker(
 /**
  * #2047 — a bind's serve, run INSIDE the bind's transaction after the session row exists: resolve, refuse with the typed
  * refusal (which rolls the whole bind back, so a refused bind leaves no session and no record), fill the platform
- * variables from the worker being bound and write the immutable record. No-op with serving OFF.
+ * variables from the worker being bound and write the immutable record.
  */
 export async function serveBindInTransaction(
   tx: Prisma.TransactionClient,
   ctx: Context,
   bind: { sessionId: string; workerId: string; appId: string; agentId: string; llmModel: string | null },
 ): Promise<void> {
-  if (!bootPromptServingEnabled()) return;
   const [worker, agent] = await Promise.all([
     tx.worker.findUniqueOrThrow({ where: { id: bind.workerId } }),
     tx.agent.findUniqueOrThrow({ where: { id: bind.agentId }, select: { name: true, urn: true, personaRole: true } }),

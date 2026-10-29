@@ -16,7 +16,7 @@ import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -87,8 +87,6 @@ function hybridAuth(userId: string): AuthContext {
 }
 
 describe('hadron_cast_worker (#974)', () => {
-  // #2712: the briefing is the served boot prompt, which a cast previews only with serving ON.
-  servingOn();
   it('returns the confusable refusal code and original name without casting', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, name: 'Alice' });

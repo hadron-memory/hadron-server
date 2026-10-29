@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { mintAppRun, handleSpawnCompletion } from '../jobs/appRuns.js';
 import { runContext } from '../jobs/appRunDeps.js';
@@ -48,6 +49,7 @@ beforeEach(async () => {
   const ag = await db.agent.create({ data: { id: generateId(), organizationId: orgA.id, name: 'ag', urn: `${orgA.urn}:ag`, visibility: 'ORGANIZATION' } });
   agent = ag;
   await db.appAgent.create({ data: { appId: app.id, agentId: ag.id } });
+  await serveAgentBootPrompt(db, ag.id, 'Test boot prompt.'); // #2712: a run needs a served Agent (R74)
   const mem = (org: { id: string; urn: string }, slug: string) =>
     db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${slug}`, name: slug, class: 'knowledge', visibility: 'ORGANIZATION' } });
   memA1 = await mem(orgA, 'a1');
@@ -95,7 +97,7 @@ describe('the snapshot on the run', () => {
     // A trigger whose scope has been deleted mints no snapshot (⇒ app).
     await M.deleteScope({}, { ref: s.id }, ctx(admin.id));
     const later = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
+      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
     });
     expect(later.scopeSnapshot).toBeNull();
   });
@@ -103,7 +105,7 @@ describe('the snapshot on the run', () => {
   it('is data, never a grant: resolveRunScope re-intersects with CURRENT access and discloses the drop', async () => {
     const s = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA1.urn, memB.urn] } }, ctx(admin.id));
     const run = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
+      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, scopeId: s.id, publish: false,
     });
     const before = await resolveRunScope(ctx(admin.id), run);
     expect(before).toMatchObject({ kind: 'scope', source: 'trigger', label: 'lens', ownerUrn: orgA.urn, memoryIds: [memA1.id, memB.id], droppedCount: 0 });
@@ -118,7 +120,7 @@ describe('the snapshot on the run', () => {
 
   it('no snapshot ⇒ the App\'s attached memories, and AppRun.scope is null', async () => {
     const run = await mintAppRun(db, {
-      organizationId: orgA.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
+      organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false,
     });
     expect(run.scopeSnapshot).toBeNull();
     const r = await resolveRunScope(ctx(admin.id), run);

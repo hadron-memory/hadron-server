@@ -15,7 +15,7 @@ import { setUpResetFixture, M as ResetM, ctx as resetCtx } from '../../../test/c
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
-import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -28,9 +28,6 @@ const change = () => M.changeWorkerAgent({}, { workerRef: worker.id, agentRef: a
 const channelsOf = async (sessionId?: string) =>
   ((await collectRegisterRows(db, { workerId: worker.id }, sessionId))?.rows ?? []).map(r => r.channelId).sort();
 let chanA: string, chanB: string;
-
-// #2712: the agents' prompts are served nodes, which reach a bind or a briefing only with serving ON.
-servingOn();
 
 beforeEach(async () => {
   await cleanDb(db);

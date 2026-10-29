@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import {
@@ -127,6 +128,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: appMember.id, role: 'member' } });
   await db.appMember.create({ data: { appId: app.id, userId: appReader.id, role: 'reader' } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 /** Cast a Worker of the installed team agent and bind an active session

@@ -24,6 +24,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -66,6 +67,7 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 afterEach(() => {

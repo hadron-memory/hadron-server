@@ -13,7 +13,7 @@ import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -49,7 +49,6 @@ afterAll(async () => {
   await new Promise<void>(r => server.close(() => r()));
 });
 afterEach(async () => { for (const c of clients.splice(0)) await c.close(); vi.restoreAllMocks(); });
-servingOn();
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = generateId();

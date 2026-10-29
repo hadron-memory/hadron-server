@@ -25,9 +25,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
-
-servingOn();
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({

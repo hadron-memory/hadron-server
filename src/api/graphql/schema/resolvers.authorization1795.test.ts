@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../../../server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
 import { requireMemoryWriteAccess } from './resolvers.helpers.js';
@@ -49,6 +50,7 @@ beforeEach(async () => {
   await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: memories.definition } });
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default', name: 'Default', data: { stageOrder: ['start'] } } });
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default:start', name: 'Start', content: 'Hello' } });
+  await serveEveryAgent(db); // #2712: the chat is served the Agent's boot prompt
   // Provision through the shipped path, not a synthetic ownership shortcut.
   await resolvers.Mutation.startChat({}, { agentId }, ctx('owner'));
   memories.holding = (await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agentId, createdBy: users.owner } })).id;

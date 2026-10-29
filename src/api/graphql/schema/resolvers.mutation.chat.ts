@@ -28,7 +28,6 @@ import {
 import { compileTemplate } from '../../../lib/template.js';
 import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
-import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
   evaluateEdgeCondition,
@@ -110,7 +109,7 @@ async function chatWriteTx(
 }
 
 /**
- * #2047 (S10) — what a chat is served with serving ON: the compiled boot prompt (approved revision, as-is), its platform
+ * #2047 (S10) — what a chat is served: the compiled boot prompt (approved revision, as-is), its platform
  * variables bound to the Agent (a chat binds no worker). Resolved BEFORE the chat is created or answered, so a refusal
  * is the same typed refusal a bind gives and leaves no chat behind. The App is the one the chat's holding memory belongs
  * to; a chat held in a memory with no App serves the Agent's own pointer and has no App to record under.
@@ -536,11 +535,9 @@ export const chatMutations = {
       // personal memories); private chats retain the caller's read filter.
       // #1835 intersects either filter with targetMemoryId, so bare refs stay
       // in the holding memory without weakening the chat's authority gate.
-      // #2047 (S10): with serving ON the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
-      const chatAppId = bootPromptServingEnabled()
-        ? ((await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null)
-        : null;
-      const chatServed = bootPromptServingEnabled() ? await serveChatPrompt(ctx.db, agent, chatAppId) : null;
+      // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
+      const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
+      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -757,11 +754,8 @@ export const chatMutations = {
       // messages parent), so it is two writes.
       recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
-      // The served boot prompt leads the system message (#2047). #2712 deleted the literal prompt that served with
-      // serving OFF, so OFF leads with nothing.
-      if (chatServed) {
-        systemMessage = chatServed.text + '\n\n' + systemMessage;
-      }
+      // The served boot prompt leads the system message (#2047).
+      systemMessage = chatServed.text + '\n\n' + systemMessage;
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
     },
@@ -1106,7 +1100,7 @@ export const chatMutations = {
         }
 
         // Re-served on each chat turn so a newly approved revision takes effect.
-        if (agent && bootPromptServingEnabled()) {
+        if (agent) {
           // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
           const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);

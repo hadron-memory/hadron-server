@@ -70,6 +70,8 @@ beforeEach(async () => {
   newAgent = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: oldAgent.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: newAgent.id } });
+  await serveAgentBootPrompt(db, oldAgent.id, 'OLD {{worker.name}} {{worker.role}}');
+  await serveAgentBootPrompt(db, newAgent.id, 'NEW {{worker.name}} {{worker.role}}');
   for (const a of [oldAgent, newAgent]) {
     await M.createAgentTickerTemplate({}, { agentRef: a.id, input: { name: `${a.name} tick`, cadenceSeconds: 600 } }, ctx());
   }
@@ -112,23 +114,14 @@ describe('#2458 changeWorkerAgent: the change', () => {
   });
 
   it('a past session keeps the agent and role it ran under; the next bind gets the new ones and the new prompt', async () => {
-    await serveAgentBootPrompt(db, oldAgent.id, 'OLD {{worker.name}} {{worker.role}}');
-    await serveAgentBootPrompt(db, newAgent.id, 'NEW {{worker.name}} {{worker.role}}');
-    const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
-    try {
-      const past = await bind();
-      expect(await db.session.findUniqueOrThrow({ where: { id: past.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
-      await endOpenSessions();
-      await change();
-      expect(await db.session.findUniqueOrThrow({ where: { id: past.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
-      const next = await bind();
-      expect(await db.session.findUniqueOrThrow({ where: { id: next.id } })).toMatchObject({ agentId: newAgent.id, role: 'specs-engineer' });
-      expect((await composeWorkerPrompt(ctx(), await row())).text).toBe('NEW Ruin specs-engineer');
-    } finally {
-      if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-      else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-    }
+    const past = await bind();
+    expect(await db.session.findUniqueOrThrow({ where: { id: past.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
+    await endOpenSessions();
+    await change();
+    expect(await db.session.findUniqueOrThrow({ where: { id: past.id } })).toMatchObject({ agentId: oldAgent.id, role: 'security-engineer' });
+    const next = await bind();
+    expect(await db.session.findUniqueOrThrow({ where: { id: next.id } })).toMatchObject({ agentId: newAgent.id, role: 'specs-engineer' });
+    expect((await composeWorkerPrompt(ctx(), await row())).text).toBe('NEW Ruin specs-engineer');
   });
 });
 

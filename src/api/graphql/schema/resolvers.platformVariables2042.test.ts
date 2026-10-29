@@ -11,7 +11,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
-import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -80,7 +80,6 @@ describe('the chat binding — a chat binds no worker (cor:dmo:150:08)', () => {
 });
 
 describe('composeWorkerPrompt — filled at each bind', () => {
-  servingOn();
   let userId: string;
   let appId: string;
   let agentId: string;

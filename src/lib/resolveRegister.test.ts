@@ -23,7 +23,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { parseRunRegisterSnapshot, renderDerivedBlocks, resolveRegister } from './resolveRegister.js';
 import { mintAppRun } from '../jobs/appRuns.js';
-import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
+import { serveAgentBootPrompt, serveEveryAgent } from '../test/servedBootPrompt.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -66,6 +66,7 @@ beforeEach(async () => {
   channel = (await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id })).channel;
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
   entry = `hrn:node:${appMem.urn}:${node.loc}`;
+  await serveEveryAgent(db); // #2712: binds and runs need a served prompt
 });
 
 describe('resolveRegister', () => {
@@ -135,21 +136,15 @@ describe('resolveRegister', () => {
   });
 
   it('Worker.prompt appends the register block through renderDerivedBlocks; none for an attendee without rows', async () => {
-    const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
-    try {
-      await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, the {{worker.role}}.');
-      const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-      const prompt = await W.prompt(w, {}, ctx(admin.id));
-      expect(prompt).toContain('You are Iris, the engineer.');
-      expect(prompt).toContain('## Channels (register)');
-      expect(prompt).toContain(`- team — hrn:mem:${appMem.urn}:chats:team: both, install default; read + post; no messages yet`);
-      expect(renderDerivedBlocks(null)).toBe('');
-      await db.registerEntry.updateMany({ where: { appId: app.id }, data: { deletedAt: new Date() } });
-      expect(await W.prompt(w, {}, ctx(admin.id))).toBe('You are Iris, the engineer.');
-    } finally {
-      if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED; else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-    }
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, the {{worker.role}}.');
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const prompt = await W.prompt(w, {}, ctx(admin.id));
+    expect(prompt).toContain('You are Iris, the engineer.');
+    expect(prompt).toContain('## Channels (register)');
+    expect(prompt).toContain(`- team — hrn:mem:${appMem.urn}:chats:team: both, install default; read + post; no messages yet`);
+    expect(renderDerivedBlocks(null)).toBe('');
+    await db.registerEntry.updateMany({ where: { appId: app.id }, data: { deletedAt: new Date() } });
+    expect(await W.prompt(w, {}, ctx(admin.id))).toBe('You are Iris, the engineer.');
   });
 
   it('reports the Worker holder\'s access to an admin viewer, and no access when unheld', async () => {
@@ -211,9 +206,9 @@ describe('resolveRegister', () => {
       canRead: true, canPost: false, disclosure: 'HOST_MEMORY_NOT_WRITABLE',
       channel: expect.objectContaining({ hostMemoryId: null, hostMemoryUrn: null }),
     })]);
-    const bare = await mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
-    expect(bare.registerSnapshot).toBeNull();
-    expect(await R.register(bare, {}, ctx(admin.id))).toEqual([]);
+    // #2712 (R74): a run with no Agent has no attendee, and is now refused before it exists.
+    await expect(mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
+      .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NOT_SET' } });
   });
 
   it('attendeeRegister is gated on App participation', async () => {

@@ -6,7 +6,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import * as workerResolvers from '../api/graphql/schema/resolvers.worker.js';
 import { createTestableMcpServer } from './server.js';
-import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -31,7 +31,6 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.restoreAllMocks());
-servingOn();
 
 const server = () => createTestableMcpServer({ userId, appId, roles: ['READER'], clientId: `user:${userId}` }, { sessionId: generateId() });
 

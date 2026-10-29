@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildSchema, parse, validate, GraphQLObjectType, GraphQLInputObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
@@ -85,6 +85,21 @@ describe('#2712 — no source reference remains outside the migrations and histo
       readFileSync(file, 'utf8')
         .split('\n')
         .flatMap((line, i) => (/systemPrompt|promptOverride|system_prompt|prompt_override/.test(line) ? [`${file}:${i + 1}`] : [])),
+    );
+    expect(hits).toEqual([]);
+  });
+});
+
+// D1 (Holger, 2026-10-29, "Yes, retire it", decisions:2026-10-29-holger-rulings-to-vera): the serving switch is retired
+// with the literal prompts it fell back to, so a boot prompt is always the served compiled node.
+describe('#2712 D1 — BOOT_PROMPT_SERVE_ENABLED is retired', () => {
+  it('the gate module is gone and no source or document names the switch', () => {
+    expect(existsSync('src/lib/bootPrompt/gate.ts')).toBe(false);
+    const files = [...sources('src'), ...sources('scripts'), 'CLAUDE.md'];
+    const hits = files.flatMap((file) =>
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .flatMap((line, i) => (/BOOT_PROMPT_SERVE_ENABLED|bootPromptServingEnabled/.test(line) ? [`${file}:${i + 1}`] : [])),
     );
     expect(hits).toEqual([]);
   });

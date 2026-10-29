@@ -1,10 +1,8 @@
 /**
  * #2712 — a test fixture for an Agent whose boot prompt is SERVED: an approved compiled boot-prompt node in the
  * Agent's system memory with its provenance row, named by the Agent's pointer (cor:agt:040:06/:07). It replaces the
- * literal prompt column fixtures used to set, which #2712 deleted; the text reaches a bind, chat or run only with
- * serving ON (`servingOn`).
+ * literal prompt column fixtures used to set, which #2712 deleted.
  */
-import { afterEach, beforeEach } from 'vitest';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { computeApprovalHash } from '../lib/approvalHash.js';
@@ -46,15 +44,12 @@ export async function serveAgentBootPrompt(db: PrismaClient, agentId: string, co
   return node.id;
 }
 
-/** Turn boot-prompt serving ON for every test in the enclosing suite, restoring the prior value after each. */
-export function servingOn(): void {
-  let before: string | undefined;
-  beforeEach(() => {
-    before = process.env.BOOT_PROMPT_SERVE_ENABLED;
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
-  });
-  afterEach(() => {
-    if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-  });
+/**
+ * Serve a boot prompt for every live Agent that has no pointer yet, so a fixture's binds, chats and runs are serveable
+ * (#2712 retired the serving switch: an Agent with no approved prompt is refused BOOT_PROMPT_NOT_SET, cor:agt:040:10).
+ * Call it after the fixture's Agents exist; a test about the refusal itself must not.
+ */
+export async function serveEveryAgent(db: PrismaClient, content = 'Test boot prompt.'): Promise<void> {
+  const agents = await db.agent.findMany({ where: { bootPromptNodeId: null, deletedAt: null }, select: { id: true } });
+  for (const a of agents) await serveAgentBootPrompt(db, a.id, content);
 }
