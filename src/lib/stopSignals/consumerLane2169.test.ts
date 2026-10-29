@@ -361,6 +361,10 @@ describe('#2433 — a worker joins after its lane declared', () => {
 
     const next = await dueWakes(consumer, { accepts: ['STOP'], first: 200 });
     expect(next.pageInfo.hasNextPage).toBe(false);
+    const refreshed = await declarations();
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]!.lane).toBe(declaration[0]!.lane);
+    expect(refreshed[0]!.declaredAt.getTime()).toBeGreaterThan(declaration[0]!.declaredAt.getTime());
     const offered = next.wakes.filter((w: any) => w.worker.id === joined.id);
     expect(offered).toHaveLength(1);
     expect(offered[0].reasons).toEqual([expect.objectContaining({ kind: 'STOP', stop: expect.objectContaining({
