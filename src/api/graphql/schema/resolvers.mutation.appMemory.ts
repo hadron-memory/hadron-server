@@ -46,7 +46,7 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
-import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -218,6 +218,8 @@ export const appMemoryMutations = {
       });
     }
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
+    // #2730: the root node's loc is `name`; refuse an unprojectable one after the gate.
+    assertMemoryRootLoc(name);
     return withAuthorizedTx(ctx, [
       { kind: 'org', id: observed.organizationId }, { kind: 'app', id },
     ], async txCtx => {
@@ -303,6 +305,9 @@ export const appMemoryMutations = {
 
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
+    // #2730: the root node's loc is `name`; refuse an unprojectable one after the
+    // gates and before the tombstone reclaim or any create.
+    assertMemoryRootLoc(name);
     const agentSlug = agentSlugFromUrn(agent.urn);
     const slug = deriveSlugFromName(name);
 
