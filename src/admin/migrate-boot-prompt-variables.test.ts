@@ -6,6 +6,8 @@ import { generateId } from '../lib/id.js';
 import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { applyPlatformVariables } from '../lib/personaDescription.js';
+import { compileBootPrompt } from '../api/graphql/schema/compileBootPrompt.js';
+import { createOperatorConversionContext } from '../lib/auth/operatorConversion.js';
 import { convertBootPrompts } from './convert-boot-prompts.js';
 import { approveCheckedRevision, auditBootPromptTokens, migrateBootPromptVariables, renameLegacyTokens } from './migrate-boot-prompt-variables.js';
 
@@ -220,6 +222,21 @@ describe('#2704 — migration', () => {
     expect(raced).toBe(true);
     expect(report).toMatchObject({ migrated: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'NODE_WRITE_CONFLICT' }] });
     expect((await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' } })).content).toBe('Hi {{name}} edited');
+  });
+
+  it('a dry run agrees with apply on an include that holds a legacy token apply never renames', async () => {
+    const agent = await agentWith('coord', 'Hi {{name}}');
+    await convert();
+    // The source later gains an include of a part that is not one of the migrated sources, and the Agent is recompiled and approved.
+    await db.node.create({ data: { id: generateId(), memoryId: agent.systemMemoryId!, loc: 'parts:a', name: 'a', content: 'Part {{name}}' } });
+    await db.node.updateMany({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' }, data: { content: 'Hi {{name}} {{> parts:a}}', revSeq: { increment: 1 } } });
+    const compiled = await compileBootPrompt(createOperatorConversionContext(db), { kind: 'AGENT', agentId: agent.id }, { setPointer: false });
+    await approveCheckedRevision(db, compiled.node.id, compiled.node.content ?? '');
+    expect(compiled.node.content).toBe('Hi {{name}} Part {{name}}');
+    const preview = await migrate(false);
+    expect(preview).toMatchObject({ migrated: 0, candidates: 0, failed: 1, rows: [{ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' }] });
+    // The fixture's out-of-band source edit is itself refused by the revision guard; what matters is that apply fails the row too.
+    expect(await migrate()).toMatchObject({ migrated: 0, failed: 1 });
   });
 
   it('reports a converted Agent whose source is gone while its served text still holds a legacy token', async () => {

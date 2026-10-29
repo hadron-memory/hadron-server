@@ -71,7 +71,7 @@ export interface CompileBootPromptOptions {
 
 /** Thrown out of a `previewOnly` compile with the text it would have written; the rollback leaves nothing behind. */
 export class BootCompilePreview extends Error {
-  constructor(readonly text: string) { super('boot prompt preview'); }
+  constructor(readonly text: string, readonly occurrences: ReadonlyArray<{ kind: string; nodeId: string; revNo: number }>) { super('boot prompt preview'); }
 }
 
 /** One 30-second budget for the whole compile, not per attempt (Xavier 6258672877). */
@@ -366,7 +366,7 @@ async function decide(
       callerCanRead: (memoryId) => isMemoryReadableFresh(txCtx, memoryId, tx),
     });
 
-    if (options.previewOnly) throw new BootCompilePreview(plan.text);
+    if (options.previewOnly) throw new BootCompilePreview(plan.text, plan.occurrences);
 
     // Missing same-organisation grants are provisioned here, in the deciding transaction.
     if (recipient.kind === 'org') {
@@ -461,11 +461,11 @@ async function decide(
 }
 
 /** The text a compile would write now, assembled under the compile's own gate, locks and budget; nothing is written. */
-export async function previewBootPromptText(ctx: Context, target: CompileTargetInput): Promise<string> {
+export async function previewBootPromptText(ctx: Context, target: CompileTargetInput): Promise<{ text: string; occurrences: BootCompilePreview['occurrences'] }> {
   try {
     await compileBootPrompt(ctx, target, { previewOnly: true, setPointer: false });
   } catch (e) {
-    if (e instanceof BootCompilePreview) return e.text;
+    if (e instanceof BootCompilePreview) return { text: e.text, occurrences: e.occurrences };
     throw e;
   }
   throw new Error('previewOnly compile returned without a preview');

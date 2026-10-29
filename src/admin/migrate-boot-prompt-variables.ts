@@ -37,6 +37,7 @@ const LEGACY = /\{\{(name|role)\}\}/g;
 const WORKER_SOURCE_LOC = /^boot:workers:([^:]+):source$/;
 const CLOSED_SET: ReadonlySet<string> = new Set(PLATFORM_VARIABLE_KEYS);
 const hasText = (s: string | null | undefined): s is string => typeof s === 'string' && s.length > 0;
+const holdsLegacy = (t: string | null | undefined) => hasText(t) && scan(t).legacy > 0;
 
 /** The rename the migration makes, and the only edit it makes. */
 export const renameLegacyTokens = (text: string): string => text.replace(LEGACY, (_m, key: string) => `{{worker.${key}}}`);
@@ -173,7 +174,7 @@ export async function approveCheckedRevision(db: PrismaClient, nodeId: string, c
 
 async function migrateSource(
   ctx: Context,
-  p: { kind: 'AGENT' | 'WORKER'; ownerId: string; source: SourceRow; compiledNodeId: string; compile: Parameters<typeof compileBootPrompt>[1] },
+  p: { kind: 'AGENT' | 'WORKER'; ownerId: string; source: SourceRow; compiledNodeId: string; compile: Parameters<typeof compileBootPrompt>[1]; migratingSourceIds: ReadonlySet<string> },
   apply: boolean,
 ): Promise<MigrationRow> {
   const db = ctx.db as PrismaClient;
@@ -186,7 +187,14 @@ async function migrateSource(
     if (!apply) {
       // Read-only: assemble what the compile would produce from the source as it stands (nothing is written) and
       // compare it, renamed, with the served text, byte for byte, as apply does after its write.
-      if (renameLegacyTokens(await previewBootPromptText(ctx, p.compile)) !== expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
+      const preview = await previewBootPromptText(ctx, p.compile);
+      if (renameLegacyTokens(preview.text) !== expected) throw new RowFailure('COMPILED_TEXT_DIFFERS');
+      // Apply renames this row's source and, earlier in the run, the Agent sources; it never touches any other included
+      // node. A legacy token such an include contributes survives apply unrenamed, so apply would refuse the row.
+      for (const o of preview.occurrences) {
+        if (o.nodeId === p.source.id || p.migratingSourceIds.has(o.nodeId)) continue;
+        if (holdsLegacy(await readRecordedRevisionContent(db, o.nodeId, o.revNo))) throw new RowFailure('COMPILED_TEXT_DIFFERS');
+      }
       return row('candidate');
     }
     let source = p.source;
@@ -215,8 +223,9 @@ export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply
   const apply = opts.apply === true;
   const ctx = createOperatorConversionContext(db);
   const rows: MigrationRow[] = [];
+  // Sources this run renames: an include of one of them is renamed before the row that includes it (Agents first).
+  const migratingSourceIds = new Set<string>();
   const select = { id: true, memoryId: true, loc: true, content: true, revSeq: true, approvedRevNo: true } as const;
-  const holdsLegacy = (t: string | null | undefined) => hasText(t) && scan(t).legacy > 0;
 
   const agents = await db.agent.findMany({
     where: { deletedAt: null, bootPromptNodeId: { not: null } },
@@ -231,7 +240,8 @@ export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply
       continue;
     }
     if (!holdsLegacy(source.content) && !holdsLegacy((await servedText(db, agent.bootPromptNodeId!))?.text)) continue;
-    const r = await migrateSource(ctx, { kind: 'AGENT', ownerId: agent.id, source, compiledNodeId: agent.bootPromptNodeId!, compile: { kind: 'AGENT', agentId: agent.id } }, apply);
+    const r = await migrateSource(ctx, { kind: 'AGENT', ownerId: agent.id, source, compiledNodeId: agent.bootPromptNodeId!, compile: { kind: 'AGENT', agentId: agent.id }, migratingSourceIds }, apply);
+    if (r.outcome !== 'failed') migratingSourceIds.add(source.id);
     rows.push(r);
   }
 
@@ -250,7 +260,7 @@ export async function migrateBootPromptVariables(db: PrismaClient, opts: { apply
     const source = await db.node.findFirst({ where: { memoryId: install.id, loc: `boot:workers:${worker.id}:source`, role: 'boot-prompt', deletedAt: null }, select });
     if (!source || !WORKER_SOURCE_LOC.test(source.loc)) { await reportMissing('SOURCE_MISSING'); continue; }
     if (!holdsLegacy(source.content) && !holdsLegacy((await servedText(db, worker.bootPromptNodeId!))?.text)) continue;
-    const r = await migrateSource(ctx, { kind: 'WORKER', ownerId: worker.id, source, compiledNodeId: worker.bootPromptNodeId!, compile: { kind: 'WORKER', workerId: worker.id } }, apply);
+    const r = await migrateSource(ctx, { kind: 'WORKER', ownerId: worker.id, source, compiledNodeId: worker.bootPromptNodeId!, compile: { kind: 'WORKER', workerId: worker.id }, migratingSourceIds }, apply);
     rows.push(r);
   }
   const count = (o: MigrationOutcome) => rows.filter((r) => r.outcome === o).length;
