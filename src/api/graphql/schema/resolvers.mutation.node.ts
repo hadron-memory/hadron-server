@@ -2089,6 +2089,9 @@ export async function updateNodePropertiesWith(
   // pooled client rather than a closed transaction client.
   const effects: Array<() => void> = [];
   const written = await ctx.db.$transaction(async (lockTx) => {
+    // This path owns its transaction, so it takes the write authority first, as writeNodeCore's own-transaction path
+    // does: the authority anchors before the node lock, the memory row and the write (the documented lock order).
+    await lockInstallAuthorityFirst(lockTx, ctx, meta.memoryId);
     await lockTx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${meta.id}))`;
 
     // Fresh read UNDER the lock — the merge base can't be stale. `properties`
