@@ -187,7 +187,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
 import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
-import { nextSiblingSeq } from '../lib/nodeSeq.js';
+import { assertRootAllocationAllowed, lockRootSiblings, nextSiblingSeq } from '../lib/nodeSeq.js';
 import { BATCH_READ_MAX_NODES, BATCH_READ_MAX_BYTES } from '../lib/batchRead.js';
 import { isCiphertext } from '../lib/crypto.js';
 import { enqueueNodeEmbedding, pendingAtForRevival } from '../services/embedding/enqueue.js';
@@ -6230,12 +6230,8 @@ export function createMcpServerInstance(
       // Auto-assign `seq` for a NEW node joining an already-ordered sibling
       // list (parity with the GraphQL upsertNode resolver). Create-only; an
       // explicit `seq` arg wins; an unordered / empty list leaves it null.
-      const createSeq =
-        seq !== undefined
-          ? seq
-          : existing == null && !loc.includes(':')
-            ? await nextSiblingSeq(db, memoryId, loc)
-            : null;
+      // #443: root and nested allocation both read inside the write transaction (root under K).
+      const createSeq = seq !== undefined ? seq : null;
 
       // Spec 041 (PR-2, closes #206 write-side): on an encrypted memory,
       // encrypt with this session's key — or REJECT when locked. Pre-041 the
@@ -6431,6 +6427,8 @@ export function createMcpServerInstance(
       let upserted;
       try {
         upserted = await db.$transaction(async (tx) => {
+          // #443: a second root allocation in one transaction is refused before ANY lock of its own is taken.
+          if (seq === undefined && !loc.includes(':')) await assertRootAllocationAllowed(tx, memoryId);
           // #2206 (Xan's parity ruling on #2233): an Agent definition's authority before any memory/node/loc lock.
           await lockAgentDefinitionAuthority(tx, auth.userId ?? null, memoryId);
           if (resolvedEdges !== null) {
@@ -6502,8 +6500,12 @@ export function createMcpServerInstance(
             : undefined;
           // #443: nested siblings already share the held immediate-parent key.
           // Allocate on this writing transaction only after that wait.
-          const nestedSeq = seq === undefined && existing == null && loc.includes(':')
-            ? await nextSiblingSeq(tx, memoryId, loc) : null;
+          // A ROOT has no parent key: it takes K (held to commit) before the read.
+          // Keyed on the AUTHORITATIVE read under the locks, not the stale pre-transaction probe: a row that appeared after
+          // the probe must not make this root take K after its FOR UPDATE and revision writes.
+          const autoSeq = seq === undefined && pre == null;
+          if (autoSeq && !loc.includes(':')) await lockRootSiblings(tx, memoryId);
+          const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
