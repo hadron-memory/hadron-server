@@ -119,7 +119,6 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'TR Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx(admin.id),
   );

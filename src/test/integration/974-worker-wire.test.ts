@@ -18,6 +18,7 @@ import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt, servingOn } from '../servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -30,14 +31,13 @@ const M = resolvers.Mutation as any;
 
 /** Every advertised castWorker argument, plus the resolved-field surface. */
 const CAST = `
-  mutation Cast($appRef: ID!, $agentRef: ID, $role: String, $name: String, $promptOverride: String) {
-    castWorker(appRef: $appRef, agentRef: $agentRef, role: $role, name: $name, promptOverride: $promptOverride) {
+  mutation Cast($appRef: ID!, $agentRef: ID, $role: String, $name: String) {
+    castWorker(appRef: $appRef, agentRef: $agentRef, role: $role, name: $name) {
       id
       appId
       agentId
       name
       role
-      promptOverride
       memoryId
       prompt
       retiredAt
@@ -130,18 +130,18 @@ beforeAll(async () => {
       data: { names: ['Iris'] },
     },
   });
-  // Role-agent: carries the persona dressing the Worker.prompt field binds.
+  // Role-agent: its served boot prompt is the persona dressing the Worker.prompt field binds (#2712).
   const role = await M.createAgent(
     {},
     {
       orgId: org.id,
       name: 'Wire Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx,
   );
   roleAgent = { id: role.id };
+  await serveAgentBootPrompt(db, role.id, 'You are {{name}}, a {{role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Wire Team App', urn: `${org.urn}:team` },
@@ -162,6 +162,7 @@ afterAll(async () => {
 });
 
 describe('the Worker surface on the wire (#974)', () => {
+  servingOn();
   let zoeId: string;
   let irisId: string;
 
@@ -171,7 +172,6 @@ describe('the Worker surface on the wire (#974)', () => {
       agentRef: roleAgent.id,
       role: 'backend-engineer',
       name: 'Zoe',
-      promptOverride: 'Stay focused.',
     });
     expect(body.errors).toBeUndefined();
     const worker = body.data?.castWorker;
@@ -179,11 +179,10 @@ describe('the Worker surface on the wire (#974)', () => {
     expect(worker.appId).toBe(app.id);
     expect(worker.agentId).toBe(roleAgent.id);
     expect(worker.role).toBe('backend-engineer');
-    expect(worker.promptOverride).toBe('Stay focused.');
     expect(worker.memoryId).toBeTruthy();
     expect(worker.retiredAt).toBeNull();
-    // The resolved prompt: template bound, override appended as a paragraph.
-    expect(worker.prompt).toBe('You are Zoe, a backend-engineer.\n\nStay focused.');
+    // The resolved prompt: the served template, bound.
+    expect(worker.prompt).toBe('You are Zoe, a backend-engineer.');
     expect(worker.agent?.id).toBe(roleAgent.id);
     expect(worker.app?.id).toBe(app.id);
     zoeId = worker.id;

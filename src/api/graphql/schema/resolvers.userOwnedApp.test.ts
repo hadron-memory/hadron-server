@@ -384,7 +384,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
     // The victim's user-owned agent: organizationId NULL, visibility PERSONAL.
     const victimAgent = await resolvers.Mutation.createAgent(
       {},
-      { name: 'Victim Helper', systemPrompt: 'SECRET-SYSTEM-PROMPT' },
+      { name: 'Victim Helper' },
       ctx({ userId: otherId, roles: ['READER'] }),
     );
     expect(victimAgent.organizationId).toBeNull();
@@ -392,7 +392,7 @@ describe('installAgentIntoApp — personal-App accessibility gate (#756)', () =>
 
     const app = await seedPersonalApp();
     // Pre-#756 this passed the guard (`null !== null` ⇒ false) and returned
-    // the victim's agent with AGENT_INCLUDE — systemPrompt and all.
+    // the victim's agent with AGENT_INCLUDE — its whole definition.
     await expect(
       resolvers.Mutation.installAgentIntoApp(
         {},

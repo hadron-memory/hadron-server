@@ -1,7 +1,7 @@
 /**
  * #2047 (S10, cor:agt:040:03/:07/:09/:10) — the BIND surface: an unserveable boot prompt refuses the bind and rolls it
  * back whole, an approved one is served as-is and recorded in the bind's transaction, the retired columns are not read,
- * and an open session finishes under the revision it was bound with. With serving OFF nothing changes.
+ * and an open session finishes under the revision it was bound with. With serving OFF no authored text is served (#2712).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -53,9 +53,9 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 92047000, githubUsername: `serve-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'tester', systemPrompt: 'LEGACY {{worker.name}}' }, ctx());
+  agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'tester', description: 'LEGACY {{worker.name}}' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Iris', promptOverride: 'LEGACY OVERRIDE' }, ctx());
+  const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Iris' }, ctx());
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: `${org.urn}:sys`, organizationId: org.id } })).id;
 });
@@ -65,12 +65,12 @@ afterEach(() => {
 });
 
 describe('#2047 bind', () => {
-  it('serving OFF: the bind needs no pointer, writes no record and still reads the legacy prompt', async () => {
+  it('serving OFF: the bind needs no pointer, writes no record and reads no authored text (#2712)', async () => {
     delete process.env.BOOT_PROMPT_SERVE_ENABLED;
     expect(await code(bind())).toBe('RESOLVED');
     expect(await records()).toEqual([]);
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect((await composeWorkerPrompt(ctx(), w as never)).text).toContain('LEGACY Iris');
+    expect((await composeWorkerPrompt(ctx(), w as never)).text ?? '').not.toContain('LEGACY');
   });
 
   it('no pointer: the bind is refused BOOT_PROMPT_NOT_SET and rolled back whole (no session, no record)', async () => {

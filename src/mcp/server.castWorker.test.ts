@@ -16,6 +16,7 @@ import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -60,18 +61,18 @@ beforeEach(async () => {
     },
   });
 
-  // The role-agent carries the persona dressing the boot briefing binds.
+  // The role-agent's served boot prompt is the persona dressing the boot briefing binds (#2712).
   const role = await M.createAgent(
     {},
     {
       orgId: org.id,
       name: 'MCP Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
     },
     ctx,
   );
   roleAgent = { id: role.id, urn: role.urn };
+  await serveAgentBootPrompt(db, role.id, 'You are {{name}}, a {{role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'MCP Team App', urn: `${org.urn}:team` },
@@ -86,6 +87,8 @@ function hybridAuth(userId: string): AuthContext {
 }
 
 describe('hadron_cast_worker (#974)', () => {
+  // #2712: the briefing is the served boot prompt, which a cast previews only with serving ON.
+  servingOn();
   it('returns the confusable refusal code and original name without casting', async () => {
     const srv = createTestableMcpServer(hybridAuth(admin.id));
     await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, name: 'Alice' });
@@ -101,7 +104,7 @@ describe('hadron_cast_worker (#974)', () => {
       name: 'Zoe',
     });
     expect(out).toContain('Worker cast: **Zoe** (backend-engineer)');
-    // The boot briefing is the agent's template with {{name}}/{{role}} bound.
+    // The boot briefing is the agent's served prompt with {{name}}/{{role}} bound.
     expect(out).toContain('Boot briefing:');
     expect(out).toContain('You are Zoe, a backend-engineer.');
     // The full operation ran: a real Worker row, id echoed for session binding.

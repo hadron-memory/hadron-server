@@ -1,7 +1,7 @@
 /**
  * #2047 (S10, cor:agt:040:03/:10) — the CHAT surface: an unserveable boot prompt refuses startChat and sendChatMessage with
  * the bind's typed refusal and leaves no chat; an approved one is served with its variables bound to the Agent, never the
- * retired `Agent.systemPrompt`; the chat records at start and again only when its served revision changes.
+ * retired literal prompt (#2712 deleted it); the chat records at start and again only when its served revision changes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -51,7 +51,7 @@ beforeEach(async () => {
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', systemPrompt: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
+  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
@@ -73,10 +73,10 @@ afterEach(() => {
 const chatNodes = () => db.node.count({ where: { loc: { startsWith: 'chats:' } } });
 
 describe('#2047 chat', () => {
-  it('serving OFF: the legacy Agent prompt is bound and nothing is recorded', async () => {
+  it('serving OFF: no authored text is bound (#2712 deleted the literal prompt) and nothing is recorded', async () => {
     delete process.env.BOOT_PROMPT_SERVE_ENABLED;
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
-    expect(start.systemMessage).toContain('LEGACY chat-agent');
+    expect(start.systemMessage ?? '').not.toContain('LEGACY');
     expect(await db.servedPrompt.count()).toBe(0);
   });
 

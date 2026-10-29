@@ -96,7 +96,7 @@ beforeEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe('createApp accepts absorbed Station fields', () => {
-  it('persists appType, role, description, systemPrompt, agentTools, ai* fields', async () => {
+  it('persists appType, role, description, agentTools, ai* fields', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       {
@@ -106,7 +106,6 @@ describe('createApp accepts absorbed Station fields', () => {
         appType: 'CHATBOT',
         role: 'CONTRIBUTOR',
         description: 'a chatbot',
-        systemPrompt: 'you are helpful',
         agentTools: ['hadron_find_nodes', 'hadron_get_node'],
         aiProvider: 'anthropic',
         aiModel: 'claude-sonnet-4-20250514',
@@ -118,7 +117,6 @@ describe('createApp accepts absorbed Station fields', () => {
     expect(created.appType).toBe('CHATBOT');
     expect(created.role).toBe('CONTRIBUTOR');
     expect(created.description).toBe('a chatbot');
-    expect(created.systemPrompt).toBe('you are helpful');
     expect(created.agentTools).toEqual(['hadron_find_nodes', 'hadron_get_node']);
     // 036-ai-service-config: the legacy args land in the App's 'default'
     // registry config (columns dropped).
@@ -148,7 +146,7 @@ describe('createApp accepts absorbed Station fields', () => {
 });
 
 describe('updateApp updates absorbed Station fields', () => {
-  it('updates appType, role, description, systemPrompt, agentTools, ai*', async () => {
+  it('updates appType, role, description, agentTools, ai*', async () => {
     const created = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgId, agentRef: agentId, name: 'To Update' },
@@ -161,7 +159,6 @@ describe('updateApp updates absorbed Station fields', () => {
         appType: 'AGENT',
         role: 'ADMIN',
         description: 'updated',
-        systemPrompt: 'updated prompt',
         agentTools: ['hadron_create_node'],
         aiProvider: 'openai',
         aiModel: 'gpt-4',
@@ -172,7 +169,6 @@ describe('updateApp updates absorbed Station fields', () => {
     expect(updated.appType).toBe('AGENT');
     expect(updated.role).toBe('ADMIN');
     expect(updated.description).toBe('updated');
-    expect(updated.systemPrompt).toBe('updated prompt');
     expect(updated.agentTools).toEqual(['hadron_create_node']);
     const config = await db.aiServiceConfig.findFirstOrThrow({
       where: { appId: created.id, name: 'default' },

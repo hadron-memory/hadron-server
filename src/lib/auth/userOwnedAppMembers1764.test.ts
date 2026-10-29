@@ -19,6 +19,7 @@ import { participantAppIds } from './appParticipation.js';
 import { computeEffectiveAccess } from './effectiveAccess.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import type { AuthContext } from '../../middleware/auth.js';
+import { serveAgentBootPrompt, servingOn } from '../../test/servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -310,8 +311,11 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
 });
 
 describe('nested content behind the widened Worker gate (Riana P1, #1786)', () => {
+  // #2712: the owner's template is the Agent's served boot prompt, which Worker.prompt reads only with serving ON.
+  servingOn();
   async function fixture() {
-    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Secret role', urn: `own${generateId().toLowerCase()}:secret-role`, visibility: 'ORGANIZATION', systemPrompt: 'synthetic-agent-secret' } as never });
+    const agent = await db.agent.create({ data: { id: generateId(), ownerUserId: owner.id, name: 'Secret role', urn: `own${generateId().toLowerCase()}:secret-role`, visibility: 'ORGANIZATION' } as never });
+    await serveAgentBootPrompt(db, agent.id, 'synthetic-agent-secret');
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const mem = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, ownerUserId: owner.id, name: 'Strict worker state', urn: `own${generateId().toLowerCase()}:worker-state` } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'SecretWorker', slug: 'secretworker', memoryId: mem.id, heldByUserId: owner.id, heldAt: new Date() } });
@@ -324,7 +328,7 @@ describe('nested content behind the widened Worker gate (Riana P1, #1786)', () =
     const server = new ApolloServer({ typeDefs, resolvers });
     try {
       const result = await server.executeOperation(
-        { query: 'query($ref: ID!) { worker(ref: $ref) { id agent { id systemPrompt } prompt continuity { handoff { id content data } } } }', variables: { ref: workerId } },
+        { query: 'query($ref: ID!) { worker(ref: $ref) { id agent { id description } prompt continuity { handoff { id content data } } } }', variables: { ref: workerId } },
         { contextValue: ctx(as) },
       );
       const body = (result.body as any).singleResult;

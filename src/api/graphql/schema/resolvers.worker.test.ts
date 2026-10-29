@@ -2,8 +2,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
  *
- * A persona is universal DRESSING on an Agent (`personaRole` + the
- * `systemPrompt` template with {{name}}/{{role}} placeholders); the Worker is
+ * A persona is universal DRESSING on an Agent (`personaRole` + a served boot
+ * prompt with {{name}}/{{role}} placeholders, #2712); the Worker is
  * the named casting of an installed agent into an App — the local identity
  * ("Iris") that does attributable work. `castWorker` mints nothing: it casts
  * an EXISTING installed agent under a name, allocating the name against the
@@ -27,6 +27,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { sessionActivityAt, loadLastEventBySession, isSessionLive } from '../../../lib/sessionActivity.js';
 import { lockWorkerNames } from '../../../lib/workerName.js';
+import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -143,18 +144,18 @@ beforeEach(async () => {
   await createRoleNode(teamAgent.systemMemoryId, 'backend-engineer');
 
   // The role-agent — the persona dressing lives HERE (#974): personaRole is
-  // the role-resolution key, systemPrompt the {{name}}/{{role}} template.
+  // the role-resolution key; its served boot prompt is the {{name}}/{{role}} template (#2712).
   const role = await M.createAgent(
     {},
     {
       orgId: org.id,
       name: 'Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: TEMPLATE,
     },
     ctx(admin.id),
   );
   roleAgent = { id: role.id, urn: role.urn, systemMemoryId: role.systemMemoryId };
+  await serveAgentBootPrompt(db, roleAgent.id, TEMPLATE);
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
@@ -175,7 +176,8 @@ describe('castWorker — happy path', () => {
     expect(worker.agentId).toBe(roleAgent.id);
     // Role defaults from the agent's personaRole dressing.
     expect(worker.role).toBe('backend-engineer');
-    expect(worker.promptOverride).toBeNull();
+    // #2712: a worker carries no authored prompt text of its own.
+    expect(worker).not.toHaveProperty('promptOverride');
     expect(worker.retiredAt).toBeNull();
     expect(worker.createdBy).toBe(admin.id);
     // Working memory provisioned at cast: app-class, in the App's container,
@@ -205,15 +207,6 @@ describe('castWorker — happy path', () => {
     await expectCode(cast({ agentRef: roleAgent.id, role: 'debugger', name: 'Zoe' }), 'WORKER_ROLE_OVERRIDE_REFUSED');
     const worker = await cast({ agentRef: roleAgent.id, role: 'backend-engineer', name: 'Zoe' });
     expect(worker.role).toBe('backend-engineer');
-  });
-
-  it('stores a promptOverride verbatim', async () => {
-    const worker = await cast({
-      agentRef: roleAgent.id,
-      name: 'Zoe',
-      promptOverride: 'Prefer boring solutions.',
-    });
-    expect(worker.promptOverride).toBe('Prefer boring solutions.');
   });
 
   it('a blank caller-supplied name counts as ABSENT and refuses (#1050)', async () => {
@@ -745,7 +738,7 @@ describe('castWorker — user-owned App (spec 047)', () => {
     });
     const agent = await M.createAgent(
       {},
-      { name: 'My Engineer', personaRole: 'backend-engineer', systemPrompt: TEMPLATE },
+      { name: 'My Engineer', personaRole: 'backend-engineer' },
       ctx(owner.id),
     );
     personalAgent = { id: agent.id };
@@ -1332,38 +1325,30 @@ describe('Worker field resolvers', () => {
     expect(resolvedApp?.id).toBe(app.id);
   });
 
-  it('prompt binds {{name}}/{{role}} and appends the override as its own paragraph', async () => {
-    const worker = await cast({
-      agentRef: roleAgent.id,
-      name: 'Zoe',
-      promptOverride: 'Prefer boring solutions.',
+  describe('with serving ON (#2712: the prompt is the served node)', () => {
+    servingOn();
+
+    it('prompt binds {{name}}/{{role}} in the served text', async () => {
+      const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+      const prompt = await W.prompt(worker, {}, ctx(admin.id));
+      expect(prompt).toBe('You are Zoe, a backend-engineer on this team.\nWork from your own memories.');
     });
-    const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toBe(
-      'You are Zoe, a backend-engineer on this team.\nWork from your own memories.\n\nPrefer boring solutions.',
-    );
-  });
 
-  it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {
-    // A casting role that differs from the agent's can no longer be cast (WORKER_ROLE_OVERRIDE_REFUSED); the
-    // prompt still binds the worker's stored role, so a worker cast with an override before R222 keeps its own.
-    const cast0 = await cast({ agentRef: roleAgent.id, name: 'Legacy' });
-    const legacy = await db.worker.update({ where: { id: cast0.id }, data: { role: 'debugger' } });
-    expect(await W.prompt(legacy, {}, ctx(admin.id))).toContain('You are Legacy, a debugger on this team.');
-  });
-
-  it('override-only when the agent carries no template', async () => {
-    // The team agent has no systemPrompt dressing.
-    const worker = await cast({
-      agentRef: teamAgent.id,
-      name: 'Zoe',
-      promptOverride: 'Coordinate the team.',
+    it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {
+      // A casting role that differs from the agent's can no longer be cast (WORKER_ROLE_OVERRIDE_REFUSED); the
+      // prompt still binds the worker's stored role, so a worker cast with an override before R222 keeps its own.
+      const cast0 = await cast({ agentRef: roleAgent.id, name: 'Legacy' });
+      const legacy = await db.worker.update({ where: { id: cast0.id }, data: { role: 'debugger' } });
+      expect(await W.prompt(legacy, {}, ctx(admin.id))).toContain('You are Legacy, a debugger on this team.');
     });
-    const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toBe('Coordinate the team.');
   });
 
-  it('null when the agent carries no template and the worker no override', async () => {
+  it('serving OFF: no authored text reaches the prompt (#2712)', async () => {
+    const worker = await cast({ agentRef: roleAgent.id, name: 'Zoe' });
+    expect(await W.prompt(worker, {}, ctx(admin.id))).toBeNull();
+  });
+
+  it('null when the agent serves no prompt', async () => {
     const worker = await cast({ agentRef: teamAgent.id, name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
