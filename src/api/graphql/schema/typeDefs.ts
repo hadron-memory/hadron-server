@@ -5204,6 +5204,11 @@ export const typeDefs = `#graphql
     gate as hasLiveSession.
     """
     checkStatus: WorkerCheckStatus
+    """
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored, decides nothing;
+    judge its age from checkedAt. Null until a host reports, and masked to null on the same read gate as checkStatus.
+    """
+    terminal: WorkerTerminal
     "The role-agent behind the casting."
     agent: Agent
     "The App whose staff this casting fills."
@@ -9906,6 +9911,16 @@ export const typeDefs = `#graphql
     """
     setHostWorkerAvailability(input: SetHostWorkerAvailabilityInput!): WorkerAvailability!
     """
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — a host reports the terminal state of workers it
+    registers, as classified by its on-host sweep. The server builds what it stores (Worker.terminal): the host comes
+    from the key and its registration, the time from the server, and no screen text of any kind is accepted. A
+    malformed input refuses the whole call and stores nothing (BAD_USER_INPUT); a worker this host does not register is
+    refused for that item only (WORKER_NOT_FOUND, as setHostWorkerAvailability); an older report than the stored one
+    is skipped (TERMINAL_REPORT_STALE). The result carries the alarm verdict, computed and returned, never stored.
+    The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
+    """
+    setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
+    """
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
     missing, extra or malformed argument BAD_HOST_OPERATION_ARGS. worktree.create and worktree.remove: the worker's
@@ -14408,6 +14423,113 @@ export const typeDefs = `#graphql
     until: DateTime
   }
 
+  "#2771 — what a host's sweep saw in a worker's terminal."
+  enum WorkerTerminalState {
+    busy
+    idle
+    locked
+    dark
+  }
+
+  "#2771 — what the terminal's input prompt looked like."
+  enum WorkerTerminalPrompt {
+    empty
+    not_empty
+    menu
+    unknown
+  }
+
+  "#2771 — why a terminal is locked or dark: a closed code (hadron-cli#1187), never text from the screen."
+  enum WorkerTerminalReason {
+    model_at_capacity
+    token_budget_exhausted
+    rate_limited
+    guardrail_triggered
+    menu_or_question
+    shed_staged_not_relaunched
+    unrecognized
+    no_turn_for_due_ticker
+    no_terminal
+    bare_shell
+    no_agent
+  }
+
+  "#2771 — the host that made a worker's latest terminal report: its id from the key, its label from its registration."
+  type WorkerTerminalHost {
+    id: String!
+    label: String!
+  }
+
+  """
+  #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — a worker's latest terminal report, stored as the
+  server built it. It decides nothing (no check status, availability, matcher, stall rule or alarm). Judge its age
+  from checkedAt and reportedAt. Null until a host first reports; null to a reader without the Working-state gate.
+  """
+  type WorkerTerminal {
+    host: WorkerTerminalHost!
+    status: WorkerTerminalState!
+    prompt: WorkerTerminalPrompt!
+    "Required for locked and dark, null otherwise."
+    reason: WorkerTerminalReason
+    lastTurnAt: DateTime
+    "When the host classified the terminal."
+    checkedAt: DateTime!
+    "When the server stored the report."
+    reportedAt: DateTime!
+  }
+
+  "#2771 — one worker's terminal report. There is no free-text field."
+  input WorkerTerminalReportInput {
+    "A worker this host registers: its id, URN or name within the App."
+    worker: String!
+    status: WorkerTerminalState!
+    prompt: WorkerTerminalPrompt!
+    "Required for locked and dark; refused for busy and idle."
+    reason: WorkerTerminalReason
+    "When the worker's last turn ended, not after checkedAt."
+    lastTurnAt: DateTime
+    "When the host classified the terminal, not more than two minutes ahead of the server."
+    checkedAt: DateTime!
+  }
+
+  input SetHostWorkerTerminalsInput {
+    appRef: String!
+    "One to 200 reports, a worker at most once."
+    reports: [WorkerTerminalReportInput!]!
+  }
+
+  "#2771 — a worker by id and URN only: a host key is not given a Worker object."
+  type WorkerTerminalRef {
+    id: ID!
+    urn: String!
+  }
+
+  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND or TERMINAL_REPORT_STALE."
+  type WorkerTerminalRefusal {
+    "The worker as the host named it."
+    worker: String!
+    code: String!
+  }
+
+  "#2771 — a coordinator this host registers whose stored status is locked or dark."
+  type WorkerTerminalAlarm {
+    worker: WorkerTerminalRef!
+    status: WorkerTerminalState!
+    reason: WorkerTerminalReason
+  }
+
+  type SetHostWorkerTerminalsResult {
+    stored: [WorkerTerminalRef!]!
+    refused: [WorkerTerminalRefusal!]!
+    """
+    The alarm verdict, computed after the write and returned, never stored: coordinators of the App this host registers
+    whose stored status is locked or dark, leaving out a paused or stopped worker and a paused or halted team.
+    """
+    alarm: [WorkerTerminalAlarm!]!
+    "True when the App has no coordinator (a worker with the coordinator role that is not retired)."
+    noCoordinator: Boolean!
+  }
+
   input IssueHostOperationInput {
     appRef: String!
     "The registered host to run it."
@@ -14627,6 +14749,8 @@ export const typeDefs = `#graphql
     reportsToRetired: Boolean!
     "#2138 §3.4 (experimental) — whether it is checking its team channel as expected."
     checkStatus: WorkerCheckStatus
+    "#2771 — the latest terminal report a host made for it (Worker.terminal); null on the same read gate as checkStatus."
+    terminal: WorkerTerminal
     "The worker's own stored pause timestamp, including expired history; use checkStatus for current pause state. Separate from team pause and availability."
     pausedUntil: DateTime
     "The worker's top open assignment you can read, for display only. STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment."

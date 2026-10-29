@@ -17,6 +17,7 @@ import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
 import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
 import { loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
+import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import { groupComposition } from '../../../lib/agentTasks/composition.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
 
@@ -42,13 +43,14 @@ async function readTeamRoster(ctx: Context, appRef: string) {
       ]);
       const pauses = new Map(settings.map((s) => [s.workerId, s.pausedUntil]));
       const workingStateVisible = workerIds.length > 0 && await maySeeWorkerInternals(readCtx, app.id);
-      const holders = await loadRosterHolders(readCtx, tx, app.id, workerIds, workingStateVisible);
+      const { holders, terminals } = await loadRosterWorkingState(readCtx, tx, workerIds, workingStateVisible);
       return {
         appId: app.id,
         asOf,
         workers: entries.map((e) => ({ ...e, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
           pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
-          heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null })),
+          heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
+          terminal: terminals.get(e.workerId) ?? null })),
       };
     // An explicit, bounded read budget avoids imposing Prisma's implicit 5s interactive-transaction default
     // on the now-serialized bulk roster loaders. This does not change query/lock or test timeouts.
@@ -67,30 +69,33 @@ export const agentTaskMatchingQueries = {
 export type RosterHolder = { id: string; handle: string | null; name: string | null };
 
 /**
- * #2223 — who holds each worker's name, for the roster leaf.
+ * #2223 — who holds each worker's name, for the roster leaf. #2771 — and each worker's stored terminal report, read in
+ * the SAME query so the roster's query count does not grow.
  *
- * `heldByUserId`/`heldAt` are WORKING-STATE fields (cor:agt:020:09), narrower than the roster's audience, so
- * the worker working-state gate decides, once per App, before any holder is read: a reader who fails it
- * costs no holder query and every row answers null. A holder who is soft-deleted is null (fail closed; a live
+ * `heldByUserId`/`heldAt` and `terminal` are WORKING-STATE fields (cor:agt:020:09, cor:dmo:050:11), narrower than the
+ * roster's audience, so the worker working-state gate decides, once per App, before any is read: a reader who fails it
+ * costs no query and every row answers null. A holder who is soft-deleted is null (fail closed; a live
  * hold should never point at one). Each name goes through the shared #384 gate in bulk, so the number of
  * queries is constant in the number of workers and distinct holders. The projection is selected, never the
  * User row (findings:broadening-read-gate-leaks-nested-objects).
  */
-async function loadRosterHolders(
+async function loadRosterWorkingState(
   readCtx: Context,
   tx: Prisma.TransactionClient,
-  appId: string,
   workerIds: string[],
   workingStateVisible: boolean,
-): Promise<Map<string, { heldBy: RosterHolder; heldAt: Date | null }>> {
-  const out = new Map<string, { heldBy: RosterHolder; heldAt: Date | null }>();
-  if (workerIds.length === 0 || !workingStateVisible) return out;
-  const holds = await tx.worker.findMany({
-    where: { id: { in: workerIds }, heldByUserId: { not: null } },
-    select: { id: true, heldByUserId: true, heldAt: true },
+): Promise<{ holders: Map<string, { heldBy: RosterHolder; heldAt: Date | null }>; terminals: Map<string, StoredWorkerTerminal> }> {
+  const holders = new Map<string, { heldBy: RosterHolder; heldAt: Date | null }>();
+  const terminals = new Map<string, StoredWorkerTerminal>();
+  if (workerIds.length === 0 || !workingStateVisible) return { holders, terminals };
+  const rows = await tx.worker.findMany({
+    where: { id: { in: workerIds } },
+    select: { id: true, heldByUserId: true, heldAt: true, terminal: true },
   });
+  for (const r of rows) if (r.terminal) terminals.set(r.id, r.terminal as unknown as StoredWorkerTerminal);
+  const holds = rows.filter((r) => r.heldByUserId !== null);
   const holderIds = [...new Set(holds.map((h) => h.heldByUserId!))];
-  if (holderIds.length === 0) return out;
+  if (holderIds.length === 0) return { holders, terminals };
   const users = await tx.user.findMany({
     where: { id: { in: holderIds }, deletedAt: null },
     select: { id: true, handle: true, name: true },
@@ -100,15 +105,15 @@ async function loadRosterHolders(
   for (const h of holds) {
     const u = byId.get(h.heldByUserId!);
     if (!u) continue;
-    out.set(h.id, { heldBy: { id: u.id, handle: u.handle, name: nameVisible.has(u.id) ? (u.name || null) : null }, heldAt: h.heldAt });
+    holders.set(h.id, { heldBy: { id: u.id, handle: u.handle, name: nameVisible.has(u.id) ? (u.name || null) : null }, heldAt: h.heldAt });
   }
-  return out;
+  return { holders, terminals };
 }
 
 type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
   teamPlacement: RosterEntry['teamPlacement'] | null;
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
-  heldBy: RosterHolder | null; heldAt: Date | null;
+  heldBy: RosterHolder | null; heldAt: Date | null; terminal: StoredWorkerTerminal | null;
 };
 
 export const agentTaskMatchingFieldResolvers = {
@@ -128,5 +133,6 @@ export const agentTaskMatchingFieldResolvers = {
       : null),
     reportsToRetired: (r: RosterRow) => r.reportsTo?.retired ?? false,
     checkStatus: (r: RosterRow) => r.checkStatus,
+    terminal: (r: RosterRow) => workerTerminalView(r.terminal),
   },
 };

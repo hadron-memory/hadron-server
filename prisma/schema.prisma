@@ -3905,6 +3905,13 @@ model Worker {
   reportsToWorkerId String?   @map("reports_to_worker_id")
   /// S12: explicit human choice; false + null reportsTo is UNSET, never inferred NO_TEAM.
   explicitNoTeam Boolean @default(false) @map("explicit_no_team")
+  /// #2771 (proposed cor:agt:070:09) — the latest terminal report a HOST made for this worker, built by the server
+  /// (`src/lib/workerTerminal.ts`): host {id,label}, status, prompt, reason (a closed code), lastTurnAt, checkedAt,
+  /// reportedAt. Null until a host first reports. A stored report that DECIDES NOTHING: it feeds no `checkStatus`,
+  /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
+  /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
+  /// cannot store more. Read behind `maySeeWorkerInternals` (cor:dmo:050:11).
+  terminal Json? @map("terminal")
 
   app                  App                       @relation(fields: [appId], references: [id], onDelete: Cascade)
   /// SetNull: a worker row is never hard-deleted in normal operation, but an

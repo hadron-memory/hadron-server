@@ -85,6 +85,7 @@ import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEve
 import { assertCastable, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import {
   type Context,
   requireOrgRole,
@@ -3228,6 +3229,16 @@ export const workerFieldResolvers = {
         memoize: info?.operation?.operation === 'query',
       });
       return statuses.get(worker.id) ?? null;
+    },
+    /**
+     * #2771 (proposed cor:agt:070:09) — the latest terminal report a host made for this worker. Working-state
+     * internals: the same gate as checkStatus (cor:dmo:050:11), null to anyone else. The Prisma row carries the raw
+     * JSON, so this resolver is what keeps it from a reader who fails the gate. Decides nothing.
+     */
+    terminal: async (worker: { appId: string; terminal?: unknown }, _: unknown, ctx: Context) => {
+      if (!worker.terminal) return null;
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return workerTerminalView(worker.terminal as StoredWorkerTerminal);
     },
     /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate

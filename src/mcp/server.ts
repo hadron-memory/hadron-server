@@ -249,6 +249,7 @@ import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } 
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
+import { renderTerminal } from '../lib/workerTerminal.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
 
@@ -1541,6 +1542,8 @@ type ReadProjectionNode = {
   properties: unknown;
   data: unknown;
   content: string | null;
+  /** Only plaintext, raw abstract reads without an origin fingerprint use this. */
+  contentPresent?: boolean;
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
@@ -1549,8 +1552,8 @@ type ReadProjectionNode = {
 };
 
 const readProjectionInclude = {
-  outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-  incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } } },
+  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } } },
   memory: { select: { isEncrypted: true } },
 } as const;
 
@@ -1560,6 +1563,7 @@ async function loadCurrentReadProjection(
   authorizedMemoryId: string,
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
+  mode: 'body' | 'metadata' | 'abstract-raw' | 'abstract-expanded' = 'body',
 ): Promise<ReadProjectionNode | null> {
   return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
     let fresh: Context;
@@ -1573,10 +1577,24 @@ async function loadCurrentReadProjection(
     }
     return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
   }, async (tx) => {
-    return tx.node.findFirst({
-      where: { id: nodeId, deletedAt: null },
-      include: readProjectionInclude,
-    }) as Promise<ReadProjectionNode | null>;
+    const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
+    // The batch provenance pass retains only metadata. Its render pass reads
+    // one current body under the same reconciliation and authorization gate.
+    if (mode === 'body') return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
+    const row = await tx.node.findFirst({ ...args, omit: { content: true } });
+    if (!row) return null;
+    if (mode === 'metadata' || !row.abstract) return { ...row, content: null };
+    if (mode === 'abstract-raw' && !row.memory.isEncrypted && row.abstractOriginHash == null) {
+      // Presence is enough for the existing missing-fingerprint marker. Read
+      // it under this node's lock; never trust the earlier metadata snapshot.
+      const presence = await tx.$queryRaw<Array<{ present: boolean }>>`
+        SELECT (content IS NOT NULL AND octet_length(content) > 0) AS present
+        FROM nodes WHERE id = ${nodeId} AND memory_id = ${authorizedMemoryId} AND deleted_at IS NULL`;
+      return presence[0] ? { ...row, content: null, contentPresent: presence[0].present } : null;
+    }
+    // Fingerprinted, encrypted and expanded abstracts retain their exact
+    // plaintext predicate. Only one such body survives to the next render.
+    return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
   }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
 
@@ -1825,7 +1843,7 @@ async function renderNodeReadProjection(
     const canRead = (memoryId: string) =>
       opts.auth ? canReadMemory(db, opts.auth, memoryId, EXPLICIT_REF) : Promise.resolve(false);
     const resolve = (direction: 'out' | 'in') => via
-      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead })
+      ? resolveInheritedEdges(db, { nodeId: node.id, via, direction, canReadMemory: canRead, endpointMetadataOnly: true })
       : Promise.resolve([]);
     const [outgoing, incoming] = await Promise.all([resolve('out'), resolve('in')]);
     node = {
@@ -1875,7 +1893,7 @@ async function renderNodeReadProjection(
   // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
   const includeStaleMarker =
-    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent);
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
@@ -4828,24 +4846,7 @@ export function createMcpServerInstance(
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
-      const nodeReadInclude = {
-        // Filter edges whose other-end node is soft-deleted; dangling
-        // tombstones in the Related / Referenced-by section are no
-        // more useful than the deleted node itself.
-        outgoingEdges: {
-          include: { target: true },
-          where: { target: { deletedAt: null } },
-        },
-        incomingEdges: {
-          include: { source: true },
-          where: { source: { deletedAt: null } },
-        },
-        // Spec 032 — encryption gate for the abstract-stale predicate
-        // (FR-010). Riding the node fetch avoids a second round-trip
-        // (PR-210 review). resolveMemoryByUrn above doesn't carry
-        // `isEncrypted` and changing it has a wider blast radius.
-        memory: { select: { isEncrypted: true } },
-      } as const;
+      const nodeReadInclude = readProjectionInclude;
 
       // A LITERAL match wins over the fragment reading. `#data` decomposes to
       // parent + fragment, but a row's stored loc can BE `foo#data` (it
@@ -5084,6 +5085,7 @@ export function createMcpServerInstance(
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
           include: readProjectionInclude,
+          omit: { content: true },
         });
         markInherited(rows, inheritance.inheritedFrom);
         if (rows.length > BATCH_READ_MAX_NODES) {
@@ -5190,7 +5192,7 @@ export function createMcpServerInstance(
           }
           const rows = await db.node.findMany({
             where: { memoryId: mem.id, loc: { in: [...wanted] }, deletedAt: null },
-            include: projectionInclude,
+            include: projectionInclude, omit: { content: true },
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
@@ -5256,7 +5258,7 @@ export function createMcpServerInstance(
         const movedRows = allowedProbes.length
           ? await db.node.findMany({
               where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
-              include: projectionInclude,
+              include: projectionInclude, omit: { content: true },
             })
           : [];
         const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
@@ -5278,7 +5280,7 @@ export function createMcpServerInstance(
           const childId = childReadable.get(r.memoryUrn);
           const effective = childId ? await findEffectiveNodeIdByLoc(db, childId, r.literalLoc ?? r.loc) : null;
           const inherited = effective?.inheritedFrom
-            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude })
+            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude, omit: { content: true } })
             : null;
           if (inherited && effective?.inheritedFrom) {
             markInherited([inherited], new Map([[inherited.memoryId, effective.inheritedFrom]]));
@@ -5314,7 +5316,7 @@ export function createMcpServerInstance(
             (allowedIds.length > 0
               ? await db.node.findMany({
                   where: { id: { in: allowedIds } },
-                  include: projectionInclude,
+                  include: projectionInclude, omit: { content: true },
                 })
               : []
             ).map((r) => [r.id, r]),
@@ -5363,7 +5365,7 @@ export function createMcpServerInstance(
       for (const selected of ordered) {
         // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, 'metadata');
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
@@ -5410,11 +5412,28 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
-      for (const n of visible) {
+      for (const metadata of visible) {
         if (truncated) {
-          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
+          omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
           continue;
         }
+        const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        const via = inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId;
+        const mode = scope === 'abstract' ? (raw ? 'abstract-raw' : 'abstract-expanded') : 'body';
+        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, mode);
+        if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
+          || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
+          || (inheritedFrom && !(inheritedFrom.via
+            ? await stillInherited(db, inheritedFrom, n)
+            : prefixInheritance !== null && (await retainEffective(db, [n], prefixInheritance)).length === 1))) {
+          unavailable.push(echoByNodeId.get(metadata.id) ?? metadata.id);
+          continue;
+        }
+        if (inheritedFrom) markInherited([n], new Map([[n.memoryId, inheritedFrom]]));
+        // A concurrent revision after metadata prefetch must not pair the new
+        // body with provenance selected for an older revision. Only raced rows
+        // fall back to the single renderer's current provenance reads.
+        const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const served = lockState === 'locked' || raw
           ? n
@@ -5423,7 +5442,7 @@ export function createMcpServerInstance(
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
-          batch: batchProvenance,
+          batch: provenance,
           memoryUrnOf,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing
@@ -10777,7 +10796,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus, terminal] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10798,6 +10817,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.trailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
+          // #2771 — the same gate; the host's latest terminal report, null on deny or before a host reports.
+          resolvers.Worker.terminal(worker, {}, ctx),
         ]);
         // #2045: the boot-prompt pointer, through the SAME gated field resolvers
         // GraphQL serves (null on deny, and null when unset). A read only: R24
@@ -10903,6 +10924,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
             (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
+            (terminal ? `${renderTerminal(terminal, new Date())}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).
