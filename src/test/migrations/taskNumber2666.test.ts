@@ -74,6 +74,8 @@ describe('#2666 task-number SQL', () => {
         .toEqual([{ column_name: 'handle', is_nullable: 'NO' }, { column_name: 'task_number', is_nullable: 'NO' }]);
       await postPush();
       expect(await snapshot()).toEqual(once);
+      await expect(db.agentTask.create({ data: { appId: a.id, title: 'Next project', ownerUserId: u.id } }))
+        .resolves.toMatchObject({ taskNumber: 8n, handle: 'AT8' });
     } finally {
       // The failed red run may leave legacy NULLs: remove synthetic tasks with their App, then restore current SQL.
       try {

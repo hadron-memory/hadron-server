@@ -75,4 +75,12 @@ INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
 
 CREATE UNIQUE INDEX IF NOT EXISTS "agent_tasks_app_id_handle_key" ON "agent_tasks"("app_id", "handle");
 
+-- #2666: a db-push counter table may be empty while projects are already numbered.
+-- Preserve every existing high-water mark, including gaps from removed projects.
+INSERT INTO agent_task_counters (id, app_id, parent_task_id, last_number)
+  SELECT replace(gen_random_uuid()::text, '-', ''), app_id, NULL, MAX(task_number)
+    FROM agent_tasks WHERE parent_task_id IS NULL GROUP BY app_id
+  ON CONFLICT (app_id) WHERE parent_task_id IS NULL
+  DO UPDATE SET last_number = GREATEST(agent_task_counters.last_number, EXCLUDED.last_number);
+
 COMMIT;
