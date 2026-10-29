@@ -211,3 +211,24 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
   }
   return raised;
 }
+
+/** The evidence a dark-worker alarm carries beyond its reason: shown only to a reader of the worker's internals. */
+const EVIDENCE_KEYS = ['lastCheckedAt', 'oldestWakeAgeSeconds'] as const;
+
+/**
+ * An event's payload as one reader may see it. Every event but a dark-worker alarm is returned as written; a
+ * dark-worker alarm keeps its `reason` and window for everyone who may read the alarm, and its evidence (the last
+ * check, the oldest unacknowledged wake's age) only for a reader of the worker's internals (cor:agt:100:06, Proposed).
+ */
+export async function eventPayloadFor(
+  e: { type: string; appId: string; payload: unknown },
+  ctx: Context,
+): Promise<unknown> {
+  if (e.type !== DARK_WORKER_EVENT_TYPE || !e.payload || typeof e.payload !== 'object') return e.payload;
+  // Lazy: resolvers.worker imports a long chain of resolvers.
+  const { maySeeWorkerInternals } = await import('../../api/graphql/schema/resolvers.worker.js');
+  if (await maySeeWorkerInternals(ctx, e.appId)) return e.payload;
+  const rest: Record<string, unknown> = { ...(e.payload as Record<string, unknown>) };
+  for (const k of EVIDENCE_KEYS) delete rest[k];
+  return rest;
+}

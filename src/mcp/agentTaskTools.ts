@@ -205,7 +205,8 @@ export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
   // #2553: the handle first, then the id (one read: the event row carries only the id).
   const handle = e.taskId ? (await ctx.db.agentTask.findUnique({ where: { id: e.taskId }, select: { handle: true } }))?.handle ?? null : null;
-  const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
+  const shown = (await E.payload(e as never, {}, ctx)) as Record<string, unknown> | null; // #2755: evidence only for a reader of the worker's internals
+  const payload = shown && Object.keys(shown).length ? ` ${JSON.stringify(shown)}` : '';
   const line = `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
     `${e.taskId ? ` task ${handle ? `${handle} ` : ''}${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;

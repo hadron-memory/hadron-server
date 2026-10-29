@@ -10,9 +10,9 @@ ALTER TABLE apps ADD CONSTRAINT chk_apps_delivery_dark_alarm_window CHECK (
 -- #2755 — dark-worker episodes: at most ONE open episode per worker, across both reasons; a reason is one of two.
 CREATE TABLE IF NOT EXISTS dark_worker_episodes (
   id         TEXT PRIMARY KEY,
-  app_id     TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
-  worker_id  TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
-  event_id   TEXT NOT NULL UNIQUE REFERENCES agent_team_events(id) ON DELETE CASCADE,
+  app_id     TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  worker_id  TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  event_id   TEXT NOT NULL UNIQUE REFERENCES agent_team_events(id) ON DELETE CASCADE ON UPDATE CASCADE,
   reason     TEXT NOT NULL,
   opened_at  TIMESTAMP(3) NOT NULL,
   ended_at   TIMESTAMP(3),

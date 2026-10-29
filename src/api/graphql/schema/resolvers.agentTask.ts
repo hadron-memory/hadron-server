@@ -1872,6 +1872,11 @@ export const agentTaskFieldResolvers = {
       t.assignedAt ? partyView(ctx, t.assignedByWorkerId, t.assignedByWorkerId ? null : t.assignedBy) : null,
   },
   AgentTeamEvent: {
+    // #2755: a dark-worker alarm's evidence is for a reader of the worker's internals; every other payload is as written.
+    payload: async (e: { type: string; appId: string; payload: unknown }, _: unknown, ctx: Context) => {
+      const { eventPayloadFor } = await import('../../../lib/agentTasks/darkWorker.js');
+      return eventPayloadFor(e, ctx);
+    },
     severity: (e: { severity: string | null }) => (e.severity === 'alarm' ? 'ALARM' : null),
     actor: (e: { actorWorkerId: string | null; actorUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),

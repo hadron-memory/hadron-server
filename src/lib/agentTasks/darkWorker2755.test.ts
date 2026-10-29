@@ -292,3 +292,46 @@ describe('#2755 one platform post per episode in the team channel', () => {
     expect(chat.postSystemNotice).toBeTypeOf('function');
   });
 });
+
+describe('#2755 the alarm reads show the reason; the evidence only to a reader of the worker\'s internals', () => {
+  async function aliveAlarm() {
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    return (await alarms('Liam'))[0];
+  }
+  const { resolvers } = { resolvers: null as any };
+  const fields = async () => (await import('../../api/graphql/schema/resolvers.js')).resolvers as any;
+
+  it('GraphQL payload: a participant sees reason and evidence; a caller who cannot read the internals sees the reason only', async () => {
+    const alarm = await aliveAlarm();
+    const outsider = await db.user.create({ data: { id: generateId(), githubId: 98_999, githubUsername: `out-${generateId()}`, roles: ['READER'] } });
+    await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'member' } });
+    const F = await fields();
+    const asUser = { db, userId: user.id, roles: ['READER'] } as any;
+    const asOutsider = { db, userId: outsider.id, roles: ['READER'] } as any;
+    const seen = await F.AgentTeamEvent.payload(alarm, {}, asUser);
+    expect(seen).toMatchObject({ reason: 'overdue', lastCheckedAt: at(40).toISOString() });
+    expect(seen).toHaveProperty('oldestWakeAgeSeconds');
+    const hidden = await F.AgentTeamEvent.payload(alarm, {}, asOutsider);
+    expect(hidden).toMatchObject({ reason: 'overdue' });
+    expect(hidden).not.toHaveProperty('lastCheckedAt');
+    expect(hidden).not.toHaveProperty('oldestWakeAgeSeconds');
+  });
+
+  it('every other event keeps its payload as written', async () => {
+    const F = await fields();
+    const outsider = await db.user.create({ data: { id: generateId(), githubId: 98_998, githubUsername: `out-${generateId()}`, roles: ['READER'] } });
+    const e = { type: 'task.finished', appId: app.id, payload: { outcome: 'succeeded' } };
+    expect(await F.AgentTeamEvent.payload(e, {}, { db, userId: outsider.id, roles: ['READER'] })).toEqual({ outcome: 'succeeded' });
+  });
+
+  it('the MCP event line carries the same masking', async () => {
+    const alarm = await aliveAlarm();
+    const { renderEvent } = await import('../../mcp/agentTaskTools.js');
+    const outsider = await db.user.create({ data: { id: generateId(), githubId: 98_997, githubUsername: `out-${generateId()}`, roles: ['READER'] } });
+    const line = await renderEvent(alarm as never, { db, userId: outsider.id, roles: ['READER'] } as any);
+    expect(line).toContain('"reason":"overdue"');
+    expect(line).not.toContain('lastCheckedAt');
+    expect(line).not.toContain('oldestWakeAgeSeconds');
+  });
+});

@@ -13983,7 +13983,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
@@ -13998,6 +13998,7 @@ export const typeDefs = `#graphql
     chain: JSON
     acknowledgedBy: AgentTaskParty
     acknowledgedAt: DateTime
+    "A dark-worker alarm's payload carries its reason (overdue, wake-unacked) and window for every reader; its evidence (lastCheckedAt, oldestWakeAgeSeconds) only for a reader of the worker's internals."
     payload: JSON!
     createdAt: DateTime!
     """
