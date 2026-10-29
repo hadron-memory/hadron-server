@@ -174,6 +174,13 @@ describe('#2677 routing order: named, role holder, coordinator, managers, empty'
     expect(ids(await pick(admin.id))).toEqual([`WORKER:${b.id}`]);
   });
 
+  it('an unregistered code has no candidates but still routes to a readable coordinator, not the managers', async () => {
+    const roleless = await roleAgent('Other');
+    const c = await worker('Cora', roleless.id, 'coordinator'); await bindAs(c, roleless.id, 'coordinator');
+    const r = await (resolvers.Query as any).registerRolePick({}, { appRef: app.id, code: 'no.such.code' }, ctx(admin.id));
+    expect(ids(r)).toEqual([`WORKER:${c.id}`]);
+  });
+
   it('no coordinator either: every App manager as USER entries in the helper order, only for a manager caller', async () => {
     await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
     const r = await pick(admin.id);
