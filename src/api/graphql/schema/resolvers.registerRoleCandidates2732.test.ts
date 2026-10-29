@@ -5,6 +5,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { requireReadableAgent } from './resolvers.helpers.js';
+import { registerReadableAgents, type RosterGateAgent } from './registerReadableAgents2732.js';
+import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -61,4 +64,39 @@ it('omits only the Agent behind a revoked membership, with a live admission cont
   expect((await pick()).candidates.map(x => x.worker.id)).toEqual([live.workerId]);
   await db.orgMember.update({ where: { organizationId_userId: { organizationId: revokedOrg.id, userId } }, data: { deletedAt: null } });
   expect((await pick()).total).toBe(2);
+});
+
+it('matches the unchanged singular gate for public, deleted, owner, platform, impersonation and org arms', async () => {
+  const live = await rosterOrg('Parity live'), revoked = await rosterOrg('Parity revoked'), deleted = await rosterOrg('Parity deleted');
+  await db.orgMember.update({ where: { organizationId_userId: { organizationId: revoked.id, userId } }, data: { deletedAt: new Date() } });
+  await db.organization.update({ where: { id: deleted.id }, data: { deletedAt: new Date() } });
+  const row = (id: string, extra: Partial<RosterGateAgent> = {}): RosterGateAgent => ({
+    id, visibility: 'ORGANIZATION', deletedAt: null, organizationId: live.id, ownerUserId: null, ...extra,
+  });
+  const rows = [row('live'), row('revoked', { organizationId: revoked.id }), row('deleted-org', { organizationId: deleted.id }),
+    row('foreign', { organizationId: generateId() }), row('own', { organizationId: null, ownerUserId: userId }),
+    row('other-owner', { organizationId: null, ownerUserId: generateId() }), row('public', { visibility: 'PUBLIC' }),
+    row('deleted-public', { visibility: 'PUBLIC', deletedAt: new Date() })];
+  const impersonation = (orgId: string) => ({ sessionId: generateId(), actorUserId: generateId(), orgId, expiresAt: new Date(Date.now() + 60000) });
+  const contexts: Context[] = [context(), { db, roles: [] }, { db, userId: generateId(), roles: ['READER'] },
+    { db, userId, roles: ['ADMIN'] }, { db, userId, roles: ['OWNER'] },
+    { db, userId, roles: [], impersonation: impersonation(live.id) },
+    { db, userId, roles: [], impersonation: impersonation(revoked.id) }];
+  for (const c of contexts) {
+    const canRead = await registerReadableAgents(c, rows);
+    for (const a of [...rows, null]) {
+      let singular = true;
+      try { await requireReadableAgent(c, a, a?.id ?? 'missing'); }
+      catch (error) { if (!(error instanceof AgentNotFoundError)) throw error; singular = false; }
+      expect(canRead(a?.id ?? 'missing'), `${a?.id ?? 'missing'} / ${JSON.stringify({ user: c.userId, roles: c.roles, impersonation: c.impersonation?.orgId })}`).toBe(singular);
+    }
+  }
+});
+it('propagates a failed membership batch instead of concealing an outage as no candidates', async () => {
+  const org = await rosterOrg('Outage'); await rosterAgent(org.id, 'outage');
+  const broken = db.$extends({ query: { orgMember: { findMany: async ({ args, query }) => {
+    if (args.select?.role) throw new Error('membership batch unavailable');
+    return query(args);
+  } } } }) as unknown as typeof db;
+  await expect(pick(broken)).rejects.toThrow('membership batch unavailable');
 });
