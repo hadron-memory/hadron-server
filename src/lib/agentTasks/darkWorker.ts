@@ -23,6 +23,7 @@ import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckStatus.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import { computeDueWakes } from '../tickers/dueWakes.js';
 import type { AlarmChain } from './events.js';
 
 export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
@@ -34,10 +35,14 @@ const EXEMPT_PENDING = new Set(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 
 type DarkWorker = { workerId: string; reason: DarkReason; status: WorkerCheckStatus; oldestWakeAgeSeconds: number | null };
 
 /**
- * The workers of one App that are dark now, with the reason that would open an episode (OVERDUE first). The
- * unacknowledged-wake trigger joins this set in `unackedWakeAges` (a read-only view of the due wakes).
+ * The workers of one App that are dark now, with the reason that would open an episode (OVERDUE first), and the
+ * evidence: the last check and the age of the oldest wake left unacknowledged past the window.
  */
-async function darkWorkersOf(db: PrismaClient, app: { id: string }, now: Date): Promise<Map<string, DarkWorker>> {
+async function darkWorkersOf(
+  db: PrismaClient,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null; deliveryDarkAlarmWindowSeconds: number },
+  now: Date,
+): Promise<Map<string, DarkWorker>> {
   const workers = await db.worker.findMany({ where: { appId: app.id, retiredAt: null }, select: { id: true } });
   const out = new Map<string, DarkWorker>();
   if (workers.length === 0) return out;
@@ -45,12 +50,51 @@ async function darkWorkersOf(db: PrismaClient, app: { id: string }, now: Date): 
   const { locateTeamChatChannel } = await import('../../api/graphql/schema/resolvers.teamChat.js');
   const channel = await locateTeamChatChannel({ db } as Context, app.id);
   const statuses = await loadWorkerCheckStatuses(db, { appId: app.id, teamChannelId: channel?.channelId ?? null, workerIds: workers.map((w) => w.id), now });
+  const eligible = new Map<string, WorkerCheckStatus>();
   for (const [workerId, status] of statuses) {
     if (status.status === 'NO_SESSION') continue;
     if (status.status === 'PENDING' && status.pendingReason && EXEMPT_PENDING.has(status.pendingReason)) continue;
-    if (status.status === 'OVERDUE') out.set(workerId, { workerId, reason: 'overdue', status, oldestWakeAgeSeconds: null });
+    eligible.set(workerId, status);
+  }
+  if (eligible.size === 0) return out;
+  const wakeAges = await unackedWakeAges(db, app, [...eligible.keys()], app.deliveryDarkAlarmWindowSeconds, now);
+  for (const [workerId, status] of eligible) {
+    const oldestWakeAgeSeconds = wakeAges.get(workerId) ?? null;
+    if (status.status === 'OVERDUE') out.set(workerId, { workerId, reason: 'overdue', status, oldestWakeAgeSeconds });
+    else if (oldestWakeAgeSeconds !== null) out.set(workerId, { workerId, reason: 'wake-unacked', status, oldestWakeAgeSeconds });
   }
   return out;
+}
+
+/**
+ * The age, in seconds, of each worker's oldest due wake, for the workers whose is older than `windowSeconds`. A READ-ONLY
+ * preview of `computeDueWakes` as a manager of the App (the wake derivation is not duplicated here), so nothing is
+ * reserved or charged. A wake is "due and unacknowledged" for as long as it is still derived: an acknowledgement moves
+ * the marks that make it due. Only the wake's own anchor counts, never the delivery floor or the batching window.
+ */
+async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, workerIds: string[], windowSeconds: number, now: Date): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const wanted = new Set(workerIds);
+  let after: string | null = null;
+  for (;;) {
+    const page = await computeDueWakes({
+      ctx: { db, roles: [] } as unknown as Context,
+      app,
+      reader: { manager: true, userId: null },
+      requester: { userId: 'platform' },
+      first: 200,
+      after,
+      now,
+      preview: true,
+    });
+    for (const wake of page.wakes) {
+      if (!wanted.has(wake.workerId)) continue;
+      const ageSeconds = Math.floor((now.getTime() - wake.timing.anchorAt.getTime()) / 1000);
+      if (ageSeconds > windowSeconds) out.set(wake.workerId, Math.max(ageSeconds, out.get(wake.workerId) ?? 0));
+    }
+    if (!page.nextAfter) return out;
+    after = page.nextAfter;
+  }
 }
 
 /** The worker's reporting line, nearest first (cycle-safe, same App, retired workers skipped), then whoever manages the App. */
