@@ -192,7 +192,8 @@ async function migrateSource(
       // Apply renames this row's source and, earlier in the run, the Agent sources; it never touches any other included
       // node. A legacy token such an include contributes survives apply unrenamed, so apply would refuse the row.
       for (const o of preview.occurrences) {
-        if (o.nodeId === p.source.id || p.migratingSourceIds.has(o.nodeId)) continue;
+        // An include pinned to a revision keeps that revision's text: apply writes a NEW revision of a migrated source, so only an unpinned include follows it.
+        if (o.nodeId === p.source.id || (p.migratingSourceIds.has(o.nodeId) && o.selection.rev === null)) continue;
         if (holdsLegacy(await readRecordedRevisionContent(db, o.nodeId, o.revNo))) throw new RowFailure('COMPILED_TEXT_DIFFERS');
       }
       return row('candidate');

@@ -239,6 +239,21 @@ describe('#2704 — migration', () => {
     expect(await migrate()).toMatchObject({ migrated: 0, failed: 1 });
   });
 
+  it('a dry run fails a worker row whose include is pinned to the Agent source revision apply is about to supersede', async () => {
+    const agent = await agentWith('coord', 'Agent {{name}}');
+    const app = await appWith('mg-app', agent.id);
+    const w = await workerOf(app.id, agent.id, 'iris', 'Override {{role}}');
+    await convert();
+    const agentSource = await db.node.findFirstOrThrow({ where: { memoryId: agent.systemMemoryId!, loc: 'boot:source' } });
+    const install = await db.memory.findFirstOrThrow({ where: { appId: app.id, installOfAgentId: agent.id, isInstallMemory: true } });
+    await db.node.updateMany({ where: { memoryId: install.id, loc: `boot:workers:${w.id}:source` }, data: { content: `{{> boot:source rev=${agentSource.revSeq}}}\n\nOverride {{role}}`, revSeq: { increment: 1 } } });
+    const compiled = await compileBootPrompt(createOperatorConversionContext(db), { kind: 'WORKER', workerId: w.id }, { setPointer: false });
+    await approveCheckedRevision(db, compiled.node.id, compiled.node.content ?? '');
+    const preview = await migrate(false);
+    expect(preview.rows.find((r) => r.kind === 'WORKER')).toMatchObject({ outcome: 'failed', reason: 'COMPILED_TEXT_DIFFERS' });
+    expect((await migrate()).rows.find((r) => r.kind === 'WORKER')).toMatchObject({ outcome: 'failed' });
+  });
+
   it('reports a converted Agent whose source is gone while its served text still holds a legacy token', async () => {
     const agent = await agentWith('coord', 'Hi {{name}}');
     await convert();

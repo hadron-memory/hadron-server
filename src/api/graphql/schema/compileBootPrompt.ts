@@ -71,7 +71,7 @@ export interface CompileBootPromptOptions {
 
 /** Thrown out of a `previewOnly` compile with the text it would have written; the rollback leaves nothing behind. */
 export class BootCompilePreview extends Error {
-  constructor(readonly text: string, readonly occurrences: ReadonlyArray<{ kind: string; nodeId: string; revNo: number }>) { super('boot prompt preview'); }
+  constructor(readonly text: string, readonly occurrences: ReadonlyArray<{ kind: string; nodeId: string; revNo: number; selection: { rev: number | null } }>) { super('boot prompt preview'); }
 }
 
 /** One 30-second budget for the whole compile, not per attempt (Xavier 6258672877). */
