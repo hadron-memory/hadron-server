@@ -379,6 +379,7 @@ export async function consumeActionTicket(
 
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
+/** Budget fields apply only to MANUAL; SCHEDULE/WEBHOOK always read durable setup, ignoring caller amounts. */
 export interface MintAppRunArgs extends TriggerRunBudgets {
   /** Internal interactive caller; never accepted from trigger/event data. */
   consentPrincipal?: import('../middleware/auth.js').AuthContext;

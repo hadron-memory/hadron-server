@@ -197,3 +197,22 @@ it.each(['SCHEDULE', 'WEBHOOK'] as const)('updates the %s budget projection with
   expect(after.summary.limits).not.toEqual(before.summary.limits);
   amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
 });
+
+
+it('a corrupt stored schedule budget is refused per row without poisoning other due schedules', async () => {
+  const f = await fixture();
+  const bad = await M.createAgentSchedule({}, { input: { ...f.input, ...requested, name: 'bad' } }, f.ctx);
+  const good = await M.createAgentSchedule({}, { input: { ...f.input, ...requested, name: 'good' } }, f.ctx);
+  await db.agentSchedule.updateMany({ where: { id: { in: [bad.id, good.id] } }, data: { nextRunAt: new Date(0) } });
+  // CHECK constraints refuse this value in the DB. Inject a corrupt read to exercise the scheduler's error boundary.
+  const read = db.agentSchedule.findFirst.bind(db.agentSchedule);
+  const spy = vi.spyOn(db.agentSchedule, 'findFirst').mockImplementation(((args: any) => args?.where?.id === bad.id
+    ? Promise.resolve({ budgetTokens: 0, budgetActions: 3 }) : read(args)) as any);
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  try {
+    expect(await schedulerTick(db)).toBe(1);
+    expect(await db.appRun.count({ where: { triggerId: bad.id } })).toBe(0);
+    amounts(await db.appRun.findFirstOrThrow({ where: { triggerId: good.id } }));
+    expect(errors).toHaveBeenCalled();
+  } finally { spy.mockRestore(); errors.mockRestore(); }
+});
