@@ -21,11 +21,12 @@ import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../li
  */
 
 import { runAsActor } from '../lib/requestActor.js';
-import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
+import type { PrismaClient, Prisma, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
+import { emitNodeUrnV2 } from '../lib/urnEmit.js';
 import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
@@ -38,6 +39,7 @@ import {
   NoToolSupportError,
   ToolDeniedError,
   ToolExecutionError,
+  partialUsageOf,
   type LlmResult,
   type LlmObjectResult,
   type LlmToolLoopResult,
@@ -45,6 +47,11 @@ import {
 } from '../lib/llm/index.js';
 import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
+import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
+import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
+import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
+import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
+import { applyPlatformVariables, legacyFromValues } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -385,6 +392,10 @@ export interface MintAppRunArgs {
   /** Fan-out lineage (plan-spawn): set on child + callback runs. */
   parentRunId?: string | null;
   entryNodeUrn: string;
+  /** #2438: the entry's stable node id, when the caller holds it (the trigger
+   * row). Preferred over resolving `entryNodeUrn` — a renamed or moved entry
+   * keeps launching — and stamped onto the run alongside the display URN. */
+  entryNodeId?: string | null;
   eventData?: Record<string, unknown> | null;
   /** Trigger policy link, or a previously captured `{chain:[...]}` snapshot
    *  that must remain an additional restriction (integration events). */
@@ -458,9 +469,13 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // UNAVAILABLE on encrypted memories — the server never holds the key, and
   // a run has no session to supply one. Fail loud at the gate, not deep in
   // assembly. Resolved best-effort: an unresolvable entry URN falls through
-  // to the runner's normal assembly failure.
+  // to the runner's normal assembly failure. #2438: the caller's stable id,
+  // when present, resolves in preference to the (possibly stale) URN, so a
+  // renamed entry keeps passing through these gates rather than skipping them.
+  let resolvedEntryNodeId: string | null = null;
   try {
-    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeUrn);
+    const { id: entryNodeId } = await resolveNodeRef(db, args.entryNodeId ?? args.entryNodeUrn);
+    resolvedEntryNodeId = entryNodeId;
     const entryNode = await db.node.findUnique({
       where: { id: entryNodeId },
       select: { memory: { select: { isEncrypted: true, organizationId: true } } },
@@ -554,21 +569,51 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // Consent comes from setup, never the webhook/event payload. Child runs
   // inherit the parent's artifact; poll events use the origin trigger's pin.
   let automationPin: unknown = null;
+  // #2438: the entry id this run resolves by — the trigger row's stamp when
+  // the launch carries one (authoritative at mint), else the caller's, else a
+  // fresh resolution from the URN. Null on legacy rows and unresolvable refs.
+  let entryNodeId: string | null = args.entryNodeId ?? null;
   if (args.triggerKind === 'MANUAL') {
-    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, entryNodeId ?? args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
   } else if (args.triggerKind === 'SCHEDULE') {
-    automationPin = (await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+    const schedule = await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
+    automationPin = schedule?.automationPin;
+    if (schedule?.entryNodeId) entryNodeId = schedule.entryNodeId;
   } else if (args.triggerKind === 'WEBHOOK') {
-    automationPin = (await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null } }))?.automationPin;
+    const webhook = await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
+    automationPin = webhook?.automationPin;
+    if (webhook?.entryNodeId) entryNodeId = webhook.entryNodeId;
   } else if (args.parentRunId) {
     automationPin = args.triggerKind === 'INTEGRATION'
       ? await currentOriginPin(db, args.parentRunId)
       : (await db.appRun.findUnique({ where: { id: args.parentRunId } }))?.automationPin;
   }
 
-  const run = await db.appRun.create({
+  // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
+  // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
+  // cor:agt:040:07 (R74): a headless run with NO Agent has no boot prompt to serve and is refused the same way.
+  if (bootPromptServingEnabled() && !args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  const runServing = bootPromptServingEnabled() && args.agentId
+    ? await (async () => {
+        const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
+        return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
+      })()
+    : null;
+  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
+  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
+  let runModel = '';
+  if (runServing) {
+    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
+    try {
+      runModel = (await resolveAiConfigWithFallback(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, organizationId: args.organizationId })).config.model ?? '';
+    } catch (err) {
+      if (!(err instanceof NoAiConfigAvailableError)) throw err;
+    }
+  }
+  const runId = generateId();
+  const createRun = (client: Pick<PrismaClient, 'appRun'>) => client.appRun.create({
     data: {
-      id: generateId(),
+      id: runId,
       organizationId: args.organizationId,
       appId: args.appId,
       agentId: args.agentId ?? null,
@@ -577,6 +622,9 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       triggerId: args.triggerId ?? null,
       parentRunId: args.parentRunId ?? null,
       entryNodeUrn: args.entryNodeUrn,
+      // #2438: the stable id the pin's v4 format keys by; null keeps legacy
+      // runs on their stored pin's URN identity.
+      entryNodeId: entryNodeId ?? resolvedEntryNodeId,
       automationPin: (automationPin ?? undefined) as never,
       eventData: (args.eventData ?? undefined) as never,
       // Chain snapshot: `{chain: [...]}` since #510. checkActivation also
@@ -591,15 +639,44 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       // budget" — the two columns above are live-decremented remainders.
       budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
       budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
+      costMicroCents: 0n,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
     },
   });
+  const createAndRecord = async (client: Prisma.TransactionClient) => {
+    // #2047 PR-C: the revision is selected HERE, in the transaction that records it, under the compiled node's share lock
+    // (resolveServedBootPrompt), so cap-pruning cannot remove it between selection and record. The early resolve above
+    // is only the refusal preflight: a refused launch writes nothing.
+    const served = await resolveServedBootPrompt(client, { surface: 'run', appId: args.appId, agent: { id: runServing!.agent.id, name: runServing!.agent.name } });
+    const created = await createRun(client);
+    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
+    return created;
+  };
+  // A caller already inside a transaction (the webfetch event ingress) passes its transaction client, which cannot open
+  // another: the run and its record then join the caller's transaction and commit or roll back with it.
+  const run = runServing
+    ? ('$transaction' in db && typeof db.$transaction === 'function'
+        ? await db.$transaction(createAndRecord)
+        : await createAndRecord(db as unknown as Prisma.TransactionClient))
+    : await createRun(db);
   if (args.triggerKind === 'MANUAL' && automationPin) {
     await db.manualAutomationPin.create({ data: { runId: run.id, pin: automationPin as never, adoptedBy: args.userId ?? args.createdBy ?? null } });
   }
   if (args.publish !== false) await publishRunRequested(db, run.id);
   return run;
+}
+
+/** #2047 — append one `{hop, blocks}` entry to the run's derived-block log when the blocks differ from the last entry. */
+async function logDerivedBlocks(db: PrismaClient, runId: string, hop: number, blocks: string[]): Promise<void> {
+  const row = await db.appRun.findUnique({ where: { id: runId }, select: { derivedLog: true } });
+  const log = Array.isArray(row?.derivedLog) ? (row!.derivedLog as Array<{ hop: number; blocks: string[] }>) : [];
+  const last = log[log.length - 1];
+  // A run with no block yet and none now has nothing to record: the first entry exists to show what was seen.
+  if (last ? JSON.stringify(last.blocks) === JSON.stringify(blocks) : blocks.length === 0) return;
+  await db.$executeRaw`
+    UPDATE app_runs SET derived_log = COALESCE(derived_log, '[]'::jsonb) || ${JSON.stringify([{ hop, blocks }])}::jsonb
+    WHERE id = ${runId} AND status = 'RUNNING'`;
 }
 
 /** Publish + stamp publishedAt on success; NULL keeps the sweep republishing. */
@@ -655,6 +732,8 @@ export interface RunExecutionDeps {
     opts: {
       onToolCall: (action: `tool.${string}`, cost: 0 | 1) => Promise<boolean>;
       log: (message: string) => void;
+      /** The flow node this hop executes (#2485). */
+      nodeUrn?: string;
     },
   ) => Promise<LlmToolLoopResult>;
   writeOutput: (run: AppRun, nodeUrn: string, text: string) => Promise<string | null>; // returns written node id/urn
@@ -704,10 +783,13 @@ export async function executeAppRun(
 ): Promise<RunOutcome> {
   // #1610: a headless run writes as its App's agent, so every node it
   // creates or edits records that agent beside the run's user. A run that
-  // names no agent writes as nobody (both null).
-  const agent = await db.appRun.findUnique({ where: { id: runId }, select: { agentId: true } });
+  // names no agent writes as nobody (both null). #2176: the scope names the
+  // run's user explicitly, because the node stamp reads it from here while the
+  // revision reads it from runAuthContext(run); a worker loop has no
+  // surrounding user to inherit, and the two must agree.
+  const run = await db.appRun.findUnique({ where: { id: runId }, select: { agentId: true, userId: true } });
   const outcome = await runAsActor(
-    { workerId: null, agentId: agent?.agentId ?? null },
+    { workerId: null, agentId: run?.agentId ?? null, userId: run?.userId ?? null },
     () => executeAppRunInner(db, runId, deps),
   );
   if (outcome === 'completed' || outcome === 'failed') {
@@ -747,26 +829,35 @@ async function executeAppRunInner(
   if (claimed.count === 0) return 'skipped';
   const run = await db.appRun.findUniqueOrThrow({ where: { id: runId } });
 
-  const fail = async (code: string, message: string): Promise<RunOutcome> => {
+  const fail = async (code: string, message: string, reason?: string): Promise<RunOutcome> => {
     // Guarded transition: a concurrent cancelAppRun must not be overwritten
     // to FAILED — the audit log keeps CANCELLED (PR-493 review, Gemini).
     const res = await db.appRun.updateMany({
       where: { id: runId, status: 'RUNNING' },
-      data: { status: 'FAILED', failure: { code, message }, finishedAt: new Date() },
+      data: { status: 'FAILED', failure: { code, message, ...(reason ? { reason } : {}) }, finishedAt: new Date() },
     });
     return res.count === 1 ? 'failed' : 'skipped';
   };
 
-  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
+  // #2438: the entry address recorded at mint goes stale after a rename or
+  // move; the run's stable entry id (when stamped) resolves to the LIVE
+  // address, and hop 0 starts there. A resumed run's checkpoint still wins.
+  let entryAddress = run.entryNodeUrn;
+  if (!run.curNodeUrn && run.entryNodeId) {
+    const live = await db.node.findUnique({ where: { id: run.entryNodeId }, select: { loc: true, memory: { select: { urn: true } } } });
+    if (live) entryAddress = emitNodeUrnV2(live.memory.urn, live.loc);
+  }
+  let lastToolDenial: ActivationDenial | null = null;
+  const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
   try {
-    await deps.verifyAutomation(run, run.curNodeUrn ?? run.entryNodeUrn);
+    await deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
     // Per-ATTEMPT wall clock (D-MN-5): recomputed at each claim.
     const deadline = Date.now() + (run.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS);
 
     // D-MN-5 resume: the checkpoint (curNodeUrn + data) written after each
     // hop makes a bus redelivery continue at the failing hop, never re-run
     // completed ones. A fresh run has neither → starts at the entry.
-    let cur = run.curNodeUrn ?? run.entryNodeUrn;
+    let cur = run.curNodeUrn ?? entryAddress;
     let envelope: Record<string, unknown> =
       run.data !== null && typeof run.data === 'object' && !Array.isArray(run.data)
         ? { ...(run.data as Record<string, unknown>) }
@@ -791,6 +882,20 @@ async function executeAppRunInner(
       throw err;
     }
 
+    // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
+    // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
+    let servedText: string | null = null;
+    if (bootPromptServingEnabled() && run.agentId) {
+      const record = await db.servedPrompt.findFirst({ where: { runId } });
+      if (record) {
+        const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
+        if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
+        const values = record.variables as unknown as Parameters<typeof applyPlatformVariables>[1];
+        servedText = applyPlatformVariables(content, values, legacyFromValues(values));
+      }
+    }
+    const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);
+
     for (let hop = 0; ; hop++) {
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
@@ -809,10 +914,12 @@ async function executeAppRunInner(
       // budget (the kill-switch contract). Entering an ADDITIONAL hop
       // consumes one action (D-MN-3: budgetActions is the LLM-hop ceiling);
       // the first hop is covered by run.execute at mint — today's behavior.
-      if (!(await checkActivation(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 }))) {
+      const entryDenial = await activationVerdict(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 });
+      if (entryDenial) {
         return fail(
           'ACTIVATION_DENIED',
           'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
+          `DENIED_${entryDenial}`,
         );
       }
 
@@ -824,7 +931,7 @@ async function executeAppRunInner(
       } catch (err) {
         // A mid-flow node that can't be loaded is the D20 entry-missing
         // analog: an OBSERVABLE failed run, position preserved on the row.
-        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
         await checkConsent();
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
@@ -844,10 +951,53 @@ async function executeAppRunInner(
       // checkpoint advances, so a message landing in between is never skipped.
       const attention = await renderAttentionSection(db, run);
       if (attention.text) instructions = `${instructions}\n\n${attention.text}`;
+      // #2047: the derived blocks this hop saw, appended to the run's log only when they differ from the last entry (an
+      // empty list is an entry too, so a block going away is recorded). Guarded on RUNNING, before the hop's LLM call, so
+      // a hop that fails or is aborted still shows what it saw.
+      if (servedText !== null) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
 
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
       const maxTokens = budget != null ? { maxTokens: Math.max(1, Math.min(budget, 32_000)) } : {};
+      // Counts tokens the provider has billed against this run: the run's budget
+      // and spend, both daily quotas and one usage event. Used once per hop on
+      // success, and once for the completed steps of a REJECTED tool-loop call (#862).
+      const chargeUsage = async (tokensIn: number, tokensOut: number, provider: string, model: string) => {
+        const spent = tokensIn + tokensOut;
+        await db.appRun.updateMany({
+          where: { id: runId },
+          data: {
+            // The DECREMENT is clamped so the remaining budget never goes
+            // negative...
+            budgetTokens: { decrement: Math.min(spent, budget ?? spent) },
+            // ...but the #832 spend counter is NOT: it must stay truthful when a
+            // hop overshoots the remaining budget, which is precisely the run an
+            // operator is auditing. Same statement, so the two can't diverge.
+            tokensSpent: { increment: spent },
+          },
+        });
+        // Recorded even into overage — tokens are already spent at the provider;
+        // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
+        await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
+        await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+        // One usage event per hop — a failed flow still shows what it spent.
+        // Spec 046: recordLlmUsage enriches with attribution (user + org),
+        // the cost snapshot, and BYOK classification; it is throw-safe.
+        await recordLlmUsage(db, {
+          type: 'app-run',
+          nodeLoc: cur,
+          appId: run.appId,
+          userId: run.userId ?? null,
+          organizationId: run.organizationId,
+          provider,
+          model,
+          tokensIn,
+          tokensOut,
+          keyOwnerType: resolved.ownerType,
+          createdBy: run.userId ?? null,
+          appRunId: runId,
+        });
+      };
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
       let toolCalls: LlmToolLoopResult['toolCalls'] | null = null;
@@ -860,10 +1010,10 @@ async function executeAppRunInner(
             run,
             resolved,
             {
-              system:
+              system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
                 'Use the available tools as the step instructions direct, ' +
-                'then reply with a concise result of what you did.',
+                'then reply with a concise result of what you did.'),
               prompt: instructions,
               ...maxTokens,
             },
@@ -871,9 +1021,11 @@ async function executeAppRunInner(
             {
               onToolCall: async (action, cost) => {
                 await checkConsent();
-                return checkActivation(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                lastToolDenial = await activationVerdict(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                return lastToolDenial === null;
               },
               log: (message) => hopLogs.push(message),
+              nodeUrn: cur,
             },
           );
           toolCalls = loopResult.toolCalls;
@@ -889,9 +1041,9 @@ async function executeAppRunInner(
           const objectResult = await deps.llmObject(
             resolved,
             {
-              system:
+              system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
-                'Extract the requested fields from the task context below.',
+                'Extract the requested fields from the task context below.'),
               prompt: instructions,
               ...maxTokens,
             },
@@ -907,33 +1059,41 @@ async function executeAppRunInner(
           };
         } else {
           result = await deps.llm(resolved, {
-            system:
+            system: serve(
               'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
-              'Produce ONLY the requested output document — no preamble, no meta-commentary.',
+              'Produce ONLY the requested output document — no preamble, no meta-commentary.'),
             prompt: instructions,
             ...maxTokens,
           });
         }
       } catch (err) {
-        // #832 KNOWN GAP (PR #854 review, Codex P1): every return below skips
-        // the token accounting under it. For the tool-loop terminals the
-        // provider HAS already generated and billed the tool-call response,
-        // but `generateWithTools` discards the accumulated usage when a tool
-        // throws — it rethrows `fatal` without reading `out.totalUsage`, which
-        // the aborted SDK call never produced. So the tokens are not available
-        // here to count. `AppRun.tokensSpent` documents the under-report
-        // rather than inventing a number; closing it needs the tool loop to
-        // surface partial usage on the error.
+        // #862: a rejected tool-loop call carries the usage of the steps the SDK
+        // reported complete (`partialUsage`); the provider billed them, so they are
+        // counted here, once, BEFORE any exit below (terminal, transient reset or
+        // refusal). The step that failed is unavailable and is not counted; a
+        // rejection with no completed step counts nothing (unknown is not zero).
+        // Only measured steps become known: this closes #832's gap for those paths.
+        const partial = partialUsageOf(err);
+        if (partial) {
+          // An accounting fault must not replace the failure being classified below
+          // (terminal code, transient reset): log it and carry on. A charge is never
+          // retried here, so what was persisted is not counted twice.
+          try {
+            await chargeUsage(partial.tokensIn, partial.tokensOut, resolved.config.provider, resolved.config.model);
+          } catch (chargeErr) {
+            console.error(`[appRuns] run ${runId}: usage of the completed steps was not fully recorded:`, chargeErr instanceof Error ? chargeErr.message : chargeErr);
+          }
+        }
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
-        if (err instanceof AutomationPinError) return fail(err.code, err.message);
+        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }
         if (err instanceof ToolDeniedError) {
-          return fail('ACTIVATION_DENIED', err.message); // gate said no, mid-hop
+          return fail('ACTIVATION_DENIED', err.message, lastToolDenial ? `DENIED_${lastToolDenial}` : undefined); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
-          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message);
+          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message, err.cause.reason);
           return fail('TOOL_FAILED', err.message); // handler threw (D21)
         }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
@@ -957,38 +1117,7 @@ async function executeAppRunInner(
       // Live decrement: run budget + daily token counters, per hop — the
       // kill switch stays truthful across a multi-call flow.
       const spent = result.tokensIn + result.tokensOut;
-      await db.appRun.updateMany({
-        where: { id: runId },
-        data: {
-          // The DECREMENT is clamped so the remaining budget never goes
-          // negative...
-          budgetTokens: { decrement: Math.min(spent, budget ?? spent) },
-          // ...but the #832 spend counter is NOT: it must stay truthful when a
-          // hop overshoots the remaining budget, which is precisely the run an
-          // operator is auditing. Same statement, so the two can't diverge.
-          tokensSpent: { increment: spent },
-        },
-      });
-      // Recorded even into overage — tokens are already spent at the provider;
-      // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
-      await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
-      await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
-      // One usage event per hop — a failed flow still shows what it spent.
-      // Spec 046: recordLlmUsage enriches with attribution (user + org),
-      // the cost snapshot, and BYOK classification; it is throw-safe.
-      await recordLlmUsage(db, {
-        type: 'app-run',
-        nodeLoc: cur,
-        appId: run.appId,
-        userId: run.userId ?? null,
-        organizationId: run.organizationId,
-        provider: result.provider,
-        model: result.model,
-        tokensIn: result.tokensIn,
-        tokensOut: result.tokensOut,
-        keyOwnerType: resolved.ownerType,
-        createdBy: run.userId ?? null,
-      });
+      await chargeUsage(result.tokensIn, result.tokensOut, result.provider, result.model);
 
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({
@@ -1019,8 +1148,9 @@ async function executeAppRunInner(
       let writtenRef: string | null = null;
       if (spec.hasOutput || next === null) {
         // Output write — its own activation re-check (memory.write) + action budget.
-        if (!(await checkActivation(db, runId, 'memory.write', { actionCost: 1 }))) {
-          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).');
+        const writeDenial = await activationVerdict(db, runId, 'memory.write', { actionCost: 1 });
+        if (writeDenial) {
+          return fail('ACTIVATION_DENIED', 'memory.write denied (policy, cancellation, or action budget).', `DENIED_${writeDenial}`);
         }
         try {
           writtenRef = await deps.writeOutput(run, cur, result.text);
@@ -1084,7 +1214,7 @@ async function executeAppRunInner(
     }
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
-    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err));
+    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err), err instanceof AutomationPinError ? err.reason : undefined);
   } finally { deps.releaseAutomationProof?.(run); }
 }
 
@@ -1108,19 +1238,23 @@ export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } 
  * (optionally) action budget headroom, decremented atomically on the same
  * statement so cancellation/zeroing halts the run at its next action.
  */
-async function checkActivation(
+type ActivationDenial = 'CANCELLED' | 'POLICY' | 'BUDGET';
+
+/** The activation re-check's verdict: null = allowed, else the FIRST check that
+ * failed (#2439 records it, so a denial's cause is never guessed from balances). */
+async function activationVerdict(
   db: PrismaClient,
   runId: string,
   action: PolicyAction,
   opts: { actionCost?: number } = {},
-): Promise<boolean> {
+): Promise<ActivationDenial | null> {
   const run = await db.appRun.findUnique({
     where: { id: runId },
     select: { status: true, policy: true, budgetActions: true, budgetTokens: true },
   });
-  if (!run || run.status !== 'RUNNING') return false;
-  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return false;
-  if (run.budgetTokens != null && run.budgetTokens <= 0) return false; // zeroed = kill switch
+  if (!run || run.status !== 'RUNNING') return 'CANCELLED';
+  if (!evaluatePolicyChain(action, parseRunPolicySnapshot(run.policy))) return 'POLICY';
+  if (run.budgetTokens != null && run.budgetTokens <= 0) return 'BUDGET'; // zeroed = kill switch
   const cost = opts.actionCost ?? 0;
   if (cost > 0) {
     const res = await db.appRun.updateMany({
@@ -1130,9 +1264,23 @@ async function checkActivation(
       // `gte: cost` guard failing) increments nothing.
       data: { budgetActions: { decrement: cost }, actionsSpent: { increment: cost } },
     });
-    return res.count === 1;
+    if (res.count !== 1) return 'BUDGET';
   }
-  return true;
+  return null;
+}
+
+/**
+ * The activation re-check (cor:agt:010:02): status live + policy allows +
+ * (optionally) action budget headroom, decremented atomically on the same
+ * statement so cancellation/zeroing halts the run at its next action.
+ */
+async function checkActivation(
+  db: PrismaClient,
+  runId: string,
+  action: PolicyAction,
+  opts: { actionCost?: number } = {},
+): Promise<boolean> {
+  return (await activationVerdict(db, runId, action, opts)) === null;
 }
 
 // ── Spawn lifecycle (plan-spawn D-SP-3/-4) ──────────────────────────────────

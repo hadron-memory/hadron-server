@@ -1,36 +1,10 @@
 /**
- * Persona template substitution (#928/#974 — cor:agt:020:01): the ONE
- * definition of how `{{name}}` / `{{role}}` bind into a persona's template
- * prompt. The agent's `systemPrompt` is a TEMPLATE; the Worker's resolved
- * `prompt` field binds it with the casting's name and role at read time.
- *
- * (The #950-era `composePersonaDescription` / `humanizeRole` helpers were
- * removed with the persona-as-agent model: castWorker mints no Agent, so
- * nothing synthesizes a persona description anymore.)
+ * Prompt variable binding (cor:dmo:150:08): the ONE definition of how a boot
+ * prompt's variables bind at read time. S12 (#2049) removed the old
+ * name-only helpers and the name-placeholder probe; the legacy `{{name}}` /
+ * `{{role}}` tokens still bind, in the same pass, through `applyPlatformVariables`
+ * until the live-node token audit.
  */
-
-/** THE name token `applyPersonaTemplate` binds — exact, whitespace-sensitive. */
-export const PERSONA_NAME_TOKEN = '{{name}}';
-
-/** Substitute `{{name}}` / `{{role}}` into a template. split/join rather than
- * replaceAll so a name containing replacement-pattern characters ($&, $') is
- * inserted literally. */
-export function applyPersonaTemplate(template: string, name: string, role: string): string {
-  return template.split(PERSONA_NAME_TOKEN).join(name).split('{{role}}').join(role);
-}
-
-/**
- * Does a template bind the worker's name? Detection MUST share the composer's
- * exact token semantics (#985 review, Codex/Copilot): a whitespace-tolerant
- * probe would report `{{ name }}` as bound while `applyPersonaTemplate`
- * leaves it literal — flagging safe precisely the template that silently
- * produces a nameless worker. Every surface answering "does this template
- * name the worker?" (`TeamRole.hasNamePlaceholder`, `castWorkerPreview`)
- * goes through here.
- */
-export function templateBindsName(template: string | null | undefined): boolean {
-  return !!template && (template.includes(PERSONA_NAME_TOKEN) || template.includes('{{worker.name}}'));
-}
 
 /**
  * Platform variables (#2042, cor:dmo:150:08): the CLOSED set a boot prompt may
@@ -40,11 +14,11 @@ export function templateBindsName(template: string | null | undefined): boolean 
  * never calls it, so one Agent prompt serves every worker and a rename reaches
  * the next bind with no recompile.
  *
- * Exact tokens only, like `applyPersonaTemplate`. An unknown `{{worker.x}}`
+ * Exact tokens only. An unknown `{{worker.x}}`
  * stays as written (the set is closed, nothing else resolves here). Substitution
  * is a single pass over the template, so a value that itself contains a token
  * (a name like `{{agent.name}}`) is inserted literally, never re-expanded.
- * The old `{{name}}` / `{{role}}` placeholders stay until S12 (#1772).
+ * The old `{{name}}` / `{{role}}` placeholders stay until the live-node token audit (#1772).
  */
 export interface PlatformVariableValues {
   'worker.name': string;
@@ -55,6 +29,28 @@ export interface PlatformVariableValues {
   'worker.trailer': string;
   'worker.url': string;
   'session.llmModel': string;
+}
+
+/** The closed set's keys, in one place for the audit (#2704). */
+export const PLATFORM_VARIABLE_KEYS = [
+  'worker.name', 'worker.role', 'agent.name', 'worker.reportsTo.name', 'worker.signature', 'worker.trailer', 'worker.url', 'session.llmModel',
+] as const satisfies readonly (keyof PlatformVariableValues)[];
+
+// Exhaustiveness (#2704): a variable added to PlatformVariableValues but not to the list above fails to compile here,
+// so the audit can never call a supported token unknown.
+const platformVariableKeysAreExhaustive: Exclude<keyof PlatformVariableValues, (typeof PLATFORM_VARIABLE_KEYS)[number]> extends never ? true : never = true;
+void platformVariableKeysAreExhaustive;
+
+/**
+ * #2702: the legacy `{{name}}` / `{{role}}` values for SERVED text, taken from the variable values that text is bound with
+ * (`worker.name` / `worker.role`), so a recorded replay binds the recorded identity, never today's. Converted prompts keep
+ * these tokens until the live-node token audit (#1772); without this they reached the briefing literally. A record whose
+ * stored values lack either key leaves the tokens as written rather than printing "undefined".
+ */
+export function legacyFromValues(values: Partial<Pick<PlatformVariableValues, 'worker.name' | 'worker.role'>>): { name: string; role: string } | undefined {
+  const name = values['worker.name'];
+  const role = values['worker.role'];
+  return typeof name === 'string' && typeof role === 'string' ? { name, role } : undefined;
 }
 
 export function applyPlatformVariables(

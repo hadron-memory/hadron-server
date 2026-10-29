@@ -85,6 +85,32 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect(await db.node.count({ where: { memoryId, loc: 'n' } })).toBe(0);
   });
 
+  it('refuses a v1 include on create or update without changing nodes, revisions or derived edges (#2251)', async () => {
+    await create('b', 'B');
+    await create('a', '{{> b}}');
+    // Embedding scheduling can update its own timestamps asynchronously; pin the authored state.
+    const select = { id: true, content: true, revSeq: true, contentRevSeq: true, revisionContentHash: true } as const;
+    const node = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' }, select });
+    const edges = await includeEdges('a');
+    const revisions = await db.nodeRevision.findMany({ where: { nodeId: node.id } });
+    const tag = `{{> hrn:node:${memoryUrn.replace(':', '::')}::b }}`;
+    await expect(create('legacy', tag)).rejects.toMatchObject({ extensions: { code: 'INVALID_INCLUDE', tag } });
+    expect(await db.node.count({ where: { memoryId, loc: 'legacy' } })).toBe(0);
+    await expect(update('a', tag)).rejects.toMatchObject({ extensions: { code: 'INVALID_INCLUDE', tag } });
+    expect(await db.node.findUniqueOrThrow({ where: { id: node.id }, select })).toEqual(node);
+    expect(await db.nodeRevision.findMany({ where: { nodeId: node.id } })).toEqual(revisions);
+    expect(await includeEdges('a')).toEqual(edges);
+  });
+
+  it('does not resolve a non-hrn:node: include through a legacy URN alias (#2251)', async () => {
+    await create('b', 'B');
+    const tag = `{{> urn:node:${memoryUrn.replace(':', '::')}::b }}`;
+    // The global parser could find b, but include grammar classifies this target as a literal same-memory loc.
+    await expect(create('alias', tag)).rejects.toMatchObject({ extensions: { code: 'INCLUDE_TARGET_UNAVAILABLE', tag } });
+    expect(await db.node.count({ where: { memoryId, loc: 'alias' } })).toBe(0);
+    expect(await includeEdges('alias')).toEqual([]);
+  });
+
   // #2134 — cor:dmo:150:06: over-depth is a broken include at read, never a
   // write refusal. Depth counts from the includer: its own tags are level 1.
   it('saves a chain deeper than the cap, on create and on update; the read shows the notice past level 10 only', async () => {
@@ -125,10 +151,13 @@ describe('include tags through createNode / updateNode (#2040)', () => {
     expect((await includeEdges('w')).map(e => e.target.loc).sort()).toEqual(['x', 'y']);
   });
 
-  it('cycle detection does not depend on tag order (a node already walked on a shallow branch)', async () => {
-    await create('s', 'S');
+  it('cycle detection skips a node already walked on another branch without missing the cycle, in either tag order', async () => {
+    // `d` is reached first through `s` (it doesn't reach `a`), then again on the
+    // hub path, where it is skipped; the hub path still reaches `a`.
+    await create('d', 'D');
+    await create('s', '{{> d}}');
     await create('a', 'A');
-    for (let i = 1; i <= 11; i++) await create(`p${i}`, i === 11 ? '{{> a}}' : `{{> p${i + 1}}}`);
+    for (let i = 11; i >= 1; i--) await create(`p${i}`, i === 11 ? '{{> a}}' : `{{> d}} {{> p${i + 1}}}`);
     await create('hub', '{{> p1}}');
     expect(await code(update('a', '{{> s}} {{> hub}}'))).toBe('INCLUDE_CYCLE');
     expect(await code(update('a', '{{> hub}} {{> s}}'))).toBe('INCLUDE_CYCLE');
@@ -209,17 +238,26 @@ describe('run prompt assembly (#2040)', () => {
 });
 
 describe('copy paths conceal foreign targets (#2040, §10)', () => {
-  it('clone re-derives same-memory tags only: an unreadable foreign target gets no edge, exactly like a missing one', async () => {
+  it('clone refuses a copied tag to an unreadable foreign target, exactly like a missing one (#2167)', async () => {
     const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign.example' } });
     const foreign = await db.memory.create({ data: { id: generateId(), name: 'secret', urn: 'foreign.example:secret', class: 'knowledge', organizationId: foreignOrg.id } });
     await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'hidden', name: 'hidden', content: 'H' } });
     await create('local', 'L');
-    await create('src', '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}');
+    // Stored directly: a write ADDING these foreign tags is refused (#2041 S2b).
+    // The update below leaves them unchanged, so it saves and derives `local`'s edge.
+    const srcText = '{{> local}} {{> hrn:node:foreign.example:secret:hidden}} {{> hrn:node:foreign.example:secret:absent}}';
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'src', name: 'src', content: srcText } });
+    await update('src', `${srcText} .`);
     expect((await includeEdges('src')).map(e => e.target.loc)).toEqual(['local']);
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'inc.example' } });
-    const clone = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as());
-    const edges = await db.edge.findMany({ where: { memoryId: clone.id, governedKind: 'INCLUDE' }, include: { source: true, target: true } });
-    expect(edges.map(e => `${e.source.loc}>${e.target.loc}`)).toEqual(['src>local']);
-    expect(edges.every(e => e.targetId !== undefined && !e.loc.includes(foreign.id))).toBe(true);
+    // A copy is an includer write: every copied tag counts as added, so the
+    // unreadable and the missing foreign tag refuse alike, naming only the tag.
+    const refused = await M.cloneMemory(null, { ref: memoryId, targetUrn: `hrn:mem:${org.urn}:copy` }, as())
+      .then(() => null, (e: any) => e);
+    expect(refused?.extensions?.code).toBe('INCLUDE_TARGET_UNAVAILABLE');
+    expect(refused.extensions.tag).toBe('{{> hrn:node:foreign.example:secret:hidden}}');
+    expect(await db.memory.count({ where: { urn: `${org.urn}:copy` } })).toBe(0);
+    // loc-scope-ok: deliberately global — no include edge anywhere may name the foreign target.
+    expect(await db.edge.count({ where: { governedKind: 'INCLUDE', loc: { contains: foreign.id } } })).toBe(0);
   });
 });

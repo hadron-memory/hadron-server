@@ -48,6 +48,13 @@ const ORCA1 = () => ({
 const hostEvents = () => db.agentTeamEvent.findMany({ where: { type: { startsWith: 'host.' } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 
 describe('cor:agt:070:01 — a host registers which workers it can launch, and as which family', () => {
+  it('#2191 normalizes registration storage and existing aliases on launchable comparison', async () => {
+    const r = await registerHost(db, { ...ORCA1(), workers: [{ workerId: anne.id, family: ' OpenAI ', worktrees: ['repo/anne'] }] }, at('10:00'));
+    expect((await db.hostRegistrationWorker.findFirstOrThrow({ where: { registrationId: r.registrationId } })).family).toBe('codex');
+    await db.hostRegistrationWorker.updateMany({ where: { registrationId: r.registrationId }, data: { family: 'openai' } });
+    expect((await loadLaunchableFamilies(db, { appId: app.id }, at('10:01'))).get(anne.id)).toEqual(['codex']);
+  });
+
   it('the spec example: orca1 registers anne as codex, liam as glm, rook as claude', async () => {
     const r = await registerHost(db, ORCA1(), at('10:00'));
     expect(r.registered).toBe(true);

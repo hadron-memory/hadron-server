@@ -185,13 +185,15 @@ afterEach(() => {
 });
 
 describe('worker-owned ordinary reads', () => {
-  it('#1628 exposes the opt-out only on the GraphQL team-chat read, defaulting true', () => {
+  it('#1628 exposes the opt-out on the GraphQL team-chat read, defaulting true (and, since #2181, on the pinned channelMessages)', () => {
     const schema = buildSchema(typeDefs);
     const field = schema.getQueryType()!.getFields().teamChatMessages;
     expect(field.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
     expect(validate(schema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))).toEqual([]);
-    expect(validate(schema, parse('{ channelMessages(channelRef: "x", advanceReadState: false) { total } }')))
-      .toHaveLength(1);
+    // #2181: a pinned page must be able to defer its acknowledgement too (the client contract of hadron-cli#957).
+    expect(schema.getQueryType()!.getFields().channelMessages.args.find((arg) => arg.name === 'advanceReadState')?.defaultValue).toBe(true);
+    expect(validate(schema, parse('{ channelMessages(channelRef: "x", beforeSeq: 2, expectedIncarnation: 1, advanceReadState: false) { total } }')))
+      .toEqual([]);
     // Older-server refusal is a validation error naming exactly the new field/argument.
     const oldSchema = buildSchema(typeDefs.replace('advanceReadState: Boolean = true', ''));
     expect(validate(oldSchema, parse('{ teamChatMessages(appRef: "x", advanceReadState: false) { total } }'))[0].message)
@@ -785,7 +787,7 @@ describe('MCP parity and discovery gate', () => {
       { appRef: app.urn, sessionRef: sessionId, channelRef: channel.id, seq: 1 },
       userCtx(),
     );
-    expect(marked).toEqual({ workerId: worker.id, channelId: channel.id, lastSeenSeq: 1 });
+    expect(marked).toEqual({ workerId: worker.id, channelId: channel.id, lastSeenSeq: 1, channelIncarnation: 1, cursorIncarnation: 1 });
 
     await expect(M.markOwnTeamChatRead(
       {},
@@ -966,7 +968,16 @@ describe('MCP parity and discovery gate', () => {
       expect(teamRead).toContain('the transcript survives');
       expect(teamRead).not.toContain('cursor store unavailable');
       expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
-      expect(warn).toHaveBeenCalledTimes(2);
+      // Footer omission diagnostics may also warn; pin the two cursor failures
+      // this test induces without coupling to independent best-effort features.
+      const cursorWarnings = warn.mock.calls.filter(([message]) =>
+        message === '[hadron_channel_read] pilot read-state advance failed:' ||
+        message === '[hadron_team_chat_read] pilot read-state advance failed:',
+      );
+      expect(cursorWarnings.map(([message]) => message)).toEqual([
+        '[hadron_channel_read] pilot read-state advance failed:',
+        '[hadron_team_chat_read] pilot read-state advance failed:',
+      ]);
     } finally {
       queryRaw.mockRestore();
       warn.mockRestore();

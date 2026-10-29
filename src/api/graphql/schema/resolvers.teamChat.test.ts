@@ -1,3 +1,4 @@
+import { isRawChatNode } from '../../../services/embedding/rawChat.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /**
  * #939 — createTeamChatMessage + teamChatMessages: the team-chat platform
@@ -185,6 +186,8 @@ describe('createTeamChatMessage — happy path + bootstrap', () => {
 
     const row = await db.node.findUnique({ where: { id: msg.nodeId } });
     expect(row!.nodeType).toBe('chat-message');
+    expect(isRawChatNode(row!)).toBe(true);
+    expect(isRawChatNode(root!)).toBe(false);
     expect(row!.seq).toBe(1);
     expect(row!.content).toBe('first!');
     expect(row!.createdBy).toBe(appMember.id);
@@ -600,7 +603,7 @@ describe('teamChatMessages — mentions round trip', () => {
       body: ['```sh', `> ${token}`, token, '```'].join('\n'),
     });
     expect(codeWithQuotePrefix.mentions).toEqual([]);
-    expect(await read(ctx(appMember.id), { mentionsRef: s.workerId })).toEqual({ items: [], total: 0 });
+    expect(await read(ctx(appMember.id), { mentionsRef: s.workerId })).toMatchObject({ items: [], total: 0 });
 
     const addressed = await post(ctx(admin.id), { body: `\`${token}\` is an example. ${token}, please review.` });
     expect(addressed.mentions).toEqual([s.workerName.toLowerCase()]);
@@ -641,7 +644,7 @@ describe('teamChatMessages — mentions round trip', () => {
   it('an unresolvable mentionsRef collapses to the empty page, never an error', async () => {
     await post(ctx(appMember.id), { body: '@nobody hello' });
     const page = await read(ctx(appMember.id), { mentionsRef: 'hrn:agent:no-such-org.com:ghost' });
-    expect(page).toEqual({ items: [], total: 0 });
+    expect(page).toMatchObject({ items: [], total: 0 });
   });
 
   it("a Worker of ANOTHER App reads as the same empty page (Codex P1 — no existence oracle)", async () => {
@@ -672,10 +675,10 @@ describe('teamChatMessages — mentions round trip', () => {
     });
     await post(ctx(appMember.id), { body: '@iris are you there' });
     const page = await read(ctx(appMember.id), { mentionsRef: foreignWorker.id });
-    expect(page).toEqual({ items: [], total: 0 });
+    expect(page).toMatchObject({ items: [], total: 0 });
     // Nor does the foreign worker's NAME resolve here — this App has no Iris.
     const byName = await read(ctx(appMember.id), { mentionsRef: 'Iris' });
-    expect(byName).toEqual({ items: [], total: 0 });
+    expect(byName).toMatchObject({ items: [], total: 0 });
   });
 
   it('a user who is not on the roster reads as the empty page; the caller themself resolves', async () => {
@@ -683,7 +686,7 @@ describe('teamChatMessages — mentions round trip', () => {
     // outsider (a real user, resolvable globally) is not an AppMember —
     // filtering by them must look identical to a nonexistent ref.
     const page = await read(ctx(appMember.id), { mentionsRef: outsider.id });
-    expect(page).toEqual({ items: [], total: 0 });
+    expect(page).toMatchObject({ items: [], total: 0 });
     // The caller can always filter for their own mentions.
     const self = await read(ctx(appMember.id), { mentionsRef: appMember.id });
     expect(self.total).toBe(1);
@@ -786,7 +789,7 @@ describe('teamChatMessages — pagination + sinceSeq', () => {
 
   it('limit: 0 is count-only', async () => {
     const page = await read(ctx(appMember.id), { limit: 0 });
-    expect(page).toEqual({ items: [], total: 5 });
+    expect(page).toMatchObject({ items: [], total: 5 });
   });
 
   it('an App with no team chat yet reads as the empty page', async () => {
@@ -1332,9 +1335,9 @@ describe('teamChatMessages beforeSeq (#1116)', () => {
 
     const newest = await read(ctx(admin.id));
     expect(newest.total).toBe(205);
-    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 156));
-    expect((await read(ctx(admin.id), { beforeSeq: 156 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 106));
-    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    expect(newest.items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 186));
+    expect((await read(ctx(admin.id), { beforeSeq: 186 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 166));
+    expect((await read(ctx(admin.id), { sinceSeq: 0 })).items.map((m: { seq: number }) => m.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
     // The old portal's second request remains correct during rollout.
     expect((await read(ctx(admin.id), { offset: 5, limit: 200 })).items.at(-1)?.seq).toBe(205);
   });

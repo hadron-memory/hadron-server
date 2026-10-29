@@ -14,13 +14,14 @@
  * than buried so nobody mistakes it for an oversight, and so the
  * eventual fix has an obvious home.
  *
- * When safeguards land, the likely shape is an explicit per-asset
- * publish flag (default off) plus an unguessable token in the path, so
- * that only assets whose owner opted in are reachable and a leaked id
- * is not by itself sufficient. Until then, treat every uploaded asset
- * as world-readable-if-its-id-leaks and size the risk accordingly.
+ * Since #1667 (cor:dmo:060:15) a per-asset opt-in guards it: an asset is served
+ * only while its `publicLinkEnabled` switch is on (default off, switched by the
+ * memory's manager through `setAssetPublicLink`), on top of the deployment gate
+ * below and the checks that follow. A leaked id alone is therefore no longer
+ * enough for an asset nobody published.
  *
  * What this route still enforces, and must keep enforcing:
+ *   - `publicLinkEnabled` — the per-asset opt-in (#1667).
  *   - `scanStatus = CLEAN` — the malware gate is NOT relaxed here
  *     (cor:dmo:060:10 makes the clean-scan download gate an invariant
  *     independent of the entry path).
@@ -130,6 +131,9 @@ export function mountPublicAssetRoutes(app: Express, db: PrismaClient): void {
 
       if (!asset || asset.deletedAt || !asset.memoryId) return notFound();
       if (asset.scanStatus !== 'CLEAN') return notFound();
+      // #1667, cor:dmo:060:15: the per-asset opt-in. OFF is the default for every
+      // asset and answers the SAME bare 404 as a missing one.
+      if (!asset.publicLinkEnabled) return notFound();
 
       const memory = await db.memory.findUnique({
         where: { id: asset.memoryId },

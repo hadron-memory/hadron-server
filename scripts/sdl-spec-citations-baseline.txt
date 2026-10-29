@@ -13,7 +13,7 @@ cor:acl:080:02 3
 cor:acl:080:04 4
 cor:agt:010 2
 cor:agt:010:01 3
-cor:agt:010:02 3
+cor:agt:010:02 2
 cor:agt:020:01 6
 cor:agt:020:02 9
 cor:agt:020:03 7

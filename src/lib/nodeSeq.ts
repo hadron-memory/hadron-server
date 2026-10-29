@@ -8,10 +8,10 @@
  * sibling already carries a `seq`; an unordered (or empty) list is left alone
  * so we never impose an order that wasn't there.
  *
- * Spec: cor:dmo:020:01 (Node ordering).
+ * Spec: hrn:node:hadronmemory.com:specs:cor:dmo:020:01 (Node ordering).
  */
 
-import type { PrismaClient } from '../generated/prisma/index.js';
+import type { Prisma } from '../generated/prisma/index.js';
 
 /**
  * The `seq` a NEW node at `loc` should take to append to its sibling list, or
@@ -20,12 +20,16 @@ import type { PrismaClient } from '../generated/prisma/index.js';
  *
  * Siblings = the direct children of the new node's parent loc within the same
  * memory (same depth, same parent prefix) — the same direct-child rule
- * `hadron_get_next_node` uses to walk ordered children. Soft-deleted rows are
- * excluded, and the node itself is excluded (harmless on a fresh create,
+ * `hadron_get_next_node` uses to walk ordered children.
+ * For automatic nested creates, call on the writing transaction AFTER its
+ * existing ancestor locks; the parent key serializes read-max plus insert (#443).
+ * Root callers retain their historical behavior and have no sibling lock.
+ *
+ * Soft-deleted rows and the node itself are excluded (harmless on a fresh create,
  * correct when an upsert targets an existing loc).
  */
 export async function nextSiblingSeq(
-  db: PrismaClient,
+  db: Prisma.TransactionClient,
   memoryId: string,
   loc: string,
 ): Promise<number | null> {

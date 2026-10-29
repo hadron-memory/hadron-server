@@ -25,6 +25,7 @@ import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { mintAppRun, RunLaunchDeniedError, consumeActionTicket } from '../jobs/appRuns.js';
 import { assertUrlAllowed } from '../lib/webFetch.js';
+import { respondInternalFault } from '../lib/internalFault.js';
 
 const HPT_DEFAULT_TTL = process.env.WEBHOOK_TOKEN_TTL ?? '90d';
 const CALLBACK_TIMEOUT_MS = 10_000;
@@ -65,8 +66,7 @@ async function verifyWebhookPlatformToken(hpt: string, webhookId: string): Promi
 export function mountWebhookRoutes(app: Express, db: PrismaClient): void {
   app.all('/hooks/:secret/:name', (req, res) => {
     void handleWebhook(db, req, res).catch((err) => {
-      console.error('[webhook] handler error:', err);
-      if (!res.headersSent) res.status(500).json({ error: 'internal' });
+      respondInternalFault(res, 'webhook', err);
     });
   });
 }
@@ -135,6 +135,7 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
       triggerKind: 'WEBHOOK',
       triggerId: webhook.id,
       entryNodeUrn: webhook.entryNodeUrn,
+      entryNodeId: webhook.entryNodeId,
       eventData: {
         ...(webhook.eventData && typeof webhook.eventData === 'object' && !Array.isArray(webhook.eventData)
           ? (webhook.eventData as Record<string, unknown>)

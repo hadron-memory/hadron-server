@@ -100,8 +100,9 @@ export async function mintPrincipal(
  * caller sets the entity's `principalId` to the new/none value separately.
  */
 export async function releasePrincipal(db: PrincipalDb, principalId: string): Promise<void> {
-  await db.principal.update({
-    where: { id: principalId },
+  // Active-only, so releasing twice (a merge retry, an already-tombstoned row) keeps the original `releasedAt`.
+  await db.principal.updateMany({
+    where: { id: principalId, status: 'active' },
     data: { status: 'released', releasedAt: new Date() },
   });
 }

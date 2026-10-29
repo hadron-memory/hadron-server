@@ -1,3 +1,4 @@
+import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import type { Node } from '../../index.d.js';
 import { runAsSystem } from '../../lib/requestActor.js';
@@ -78,6 +79,12 @@ const createNodeAsSystem = async (
     if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
+    // #2043 — defensive: no boot-prompt role or compiled marker reaches this
+    // legacy path today (memory-root creation only); a future caller must not reopen it.
+    if (isBootPromptRole((node as { role?: string | null }).role) || (node as { nodeType?: string | null }).nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+      throw bootPromptCompiledWriteError('create', 'produces');
+    }
+    assertBootPromptWriteAllowed(existing, {}, 'update');
     let authoredEdit = false;
     if (existing) {
       const changes = diffNodeChanges(existing, fields);
@@ -117,8 +124,10 @@ const createNodeAsSystem = async (
       },
     });
     // #2040 — this legacy seam runs as the system with no principal, so tags
-    // reach only the node's own memory; a refusal rolls the write back.
-    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId]);
+    // reach only the node's own memory; a refusal rolls the write back. With no
+    // writing person it skips the writer's read check (#2041 S2b). Its only
+    // callers write a new memory's root node, with no caller content.
+    const tags = await assertIncludesWritable(tx, written, content, [node.memoryId], undefined, { includeSystemWrite: true });
     await syncDerivedIncludesEdges(tx, written, tags, [node.memoryId]);
     return written;
   });

@@ -39,7 +39,9 @@ import rateLimit from 'express-rate-limit';
 import { doubleCsrf, type DoubleCsrfUtilities } from 'csrf-csrf';
 import { decodeJwt } from 'jose';
 import { db } from '../integrations/db/client.js';
-import { signJwt, verifyJwt } from './jwt.js';
+import { signJwt } from './jwt.js';
+import { verifyAuthenticatedJwt, SignInNotLive, lockLiveSignInRoot } from './signIn.js';
+import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
 import {
   EMAIL_ENTRY_TEMPLATE,
@@ -54,12 +56,16 @@ import {
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
 import { isServerLocalPath } from './server-local-path.js';
+import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
+import { redirectAnchor } from './redirectAnchor.js';
+import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
   SUPPORTED_OAUTH_SCOPES,
   USER_API_KEY_LABEL_MAX_LEN,
-  mintUserApiKey,
+  mintUserApiKeyInTx,
   type OAuthScope,
 } from '../middleware/auth.js';
+import { respondInternalFault, respondOAuthServerError } from '../lib/internalFault.js';
 
 /**
  * Validate a `BASE_URL` env-var value for OAuth-metadata use. Exported
@@ -361,6 +367,29 @@ function validateRedirectUris(
 /** Length cap for the optional `client_name` field. */
 const CLIENT_NAME_MAX_LENGTH = 200;
 
+/** #156: longest `client_name` an operator log line carries. */
+const LOGGED_CLIENT_NAME_MAX_LENGTH = 80;
+
+/**
+ * #156: the attacker-controlled DCR `client_name`, made safe for a log line.
+ * Control characters and Unicode line/paragraph separators are stripped
+ * BEFORE truncating, so a name carrying a newline cannot forge a second
+ * log line and the cap measures visible characters.
+ */
+function loggableClientName(name: string): string {
+  return name.replace(/[\p{Cc}\u2028\u2029]/gu, '').slice(0, LOGGED_CLIENT_NAME_MAX_LENGTH);
+}
+
+/**
+ * #156: one operator log line for a completed OAuth event, in the
+ * `[prefix] event, payload-object` shape `mcpLog` uses. Callers pass public
+ * identifiers only: never a code, its hash, a PKCE challenge, `state` or a
+ * redirect URI.
+ */
+function logOAuthEvent(event: 'dcr_registered' | 'authcode_minted', payload: Record<string, string>): void {
+  console.log(`[oauth] ${event}`, payload);
+}
+
 /**
  * RFC 7591 §3 — DCR registration handler. The endpoint is
  * unauthenticated by RFC; abuse is bounded by the two rate limiters
@@ -417,19 +446,19 @@ export async function handleClientRegistration(
         clientId,
         clientName,
         redirectUris: validation.uris,
+        // #155: an unused client becomes collectable; redemptions extend it.
+        expiresAt: oauthClientExpiresAt(),
       },
     });
   } catch (err) {
     // Don't echo the DB error message back — it may name internal
     // identifiers or constraints. `server_error` is RFC 7591 §3.2.2's
     // catch-all error code.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to persist registration',
-    });
+    respondOAuthServerError(res, 'Failed to persist registration', err);
     return;
   }
 
+  logOAuthEvent('dcr_registered', { client_id: clientId, client_name: loggableClientName(clientName), ip: req.ip ?? '' });
   res.status(201).json({
     client_id: clientId,
     client_name: clientName,
@@ -546,6 +575,7 @@ export function renderConsent(params: ConsentParams): string {
     resource: params.resource,
     clientId: params.clientId,
     redirectUri: params.redirectUri,
+    redirectAnchor: redirectAnchor(params.redirectUri),
     codeChallenge: params.codeChallenge,
     codeChallengeMethod: params.codeChallengeMethod,
     state: params.state,
@@ -684,15 +714,24 @@ function buildAuthorizeCsrfProtection(): DoubleCsrfUtilities {
  * to the selected first-party login provider).
  */
 async function getUserIdFromCookie(req: Request): Promise<string | null> {
+  return (await getSessionFromCookie(req))?.userId ?? null;
+}
+
+/**
+ * The signed-in user and, for a factor-protected sign-in (#1897), its root. `verifyAuthenticatedJwt`
+ * has already refused an ended or absent sign-in, so a returned `signInId` was live at this read; the
+ * issuing transaction rechecks it under the user authority anchor.
+ */
+async function getSessionFromCookie(req: Request): Promise<{ userId: string; signInId: string | null } | null> {
   const token = req.cookies?.hadron_token;
   if (typeof token !== 'string' || token.length === 0) return null;
   try {
-    const payload = await verifyJwt(token);
+    const payload = await verifyAuthenticatedJwt(token, db);
     // Admin impersonation: an impersonation token must never authenticate the
     // OAuth consent screen (it could mint long-lived credentials as the
     // target). Treat it as anonymous.
     if (payload.imp) return null;
-    return typeof payload.sub === 'string' ? payload.sub : null;
+    return typeof payload.sub === 'string' ? { userId: payload.sub, signInId: payload.sid ?? null } : null;
   } catch {
     return null;
   }
@@ -785,7 +824,7 @@ async function validateClientAndRedirectUri(
   const client = await db.oAuthClient.findUnique({
     where: { clientId: rawClientId },
   });
-  if (!client || client.deletedAt) {
+  if (!isLiveOAuthClient(client)) {
     res.status(400).json({
       error: 'invalid_client',
       error_description: 'client_id is unknown',
@@ -951,6 +990,28 @@ function buildHandleAuthorizeGet(
         );
         return;
       }
+      // #168 (Holger's scoped (b) ruling): an MCP connector flow that did not
+      // pick a provider gets an explanatory page instead of a silent bounce.
+      // EXACT string equality on both conditions: `login_provider` omitted
+      // (so the CLI's explicit/default flows stay one-click) and `resource`
+      // === `${origin}/mcp` (no normalizing, case-folding or prefix match).
+      // `getServerOrigin` null means no trustworthy origin: never prompt.
+      if (q.login_provider === undefined && typeof q.resource === 'string') {
+        const origin = getServerOrigin(req);
+        if (origin !== null && q.resource === `${origin}/mcp`) {
+          res.type('html').send(
+            renderTemplate(SIGNIN_PROMPT_TEMPLATE, {
+              clientName,
+              redirectAnchor: redirectAnchor(redirectUri),
+              signInUrl: `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
+              // Fixed local path + the original query: never derived from the
+              // request target's origin (an absolute-form request line).
+              emailUrl: `/oauth/authorize${req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '?'}&login_provider=email`,
+            }),
+          );
+          return;
+        }
+      }
       // req.originalUrl is the path + query that hit Express
       // (e.g., `/oauth/authorize?client_id=…&state=…`). The
       // selected auth handler's `isServerLocalPath` predicate
@@ -1035,7 +1096,8 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   // 1. Auth check — same as GET. Without a signed-in user we can't
   // mint an AuthCode, but we ALSO can't safely redirect (we haven't
   // re-validated the redirect_uri yet). Treat as 401.
-  const userId = await getUserIdFromCookie(req);
+  const session = await getSessionFromCookie(req);
+  const userId = session?.userId ?? null;
   if (!userId) {
     res.status(401).json({ error: 'unauthorized', error_description: 'Not signed in' });
     return;
@@ -1120,29 +1182,42 @@ async function handleAuthorizePost(req: Request, res: Response): Promise<void> {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10-minute expiry
 
   try {
-    await db.authCode.create({
-      data: {
-        codeHash,
-        clientId: validated.clientId,
-        userId,
-        redirectUri,
-        codeChallenge,
-        resource: [resource],
-        oauthScopes: parsedScopes.scopes,
-        expiresAt,
-        createdBy: userId,
-      },
+    // #1897 / R66: the code carries its sign-in root, rechecked under the user authority anchor so
+    // a cancellation cannot interleave with the issue (no code is born from an ended sign-in).
+    await db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: userId }], 'shared');
+      if (session?.signInId) await lockLiveSignInRoot(tx, session.signInId, userId);
+      await tx.authCode.create({
+        data: {
+          codeHash,
+          clientId: validated.clientId,
+          userId,
+          redirectUri,
+          codeChallenge,
+          resource: [resource],
+          oauthScopes: parsedScopes.scopes,
+          expiresAt,
+          createdBy: userId,
+          signInId: session?.signInId ?? null,
+        },
+      });
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof SignInNotLive) {
+      res.status(401).json({ error: 'unauthorized', error_description: 'Not signed in' });
+      return;
+    }
     // Same posture as /oauth/register: a thrown Prisma error must
     // not become an unhandled rejection. 500 is the catch-all per
     // RFC 7591 §3.2.2.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'Failed to issue authorization code',
-    });
+    respondOAuthServerError(res, 'Failed to issue authorization code', error);
     return;
   }
+
+  // #156: logged only after the mint committed; the raw code never reaches a log.
+  // `user` is the id's random tail: ids are UUIDv7, so the leading characters are
+  // a millisecond timestamp shared by every user created in the same minute.
+  logOAuthEvent('authcode_minted', { client_id: validated.clientId, user: userId.slice(-8), ip: req.ip ?? '' });
 
   // 7. Redirect with the RAW code (not the hash). Single-use; the
   // /token handler atomically claims it via updateMany-with-conditional.
@@ -1317,8 +1392,7 @@ function buildHandleAuthorizeEmailPost(_csrf: DoubleCsrfUtilities) {
     // Option-C legs).
     await sendMagicLink(email, db, undefined, undefined, returnTo);
   } catch (err) {
-    console.error('OAuth email-entry send error:', err);
-    res.status(500).json({ error: 'Failed to send verification email' });
+    respondInternalFault(res, 'oauth/email-entry', err);
     return;
   }
 
@@ -1390,8 +1464,7 @@ async function handleAuthorizeEmailCodePost(req: Request, res: Response): Promis
     });
     res.redirect(returnTo as string);
   } catch (err) {
-    console.error('OAuth demo-code sign-in error:', err);
-    res.status(500).json({ error: 'Sign-in failed' });
+    respondInternalFault(res, 'oauth/demo-code', err);
   }
 }
 
@@ -1637,75 +1710,86 @@ async function handleOAuthToken(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  // 5. Atomic claim (SC-005 / R-9 race guard).
-  // Postgres handles the UPDATE under the row lock; under concurrent
-  // attempts, exactly one query sees count=1 + the others see count=0.
-  // No transaction / SELECT FOR UPDATE needed — the conditional WHERE
-  // is the lock.
-  let claimedCount: number;
+  // 5+6. Claim the code AND mint the key in ONE transaction under the user authority anchor
+  // (#1897 / R66). The claim is still the SC-005 / R-9 race guard (conditional updateMany under the
+  // row lock: exactly one concurrent redeemer sees count=1). Holding the anchor across both steps is
+  // what orders this against a first-passkey cancellation (`endSignInsCompletedBy`, which takes the
+  // anchor exclusively): cancellation first => the root is ended, the mint refuses and the whole
+  // transaction (claim included) rolls back, so no key exists; mint first => the cancellation finds
+  // the key by its origin root and revokes it. There is no interval where a cancelled sign-in's code
+  // yields a surviving key. A mint failure now also releases the claim instead of burning the code.
+  //
+  // The client lookup is inside because (a) submittedClientId was validated against the AuthCode
+  // binding above and (b) claiming first stops a concurrent client-deletion double-minting. RFC 7591
+  // §2 leaves clientName optional, so fall back to clientId so the label never reads
+  // "OAuth: undefined".
+  type TokenOutcome = { kind: 'ok'; rawKey: string } | { kind: 'lost' } | { kind: 'ended' };
+  let outcome: TokenOutcome;
   try {
-    const result = await db.authCode.updateMany({
-      where: { codeHash, redeemedAt: null },
-      data: { redeemedAt: new Date() },
+    outcome = await db.$transaction(async (tx): Promise<TokenOutcome> => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: authCode.userId }], 'shared');
+      // Expiry is judged by the DATABASE clock at the moment the row lock is actually held
+      // (Ruth P2, #2116): a cutoff bound in JS is fixed before the UPDATE waits on a competing row
+      // lock, so a code that expired during that wait would still be claimed. `clock_timestamp()`
+      // is the wall clock at evaluation, unlike `now()` (the transaction start).
+      // Take the row lock FIRST, as its own statement: an UPDATE that waits on a lock whose holder
+      // changed nothing keeps the qualification it evaluated BEFORE waiting (no recheck), so the
+      // expiry test must run in a statement that starts after the lock is held.
+      await tx.$queryRaw`SELECT id FROM auth_codes WHERE code_hash = ${codeHash} FOR UPDATE`;
+      const claimed = await tx.$executeRaw`
+        UPDATE auth_codes SET redeemed_at = (clock_timestamp() AT TIME ZONE 'UTC')
+        WHERE code_hash = ${codeHash} AND redeemed_at IS NULL
+          AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')`;
+      // Lost the race (or the code expired while this waited on the anchor or the row).
+      if (claimed !== 1) return { kind: 'lost' };
+      const live = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM users WHERE id = ${authCode.userId} AND deleted_at IS NULL FOR SHARE`;
+      if (!live[0]) throw new Error('User not found');
+      // #155: the client row last, FOR UPDATE, after the anchor, the code and the user. A
+      // soft-deleted (collected) client mints nothing; the transaction still commits, so the claim
+      // stands and the answer is the lost-race one (no client-state oracle, Xabat's CHECKED Q2).
+      // Holding the row is what makes that deterministic against the GC: a collection that commits
+      // first is seen here, and one that comes later waits and re-checks the extended expiry below.
+      await tx.$queryRaw`SELECT client_id FROM oauth_clients WHERE client_id = ${authCode.clientId} FOR UPDATE`;
+      const client = await tx.oAuthClient.findUnique({ where: { clientId: authCode.clientId } });
+      if (!isLiveOAuthClient(client)) return { kind: 'lost' };
+      // A NULL expiry (seeded clients) never expires and stays NULL.
+      await tx.oAuthClient.updateMany({
+        where: { clientId: authCode.clientId, expiresAt: { not: null }, deletedAt: null },
+        data: { expiresAt: oauthClientExpiresAt() },
+      });
+      const clientNameForLabel =
+        client.clientName.length > 0 ? client.clientName : authCode.clientId;
+      // Cap the label at the same length as the GraphQL resolver's user-supplied label (DCR's
+      // 200-char client_name cap is only implicit); one shared constant bounds it regardless.
+      const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
+      const minted = await mintUserApiKeyInTx(tx, {
+        userId: authCode.userId,
+        label,
+        createdBy: authCode.userId,
+        issuedVia: `oauth:${authCode.clientId}`,
+        oauthScopes,
+        originSignInId: authCode.signInId,
+      });
+      return { kind: 'ok', rawKey: minted.rawKey };
     });
-    claimedCount = result.count;
-  } catch {
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'failed to claim authorization code',
-    });
-    return;
+  } catch (error) {
+    if (error instanceof SignInNotLive) {
+      outcome = { kind: 'ended' };
+    } else {
+      respondOAuthServerError(res, 'failed to issue access token', error);
+      return;
+    }
   }
-  if (claimedCount !== 1) {
-    // Lost the race. The other side just minted a token; we don't.
+  if (outcome.kind !== 'ok') {
+    // Lost the race, or the sign-in this code descends from has ended: same answer as an unknown code.
     res.status(400).json({
       error: 'invalid_grant',
       error_description: 'code is unknown',
     });
     return;
   }
-
-  // 6. Mint via the shared FR-015 insert path.
-  // The client lookup is post-claim because: (a) we already validated
-  // submittedClientId against the AuthCode.clientId binding above, and
-  // (b) by claiming first, a concurrent client-deletion can't
-  // double-mint. RFC 7591 §2 leaves clientName optional, so fall back
-  // to clientId so the label never reads "OAuth: undefined".
-  const client = await db.oAuthClient.findUnique({
-    where: { clientId: authCode.clientId },
-  });
-  const clientNameForLabel =
-    client?.clientName && client.clientName.length > 0
-      ? client.clientName
-      : authCode.clientId;
-
-  let rawKey: string;
-  try {
-    // Cap the label at the same length as the GraphQL resolver's
-    // user-supplied label. Today the implicit cap depends on DCR's
-    // 200-char client_name cap from PR #154; if that ever changes,
-    // we'd want the OAuth label to stay bounded regardless. Defense
-    // in depth via a single shared constant.
-    const label = `OAuth: ${clientNameForLabel}`.slice(0, USER_API_KEY_LABEL_MAX_LEN);
-    const minted = await mintUserApiKey(db, {
-      userId: authCode.userId,
-      label,
-      createdBy: authCode.userId,
-      issuedVia: `oauth:${authCode.clientId}`,
-      oauthScopes,
-    });
-    rawKey = minted.rawKey;
-  } catch {
-    // The AuthCode is already claimed; we can't un-claim it
-    // safely. The user can retry the OAuth dance from scratch.
-    // Better to fail-loud than to silently leave them with a
-    // dead code.
-    res.status(500).json({
-      error: 'server_error',
-      error_description: 'failed to issue access token',
-    });
-    return;
-  }
+  const rawKey = outcome.rawKey;
 
   // 7. RFC 6749 §5.1 token response. No `expires_in` — opaque
   // tokens are long-lived per D-2026-05-17-001. No `refresh_token`

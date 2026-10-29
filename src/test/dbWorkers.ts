@@ -66,6 +66,23 @@ export const WORKER_CONNECTION_LIMIT = (() => {
   return n;
 })();
 
+/**
+ * Cap on vitest's fork count, from HADRON_TEST_MAX_WORKERS. Each fork holds its
+ * own Postgres clone, and vitest's default (~cores - 1) ran a shared 32-core host
+ * out of memory under parallel full suites (Hugo, 2026-10-21). Undefined keeps
+ * vitest's default, so CI and laptops are unchanged. An invalid value also keeps
+ * the default, with a warning: a typo should not refuse a test run.
+ */
+export function testMaxWorkers(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    console.warn(`HADRON_TEST_MAX_WORKERS must be a positive integer, got: ${raw}; using vitest's default.`);
+    return undefined;
+  }
+  return n;
+}
+
 /** The template DB URL (CI/dev override via TEST_DATABASE_URL). */
 export function baseTestDbUrl(): string {
   return process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test';

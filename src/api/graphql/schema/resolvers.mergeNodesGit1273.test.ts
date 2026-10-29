@@ -1,4 +1,4 @@
-/** #1273: a keyless metadata merge must not overwrite a plaintext Git mirror. */
+/** #1273 / R206 (#2377): an encrypted memory never syncs to Git, so no merge, key or cache can overwrite or extend its mirror. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
@@ -38,7 +38,7 @@ const fields = { content: 'target private body', abstract: 'target private summa
 const ctx = (): Context => ({ db, userId: ownerId, roles: ['READER'] });
 const payload = async (): Promise<mirror.NodeForGit> => {
   const node = await db.node.findUniqueOrThrow({ where: { id: targetId }, include: { outgoingEdges: { include: { target: true } } } });
-  return { ...node, ...fields, outgoingEdges: node.outgoingEdges, mirrorRevSeq: node.revSeq };
+  return { ...node, ...fields, outgoingEdges: node.outgoingEdges };
 };
 
 beforeEach(async () => {
@@ -94,7 +94,6 @@ describe('#1273 encrypted node Git mirror', () => {
     expect(result.tags).toEqual(['target-tag', 'source-tag']);
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(execGit).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
     const savedSource = await db.node.findUniqueOrThrow({ where: { id: sourceId } });
     const savedTarget = await db.node.findUniqueOrThrow({ where: { id: targetId } });
     for (const field of ['content', 'abstract', 'data'] as const) {
@@ -111,7 +110,6 @@ describe('#1273 encrypted node Git mirror', () => {
     await Promise.all(jobs);
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(execGit).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
     const after = await db.node.findUniqueOrThrow({ where: { id: targetId } });
     expect(after.content).toBe(before.content);
     expect(after.abstract).toBe(before.abstract);
@@ -131,7 +129,6 @@ describe('#1273 encrypted node Git mirror', () => {
     expect(result.tags).toEqual(['target-tag', 'source-tag']);
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(execGit).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no request-carried key/i));
     expect((await db.node.findUniqueOrThrow({ where: { id: targetId } })).content).toMatch(/^enc:v1:/);
   });
 
@@ -147,28 +144,24 @@ describe('#1273 encrypted node Git mirror', () => {
 
   it('does not write a ciphertext payload even when this request carries a key', async () => {
     const raw = await db.node.findUniqueOrThrow({ where: { id: targetId }, include: { outgoingEdges: { include: { target: true } } } });
-    await requestKeyStorage.run(new Map([[memoryId, key]]), () => mirror.writeNodeToGit({ ...raw, mirrorRevSeq: raw.revSeq }, '', null, memoryId));
+    await requestKeyStorage.run(new Map([[memoryId, key]]), () => mirror.writeNodeToGit(raw, '', null, memoryId));
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*ciphertext/i));
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
   });
 
-  it('writes plaintext when the authorized request carries the key, without changing encryption at rest', async () => {
+  it('does NOT write plaintext when the authorized request carries the key, and changes nothing at rest (R206)', async () => {
     const result = await requestKeyStorage.run(new Map([[memoryId, key]]), mergeTags);
     await Promise.all(jobs);
     expect(result.content).toBe(fields.content);
-    const written = readFileSync(join(localPath, 'target.md'), 'utf8');
-    expect(written).toContain(fields.content);
-    expect(written).toContain(fields.abstract);
-    expect(written).toContain('source-tag');
-    expect(written).not.toContain('enc:v1:');
-    expect(written).not.toContain('__enc:');
-    expect(execGit).toHaveBeenCalledWith(expect.arrayContaining(['push']), expect.anything());
-    expect(warning).not.toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
+    expect(execGit).not.toHaveBeenCalled();
+    expect(jobs).toHaveLength(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: targetId } })).content).toMatch(/^enc:v1:/);
   });
 
-  it('does not authorize a queued keyless export when a key arrives later', async () => {
+  it('refuses a write queued behind another checkout when the memory became encrypted while it waited, key or not', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -179,12 +172,14 @@ describe('#1273 encrypted node Git mirror', () => {
       return false;
     });
     await ready;
-    const queued = mirror.writeNodeToGit({ ...await payload(), content: 'queued plaintext snapshot' }, '', null, memoryId);
+    const queued = requestKeyStorage.run(new Map([[memoryId, key]]), () =>
+      payload().then(p => mirror.writeNodeToGit({ ...p, content: 'queued plaintext snapshot' }, '', null, memoryId)));
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
     sessionKeyCache.set('later-unlock', memoryId, key);
     release();
     await Promise.all([occupying, queued]);
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
     expect(vi.mocked(execGit).mock.calls.some(([args]) => args[0] === 'push')).toBe(false);
   });
 
@@ -192,14 +187,14 @@ describe('#1273 encrypted node Git mirror', () => {
     await mirror.writeNodeToGit({ ...await payload(), content: null, abstract: null, data: null }, '', null, memoryId);
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(execGit).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
   });
 
   it('cannot bypass deferral using the legacy repo-slug lookup without a memory ID', async () => {
     await mirror.writeNodeToGit({ ...await payload(), content: 'keyless plaintext export' }, 'andi1273/fixture');
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(execGit).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
   });
 
   it('continues mirroring ordinary unencrypted memory without a key', async () => {
@@ -209,7 +204,7 @@ describe('#1273 encrypted node Git mirror', () => {
     expect(written).toContain(fields.content);
     expect(written).toContain('plain-write');
     expect(execGit).toHaveBeenCalledWith(expect.arrayContaining(['push']), expect.anything());
-    expect(warning).not.toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    expect(warning).not.toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
   });
 
   it('rechecks encryption after Git preparation before writing the node file', async () => {
@@ -225,24 +220,28 @@ describe('#1273 encrypted node Git mirror', () => {
     });
     await mirror.writeNodeToGit(await payload(), '', null, memoryId);
     expect(flipped).toBe(true);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/memory changed during preparation/));
     expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath });
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/Deferring.*no.*key/i));
+    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));
   });
 
-  it('restores the remote when the memory disappears during preparation', async () => {
+  it('makes a memory deletion wait for an in-flight mirror instead of pulling the row out from under it (R206 row fence)', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: false } });
+    let deletion: Promise<unknown> | undefined;
+    let deletedDuringMirror = false;
     vi.mocked(execGit).mockImplementation(async args => {
-      if (args[0] === 'fetch') await db.memory.delete({ where: { id: memoryId } });
-      return { stdout: '', stderr: '' };
+      if (args[0] === 'fetch') {
+        deletion = db.memory.delete({ where: { id: memoryId } }).then(() => { deletedDuringMirror = true; });
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      if (args[0] === 'push') expect(deletedDuringMirror).toBe(false);
+      return { stdout: args[0] === 'status' ? ' M target.md\n' : '', stderr: '' };
     });
     await mirror.writeNodeToGit(await payload(), '', null, memoryId);
-    expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
-    expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath });
-    expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
-    expect(warning).toHaveBeenCalledWith(expect.stringMatching(/memory changed during preparation/));
+    expect(vi.mocked(execGit).mock.calls.some(([args]) => args[0] === 'push')).toBe(true);
+    await deletion;
+    expect(await db.memory.findUnique({ where: { id: memoryId } })).toBeNull();
   });
 
   it('does not use key possession to bypass the merge owner gate', async () => {

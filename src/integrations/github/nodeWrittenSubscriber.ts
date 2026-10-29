@@ -7,11 +7,9 @@
  * keeps the event payload IDs-only AND makes duplicate delivery free: two
  * deliveries mirror the same latest state.
  *
- * ENCRYPTED memories are punted here (same posture as the embedding wake's
- * encrypted punt): decryptNodeFields needs a session key from the
- * per-request cache, which a background subscriber can't rely on having.
- * The GraphQL write paths keep their direct in-closure writeNodeToGit call
- * for encrypted memories — request time is when the plaintext exists.
+ * ENCRYPTED memories never sync to Git (R206, cor:sec:040:05), with or without
+ * a key: there is no direct request-time write for them either. A configured
+ * mirror that was attempted is logged as ENCRYPTED_GIT_SYNC_UNAVAILABLE.
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -25,6 +23,7 @@ import {
 } from '../../lib/events/nodeWritten.js';
 import { deserializeTags } from '../db/provider.js';
 import { writeNodeToGit, type NodeForGit } from './writeNodeToGit.js';
+import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 
 /** Durable-consumer + local-fallback registration name. */
 export const GIT_MIRROR_SUBSCRIBER = 'git-mirror';
@@ -33,7 +32,7 @@ export const GIT_MIRROR_SUBSCRIBER = 'git-mirror';
  * Handle one event: re-read the node (with outgoing edges) and mirror it to
  * the memory's git repo. Resolves as a no-op for a node that vanished or was
  * deleted since the event (mirror-on-delete is deleteNode's own concern) and
- * for encrypted memories (see the module contract). writeNodeToGit handles
+ * for encrypted memories, which log a typed skip (see the module contract). writeNodeToGit handles
  * its own soft failures (missing repo, no clone) by logging.
  */
 export async function handleNodeWrittenForGit(
@@ -73,9 +72,16 @@ async function loadNodeForGit(
   }
   const memory = await db.memory.findUnique({
     where: { id: evt.memoryId },
-    select: { isEncrypted: true },
+    select: { isEncrypted: true, source: true },
   });
-  if (!memory || memory.isEncrypted) return null; // request-time direct write owns encrypted mirrors
+  if (!memory) return null;
+  // R206 (cor:sec:040:05): an encrypted memory never syncs to Git, with or
+  // without a key. A configured mirror that was attempted is an observable
+  // typed skip, not a silent null; a memory with no source has nothing to skip.
+  if (memory.isEncrypted) {
+    if (memory.source) logEncryptedGitSyncRefusal('node.written mirror', evt.memoryId);
+    return null;
+  }
   return {
       id: node.id,
       loc: node.loc,

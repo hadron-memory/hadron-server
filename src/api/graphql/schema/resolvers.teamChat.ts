@@ -1,3 +1,6 @@
+import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
+import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
+import { requireWorkerReadAccess } from './resolvers.worker.js';
 // Team-chat operations — #939: createTeamChatMessage + teamChatMessages as
 // platform operations (team logic lives server-side; CLI/MCP/portal are thin
 // surfaces — the #935/#936 wrapper precedent).
@@ -31,7 +34,7 @@
 //   mentions       — lowercased mention tokens extracted server-side at write
 //   replyToSeq     — the seq this message replies to (also a `replies-to` edge)
 import { GraphQLError } from 'graphql';
-import type { Prisma } from '../../../generated/prisma/index.js';
+import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
@@ -74,6 +77,7 @@ import {
   lapsedResumeVerdict,
   resumeOwnLapsedSessionInTx,
   mayStillDriveWorkerApp,
+  channelIncarnationChanged,
 } from '../../../lib/teamAttention.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
@@ -368,6 +372,9 @@ export interface TeamChatMessageOut {
    * deliberately not in the SDL.
    */
   broadcastWakes: boolean;
+  teamTagsVersion?: number;
+  teamBroadcastWorkerIds?: string[];
+  teamTags?: TeamTagSnapshot[] | null;
 }
 
 type MessageRow = {
@@ -404,7 +411,7 @@ function messageUrn(memBareUrn: string | null, loc: string | null): string | nul
 }
 
 /** Decrypt a message row and project it onto the GraphQL shape. */
-function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBareUrn: string | null): TeamChatMessageOut {
+function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBareUrn: string | null, metadataVisible = false): TeamChatMessageOut {
   const dec = decryptOrSessionExpired({ content: row.content, data: row.data }, memEncInfo);
   const env = (dec.data as Record<string, unknown> | null) ?? {};
   return {
@@ -422,6 +429,9 @@ function projectMessage(row: MessageRow, memEncInfo: MemoryEncryptionInfo, memBa
     replyToSeq: typeof env.replyToSeq === 'number' ? env.replyToSeq : null,
     mentions: Array.isArray(env.mentions) ? env.mentions.filter((m): m is string => typeof m === 'string') : [],
     broadcastWakes: env.broadcastWakes === true,
+    teamTagsVersion: typeof env.teamTagsVersion === 'number' ? env.teamTagsVersion : undefined,
+    teamBroadcastWorkerIds: Array.isArray(env.teamBroadcastWorkerIds) ? env.teamBroadcastWorkerIds.filter((id): id is string => typeof id === 'string') : [],
+    teamTags: metadataVisible && env.teamTagsVersion === 1 && Array.isArray(env.teamTags) ? env.teamTags.filter((t): t is TeamTagSnapshot => !!t && typeof t === 'object' && typeof t.headId === 'string' && typeof t.label === 'string') : null,
   };
 }
 
@@ -970,6 +980,8 @@ async function postToChannelRoot(
   // #1842: the body tokens are only HALF the notified set — inside the append
   // transaction the reply target's author joins it (cor:agt:020:04 rev17), so
   // `mentions` is finalized there, before authority, stamps and sealing.
+  const useTeamTags = teamTagsEnabled();
+  const metadataVisible = await canReadTeamMetadata(ctx, app?.id ?? null);
   const bodyMentions = opts.system ? [] : extractMentions(body);
   let mentions = bodyMentions;
   if (replyToSeq != null) envelope.replyToSeq = replyToSeq;
@@ -1089,7 +1101,17 @@ async function postToChannelRoot(
     // #1748 (N3): who may wake everyone is decided NOW, here, on live authority held through the commit, and
     // stamped; nothing re-decides it later. The authority is taken BEFORE the resume below (which locks the Worker
     // row FOR UPDATE) and the stamps after it, so the Worker row is never taken SHARE then upgraded (Diego, cycle 3).
-    const stampAuthority = mentions.length > 0 ? { authority: await lockStampAuthority(ctx, tx, app) } : null;
+    let teamGraphHeld = false;
+    const holdTeamGraph = async () => { await lockAppReportsTo(tx, app!.id, 'shared'); teamGraphHeld = true; };
+    const stampAuthority = mentions.length > 0 || (useTeamTags && app && !opts.system)
+      ? { authority: await lockStampAuthority(ctx, tx, app, useTeamTags && app && !opts.system ? holdTeamGraph : undefined) } : null;
+    if (useTeamTags && app && !opts.system && !teamGraphHeld) {
+      throw new GraphQLError('Cannot post team metadata for an unavailable App.', { extensions: { code: 'APP_UNINSTALLED' } });
+    }
+    if (useTeamTags) {
+      const workers = !opts.system && app ? await tx.worker.findMany({ where: { appId: app.id }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } }) : [];
+      Object.assign(envelope, buildTeamSnapshot(workers, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions));
+    }
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
     // condition is re-decided under the App and Worker locks.
@@ -1097,7 +1119,7 @@ async function postToChannelRoot(
       throw sessionNotLiveError(sessionRef!);
     }
     if (stampAuthority) {
-      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, mentions, stampAuthority));
+      Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, useTeamTags ? mentions.filter(token => token !== 'team') : mentions, stampAuthority));
     }
     // The envelope is sealed after the stamps are in it.
     const msgFields = translateSessionExpired(memEncInfo, () =>
@@ -1178,6 +1200,9 @@ async function postToChannelRoot(
     replyToSeq: replyToSeq ?? null,
     mentions,
     broadcastWakes: envelope.broadcastWakes === true,
+    teamTagsVersion: envelope.teamTagsVersion as number | undefined,
+    teamBroadcastWorkerIds: envelope.teamBroadcastWorkerIds as string[] | undefined,
+    teamTags: metadataVisible ? (envelope.teamTags as TeamTagSnapshot[] | undefined) ?? null : null,
   };
 }
 
@@ -1255,6 +1280,37 @@ export async function postSystemNotice(
  * staff and members (an unresolvable or foreign ref collapses to the empty
  * page — never an existence oracle).
  */
+async function canReadTeamMetadata(ctx: Context, appId: string | null): Promise<boolean> {
+  if (!appId) return false;
+  const app = await ctx.db.app.findUnique({ where: { id: appId } });
+  if (!app || app.deletedAt) return false;
+  try { await requireWorkerReadAccess(ctx, app); return true; } catch { return false; }
+}
+
+async function channelHoldsHeadStamp(ctx: Context, root: ChatRootRow, headId: string): Promise<boolean> {
+  const where: Prisma.NodeWhereInput = { memoryId: root.memoryId, loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) }, nodeType: 'chat-message', deletedAt: null };
+  const enc = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  if (!enc.isEncrypted) {
+    return !!(await ctx.db.node.findFirst({ where: { ...where, data: { path: ['teamHeadIds'], array_contains: [headId] } }, select: { id: true } }));
+  }
+  const urn = await hostMemoryUrn(ctx, root.memoryId);
+  // Existence only: bound each fetch and stop at the first sealed stamp.
+  // Even limit: 0 must validate the head; exhaust later batches before refusing.
+  const batchSize = 100;
+  let afterId: string | null = null;
+  while (true) {
+    const rows: MessageRow[] = await ctx.db.node.findMany({
+      where: { ...where, ...(afterId ? { id: { gt: afterId } } : {}) },
+      orderBy: { id: 'asc' },
+      take: batchSize,
+      select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true },
+    });
+    if (rows.some(r => projectMessage(r, enc, urn, true).teamTags?.some(t => t.headId === headId))) return true;
+    if (rows.length < batchSize) return false;
+    afterId = rows[rows.length - 1]!.id;
+  }
+}
+
 async function readChannelRoot(
   ctx: Context,
   // #1196: null when the host memory belongs to no App. Used ONLY to resolve a
@@ -1264,9 +1320,23 @@ async function readChannelRoot(
   // P1 on PR #941). Everything else this function does is memory-scoped.
   appId: string | null,
   root: ChatRootRow,
-  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; limit?: number | null; offset?: number | null },
+  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
-  const { sinceSeq, beforeSeq, mentionsRef, limit, offset } = args;
+  const { sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  const metadataVisible = await canReadTeamMetadata(ctx, appId);
+  const teamFiltered = teamHeadRef != null || untagged != null;
+  if (teamFiltered && !metadataVisible) throw new GraphQLError('Team metadata is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN' } });
+  if (teamHeadRef != null && untagged != null) throw new GraphQLError('teamHeadRef and untagged are mutually exclusive.', { extensions: { code: 'BAD_USER_INPUT' } });
+  let selectedHead: string | null = null;
+  if (teamHeadRef != null) {
+    // The wire accepts stable IDs only, including authorized retired identities.
+    // A leaf or unknown id refuses the same way (byte-identical, App-scoped), through the write path's head predicate.
+    const workers = await ctx.db.worker.findMany({ where: { appId: appId! }, select: { id: true, name: true, reportsToWorkerId: true, retiredAt: true } });
+    // Reparenting keeps no history, so a head whose reports are gone is still one when this Channel holds a message stamped with it.
+    if (!workers.some(w => w.id === teamHeadRef)
+      || !(isReadableTeamHead(workers, teamHeadRef) || await channelHoldsHeadStamp(ctx, root, teamHeadRef))) throw teamHeadInvalid();
+    selectedHead = teamHeadRef;
+  }
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
   const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
   const take = clampListTake(limit);
@@ -1335,18 +1405,25 @@ async function readChannelRoot(
     );
   };
 
-  if (mentionsRef) {
-    const resolved = appId === null ? null : await resolveMentionTokens(ctx, appId, mentionsRef);
-    if (!resolved) return { items: [], total: 0 };
-    const { tokens, workerId } = resolved;
+  if (teamFiltered && !memEncInfo.isEncrypted) {
+    const predicate: Prisma.NodeWhereInput = selectedHead
+      ? { data: { path: ['teamHeadIds'], array_contains: [selectedHead] } }
+      : { OR: [{ data: { path: ['teamHeadIds'], equals: Prisma.DbNull } }, { data: { path: ['teamHeadIds'], equals: Prisma.AnyNull } }, { data: { path: ['teamHeadIds'], equals: [] } }] };
+    const noHeads = predicate;
+    where.AND = untagged === false ? [{ NOT: noHeads }] : [predicate];
+  }
+  if (mentionsRef || (teamFiltered && memEncInfo.isEncrypted)) {
+    const resolved = mentionsRef && appId !== null ? await resolveMentionTokens(ctx, appId, mentionsRef) : null;
+    if (mentionsRef && !resolved) return { items: [], total: 0 };
+    const { tokens, workerId } = resolved ?? { tokens: [], workerId: null };
     // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
     const matches = (msg: TeamChatMessageOut): boolean =>
-      workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t));
+      (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
     const rows = await ctx.db.node.findMany({ where, orderBy, select });
     const matching = rows
-      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn) }))
+      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn, metadataVisible) }))
       .filter((m) => matches(m.msg));
     const page =
       take === 0
@@ -1377,7 +1454,7 @@ async function readChannelRoot(
   // SESSION_EXPIRED — so recording first would count reads for a transcript
   // the caller never received. The mentions branch above already projects
   // first; this makes the two branches agree.
-  const items = rows.map((r) => projectMessage(r, memEncInfo, memBareUrn));
+  const items = rows.map((r) => projectMessage(r, memEncInfo, memBareUrn, metadataVisible));
   recordRead(rows);
   return { items, total };
 }
@@ -1468,6 +1545,50 @@ export const teamChatMutations = {
   },
 };
 
+/**
+ * #2520 — the READ GATE of the App team chat, shared by `teamChatMessages` and the `team_chat_read` run tool so the
+ * tool carries no copy of the predicate: principal, App ref, `requireTeamChatAccess`, the chat root, and the host
+ * memory's own point check. `null` is the empty page (no chat yet, or an unreadable host memory), exactly what
+ * `teamChatMessages` answers; every refusal (UNAUTHENTICATED, FORBIDDEN, not found) is thrown unchanged. No side
+ * effect: nothing here touches a read mark, a check stamp or a session.
+ */
+export async function resolveTeamChatReadTarget(ctx: Context, appRef: string): Promise<{ appId: string; root: ChatRootRow } | null> {
+  requirePrincipal(ctx);
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  await requireTeamChatAccess(ctx, app, 'read');
+  const root = await locateTeamChatRoot(ctx, app);
+  if (!root) return null;
+  // One gate, two entry points: the convenience runs the same host-memory
+  // point check the Channel-addressed read runs (Copilot on PR #1169).
+  if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return null;
+  return { appId, root };
+}
+
+/**
+ * #2520 — read ONE page of a team chat (`appRef`) or a named Channel (`channelRef`) for a principal with NO read-state
+ * side effect: no `maybeAdvanceOwnChannelRead`, no channel check, no heartbeat. The `team_chat_read` run tool is its only
+ * caller; the resolvers keep their own advance calls and use the same two gate halves. The Channel address uses
+ * `resolveChannelTarget` (no match: CHANNEL_NOT_FOUND), the App address `resolveTeamChatReadTarget` (no access:
+ * FORBIDDEN; unreadable host: the empty page), each refusal byte-identical to the resolver's.
+ */
+export async function readChatPageWithoutAdvancing(
+  ctx: Context,
+  address: { appRef: string } | { channelRef: string; withinAppId: string },
+  args: { sinceSeq?: number | null; mentionsRef?: string | null; limit?: number | null },
+): Promise<{ items: TeamChatMessageOut[]; total: number }> {
+  if ('channelRef' in address) {
+    const target = await resolveChannelTarget(ctx, address.channelRef, 'read');
+    // A run speaks for ONE App: a Channel outside that App's team space is no match, however much the
+    // run's user could read elsewhere (a personal memory, another App). Same answer as an unreadable one.
+    if (target.app?.id !== address.withinAppId) throw channelNotFound(address.channelRef);
+    return readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+  }
+  const target = await resolveTeamChatReadTarget(ctx, address.appRef);
+  if (!target) return { items: [], total: 0 };
+  return readChannelRoot(ctx, target.appId, target.root, args);
+}
+
 export const teamChatQueries = {
   /**
    * #939 — read the team chat: the `appRef → App.defaultChannel` convenience
@@ -1486,22 +1607,16 @@ export const teamChatQueries = {
       advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
     },
     ctx: Context,
-  ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
-    requirePrincipal(ctx);
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
-    const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
-    await requireTeamChatAccess(ctx, app, 'read');
-
-    const root = await locateTeamChatRoot(ctx, app);
-    if (!root) return { items: [], total: 0 };
-    // One gate, two entry points: the convenience runs the same host-memory
-    // point check the Channel-addressed read runs (Copilot on PR #1169).
-    if (!(await hostMemoryReadable(ctx, root.memoryId, app))) return { items: [], total: 0 };
+  ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
+    // #2520: the gate half is ONE function shared with the `team_chat_read` run tool.
+    const target = await resolveTeamChatReadTarget(ctx, appRef);
+    if (!target) return { items: [], total: 0 };
+    const { appId, root } = target;
     // The attention capture changes ordinary-read semantics only for a
     // caller's exact Worker session. Outside that boundary this extra lookup
     // is not even made (#1353: the pilot operator allowlist is gone; the
@@ -1510,13 +1625,12 @@ export const teamChatQueries = {
     // this App's Channel. The helper verifies that session's App
     // participation and register entry before advancing; the Channel host
     // is not the key.
-    const pilotChannel =
-      ctx.sessionId || ctx.sessionBindingRefused
-        ? await ctx.db.channel.findFirst({
-            where: { chatRootNodeId: root.id, deletedAt: null },
-            select: { id: true, lastSeq: true },
-          })
-        : null;
+    // #2181: the channel is selected for every read now (the page names it), not only for a session's.
+    const readChannel = await ctx.db.channel.findFirst({
+      where: { chatRootNodeId: root.id, deletedAt: null },
+      select: { id: true, lastSeq: true, incarnation: true },
+    });
+    const pilotChannel = ctx.sessionId || ctx.sessionBindingRefused ? readChannel : null;
     const page = await readChannelRoot(ctx, appId, root, args);
     // #2138 follow-up: a request that NAMED a session the server refused is served as a session-less read, so it can never
     // count as a check. Say so in the App log (reason code only); behaviour is unchanged.
@@ -1538,7 +1652,8 @@ export const teamChatQueries = {
         console.warn('[teamChatMessages] pilot read-state advance failed:', error);
       }
     }
-    return page;
+    // The SAME object: the mentions read is recorded against this page's identity (recordMentionsWorker).
+    return Object.assign(page, { channelId: readChannel?.id ?? null, channelIncarnation: readChannel?.incarnation ?? null });
   },
 
   /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
@@ -1546,19 +1661,35 @@ export const teamChatQueries = {
     _: unknown,
     {
       channelRef,
+      expectedIncarnation,
+      advanceReadState,
       ...args
     }: {
       channelRef: string;
+      advanceReadState?: boolean | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
-      mentionsRef?: string | null;
+      mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
       limit?: number | null;
       offset?: number | null;
+      expectedIncarnation?: number | null;
     },
     ctx: Context,
-  ): Promise<{ items: TeamChatMessageOut[]; total: number }> => {
+  ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId: string; channelIncarnation: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
+    const pinned = expectedIncarnation != null;
+    // #2181 (a): a pinned read that already names a different incarnation reads nothing.
+    if (pinned && expectedIncarnation !== target.incarnation.value) {
+      throw channelIncarnationChanged(target.channelId, target.incarnation.value);
+    }
     const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    // (c): incarnation only rises, so equality before and after proves no recreation happened while the page was read;
+    // otherwise old contents would be emitted under new metadata.
+    if (pinned) {
+      const after = await ctx.db.channel.findUnique({ where: { id: target.channelId }, select: { incarnation: true, deletedAt: true } });
+      if (!after || after.deletedAt) throw channelNotFound(channelRef);
+      if (after.incarnation !== expectedIncarnation) throw channelIncarnationChanged(target.channelId, after.incarnation);
+    }
     if (!ctx.sessionId && ctx.sessionBindingRefused) {
       await recordCheckMiss(ctx.db, { channelId: target.channelId, reason: 'BINDING_REFUSED', via: 'read' });
     }
@@ -1567,13 +1698,18 @@ export const teamChatQueries = {
         await maybeAdvanceOwnChannelRead(ctx, {
           channelId: target.channelId,
           capturedHead: target.lastSeq,
+          expectedIncarnation,
+          advanceReadState,
           ...args,
           page,
         });
       } catch (error) {
+        // (d): the final fence (page check to effects) refuses with the typed error and no effects; anything else is a
+        // cursor write failing, which must leave the transcript readable.
+        if (pinned && error instanceof GraphQLError && ['CHANNEL_INCARNATION_CHANGED', 'CHANNEL_NOT_FOUND'].includes(String(error.extensions?.code))) throw error;
         console.warn('[channelMessages] pilot read-state advance failed:', error);
       }
     }
-    return page;
+    return Object.assign(page, { channelId: target.channelId, channelIncarnation: pinned ? expectedIncarnation : target.incarnation.value });
   },
 };

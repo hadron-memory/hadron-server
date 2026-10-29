@@ -10,11 +10,13 @@
 //     separate GCP project so login never enters restricted-scope
 //     verification.
 
+import { getProjectBaseUrl } from '../lib/baseUrl.js';
 import {
   jwtVerify,
   createRemoteJWKSet,
   type JWTVerifyGetKey,
 } from 'jose';
+import { enforceIdTokenNonce, type NonceExpectation } from './providerNonce.js';
 import { db } from '../integrations/db/client.js';
 import { generateUniqueHandle, isHandleTaken } from '../lib/userHandle.js';
 import { ensureUserPrincipal, RootNameTakenError } from '../lib/principal/mintPrincipal.js';
@@ -29,21 +31,29 @@ export interface GoogleIdentity {
   emailVerified: boolean;
   name: string | null;
   picture: string | null;
+  /** OIDC `auth_time` in epoch seconds, when Google sent it (it does when `max_age` was requested). */
+  authTime: number | null;
 }
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 
-/** Build the Google authorization redirect URL for the given state-CSRF token. */
-export function buildGoogleAuthUrl(state: string): string {
+/**
+ * Build the Google authorization redirect URL for the given state-CSRF token. `reauthenticate` (#1631 PR1b, R154)
+ * asks Google for a fresh authentication with `max_age=0`; the callback must then check `auth_time`.
+ */
+export function buildGoogleAuthUrl(state: string, nonce: string, opts: { reauthenticate?: boolean } = {}): string {
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID!,
     redirect_uri: getGoogleCallbackUrl(),
     response_type: 'code',
     scope: 'openid email profile',
     state,
+    // #2204: echoed back inside the signed ID token; the callback compares its hash.
+    nonce,
   });
+  if (opts.reauthenticate) params.set('max_age', '0');
   return `${GOOGLE_AUTH_URL}?${params}`;
 }
 
@@ -84,6 +94,7 @@ let remoteJwks: JWTVerifyGetKey | undefined;
  */
 export async function verifyGoogleIdToken(
   idToken: string,
+  expected: NonceExpectation,
   getKey?: JWTVerifyGetKey,
 ): Promise<GoogleIdentity> {
   const key = getKey ?? (remoteJwks ??= createRemoteJWKSet(new URL(GOOGLE_JWKS_URL)));
@@ -93,6 +104,7 @@ export async function verifyGoogleIdToken(
     issuer: ['https://accounts.google.com', 'accounts.google.com'],
     audience: process.env.GOOGLE_CLIENT_ID ?? '',
   });
+  enforceIdTokenNonce('google', payload.nonce, expected);
   if (typeof payload.sub !== 'string' || payload.sub === '') {
     throw new Error('Google ID token missing sub claim');
   }
@@ -109,7 +121,20 @@ export async function verifyGoogleIdToken(
     emailVerified: payload.email_verified === true,
     name: typeof payload.name === 'string' ? payload.name : null,
     picture: typeof payload.picture === 'string' ? payload.picture : null,
+    authTime: typeof payload.auth_time === 'number' && Number.isFinite(payload.auth_time) ? payload.auth_time : null,
   };
+}
+
+/** Tolerated clock difference between Google and this server when comparing `auth_time` (seconds). */
+export const GOOGLE_AUTH_TIME_SKEW_SECONDS = 60;
+
+/**
+ * #1631 PR1b (R154): did Google re-authenticate the person for THIS leg? True only when `auth_time` is present and
+ * no earlier than the moment the leg's state was minted, less a small clock skew. A missing `auth_time` fails
+ * closed: we asked with `max_age=0`, so its absence means the request was not honoured.
+ */
+export function googleReauthenticatedSince(authTime: number | null, startedAt: Date): boolean {
+  return authTime !== null && authTime * 1000 >= startedAt.getTime() - GOOGLE_AUTH_TIME_SKEW_SECONDS * 1000;
 }
 
 /**
@@ -225,7 +250,6 @@ function getGoogleCallbackUrl(): string {
   // producing `http://localhost:` — symmetric with github.ts. Behind
   // Cloudflare, BASE_URL (not per-request headers) MUST drive the redirect
   // URI (see findings:oauth-mcp-https-discovery-bug).
-  const base =
-    process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+  const base = getProjectBaseUrl();
   return `${base}/auth/google/callback`;
 }

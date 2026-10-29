@@ -568,6 +568,17 @@ describe('the hazard #835 exists to remove', () => {
   }, 20_000);
 });
 
+/**
+ * Source of the `hadron_update_edge` parameter shape. Since #2260 shapes live at module scope in server.ts
+ * (`SHAPE_HADRON_UPDATE_EDGE`), built once per process, not inline in the `server.tool` call.
+ */
+function updateEdgeShapeSource(): string {
+  const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('const SHAPE_HADRON_UPDATE_EDGE = ');
+  expect(start).toBeGreaterThan(-1);
+  return src.slice(start, src.indexOf('\n};', start));
+}
+
 describe('hadron_update_edge — the single-edge intent (#835)', () => {
   it('renames ONE edge and leaves every sibling intact', async () => {
     const target = (await edgesOf()).find((e) => e.name === 'applies-when')!;
@@ -679,14 +690,12 @@ describe('hadron_update_edge — the single-edge intent (#835)', () => {
   // the handler directly and never runs the zod parse the MCP transport does,
   // so a runtime-rejection test here would pass vacuously.
   it('declares priority as an INTEGER so a float is rejected by the transport', () => {
-    const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
-    const desc = src.slice(src.indexOf("'hadron_update_edge'"), src.indexOf("'hadron_delete_edge'"));
+    const desc = updateEdgeShapeSource();
     expect(desc).toMatch(/priority: z\.number\(\)\.int\(\)/);
   });
 
   it('declares the clearable fields as NULLABLE so null reaches the resolver', () => {
-    const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
-    const desc = src.slice(src.indexOf("'hadron_update_edge'"), src.indexOf("'hadron_delete_edge'"));
+    const desc = updateEdgeShapeSource();
     expect(desc).toMatch(/name: z\.string\(\)\.nullable\(\)\.optional\(\)/);
     expect(desc).toMatch(/description: z\.string\(\)\.nullable\(\)\.optional\(\)/);
   });

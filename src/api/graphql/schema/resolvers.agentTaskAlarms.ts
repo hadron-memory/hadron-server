@@ -34,14 +34,16 @@
 // escalation holds the alarm FOR SHARE while it wakes the next owner, so an
 // acknowledgement and a wake never interleave.
 
+import { familySpellings, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import {
   HOST_REPORT_TIMEOUT_DEFAULT_MINUTES,
   HOST_REPORT_TIMEOUT_MAX_MINUTES,
   HOST_REPORT_TIMEOUT_MIN_MINUTES,
 } from '../../../lib/hostOperations/settle.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { type Context } from './resolvers.helpers.js';
+import { emitTaskWarnings, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import {
   actorManagesApp,
   inTaskWriteTx,
@@ -65,7 +67,8 @@ import {
   type AvailabilityReason,
   type AvailabilitySetter,
 } from '../../../lib/agentTasks/events.js';
-import { FAMILY_PATTERN, recordInEffect } from '../../../lib/agentTasks/availability.js';
+import { recordInEffect } from '../../../lib/agentTasks/availability.js';
+import { cancelLiveReset, holdForStopLease } from '../../../lib/contextReset/contextReset.js';
 import { effectiveWindows, STALL_WINDOW_DEFAULTS, type StallWindows } from '../../../lib/agentTasks/stall.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import {
@@ -200,8 +203,11 @@ export const agentTaskAlarmMutations = {
    * not end the stall episode. Any owner in the alarm's chain, or whoever
    * manages the App (cor:agt:050:24), and nobody else. A second acknowledgement is refused and the first stands
    * (050:20 edge case, Proposed).
+   * #2607: an acknowledgement admitted only by the manager arm (the caller is no owner in the chain) still succeeds,
+   * with the `alarm.ack.outside-chain` warning. Decided from the locked row's chain with the same `inChain` the gate
+   * uses, so an owner in the chain who also manages the App gets none; filed after commit.
    */
-  acknowledgeAlarm: async (_: unknown, { eventId }: { eventId: string }, ctx: Context) => {
+  acknowledgeAlarm: async (_: unknown, { eventId }: { eventId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
     const id = typeof eventId === 'string' ? eventId.trim() : '';
     const found = isId(id)
       ? await ctx.db.agentTeamEvent.findUnique({ where: { id }, select: { appId: true } })
@@ -211,6 +217,7 @@ export const agentTaskAlarmMutations = {
     // An event of an App the caller does not participate in reads as missing.
     if (!app || !actor) throw alarmNotFound(id);
     requireWritable(ctx, app);
+    const warn: TaskWarningCode[] = [];
     await inTaskWriteTx(ctx, app, actor, () => alarmNotFound(id), async (tx, txCtx, freshApp) => {
       const [row] = await tx.$queryRaw<{ appId: string; severity: string | null; chain: unknown; acknowledgedAt: Date | null }[]>`
         SELECT app_id AS "appId", severity, chain, acknowledged_at AS "acknowledgedAt"
@@ -221,7 +228,8 @@ export const agentTaskAlarmMutations = {
       }
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
       // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
-      if (!inChain(actor, row.chain) && !(await actorManagesApp(txCtx, freshApp, actor))) {
+      const ownerInChain = inChain(actor, row.chain);
+      if (!ownerInChain && !(await actorManagesApp(txCtx, freshApp, actor))) {
         throw taskError(
           'ALARM_NOT_IN_CHAIN',
           "Only an owner in the alarm's chain, or whoever manages the App, acknowledges it (cor:agt:050:24).",
@@ -231,6 +239,7 @@ export const agentTaskAlarmMutations = {
       if (row.acknowledgedAt) {
         throw taskError('ALARM_ALREADY_ACKNOWLEDGED', 'This alarm is already acknowledged; the first acknowledgement stands.', { eventId: id });
       }
+      if (!ownerInChain) warn.push('alarm.ack.outside-chain');
       // The server's clock, never a client value (Rook P3-2).
       await tx.agentTeamEvent.update({
         where: { id },
@@ -241,6 +250,7 @@ export const agentTaskAlarmMutations = {
         },
       });
     });
+    await emitTaskWarnings(ctx, info, app.id, { codes: warn });
     return ctx.db.agentTeamEvent.findUniqueOrThrow({ where: { id } });
   },
 
@@ -298,8 +308,20 @@ export const agentTaskAlarmMutations = {
       } else {
         throw notPermitted("Only the worker itself, the person holding its name, or whoever manages the App sets a worker's availability.");
       }
+      // #2162 (cor:agt:050:27 §2.4): a write by the worker, its holder or a manager cancels a live context reset at
+      // once (its epoch moves; the host's later steps are refused). While a granted stop could still be acted on, by
+      // a live reset or one already ended, the worker is not made available before the lease ends: it stays
+      // unavailable, lapsing by itself then (#2255 review: every such write, not only the first).
+      const lease = await cancelLiveReset(tx, workerId, 'CANCELLED_BY_CLEAR', now);
+      if (lease && value.state === 'available') {
+        await holdForStopLease(tx, { workerId, appId: freshApp.id }, lease, now);
+        return;
+      }
+      const until = lease && value.until && value.until.getTime() < lease.leaseEnd.getTime() ? lease.leaseEnd : value.until;
       // #1709: a person's or a worker's write replaces a host's mark, and no longer names the host.
-      const data = { ...value, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null };
+      const data = {
+        ...value, until, setAt: now, setBy, ...setByColumns(ctx), setByHostId: null, clearsOnActivityAfter: null, contextResetId: null,
+      };
       await tx.workerAvailability.upsert({
         where: { workerId },
         create: { workerId, ...data },
@@ -308,9 +330,9 @@ export const agentTaskAlarmMutations = {
       await appendAvailabilityEvent(tx, {
         appId: freshApp.id,
         actor: eventActor(ctx.userId),
-        event: { kind: 'worker', workerId, state: value.state, reason: value.reason, until: value.until, setBy },
+        event: { kind: 'worker', workerId, state: value.state, reason: value.reason, until, setBy },
       });
-    });
+    }, { lockWorkerIds: [workerId] });
     // #1707: availability changed, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
     return ctx.db.workerAvailability.findUniqueOrThrow({ where: { workerId } });
@@ -325,8 +347,8 @@ export const agentTaskAlarmMutations = {
     if (!input) throw badInput('input is required.');
     const now = new Date();
     const value = normalizeAvailability(input, now);
-    const family = (input.family ?? '').trim().toLowerCase();
-    if (!FAMILY_PATTERN.test(family)) {
+    const family = normalizeFamily(input.family);
+    if (!family) {
       throw badInput('family is a lowercase token (letters, digits, ".", "_" or "-"; up to 64 characters), e.g. claude or codex.');
     }
     const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
@@ -336,6 +358,11 @@ export const agentTaskAlarmMutations = {
         throw notPermitted("Only whoever manages the App sets a model family's availability.");
       }
       const data = { ...value, setAt: now, ...setByColumns(ctx) };
+      // Existing aliases are the same availability key. A deliberate setter
+      // updates these records too; historical events remain untouched.
+      await tx.modelFamilyAvailability.updateMany({
+        where: { appId: freshApp.id, family: { in: familySpellings(family) } }, data,
+      });
       await tx.modelFamilyAvailability.upsert({
         where: { appId_family: { appId: freshApp.id, family } },
         create: { appId: freshApp.id, family, ...data },

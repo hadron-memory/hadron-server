@@ -27,6 +27,10 @@ import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
+import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
+import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
+import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { unauthenticatedError } from '../../../lib/refusals.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -40,7 +44,7 @@ function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
 // Graph-view fetch (issue #466): default page size + hard cap for the slim
 // memoryNodes / memoryEdges lists. Large enough to fill the graph in a few
 // round trips, capped so a single page stays bounded.
-const GRAPH_PAGE_DEFAULT = 1000;
+export const GRAPH_PAGE_DEFAULT = 20;
 const GRAPH_PAGE_MAX = 2000;
 
 /**
@@ -49,7 +53,7 @@ const GRAPH_PAGE_MAX = 2000;
  * fetch only `total` — the cheap "how big is this memory?" node/edge count — or
  * suppress the payload during init, the standard limit-0 pattern.
  */
-function clampGraphTake(limit?: number | null): number {
+export function clampGraphTake(limit?: number | null): number {
   if (limit == null) return GRAPH_PAGE_DEFAULT;
   return Math.min(GRAPH_PAGE_MAX, Math.max(0, limit));
 }
@@ -248,6 +252,23 @@ export const memoryQueries = {
         type: r.type,
         count: r._count.id,
       }));
+    },
+
+    // #2044 (cor:agt:040:06): the App's install memory for an Agent. Creates nothing; a
+    // customisation that does not exist and one the record gate does not open are the same null.
+    installMemory: async (_: unknown, args: { appRef: string; agentRef: string }, ctx: Context) => {
+      let target: { appId: string; agentId: string };
+      try {
+        target = await resolveInstallTarget(ctx.db, { appRef: args.appRef, agentRef: args.agentRef });
+      } catch (e) {
+        if (e instanceof AppNotFoundError || e instanceof AgentNotFoundError) return null;
+        throw e;
+      }
+      const row = await findInstallMemory(ctx.db, target.appId, target.agentId);
+      if (!row) return null;
+      const memory = await ctx.db.memory.findUnique({ where: { id: row.id }, include: MEMORY_INCLUDE });
+      if (!memory || memory.deletedAt) return null;
+      return (await canReadMemoryRecord(ctx, memory)) ? memory : null;
     },
 
     memory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
@@ -565,6 +586,7 @@ export const memoryQueries = {
         // include concealed records. Preserve the helper's unrestricted-set
         // sentinel if supplied; current admin sets retain strict-owner limits.
         const accessibleIds = await getAccessibleMemoryIds(ctx);
+        const installListable = await listableInstallMemoryIds(ctx.db, ctx);
         // DS (Holger, 2026-10-05): the default listing is a membership slice,
         // including for platform admins whose direct-record reach is wider.
         // External AppMembers still discover their own App's readable rows.
@@ -577,7 +599,10 @@ export const memoryQueries = {
           userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any } },
+            // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
+            // the org clause skips it, and the clause below lists it to its own audience alone.
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
+            { class: 'system' as any, isInstallMemory: true, id: { in: installListable } },
             {
               class: 'app' as any,
               ...(accessibleIds === null ? {} : { id: { in: accessibleIds } }),
@@ -652,7 +677,7 @@ export const memoryQueries = {
           ],
         });
       }
-      throw new Error('Unauthenticated');
+      throw unauthenticatedError();
     },
 
     // #466: slim, paginated node list for the graph view. Phase one — the

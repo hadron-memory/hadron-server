@@ -20,9 +20,11 @@ ALTER TABLE memories
   ADD CONSTRAINT chk_personal_visibility_user
   CHECK ((class IN ('personal', 'private')) = (user_id IS NOT NULL));
 
--- 008-agent-installation, relaxed by 034-memory-class-access and #653: app_id
--- is REQUIRED for class='app'; FORBIDDEN for class='system' (an agent's own
--- definition is never app-scoped); OPTIONAL for knowledge/group/personal/private
+-- 008-agent-installation, 034-memory-class-access, #653 and #2064:
+-- app_id is REQUIRED for class='app'; class='system' has app_id NULL for an
+-- Agent's own system memory, or app_id set with is_install_memory=true for an
+-- App's install memory. Other classes have is_install_memory=false and no
+-- install_of_agent_id. app_id is OPTIONAL for knowledge/group/personal/private
 -- (set when provisioned inside an app — the (app, user) scope for personal;
 -- NULL when free-standing). #653 moved knowledge + group from FORBIDDEN to
 -- OPTIONAL so those shared memory classes can be attached to an App.
@@ -31,9 +33,10 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_class_app_id
   CHECK (
-    (class = 'app' AND app_id IS NOT NULL)
-    OR (class = 'system' AND app_id IS NULL)
-    OR (class IN ('knowledge', 'group', 'personal', 'private'))
+    (class = 'app' AND app_id IS NOT NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NULL AND install_of_agent_id IS NULL AND is_install_memory = false)
+    OR (class = 'system' AND app_id IS NOT NULL AND is_install_memory = true)
+    OR (class IN ('knowledge', 'group', 'personal', 'private') AND install_of_agent_id IS NULL AND is_install_memory = false)
   );
 
 -- #723: shared_memory_of_agent_id IDENTIFIES an App's runtime `shared`
@@ -46,6 +49,17 @@ ALTER TABLE memories
 ALTER TABLE memories
   ADD CONSTRAINT chk_memory_shared_agent_scope
   CHECK (shared_memory_of_agent_id IS NULL OR (class = 'app' AND app_id IS NOT NULL));
+
+-- #2044 (S7): an App's INSTALL MEMORY is class='system', app_id set and
+-- is_install_memory=true. install_of_agent_id identifies the Agent while
+-- present; erasure may detach it to NULL without erasing the retained memory
+-- (hrn:node:hadronmemory.com:specs:cor:dmo:060:01). ONE live install memory per
+-- (App, Agent); a soft-deleted
+-- one never blocks its replacement (Prisma cannot model the WHERE). Synced with
+-- the 20261019090000 migration and src/test/globalSetup.ts.
+CREATE UNIQUE INDEX IF NOT EXISTS memories_install_memory_live_uniq
+  ON memories (app_id, install_of_agent_id)
+  WHERE install_of_agent_id IS NOT NULL AND deleted_at IS NULL;
 
 -- 023-app-shape FR-024: bidirectional invariant — class='group' ⇔
 -- visibility='GROUP'.
@@ -638,18 +652,35 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+\ir boot-prompt-invariants.sql
+\ir boot-prompt-pointer-invariants.sql
+\ir compiled-prompt-revision-invariants.sql
+\ir boot-prompt-approval-invariants.sql
 
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql
+
+-- #2441: append-only automation adoption events.
+\ir automation-adoption-invariants.sql
+
+-- #2484: an App's prefix-scoped write grant for userless runs, and its append-only events.
+\ir app-memory-write-grant-invariants.sql
+
+-- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
+\ir git-mirror-obligation-invariants.sql
 
 -- #1705: agent task shape + the append-only team event stream. One source,
 -- shared verbatim with migration 20261008010000_agent_tasks (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
 
+-- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
+-- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
+\ir agent-task-number-invariants.sql
+
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
--- 20261014150000_host_report_timeout (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
+-- 20261024100200_context_reset_availability (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-stall-invariants.sql
 
 -- #1707: a session's model family and host registrations. One source, shared
@@ -661,6 +692,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- and the App ticker-settings bounds. One source, shared verbatim with migration
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
+\ir agent-ticker-template-invariants.sql
 \ir delivery-settings-invariants.sql
 \ir channel-checks-invariants.sql
 
@@ -673,10 +705,14 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir app-key-scope-invariants.sql
 
 -- #1709: host operations and the record of host-key use. One source, shared
--- verbatim with migration 20261014150100_host_operation_settlement (the newest to carry it) (pinned by
+-- verbatim with migration 20261024100100_context_reset_host_operations (the newest to carry it) (pinned by
 -- src/lib/hostOperations/invariants.test.ts). After agent-task-matching-invariants.sql,
 -- whose host_operation_token_ok it uses.
 \ir host-operation-invariants.sql
+
+-- #2162: a worker's context reset (cor:agt:050:27). One source, shared verbatim with migration
+-- 20261024100000_context_reset (pinned by src/lib/contextReset/invariants.test.ts).
+\ir context-reset-invariants.sql
 
 -- #1709 slice 2: launch grants and host-launched sessions. One source, shared
 -- verbatim with migration 20261014030000_host_launch (pinned by
@@ -685,6 +721,25 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #1631: shared passkey registry invariant guards.
 \ir passkey-invariants.sql
+
+-- #1897: sign-in lineage guards. One source, shared verbatim with migration
+-- 20261019120000_sign_in_lineage.
+\ir signin-invariants.sql
+
+-- #1631 PR1b slice 2: fresh sign-ins bound to the ceremony browser. One source, shared verbatim with migration
+-- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
+\ir fresh-sign-in-invariants.sql
+
+-- #2204: OIDC nonce hash on pending logins. One source, shared verbatim with migration
+-- 20261023120000_pending_login_provider_nonce (pinned by src/auth/providerNonce.test.ts).
+\ir login-nonce-invariants.sql
+
+-- #1631 PR2: passkey registration lifecycle (cancel tokens). One source, shared verbatim with migration
+-- 20261022030000_passkey_revoke (pinned by src/lib/passkeys/cancel1631.test.ts).
+\ir passkey-registration-invariants.sql
+-- #1897 slice B1: pending email sign-ins. One source, shared verbatim with migration
+-- 20261021120000_pending_email_sign_ins (pinned by src/auth/pendingEmailSignIn1897.test.ts).
+\ir pending-email-sign-in-invariants.sql
 
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
@@ -720,5 +775,29 @@ CREATE TRIGGER user_deletion_audits_immutable
   BEFORE UPDATE OR DELETE ON user_deletion_audits
   FOR EACH ROW EXECUTE FUNCTION hadron_user_deletion_audit_immutable();
 
+-- #2245 (R170.6): the Agent-clone audit is append-only and names exactly one target
+-- (Prisma can model neither; the migration carries the same statements).
+ALTER TABLE agent_clone_audits DROP CONSTRAINT IF EXISTS chk_agent_clone_audit_one_target;
+ALTER TABLE agent_clone_audits ADD CONSTRAINT chk_agent_clone_audit_one_target
+  CHECK ((target_org_id IS NOT NULL) <> (target_user_id IS NOT NULL));
+CREATE OR REPLACE FUNCTION hadron_agent_clone_audit_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'agent_clone_audits is append-only';
+END $$;
+DROP TRIGGER IF EXISTS agent_clone_audits_immutable ON agent_clone_audits;
+CREATE TRIGGER agent_clone_audits_immutable
+  BEFORE UPDATE OR DELETE ON agent_clone_audits
+  FOR EACH ROW EXECUTE FUNCTION hadron_agent_clone_audit_immutable();
+
 -- #1162: newly introduced typed Worker/session references fence hard deletion.
 \ir worker-reference-invariants.sql
+
+-- S12 explicit reporting choice (legacy UNSET retained).
+\ir worker-team-choice-invariants.sql
+-- #423: outgoing-edge lookup/delete must not scan every tenant’s edges.
+CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
+-- #2047: the served-prompt record — one owner, owner-consistent identity, immutable, deleted only with its owner. After
+-- the #1162 fence file: it puts the record's worker/session columns under that fence function.
+\ir served-prompt-invariants.sql
+\ir served-prompt-app-invariants.sql

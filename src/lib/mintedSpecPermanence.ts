@@ -1,20 +1,18 @@
 /**
- * #1468 — a spec in a mint-stamped corpus is permanent.
+ * Legacy memory-stamped spec-removal guards, disabled by #1591.
  *
- * "Permanent at mint" (#1447 contract §5, D-2026-09-23-004) is ENFORCED, not
- * only documented (Holger, team chat #4181): once a corpus has been minted,
- * no path may remove one of its specs. Replacing a minted spec is done by
- * superseding it, which keeps the old citation resolvable.
+ * Current minting is per node. A first mint ends that node's draft rights:
+ * renumbering and governed bulk replacement are refused, and moves retain an
+ * alias (hrn:node:hadronmemory.com:specs:cor:dmo:120:08). Minting currently adds
+ * NO removal protection (hrn:node:hadronmemory.com:specs:cor:dmo:120:09).
  *
- * WHICH corpora (Holger, team chat #4370): only a corpus stamped by the
- * `mintSpecCorpus` flow, i.e. `Memory.corpusMintedAt` is set. This is
- * deliberately NARROWER than `specCorpus.ts`'s MINTED state
- * (`corpusDraft = false`): every ordinary memory defaults to that, including
- * the live platform specs corpus, which never passed through the mint flow and
- * is outside this guard unless it is later stamped through an authorized flow.
- * A draft corpus is never stamped, so draft removals stay allowed.
+ * The retained implementation below is the OLD policy, exercised by its own
+ * tests only while the switch is enabled. It keys on Memory.corpusMintedAt,
+ * now a compatibility stamp of the latest mint in any memory. It must not be
+ * re-enabled unchanged: that would protect specs beyond the individually
+ * minted nodes. Future protection needs a new decision and per-node checks.
  *
- * WHICH nodes: anything carrying the spec marker (`hasSpecMarker` — a `spec`
+ * The legacy implementation selects anything carrying the spec marker (`hasSpecMarker` — a `spec`
  * tag or a `spec`/`spec.*` role; both are plaintext at rest even in encrypted
  * memories). Because the removal guards pick specs out BY that marker,
  * dropping it is itself a removal path, and the marker is guarded too
@@ -22,7 +20,7 @@
  * rewrite `tags` or `role` refuses to leave a minted spec unmarked, and git
  * sync keeps the stored marker and reports the file.
  *
- * Race safety against a concurrent mint. The mint fences with Memory
+ * Retained lock protocol when this legacy policy is enabled: the mint fences with Memory
  * `FOR UPDATE`, then every node row `FOR UPDATE` with a 500ms lock timeout
  * that turns into a retryable `SPEC_CORPUS_BUSY` (`fenceCorpusForMint`). This
  * guard takes the opposite, cooperating order that node writers use: the
@@ -59,8 +57,8 @@ import { decisionContainedError, memoryHoldsDecisions } from './decisions/index.
  *
  * Holger, 2026-10-01 (#1591): no minted spec is permanent for now, including
  * the corpora this guard protected since #1468. Every guard below answers
- * "nothing protected" while this is false. The guard stays so a later ruling
- * re-enables it here, in one place; its own tests run with it on. Note that it
+ * "nothing protected" while this is false. The guard is retained for a later
+ * policy decision; its own tests run with it on. Note that it
  * still keys on the legacy `Memory.corpusMintedAt` stamp, so re-enabling it
  * under per-node minting needs a decision on which nodes it covers.
  */

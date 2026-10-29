@@ -725,7 +725,7 @@ describe('encryptMemory', () => {
 // ---------------------------------------------------------------------------
 
 describe('linkMemoryToUser with encryption', () => {
-  it('does not replace a competing promotion key after its live-node scan', async () => {
+  it('does not replace a competing promotion key before taking the promotion lock', async () => {
     const anon = await resolvers.Mutation.startAgentSession(
       {}, { agentId: agent.id }, appCtx(plaintextApp.id),
     );
@@ -740,33 +740,37 @@ describe('linkMemoryToUser with encryption', () => {
     const rivalContent = encryptNodeFieldsWithKey(
       { content: 'competing private draft' }, parseDataKey(rivalKey),
     ).content;
-    const originalFindMany = db.node.findMany.bind(db.node);
+    const transaction = db.$transaction.bind(db) as any;
     let intervened = false;
-    const scan = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
-      const rows = await originalFindMany(args);
-      if (!intervened && args?.where?.memoryId === anon.memoryId && args?.select?.content === true) {
-        intervened = true;
-        const owner = await db.user.findFirstOrThrow({
-          where: { externalAppId: plaintextApp.id, externalId: 'claimant' },
-        });
-        await db.node.update({ where: { id: node.id }, data: { content: rivalContent } });
-        await db.memory.update({
-          where: { id: anon.memoryId! },
-          data: {
-            isEncrypted: true, keyVerifier: rivalVerifier,
-            class: 'private', userId: owner.id,
-          },
-        });
-      }
-      return rows;
-    }) as typeof db.node.findMany);
+    const fence = vi.spyOn(db, '$transaction').mockImplementation((async (input: any, options: any) => {
+      if (typeof input !== 'function') return transaction(input, options);
+      return transaction((tx: any) => input(new Proxy(tx, { get(target, property) {
+        if (property !== '$queryRaw') return Reflect.get(target, property);
+        return async (strings: TemplateStringsArray, ...values: unknown[]) => {
+          // #1346 removes the pre-transaction live-value scan. A rival can
+          // still win after preflight and before our deciding Memory lock.
+          if (!intervened && strings.join('').includes('FROM memories') && strings.join('').includes('FOR UPDATE')) {
+            intervened = true;
+            const owner = await db.user.findFirstOrThrow({
+              where: { externalAppId: plaintextApp.id, externalId: 'claimant' },
+            });
+            await db.node.update({ where: { id: node.id }, data: { content: rivalContent } });
+            await db.memory.update({
+              where: { id: anon.memoryId! },
+              data: { isEncrypted: true, keyVerifier: rivalVerifier, class: 'private', userId: owner.id },
+            });
+          }
+          return target.$queryRaw(strings, ...values);
+        };
+      } })), options);
+    }) as typeof db.$transaction);
     try {
       await expect(withTestOperationKey(generateDataKey().raw.toString('base64'), (appCtx(plaintextApp.id)).appId, () => resolvers.Mutation.linkMemoryToUser(
         {}, { memoryId: anon.memoryId!, externalUserId: 'claimant' },
         appCtx(plaintextApp.id),
       ))).rejects.toMatchObject({ extensions: { code: 'MEMORY_WRITE_CONFLICT' } });
     } finally {
-      scan.mockRestore();
+      fence.mockRestore();
     }
     expect(intervened).toBe(true);
     expect((await db.memory.findUniqueOrThrow({ where: { id: anon.memoryId! } })).keyVerifier)

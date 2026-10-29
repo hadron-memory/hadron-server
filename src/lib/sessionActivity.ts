@@ -476,6 +476,20 @@ export function isSessionDormant(
   return sessionActivityAt(session, lastEventAt).getTime() < now.getTime() - dormancyThresholdMs(dormancyDays);
 }
 
+/** #2288: a read-only description, independent of who could resume the session. */
+export type SessionState = 'LIVE' | 'LAPSED' | 'DORMANT' | 'ENDED';
+export function sessionState(
+  session: Parameters<typeof isSessionLive>[0] & { deletedAt?: Date | null },
+  lastEventAt: Date | null | undefined,
+  dormancyDays: number,
+  now: Date,
+): SessionState {
+  // ENDED means terminal, including deletion and the promised end before reap.
+  if (session.endedAt || session.deletedAt || (session.expiresAt && now >= session.expiresAt)) return 'ENDED';
+  if (isSessionDormant(session, lastEventAt, dormancyDays, now)) return 'DORMANT';
+  return isSessionLive(session, lastEventAt, now) ? 'LIVE' : 'LAPSED';
+}
+
 /**
  * The dormancy threshold in milliseconds for an App's `sessionDormancyDays`.
  * ONE definition for `isSessionDormant` and for worker dormancy (#1748,
