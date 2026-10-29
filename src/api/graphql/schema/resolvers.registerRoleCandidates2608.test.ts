@@ -345,6 +345,58 @@ describe('#2608 register role candidates', () => {
     expect(r.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
   });
 
+  // Axel P2 (#2724 LOCAL delta at 835a6a27): the batched walk's node-liveness filter
+  // (`n.deleted_at IS NULL`, effectiveSystemMemory.ts:281) was unpinned — the resolver
+  // checks `isRunnable` and the MEMORY's deletedAt, never the node's own, so under a
+  // strip mutant a soft-deleted runnable task node resolved as the hit and its worker
+  // became a candidate. The tombstone has a product writer (`deleteNode` without
+  // `hard`), so the pin is reachable, not #943-dead. Both directions: the child's own
+  // override tombstoned falls through to the live base, and the last live task node
+  // tombstoned leaves no hit at all.
+  it('a soft-deleted task node never resolves: fall-through to the live base, then nothing', async () => {
+    await mapTask();
+    const base = await roleAgent('Tomb base'); const baseTask = await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const child = await roleAgent('Tomb child', base.id);
+    const own = await node(child.memoryId, 'tasks:finish', { isRunnable: true });
+    const w = await worker('Tomb worker', child.id);
+    expect((await pick()).depth).toBe(0);
+    await db.node.update({ where: { id: own.id }, data: { deletedAt: new Date() } });
+    const fell = await pick();
+    expect(fell.depth).toBe(1);
+    expect(fell.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
+    await db.node.update({ where: { id: baseTask.id }, data: { deletedAt: new Date() } });
+    expect((await pick()).total).toBe(0);
+  });
+
+  // Axel P3 (#2724 LOCAL delta), DISPOSED NOT PINNED: the batched walk's
+  // AGENT_BASE_CHAIN_CAP bound (effectiveSystemMemory.ts:260) survives a widening
+  // mutant because a chain past the cap is unreachable state, not because a pin is
+  // missing — prisma/agent-base-invariants.sql REFUSES the row itself ("a chain would
+  // hold % Agents, more than 4", a 23514 even on a raw agent.update), so no fixture
+  // can hold a 5-Agent chain without disabling a database invariant (#943 class: a
+  // pin on state nothing can write proves nothing). The narrowing direction is
+  // already pinned: the full-cap test above sees the depth-3 base contribute.
+
+  // Axel P3 (#2724 LOCAL delta): the walked CTE's own `a.deleted_at IS NULL`
+  // (effectiveSystemMemory.ts:265) was unpinned — every soft-deleted-intermediate
+  // fixture gave the middle Agent no memory, and nothing else masks it here: the child
+  // roots at its OWN live memory, so what the walk includes past that root is decided
+  // by the CTE alone (the resolver's memoryOf only picks roots). Give the deleted
+  // intermediate a system memory holding the task: it must not become a link, and
+  // un-deleting it proves the fixture can show what the filter guards.
+  it('a soft-deleted intermediate with its own task memory is not a link in the walk', async () => {
+    await mapTask();
+    const base = await roleAgent('Delmem base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const child = await roleAgent('Delmem child', base.id);
+    const w = await worker('Delmem worker', child.id);
+    await db.agent.update({ where: { id: base.id }, data: { deletedAt: new Date() } });
+    expect((await pick()).total).toBe(0);
+    await db.agent.update({ where: { id: base.id }, data: { deletedAt: null } });
+    const live = await pick();
+    expect(live.depth).toBe(1);
+    expect(live.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
+  });
+
   it('exposes only the closed paginated projection in the GraphQL schema', () => {
     const query = parse('{ registerRoleCandidates(appRef: "app", code: "code", limit: 20, offset: 0) { appId code taskLoc depth total candidates { role depth taskUrn worker { id kind name urn } } } }');
     expect(validate(buildSchema(typeDefs), query)).toEqual([]);
