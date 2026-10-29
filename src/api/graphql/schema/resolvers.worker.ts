@@ -1,7 +1,7 @@
 import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
-// an Agent (`personaRole` + the `systemPrompt` template); the Worker is the
+// an Agent (`personaRole` and its compiled boot prompt); the Worker is the
 // local named identity ("Iris") that does attributable work. `castWorker`
 // supersedes `createTeamPersona`'s minting semantics: it no longer mints an
 // Agent at all — it casts an EXISTING installed agent under a name, allocating
@@ -327,7 +327,6 @@ type WorkerRow = {
   name: string;
   slug: string;
   role: string | null;
-  promptOverride: string | null;
   signature: string;
   trailer: string;
   memoryId: string | null;
@@ -365,7 +364,6 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
       name: true,
       slug: true,
       role: true,
-      promptOverride: true,
       signature: true,
       trailer: true,
       memoryId: true,
@@ -825,18 +823,16 @@ type CastArgs = CastTeamArgs & {
   agentRef?: string | null;
   role?: string | null;
   name?: string | null;
-  promptOverride?: string | null;
 };
 
 type CastTarget = {
   appId: string;
   app: AppRow & { deletedAt: Date | null };
-  agent: { id: string; name: string; personaRole: string | null; systemPrompt: string | null };
+  agent: { id: string; name: string; personaRole: string | null };
   workerRole: string | null;
   /** The role the caller passed (trimmed), or null: the cast re-checks it against the agent read in its transaction. */
   requestedRole: string | null;
   requestedName: string | null;
-  override: string | null;
   choice: ReturnType<typeof castTeamChoice>;
   reportingHeadId: string | null;
 };
@@ -859,7 +855,7 @@ const roleOverrideRefused = (appId: string, agentRole: string | null, requested:
  * to allocation behaves identically under preview and cast.
  */
 async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?: string): Promise<CastTarget> {
-  const { appRef, agentRef, role, name, promptOverride } = args;
+  const { appRef, agentRef, role, name } = args;
   const choice = castTeamChoice(args);
   const roleNorm = (role ?? '').trim() || null;
   if (roleNorm !== null && roleNorm.includes(':')) {
@@ -869,7 +865,6 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   }
   // cor:agt:020:02 blank-is-absent: a whitespace-only name is no name.
   const requestedName = (name ?? '').trim() || null;
-  const override = (promptOverride ?? '').trim() === '' ? null : (promptOverride as string);
   // #1870 (Holger, 2026-10-13, #10579): a worker whose MENTION TOKEN is a
   // broadcast word would wake every registered destination on a reply to it,
   // so casting refuses such names — by token (Vera #10580), not raw name:
@@ -928,7 +923,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       where: { appId_agentId: { appId, agentId: id } },
       select: {
         agent: {
-          select: { id: true, name: true, personaRole: true, systemPrompt: true, deletedAt: true },
+          select: { id: true, name: true, personaRole: true, deletedAt: true },
         },
       },
     });
@@ -945,7 +940,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       orderBy: { createdAt: 'asc' },
       select: {
         agent: {
-          select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true },
+          select: { id: true, name: true, urn: true, personaRole: true, deletedAt: true },
         },
       },
     });
@@ -988,7 +983,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   }
   await assertCastable(ctx.db, app, agent.id);
   const workerRole = agent.personaRole ?? null;
-  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, override, choice, reportingHeadId };
+  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
 }
 
 /** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
@@ -1126,7 +1121,6 @@ export const workerMutations = {
                 name: candidate,
                 slug,
                 role: castRole,
-                promptOverride: freshTarget.override,
                 createdBy: ctx.userId ?? null,
                 // #1050 — casting does NOT hold. A name is held by the person
                 // who WORKS as it, and the canonical setup flow is a coordinator
@@ -1656,44 +1650,28 @@ export const workerMutations = {
   },
 
   /**
-   * updateWorker — #1010: amend a casting's individuality after the fact.
+   * updateWorker — #1010: amend a casting's signature and trailer after the fact (cor:agt:040:04).
    *
-   * `promptOverride` is the platform's designated per-worker escape hatch
-   * (cor:agt:020:01), but it could only be set at CASTING time and was
-   * immutable thereafter — which inverts the natural order, fixing a casting's
-   * individuality at the one moment nobody yet knows what makes it individual.
-   * Neither escape hatch covered it: the role agent's `systemPrompt` is SHARED
-   * by every casting of that role (cor:agt:020:01 explicitly allows several), so
-   * anything individual written there is claimed by all of them; and
-   * `deleteWorker` + re-cast refuses `WORKER_IN_USE` the moment a session was
-   * bound — so exactly the workers that have accumulated an identity are the
-   * ones that could not be re-cast.
+   * #2712 removed the per-worker prompt override this mutation was first written for (#1010): per-worker
+   * customisation is now the worker's own compiled boot prompt (`boot:workers:<id>:source`, cor:agt:040:06), so a
+   * change to what a worker is told goes through that source, a compile and an approval, never this mutation.
    *
    * `name` is permanent by law (cor:agt:020:02 — the allocation contract). The
    * agent, and with it the role, is changed by `changeWorkerAgent` (#2458,
    * cor:dmo:050:11), never here: that change has its own checks and effects.
    *
-   * Argument semantics: OMITTED preserves (the partial-update convention every
-   * other surface follows), explicit `null` or blank CLEARS — matching both the
-   * nullable column and `castWorker`'s own blank-is-absent normalization, so a
-   * value that castWorker would have stored as null cannot be reintroduced here.
-   *
-   * A RETIRED worker refuses. An override is briefing text, delivered at bind
-   * time — and a retired worker takes no new bindings (`startSession` refuses
-   * WORKER_RETIRED), so the edit could never reach anyone. Silently accepting a
-   * write with no possible effect is worse than a typed refusal that says why.
-   *
-   * Authorization is castWorker's gate: this edits the App's staff.
+   * Argument semantics: OMITTED preserves (the partial-update convention every other surface follows). A call that
+   * names neither field changes nothing and returns the worker, behind castWorker's staffing gate.
    */
   updateWorker: async (
     _: unknown,
-    args: { workerRef: string; promptOverride?: string | null; signature?: string | null; trailer?: string | null },
+    args: { workerRef: string; signature?: string | null; trailer?: string | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
     const changesSignature = 'signature' in args || 'trailer' in args;
     if (changesSignature) {
-      const data: { signature?: string; trailer?: string; promptOverride?: string | null } = {};
+      const data: { signature?: string; trailer?: string } = {};
       const anchors: AuthorityAnchor[] = [
         { kind: 'app', id: app.id },
         ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
@@ -1706,11 +1684,9 @@ export const workerMutations = {
         const actor = currentActor();
         const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
         if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
-        if ('promptOverride' in args) await requireWorkerStaffAccess(txCtx, fresh);
         for (const field of ['signature', 'trailer'] as const) {
           if (field in args) data[field] = normalizeWorkerSignature(args[field]);
         }
-        if ('promptOverride' in args) data.promptOverride = (args.promptOverride ?? '').trim() === '' ? null : args.promptOverride;
       }, async tx => {
         const { count } = await tx.worker.updateMany({ where: { id: worker.id, retiredAt: null }, data });
         if (!count) {
@@ -1722,59 +1698,6 @@ export const workerMutations = {
       });
     }
     await requireWorkerStaffAccess(ctx, app);
-
-    if (worker.retiredAt) {
-      throw new GraphQLError(
-        'This worker is retired — it takes no new session bindings, so a prompt override would never be delivered. Cast a new worker instead.',
-        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
-      );
-    }
-
-    // Presence, not truthiness: `promptOverride: null` is a request to CLEAR,
-    // while omitting it is a request to leave it alone. A `?? undefined` here
-    // would collapse the two and make clearing impossible.
-    if (!('promptOverride' in args)) {
-      return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    }
-    const next = args.promptOverride;
-    // Guarded on the state the refusal above consumed (PR #1019 review,
-    // Copilot): the check read `retiredAt` from a row resolved earlier, so a
-    // `retireWorker` landing in between would let this write through and amend
-    // a retired casting the contract says it refuses. `updateMany` re-applies
-    // the predicate at write time — the same shape `retireWorker` itself uses
-    // for its idempotent claim, and the lighter sibling of `deleteWorker`'s
-    // SERIALIZABLE count-then-act (this write cannot corrupt anything, it just
-    // must not contradict its own stated refusal).
-    const { count } = await ctx.db.worker.updateMany({
-      where: { id: worker.id, retiredAt: null },
-      // castWorker's normalization, verbatim: blank is absent, and a non-blank
-      // value is stored RAW (not trimmed) — the override is prose whose leading
-      // and trailing whitespace is the author's to choose.
-      data: { promptOverride: (next ?? '').trim() === '' ? null : (next as string) },
-    });
-    if (count === 0) {
-      // Zero rows has TWO causes, and guessing retirement is wrong (PR #1020
-      // review, Codex P2): a concurrent `deleteWorker` can also have removed the
-      // row. It is permitted to — its "never used" test is about bound sessions
-      // and working-memory content, and setting an override makes a worker
-      // neither. Reporting WORKER_RETIRED for a worker that was actually DELETED
-      // would be actively misleading, since deletion frees the name to be cast
-      // again while retirement reserves it forever (cor:agt:020:02) — opposite
-      // advice for the caller. So ask which happened rather than assume.
-      const still = await ctx.db.worker.findUnique({
-        where: { id: worker.id },
-        select: { retiredAt: true },
-      });
-      if (!still) {
-        throw new GraphQLError('Worker not found.', {
-          extensions: { code: 'WORKER_NOT_FOUND', workerRef: args.workerRef },
-        });
-      }
-      throw new GraphQLError(
-        'This worker was retired while the update was in flight — it takes no new session bindings, so a prompt override would never be delivered.',
-        { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
-      );
-    }
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -2131,7 +2054,7 @@ export const workerQueries = {
    * could mint anyway.
    */
   castWorkerPreview: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, agent, workerRole, requestedName, override, choice, reportingHeadId } = await resolveCastTarget(
+    const { appId, agent, workerRole, requestedName, choice, reportingHeadId } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -2155,9 +2078,6 @@ export const workerQueries = {
       );
     }
 
-    // Prompt composition mirrors Worker.prompt exactly: the agent's template
-    // with {{name}}/{{role}} bound, then the override as its own paragraph.
-    const template = agent.systemPrompt ?? null;
     const previewRole = workerRole ?? agent.personaRole ?? '';
     // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
     const values = withWorkerSignatures({
@@ -2170,9 +2090,9 @@ export const workerQueries = {
       'worker.url': '',
       'session.llmModel': '',
     }, WORKER_SIGNATURE_DEFAULTS);
-    // #2047 (S10): with serving ON the preview shows what a bind would be served now (no worker pointer exists yet), not the
-    // retired template and override; a prompt that could not be served previews as none rather than failing a cast it does not gate.
-    let servedTemplate: string | null | undefined;
+    // #2047 (S10): the preview shows what a bind would be served now (no worker pointer exists yet); a prompt that could not
+    // be served previews as none rather than failing a cast it does not gate. #2712: there is no other text to preview.
+    let servedTemplate: string | null = null;
     if (bootPromptServingEnabled()) {
       try {
         servedTemplate = (await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId, agent: { id: agent.id, name: agent.name } })).content;
@@ -2182,10 +2102,7 @@ export const workerQueries = {
         servedTemplate = null;
       }
     }
-    const previewTemplate = servedTemplate !== undefined ? servedTemplate : template;
-    const bound = previewTemplate ? applyPlatformVariables(previewTemplate, values, { name, role: previewRole }) : null;
-    const boundOverride = servedTemplate !== undefined ? null : (override ? applyPlatformVariables(override, values) : override);
-    const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
+    const prompt = servedTemplate ? applyPlatformVariables(servedTemplate, values, { name, role: previewRole }) : null;
 
     // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
     // what is committed now, takes no lock and writes nothing, so a cast may still differ if the App changes.
@@ -2469,8 +2386,7 @@ export async function loadAppWorkerCheckStatuses(
  * `sessionScopeFilter` admits ANY org member (READER included), and a
  * self-attributed session stays readable by its user after they leave the
  * App. Attribution needs only the IDENTITY scalars (name, role, appId,
- * retiredAt); the WORKING-STATE fields — `prompt`, `promptOverride`,
- * `memoryId` — must stay behind the worker read gate, masked to null on
+ * retiredAt); the WORKING-STATE fields — `prompt`, `memoryId` — must stay behind the worker read gate, masked to null on
  * deny (the #552 posture applied field-level, like Worker.app/agent).
  * Memoized per request+App: one gate check covers a whole session page.
  */
@@ -2482,14 +2398,13 @@ export async function loadAppWorkerCheckStatuses(
  * the SAME agent read that supplied the template, so the stamp describes the
  * template actually rendered — a parallel agent read could race an edit and
  * label an older prompt with a newer time (Andi, #2853). It is the Agent
- * row's generic `updatedAt` (nullable), NOT a proven persona-template edit
- * time; no separate prompt-override mtime exists, and none is invented here.
- * Text is null when there is no template and no override — in that case
- * callers show no stamps.
+ * row's generic `updatedAt` (nullable), NOT a proven boot-prompt edit
+ * time. Text is null when no prompt is served — in that case callers show no
+ * stamps.
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; promptOverride: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
+  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
   opts?: { llmModel?: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null; refusal?: string | null }> {
   // Working-state path: the composed boot prompt embeds the agent's persona
@@ -2506,7 +2421,7 @@ export async function composeWorkerPrompt(
   if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
   const agent = await ctx.db.agent.findUnique({
     where: { id: worker.agentId },
-    select: { systemPrompt: true, personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
+    select: { personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
   });
   // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
   // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
@@ -2523,20 +2438,15 @@ export async function composeWorkerPrompt(
   // — evaluated for the Worker's durable holder, so an admin reading another
   // Worker's briefing sees that Worker's standing, not the admin's.
   const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE' }));
-  // #2047 (S10): with serving ON the prompt is the pointed-to compiled node's approved revision, as-is; the retired
-  // `Agent.systemPrompt` and `Worker.promptOverride` are not read. A refusal reads as no briefing with its code, so a
-  // read never throws where a bind would have refused.
+  // #2047 (S10): with serving ON the prompt is the pointed-to compiled node's approved revision, as-is. A refusal reads
+  // as no briefing with its code, so a read never throws where a bind would have refused. #2712 deleted the authored
+  // literal prompts, so with serving OFF there is no authored text: only the derived blocks.
   if (bootPromptServingEnabled()) {
     const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform);
     const text = served.text === null ? (derived || null) : !derived ? served.text : `${served.text}\n\n${derived}`;
     return { text: served.text === null ? null : text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null, refusal: served.refusal };
   }
-  const template = agent?.systemPrompt ?? null;
-  // One pass over each authored text (blind review P2-1/P2-2): the override is boot-prompt text too.
-  const bound = template ? applyPlatformVariables(template, platform, { name: worker.name, role }) : null;
-  const override = worker.promptOverride ? applyPlatformVariables(worker.promptOverride, platform) : worker.promptOverride;
-  const authored = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
-  const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
+  const text = derived || null;
   // #1090 review (Andi, P2): stamp the render time AFTER the text exists. A
   // clock read taken up front could predate a concurrent template edit that
   // the same query then picked up — an Agent stamp LATER than the claimed
@@ -2940,7 +2850,7 @@ export const workerFieldResolvers = {
      * mismatch warning fires at `session start` (hadron-cli#456), which already
      * has the worker in hand.
      *
-     * Behind the worker read gate and masked on deny, like `promptOverride` and
+     * Behind the worker read gate and masked on deny, like `memoryId` and
      * the holder — because `Session.worker` reaches a Worker through a WIDER
      * gate that admits any org member and survives a user leaving the App, so
      * an ungated field here would publish a team's repo list through any
@@ -3018,11 +2928,6 @@ export const workerFieldResolvers = {
         return null;
       }
     },
-    promptOverride: async (
-      worker: { appId: string; promptOverride: string | null },
-      _: unknown,
-      ctx: Context,
-    ) => ((await maySeeWorkerInternals(ctx, worker.appId)) ? worker.promptOverride : null),
     /**
      * #1050 — the holder, behind the worker read gate and masked to null on
      * deny (PR #1052 review, Codex P2).
@@ -3225,7 +3130,7 @@ export const workerFieldResolvers = {
      * The role-agent behind the casting — behind Query.agent's OWN read gate
      * (PUBLIC, else owner / org READER), masked to null on deny. The Worker
      * read gate is WIDER than the Agent's (App participants, App keys), and a
-     * nested object hands the caller the Agent's field resolvers — systemPrompt
+     * nested object hands the caller the Agent's field resolvers — systemMemoryId
      * included — which assume the outer query authorized them
      * (findings:broadening-read-gate-leaks-nested-objects, #552). The
      * installed-agent read grant cannot stand in for that gate either: Worker
@@ -3261,14 +3166,12 @@ export const workerFieldResolvers = {
       return app;
     },
     /**
-     * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{name}} and
-     * the override compose is tunable"): the agent's `systemPrompt` template
-     * with `{{name}}`/`{{role}}` bound, then the per-worker `promptOverride`
-     * appended as its own paragraph. Null when the agent carries no template
-     * and the worker no override.
+     * The worker's boot prompt: the compiled boot prompt a bind of this worker
+     * is served (cor:agt:040:07), with the platform variables filled. Null when
+     * no prompt can be served.
      */
     prompt: async (
-      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; promptOverride: string | null; signature: string; trailer: string },
+      worker: { id: string; appId: string; agentId: string; name: string; role: string | null; signature: string; trailer: string },
       _: unknown,
       ctx: Context,
     ) => (await composeWorkerPrompt(ctx, worker)).text,

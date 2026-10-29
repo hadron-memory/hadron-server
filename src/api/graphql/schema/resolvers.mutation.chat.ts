@@ -110,16 +110,6 @@ async function chatWriteTx(
 }
 
 /**
- * The Agent's own identity bound into its template on the chat path (#2042, cor:dmo:150:08): a chat binds no worker,
- * so `worker.name` falls back to the Agent's name, `worker.role` to its persona role, `worker.url` is the Agent's
- * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
- * so `session.llmModel` has no value here and is empty.
- */
-export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
-  return applyPlatformVariables(agent.systemPrompt ?? '', agentPlatformValues(agent), { name: agent.name, role: agent.personaRole ?? '' });
-}
-
-/**
  * #2047 (S10) — what a chat is served with serving ON: the compiled boot prompt (approved revision, as-is), its platform
  * variables bound to the Agent (a chat binds no worker). Resolved BEFORE the chat is created or answered, so a refusal
  * is the same typed refusal a bind gives and leaves no chat behind. The App is the one the chat's holding memory belongs
@@ -767,12 +757,10 @@ export const chatMutations = {
       // messages parent), so it is two writes.
       recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
-      // Bind the Agent's own identity on the chat path. Worker briefings bind
-      // the same template to the Worker's name and role instead.
+      // The served boot prompt leads the system message (#2047). #2712 deleted the literal prompt that served with
+      // serving OFF, so OFF leads with nothing.
       if (chatServed) {
         systemMessage = chatServed.text + '\n\n' + systemMessage;
-      } else if (agent.systemPrompt) {
-        systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
       }
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
@@ -1117,14 +1105,12 @@ export const chatMutations = {
           systemMessage = promptContent;
         }
 
-        // Rebind on each chat turn so edits to the Agent's prompt take effect.
+        // Re-served on each chat turn so a newly approved revision takes effect.
         if (agent && bootPromptServingEnabled()) {
           // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
           const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
-        } else if (agent?.systemPrompt) {
-          systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec

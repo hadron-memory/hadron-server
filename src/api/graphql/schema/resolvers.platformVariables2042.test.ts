@@ -9,8 +9,9 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
-import { bindAgentPrompt } from './resolvers.mutation.chat.js';
-import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
+import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
+import { serveAgentBootPrompt, servingOn } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -66,19 +67,20 @@ describe('one pass over the authored source (blind review P2-1, P3-1)', () => {
   });
 });
 
-describe('bindAgentPrompt — a chat binds no worker (cor:dmo:150:08)', () => {
+describe('the chat binding — a chat binds no worker (cor:dmo:150:08)', () => {
   afterEach(() => vi.unstubAllEnvs());
 
   it('worker.name falls back to the Agent name, role to persona role, the rest empty, url to the Agent portal URL', () => {
     vi.stubEnv('FRONTEND_URL', 'https://portal.test');
-    const out = bindAgentPrompt({
-      systemPrompt: TEMPLATE, name: 'Juno', urn: 'acme.com:juno', personaRole: 'mentor',
-    });
+    // The served chat path's binding (serveChatPrompt): the Agent's own values, legacy tokens from them.
+    const agentValues = agentPlatformValues({ name: 'Juno', urn: 'acme.com:juno', personaRole: 'mentor' });
+    const out = applyPlatformVariables(TEMPLATE, agentValues, legacyFromValues(agentValues));
     expect(out).toBe('Juno|mentor|Juno||[]|[]|https://portal.test/app/u/acme.com:juno|');
   });
 });
 
 describe('composeWorkerPrompt — filled at each bind', () => {
+  servingOn();
   let userId: string;
   let appId: string;
   let agentId: string;
@@ -94,9 +96,10 @@ describe('composeWorkerPrompt — filled at each bind', () => {
     userId = user.id;
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId, role: 'ADMIN' } });
     const agent = await M.createAgent(
-      {}, { orgId: org.id, name: 'PV Agent', personaRole: 'engineer', systemPrompt: TEMPLATE }, ctx(userId),
+      {}, { orgId: org.id, name: 'PV Agent', personaRole: 'engineer' }, ctx(userId),
     );
     agentId = agent.id;
+    await serveAgentBootPrompt(db, agentId, TEMPLATE);
     const app = await db.app.create({
       data: { id: generateId(), organizationId: org.id, name: 'PV App', urn: `${org.urn}:team` },
     });
@@ -134,16 +137,8 @@ describe('composeWorkerPrompt — filled at each bind', () => {
 
   it('a legacy role value holding a platform token is served literally (composition level)', async () => {
     const w = await cast('Fay', '{{session.llmModel}}');
-    await db.agent.update({ where: { id: agentId }, data: { systemPrompt: '{{role}}|{{worker.role}}' } });
+    await serveAgentBootPrompt(db, agentId, '{{role}}|{{worker.role}}');
     expect(await prompt(w.id, { llmModel: 'm-9' })).toBe('{{session.llmModel}}|{{session.llmModel}}');
-  });
-
-  it('platform variables in a worker override are filled, with a template and with the override alone', async () => {
-    const w = await cast('Gus');
-    await db.worker.update({ where: { id: w.id }, data: { promptOverride: 'I am {{worker.name}} on {{session.llmModel}}.' } });
-    expect((await prompt(w.id, { llmModel: 'm-2' }))!.endsWith('\n\nI am Gus on m-2.')).toBe(true);
-    await db.agent.update({ where: { id: agentId }, data: { systemPrompt: null } });
-    expect(await prompt(w.id, { llmModel: 'm-2' })).toBe('I am Gus on m-2.');
   });
 
   it('a rename reaches the next bind with no recompile', async () => {

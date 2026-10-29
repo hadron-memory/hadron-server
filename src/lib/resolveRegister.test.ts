@@ -23,6 +23,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { parseRunRegisterSnapshot, renderDerivedBlocks, resolveRegister } from './resolveRegister.js';
 import { mintAppRun } from '../jobs/appRuns.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -55,7 +56,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: reader.id, role: 'READER' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: stranger.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'agent', urn: `${org.urn}:agent`, visibility: 'ORGANIZATION', systemPrompt: 'You are {{name}}, the {{role}}.', personaRole: 'engineer' } });
+  agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'agent', urn: `${org.urn}:agent`, visibility: 'ORGANIZATION', personaRole: 'engineer' } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'admin' } });
   appMem = await db.memory.create({
@@ -134,14 +135,21 @@ describe('resolveRegister', () => {
   });
 
   it('Worker.prompt appends the register block through renderDerivedBlocks; none for an attendee without rows', async () => {
-    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    const prompt = await W.prompt(w, {}, ctx(admin.id));
-    expect(prompt).toContain('You are Iris, the engineer.');
-    expect(prompt).toContain('## Channels (register)');
-    expect(prompt).toContain(`- team — hrn:mem:${appMem.urn}:chats:team: both, install default; read + post; no messages yet`);
-    expect(renderDerivedBlocks(null)).toBe('');
-    await db.registerEntry.updateMany({ where: { appId: app.id }, data: { deletedAt: new Date() } });
-    expect(await W.prompt(w, {}, ctx(admin.id))).toBe('You are Iris, the engineer.');
+    const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
+    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+    try {
+      await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, the {{worker.role}}.');
+      const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+      const prompt = await W.prompt(w, {}, ctx(admin.id));
+      expect(prompt).toContain('You are Iris, the engineer.');
+      expect(prompt).toContain('## Channels (register)');
+      expect(prompt).toContain(`- team — hrn:mem:${appMem.urn}:chats:team: both, install default; read + post; no messages yet`);
+      expect(renderDerivedBlocks(null)).toBe('');
+      await db.registerEntry.updateMany({ where: { appId: app.id }, data: { deletedAt: new Date() } });
+      expect(await W.prompt(w, {}, ctx(admin.id))).toBe('You are Iris, the engineer.');
+    } finally {
+      if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED; else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
+    }
   });
 
   it('reports the Worker holder\'s access to an admin viewer, and no access when unheld', async () => {

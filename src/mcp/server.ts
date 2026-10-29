@@ -8943,9 +8943,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     // to go looking for the prompt afterwards, and nothing routes it to one
     // (hadron_server_info returns deployment identity only). Returning it
     // live also removes the reason to publish briefing NODES into the Team
-    // Agent's memory (hadron-cli#443): those are copies of
-    // Agent.systemPrompt + Worker.promptOverride that nothing recomputes,
-    // so they go stale silently the moment a role agent's prompt changes.
+    // Agent's memory (hadron-cli#443): those are copies of the briefing
+    // that nothing recomputes, so they go stale silently the moment a role
+    // agent's prompt changes.
     //
     // Resolved through the SAME field resolver GraphQL serves
     // (Worker.prompt), so the two surfaces cannot drift — and that resolver
@@ -8995,14 +8995,14 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           `\nWorking as ${worker?.name ?? 'worker'} (worker id: ${session.workerId}).` +
           (boundUrn ? `\n${boundUrn}` : '') +
           (boundUrl ? `\nURL: ${boundUrl}` : '') +
-          // A worker whose agent carries no template and who has no override
-          // has no briefing — say so, rather than emitting a bare heading.
+          // A worker with no servable prompt has no briefing — say so, rather
+          // than emitting a bare heading.
           (prompt
             ? `\n\nBoot briefing — adopt this for the rest of the session:` +
               `\nrendered at: ${briefing.renderedAt!.toISOString()}` +
-              `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+              `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update)` +
               `\n\n${prompt}`
-            : '\n\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+            : '\n\n(No boot briefing: no boot prompt is served to this worker.)') +
           renderWorkerContinuity(continuity as RenderableContinuity | null);
       } catch {
         workerLine =
@@ -9578,9 +9578,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_cast_worker',
-    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole + the systemPrompt template with {{name}}/{{role}} placeholders); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole, and the compiled boot prompt every casting of it is served); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
     SHAPE_HADRON_CAST_WORKER,
-    async ({ role, name, agent, app, promptOverride, reportsTo, noTeam, session }) => {
+    async ({ role, name, agent, app, reportsTo, noTeam, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
       // touch is explicit here rather than a side effect of whichever tool
       // happens to write the Session row (see heartbeatSession).
@@ -9617,7 +9617,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         };
         const worker = await resolvers.Mutation.castWorker(
           {},
-          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null, promptOverride: promptOverride ?? null,
+          { appRef, role: role ?? null, agentRef: agent ?? null, name: name ?? null,
             ...(reportsTo !== undefined ? { reportsTo } : {}), ...(noTeam !== undefined ? { noTeam } : {}),
           },
           ctx,
@@ -10754,18 +10754,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, continuity, signature, trailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
-          // The RAW override, separate from the composed briefing (PR #1019
-          // review, Codex P2). hadron_update_worker REPLACES the override, so a
-          // caller extending one needs the override alone; handing back only
-          // the composed text would have it paste template+override into the
-          // override field, after which rendering prepends the template again —
-          // and every subsequent edit compounds the duplication. Same gated
-          // field resolver GraphQL serves, so it masks to null on deny.
-          resolvers.Worker.promptOverride(worker, {}, ctx),
           // #1029: this tool IS the post-compaction recovery read, so it must
           // carry the handoff for the same reason the bind does — an agent that
           // lost its context lost the handoff with it, and is the least likely
@@ -10894,17 +10886,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // correct to be given back.
             (signature != null ? `\nSignature template:\n${signature}\n` : '') +
             (trailer != null ? `\nTrailer template:\n${trailer}\n` : '') +
-            (override
-              ? `\nPrompt override (the editable part — pass THIS text, amended, to hadron_update_worker; the briefing below is it composed with the shared template):\n\n${override}\n`
-              : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:` +
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
-                `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update — no per-override mtime is tracked)` +
+                `\nrole Agent updated at: ${briefing.roleAgentUpdatedAt ? briefing.roleAgentUpdatedAt.toISOString() : 'not recorded'} (generic Agent row update)` +
                 `\n\n${prompt}`
               : briefing.refusal
                 ? `\n(No boot briefing: the boot prompt cannot be served — ${briefing.refusal}.)`
-                : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+                : '\n(No boot briefing: no boot prompt is served to this worker.)') +
             (await describeServedWorker(ctx, worker)) +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );
@@ -10940,9 +10929,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_update_worker',
-    "Amend a worker's promptOverride — the per-worker individuality layered over the role agent's shared template (#1010). Use it to record what a worker has become: authorship of a body of work, a standing specialisation, anything true of THIS casting and not of every casting of the same role. It reaches the worker at its next bind, live, with nothing to republish. The override was previously fixed at casting time, which sealed a worker's individuality before the work that defines it. promptOverride REPLACES the whole override (it is not appended) — to extend one, read the worker with hadron_get_worker and amend the text under 'Prompt override', NOT the composed boot briefing below it (pasting the briefing back would fold the shared template into the override, and it would then be prepended again on every render). Omit it to change nothing; pass an empty string to clear it. signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker, which takes no new bindings and so could never receive it.",
+    "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
     SHAPE_HADRON_UPDATE_WORKER,
-    async ({ workerRef, promptOverride, signature, trailer, app, session }) => {
+    async ({ workerRef, signature, trailer, app, session }) => {
       // This tool owns `session`, so the common actor gate leaves invalid names to us.
       // Refuse before heartbeat or edits instead of falling back to the human principal.
       if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
@@ -10992,34 +10981,20 @@ function ageOf(at: Date, now: Date = new Date()): string {
         );
         if (!target) return refusalResult(`Worker not found: ${workerRef}`);
 
-        // Forward the key ONLY when the caller supplied it (PR #1019 review,
-        // Copilot): the resolver distinguishes omitted-preserves from
-        // null-clears by PRESENCE, so passing `promptOverride: undefined`
-        // unconditionally would land in the clear branch and silently wipe the
-        // override of every caller who omitted it. Making the zod arg optional
-        // without this would have converted a loud validation error into a
-        // silent data loss — strictly worse.
-        const mutationArgs: { workerRef: string; promptOverride?: string; signature?: string | null; trailer?: string | null } = {
+        // Forward a key ONLY when the caller supplied it (PR #1019 review,
+        // Copilot): the resolver distinguishes omitted-preserves by PRESENCE.
+        const mutationArgs: { workerRef: string; signature?: string | null; trailer?: string | null } = {
           workerRef: target.id,
         };
-        const overrideChanged = promptOverride !== undefined;
-        const changing = overrideChanged || signature !== undefined || trailer !== undefined;
-        if (promptOverride !== undefined) mutationArgs.promptOverride = promptOverride;
+        const changing = signature !== undefined || trailer !== undefined;
         if (signature !== undefined) mutationArgs.signature = signature;
         if (trailer !== undefined) mutationArgs.trailer = trailer;
 
         const worker = await resolvers.Mutation.updateWorker({}, mutationArgs, ctx);
-        // Echo the RESOLVED prompt, not the override alone: what the caller
-        // actually cares about is what the worker will be told at its next
-        // bind, and that is the template plus the override, composed.
+        // Echo the RESOLVED prompt: what the worker will be told at its next bind.
         const prompt = await resolvers.Worker.prompt(worker, {}, ctx);
         return textResult(
           (changing ? `Updated **${worker.name}**.\n` : `**${worker.name}** — no change requested (editable fields omitted).\n`) +
-            (worker.promptOverride
-              ? `\nPrompt override${overrideChanged ? ' now' : ''}:\n\n${worker.promptOverride}\n`
-              : overrideChanged
-                ? '\nPrompt override cleared.\n'
-                : '\nThis worker has no prompt override.\n') +
             (signature !== undefined ? `\nSignature template now:\n\n${worker.signature}\n` : '') +
             (trailer !== undefined ? `\nTrailer template now:\n\n${worker.trailer}\n` : '') +
             (prompt
@@ -12843,7 +12818,6 @@ const SHAPE_HADRON_CAST_WORKER = {
   name: z.string().optional().describe('The worker\'s name — REQUIRED in effect (#1050): omitting it refuses WORKER_NAME_REQUIRED rather than deriving one, because a name is permanent within the App. Optional in the schema only so that refusal carries its reason instead of arriving as a bare validation error.'),
   agent: z.string().optional().describe('The agent to cast (Agent URN or ID) — must be installed in the App. Omit to resolve it from role.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the session\'s active App.'),
-  promptOverride: z.string().optional().describe('Per-worker individuality layered over the agent\'s template prompt — appended to the bound template in the worker\'s resolved prompt.'),
   session: z.string().optional().describe('Your session id — used to resolve which App to cast in when app is omitted. Passing it also keeps that session alive — driving a session through any team tool counts as activity (#1081).'),
 };
 
@@ -12949,13 +12923,6 @@ const SHAPE_HADRON_DELETE_WORKER = {
 
 const SHAPE_HADRON_UPDATE_WORKER = {
   workerRef: z.string().describe('The worker: its NAME ("Iris", within the App), its URN, or its id.'),
-  // Optional, matching the description's "omit it to change nothing" and
-  // the GraphQL mutation's omitted-preserves convention (PR #1019 review,
-  // Copilot). It was REQUIRED while the description promised omission
-  // worked, so a model that read the contract and followed it hit a hard
-  // schema-validation error — the one failure mode worse than the tool not
-  // offering the option at all.
-  promptOverride: z.string().optional().describe("The worker's new individuality text, REPLACING any current override. Pass an empty string to clear it; omit it to leave the override untouched."),
   signature: z.string().nullable().optional().describe('Per-worker signature template. Omit preserves; null refuses; blank delivers nothing. App managers only.'),
   trailer: z.string().nullable().optional().describe('Per-worker trailer template, same manager and omission rules as signature.'),
   app: z.string().optional().describe('The team App — an App URN or ID. Only needed for the NAME form; omit to use the session\'s active App.'),

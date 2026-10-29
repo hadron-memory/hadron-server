@@ -13,6 +13,7 @@ import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -48,6 +49,7 @@ afterAll(async () => {
   await new Promise<void>(r => server.close(() => r()));
 });
 afterEach(async () => { for (const c of clients.splice(0)) await c.close(); vi.restoreAllMocks(); });
+servingOn();
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = generateId();
@@ -57,7 +59,8 @@ beforeEach(async () => {
   const foreign = await db.organization.create({ data: { name: 'Hidden', urn: `hidden-${suffix}.example` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'CONTRIBUTOR' } });
   agentId = (await db.agent.create({ data: { organizationId: org.id, name: 'Builder', urn: `${org.urn}:builder`,
-    systemPrompt: 'Work as {{name}}.', personaRole: 'server-engineer', visibility: 'ORGANIZATION' } })).id;
+    personaRole: 'server-engineer', visibility: 'ORGANIZATION' } })).id;
+  await serveAgentBootPrompt(db, agentId, 'Work as {{worker.name}}.');
   appA = await db.app.create({ data: { organizationId: org.id, name: 'Alpha', urn: `${org.urn}:alpha` } });
   appB = await db.app.create({ data: { organizationId: org.id, name: 'Beta', urn: `${org.urn}:beta` } });
   hiddenApp = await db.app.create({ data: { organizationId: foreign.id, name: 'Hidden app', urn: `${foreign.urn}:hidden` } });

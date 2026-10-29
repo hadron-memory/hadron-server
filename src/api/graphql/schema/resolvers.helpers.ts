@@ -3177,7 +3177,7 @@ export async function installAgentIntoAppCore(
   // Agent, and installing is itself a read grant. An installed Agent's system
   // memory becomes READ_ONLY in every App-context access map
   // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
-  // object, whose own definition fields (systemPrompt / systemMemoryId /
+  // object, whose own definition fields (systemMemoryId /
   // memoryItems) are NOT field-gated — they rely on this object-level gate
   // (#551). An AppMember who is not an org member cannot read a non-PUBLIC org
   // Agent today (`Query.agent` requires org READER), so admitting them here
@@ -3196,7 +3196,7 @@ export async function installAgentIntoAppCore(
   // `organizationId` columns are null for a user-owned App + a user-owned
   // Agent, so a bare `agent.organizationId !== app.organizationId` reads
   // `null !== null` ⇒ false and waves through another USER's non-PUBLIC agent
-  // (leaking its systemPrompt via the returned AGENT_INCLUDE). Branch on the
+  // (leaking its definition via the returned AGENT_INCLUDE). Branch on the
   // App's ownership class instead, mirroring createApp's personal path.
   if (app.organizationId === null) {
     // spec 047 personal install: no org ⇒ no AgentOrgGrant. A user-owned App

@@ -2376,14 +2376,14 @@ export const typeResolvers = {
     // #757 — `importedBy` surfaces the agents that import THIS one, i.e. OTHER
     // tenants' parent agents. On a PUBLIC agent (readable by anyone,
     // including anonymous) that handed out foreign orgs' private parent-agent
-    // definitions — `systemPrompt`, description, linked-memory metadata — the
+    // definitions — description, linked-memory metadata — the
     // exact #552 class. `publishAgentImport` puts no visibility constraint on
     // the parent, so this is the intended marketplace flow, not a rare shape.
     //
     // The row list retains the established App-key installed-parent audience
     // (an adoption signal, not an Agent definition grant). Its parentAgent
     // object resolver now applies Query.agent's own read gate, so a visible
-    // import row cannot reveal an unreadable parent's systemPrompt.
+    // import row cannot reveal an unreadable parent's definition.
     importedBy: async (a: { id: string }, _: unknown, ctx: Context) => {
       const parentAgent = await callerReadableAgentFilter(ctx);
       return ctx.db.agentImport.findMany({
@@ -2391,7 +2391,7 @@ export const typeResolvers = {
         orderBy: { position: 'asc' },
       });
     },
-    // #551 — the Agent's OWN definition (systemPrompt / systemMemoryId /
+    // #551 — the Agent's OWN definition (systemMemoryId /
     // memoryItems / imports, above) is public on a PUBLIC agent: reaching the
     // Agent object means the object-level read gate already admitted the
     // caller (PUBLIC → anyone; non-public → members), and the agent's own
@@ -2400,7 +2400,7 @@ export const typeResolvers = {
     //
     // The "who USES this agent" fields below are different: they surface OTHER
     // tenants' data, so they are NOT public. `apps` / `appAgents` return full
-    // `App` objects, including scalars such as systemPrompt. Returning a
+    // `App` objects, including scalars such as description. Returning a
     // foreign App here leaks data even though keys and members re-check.
     // Scope them to
     // Apps in orgs the CALLER belongs to, then apply each App's own read

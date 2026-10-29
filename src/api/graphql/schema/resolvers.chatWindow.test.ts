@@ -23,6 +23,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -378,25 +379,29 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
   }
 
   it('binds the Agent identity in both chat prompt paths and preserves the stage prompt', async () => {
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}, a {{role}}.', personaRole: 'researcher' },
-    });
+    const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
+    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+    try {
+      await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'researcher' } });
+      await serveAgentBootPrompt(db, agent.id, 'You are {{name}}, a {{role}}.');
 
-    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
-    expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');
+      const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+      expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');
 
-    const turn = await resolvers.Mutation.sendChatMessage(
-      {}, { chatId: start.chatId, userMessage: 'first turn' }, adminCtx(),
-    );
-    expect(turn.systemMessage).toBe(start.systemMessage);
+      const turn = await resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'first turn' }, adminCtx(),
+      );
+      expect(turn.systemMessage).toBe(start.systemMessage);
 
-    // Existing systemPrompt text without tokens remains byte-for-byte.
-    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: 'Existing prompt.' } });
-    const next = await resolvers.Mutation.sendChatMessage(
-      {}, { chatId: start.chatId, userMessage: 'second turn' }, adminCtx(),
-    );
-    expect(next.systemMessage).toBe('Existing prompt.\n\nScope the research.');
+      // A newly served prompt without tokens reaches the next turn byte-for-byte.
+      await serveAgentBootPrompt(db, agent.id, 'Existing prompt.');
+      const next = await resolvers.Mutation.sendChatMessage(
+        {}, { chatId: start.chatId, userMessage: 'second turn' }, adminCtx(),
+      );
+      expect(next.systemMessage).toBe('Existing prompt.\n\nScope the research.');
+    } finally {
+      if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED; else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
+    }
   });
 
   it('includes the turn being answered on a chat longer than the window', async () => {

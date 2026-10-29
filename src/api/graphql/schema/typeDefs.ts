@@ -3051,7 +3051,6 @@ export const typeDefs = `#graphql
     appType: AppType!
     role: AppMembershipRole!
     description: String
-    systemPrompt: String
     agentTools: [String!]!
     # 036-ai-service-config: the three AI fields below are registry-backed
     # reads of the App's config named 'default' (legacy columns dropped).
@@ -4426,8 +4425,6 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
-    "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
-    systemPrompt: String
     """
     #2045 — the canonical URN of the compiled boot prompt this Agent's pointer names now
     (a moved node shows its new URN; a hard-deleted one its URN at write time). Null when no pointer is set
@@ -5013,7 +5010,7 @@ export const typeDefs = `#graphql
     does not enforce a repo-affinity refusal.
 
     WORKING-STATE field: behind the worker read gate and masked to [] on deny,
-    like promptOverride and the holder — Session.worker reaches a Worker
+    like memoryId and the holder — Session.worker reaches a Worker
     through a wider gate that admits any org member and survives a user leaving
     the App, so an ungated field would publish a team's repo list through any
     historical session.
@@ -5035,8 +5032,6 @@ export const typeDefs = `#graphql
     fault. A warning never blocks an edit.
     """
     signatureLint(first: Int = 50, after: String): LintWarningPage
-    "Per-worker individuality layered over the agent's template prompt."
-    promptOverride: String
     """
     #2045 — the canonical URN of the compiled boot prompt this worker's pointer names now
     (set for customised workers only). Null when no pointer is set OR when the caller may not see it (WORKING-STATE
@@ -5059,7 +5054,7 @@ export const typeDefs = `#graphql
     while a live session is only ever a question about your own worker.
 
     WORKING-STATE field, behind the worker read gate and masked to null on
-    deny — like promptOverride and memoryId, and NOT like name/role/urn.
+    deny — like memoryId, and NOT like name/role/urn.
     Session.worker reaches a Worker row through a wider gate that admits any
     org member and survives a user leaving the App, so an ungated holder would
     let a former member read current staffing off a historical session.
@@ -5164,10 +5159,9 @@ export const typeDefs = `#graphql
     "The App whose staff this casting fills."
     app: App
     """
-    The worker's boot prompt, resolved: the agent's systemPrompt template
-    with {{name}}/{{role}} bound, then promptOverride appended as its own
-    paragraph. Null when the agent carries no template and the worker no
-    override.
+    The worker's boot prompt: the approved revision of the compiled boot
+    prompt a bind of this worker is served (hrn:node:hadronmemory.com:specs:cor:agt:040:07),
+    with the platform variables filled. Null when no prompt can be served.
     """
     prompt: String
     """
@@ -5177,7 +5171,7 @@ export const typeDefs = `#graphql
     so binding is handoff) and by the worker read, which is the recovery path
     after a context compaction — the reader who has most lost the handoff and
     least knows one exists. Working-state field: behind the worker read gate,
-    masked to null on deny, like prompt/promptOverride/memoryId.
+    masked to null on deny, like prompt/memoryId.
     """
     continuity: WorkerContinuity
     createdAt: DateTime!
@@ -5276,10 +5270,9 @@ export const typeDefs = `#graphql
     agentId: ID!
     agentName: String!
     """
-    The composed boot prompt, post {{name}}/{{role}} substitution with
-    promptOverride appended — the same composition Worker.prompt performs,
-    reviewable BEFORE the name is permanent. Null when the agent carries no
-    template and no override was given.
+    The boot prompt a bind of this casting would be served now, with the
+    name and role filled — reviewable BEFORE the name is permanent. Null when
+    no prompt can be served yet (no worker pointer exists before the cast).
     """
     prompt: String
     "Always null. The name-placeholder check was retired with the old variable logic (#2049)."
@@ -5306,9 +5299,8 @@ export const typeDefs = `#graphql
   A role definition (#960): the roles:<role> node in the Team Agent's system
   memory. #1050: it carries no name register — a role is a definition, not an
   allocation pool.
-  The prompt template is NOT here — with the Worker model (#974) it
-  lives on the role-agent (personaRole + systemPrompt); roleAgent
-  points at it.
+  The boot prompt is NOT here — it is the role-agent's compiled boot prompt
+  (hrn:node:hadronmemory.com:specs:cor:agt:040:07); roleAgent points at it.
   """
   type TeamRole {
     "The role slug, e.g. backend-engineer."
@@ -8791,7 +8783,7 @@ export const typeDefs = `#graphql
     is PUBLIC by definition).
 
     Field-level exposure: a PUBLIC agent publishes its OWN definition
-    (systemPrompt / systemMemoryId / memoryItems / imports) to every caller —
+    (systemMemoryId / memoryItems / imports) to every caller —
     that is what a marketplace listing is (#551). The fields that surface OTHER
     tenants (apps / appAgents / appCount / orgGrants / importedBy) are scoped to
     the caller's own access and come back empty for an outsider (#552, #757).
@@ -9397,7 +9389,6 @@ export const typeDefs = `#graphql
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
-      promptOverride: String
     ): CastWorkerPreview!
 
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
@@ -11217,13 +11208,15 @@ export const typeDefs = `#graphql
     v2 — no @ sigil) and its system memory is user-owned too. Exactly one owner
     (org XOR user).
 
-    personaRole and systemPrompt are the persona dressing (cor:agt:020:01) —
-    the reusable role plus the '{{name}}'-templated prompt. The NAMED
-    identity is a Worker, cast with castWorker; names never live on agents.
+    personaRole is the persona dressing (hrn:node:hadronmemory.com:specs:cor:agt:020:01), the reusable role.
+    A new Agent has no boot prompt: write its boot:source, compile it and
+    approve the compiled revision (hrn:node:hadronmemory.com:specs:cor:agt:040:10,
+    hrn:node:hadronmemory.com:specs:cor:agt:040:12). The NAMED identity is a
+    Worker, cast with castWorker; names never live on agents.
 
     orgId accepts the org's ID or URN.
     """
-    createAgent(orgId: ID, name: String!, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
+    createAgent(orgId: ID, name: String!, description: String, systemMemoryId: String, visibility: AgentVisibility, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#2171 (R211): the member roles the Agent offers. Omitted: owner and member. Empty or malformed: BAD_USER_INPUT." memberRoles: [String!]): Agent!
     """
     Clone an Agent into an organization you administer: a new PERSONAL-draft Agent
     with its own copy of the source's system memory, its links and imports, and a recorded origin. Needs a
@@ -11231,7 +11224,7 @@ export const typeDefs = `#graphql
     CLONE_*); a source that keeps changing answers CONFLICT with reason AGENT_CLONE_SOURCE_CHANGED
     (retryable). target must be an organization.
 
-    Copied: name, description, systemPrompt, type, surfaces, usesTasks, registerDefaults, installationPolicy,
+    Copied: name, description, type, surfaces, usesTasks, registerDefaults, installationPolicy,
     memoryProvisioning, personaRole; the system memory graph (nodes, edges, pending edges) with the tasks and
     processes index pointers remapped; memory links (kept as links, not copied); imports and the base, re-pointed.
     NOT copied: visibility (the clone is PERSONAL), AI service config, boot-prompt pointers, node comments,
@@ -11254,7 +11247,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemPrompt: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryId: String, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -12085,7 +12078,6 @@ export const typeDefs = `#graphql
       appType: AppType
       role: AppMembershipRole
       description: String
-      systemPrompt: String
       agentTools: [String!]
       aiProvider: String
       aiModel: String
@@ -12121,7 +12113,6 @@ export const typeDefs = `#graphql
       appType: AppType
       role: AppMembershipRole
       description: String
-      systemPrompt: String
       agentTools: [String!]
       aiProvider: String
       aiModel: String
@@ -12169,7 +12160,7 @@ export const typeDefs = `#graphql
     CONTRIBUTOR+ on an org-owned App's org (platform admins included). NOT
     plain AppMembers: installing an existing Agent is itself a read grant on
     that Agent's design — its system memory becomes readable from every App
-    context, and the returned Agent carries its systemPrompt — so this gate
+    context, and the returned Agent carries its definition — so this gate
     stays at the level that can already read the org's Agents.
 
     Accepts the entity's ID or URN for both appRef and agentRef. Optional
@@ -12264,7 +12255,6 @@ export const typeDefs = `#graphql
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
-      promptOverride: String
     ): Worker!
 
     """
@@ -12342,31 +12332,22 @@ export const typeDefs = `#graphql
     ): ReleaseWorkerPayload!
 
     """
-    #1010 — amend a casting's individuality after the fact.
-
-    \`promptOverride\` is the per-worker escape hatch (cor:agt:020:01), but it
-    could only be set at CASTING time — fixing a casting's individuality at the
-    one moment nobody yet knows what makes it individual. The role agent's
-    \`systemPrompt\` cannot stand in (it is SHARED by every casting of that
-    role), and re-casting is barred by \`WORKER_IN_USE\` for any worker that has
-    done work — precisely the ones with an identity to record.
+    #1010 — amend a casting's signature and trailer after the fact
+    (hrn:node:hadronmemory.com:specs:cor:agt:040:04). #2712 removed the per-worker
+    prompt override: a worker's own boot prompt is its compiled boot source
+    (hrn:node:hadronmemory.com:specs:cor:agt:040:06), changed by compile and approve.
 
     Signature/trailer edits require an App manager; a bound worker is provisionally refused (H26).
     Omitted preserves, null refuses, whitespace-only becomes empty text; other text is raw, max 2000 characters, no NUL.
     A mixed update is atomic. These values reach the next compose/bind via S4.
+    A retired worker refuses WORKER_RETIRED.
 
     \`name\` is permanent by law (hrn:node:hadronmemory.com:specs:cor:agt:020:02). The agent
-    (and with it the role) is changed by changeWorkerAgent, not here. OMITTING promptOverride
-    preserves it; explicit \`null\` or a blank string CLEARS it, matching the
-    nullable column and castWorker's blank-is-absent normalization.
-
-    Refuses WORKER_RETIRED for a retired worker: an override is briefing text
-    delivered at bind time, and a retired worker takes no new bindings, so the
-    edit could never reach anyone.
-
-    promptOverride alone keeps castWorker staffing authorization. workerRef is the worker's id or URN (#991).
+    (and with it the role) is changed by changeWorkerAgent, not here. A call naming
+    neither field changes nothing and keeps castWorker staffing authorization.
+    workerRef is the worker's id or URN (#991).
     """
-    updateWorker(workerRef: ID!, promptOverride: String, signature: String, trailer: String): Worker!
+    updateWorker(workerRef: ID!, signature: String, trailer: String): Worker!
 
     """
     #2458 (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, R222): change the

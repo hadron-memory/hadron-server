@@ -59,7 +59,7 @@ beforeEach(async () => {
     data: {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:server`,
       name: 'Server Engineer', visibility: 'ORGANIZATION',
-      personaRole: 'server-engineer', systemPrompt: 'You are {{name}}, a {{role}}.',
+      personaRole: 'server-engineer',
     },
   });
   app = await db.app.create({

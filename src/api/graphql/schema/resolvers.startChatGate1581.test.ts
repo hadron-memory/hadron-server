@@ -77,7 +77,6 @@ beforeEach(async () => {
 
   const created = await M.createAgent({}, { orgId: orgA.id, name: 'secret-agent', visibility: 'ORGANIZATION' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context);
-  await db.agent.update({ where: { id: created.id }, data: { systemPrompt: 'VENDOR-SECRET-PROMPT' } });
   agent = await db.agent.findUniqueOrThrow({
     where: { id: created.id },
     select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },

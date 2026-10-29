@@ -61,7 +61,6 @@ async function makeAgent(orgId: string, orgUrn: string, slug: string, visibility
       name: slug,
       systemMemoryId: systemMemory.id,
       visibility: visibility as any,
-      systemPrompt: 'the secret identity paragraph',
     },
   });
   return { id: agent.id, systemMemoryId: systemMemory.id };

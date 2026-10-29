@@ -178,12 +178,8 @@ describe('#960 — teamRoles read', () => {
     // No installed agent carries frontend-engineer dressing → no role-agent.
     const fe = page.items.find((r: any) => r.role === 'frontend-engineer');
     expect(fe.roleAgent).toBeNull();
-    // Deprecated field: whatever the template says, it resolves null.
-    for (const prompt of ['You are {{name}}.', 'You are {{worker.name}}.', 'You are a {{role}} with no name.']) {
-      await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: prompt } });
-      const again = await teamRoles(ctx(contrib.id));
-      for (const item of again.items) expect(item.hasNamePlaceholder).toBeNull();
-    }
+    // Deprecated field: it resolves null.
+    for (const item of page.items) expect(item.hasNamePlaceholder).toBeNull();
   });
 
   it('excludes role SUB-nodes and paginates deterministically', async () => {

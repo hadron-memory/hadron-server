@@ -88,7 +88,6 @@ async function seed() {
       const agentId = id(`${org}:${role}`);
       await db.agent.create({ data: { id: agentId, organizationId,
         urn: `${org}:${role}`, name: role, personaRole: role,
-        systemPrompt: 'You are {{name}}, the synthetic {{role}} fixture.',
         systemMemoryId: memoryIds.system, visibility: 'ORGANIZATION' } });
       await db.appAgent.create({ data: { appId, agentId } });
       await db.agentMemoryItem.create({ data: { id: id(`${org}:${role}:item`),

@@ -6,6 +6,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import * as workerResolvers from '../api/graphql/schema/resolvers.worker.js';
 import { createTestableMcpServer } from './server.js';
+import { serveAgentBootPrompt, servingOn } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -20,7 +21,8 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { githubId: 159901, githubUsername: 'receipt-user' } });
   userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
-  const agent = await db.agent.create({ data: { organizationId: org.id, name: 'Engineer', urn: `${org.urn}:engineer`, systemPrompt: 'You are {{name}}.' } });
+  const agent = await db.agent.create({ data: { organizationId: org.id, name: 'Engineer', urn: `${org.urn}:engineer` } });
+  await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}.');
   const app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   appId = app.id;
   await db.appAgent.create({ data: { appId, agentId: agent.id } });
@@ -29,6 +31,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.restoreAllMocks());
+servingOn();
 
 const server = () => createTestableMcpServer({ userId, appId, roles: ['READER'], clientId: `user:${userId}` }, { sessionId: generateId() });
 

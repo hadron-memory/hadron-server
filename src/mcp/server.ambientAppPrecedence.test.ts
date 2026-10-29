@@ -52,7 +52,7 @@ beforeEach(async () => {
   agent = await db.agent.create({
     data: {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:be`, name: 'BE',
-      visibility: 'ORGANIZATION', personaRole: 'backend-engineer', systemPrompt: 'You are {{name}}.',
+      visibility: 'ORGANIZATION', personaRole: 'backend-engineer',
     },
   });
   appA = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team A', urn: `${org.urn}:team-a` } });

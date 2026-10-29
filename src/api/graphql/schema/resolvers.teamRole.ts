@@ -1,7 +1,7 @@
 // Team roles as a platform surface — #960 (cor:agt:020:01/:02), re-keyed by
 // the Worker model (#974): a role definition is the `roles:<role>` node in the
-// Team Agent's system memory. The persona prompt template is NOT here — it
-// lives on the role-agent as dressing (`Agent.personaRole` + `systemPrompt`),
+// Team Agent's system memory. The boot prompt is NOT here — it is the
+// role-agent's compiled boot prompt (`Agent.personaRole` names the role),
 // which this surface only points at.
 //
 // #1050 — the NAME REGISTER is gone. `data.names` and its conventions
@@ -47,7 +47,7 @@ type WorkerRosterRow = Record<string, unknown> & { id: string; name: string };
 
 type RoleAgentEntry = {
   /** The single installed agent whose personaRole matches, or null (zero or 2+). */
-  agent: (Record<string, unknown> & { systemPrompt: string | null }) | null;
+  agent: Record<string, unknown> | null;
   /** How many installed agents carry the role — 2+ means castWorker would refuse ambiguous. */
   matches: number;
 };
@@ -194,7 +194,7 @@ async function buildTeamRole(
   if (entry?.agent) {
     // The agent OBJECT runs Query.agent's own read gate, masked to null on
     // deny — the same #552 posture as Worker.agent: a nested Agent hands the
-    // caller its field resolvers (systemPrompt included).
+    // caller its field resolvers (its definition included).
     const agent = entry.agent as unknown as {
       visibility: string | null;
       organizationId: string | null;

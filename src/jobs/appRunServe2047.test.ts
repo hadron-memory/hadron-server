@@ -69,7 +69,7 @@ beforeEach(async () => {
   userId = (await db.user.create({ data: { githubId: 92047200, githubUsername: 'run-user', roles: ['READER'] } })).id;
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'run-org:sys', organizationId: orgId } })).id;
-  agentId = (await db.agent.create({ data: { id: generateId(), name: 'Runner', urn: 'run-org:runner', organizationId: orgId, systemMemoryId: memoryId, systemPrompt: 'LEGACY' } })).id;
+  agentId = (await db.agent.create({ data: { id: generateId(), name: 'Runner', urn: 'run-org:runner', organizationId: orgId, systemMemoryId: memoryId } })).id;
   await db.appAgent.create({ data: { appId, agentId } as never });
 });
 afterEach(() => {
@@ -142,7 +142,6 @@ describe('#2047 run', () => {
     expect(await executeAppRun(db, run.id, d)).toBe('completed');
     const system = llm.mock.calls[0]![1].system!;
     expect(system.startsWith('You are Runner.\n\n')).toBe(true);
-    expect(system).not.toContain('LEGACY');
   });
 
   it('a run whose recorded revision was deleted fails with the typed code, not newer text', async () => {
