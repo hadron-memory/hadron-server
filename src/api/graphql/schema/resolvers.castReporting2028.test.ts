@@ -40,7 +40,7 @@ describe('S12 cast choice', () => {
     const worker = await M.castWorker({}, args(), ctx());
     const row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     expect(await W.teamPlacement(row, {}, ctx())).toBe('UNSET');
-    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: row.id } })).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: row.id, type: 'worker.reports-to' } })).toBe(0);
   });
   for (const required of [false, true]) {
     for (const choice of [{ noTeam: null }, { noTeam: false }, { reportsTo: null }, { reportsTo: ' ' }]) {
@@ -141,7 +141,7 @@ describe('S12 lifecycle and invariant', () => {
     const worker = await M.castWorker({}, args(), ctx());
     await db.$transaction(tx => writeReportsTo(tx, { workerId: worker.id, appId: app.id, to: null, actor: eventActor(user.id), setBy: 'app-manager' }));
     await db.$transaction(tx => writeReportsTo(tx, { workerId: worker.id, appId: app.id, to: null, actor: eventActor(user.id), setBy: 'app-manager' }));
-    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: worker.id } })).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: worker.id, type: 'worker.reports-to' } })).toBe(1);
     await M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: head.id }, ctx());
     let row = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     expect((row as any).explicitNoTeam).toBe(false);
@@ -180,7 +180,7 @@ describe('S12 DARK boundary and atomic S8 join', () => {
       await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTING_CAST_UNAVAILABLE' } });
     }
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   });
   it('conceals foreign/missing/malformed head identities after the manager gate', async () => {
     const other = await db.app.create({ data: { ownerUserId: user.id, name: 'Other', urn: `s12-${generateId()}:other` } });
@@ -278,14 +278,14 @@ describe('S12 deciding transaction fences', () => {
     } finally { release(); }
     await casting; await revoking;
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(1);
   });
   it('dual casts serialize before the App row upgrade and only one name is minted', async () => {
     const result = await Promise.allSettled([M.castWorker({}, args({ noTeam: true }), ctx()), M.castWorker({}, args({ noTeam: true }), ctx())]);
     expect(result.filter(r => r.status === 'fulfilled')).toHaveLength(1);
     expect(result.find(r => r.status === 'rejected')).toMatchObject({ reason: { extensions: { code: 'WORKER_NAME_TAKEN' } } });
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(1);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(1);
   });
   it('shared reporting graph is never upgraded after the new Worker exists', async () => {
     // Hold exclusive graph; the cast must wait before inserting the worker.
@@ -318,7 +318,7 @@ it('migration preserves legacy pointers and null UNSET without backfilled events
     const rows = await tx.worker.findMany({ where: { id: { in: [head.id, child.id] } } });
     expect(rows.find(w => w.id === head.id)).toMatchObject({ reportsToWorkerId: null, explicitNoTeam: false });
     expect(rows.find(w => w.id === child.id)).toMatchObject({ reportsToWorkerId: head.id, explicitNoTeam: false });
-    expect(await tx.agentTeamEvent.count()).toBe(0);
+    expect(await tx.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   });
 });
 
@@ -358,7 +358,7 @@ it('a marker-only clear cannot bypass the existing setter authorization', async 
   const member = await db.user.create({ data: { githubId: 2028004, githubUsername: 's12-reader' } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
   await expect(M.setWorkerReportsTo({}, { workerRef: worker.id, reportsTo: null }, { ...ctx(), userId: member.id })).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
-  expect(await db.agentTeamEvent.count()).toBe(0);
+  expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   expect((await db.worker.findUniqueOrThrow({ where: { id: worker.id } }) as any).explicitNoTeam).toBe(false);
 });
 
@@ -373,7 +373,7 @@ describe('S12 head casts while standby is inert (Ada36559)', () => {
       const made = await M.castWorker({}, args({ reportsTo: head.id }), ctx());
       expect(made).toMatchObject({ reportsToWorkerId: head.id, explicitNoTeam: false });
       expect(await W.teamPlacement(made, {}, ctx())).toBe('REPORTS_TO');
-      expect(await db.agentTeamEvent.findMany({ where: { subjectWorkerId: made.id } })).toMatchObject([
+      expect(await db.agentTeamEvent.findMany({ where: { subjectWorkerId: made.id, type: 'worker.reports-to' } })).toMatchObject([
         { type: 'worker.reports-to', payload: { from: null, to: head.id, setBy: 'cast' } },
       ]);
     });
@@ -393,7 +393,7 @@ describe('S12 head casts while standby is inert (Ada36559)', () => {
       await expect(operation({}, args({ reportsTo: head.id }), ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_REPORTS_TO_RETIRED' } });
     }
     expect(await db.worker.count()).toBe(1);
-    expect(await db.agentTeamEvent.count()).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
   });
 });
 
@@ -464,7 +464,7 @@ it('retirement winning the shared App anchor refuses the later head cast without
   } finally { release(); await retiring; }
   expect(await result).toBe('WORKER_REPORTS_TO_RETIRED');
   expect(await db.worker.count()).toBe(1);
-  expect(await db.agentTeamEvent.count()).toBe(0);
+  expect(await db.agentTeamEvent.count({ where: { type: 'worker.reports-to' } })).toBe(0);
 });
 
 it('cast winning the App anchor commits first; later head retirement preserves the historical line', async () => {

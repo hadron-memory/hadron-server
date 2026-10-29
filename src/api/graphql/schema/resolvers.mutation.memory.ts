@@ -813,16 +813,16 @@ export const memoryMutations = {
             },
           });
         }
+        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
+        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
+        const rootName = name.split(':').pop() ?? name;
+        await createNode({
+          memoryId: created.id,
+          loc: name,
+          name: rootName,
+          description: 'Root node for this memory.',
+        }, tx);
         return created;
-      });
-
-      // Create the root node for this memory
-      const rootName = name.split(':').pop() ?? name;
-      await createNode({
-        memoryId: memory.id,
-        loc: name,
-        name: rootName,
-        description: 'Root node for this memory.',
       });
 
       return memory;
