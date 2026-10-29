@@ -131,7 +131,7 @@ describe('createMemorySubscription', () => {
         { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
         adminCtx(subscriberAdminUser.id),
       ),
-    ).rejects.toThrow(/public/);
+    ).rejects.toMatchObject({ extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } });
   });
 
   it('rejects when subscriber-org admin role is missing', async () => {
@@ -157,7 +157,25 @@ describe('createMemorySubscription', () => {
         { memoryId: publicMemory.id, orgId: ownerOrg.id, role: 'READER' },
         adminCtx(ownerAdminUser.id),
       ),
-    ).rejects.toThrow(/implicit access/);
+    ).rejects.toMatchObject({ extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } });
+  });
+
+  // #2572: the typed codes sit behind the hidden-memory refusal (#1381): a
+  // caller who cannot open the memory gets the not-found miss, never a code
+  // that would confirm the memory exists.
+  it('a caller who cannot open a non-public memory gets not-found, not the typed code', async () => {
+    const outsider = await db.user.create({
+      data: { id: generateId(), githubId: 9604, githubUsername: 'sub-outsider', roles: ['READER'] },
+    });
+    const err = await resolvers.Mutation.createMemorySubscription(
+      null,
+      { memoryId: privateMemory.id, orgId: subscriberOrg.id, role: 'READER' },
+      readerCtx(outsider.id),
+    ).then(() => null, (e: unknown) => e);
+    expect(err).not.toBeNull();
+    expect((err as { extensions?: { code?: string } }).extensions?.code).not.toMatch(
+      /SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY|OWNER_ORG_CANNOT_SUBSCRIBE/,
+    );
   });
 
   // #764: the shared resolveRefArg helper maps every entity-ref miss to the
