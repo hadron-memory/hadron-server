@@ -21,6 +21,8 @@ import { typeDefs } from './typeDefs.js';
 const N = 200;
 /** Production-equivalent pool (Slice 1). */
 const P = 5;
+/** A 200-node batch runs its serial pre-reconcile and the bounded fields; slow CI runners need more than vitest's 5 s. */
+const SLOW = { timeout: 60_000 };
 
 const schema = buildSchema(typeDefs);
 const fieldResolver = (parent: any, args: any, context: any, info: any) => {
@@ -56,7 +58,7 @@ beforeEach(async () => {
   foreignNodeId = (await db.node.create({ data: { memoryId: personal.id, loc: 'secret', name: 'secret', nodeType: 'record', content: 'theirs' } as never })).id;
   // Warm: reconcile the fixture once, so the measured batches are unchanged rows (production's steady state).
   await batch(ctxFor(db), 'id revision');
-});
+}, 120_000);
 
 /** A ctx.db whose field-reconcile transactions (maxWait 2000) are counted while requested and not yet settled. */
 function ctxFor(client: PrismaClient | typeof db, track?: { inFlight: number; max: number }) {
@@ -82,7 +84,7 @@ const batch = (ctx: Context, sel: string, args = `memory: "${'$m'}", locPrefix: 
     variableValues: { m: memoryId } });
 
 describe('#2715 the Node.revision fan-out is bounded per request', () => {
-  it('a 200-node batch never has more than a handful of field reconcile transactions requested at once', async () => {
+  it('a 200-node batch never has more than a handful of field reconcile transactions requested at once', SLOW, async () => {
     const track = { inFlight: 0, max: 0 };
     const res = await batch(ctxFor(db, track), 'id revision');
     expect(res.errors).toBeUndefined();
@@ -104,14 +106,14 @@ describe('#2715 the Node.revision fan-out is bounded per request', () => {
 });
 
 describe('#2715 CONTROLS: what the bound must not change', () => {
-  it('an unchanged batch makes no reconcile writes', async () => {
+  it('an unchanged batch makes no reconcile writes', SLOW, async () => {
     const before = await db.nodeRevision.count({ where: { node: { memoryId } } });
     const res = await batch(ctxFor(db), 'id revision content');
     expect(res.errors).toBeUndefined();
     expect(await db.nodeRevision.count({ where: { node: { memoryId } } })).toBe(before);
   });
 
-  it('a raw writer\'s drift is reconciled once, and each node pairs its revision with its own content', async () => {
+  it('a raw writer\'s drift is reconciled once, and each node pairs its revision with its own content', SLOW, async () => {
     const drifted = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'batch:n007' } });
     await db.$executeRaw`UPDATE nodes SET content = 'raw edit' WHERE id = ${drifted.id}`;
     const res = await batch(ctxFor(db), 'id revision content');
@@ -123,7 +125,7 @@ describe('#2715 CONTROLS: what the bound must not change', () => {
     expect(nodes.find((n) => n.id === drifted.id)).toMatchObject({ content: 'raw edit', revision: drifted.revSeq + 1 });
   });
 
-  it('a denied node and a missing ref stay unavailable, with nothing of theirs returned', async () => {
+  it('a denied node and a missing ref stay unavailable, with nothing of theirs returned', SLOW, async () => {
     const mine = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'batch:n000' } });
     const missing = generateId();
     const res = await graphql({ schema, fieldResolver, contextValue: ctxFor(db),
