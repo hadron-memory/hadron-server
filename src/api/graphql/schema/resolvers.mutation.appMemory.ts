@@ -3,7 +3,7 @@
  *
  * `createMemory` (resolvers.mutation.memory.ts) deliberately creates only
  * FREE-STANDING memories (app_id / agent stay NULL) and rejects class='app'.
- * The legacy mutations are the explicit, caller-invokable way to add every
+ * The mutations below are the explicit, caller-invokable way to add every
  * App-associable memory class to a chosen App:
  *
  *   - createAppMemory (#2661) — new org-admin-only app-class creation without
@@ -212,12 +212,13 @@ export const appMemoryMutations = {
     const { id } = await resolveAppRef(ctx.db, appRef);
     const observed = await ctx.db.app.findUniqueOrThrow({ where: { id } });
     if (!observed.organizationId) {
+      if (observed.ownerUserId !== ctx.userId) throw authorizationDenied();
       throw new GraphQLError('Creating an app memory for a user-owned App is not yet supported.', {
         extensions: { code: 'USER_OWNED_APP_UNSUPPORTED' },
       });
     }
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
-    const memory = await withAuthorizedTx(ctx, [
+    return withAuthorizedTx(ctx, [
       { kind: 'org', id: observed.organizationId }, { kind: 'app', id },
     ], async txCtx => {
       const current = await txCtx.db.app.findUniqueOrThrow({ where: { id } });
@@ -238,16 +239,16 @@ export const appMemoryMutations = {
       const urn = await mintMemoryUrnV2(tx, {
         root: org.urn, desiredSlug: deriveSlugFromName(name), authorRoot: observed.urn.split(':').pop()!,
       });
-      return tx.memory.create({ data: {
+      const memory = await tx.memory.create({ data: {
         id: generateId(), organizationId: observed.organizationId, appId: id,
         urn, name, shortDescription, description, tags: tags ?? [], class: 'app',
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,
       }, include: MEMORY_INCLUDE });
+      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
+        description: 'Root node for this memory.' }, tx);
+      return memory;
     });
-    await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
-      description: 'Root node for this memory.' });
-    return memory;
   },
 
   createMemoryInApp: async (

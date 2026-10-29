@@ -5,6 +5,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { canReadMemoryRecord, requireMemoryWriteAccess } from './resolvers.helpers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import * as authorityAnchors from '../../../lib/auth/authorityAnchors.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
@@ -142,6 +143,15 @@ describe('#2661 new free-standing app memory', () => {
       expect(text).toContain(message);
       expect(await db.memory.count()).toBe(count);
     }
+  });
+  for (const revoker of ['uninstall', 'revoke', 'delete']) it(`real ${revoker} mutation takes the matching exclusive authority anchor`, async () => {
+    const locks = vi.spyOn(authorityAnchors, 'lockAuthorityAnchors');
+    if (revoker === 'uninstall') await M.uninstallAgentFromApp({}, {appRef:app.id,agentRef:agent.id}, ctx(owner.id));
+    else if (revoker === 'revoke') await M.removeOrgMember({}, {orgRef:org.id,userRef:admin.id}, ctx(owner.id));
+    else await M.deleteApp({}, {ref:app.id}, ctx(owner.id));
+    expect(locks).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([
+      {kind:revoker === 'revoke' ? 'org':'app',id:revoker === 'revoke' ? org.id:app.id},
+    ]), 'exclusive');
   });
   for (const race of ['uninstall','revoke','transfer','delete','demote']) it(`waits for concurrent ${race}, then refuses with no memory`, async () => {
     expect(M.createAppMemory).toBeTypeOf('function');
