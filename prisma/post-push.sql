@@ -687,6 +687,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- verbatim with migration 20261010010000_agent_task_matching (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-matching-invariants.sql
+\ir task-blocker-invariants.sql
 
 -- #1747: tickers, subscriptions, wake settings, the may-subscribe-workers grant
 -- and the App ticker-settings bounds. One source, shared verbatim with migration

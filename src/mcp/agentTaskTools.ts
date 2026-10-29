@@ -84,6 +84,7 @@ type AvailabilityRow = Record<string, any>;
 export const AGENT_TASK_WRITE_TOOLS = [
   'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
   'hadron_task_progress', 'hadron_task_finish', 'hadron_task_cancel',
+  'hadron_task_blocker_add', 'hadron_task_blocker_remove', 'hadron_task_priority_set',
   // #1754 — the backlog moves (cor:agt:050:02)
   'hadron_task_park', 'hadron_task_make_ready',
   // #1706
@@ -152,16 +153,21 @@ function partyLabel(p: Party): string {
 }
 
 /** One task as text, every derived field through the GraphQL field resolvers. */
-export async function renderTask(t: TaskRow, ctx: Context): Promise<string> {
+export async function renderTask(t: TaskRow, ctx: Context, dependencies: { limit?: number; offset?: number } = {}): Promise<string> {
   const [owner, assignee, waiting] = await Promise.all([
     T.owner(t as never, {}, ctx) as Promise<Party>,
     T.assignee(t as never, {}, ctx) as Promise<Party>,
     T.waitingOnChildren(t as never, {}, ctx),
   ]);
+  const [blockedBy, blocks] = await Promise.all([T.blockedBy(t as never, dependencies, ctx), T.blocks(t as never, dependencies, ctx)]);
   const flags = [T.queued(t as never) ? 'queued' : null, waiting ? 'waiting on child tasks' : null].filter(Boolean);
   const lines = [
     // #2553: the handle first, then the id it is an alias for.
     `- ${t.handle} ${t.title} (id: ${t.id})`,
+    `  priority: ${t.priority ?? 1}`,
+    `  blocked: ${t.blocked ?? false}`,
+    `  blocked by (${blockedBy.total} total${blockedBy.hasMore ? ', more pages' : ''}): ${blockedBy.items.map((b) => b.id).join(', ') || 'none on this page'}`,
+    `  blocks (${blocks.total} total${blocks.hasMore ? ', more pages' : ''}): ${blocks.items.map((b) => b.id).join(', ') || 'none on this page'}`,
     `  status: ${t.status}${flags.length ? ` (${flags.join(', ')})` : ''}`,
     `  owner: ${partyLabel(owner)} · assignee: ${partyLabel(assignee)}`,
   ];
@@ -368,6 +374,19 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       write('hadron_task_create', session, 'Created', (ctx) => M.createAgentTask({}, { input }, ctx)),
   );
 
+  server.tool('hadron_task_blocker_add',
+    'Add a same-App blocker to a pending/backlog task. Assigner authority; cycles refuse (cor:agt:050:01).',
+    SHAPE_HADRON_TASK_BLOCKER,
+    async ({ session, ...args }) => write('hadron_task_blocker_add', session, 'Blocker added', (ctx) => M.addAgentTaskBlocker({}, args, ctx)));
+  server.tool('hadron_task_blocker_remove',
+    'Remove a blocker from a pending/backlog task. Last-blocker release restarts stall clocks; assigner authority (cor:agt:050:02).',
+    SHAPE_HADRON_TASK_BLOCKER,
+    async ({ session, ...args }) => write('hadron_task_blocker_remove', session, 'Blocker removed', (ctx) => M.removeAgentTaskBlocker({}, args, ctx)));
+  server.tool('hadron_task_priority_set',
+    'Set task priority1..5 (1 highest). Assigner authority; priority never grants authority (cor:agt:050:01).',
+    SHAPE_HADRON_TASK_PRIORITY,
+    async ({ session, ...args }) => write('hadron_task_priority_set', session, 'Priority set', (ctx) => M.setAgentTaskPriority({}, args, ctx)));
+
   server.tool(
     'hadron_task_assign',
     'Assign a task with no assignee — a queued task (pending) or a BACKLOG task: the task\'s owner, a worker the owner ' +
@@ -443,16 +462,16 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_task_get',
     'Read one agent task, or with tree: true the task and every task below it. Readers: the App\'s participants (cor:agt:050:21). A task you cannot read reads as not found.',
     SHAPE_HADRON_TASK_GET,
-    async ({ taskId: id, tree, session }) =>
+    async ({ taskId: id, tree, session, dependencyLimit, dependencyOffset }) =>
       read(session, async (ctx) => {
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
           if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
-          return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx)))).join('\n'));
+          return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
         const t = await Q.agentTask({}, { id }, ctx);
         if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
-        return textResult(await renderTask(t, ctx));
+        return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
   );
 
@@ -595,6 +614,8 @@ const availabilityFields = {
 };
 
 const SHAPE_HADRON_TASK_CREATE = {
+  priority: z.number().int().optional().describe('Priority1..5 (1 highest), default1; assigner authority required when named.'),
+  blockedBy: z.array(z.string()).optional().describe('Same-App task refs that must end before start/matching; assigner authority required.'),
   appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
   parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
   project: z.boolean().optional().describe('Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId.'),
@@ -618,6 +639,9 @@ const SHAPE_HADRON_TASK_CREATE = {
   session: SESSION_WRITE,
 };
 
+const SHAPE_HADRON_TASK_BLOCKER = { taskRef: taskId, blockerTaskRef: z.string(), session: SESSION_WRITE };
+const SHAPE_HADRON_TASK_PRIORITY = { taskRef: taskId, priority: z.number().int(), session: SESSION_WRITE };
+
 const SHAPE_HADRON_TASK_ASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional().describe('Omitted keeps the task\'s stored value (cor:agt:050:10).'), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_REASSIGN = { taskId, assignee: party, closeSessionWhenDone: z.boolean().optional().describe('Omitted keeps the task\'s stored value (cor:agt:050:10).'), session: SESSION_WRITE };
@@ -640,7 +664,7 @@ const SHAPE_HADRON_TASK_PARK = { taskId, session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_MAKE_READY = { taskId, session: SESSION_WRITE };
 
-const SHAPE_HADRON_TASK_GET = { taskId, tree: z.boolean().optional(), session: SESSION_READ };
+const SHAPE_HADRON_TASK_GET = { taskId, tree: z.boolean().optional(), dependencyLimit: z.number().int().optional().describe('Dependency page size, default20 cap200.'), dependencyOffset: z.number().int().optional().describe('Dependency offset, default0; applies to both blocks and blockedBy.'), session: SESSION_READ };
 
 const SHAPE_HADRON_TASK_LIST = {
   appRef: z.string().describe('The team App (id or URN).'),

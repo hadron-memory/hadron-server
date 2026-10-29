@@ -70,7 +70,19 @@
   ],
   [
    "hadron_task_create",
-   "8a06d776c6d0bbde06390e1cf7deb0c2f5e830ea700cdd51256152a7e1820b4a"
+   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+  ],
+  [
+   "hadron_task_blocker_add",
+   "a93ff64f317c6f94df7e061ab13e0be8fbe33ca44339864f000680f8e3420820"
+  ],
+  [
+   "hadron_task_blocker_remove",
+   "b86028a497ef2fa471fc7edb707f429475b8ddaa25088dc4d50fc2764838b1fe"
+  ],
+  [
+   "hadron_task_priority_set",
+   "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
    "hadron_task_assign",
@@ -106,7 +118,7 @@
   ],
   [
    "hadron_task_get",
-   "c91bd8ec26cf3add73079c4ce7aed317effaf5592dc9acf9fd0da4c504665628"
+   "a5446b9d7385fab5679be969fb6e60b066cb233f6fb0659d864803e44577ecc3"
   ],
   [
    "hadron_task_list",
@@ -604,7 +616,19 @@
   ],
   [
    "hadron_task_create",
-   "8a06d776c6d0bbde06390e1cf7deb0c2f5e830ea700cdd51256152a7e1820b4a"
+   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+  ],
+  [
+   "hadron_task_blocker_add",
+   "a93ff64f317c6f94df7e061ab13e0be8fbe33ca44339864f000680f8e3420820"
+  ],
+  [
+   "hadron_task_blocker_remove",
+   "b86028a497ef2fa471fc7edb707f429475b8ddaa25088dc4d50fc2764838b1fe"
+  ],
+  [
+   "hadron_task_priority_set",
+   "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
    "hadron_task_assign",
@@ -640,7 +664,7 @@
   ],
   [
    "hadron_task_get",
-   "c91bd8ec26cf3add73079c4ce7aed317effaf5592dc9acf9fd0da4c504665628"
+   "a5446b9d7385fab5679be969fb6e60b066cb233f6fb0659d864803e44577ecc3"
   ],
   [
    "hadron_task_list",
@@ -1138,7 +1162,19 @@
   ],
   [
    "hadron_task_create",
-   "8a06d776c6d0bbde06390e1cf7deb0c2f5e830ea700cdd51256152a7e1820b4a"
+   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+  ],
+  [
+   "hadron_task_blocker_add",
+   "a93ff64f317c6f94df7e061ab13e0be8fbe33ca44339864f000680f8e3420820"
+  ],
+  [
+   "hadron_task_blocker_remove",
+   "b86028a497ef2fa471fc7edb707f429475b8ddaa25088dc4d50fc2764838b1fe"
+  ],
+  [
+   "hadron_task_priority_set",
+   "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
    "hadron_task_assign",
@@ -1174,7 +1210,7 @@
   ],
   [
    "hadron_task_get",
-   "c91bd8ec26cf3add73079c4ce7aed317effaf5592dc9acf9fd0da4c504665628"
+   "a5446b9d7385fab5679be969fb6e60b066cb233f6fb0659d864803e44577ecc3"
   ],
   [
    "hadron_task_list",
@@ -1656,7 +1692,19 @@
   ],
   [
    "hadron_task_create",
-   "8a06d776c6d0bbde06390e1cf7deb0c2f5e830ea700cdd51256152a7e1820b4a"
+   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+  ],
+  [
+   "hadron_task_blocker_add",
+   "a93ff64f317c6f94df7e061ab13e0be8fbe33ca44339864f000680f8e3420820"
+  ],
+  [
+   "hadron_task_blocker_remove",
+   "b86028a497ef2fa471fc7edb707f429475b8ddaa25088dc4d50fc2764838b1fe"
+  ],
+  [
+   "hadron_task_priority_set",
+   "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
    "hadron_task_assign",
@@ -1692,7 +1740,7 @@
   ],
   [
    "hadron_task_get",
-   "c91bd8ec26cf3add73079c4ce7aed317effaf5592dc9acf9fd0da4c504665628"
+   "a5446b9d7385fab5679be969fb6e60b066cb233f6fb0659d864803e44577ecc3"
   ],
   [
    "hadron_task_list",
