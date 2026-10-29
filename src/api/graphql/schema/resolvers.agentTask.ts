@@ -1,3 +1,4 @@
+import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // Agent tasks — #1705 (Task Management slice T1, epic #1704).
 //
 // A team App assigns its work as AgentTasks (cor:agt:050). Each task has one
@@ -1178,7 +1179,7 @@ export const agentTaskMutations = {
     const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
-    await emitTaskWarnings(ctx, info, created.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
     return created;
   },
 
@@ -1248,7 +1249,7 @@ export const agentTaskMutations = {
     }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
-    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
     return assigned;
   },
 
@@ -1367,7 +1368,7 @@ export const agentTaskMutations = {
       });
     }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
     await launchAssignee(ctx.db, reassigned);
-    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn, taskId: reassigned.id });
     return reassigned;
   },
 
@@ -1456,7 +1457,7 @@ export const agentTaskMutations = {
     }, { assignee: true });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, finished.appId);
-    await emitTaskWarnings(ctx, info, finished.appId, { codes: warn });
+    await emitTaskWarnings(ctx, info, finished.appId, { codes: warn, taskId: finished.id });
     return finished;
   },
 
@@ -1464,13 +1465,16 @@ export const agentTaskMutations = {
    * Cancel a pending, started or backlog task: its owner, or whoever manages
    * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
    */
-  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, cancels it.", { taskId });
       }
       refuseEnded(task);
       const openChildCount = await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } });
+      // #2607: cancelling with open children still succeeds; it does not end them, and the response says so.
+      if (openChildCount > 0) warn.push('task.cancel.open-children');
       await tx.agentTask.update({
         where: { id: task.id },
         data: { status: 'cancelled', cancelledAt: new Date(), ...updatedStamp(ctx) },
@@ -1489,6 +1493,7 @@ export const agentTaskMutations = {
     }, { assignee: true });
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
+    await emitTaskWarnings(ctx, info, cancelled.appId, { codes: warn, taskId: cancelled.id });
     return cancelled;
   },
 };
@@ -1532,6 +1537,16 @@ type ListArgs = {
   assignee?: PartyInput;
   creator?: PartyInput;
   tag?: string | null;
+  tagsAny?: string[] | null;
+  tagsAll?: string[] | null;
+  source?: string | null;
+  overdue?: boolean | null;
+  createdAfter?: unknown;
+  createdBefore?: unknown;
+  startedAfter?: unknown;
+  startedBefore?: unknown;
+  finishedAfter?: unknown;
+  finishedBefore?: unknown;
   parentTaskId?: string | null;
   rootsOnly?: boolean | null;
   queued?: boolean | null;
@@ -1564,6 +1579,35 @@ export const agentTaskQueries = {
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
   agentTasks: async (_: unknown, args: ListArgs, ctx: Context) =>
     withReadableApp(ctx, args.appRef, async (c, app) => {
+    // Narrow only after the existing App read gate. All filters run in SQL before paging.
+    const filters: Prisma.AgentTaskWhereInput[] = [];
+    if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
+    if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
+    if (args.source != null) filters.push({ source: args.source });
+    for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
+      const range: { gte?: Date; lte?: Date } = {};
+      for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
+        const value = args[`${prefix}${suffix}`];
+        if (value == null) continue;
+        if (!(value instanceof Date) && !taskListDateTime.safeParse(value).success) {
+          throw badInput(`${prefix}${suffix} must be an ISO date-time with a timezone offset.`);
+        }
+        const date = value instanceof Date ? value : new Date(value as string);
+        if (!Number.isFinite(date.getTime())) throw badInput(`${prefix}${suffix} is not a valid date-time.`);
+        range[op] = date;
+      }
+      if (range.gte && range.lte && range.gte > range.lte) throw badInput(`${prefix}After must not be later than ${prefix}Before.`);
+      if (range.gte || range.lte) filters.push({ [field]: range });
+    }
+    if (args.overdue != null) {
+      // Match the millisecond precision exposed by DateTime, using the database clock.
+      const [{ now }] = await c.db.$queryRaw<{ now: Date }[]>`SELECT date_trunc('milliseconds', CURRENT_TIMESTAMP) AS now`;
+      const late: Prisma.AgentTaskWhereInput = {
+        status: 'pending', startBy: { lt: now }, startedAt: null, finishedAt: null, cancelledAt: null,
+      };
+      // SQL NOT over a nullable startBy alone would also discard tasks with no deadline.
+      filters.push(args.overdue ? late : { OR: [{ startBy: null }, { NOT: late }] });
+    }
     const statuses = args.status?.map((s) => STATUS_FROM_GQL[s] ?? s);
     const where: Prisma.AgentTaskWhereInput = {
       appId: app.id,
@@ -1583,7 +1627,7 @@ export const agentTaskQueries = {
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
     const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
     return c.db.agentTask.findMany({
-      where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere] },
+      where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),

@@ -8,6 +8,7 @@ import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
@@ -20,7 +21,6 @@ import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import {
   getPrimaryAgent,
-  getPrimaryAgentId,
   isAgentInstalledAndLicensed,
   isGrantedAgentMemoryRole,
 } from '../../../lib/appAgent.js';
@@ -84,10 +84,8 @@ import {
   APP_INCLUDE,
   ORG_INCLUDE,
   listOrgExchangeConnections,
-  readPrimaryAgentIdFromEager,
   readPrimaryAgentRecordFromEager,
   readAllAgentRecordsFromEager,
-  readPrimaryAgentField,
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
@@ -253,6 +251,21 @@ export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
     throw error;
   }
+}
+
+/**
+ * #2640: the App's primary installed Agent as this caller may read it, or null (none installed, or withheld).
+ * Every App field that names the primary Agent (`agentId`, `installedAgentUrn`) goes through here so none can
+ * disclose what `agent` withholds.
+ */
+async function readablePrimaryAgent(
+  ctx: Context,
+  a: { id: string; appAgents?: unknown },
+): Promise<(NestedAgentRow & { urn?: string }) | null> {
+  const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & { urn?: string }) | null | undefined;
+  if (eager !== undefined) return readableNestedAgent(ctx, eager);
+  const agent = await getPrimaryAgent(ctx.db, a.id);
+  return readableNestedAgent(ctx, agent as (NestedAgentRow & { urn?: string }) | null);
 }
 
 /**
@@ -575,8 +588,32 @@ async function resolveAuthorship(state: AuthoredState, ctx: Context) {
 }
 
 /**
+ * #2715 — at most this many per-parent reconcile transactions in flight per request. GraphQL resolves a list's
+ * `Node.revision` fields concurrently; unbounded, a 200-node `nodeBatch` asks the pool for 200 interactive
+ * transactions at once, and those queued past `maxWait` (2 s) fail with Prisma P2028. Production's default pool is 5
+ * (Prisma 6.19.2, physical CPUs x 2 + 1); 4 leaves one connection for the rest of the server. The rest wait here,
+ * app-side, where no start deadline applies.
+ */
+export const NODE_RECONCILE_CONCURRENCY = 4;
+
+/** Run `fn` once fewer than {@link NODE_RECONCILE_CONCURRENCY} of this request's reconciles are in flight (FIFO). */
+function withReconcileSlot<T>(ctx: Context, fn: () => Promise<T>): Promise<T> {
+  const slots = ctx.nodeReconcileSlots ??= { active: 0, waiting: [] };
+  const run = () => {
+    slots.active++;
+    return fn().finally(() => {
+      slots.active--;
+      slots.waiting.shift()?.();
+    });
+  };
+  if (slots.active < NODE_RECONCILE_CONCURRENCY) return run();
+  return new Promise<T>((resolve, reject) => { slots.waiting.push(() => { run().then(resolve, reject); }); });
+}
+
+/**
  * Reconcile a raw writer's drift for a Node parent without mixing a later
  * writer's state into the GraphQL object already selected by the caller.
+ * Queued behind {@link withReconcileSlot}: only WHEN the transaction starts changes, never what it reads or decides.
  */
 async function reconciledNodeForParent(
   n: SnapshotSourceNode & { revSeq: number },
@@ -588,7 +625,7 @@ async function reconciledNodeForParent(
   const cache = ctx.nodeReconcileCache ??= new WeakMap();
   const existing = cache.get(n);
   if (existing) return existing;
-  const pending = withReconciledNodeRead(ctx.db, n.id, n.memoryId, async (tx, mayReconcile) => {
+  const pending = withReconcileSlot(ctx, () => withReconciledNodeRead(ctx.db, n.id, n.memoryId, async (tx, mayReconcile) => {
     const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
     const inherited = (n as typeof n & { inheritedFrom?: InheritedFrom }).inheritedFrom;
     if (!(await isMemoryReadableCached(fresh, inherited?.via ?? n.memoryId))) return false;
@@ -611,7 +648,7 @@ async function reconciledNodeForParent(
     const key = sessionKeyCache.getByMemoryId(current.memoryId);
     if (key) decryptNodeFieldsWithKey(current, key);
     return revisionStateMatchesWithoutAuthorship(n, current) ? current : null;
-  }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
+  }, { timeoutMs: 5_000, maxWaitMs: 2_000 }));
   cache.set(n, pending);
   return pending;
 }
@@ -886,6 +923,10 @@ function lastEventAtBatched(ctx: Context, sessionId: string): Promise<Date | nul
 }
 
 export const typeResolvers = {
+  ...servedPromptTypeResolvers,
+  Chat: {
+    servedPrompts: servedPromptOwnerFields.chatServedPrompts,
+  },
   McpServer: {
     // headersEncrypted is not in the GraphQL type at all; readers get only
     // this boolean (write-only secret posture, same as tool-held tokens).
@@ -898,6 +939,10 @@ export const typeResolvers = {
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
+  },
+  CompiledBootPrompt: {
+    lintWarnings: (r: { node: { id: string }; revNo: number }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
+      import('../../../lib/compiledBootPromptLint.js').then(m => m.lintCompiledRevision(ctx, r.node.id, r.revNo, args)),
   },
   NodeApprovalReceipt: {
     /** #2048 — the same warnings as Node.lintWarnings, for the node just approved; approving never blocked on them. */
@@ -1196,6 +1241,8 @@ export const typeResolvers = {
       resolveRevisionEditor(ctx, [nv.approvedBy]),
   },
   AppRun: {
+    /** #2047: the run's record, self-authorized (the run read gate). */
+    servedPrompt: servedPromptOwnerFields.runServedPrompt,
     // #2439: BigInt over the wire as a string, like UsageEvent.costMicroCents; NULL = unknown.
     costMicroCents: (r: { costMicroCents?: bigint | null }) => r.costMicroCents != null ? r.costMicroCents.toString() : null,
     failureReason: (r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null }) => plainRunFailure(r),
@@ -1616,7 +1663,8 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      const agentUrn = await readPrimaryAgentField(a, ctx, 'urn');
+      // #2640: the URN names the primary Agent, so it answers as that Agent's own read does.
+      const agentUrn = (await readablePrimaryAgent(ctx, a))?.urn;
       if (!agentUrn) return null;
       // #697 Stage 2 / D10: an installed agent stays AUTHOR-ROOTED forever, so
       // its v2 URN is just the agent's own author-rooted URN — the v1
@@ -1642,15 +1690,13 @@ export const typeResolvers = {
     // value must include AGENT_INCLUDE — `appAgents` from APP_INCLUDE /
     // ORG_INCLUDE already does, and the fallback re-fetch via
     // `getPrimaryAgent({ include: AGENT_INCLUDE })` does too.
+    // #2640: `agentId` names the PRIMARY install's Agent, so it answers as that Agent's own read does: null for an
+    // Agent the caller cannot read (never the first READABLE install's id, never the raw id).
     agentId: async (
       a: { id: string; appAgents?: unknown },
       _: unknown,
       ctx: Context,
-    ): Promise<string | null> => {
-      const id = readPrimaryAgentIdFromEager(a);
-      if (id !== undefined) return id;
-      return getPrimaryAgentId(ctx.db, a.id);
-    },
+    ): Promise<string | null> => (await readablePrimaryAgent(ctx, a))?.id ?? null,
     agent: async (
       a: { id: string; appAgents?: unknown },
       _: unknown,
@@ -2005,6 +2051,8 @@ export const typeResolvers = {
     },
   },
   Session: {
+    /** #2047: a bind's record, self-authorized (worker internals). */
+    servedPrompts: servedPromptOwnerFields.sessionServedPrompts,
     /** #1156 / cor:dmo:070:05: no new read gate; the parent Session is authorized. */
     endReason: sessionEndReason,
     /** #1645: nested events inherit current session and memory read boundaries. */

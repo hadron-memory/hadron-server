@@ -77,6 +77,14 @@ interface Fake {
   /** When set, the alarm read answers this GraphQL error. */
   alarmError: string | null;
   alarmQueries: string[];
+  /** #2613: agentTasks rows by worker id (the open-task read), the reads seen, and a failure switch. */
+  openTasks: Record<string, unknown[]>;
+  openTaskReads: string[][];
+  openTasksError: boolean;
+  /** #2613: the order of the open-task read, screen reads and sends. */
+  order: string[];
+  /** #2613: runs when the open-task read is served (a test clock advances here). */
+  onCount: (() => void) | null;
 }
 
 let dir: string;
@@ -90,7 +98,7 @@ function fake(): Fake {
     incarnation: 'inc-1', retries: [], retryReply: null, run: undefined as any,
     lastCheckedAt: null, tasks: {}, evidenceQueries: [], checkError: null, enters: [], enterReply: null,
     tickers: [], subscribersError: null, extraTerminals: [], sessions: {}, sessionsError: null, sessionQueries: [],
-    alarms: {}, alarmError: null, alarmQueries: [],
+    alarms: {}, alarmError: null, alarmQueries: [], openTasks: {}, openTaskReads: [], openTasksError: false, order: [], onCount: null,
   };
   const subPage = (t: { pages: Array<Array<{ id: string; name: string }>> }, i: number) => ({
     items: (t.pages[i] ?? []).map((w) => ({ worker: w })), hasNextPage: i + 1 < t.pages.length, endCursor: i + 1 < t.pages.length ? `p${i + 1}` : null,
@@ -135,6 +143,14 @@ function fake(): Fake {
         const from = after === undefined ? 0 : all.findIndex((e) => e.id === after) + 1;
         return out({ data: { agentTeamEvents: all.slice(from, from + 200) } });
       }
+      if (q.includes('agentTasks(')) {
+        f.order.push('count');
+        f.onCount?.();
+        f.openTaskReads.push([fArg(argv, 'a') as string, fArg(argv, 'w') as string, fArg(argv, 'o') as string]);
+        if (f.openTasksError) return out({ errors: [{ message: 'tasks down', extensions: { code: 'INTERNAL_SERVER_ERROR' } }] });
+        const o = Number(fArg(argv, 'o'));
+        return out({ data: { agentTasks: (f.openTasks[fArg(argv, 'w') as string] ?? []).slice(o, o + 200) } });
+      }
       if (q.includes('agentTask(')) {
         const t = fArg(argv, 't') as string;
         f.evidenceQueries.push(`task ${t}`);
@@ -153,6 +169,7 @@ function fake(): Fake {
         return out({ ok: true, result: { hostScope: { hostIds: ['local'], omittedHostIds: [] }, terminals: [{ handle: 'term_a', incarnationId: f.incarnation, worktreePath: dir, connected: true, writable: true, agentIdentity: 'claude' }, ...f.extraTerminals] } });
       }
       if (argv[2] === 'wait') return out({ ok: f.idle, result: { wait: { satisfied: f.idle } }, error: f.idle ? undefined : { code: 'timeout' } });
+      if (argv[2] === 'read') f.order.push('read');
       if (argv[2] === 'read') return out({ ok: true, result: { terminal: f.screen } });
       if (argv[2] === 'send' && !argv.includes('--text')) {
         f.enters.push(argv[argv.indexOf('--terminal') + 1]);
@@ -163,6 +180,7 @@ function fake(): Fake {
         return { code: 0, stdout: f.retryReply ? f.retryReply() : JSON.stringify(ACCEPTED_ONLY), stderr: '' };
       }
       if (argv[2] === 'send') {
+        f.order.push('send');
         f.sent.push(argv[argv.indexOf('--text') + 1]);
         if (f.sendReply) return { code: 0, stdout: f.sendReply(), stderr: '' };
         return out(CONFIRMED);
@@ -2676,4 +2694,127 @@ describe('#2275 same-receiver never-accepted recovery', () => {
       }
     });
   }
+});
+
+describe('#2613 — the open-task line on every ticker-wake form', () => {
+  const open = (worker: string, n: number, status = 'STARTED') =>
+    Array.from({ length: n }, (_, i) => ({ id: `o${i}`, status, assignee: { kind: 'WORKER', id: worker } }));
+  const LINE = (n: number) => ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
+
+  it('appends the line after the existing bytes on the team-tick, assignment, alarm and finished-child forms', () => {
+    expect(nudgeText(['team-tick'], [], LINE(2))).toBe(nudgeText(['team-tick'], []) + LINE(2));
+    expect(nudgeText([], ['t1'], LINE(2))).toBe(nudgeText([], ['t1']) + LINE(2));
+    const forms: Array<Array<{ id: string; event: 'ALARM' | 'CHILD_FINISHED'; eventId?: string; rule?: string }>> = [
+      [{ id: 't9', event: 'ALARM', eventId: 'e9', rule: 'STALL_NOT_STARTED' }], [{ id: 'c1', event: 'CHILD_FINISHED' }],
+    ];
+    for (const tasks of forms) expect(nudgeText(['team-tick'], tasks as any, LINE(2))).toBe(nudgeText(['team-tick'], tasks as any) + LINE(2));
+    expect(nudgeText(['coordinator-tick'], [], LINE(1))).toBe(nudgeText(['coordinator-tick'], []) + LINE(1));
+  });
+
+  it('delivers a tick wake carrying the line, read for THIS worker in the wake App', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 4);
+    f.openTasks['w-other'] = open('w-other', 9); // another worker's tasks are never read for Ada
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(4)));
+    expect(f.openTaskReads).toEqual([['hrn:app:test:team', 'w-ada', '0']]);
+  });
+
+  it('delivers an assignment wake carrying the line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [task('t7')], proof([], 'b', [taskEntry('t7')]))];
+    f.openTasks['w-ada'] = open('w-ada', 1, 'PENDING');
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText([], ['t7'], LINE(1)));
+  });
+
+  it('zero open tasks leaves the wake byte-identical to today', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    await go();
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('a refused count read still delivers the wake, with no count claim and no "none"', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasksError = true;
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+    expect(f.sent[0]).not.toMatch(/open task|You have \d/);
+  });
+
+  it('a refused count read logs ONE closed-reason line with the worker name and nothing the read returned (#2630)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasksError = true;
+    await go();
+    const diag = lines.filter((l) => l.includes('open-task count unknown'));
+    expect(diag).toHaveLength(1);
+    expect(diag[0]).toMatch(/Ada: open-task count unknown \(refused\); the wake goes without the line$/);
+    expect(lines.join('\n')).not.toMatch(/tasks down|INTERNAL_SERVER_ERROR/);
+    expect(f.sent).toHaveLength(1); // fail-open
+  });
+
+  it('a count or a zero logs no diagnostic (#2630)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go();
+    expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
+  it('a row that is not open or not this worker makes the count unknown; the wake is plain', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = [...open('w-ada', 2), { id: 'x', status: 'CANCELLED', assignee: { kind: 'WORKER', id: 'w-ada' } }];
+    await go();
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('pages: 201 open tasks read as 201', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 201);
+    await go();
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(201)));
+    expect(f.openTaskReads.map((r) => r[2])).toEqual(['0', '200']);
+  });
+
+  it('a dry run reads nothing and sends nothing', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go({ dry: true });
+    expect(f.sent).toEqual([]);
+    expect(f.openTaskReads).toEqual([]);
+  });
+
+  it('reads the count BEFORE the final screen proofs, never between the last gate and the send (LOCAL P2-1)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const count = f.order.indexOf('count');
+    expect(count).toBeGreaterThan(-1);
+    expect(f.order.lastIndexOf('read')).toBeGreaterThan(count);
+    expect(f.order.indexOf('send')).toBeGreaterThan(f.order.lastIndexOf('read'));
+    expect(f.order.slice(count + 1, f.order.indexOf('send')).includes('count')).toBe(false);
+  });
+
+  it("the count shares the pass deadline: a read that ends past the pass end adds no line, and the wake is still sent plain", async () => {
+    const base = Date.now();
+    let t = 0;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    f.onCount = () => { t += 3_000; }; // the read itself takes 3 s; the pass has 2 s left
+    await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+  });
+
+  it('inside the pass deadline the same read still counts', async () => {
+    const base = Date.now();
+    let t = 0;
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = open('w-ada', 2);
+    f.onCount = () => { t += 100; };
+    await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(2)));
+  });
 });

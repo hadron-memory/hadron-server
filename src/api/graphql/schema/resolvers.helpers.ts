@@ -1,6 +1,7 @@
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { carryOperatorMark, isOperatorConversionContext } from '../../../lib/auth/operatorConversion.js';
 // Helpers extracted from resolvers.ts (Step 1 of the resolver split).
 // Pure mechanical move: shared auth/include/AI-config/chat/asset helpers used
 // by the GraphQL resolver map. No behavior change. The `Context` interface
@@ -35,7 +36,6 @@ import { planOrgAgentInstallGrant } from '../../../lib/auth/orgAgentInstallLicen
 import { withAuthorizedTx } from './authorizedTx.js';
 import { ensureAgentSubscription } from '../../../controller/operations/ensureAgentSubscription.js';
 import {
-  getPrimaryAgent,
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
@@ -146,6 +146,8 @@ export interface Context {
   /** #2198 — task warnings collected during this request (see resolvers.taskWarnings.ts); lazily created. */
   taskWarnings?: { path: string; warning: import('./resolvers.taskWarnings.js').TaskWarning }[];
   /** #2198 — request-local gate/register answers and the read time spent on them (resolvers.taskWarnings.ts). */
+  /** #2609: uncapped pending history, captured in the mutation actor scope; consumed once after result shaping. */
+  taskWarningHistory?: import('./resolvers.taskWarnings.js').TaskWarningHistory[];
   taskWarningState?: import('./resolvers.taskWarnings.js').TaskWarningState;
   // Request-scoped memo for Edge.source/target lazy loads — avoids an N+1 of
   // identical node.findUnique calls when many edges in one response share an
@@ -173,6 +175,9 @@ export interface Context {
   // Node.contentValidation and Node.authorship can all resolve on one GraphQL
   // Node object; share its locked read without mixing distinct parent states.
   nodeReconcileCache?: WeakMap<object, Promise<(SnapshotSourceNode & { revSeq: number }) | null>>;
+  // #2715 — request-scoped bound on those reconciles' transactions in flight (see withReconcileSlot): a list's fields
+  // queue here instead of past the pool's 2 s start deadline (P2028).
+  nodeReconcileSlots?: { active: number; waiting: Array<() => void> };
   // Request-scoped gated task URN lookup for repeated Node.authorship fields.
   readableTaskRefCache?: Map<string, Promise<string | null>>;
   // Request-scoped memo for AppRun.urn composition (#696) — a run-list response
@@ -437,7 +442,7 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
  */
 export function withoutRequestCaches(ctx: Context, db?: Prisma.TransactionClient): Context {
   const fresh = Object.fromEntries(Object.entries(ctx).filter(([k]) => !k.endsWith('Cache'))) as Context;
-  return db ? { ...fresh, db: db as PrismaClient } : fresh;
+  return carryOperatorMark(ctx, db ? { ...fresh, db: db as PrismaClient } : fresh);
 }
 
 /**
@@ -2202,6 +2207,10 @@ export async function getAccessibleMemoryIds(
   // is correct and the default keeps it.
   options?: { excludeAppDerived?: boolean },
 ): Promise<string[] | null> {
+  // #2676 (P9): the conversion's operator principal reads what it converts: an install memory's text is otherwise
+  // read only by its App's participants, which no operator is. Writes stay limited to system memories (see
+  // requireMemoryWriteAccess), and this principal exists only inside src/admin (lib/auth/operatorConversion.ts).
+  if (isOperatorConversionContext(ctx)) return null;
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
   // plus the agent's system memory. Even if an LLM asks to read a different
@@ -2629,6 +2638,12 @@ export function safeCanonicalUrn(type: CanonicalUrnType, raw: string): string {
  * userless runs is judged against, and no other caller passes it.
  */
 export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, destination?: WriteDestination): Promise<void> {
+  // #2676 (P9): the boot-prompt conversion's operator principal writes SYSTEM memories only (an Agent's own or an
+  // install memory); any other class falls through to the ordinary gate, which refuses it (it has no user).
+  if (isOperatorConversionContext(ctx)) {
+    const target = await ctx.db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: { class: true } });
+    if (target?.class === 'system') return;
+  }
   // App-keyed callers: delegate to the class-aware MCP gate. The ADMIN/OWNER
   // shortcut applies only to non-strict org memories. A platform-admin USER
   // with an active App still cannot write another user's personal/private
@@ -2889,12 +2904,6 @@ export function readPrimaryAppAgent(parent: { appAgents?: unknown }): EagerAppAg
   return rows[0] as EagerAppAgentRow | undefined;
 }
 
-export function readPrimaryAgentIdFromEager(parent: { appAgents?: unknown }): string | null | undefined {
-  if (parent.appAgents === undefined) return undefined;
-  const first = readPrimaryAppAgent(parent);
-  return first?.agent?.id ?? null;
-}
-
 export function readPrimaryAgentRecordFromEager(
   parent: { appAgents?: unknown },
 ): unknown | undefined {
@@ -2909,23 +2918,6 @@ export function readAllAgentRecordsFromEager(
   const rows = parent.appAgents;
   if (!Array.isArray(rows)) return undefined;
   return rows.map((r) => (r as EagerAppAgentRow).agent);
-}
-
-export async function readPrimaryAgentField(
-  parent: { id: string; appAgents?: unknown },
-  ctx: Context,
-  field: 'urn',
-): Promise<string | null> {
-  const first = readPrimaryAppAgent(parent);
-  if (first?.agent && typeof first.agent.urn === 'string') {
-    return first.agent.urn;
-  }
-  // Fall back to a re-fetch only when the parent wasn't loaded with the include.
-  if (parent.appAgents === undefined) {
-    const primary = await getPrimaryAgent(ctx.db, parent.id, { include: undefined });
-    return primary?.[field] ?? null;
-  }
-  return null;
 }
 
 // ─── 023-app-shape US3 — MemoryShare caller-authority guard ────────────

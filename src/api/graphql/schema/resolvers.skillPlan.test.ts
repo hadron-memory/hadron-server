@@ -307,6 +307,70 @@ describe('includes in an exported body (#2041, cor:dmo:150:03 R9)', () => {
   });
 });
 
+describe('a broken include warns in skill lint (#2048 S11d, cor:dmo:150:03 R9)', () => {
+  const rule = (entry: { findings: Array<{ rule: string; severity: string; message: string }> }) => entry.findings.filter(f => f.rule === 'skill-include-broken');
+
+  it('warns, once, position-only, and the export still ships', async () => {
+    await mkNode('tasks:declared', { properties: declaration(), content: '# Body\n\n{{> nope}} and {{> also-nope}}' });
+    for (const intent of ['LINT', 'EXPORT']) {
+      const got = await plan({ intent, files: [] });
+      const found = rule(got.entries[0]);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toMatchObject({ severity: 'warning' });
+      expect(found[0].message).toContain('2 includes');
+      expect(found[0].message).not.toContain('nope');
+    }
+    const exported = await plan({ intent: 'EXPORT', files: [] });
+    expect(exported.entries[0].exportPlan.action).toBe('WRITE');
+    expect(exported.entries[0].renderedBody).toContain('[Include unavailable]');
+  });
+
+  it('an unreadable target answers byte-identically to a missing one', async () => {
+    const other = await resolvers.Mutation.createMemory({}, { orgId: org.id, name: `sp-secret-${Date.now()}` }, ctx());
+    await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'secret', name: 'secret', content: 'hidden' } });
+    await mkNode('tasks:a', { properties: declaration({ name: 'skill-a' }), content: `{{> ${other.urn}:secret}}` });
+    await mkNode('tasks:b', { properties: declaration({ name: 'skill-b' }), content: '{{> missing-loc}}' });
+    const got = await plan({ intent: 'LINT' });
+    const messages = got.entries.map((e: any) => rule(e).map((f: any) => f.message));
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toHaveLength(1);
+    expect(messages[0]).toEqual(messages[1]);
+  });
+
+  it('a readable include and a plain node raise nothing', async () => {
+    await mkNode('policies:conduct', { content: 'Be kind.', isRunnable: false });
+    await mkNode('tasks:ok', { properties: declaration({ name: 'skill-ok' }), content: '{{> policies:conduct}}' });
+    await mkNode('tasks:plain', { properties: declaration({ name: 'skill-plain' }), content: 'no includes' });
+    const got = await plan({ intent: 'LINT' });
+    expect(got.entries.flatMap(rule)).toEqual([]);
+  });
+
+  it("an author's own literal notice is not a broken include", async () => {
+    await mkNode('tasks:literal', { properties: declaration(), content: 'The text says [Include unavailable] on purpose.' });
+    const got = await plan({ intent: 'LINT' });
+    expect(rule(got.entries[0])).toEqual([]);
+  });
+
+  it('a successful include whose target holds a literal notice is not broken, directly or nested', async () => {
+    await mkNode('policies:leaf', { content: 'Leaf says [Include unavailable] on purpose.', isRunnable: false });
+    await mkNode('policies:mid', { content: 'Mid {{> policies:leaf}}', isRunnable: false });
+    await mkNode('tasks:direct', { properties: declaration({ name: 'skill-direct' }), content: '{{> policies:leaf}}' });
+    await mkNode('tasks:nested', { properties: declaration({ name: 'skill-nested' }), content: '{{> policies:mid}}' });
+    const got = await plan({ intent: 'LINT' });
+    expect(got.entries).toHaveLength(2);
+    expect(got.entries.flatMap(rule)).toEqual([]);
+  });
+
+  it('counts only the failed include when a literal-notice target and a missing one sit together', async () => {
+    await mkNode('policies:leaf', { content: 'Leaf says [Include unavailable].', isRunnable: false });
+    await mkNode('tasks:mixed', { properties: declaration(), content: '{{> policies:leaf}} and {{> missing-loc}}' });
+    const got = await plan({ intent: 'LINT' });
+    const found = rule(got.entries[0]);
+    expect(found).toHaveLength(1);
+    expect(found[0].message).toContain('1 include ');
+  });
+});
+
 describe('classes and bodies', () => {
   it('never-exported, with a body only for EXPORT', async () => {
     await mkNode('tasks:declared', { properties: declaration() });

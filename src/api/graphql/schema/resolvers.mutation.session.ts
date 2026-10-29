@@ -40,7 +40,7 @@ import {
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
+import { serveBindInTransaction, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
@@ -1484,6 +1484,10 @@ export const sessionMutations = {
         },
         include: SESSION_INCLUDE,
         });
+        // #2047 (S10): serve the boot prompt in the bind's own transaction. A refusal rolls the whole bind back.
+        if (workerId && appId && agentId) {
+          await serveBindInTransaction(tx, ctx, { sessionId: created.id, workerId, appId, agentId, llmModel: input.llmModel ?? null });
+        }
         // #1709: the grant is spent by THIS bind, atomically: of two concurrent redemptions one loses here, and its
         // whole bind rolls back.
         if (launch && !(await consumeGrant(tx, launch.grant.id, created.id, new Date()))) throw launchGrantInvalid();
@@ -2478,17 +2482,31 @@ export const sessionMutations = {
 
     // ── Chat ownership mutations ────────────────────────────────────
 
+    /**
+     * Delete is connection MANAGEMENT: only an ADMIN of the owning org may do it
+     * (cor:dmo:080:04), never the owner or a delegated grant, so this does NOT
+     * reuse `requireEmailConnection`. A missing, already-deleted or not-yours
+     * connection gets the same typed FORBIDDEN as a non-ADMIN (#2593), before any
+     * write or provider teardown; a repeat delete answers as missing. Only the
+     * authorization failure maps to the denial: infrastructure errors stay errors.
+     */
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const connection = await ctx.db.exchangeConnection.findUniqueOrThrow({ where: { id } });
+      const connection = await ctx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
+      if (!connection) throw authorizationDenied();
       await requireOrgRole(ctx, connection.organizationId, 'ADMIN');
       await withAuthorizedTx(
         ctx,
         [{ kind: 'connection', id }, { kind: 'org', id: connection.organizationId }],
         (txCtx) => requireOrgRole(txCtx, connection.organizationId, 'ADMIN'),
-        (tx) => tx.exchangeConnection.update({
-          where: { id },
-          data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
-        }),
+        async (tx) => {
+          // Guarded on the live row: a delete that won the lock first leaves nothing to
+          // stamp, and this one answers as missing without a second teardown.
+          const { count } = await tx.exchangeConnection.updateMany({
+            where: { id, deletedAt: null },
+            data: { deletedAt: new Date(), deletedBy: ctx.userId ?? ctx.clientId ?? null },
+          });
+          if (count === 0) throw authorizationDenied();
+        },
         {
           lockMode: 'exclusive',
           afterLock: async (tx) => {

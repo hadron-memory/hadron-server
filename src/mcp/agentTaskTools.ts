@@ -1,3 +1,4 @@
+import { taskListDateTime } from '../lib/agentTasks/listDateTime.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 /**
  * #1705 — agent tasks on the MCP surface (cor:agt:050): create, assign,
@@ -27,7 +28,7 @@ import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';
-import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
+import { flushTaskWarningHistory, renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { agentTaskAlarmFieldResolvers } from '../api/graphql/schema/resolvers.agentTaskAlarms.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
@@ -303,7 +304,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     const ctx = ctxOf();
     try {
       const t = await call(ctx);
-      return textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      const result = textResult(`${verb}.\n\n${await renderTask(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }
@@ -327,7 +330,10 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     }
     const ctx = ctxOf();
     try {
-      return textResult(await call(ctx));
+      // #2607: a write that files task warnings (hadron_alarm_ack) renders them where the task tools do.
+      const result = textResult(`${await call(ctx)}${renderTaskWarnings(ctx.taskWarnings)}`);
+      await flushTaskWarningHistory(ctx);
+      return result;
     } catch (e) {
       return refusal(e);
     }
@@ -464,7 +470,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
@@ -643,6 +649,16 @@ const SHAPE_HADRON_TASK_LIST = {
   assignee: party.optional(),
   creator: party.optional().describe('Who created the task: a worker, or a person for a task they created themselves (not one their worker created).'),
   tag: z.string().optional(),
+  tagsAny: z.array(z.string()).optional().describe('Match at least one tag; empty does not narrow.'),
+  tagsAll: z.array(z.string()).optional().describe('Match every tag; empty does not narrow.'),
+  source: z.string().optional().describe('Exact opaque source, not a prefix.'),
+  overdue: z.boolean().optional().describe('True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks; not an alarm.'),
+  createdAfter: taskListDateTime.optional().describe('Inclusive creation-time lower bound (ISO date-time).'),
+  createdBefore: taskListDateTime.optional().describe('Inclusive creation-time upper bound (ISO date-time).'),
+  startedAfter: taskListDateTime.optional().describe('Inclusive start-time lower bound; null dates excluded.'),
+  startedBefore: taskListDateTime.optional().describe('Inclusive start-time upper bound; null dates excluded.'),
+  finishedAfter: taskListDateTime.optional().describe('Inclusive finish-time lower bound; null dates excluded.'),
+  finishedBefore: taskListDateTime.optional().describe('Inclusive finish-time upper bound; null dates excluded.'),
   parentTaskId: z.string().optional(),
   rootsOnly: z.boolean().optional(),
   queued: z.boolean().optional().describe('Only pending tasks with no assignee.'),
