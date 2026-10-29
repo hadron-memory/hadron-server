@@ -1560,6 +1560,7 @@ async function loadCurrentReadProjection(
   authorizedMemoryId: string,
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
+  metadataOnly = false,
 ): Promise<ReadProjectionNode | null> {
   return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
     let fresh: Context;
@@ -1573,10 +1574,12 @@ async function loadCurrentReadProjection(
     }
     return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
   }, async (tx) => {
-    return tx.node.findFirst({
-      where: { id: nodeId, deletedAt: null },
-      include: readProjectionInclude,
-    }) as Promise<ReadProjectionNode | null>;
+    const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
+    // The batch provenance pass retains only metadata. Its render pass reads
+    // one current body under the same reconciliation and authorization gate.
+    return metadataOnly
+      ? tx.node.findFirst({ ...args, omit: { content: true } }) as unknown as Promise<ReadProjectionNode | null>
+      : tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
   }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
 
@@ -5067,6 +5070,7 @@ export function createMcpServerInstance(
           orderBy: { loc: 'asc' },
           take: BATCH_READ_MAX_NODES + 1,
           include: readProjectionInclude,
+          omit: { content: true },
         });
         markInherited(rows, inheritance.inheritedFrom);
         if (rows.length > BATCH_READ_MAX_NODES) {
@@ -5173,7 +5177,7 @@ export function createMcpServerInstance(
           }
           const rows = await db.node.findMany({
             where: { memoryId: mem.id, loc: { in: [...wanted] }, deletedAt: null },
-            include: projectionInclude,
+            include: projectionInclude, omit: { content: true },
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
           for (const r of group) {
@@ -5239,7 +5243,7 @@ export function createMcpServerInstance(
         const movedRows = allowedProbes.length
           ? await db.node.findMany({
               where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
-              include: projectionInclude,
+              include: projectionInclude, omit: { content: true },
             })
           : [];
         const movedRowById = new Map(movedRows.map((n) => [n.id, n]));
@@ -5261,7 +5265,7 @@ export function createMcpServerInstance(
           const childId = childReadable.get(r.memoryUrn);
           const effective = childId ? await findEffectiveNodeIdByLoc(db, childId, r.literalLoc ?? r.loc) : null;
           const inherited = effective?.inheritedFrom
-            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude })
+            ? await db.node.findFirst({ where: { id: effective.id, deletedAt: null }, include: projectionInclude, omit: { content: true } })
             : null;
           if (inherited && effective?.inheritedFrom) {
             markInherited([inherited], new Map([[inherited.memoryId, effective.inheritedFrom]]));
@@ -5297,7 +5301,7 @@ export function createMcpServerInstance(
             (allowedIds.length > 0
               ? await db.node.findMany({
                   where: { id: { in: allowedIds } },
-                  include: projectionInclude,
+                  include: projectionInclude, omit: { content: true },
                 })
               : []
             ).map((r) => [r.id, r]),
@@ -5346,7 +5350,7 @@ export function createMcpServerInstance(
       for (const selected of ordered) {
         // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, true);
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
@@ -5393,11 +5397,26 @@ export function createMcpServerInstance(
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
-      for (const n of visible) {
+      for (const metadata of visible) {
         if (truncated) {
-          omitted.push(await nodeUrn(n.loc, n.memoryId, memoryUrnOf));
+          omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
           continue;
         }
+        const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
+        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId);
+        if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
+          || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
+          || (inheritedFrom && !(inheritedFrom.via
+            ? await stillInherited(db, inheritedFrom, n)
+            : prefixInheritance !== null && (await retainEffective(db, [n], prefixInheritance)).length === 1))) {
+          unavailable.push(echoByNodeId.get(metadata.id) ?? metadata.id);
+          continue;
+        }
+        if (inheritedFrom) markInherited([n], new Map([[n.memoryId, inheritedFrom]]));
+        // A concurrent revision after metadata prefetch must not pair the new
+        // body with provenance selected for an older revision. Only raced rows
+        // fall back to the single renderer's current provenance reads.
+        const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         const served = lockState === 'locked' || raw
           ? n
@@ -5406,7 +5425,7 @@ export function createMcpServerInstance(
           locked: lockState === 'locked',
           encryptedMemory: lockState !== 'plaintext',
           auth,
-          batch: batchProvenance,
+          batch: provenance,
           memoryUrnOf,
         });
         // Measured on the ANNOTATED block, which is what actually ships: sizing

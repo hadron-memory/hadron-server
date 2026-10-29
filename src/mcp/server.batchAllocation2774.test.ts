@@ -24,7 +24,7 @@
  *   - Form validation: exactly one of (refs) XOR (memoryUrn + locPrefix).
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -99,6 +99,8 @@ beforeEach(async () => {
 
 import { createHash } from 'node:crypto';
 import * as contentHash from '../lib/contentHash.js';
+import { sessionKeyCache } from '../lib/sessionKeyCache.js';
+afterEach(() => sessionKeyCache.clear());
 
 async function denseFixture() {
   const nodes: Array<{ id: string; loc: string }> = [];
@@ -114,7 +116,7 @@ async function denseFixture() {
   return nodes;
 }
 
-async function measuredRead(scope: 'abstract' | 'all', refs: string[]) {
+async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk' | 'urn' | 'prefix') {
   const loads: Array<{phase: string; rows: number; bytes: number; rootBodyBytes: number; endpointBodyBytes: number}> = [];
   let pendingBodies = 0, maxPendingBodies = 0;
   const staleCheck = contentHash.isAbstractUnverified;
@@ -148,14 +150,14 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[]) {
     }, options);
   }) as typeof db.$transaction);
   try {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { refs, contentScope: scope, raw: true });
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { ...(form === 'prefix' ? { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'dense:' } : { refs: form === 'urn' ? refs.map((_, i) => `hrn:node:batch-org:batchmem:dense:${i.toString().padStart(2, '0')}`) : refs }), contentScope: scope, raw: true });
     return { text, hash: createHash('sha256').update(text).digest('hex'), loads, maxPendingBodies };
   } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
 
-it.each(['abstract', 'all'] as const)('#2774 bounds endpoint/root payloads with byte-identical %s output', async (scope) => {
+it.each([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const)('#2774 bounds endpoint/root payloads with byte-identical %s/%s output', async (scope, form) => {
   const nodes = await denseFixture();
-  const result = await measuredRead(scope, nodes.map(n => n.id));
+  const result = await measuredRead(scope, nodes.map(n => n.id), form);
   console.log(JSON.stringify({ probe: 'mcpBatch2774', scope, ...result, text: undefined }));
   expect(result.text).not.toMatch(/^Error/);
   expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
@@ -183,4 +185,67 @@ it.each(['abstract', 'all'] as const)('#2774 preserves PK/URN/prefix and single/
   expect(byPrefix).toBe(byPk);
   const single = await server.callToolText('hadron_get_node', { urn: `hrn:node:batch-org:batchmem:${nodes[0].loc}`, ...options });
   expect(byPk).toContain(single);
+});
+
+
+it.each([
+  { scope: 'abstract', raw: true, encrypted: false },
+  { scope: 'all', raw: false, encrypted: false },
+  { scope: 'abstract', raw: true, encrypted: true },
+  { scope: 'all', raw: false, encrypted: true },
+] as const)('#2774 preserves stale/decrypt/expansion parity: %j', async ({ scope, raw, encrypted }) => {
+  const home = await db.memory.findUniqueOrThrow({ where: { id: fx.memory.id } });
+  const memory = await db.memory.create({ data: { organizationId: home.organizationId, class: 'private', userId: fx.user2.id, name: 'parity', urn: 'batch-org:parity' } });
+  const content = 'before {{> leaf}} after {{word}}';
+  await db.node.create({ data: { memoryId: memory.id, loc: 'leaf', name: 'Leaf', content: 'EXPANDED' } });
+  const root = await db.node.create({ data: { memoryId: memory.id, loc: 'root', name: 'Root', content, abstract: 'A short summary', abstractOriginHash: contentHash.computeContentHash('old content'), data: { word: 'world' } } });
+  const server = createTestableMcpServer(user2Auth(), { sessionId: 'batch2774-parity' });
+  const options = { contentScope: scope, raw };
+  const single = () => server.callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:parity:root', ...options });
+  const batch = () => server.callToolText('hadron_get_nodes', { refs: [root.id], ...options });
+  if (encrypted) {
+    await resolvers.Mutation.encryptMemory({}, { memoryId: memory.id, passphrase: 'synthetic2774' }, { db, roles: ['ADMIN'], userId: fx.user2.id } as Context);
+    const locked = await single();
+    expect(await batch()).toContain(locked);
+    expect(locked).toContain('Locked:');
+    expect(locked).not.toContain('enc:v1:');
+    expect(await server.callToolText('hadron_unlock_memory', { memoryUrn: memory.urn, passphrase: 'synthetic2774' })).toContain('unlocked');
+  }
+  const expected = await single();
+  expect(await batch()).toContain(expected);
+  expect(expected).toContain('A short summary');
+  expect(expected).toContain('abstract-stale');
+  if (!raw) {
+    expect(expected).toContain('EXPANDED');
+    expect(expected).toContain('world');
+    expect(expected).not.toContain('{{> leaf}}');
+  }
+});
+
+it('#2774 refreshes provenance if the body revision changes after metadata prefetch', async () => {
+  const task = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'validator', name: 'Validator', isRunnable: true } });
+  const node = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'racy', name: 'Racy', content: 'old', revSeq: 1, authorshipKind: 'HUMAN', authoredByHuman: fx.admin.id, authoredAt: new Date('2026-09-26T20:00:00Z') } });
+  await db.nodeContentValidationReport.create({ data: { nodeId: node.id, memoryId: fx.memory.id, nodeRevSeq: 1, validationTaskId: task.id, validationTaskRevSeq: 1, outcome: 'FAIL' } });
+  let changed = false;
+  const original = db.user.findMany.bind(db.user);
+  const spy = vi.spyOn(db.user, 'findMany').mockImplementation(((args: any) => {
+    const result = original(args);
+    // Human-name prefetch runs after report prefetch, before body hydration.
+    if (changed || !args?.select?.handle) return result;
+    return result.then(async (rows) => {
+      changed = true;
+      await db.node.update({ where: { id: node.id }, data: { content: 'new', revSeq: 2 } });
+      await db.nodeContentValidationReport.create({ data: { nodeId: node.id, memoryId: fx.memory.id, nodeRevSeq: 2, validationTaskId: task.id, validationTaskRevSeq: 1, outcome: 'PASS' } });
+      return rows;
+    });
+  }) as typeof db.user.findMany);
+  try {
+    const output = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { refs: [node.id], raw: true });
+    expect(changed, output).toBe(true);
+    // Reconciliation advances the directly edited row once more; report r2
+    // is the latest eligible report, rather than the prefetched r1 FAIL.
+    expect(output).toContain('Validation: stale (node revision 2;');
+    expect(output).not.toContain('Validation: fail');
+    expect(output).toContain('new');
+  } finally { spy.mockRestore(); }
 });
