@@ -116,7 +116,7 @@ async function denseFixture() {
   return nodes;
 }
 
-async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk' | 'urn' | 'prefix') {
+async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk' | 'urn' | 'prefix', raw = true) {
   const loads: Array<{phase: string; rows: number; bytes: number; rootBodyBytes: number; endpointBodyBytes: number}> = [];
   let pendingBodies = 0, maxPendingBodies = 0;
   const staleCheck = contentHash.isAbstractUnverified;
@@ -150,7 +150,7 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
     }, options);
   }) as typeof db.$transaction);
   try {
-    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { ...(form === 'prefix' ? { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'dense:' } : { refs: form === 'urn' ? refs.map((_, i) => `hrn:node:batch-org:batchmem:dense:${i.toString().padStart(2, '0')}`) : refs }), contentScope: scope, raw: true });
+    const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { ...(form === 'prefix' ? { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'dense:' } : { refs: form === 'urn' ? refs.map((_, i) => `hrn:node:batch-org:batchmem:dense:${i.toString().padStart(2, '0')}`) : refs }), contentScope: scope, raw });
     return { text, hash: createHash('sha256').update(text).digest('hex'), loads, maxPendingBodies };
   } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
@@ -263,4 +263,14 @@ it.each(['pk', 'prefix'] as const)('#2774 preserves first-oversized progress and
   expect(output).not.toContain('**Large1**');
   expect(output).not.toContain('**Large2**');
   expect(output).toMatch(/hrn:node:batch-org:batchmem:oversize:1[\s\S]*hrn:node:batch-org:batchmem:oversize:2/);
+});
+
+
+it.each([true, false])('#2774 omits a plaintext body when an abstract-only read has no abstract (raw=%s)', async (raw) => {
+  const node = await db.node.create({ data: { memoryId: fx.memory.id, loc: 'no-abstract', name: 'No abstract', content: 'UNNEEDED'.repeat(16_384), abstract: null } });
+  const result = await measuredRead('abstract', [node.id], 'pk', raw);
+  const single = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_node', { urn: 'hrn:node:batch-org:batchmem:no-abstract', contentScope: 'abstract', raw });
+  expect(result.text).toContain(single);
+  expect(result.loads.filter(l => l.phase === 'current').reduce((n, l) => n + l.rootBodyBytes, 0)).toBe(0);
+  expect(result.text).not.toContain('UNNEEDED');
 });
