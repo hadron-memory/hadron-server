@@ -335,3 +335,30 @@ describe('#2755 the alarm reads show the reason; the evidence only to a reader o
     expect(line).not.toContain('oldestWakeAgeSeconds');
   });
 });
+
+describe('#2755 one worker failing does not stop the App\'s pass', () => {
+  it('a raise that throws leaves the other worker\'s alarm and the episode ends to the same pass', async () => {
+    await bind('Liam');
+    await assign('Liam', 100);
+    await checked('Liam', 40);
+    await bind('Tove');
+    await assign('Tove', 100);
+    await checked('Tove', 40);
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const real = db.$transaction.bind(db);
+    let calls = 0;
+    const tx = vi.spyOn(db, '$transaction').mockImplementation(((...args: unknown[]) => {
+      if (calls++ === 0) throw new Error('fence refused');
+      return (real as (...a: unknown[]) => unknown)(...args);
+    }) as never);
+    try {
+      const raised = await evaluateDarkWorkers(db, NOW);
+      expect(raised).toHaveLength(1);
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining('raising the alarm for worker'), expect.any(Error));
+    } finally {
+      tx.mockRestore();
+      spy.mockRestore();
+    }
+    expect(await db.darkWorkerEpisode.count({ where: { endedAt: null } })).toBe(1);
+  });
+});

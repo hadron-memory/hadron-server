@@ -58,7 +58,7 @@ async function darkWorkersOf(
     eligible.set(workerId, status);
   }
   if (eligible.size === 0) return out;
-  const wakeAges = await unackedWakeAges(db, app, [...eligible.keys()], app.deliveryDarkAlarmWindowSeconds, now);
+  const wakeAges = await unackedWakeAges(db, app, new Map([...eligible].map(([id, s]) => [id, s.resumedAt])), app.deliveryDarkAlarmWindowSeconds, now);
   for (const [workerId, status] of eligible) {
     const oldestWakeAgeSeconds = wakeAges.get(workerId) ?? null;
     if (status.status === 'OVERDUE') out.set(workerId, { workerId, reason: 'overdue', status, oldestWakeAgeSeconds });
@@ -68,14 +68,15 @@ async function darkWorkersOf(
 }
 
 /**
- * The age, in seconds, of each worker's oldest due wake, for the workers whose is older than `windowSeconds`. A READ-ONLY
+ * The age, in seconds, of each worker's oldest due wake, for the workers whose wake is older than `windowSeconds`. Time
+ * before a worker's `resumedAt` (a pause, team pause or stop that ended, or a new session) is exempt and never counts:
+ * the age runs from the later of the wake's anchor and that moment, so a worker that comes back is not alarmed at once. A READ-ONLY
  * preview of `computeDueWakes` as a manager of the App (the wake derivation is not duplicated here), so nothing is
  * reserved or charged. A wake is "due and unacknowledged" for as long as it is still derived: an acknowledgement moves
  * the marks that make it due. Only the wake's own anchor counts, never the delivery floor or the batching window.
  */
-async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, workerIds: string[], windowSeconds: number, now: Date): Promise<Map<string, number>> {
+async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, resumedAtOf: Map<string, Date | null>, windowSeconds: number, now: Date): Promise<Map<string, number>> {
   const out = new Map<string, number>();
-  const wanted = new Set(workerIds);
   let after: string | null = null;
   for (;;) {
     const page = await computeDueWakes({
@@ -89,8 +90,9 @@ async function unackedWakeAges(db: PrismaClient, app: { id: string; organization
       preview: true,
     });
     for (const wake of page.wakes) {
-      if (!wanted.has(wake.workerId)) continue;
-      const ageSeconds = Math.floor((now.getTime() - wake.timing.anchorAt.getTime()) / 1000);
+      if (!resumedAtOf.has(wake.workerId)) continue;
+      const startedAt = Math.max(wake.timing.anchorAt.getTime(), resumedAtOf.get(wake.workerId)?.getTime() ?? -Infinity);
+      const ageSeconds = Math.floor((now.getTime() - startedAt) / 1000);
       if (ageSeconds > windowSeconds) out.set(wake.workerId, Math.max(ageSeconds, out.get(wake.workerId) ?? 0));
     }
     if (!page.nextAfter) return out;
@@ -194,15 +196,27 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
   for (const app of apps) {
     try {
       const dark = await darkWorkersOf(db, app, now);
-      const open = await db.darkWorkerEpisode.findMany({ where: { appId: app.id, endedAt: null }, select: { id: true, workerId: true } });
+      const open = await db.darkWorkerEpisode.findMany({ where: { appId: app.id, endedAt: null }, select: { id: true, workerId: true, openedAt: true } });
       const openWorkers = new Set(open.map((e) => e.workerId));
+      // One worker's failure (a fence or CHECK refusal, say) must not stop the App's other workers or its notices.
       for (const e of open) {
-        if (!dark.has(e.workerId)) await db.darkWorkerEpisode.updateMany({ where: { id: e.id, endedAt: null }, data: { endedAt: now } });
+        if (dark.has(e.workerId)) continue;
+        try {
+          // Never before the open: another instance's clock may run behind, and the row's CHECK needs ended >= opened.
+          const endedAt = e.openedAt > now ? e.openedAt : now;
+          await db.darkWorkerEpisode.updateMany({ where: { id: e.id, endedAt: null }, data: { endedAt } });
+        } catch (err) {
+          console.error(`[dark-worker] ending episode ${e.id} failed:`, err);
+        }
       }
       for (const d of dark.values()) {
         if (openWorkers.has(d.workerId)) continue;
-        const id = await raise(db, app, d, app.deliveryDarkAlarmWindowSeconds * 1000, now);
-        if (id) raised.push(id);
+        try {
+          const id = await raise(db, app, d, app.deliveryDarkAlarmWindowSeconds * 1000, now);
+          if (id) raised.push(id);
+        } catch (err) {
+          console.error(`[dark-worker] raising the alarm for worker ${d.workerId} failed:`, err);
+        }
       }
       await postEpisodeNotices(db, app.id, now);
     } catch (err) {

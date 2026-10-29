@@ -35,6 +35,11 @@ export type WorkerCheckStatus = {
   pendingReason: WorkerPendingReason | null;
   /** When it last checked the App's team channel through its own session; null if never. */
   lastCheckedAt: Date | null;
+  /**
+   * #2755: the latest moment the worker became expected to check again: its live session's start, the end of its own
+   * pause, of a team pause and of a stop signal. Time before it is exempt time, so a wake's age never counts it.
+   */
+  resumedAt: Date | null;
 };
 
 export type WorkerCheckInputs = {
@@ -63,6 +68,18 @@ export function overdueAfterMs(s: CheckSettings): number {
   return s.failedChecksToOverdue * s.checkPeriodSeconds * 1000 + OVERDUE_SLACK_MS;
 }
 
+/** The latest end of an exemption (or the live session's start); null when it has no live session. */
+function resumedAt(i: WorkerCheckInputs, now: Date): Date | null {
+  if (!i.liveSessionStartedAt) return null;
+  const t = Math.max(
+    i.liveSessionStartedAt.getTime(),
+    i.pausedUntil && i.pausedUntil.getTime() <= now.getTime() ? i.pausedUntil.getTime() : -Infinity,
+    i.teamResumedAt?.getTime() ?? -Infinity,
+    i.stopEndedAt && i.stopEndedAt.getTime() <= now.getTime() ? i.stopEndedAt.getTime() : -Infinity,
+  );
+  return new Date(t);
+}
+
 /**
  * The status from its inputs: NO_SESSION, then PENDING with its reason, then
  * OK or OVERDUE. OK holds at exactly the limit; OVERDUE starts one millisecond
@@ -73,6 +90,7 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
     status,
     pendingReason,
     lastCheckedAt: i.lastCheckedAt,
+    resumedAt: resumedAt(i, now),
   });
   if (!i.liveSessionStartedAt) return out('NO_SESSION');
   if (i.pendingReason) return out('PENDING', i.pendingReason);

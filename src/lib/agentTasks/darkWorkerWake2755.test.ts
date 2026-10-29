@@ -135,6 +135,26 @@ describe('#2755 a due wake left unacknowledged past the window', () => {
   });
 });
 
+describe('#2755 exempt time does not count toward a wake\'s age', () => {
+  it('a worker whose own pause ended is alarmed one window after it resumed, not at once from the old anchor', async () => {
+    await bind('Tove', after(100));
+    await db.workerWakeSettings.create({ data: { workerId: w.Tove.id, pausedUntil: after(20) } });
+    await say('hello @tove', ['tove']);
+    expect(await evaluateDarkWorkers(db, after(10))).toEqual([]); // paused: exempt
+    expect(await evaluateDarkWorkers(db, after(35))).toEqual([]); // resumed 15 min ago, the wake is 35 min old
+    expect(await evaluateDarkWorkers(db, after(49))).toEqual([]); // 29 min since it resumed
+    expect(await evaluateDarkWorkers(db, after(51))).toHaveLength(1); // 31 min since it resumed
+  });
+
+  it('a team pause that ended restarts the wake clock the same way', async () => {
+    await bind('Tove', after(100));
+    await db.app.update({ where: { id: app.id }, data: { teamResumedAt: after(25) } });
+    await say('hello @tove', ['tove']);
+    expect(await evaluateDarkWorkers(db, after(40))).toEqual([]);
+    expect(await evaluateDarkWorkers(db, after(56))).toHaveLength(1);
+  });
+});
+
 describe('#2755 the evaluator\'s read of the due wakes writes nothing', () => {
   it('reserves no wake slot and charges no daily budget, however many passes run', async () => {
     await bind('Tove', after(31));
