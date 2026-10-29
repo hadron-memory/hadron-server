@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { ApolloServer } from '@apollo/server';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 let ownerOrg: { id: string; urn: string };
 let subscriberOrg: { id: string; urn: string };
@@ -241,10 +243,21 @@ describe('createMemorySubscription', () => {
     await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id));
     const err = await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id))
       .then(() => null, (e: unknown) => e);
-    expect(err).not.toBeNull();
-    expect((err as { extensions?: { code?: string } }).extensions?.code ?? '').not.toMatch(
-      /SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY|OWNER_ORG_CANNOT_SUBSCRIBE|NOT_FOUND/,
+    // The raw Prisma unique violation, unwrapped: no typed code of ours.
+    expect(err).toMatchObject({ code: 'P2002' });
+    expect((err as { extensions?: unknown }).extensions).toBeUndefined();
+    // Through the real GraphQL boundary it is the generic server fault.
+    const server = new ApolloServer<Context>({ typeDefs, resolvers });
+    const out = await server.executeOperation(
+      {
+        query: 'mutation($m: String!, $o: String!) { createMemorySubscription(memoryRef: $m, orgRef: $o, role: READER) { id } }',
+        variables: { m: publicMemory.id, o: subscriberOrg.id },
+      },
+      { contextValue: adminCtx(subscriberAdminUser.id) },
     );
+    if (out.body.kind !== 'single') throw new Error('unexpected incremental result');
+    const res = out.body.singleResult;
+    expect(res.errors?.[0]?.extensions?.code).toBe('INTERNAL_SERVER_ERROR');
   });
 
   // #764: the shared resolveRefArg helper maps every entity-ref miss to the
