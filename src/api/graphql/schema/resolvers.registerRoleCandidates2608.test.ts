@@ -2,6 +2,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #2608 — independent real-Postgres pins for register role picking. */
 
 import { buildSchema, parse, validate } from 'graphql';
+import { agentBaseChain, agentBaseChains } from '../../../lib/agentBase.js';
 import { typeDefs } from './typeDefs.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -117,9 +118,37 @@ describe('#2608 register role candidates', () => {
     await db.worker.updateMany({ where: { appId: app.id }, data: { retiredAt: new Date() } });
     await worker('Foreign', f.id); expect((await pick()).candidates).toEqual([]);
   });
+  // #2724 seats, Axel P2 = Riana P3-1 (their shared M3): the Team-memory read gate as a
+  // reachable sole defense. Riana's probe found no participant class that FAILS it on a live
+  // memory (the App fold lets every admitted participant read the Team Agent's system
+  // memory), so the one real unreadable state is the soft-deleted row — forced here past
+  // the write gates, because a read gate must not depend on a writer having done its job
+  // (#362 class). The state has a product writer (a merge soft-deletes its source,
+  // mergeMemories.ts), so the pin is reachable, not #943-dead. Stripping the gate leaks the
+  // register:<code> → taskLoc mapping through the empty page's echo; the agent/marker
+  // lookups stay live, so nothing upstream masks it.
+  it('S3: an admitted caller learns nothing when the Team memory is unreadable (deleted row)', async () => {
+    await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    await db.memory.update({ where: { id: teamMemoryId }, data: { deletedAt: new Date() } });
+    await expect(pick()).resolves.toMatchObject({ taskLoc: null, depth: null, total: 0, candidates: [] });
+  });
+  // Riana P3-2 (her M7): a resolved task sitting in a soft-deleted base memory is dropped.
+  // The child's own live memory admits the lookup and the walk keys on agents and nodes,
+  // never the memory row, so the deletedAt check on the resolved task is the sole drop;
+  // un-deleting proves the fixture can show what it guards.
+  it('drops a candidate whose resolved task lives in a deleted memory', async () => {
+    await mapTask(); const base = await roleAgent('Base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const child = await roleAgent('Child', base.id); await worker('Child worker', child.id);
+    await db.memory.update({ where: { id: base.memoryId }, data: { deletedAt: new Date() } });
+    expect((await pick()).total).toBe(0);
+    await db.memory.update({ where: { id: base.memoryId }, data: { deletedAt: null } });
+    expect((await pick()).depth).toBe(1);
+  });
   it('refuses an App outsider through the roster gate and pages all ties without changing their minimum depth', async () => {
     await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
-    await expect(pick(outsider.id)).rejects.toBeTruthy();
+    // Riana P3-3: the concealment code, not just any refusal — a FORBIDDEN here would
+    // reveal the App exists.
+    await expect(pick(outsider.id)).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
     const all = await pick(); expect(all.total).toBe(3); const one = await pick(admin.id, undefined, { limit: 1 });
     expect(one.candidates).toHaveLength(1); expect(one.total).toBe(3); expect(one.depth).toBe(0);
     const rest = await pick(admin.id, undefined, { offset: 1, limit: 2 }); expect(rest.candidates).toHaveLength(2);
@@ -145,6 +174,50 @@ describe('#2608 register role candidates', () => {
     const middle = await roleAgent('Middle', base.id); const child = await roleAgent('Child', middle.id);
     await db.agent.update({ where: { id: middle.id }, data: { systemMemoryId: null } });
     const w = await worker('Child worker', child.id); const r = await pick(); expect(r.depth).toBe(2); expect(r.candidates[0].worker.id).toBe(w.id);
+  });
+  // Axel P3 (#2724 LOCAL): depth counts Agent links, and the walk (agentBaseChain[s])
+  // deliberately does NOT filter deleted rows — only memory contribution does. A
+  // soft-deleted intermediate therefore still carries depth; pinned as intended behavior.
+  it('counts depth through a soft-deleted intermediate Agent', async () => {
+    await mapTask(); const base = await roleAgent('Base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const middle = await roleAgent('Middle', base.id); const child = await roleAgent('Child', middle.id);
+    await db.agent.update({ where: { id: middle.id }, data: { deletedAt: new Date() } });
+    const w = await worker('Child worker', child.id); const r = await pick(); expect(r.depth).toBe(2); expect(r.candidates[0].worker.id).toBe(w.id);
+  });
+  // Atilla P2 (#2724 BLIND): the tie minimum needs every roster Agent evaluated, so the
+  // WORK is bounded instead of the roster — 30 distinct memory-less Agents over one shared
+  // base, 60 workers: the agent-row reads collapse to the two batched queries (gate rows +
+  // chain-member memories) and the recursive walk fires once, whatever the roster size.
+  // The per-Agent gate stays per-Agent by review (same semantics, S1/M1 covers it).
+  // Masked mutant, documented: dropping `, depth` from the walk's ORDER BY survives —
+  // the recursive CTE emits depth-ascending per root under every plan these fixtures
+  // produce, so the sort key is unobservable today (the GraphQL arm's mutant-A class).
+  it('evaluates a large roster set-wise: two agent-row queries, one chain walk', async () => {
+    await mapTask(); const base = await roleAgent('Base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const ids: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const child = await roleAgent(`Child ${i}`, base.id);
+      await db.agent.update({ where: { id: child.id }, data: { systemMemoryId: null } });
+      ids.push(child.id);
+      await worker(`W ${i}a`, child.id); await worker(`W ${i}b`, child.id);
+    }
+    // The batched walk is the singular walk per root, nearest first, roots kept apart.
+    const batched = await agentBaseChains(db, ids);
+    for (const id of ids) expect(batched.get(id)).toEqual(await agentBaseChain(db, id));
+    const calls: string[] = [];
+    const traced = db.$extends({ query: { $allOperations: async ({ model, operation, args, query }) => {
+      calls.push(`${model ?? 'raw'}:${operation}:${model ? '' : JSON.stringify(args).includes('WITH RECURSIVE up') ? 'up' : ''}`);
+      return query(args);
+    } } }) as unknown as typeof db;
+    const r = await (resolvers.Query as any).registerRoleCandidates({}, { appRef: app.id, code: 'task.finish.open-children' }, { db: traced, userId: admin.id, roles: ['READER'] } as Context);
+    expect(r.total).toBe(60); expect(r.depth).toBe(1);
+    // Prisma reports the model PascalCase. Four Agent reads total, all constant in roster
+    // size: locateTeamAgent's nested agent select, the gate-row batch, the chain-member
+    // memory batch, and one inside the shared memory-gate fold. The singular code ran two
+    // MORE PER DISTINCT AGENT (60 here); what still scales per Agent is the reviewed
+    // per-agent access predicate (OrgMember reads), not the roster walk.
+    expect(calls.filter((c) => c.startsWith('Agent:')).length).toBeLessThanOrEqual(4);
+    expect(calls.filter((c) => c === 'raw:$queryRaw:up')).toHaveLength(1);
   });
 
   it('exposes only the closed paginated projection in the GraphQL schema', () => {
