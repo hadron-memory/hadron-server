@@ -1,5 +1,6 @@
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
+import type { Prisma } from '../../generated/prisma/index.js';
 import type { Node } from '../../index.d.js';
 import { runAsSystem } from '../../lib/requestActor.js';
 import { GRAPHS_PATH } from '../../config.js';
@@ -27,6 +28,7 @@ import {
  */
 const createNodeAsSystem = async (
   node: Partial<Node> & { memoryId: string },
+  transaction?: Prisma.TransactionClient,
 ): Promise<Node> => {
   if (!node.loc || !node.name || !node.memoryId) {
     throw new Error('Node requires loc, name, and memoryId');
@@ -53,7 +55,7 @@ const createNodeAsSystem = async (
     ownerRepo: node.ownerRepo ?? null,
   };
 
-  const saved = await db.$transaction(async (tx) => {
+  const write = async (tx: Prisma.TransactionClient) => {
     // This legacy controller is still a real authoring seam. Declare its whole
     // path lock-set first, then use the normal create/update helpers for their
     // authoritative gates. A second call at the same loc must snapshot the
@@ -130,7 +132,11 @@ const createNodeAsSystem = async (
     const tags = await assertIncludesWritable(tx, written, content, [node.memoryId], undefined, { includeSystemWrite: true });
     await syncDerivedIncludesEdges(tx, written, tags, [node.memoryId]);
     return written;
-  });
+  };
+  // New-memory callers can include scaffolding in their authority transaction:
+  // a root failure then rolls back the memory row as well. Existing callers
+  // retain their own transaction. Filesystem projection still precedes the DB write.
+  const saved = transaction ? await write(transaction) : await db.$transaction(write);
 
   return saved as unknown as Node;
 };
