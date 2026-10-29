@@ -193,15 +193,31 @@ it('explicit inherited refs preserve child-only admission without loading unsele
     if (row?.id === b.id) endpointBodyBytes += Buffer.byteLength(row.content ?? '');
     return row;
   }) as typeof db.node.findUnique);
+  const edgeReads = vi.spyOn(db.edge, 'findMany');
   const refs = [`hrn:node:${child.memory.urn}:a`];
-  const response = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{id inheritedFrom{agentId} outgoingEdges{id}} unavailable}}', { refs });
+  const response = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{id inheritedFrom{agentId} outgoingEdges{id} again:outgoingEdges{id}} unavailable}}', { refs });
   expect(response.errors).toBeUndefined();
   expect((response.data as any).nodeBatch.unavailable).toEqual([]);
   expect((response.data as any).nodeBatch.nodes[0]).toMatchObject({ id: a.id, inheritedFrom: { agentId: base.agent.id } });
   expect((response.data as any).nodeBatch.nodes[0].outgoingEdges).toHaveLength(20);
   expect(endpointBodyBytes).toBe(0);
+  expect(edgeReads).toHaveBeenCalledTimes(1);
+  expect((response.data as any).nodeBatch.nodes[0].again).toEqual((response.data as any).nodeBatch.nodes[0].outgoingEdges);
   const override = await createDbNode(db, { memoryId: child.memory.id, loc: 'b', content: 'CHILD OVERRIDE' });
   const selected = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{target{id content}}}}}', { refs });
   expect(selected.errors).toBeUndefined();
   expect((selected.data as any).nodeBatch.nodes[0].outgoingEdges).toEqual(Array.from({ length: 20 }, () => ({ target: { id: override.id, content: 'CHILD OVERRIDE' } })));
+  // Out-of-chain readable endpoints keep their own admission, rather than
+  // being looked up by loc in the child's effective system memory.
+  const external = await db.memory.create({ data: { organizationId: home.organizationId, class: 'knowledge', name: 'External', urn: 'oom2758.example:external' } });
+  const externalNode = await createDbNode(db, { memoryId: external.id, loc: 'outside', content: 'EXTERNAL' });
+  const hidden = await db.memory.create({ data: { organizationId: home.organizationId, class: 'personal', userId: (await db.user.create({ data: { handle: 'external-owner' } })).id, name: 'Hidden', urn: 'oom2758.example:external-hidden' } });
+  const hiddenNode = await createDbNode(db, { memoryId: hidden.id, loc: 'hidden', content: 'NEVER_DISCLOSE' });
+  await db.edge.createMany({ data: [externalNode, hiddenNode].map((target, i) => ({ id: generateId(), memoryId: base.memory.id, sourceId: a.id, targetId: target.id, loc: `outside:${i}` })) });
+  const outside = await run('query($refs:[ID!]){nodeBatch(refs:$refs){nodes{outgoingEdges{target{id content}}}}}', { refs });
+  expect(outside.errors).toBeUndefined();
+  const targets = (outside.data as any).nodeBatch.nodes[0].outgoingEdges.map((edge: any) => edge.target);
+  expect(targets).toContainEqual({ id: externalNode.id, content: 'EXTERNAL' });
+  expect(targets).toHaveLength(21);
+  expect(JSON.stringify(outside)).not.toContain('NEVER_DISCLOSE');
 }, 60_000);

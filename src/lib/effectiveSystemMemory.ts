@@ -415,6 +415,8 @@ export async function resolveInheritedEdges(
     canReadMemory: (memoryId: string) => Promise<boolean>;
     /** Batch reads bound retained authorized results and page raw edge metadata, not endpoint bodies. */
     maxResults?: number;
+    /** GraphQL batch edge objects hydrate a selected endpoint lazily, after the shared edge budget. */
+    identityOnly?: boolean;
     onLimit?: () => never;
   },
 ) {
@@ -423,6 +425,7 @@ export async function resolveInheritedEdges(
   const far = args.direction === 'out' ? 'target' : 'source';
   const bounded = args.maxResults !== undefined;
   const pageSize = 128;
+  const endpointIdentity = { id: true, memoryId: true, loc: true, role: true, deletedAt: true } as const;
   let cursor: string | undefined;
   const readPage = () => db.edge.findMany({
     where: args.direction === 'out'
@@ -435,6 +438,9 @@ export async function resolveInheritedEdges(
   let edges = await readPage();
   type EdgeRow = (typeof edges)[number];
   type NodeRow = NonNullable<Awaited<ReturnType<typeof db.node.findUnique>>>;
+  const readEndpoint = async (id: string): Promise<NodeRow | null> => args.identityOnly
+    ? await db.node.findUnique({ where: { id }, select: endpointIdentity }) as NodeRow | null
+    : await db.node.findUnique({ where: { id } });
   const out: Array<ResolvedInheritedEdge<EdgeRow, NodeRow>> = [];
   const checkLimit = () => {
     if (args.maxResults === undefined || out.length <= args.maxResults) return;
@@ -444,12 +450,12 @@ export async function resolveInheritedEdges(
   do {
     for (const edge of edges) {
       const endpoint = bounded
-        ? await db.node.findUnique({ where: { id: args.direction === 'out' ? edge.targetId : edge.sourceId }, select: { id: true, memoryId: true, loc: true, deletedAt: true } })
+        ? await db.node.findUnique({ where: { id: args.direction === 'out' ? edge.targetId : edge.sourceId }, select: endpointIdentity })
         : (edge as unknown as Record<string, NodeRow>)[far]!;
       if (!endpoint || endpoint.deletedAt) continue;
       if (!inChain.has(endpoint.memoryId)) {
         if (await args.canReadMemory(endpoint.memoryId)) {
-          const row = bounded ? await db.node.findUnique({ where: { id: endpoint.id } }) : endpoint as NodeRow;
+          const row = bounded ? await readEndpoint(endpoint.id) : endpoint as NodeRow;
           if (row && row.memoryId === endpoint.memoryId && row.loc === endpoint.loc && !row.deletedAt) out.push({ edge, endpoint: row });
         }
         checkLimit();
@@ -457,7 +463,7 @@ export async function resolveInheritedEdges(
       }
       const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
       if (!effective) continue;
-      const row = effective.id === endpoint.id && !bounded ? endpoint as NodeRow : await db.node.findUnique({ where: { id: effective.id } });
+      const row = effective.id === endpoint.id && !bounded ? endpoint as NodeRow : await readEndpoint(effective.id);
       if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
       out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
       checkLimit();
