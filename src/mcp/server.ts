@@ -1549,8 +1549,8 @@ type ReadProjectionNode = {
 };
 
 const readProjectionInclude = {
-  outgoingEdges: { include: { target: true }, where: { target: { deletedAt: null } } },
-  incomingEdges: { include: { source: true }, where: { source: { deletedAt: null } } },
+  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } } },
+  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } } },
   memory: { select: { isEncrypted: true } },
 } as const;
 
@@ -4828,24 +4828,7 @@ export function createMcpServerInstance(
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
-      const nodeReadInclude = {
-        // Filter edges whose other-end node is soft-deleted; dangling
-        // tombstones in the Related / Referenced-by section are no
-        // more useful than the deleted node itself.
-        outgoingEdges: {
-          include: { target: true },
-          where: { target: { deletedAt: null } },
-        },
-        incomingEdges: {
-          include: { source: true },
-          where: { source: { deletedAt: null } },
-        },
-        // Spec 032 — encryption gate for the abstract-stale predicate
-        // (FR-010). Riding the node fetch avoids a second round-trip
-        // (PR-210 review). resolveMemoryByUrn above doesn't carry
-        // `isEncrypted` and changing it has a wider blast radius.
-        memory: { select: { isEncrypted: true } },
-      } as const;
+      const nodeReadInclude = readProjectionInclude;
 
       // A LITERAL match wins over the fragment reading. `#data` decomposes to
       // parent + fragment, but a row's stored loc can BE `foo#data` (it
