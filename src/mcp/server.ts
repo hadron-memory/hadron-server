@@ -1541,6 +1541,8 @@ type ReadProjectionNode = {
   properties: unknown;
   data: unknown;
   content: string | null;
+  /** Only plaintext, raw abstract reads without an origin fingerprint use this. */
+  contentPresent?: boolean;
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
@@ -1560,7 +1562,7 @@ async function loadCurrentReadProjection(
   authorizedMemoryId: string,
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
-  metadataOnly = false,
+  mode: 'body' | 'metadata' | 'abstract-raw' | 'abstract-expanded' = 'body',
 ): Promise<ReadProjectionNode | null> {
   return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
     let fresh: Context;
@@ -1577,10 +1579,20 @@ async function loadCurrentReadProjection(
     const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
     // The batch provenance pass retains only metadata. Its render pass reads
     // one current body under the same reconciliation and authorization gate.
-    if (metadataOnly) {
-      const row = await tx.node.findFirst({ ...args, omit: { content: true } });
-      return row ? { ...row, content: null } : null;
+    if (mode === 'body') return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
+    const row = await tx.node.findFirst({ ...args, omit: { content: true } });
+    if (!row) return null;
+    if (mode === 'metadata' || !row.abstract) return { ...row, content: null };
+    if (mode === 'abstract-raw' && !row.memory.isEncrypted && row.abstractOriginHash == null) {
+      // Presence is enough for the existing missing-fingerprint marker. Read
+      // it under this node's lock; never trust the earlier metadata snapshot.
+      const presence = await tx.$queryRaw<Array<{ present: boolean }>>`
+        SELECT (content IS NOT NULL AND octet_length(content) > 0) AS present
+        FROM nodes WHERE id = ${nodeId} AND memory_id = ${authorizedMemoryId} AND deleted_at IS NULL`;
+      return presence[0] ? { ...row, content: null, contentPresent: presence[0].present } : null;
     }
+    // Fingerprinted, encrypted and expanded abstracts retain their exact
+    // plaintext predicate. Only one such body survives to the next render.
     return tx.node.findFirst(args) as Promise<ReadProjectionNode | null>;
   }, { timeoutMs: 5_000, maxWaitMs: 2_000 });
 }
@@ -1880,7 +1892,7 @@ async function renderNodeReadProjection(
   // properties of this call, not of the node.
   const shouldCheckStale = scope === 'abstract' || scope === 'all';
   const includeStaleMarker =
-    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node);
+    shouldCheckStale && !node.memory.isEncrypted && isAbstractUnverified(node, node.contentPresent);
 
   // #881: the node's portal URL, ready to hand a human. Emitted so no agent
   // ever *constructs* one — constructing means guessing which URN spelling
@@ -5352,7 +5364,7 @@ export function createMcpServerInstance(
       for (const selected of ordered) {
         // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, true);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, 'metadata');
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
@@ -5406,13 +5418,8 @@ export function createMcpServerInstance(
         }
         const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
         const via = inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId;
-        const omitBody = scope === 'abstract' && !metadata.abstract;
-        let n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, omitBody);
-        // A concurrently added abstract (including an encrypted one) can make
-        // the body necessary for its stale marker after metadata prefetch.
-        if (omitBody && n?.abstract) {
-          n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via);
-        }
+        const mode = scope === 'abstract' ? (raw ? 'abstract-raw' : 'abstract-expanded') : 'body';
+        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, mode);
         if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
           || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
           || (inheritedFrom && !(inheritedFrom.via

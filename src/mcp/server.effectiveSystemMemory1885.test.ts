@@ -242,6 +242,7 @@ it('#2774 renders inherited edge endpoint metadata without loading their bodies'
   const ship = await db.node.findFirstOrThrow({ where: { memoryId: engineer.mem, loc: 'tasks:ship' } });
   const override = await db.node.findFirstOrThrow({ where: { memoryId: backend.mem, loc: 'tasks:open-pr' } });
   const endpointIds = new Set([ship.id, override.id]);
+  await db.node.update({ where: { id: release.id }, data: { abstract: 'Inherited summary' } });
   await db.node.updateMany({ where: { id: { in: [...endpointIds] } }, data: { content: 'UNSELECTED'.repeat(16_384) } });
   await db.edge.create({ data: { memoryId: engineer.mem, sourceId: ship.id, targetId: release.id, name: 'before', loc: 'ship-before-release' } });
   const single = await call('hadron_get_node', { urn: childUrn('processes:release'), contentScope: 'abstract', raw: true });
@@ -263,6 +264,7 @@ it('#2774 renders inherited edge endpoint metadata without loading their bodies'
     expect(batch).toContain(single);
     expect(batch).toContain(childUrn('tasks:open-pr'));
     expect(batch).toContain(baseUrn('tasks:ship'));
+    expect(batch).toContain('Source: abstract-stale');
     expect(bytes).toBe(0);
   } finally { edgeSpy.mockRestore(); nodeSpy.mockRestore(); }
 });

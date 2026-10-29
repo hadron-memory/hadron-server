@@ -120,9 +120,9 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
   const loads: Array<{phase: string; rows: number; bytes: number; rootBodyBytes: number; endpointBodyBytes: number}> = [];
   let pendingBodies = 0, maxPendingBodies = 0;
   const staleCheck = contentHash.isAbstractUnverified;
-  const renderSpy = vi.spyOn(contentHash, 'isAbstractUnverified').mockImplementation((node) => {
+  const renderSpy = vi.spyOn(contentHash, 'isAbstractUnverified').mockImplementation((node, present) => {
     pendingBodies = 0;
-    return staleCheck(node);
+    return staleCheck(node, present);
   });
   function record(value: any, phase: string) {
     const rows = Array.isArray(value) ? value : value ? [value] : [];
@@ -161,6 +161,7 @@ it.each([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all'
   console.log(JSON.stringify({ probe: 'mcpBatch2774', scope, ...result, text: undefined }));
   expect(result.text).not.toMatch(/^Error/);
   expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
+  expect(result.loads.filter(l => l.phase === 'current').length).toBeGreaterThanOrEqual(12);
   expect(result.loads.filter(l => l.phase === 'current').every(l => l.rows === 1)).toBe(true);
   expect.soft(result.maxPendingBodies).toBeLessThanOrEqual(1);
   // The main-source output hashes are captured on these same deterministic rows before the fix.
@@ -235,7 +236,7 @@ it('#2774 refreshes provenance if the body revision changes after metadata prefe
     if (changed || !args?.select?.handle) return result;
     return result.then(async (rows) => {
       changed = true;
-      await db.node.update({ where: { id: node.id }, data: { content: 'new', abstract: 'new summary', revSeq: 2 } });
+      await db.node.update({ where: { id: node.id }, data: { content: 'new', abstract: 'new summary', abstractOriginHash: contentHash.computeContentHash('older body'), revSeq: 2 } });
       await db.nodeContentValidationReport.create({ data: { nodeId: node.id, memoryId: fx.memory.id, nodeRevSeq: 2, validationTaskId: task.id, validationTaskRevSeq: 1, outcome: 'PASS' } });
       return rows;
     });
