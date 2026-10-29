@@ -107,14 +107,26 @@ describe('#2660 capability differential', () => {
         expect(r.body.singleResult.errors).toBeUndefined();
         expect(r.body.singleResult.data?.workerWakeSettings).toEqual({ canManageIsolation: true });
       }
+      const cleared = await server.executeOperation({ query: 'mutation($ref:String!){clearWorkerIsolation(workerRef:$ref){canManageIsolation}}', variables: { ref: targetId } }, { contextValue: ctx(holderId) });
+      if (cleared.body.kind === 'single') {
+        expect(cleared.body.singleResult.errors).toBeUndefined();
+        expect(cleared.body.singleResult.data?.clearWorkerIsolation).toEqual({ canManageIsolation: true });
+      }
     } finally { await server.stop(); }
   });
 
   it('MCP wake-settings read carries the same capability for person and worker sessions', async () => {
     const mcp = createTestableMcpServer({ userId: adminId, roles: ['READER'], clientId: `user:${adminId}` } as never);
-    const plain = await db.session.create({ data: { userId: adminId } });
-    const bound = await db.session.create({ data: { userId: adminId, appId, workerId: otherId, agentId } });
+    const plain = await db.session.create({ data: { id: generateId(), userId: adminId } });
+    const bound = await db.session.create({ data: { id: generateId(), userId: adminId, appId, workerId: otherId, agentId } });
     expect(text(await mcp.callTool('hadron_worker_wake_settings', { workerRef: targetId, session: plain.id }))).toContain('canManageIsolation: true');
     expect(text(await mcp.callTool('hadron_worker_wake_settings', { workerRef: targetId, session: bound.id }))).toContain('canManageIsolation: false');
+  });
+
+  it('propagates a capability lookup failure instead of silently advertising a denial', async () => {
+    const s = await Q.workerWakeSettings({}, { workerRef: targetId }, ctx(adminId));
+    const failure = new Error('synthetic worker lookup failure');
+    vi.spyOn(db.worker, 'findUnique').mockRejectedValueOnce(failure);
+    await expect(F.canManageIsolation(s, {}, ctx(adminId))).rejects.toBe(failure);
   });
 });
