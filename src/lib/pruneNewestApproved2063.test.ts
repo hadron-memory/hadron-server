@@ -135,3 +135,51 @@ it('#2751 bounds absence work at a real cap write without changing ordinary prun
   // The new snapshot plus the two newest old rows, exactly the ordinary cap.
   expect(retained.map(r => r.id)).toEqual(expect.arrayContaining(before.slice(0, 2).map(r => r.id)));
 });
+
+
+it.each([
+  { legacy: false, clearLiveHash: false },
+  { legacy: false, clearLiveHash: true },
+  { legacy: true, clearLiveHash: true },
+])('#2751 keeps newest covered history beyond the serving budget: %j', async ({ legacy, clearLiveHash }) => {
+  const n = await node('historical-control');
+  await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
+  await edit(n.id, { tags: ['covered'] });
+  await edit(n.id, { content: 'superseded approval' }); // snapshot 2 is covered, not a carrier
+  if (legacy) await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { memoryId: null } });
+  if (clearLiveHash) await db.node.update({ where: { id: n.id }, data: { approvalHash: null } });
+  await db.nodeRevision.createMany({ data: Array.from({ length: 105 }, (_, i) => ({
+    id: generateId(), nodeId: n.id, memoryId, loc: n.loc, name: n.name,
+    content: `unapproved ${i}`, tags: [], revNo: i + 10,
+  })) });
+  await db.node.update({ where: { id: n.id }, data: { revSeq: 120, contentRevSeq: 120 } });
+  const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
+  expect(live.contentRevSeq).toBeGreaterThan(live.approvedRevNo!);
+  expect((await newestApprovedRevisionOf(db, n.id)).truncated).toBe(true);
+  expect((await newestApprovedRevisionOf(db, n.id, 200)).found?.revNo).toBe(2);
+  await db.memory.update({ where: { id: memoryId }, data: { maxRevCount: 1 } });
+  await edit(n.id, { content: 'actual cap write' });
+  expect(await db.nodeRevision.count({ where: { nodeId: n.id, revNo: 2 } })).toBe(1);
+  expect((await newestApprovedRevisionOf(db, n.id)).found?.revNo).toBe(2);
+});
+
+it('#2751 a live hash without historical carriers still takes the qualification path', async () => {
+  const n = await node('live-only');
+  await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
+  await db.nodeRevision.deleteMany({ where: { nodeId: n.id } });
+  expect(await db.nodeRevision.count({ where: { nodeId: n.id } })).toBe(0);
+  expect([...await revisionsExemptFromPruning(db, n.id, memoryId)]).toContain(1);
+});
+
+it('#2751 a foreign carrier cannot qualify current-memory text after movement', async () => {
+  const n = await node('moved-control');
+  await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
+  await edit(n.id, { tags: ['covered'] });
+  await edit(n.id, { content: 'unapproved' });
+  const sourceMemory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+  const target = await resolvers.Mutation.createMemory(null, { orgId: sourceMemory.organizationId!, name: 'target' }, ctx());
+  await db.node.update({ where: { id: n.id }, data: { memoryId: target.id, approvalHash: null } });
+  await db.nodeRevision.create({ data: { id: generateId(), nodeId: n.id, memoryId: target.id, loc: n.loc, name: n.name, content: 'approved text', tags: [], revNo: 10 } });
+  expect((await newestApprovedRevisionOf(db, n.id)).found).toBeNull();
+  expect([...await revisionsExemptFromPruning(db, n.id, target.id)]).not.toContain(10);
+});
