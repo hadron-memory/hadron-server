@@ -86,9 +86,22 @@ async function sessionsWhere(
  */
 async function usageEventsWhere(
   ctx: Context,
-  { type, memoryId, nodeId, loc }: { type?: string; memoryId?: string; nodeId?: string; loc?: string },
+  { type, memoryId, nodeId, loc, since, until }: {
+    type?: string; memoryId?: string; nodeId?: string; loc?: string;
+    since?: string | null; until?: string | null;
+  },
 ): Promise<Prisma.UsageEventWhereInput> {
       requireRole(ctx, 'READER');
+      // #2784: a half-open activity window narrows the existing scope. Reject
+      // its order before resolving any resource, so the error reveals no access.
+      const start = since == null ? undefined : new Date(since);
+      const end = until == null ? undefined : new Date(until);
+      if ((start && Number.isNaN(start.getTime())) || (end && Number.isNaN(end.getTime()))) {
+        throw new GraphQLError('since and until must be valid timestamps', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      if (start && end && start >= end) {
+        throw new GraphQLError('since must be earlier than until', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
 
       // `loc` and `nodeId` are two different addressing modes for the same
       // filter slot — a verbatim loc filter vs a shape-classified node token.
@@ -212,6 +225,7 @@ async function usageEventsWhere(
             : undefined;
 
   return {
+          ...(start || end ? { createdAt: { ...(start ? { gte: start } : {}), ...(end ? { lt: end } : {}) } } : {}),
           ...(type ? { type } : {}),
           ...(nodeIdFilter ? { nodeId: nodeIdFilter } : {}),
           ...(memoryFilter ?? {}),
@@ -264,7 +278,7 @@ export const sessionQueries = {
 
     usageEvents: async (
       _: unknown,
-      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; limit?: number; offset?: number },
+      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; limit?: number; offset?: number },
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);
@@ -279,7 +293,7 @@ export const sessionQueries = {
     /** #2212 A1 — `usageEvents` as a page: the same gate and scope (one shared `where`), a stable `id` tiebreak, the real total. */
     usageEventsPage: async (
       _: unknown,
-      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; limit?: number | null; offset?: number | null },
+      args: { type?: string; memoryId?: string; nodeId?: string; loc?: string; since?: string | null; until?: string | null; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
       const where = await usageEventsWhere(ctx, args);
