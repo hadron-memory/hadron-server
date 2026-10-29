@@ -1,25 +1,30 @@
 /**
- * RED-FIRST pins for hadron-server#2610 — the `hrn:action:<root>:<agent-slug>:<code>`
+ * Pins for hadron-server#2610 — the `hrn:action:<root>:<agent-slug>:<code>`
  * URN kind on Query.resolveUrn (the CHECKED contract: Vera's Proposed cor:urn:010:01
  * amendment, issue comment 6447611964; Patrick's live-code attach; Xenophon's gate
- * receipt 2026-10-27).
+ * receipt 2026-10-27). Written red-first against the contract while the lib built;
+ * the arm landed at d4ae3490b (urn-lib-js pinned to the v0.0.18 git tag).
  *
  * The shape: root + agent-slug name the Agent whose system memory holds the entry at
  * `register:<code>`; the leaf is the code (slug charset, ≤64 chars); 1:1 with that
  * register node — a computed SECOND address, the node URN keeps resolving. The URN
  * names the entry in ONE Agent: no nearest-first chain fallthrough on resolve.
  *
- * Dependency: urn-lib-js#24 (0.0.18) is not released, so the implementation is
- * dependency-held; these pins are written against the CHECKED contract while the lib
- * builds (task note). Positive round-trips are RED until the arm lands; the negations
- * pass trivially today (no arm ⇒ null) and pin the uniform-refusal rule so it cannot
- * regress once the arm exists: every failure — other tenant, unreadable memory,
- * missing code, malformed leaf — collapses to the same null.
+ * The negations pin the uniform-refusal rule: every failure — other tenant,
+ * unreadable memory, missing code, malformed leaf — collapses to the same null.
+ *
+ * Review-driven pins (PR #2711 seats): the agent-gate pin and the chain
+ * negative kill the two mutants that survived Dan's LOCAL mutation pass (B and
+ * the fallthrough); the cross-memory move pin kills Rico's §10 allow-list
+ * mutant; the field pins kill the deleted-Agent / no-agent / bad-code mutants
+ * (G, H, J). Mutant A (dropping canReadMemory) is masked by construction —
+ * resolveNodeRefForCaller re-applies the same memory gate below it — so it has
+ * no individual pin; the PUBLIC-agent pair-pin covers the A+F interaction.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -89,7 +94,7 @@ beforeEach(async () => {
   childMemoryId = childRow.systemMemoryId as string;
 });
 
-describe('#2610 action URN — resolution (RED until the arm lands)', () => {
+describe('#2610 action URN — resolution', () => {
   it('round-trips a Team Agent register entry: resolve returns kind action, the register node id and the Agent system memory', async () => {
     const entry = await registerEntry(teamMemoryId, CODE);
     const r = await resolve(ctx(admin.id), actionUrn(teamAgent.urn, CODE));
@@ -158,7 +163,7 @@ describe('#2610 action URN — resolution (RED until the arm lands)', () => {
   });
 });
 
-describe('#2610 action URN — uniform refusal (null before AND after the arm lands)', () => {
+describe('#2610 action URN — uniform refusal', () => {
   it('refuses another tenant\'s Team Agent URN exactly like a code that names nothing', async () => {
     await registerEntry(teamMemoryId, CODE);
     const out = ctx(outsider.id);
@@ -193,5 +198,98 @@ describe('#2610 action URN — uniform refusal (null before AND after the arm la
     const r = await resolve(ctx(admin.id), emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`));
     expect(r?.kind).toBe('node');
     expect(r?.id).toBe(entry.id);
+  });
+});
+
+describe('#2610 action URN — review-driven pins (PR #2711 LOCAL/§10 mutation kills)', () => {
+  /**
+   * Dan's LOCAL mutant B: dropping the agent gate (`visibility !== 'PUBLIC' &&
+   * !isOwnerOrOrgMember`) left every test green because every outsider in the
+   * fixtures also failed the memory gates. This pin is the one caller shape
+   * that passes the memory gates but fails the agent gate: an App participant
+   * (#2206 case 3 — the participant fold reads every installed, licensed
+   * Agent's system memory) who is neither owner nor org member of a
+   * non-PUBLIC Agent. The `agent` arm refuses exactly this caller, and the
+   * action arm applies that gate verbatim — so the address an App participant
+   * may still see on a readable node (Node.actionUrn computes for any reader
+   * of the node) does not RESOLVE for them. That field/arm asymmetry is
+   * intended at this head and pinned here; the SDL documents it.
+   */
+  it('refuses an App participant who READS the system memory but is not owner/org member (agent-gate mutant B)', async () => {
+    await registerEntry(teamMemoryId, CODE);
+    const { app } = await createDbAppWithKey(db, 'au-app', org.id);
+    await createDbAppAgent(db, app.id, teamAgent.id);
+    await createDbAppMember(db, app.id, outsider.id, 'member');
+    const out = ctx(outsider.id);
+    // the memory gates genuinely pass for this caller (otherwise the pin
+    // would test the wrong gate): the node arm resolves the entry, and the
+    // computed field is non-null on it.
+    const entryRow = await db.node.findFirstOrThrow({ where: { memoryId: teamMemoryId, loc: `register:${CODE}` } });
+    const byNode = await resolve(out, emitNodeUrnV2(teamMemoryUrn, `register:${CODE}`));
+    expect(byNode?.kind).toBe('node');
+    expect(byNode?.id).toBe(entryRow.id);
+    const field = (resolvers as any).Node?.actionUrn;
+    await expect(field(entryRow, {}, out)).resolves.toBe(actionUrn(teamAgent.urn, CODE));
+    // …but the action arm refuses them (the agent gate, verbatim from the
+    // `agent` arm — non-PUBLIC Agent, not owner, not org member).
+    expect(await resolve(out, actionUrn(teamAgent.urn, CODE))).toBeNull();
+  });
+
+  /**
+   * Dan's LOCAL P2-2: the no-chain-fallthrough rule was stated (the arm's own
+   * comment) but only pinned as a positive — the shadow test resolves each
+   * Agent's OWN entry. The negative: the child's URN with NO entry in the
+   * child's memory, while the Team Agent holds one, names nothing.
+   */
+  it('refuses a child-Agent URN whose code exists only in the Team Agent\'s memory (no chain fallthrough)', async () => {
+    await registerEntry(teamMemoryId, CODE); // only the Team Agent holds the entry
+    expect(await resolve(ctx(admin.id), actionUrn(childAgent.urn, CODE))).toBeNull();
+  });
+
+  /**
+   * Rico's §10 mutant M-series / Dan's LOCAL G, H, J on the computed field:
+   * the three contract claims that had no pins. G: a soft-deleted Agent keys
+   * no address. H: a memory with NO live Agent returns null BEFORE any
+   * emittable-code work — the observable is no `not emittable` warning (the
+   * mutant's swallowed TypeError logs exactly that misleading line). J: an
+   * unemittable STORED code atom serves null, never a throw.
+   */
+  it('serves null for a register entry whose holding Agent is soft-deleted (mutant G)', async () => {
+    const field = (resolvers as any).Node?.actionUrn;
+    const entry = await registerEntry(teamMemoryId, CODE);
+    await db.agent.update({ where: { id: teamAgent.id }, data: { deletedAt: new Date() } });
+    await expect(field(entry, {}, ctx(admin.id))).resolves.toBeNull();
+  });
+
+  it('serves null with NO warning for a register loc in a memory no live Agent holds (mutant H)', async () => {
+    const field = (resolvers as any).Node?.actionUrn;
+    const otherMem = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:no-agent-mem`,
+        name: 'no-agent-mem', class: 'knowledge', visibility: 'ORGANIZATION',
+      },
+    });
+    const stray = await registerEntry(otherMem.id, CODE);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(field(stray, {}, ctx(admin.id))).resolves.toBeNull();
+      expect(warn).not.toHaveBeenCalled(); // the no-agent exit precedes any emit work
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('serves null, never a throw, for an unemittable STORED code atom (mutant J)', async () => {
+    const field = (resolvers as any).Node?.actionUrn;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // raw row: the create surface would refuse the loc; the point is what
+      // READ does with a bad stored value (serve-and-log, #298 posture).
+      const bad = await node(teamMemoryId, 'register:bad code!');
+      await expect(field(bad, {}, ctx(admin.id))).resolves.toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1); // repair prompt, not silence
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
