@@ -1664,6 +1664,11 @@ export const agentTaskQueries = {
     withReadableApp(ctx, args.appRef, async (c, app) => {
     // Narrow only after the existing App read gate. All filters run in SQL before paging.
     const filters: Prisma.AgentTaskWhereInput[] = [];
+    for (const [name, tags] of [['tagsAny', args.tagsAny], ['tagsAll', args.tagsAll]] as const) {
+      // #2696: the bounds a task's own tags obey, so the read and write limits cannot drift.
+      if (tags && tags.length > TASK_TAGS_MAX) throw badInput(`${name} takes at most ${TASK_TAGS_MAX} tags.`);
+      if (tags?.some((t) => t.length > TASK_TAG_MAX)) throw badInput(`A ${name} tag is longer than ${TASK_TAG_MAX} characters.`);
+    }
     if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
     if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
     if (args.source != null) filters.push({ source: args.source });
