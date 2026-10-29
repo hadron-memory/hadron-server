@@ -181,9 +181,11 @@ describe('encrypted merge and restore, and a section save', () => {
     );
     expect(r.errors).toBeUndefined();
     expect(r.extensions?.warnings).toEqual([{ path: 'mergeNodes', ...WARNING }]);
+    expect((r.data as any).mergeNodes.content).toBe('base text\n\ntarget text'); // returned view splices the include
     const row = await db.node.findUniqueOrThrow({ where: { id: target.id } });
-    expect(row.content).not.toContain('{{>');
-    expect(decryptNodeFields({ content: row.content }, { id: encryptedId, isEncrypted: true }).content).toContain(urnPin());
+    expect(row.content).not.toContain('{{>'); // ciphertext at rest
+    expect(row.content).not.toContain('base text');
+    expect(decryptNodeFields({ content: row.content }, { id: encryptedId, isEncrypted: true }).content).toBe(`base text\n\n${urnPin()}`);
   });
 
   it('a merge that adds no pin to the encrypted target advises nothing', async () => {
@@ -208,8 +210,18 @@ describe('encrypted merge and restore, and a section save', () => {
     const unpinned = await restore((await revision(1)).id);
     expect(unpinned.errors).toBeUndefined();
     expect(unpinned.extensions?.warnings).toBeUndefined();
+    expect((unpinned.data as any).restoreNodeRevision.content).toBe('v1 plain');
+    const stored = async () => {
+      const row = await db.node.findUniqueOrThrow({ where: { id: node.id } });
+      expect(row.content).not.toContain('{{>'); // ciphertext at rest, never the plaintext
+      expect(row.content).not.toContain('plain');
+      return decryptNodeFields({ content: row.content }, { id: encryptedId, isEncrypted: true }).content;
+    };
+    expect(await stored()).toBe('v1 plain');
     const pinned = await restore((await revision(2)).id);
     expect(pinned.errors).toBeUndefined();
+    expect((pinned.data as any).restoreNodeRevision.content).toBe('target text'); // returned view splices the include
+    expect(await stored()).toBe(urnPin());
     expect(pinned.extensions?.warnings).toEqual([{ path: 'restoreNodeRevision', ...WARNING }]);
   });
 
