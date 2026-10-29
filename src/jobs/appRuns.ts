@@ -535,6 +535,9 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
     : args.triggerKind === 'WEBHOOK'
       ? await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
       : args.triggerKind === 'MANUAL' ? triggerBudgetPatch(args) : null;
+  if ((args.triggerKind === 'SCHEDULE' || args.triggerKind === 'WEBHOOK') && !requestedBudgets) {
+    throw new RunLaunchDeniedError('Trigger not found or no longer active in this App.', 'TRIGGER_DISABLED');
+  }
   const budgets = effectiveRunBudgets(requestedBudgets ?? {});
 
   // Quota tier 1: runs/day per App AND per org (both must pass — consume

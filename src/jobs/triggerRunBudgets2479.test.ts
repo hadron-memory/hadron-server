@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { appRunMutations } from '../api/graphql/schema/resolvers.appRun.js';
-import { automationPinQueries } from '../api/graphql/schema/resolvers.automationPin.js';
+import { automationPinQueries, automationPinMutations } from '../api/graphql/schema/resolvers.automationPin.js';
 import { mintAppRun } from './appRuns.js';
 import { schedulerTick } from './scheduler.js';
 import express from 'express';
@@ -139,4 +139,61 @@ it('legacy manual approval does not interpret exhausted live counters as trigger
   const detail = await (automationPinQueries as any).automationApproval({}, { triggerKind: 'MANUAL', triggerRef: run.id }, f.ctx);
   expect(detail.summary.limits.join(' ')).toContain('100000');
   expect(await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ budgetTokensInitial: null, budgetActionsInitial: null, budgetTokens: 0, budgetActions: 0 });
+});
+
+
+it.each(['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const)('accepts the exact platform-default ceiling at the %s save door', async kind => {
+  const f = await fixture();
+  const ceiling = { budgetTokens: 100000, budgetActions: 50 };
+  if (kind === 'MANUAL') amounts(await M.triggerAppRun({}, { input: { ...f.input, ...ceiling } }, f.ctx), 100000, 50);
+  else {
+    const made = kind === 'SCHEDULE'
+      ? await M.createAgentSchedule({}, { input: { ...f.input, ...ceiling } }, f.ctx)
+      : (await M.createAgentWebhook({}, { input: { ...f.input, ...ceiling } }, f.ctx)).webhook;
+    expect(made).toMatchObject(ceiling);
+    amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn }), 100000, 50);
+  }
+});
+
+it.each(['SCHEDULE', 'WEBHOOK'] as const)('refuses a missing, deleted or foreign %s without default widening or quota consumption', async kind => {
+  const f = await fixture();
+  const made = kind === 'SCHEDULE'
+    ? await M.createAgentSchedule({}, { input: { ...f.input, ...requested } }, f.ctx)
+    : (await M.createAgentWebhook({}, { input: { ...f.input, ...requested } }, f.ctx)).webhook;
+  const model = kind === 'SCHEDULE' ? db.agentSchedule : db.agentWebhook;
+  await (model as any).update({ where: { id: made.id }, data: { deletedAt: new Date() } });
+  const foreign = await db.app.create({ data: { name: 'Foreign', urn: 'budget.test:foreign', organizationId: f.org.id } });
+  for (const [triggerId, appId] of [[made.id, f.app.id], ['missing-trigger', f.app.id], [null, f.app.id], [made.id, foreign.id]] as const) {
+    if (appId === foreign.id) await (model as any).update({ where: { id: made.id }, data: { deletedAt: null } });
+    await expect(mintAppRun(db, { appId, organizationId: f.org.id, triggerKind: kind, triggerId, entryNodeUrn: f.input.entryNodeUrn }))
+      .rejects.toMatchObject({ code: 'TRIGGER_DISABLED' });
+  }
+  expect(await db.appRun.count()).toBe(0);
+  expect(await db.quotaCounter.count()).toBe(0);
+});
+
+it('keeps omitted historical limits but refuses supplied above-current-default values on schedule update', async () => {
+  const f = await fixture();
+  const s = await M.createAgentSchedule({}, { input: { ...f.input, ...requested } }, f.ctx);
+  vi.stubEnv('RUN_DEFAULT_TOKEN_BUDGET', '200'); vi.stubEnv('RUN_DEFAULT_ACTION_BUDGET', '2');
+  await expect(M.updateAgentSchedule({}, { id: s.id, input: { budgetTokens: 500, budgetActions: 3 } }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  const same = await M.updateAgentSchedule({}, { id: s.id, input: { name: 'renamed' } }, f.ctx);
+  expect(same).toMatchObject(requested);
+  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
+});
+
+it.each(['SCHEDULE', 'WEBHOOK'] as const)('updates the %s budget projection without changing the consent hash or adopted state', async kind => {
+  const f = await fixture();
+  const s = kind === 'SCHEDULE'
+    ? await M.createAgentSchedule({}, { input: { ...f.input, ...requested } }, f.ctx)
+    : (await M.createAgentWebhook({}, { input: { ...f.input, ...requested } }, f.ctx)).webhook;
+  const Q = automationPinQueries as any;
+  const ref = { triggerKind: kind, triggerRef: s.id };
+  const before = await Q.automationApproval({}, ref, f.ctx);
+  vi.stubEnv('RUN_DEFAULT_TOKEN_BUDGET', '200'); vi.stubEnv('RUN_DEFAULT_ACTION_BUDGET', '2');
+  expect(await (automationPinMutations as any).approveAutomation({}, { ...ref, expectedHash: before.hash }, f.ctx)).toBe(true);
+  const after = await Q.automationApproval({}, ref, f.ctx);
+  expect(after.hash).toBe(before.hash); expect(after.state).toBe('ADOPTED');
+  expect(after.summary.limits).not.toEqual(before.summary.limits);
+  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
 });
