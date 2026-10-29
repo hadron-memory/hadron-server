@@ -178,6 +178,75 @@ describe('createMemorySubscription', () => {
     );
   });
 
+  // #2572 (local review P2): the in-transaction re-checks are the sites a race
+  // reaches. The request-context read is served a stale row once, after the
+  // real row changed, so only the transaction's own re-read can refuse.
+  function staleMemoryOnce(realDb: typeof db, change: () => Promise<unknown>): Context['db'] {
+    let served = false;
+    return new Proxy(realDb, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== 'memory') return typeof value === 'function' ? value.bind(target) : value;
+        return new Proxy(value, {
+          get(mTarget, mProp) {
+            const member = Reflect.get(mTarget, mProp);
+            if (mProp !== 'findUniqueOrThrow' || served) {
+              return typeof member === 'function' ? member.bind(mTarget) : member;
+            }
+            return async (args: unknown) => {
+              const stale = await member.call(mTarget, args);
+              served = true;
+              await change();
+              return stale;
+            };
+          },
+        });
+      },
+    }) as Context['db'];
+  }
+
+  it('in-transaction re-check: memory made non-public after the first read is refused with the typed code', async () => {
+    // Still able to open the memory once it is ORGANIZATION-visible (hidden-first
+    // would answer not-found otherwise), so only the typed refusal can fire.
+    await db.orgMember.create({
+      data: { id: generateId(), organizationId: ownerOrg.id, userId: subscriberAdminUser.id, role: 'READER' },
+    });
+    const ctx = {
+      ...adminCtx(subscriberAdminUser.id),
+      db: staleMemoryOnce(db, () => db.memory.update({ where: { id: publicMemory.id }, data: { visibility: 'ORGANIZATION' } })),
+    };
+    await expect(
+      resolvers.Mutation.createMemorySubscription(null, { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' }, ctx),
+    ).rejects.toMatchObject({
+      message: 'Only public memories can be subscribed to by other organizations',
+      extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' },
+    });
+  });
+
+  it('in-transaction re-check: memory moved to the subscriber org after the first read is refused with the typed code', async () => {
+    const ctx = {
+      ...adminCtx(subscriberAdminUser.id),
+      db: staleMemoryOnce(db, () => db.memory.update({ where: { id: publicMemory.id }, data: { organizationId: subscriberOrg.id } })),
+    };
+    await expect(
+      resolvers.Mutation.createMemorySubscription(null, { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' }, ctx),
+    ).rejects.toMatchObject({
+      message: 'Owner organization has implicit access and cannot subscribe',
+      extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' },
+    });
+  });
+
+  it('a duplicate subscription (unique violation) stays a server fault, not a typed refusal', async () => {
+    const args = { memoryId: publicMemory.id, orgId: subscriberOrg.id, role: 'READER' };
+    await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id));
+    const err = await resolvers.Mutation.createMemorySubscription(null, args, adminCtx(subscriberAdminUser.id))
+      .then(() => null, (e: unknown) => e);
+    expect(err).not.toBeNull();
+    expect((err as { extensions?: { code?: string } }).extensions?.code ?? '').not.toMatch(
+      /SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY|OWNER_ORG_CANNOT_SUBSCRIBE|NOT_FOUND/,
+    );
+  });
+
   // #764: the shared resolveRefArg helper maps every entity-ref miss to the
   // uniform NOT_FOUND ("No match for <label>Ref …"), matching granteeRef —
   // superseding the old per-entity MEMORY_NOT_FOUND / ORGANIZATION_NOT_FOUND.
