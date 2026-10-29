@@ -528,6 +528,15 @@ export const hostOperationMutations = {
     return asHost(ctx, input.appRef, async (tx, app, host) => {
       const refs = new Map<string, string | null>();
       for (const r of checked.reports) refs.set(r.worker, await resolveTaskWorkerId(ctx, app.id, r.worker));
+      // #2791 §10: the resolver spans every App, so a worker of ANOTHER tenant must read as absent BEFORE the duplicate
+      // check; otherwise naming it twice answers BAD_USER_INPUT while an absent worker answers WORKER_NOT_FOUND twice.
+      const resolved = [...refs.values()].filter((id): id is string => id !== null);
+      const inApp = new Set(
+        resolved.length
+          ? (await tx.worker.findMany({ where: { id: { in: resolved }, appId: app.id }, select: { id: true } })).map((w) => w.id)
+          : [],
+      );
+      for (const [k, id] of refs) if (id !== null && !inApp.has(id)) refs.set(k, null);
       // Two refs naming one worker (an id and its name) are one report twice: sender's bug, nothing stored.
       const named = [...refs.values()].filter((id): id is string => id !== null);
       if (new Set(named).size !== named.length) throw badInput('A worker is reported at most once per call.');

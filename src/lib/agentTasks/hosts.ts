@@ -173,10 +173,11 @@ export async function registerHost(
     }
     if (workers.size) {
       // FOR SHARE: a concurrent retire either committed first (and is refused
-      // here) or waits for this registration.
+      // here) or waits for this registration. ORDER BY id: lock in the same order as setHostWorkerTerminals
+      // (FOR UPDATE, id order), or the two deadlock (40P01, #2791 §10).
       const rows = await tx.$queryRaw<{ id: string; appId: string; retiredAt: Date | null }[]>`
         SELECT id, app_id AS "appId", retired_at AS "retiredAt" FROM workers
-        WHERE id IN (${Prisma.join([...workers.keys()])}) FOR SHARE`;
+        WHERE id IN (${Prisma.join([...workers.keys()])}) ORDER BY id FOR SHARE`;
       const ok = new Set(rows.filter((r) => r.appId === input.appId && !r.retiredAt).map((r) => r.id));
       const bad = [...workers.keys()].filter((id) => !ok.has(id));
       if (bad.length) {

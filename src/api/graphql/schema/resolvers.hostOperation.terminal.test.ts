@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError, graphql, parse, buildASTSchema, isObjectType } from 'graphql';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -16,6 +17,7 @@ import { renderTerminal, TERMINAL_REASONS } from '../../../lib/workerTerminal.js
 import { resolvers, type Context } from './resolvers.js';
 import * as workerGate from './resolvers.worker.js';
 import { typeDefs } from './typeDefs.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -141,6 +143,16 @@ describe('a worker this host may not report refuses that item only', () => {
     expect(await stored(zed.id)).toBeNull();
   });
 
+  it('another tenant\'s existing worker named by two spellings answers exactly as an absent worker does (#2791 §10)', async () => {
+    // The whole-batch check compares raw strings, so an id and the URN of one worker both pass it.
+    const zedUrn = `hrn:worker:${org.urn}:other:zed`;
+    const other = await send(orca1, [rep(zed.id), rep(zedUrn)]);
+    const absent = await send(orca1, [rep('nobody'), rep(`hrn:worker:${org.urn}:other:nobody`)]);
+    expect(other.stored).toEqual([]);
+    expect(other.refused.map((r: any) => r.code)).toEqual(['WORKER_NOT_FOUND', 'WORKER_NOT_FOUND']);
+    expect(absent.refused.map((r: any) => r.code)).toEqual(other.refused.map((r: any) => r.code));
+  });
+
   it('a retired worker the registration still lists is refused', async () => {
     await db.hostRegistrationWorker.create({ data: { registrationId: (await db.hostRegistration.findFirstOrThrow({ where: { appId: app.id, hostId: 'orca1' } })).id, workerId: gone.id, family: 'claude' } as any });
     expect((await send(orca1, [rep(gone.id)])).refused).toEqual([{ worker: gone.id, code: 'WORKER_NOT_FOUND' }]);
@@ -259,6 +271,37 @@ describe('the race with registerHost reaches the registration lock', () => {
   });
 });
 
+describe('registerHost locks the listed workers in id order, as the batch does (#2791 §10 P3-1)', () => {
+  it('the listed-workers lock names ORDER BY id (the interleave below cannot force a physical-order scan on a small table)', () => {
+    const src = readFileSync(new URL('../../../lib/agentTasks/hosts.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/WHERE id IN \(\$\{Prisma\.join\(\[\.\.\.workers\.keys\(\)\]\)\}\) ORDER BY id FOR SHARE/);
+  });
+
+  it('a hi-first physical order does not deadlock a refresh against a batch', async () => {
+    const [lo, hi] = [kit.id, ada.id].sort();
+    // Move lo's tuple after hi's, so a scan without ORDER BY meets hi first.
+    await db.$executeRaw`UPDATE workers SET name = name WHERE id = ${lo}`;
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM workers WHERE id = ${hi} FOR UPDATE`;
+      locked();
+      await held;
+    });
+    await lockTaken;
+    const refresh = register(orca1, [{ worker: lo, family: 'claude' }, { worker: hi, family: 'claude' }]);
+    await new Promise((r) => setTimeout(r, 300));
+    const batch = send(orca1, [rep(lo), rep(hi)]);
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await holder;
+    const [, b] = await Promise.all([refresh, batch]);
+    expect(b.stored).toHaveLength(2);
+  });
+});
+
 describe('the alarm verdict is computed, returned, never stored (cor:agt:100:02)', () => {
   const lockedCoord = (extra: Record<string, unknown> = {}) => send(orca1, [rep(coord.id, { status: 'locked', reason: 'rate_limited', ...extra })]);
 
@@ -350,6 +393,18 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
       const r = await Q.teamRoster({}, { appRef: app.id }, ctx(manager.id));
       expect(r.workers.length).toBeGreaterThan(0);
       expect(r.workers.every((e: any) => e.terminal === null)).toBe(true);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('hadron_get_worker prints the terminal line only through the gated Worker.terminal field (#2791 §10 P3-2)', async () => {
+    await send(orca1, [rep(kit.id, { status: 'dark', reason: 'bare_shell' })]);
+    const mcp = () => createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` })
+      .callToolText('hadron_get_worker', { workerRef: kit.id });
+    expect(await mcp()).toContain('terminal dark (bare_shell) on Orca One');
+    const spy = vi.spyOn(F.Worker, 'terminal').mockResolvedValue(null);
+    try {
+      expect(await mcp()).not.toContain('terminal dark');
+      expect(spy).toHaveBeenCalled();
     } finally { spy.mockRestore(); }
   });
 
