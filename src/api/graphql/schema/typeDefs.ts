@@ -13607,6 +13607,15 @@ export const typeDefs = `#graphql
   type WakeReason {
     kind: WakeKind!
     ticker: Ticker
+    """
+    #2790 (hrn:node:hadronmemory.com:specs:cor:agt:080:23) — set for kind TICK only, null for MENTION, TASK and STOP: the
+    time of THIS ticker's oldest tick the worker has not acknowledged, up to the tick that fired. It is per reason, so a
+    wake with an old mention and a fresh tick, or ticks of two tickers, shows each tick's own time; \`anchorAt\` stays the
+    earliest over all reasons (hrn:node:hadronmemory.com:specs:cor:agt:080:27) and is at or before every one of these.
+    Computed at read time from the worker's acknowledged tick, never stored: a tick that joins an outstanding wake
+    (hrn:node:hadronmemory.com:specs:cor:agt:080:12) leaves it at the oldest unacknowledged tick, not the joining one.
+    """
+    tickDueAt: DateTime
     "Set for kind TASK."
     task: DueTaskReason
     "#2022 — set for kind STOP."

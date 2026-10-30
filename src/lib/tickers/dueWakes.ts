@@ -34,6 +34,7 @@ import { decryptNodeFields } from '../nodeCrypto.js';
 import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
 import { onStandbySql, standbyAdmitsSql } from './standby.js';
 import { s7Available } from './s7Availability.js';
+import { oldestUnackedTickAt } from './ticks.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
@@ -74,6 +75,12 @@ export type DueWakeOut = {
   proof: string;
   /** R63 (#2017): when the wake may be typed and the latest a busy worker may be made to wait, from the earliest waiting reason. */
   timing: { anchorAt: Date; deliverAfter: Date; busyDeadline: Date };
+  /**
+   * #2790 (cor:agt:080:23): per TICK reason, that ticker's OLDEST unacknowledged tick up to the reason's tick, worked out in
+   * this read from the subscription's acknowledged tick. It is the value `wakeRule` folds into `anchorAtMs`, so the
+   * wake's anchor is at or before each of these. Never stored: the signed wake and its reservation do not carry it.
+   */
+  tickDueAt: Map<string, Date>;
 };
 
 export type DueWakesResult = {
@@ -519,7 +526,7 @@ export async function computeDueWakes(args: {
       issuedAt: now.getTime(),
       wakeKey: wakeIdentity(identityOf(wake)),
     });
-  const issued: Array<Omit<DueWakeOut, 'timing'> & { exempt: boolean }> = [];
+  const issued: Array<Omit<DueWakeOut, 'timing' | 'tickDueAt'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
   for (const w of workers) {
@@ -643,7 +650,13 @@ export async function computeDueWakes(args: {
     const timing = hasStop(i.wake)
       ? { anchorAt: new Date(anchorMs), deliverAfter: now, busyDeadline: now }
       : { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) };
-    wakes.push({ ...out, timing });
+    const tickDueAt = new Map<string, Date>();
+    for (const r of i.wake.reasons) {
+      if (r.kind !== 'TICK') continue;
+      const sub = (subsOf.get(i.workerId) ?? []).find((x) => x.ticker.id === r.tickerId);
+      if (sub) tickDueAt.set(r.tickerId, oldestUnackedTickAt(sub.ticker, tickAckOf.get(`${i.workerId}:${r.tickerId}`)?.lastAckedTick ?? 0, r.k));
+    }
+    wakes.push({ ...out, timing, tickDueAt });
   };
   // #2755: a PREVIEW is the pure derivation above and nothing else: no reservation, no budget slot, no proof
   // acknowledgement state touched. The dark-worker alarm reads it as the platform, so it must not spend the budget.

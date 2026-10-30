@@ -409,7 +409,7 @@ describe("the router's surface: an App key with attention:deliver (cor:agt:080:2
     const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
     expect(page.wakes).toHaveLength(1);
     expect(page.wakes[0].reasons).toEqual([
-      { kind: 'TASK', ticker: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/), ref: `TASK:${taskId}:assigned` } },
+      { kind: 'TASK', ticker: null, tickDueAt: null, task: { id: taskId, eventId, chainIndex: 0, event: 'ASSIGNED', title: 'Review #42', handle: expect.stringMatching(/^AT\d+(\.\d+)*$/), ref: `TASK:${taskId}:assigned` } },
     ]);
     expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
     const row = await db.workerDeliveryTaskEvent.findFirstOrThrow({ where: { eventId } });
