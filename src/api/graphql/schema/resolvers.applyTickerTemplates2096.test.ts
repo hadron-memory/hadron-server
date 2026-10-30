@@ -4,6 +4,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { planGeneratedTickers } from '../../../lib/tickers/agentTickerTemplates.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -109,6 +110,33 @@ describe('#2096 apply creates the missing template tickers', () => {
     expect((await liveTickers()).map((x) => x.name)).toEqual(['Base tick · Iris']);
   });
 
+  it('pin 10/12: the recreated ticker is the only live row for the pair and takes a fresh slug (the full slug unique cannot collide)', async () => {
+    const { worker, templates } = await preS8Worker('Iris', [['Base tick']]);
+    await apply(worker.id);
+    const [first] = await liveTickers();
+    await db.ticker.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
+    const r = await apply(worker.id);
+    expect(r.created.map((c: any) => c.template.id)).toEqual([templates[0].id]);
+    const live = await db.ticker.findMany({ where: { generatedForWorkerId: worker.id, sourceTemplateId: templates[0].id, deletedAt: null } });
+    expect(live).toHaveLength(1);
+    expect(live[0].id).not.toBe(first.id);
+    expect(live[0].slug).not.toBe(first.slug);
+    expect(await db.ticker.count({ where: { generatedForWorkerId: worker.id, sourceTemplateId: templates[0].id } })).toBe(2);
+  });
+
+  it('pin 11: a second LIVE row for the same worker and template is still refused by the database', async () => {
+    const { worker, templates } = await preS8Worker('Iris', [['Base tick']]);
+    await apply(worker.id);
+    const [t] = await liveTickers();
+    const dup = db.ticker.create({
+      data: {
+        appId, name: 'dup', slug: 'dup-slug', tickCode: 'tick.dup-slug', cadenceSeconds: 600, reasons: ['read-team-channel'],
+        ownerWorkerId: worker.id, sourceTemplateId: templates[0].id, sourceTemplateRevision: t.sourceTemplateRevision, generatedForWorkerId: worker.id,
+      },
+    });
+    await expect(dup).rejects.toMatchObject({ code: 'P2002' });
+  });
+
   it('pin 8: the worker\'s own hand-made tickers and subscriptions are untouched, byte for byte', async () => {
     const { worker } = await preS8Worker('Iris', [['Base tick']]);
     const hand = await M.createTicker({}, { appRef: appId, input: { name: 'Hand built', cadenceSeconds: 900 } }, admin);
@@ -137,10 +165,10 @@ describe('#2096 name clash, floor and cap are all-or-nothing', () => {
     expect(await refusal(apply(worker.id))).toBe('TICKER_LIMIT_REACHED');
     expect(await snapshot()).toEqual(before);
 
-    await db.app.update({ where: { id: appId }, data: { tickerLiveCap: 10, tickerMinCadenceSeconds: 1800 } });
+    await db.app.update({ where: { id: appId }, data: { tickerLiveCap: 10, tickerMinCadenceSeconds: 700, tickerSelfSubscribeCadenceSeconds: 1800, deliveryStuckWindowSeconds: 7200 } });
     const r = await apply(worker.id);
-    expect(r.created.map((c: any) => c.effectiveCadenceSeconds)).toEqual([1800, 1800]);
-    expect((await liveTickers()).map((t) => t.cadenceSeconds)).toEqual([1800, 1800]);
+    expect(r.created.map((c: any) => c.effectiveCadenceSeconds)).toEqual([700, 700]);
+    expect((await liveTickers()).map((t) => t.cadenceSeconds)).toEqual([700, 700]);
   });
 
   it('the cap counts only what this call would add, not the templates already generated', async () => {
@@ -159,9 +187,9 @@ describe('#2096 who may run it', () => {
     const { worker } = await preS8Worker();
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: memberId } });
     const before = await snapshot();
-    expect(await refusal(apply(worker.id, member))).not.toBeNull();
-    expect(await refusal(apply(worker.id, outsider))).not.toBeNull();
-    expect(await refusal(apply(worker.id, { db, roles: [] } as Context))).not.toBeNull();
+    expect(await refusal(apply(worker.id, member))).toBe('FORBIDDEN');
+    expect(await refusal(apply(worker.id, outsider))).toBe('WORKER_NOT_FOUND');
+    expect(await refusal(apply(worker.id, { db, roles: [] } as Context))).toBe('WORKER_NOT_FOUND');
     expect(await snapshot()).toEqual(before);
   });
 
@@ -170,25 +198,25 @@ describe('#2096 who may run it', () => {
     const other = await cast('Henry');
     const before = await snapshot();
     const asWorker = (w: { id: string }) => runAsActor({ workerId: w.id, agentId }, () => refusal(apply(worker.id, admin)));
-    expect(await asWorker(worker)).not.toBeNull();
-    expect(await asWorker(other)).not.toBeNull();
+    expect(await asWorker(worker)).toBe('FORBIDDEN');
+    expect(await asWorker(other)).toBe('FORBIDDEN');
     expect(await snapshot()).toEqual(before);
   });
 
   it('pin 6: an impersonation session is refused', async () => {
     const { worker } = await preS8Worker();
     const imp = { ...admin, impersonation: { sessionId: generateId(), actorUserId: admin.userId, orgId, expiresAt: new Date(Date.now() + 60_000) } } as Context;
-    expect(await refusal(apply(worker.id, imp))).not.toBeNull();
+    expect(await refusal(apply(worker.id, imp))).toBe('FORBIDDEN');
     expect(await liveTickers()).toEqual([]);
   });
 
-  it('a worker of another App answers as not found, zero rows', async () => {
+  it('an outsider to the App is told the worker is not found; a participant who does not manage is forbidden', async () => {
     await preS8Worker();
     const other = await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'Other', urn: 'apply2096.com:other' } });
     await db.appAgent.create({ data: { appId: other.id, agentId } });
     const foreign = await M.castWorker({}, { appRef: other.id, agentRef: agentId, name: 'Zed' }, admin);
-    const outsiderOfOther = outsider;
-    expect(await refusal(apply(foreign.id, outsiderOfOther))).not.toBeNull();
+    expect(await refusal(apply(foreign.id, outsider))).toBe('WORKER_NOT_FOUND');
+    expect(await refusal(apply(foreign.id, member))).toBe('FORBIDDEN');
   });
 });
 
@@ -213,6 +241,34 @@ describe('#2096 worker and Agent state', () => {
     expect([null, 'WORKER_NOT_FOUND']).toContain(a);
     expect(r).toBe('retired');
     expect((await liveTickers()).filter((t) => t.generatedForWorkerId === worker.id)).toEqual([]);
+  });
+});
+
+describe('#2096 lock protocol', () => {
+  it('the call waits for the App ticker lock before it touches the worker row, then applies', async () => {
+    const { worker } = await preS8Worker('Iris', [['Base tick']]);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const ready = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`tickers:${appId}`}, 0))`;
+      locked();
+      await gate;
+    }, { timeout: 30_000 });
+    await ready;
+    try {
+      const running = apply(worker.id);
+      running.catch(() => undefined);
+      await waitForLockWaitersOfType(db as any, 'advisory');
+      expect(await liveTickers()).toEqual([]);
+      release();
+      await holder;
+      expect((await running).created).toHaveLength(1);
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+    }
   });
 });
 
