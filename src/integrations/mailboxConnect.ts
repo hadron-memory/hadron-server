@@ -27,6 +27,7 @@ import { requireOrgRole } from '../api/graphql/schema/resolvers.helpers.js';
 import { createToolConnection, deleteToolConnection, subscribeToolFolder } from '../lib/emailClient.js';
 import { db } from './db/client.js';
 import { respondInternalFault } from '../lib/internalFault.js';
+import { isPortalPath, portalPathOrRoot } from './portalRedirect.js';
 
 export interface MailboxConnectConfig {
   /** emailClient PROVIDER_TOOLS key; stored on ExchangeConnection.provider. */
@@ -245,11 +246,18 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
 
     const body = (req.body ?? {}) as { orgId?: unknown; redirect?: unknown };
     const orgId = typeof body.orgId === 'string' ? body.orgId : '';
-    const redirect = typeof body.redirect === 'string' && body.redirect ? body.redirect : '/';
     if (!orgId) {
       res.status(400).json({ error: 'orgId is required' });
       return;
     }
+    // #2909: the value lands in the callback's browser redirect, so it must be a path inside the portal. Refused
+    // before the org gate and before any nonce exists. Omitted or empty keeps meaning the portal root.
+    const provided = body.redirect === undefined || body.redirect === null || body.redirect === '' ? '/' : body.redirect;
+    if (!isPortalPath(provided, process.env.FRONTEND_URL || 'http://localhost:5173')) {
+      res.status(400).json({ error: 'redirect must be a path inside the portal, such as /app/dashboard' });
+      return;
+    }
+    const redirect = provided;
 
     // #506: the Bearer JWT authenticates the caller but says nothing about
     // which org they may act on. Without this gate any authenticated user
@@ -587,7 +595,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         sendConnectDonePage(res, { provider: cfg.provider, ok: true, orgName: org?.name ?? null });
         return;
       }
-      const successUrl = new URL(pending.redirect, frontendUrl);
+      const successUrl = new URL(portalPathOrRoot(pending.redirect, frontendUrl), frontendUrl);
       successUrl.searchParams.set('exchangeConnected', '1');
       successUrl.searchParams.set('provider', cfg.provider);
       res.redirect(successUrl.toString());
@@ -603,7 +611,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: 'connection_failed' });
         return;
       }
-      const errorUrl = new URL(pending.redirect, frontendUrl);
+      const errorUrl = new URL(portalPathOrRoot(pending.redirect, frontendUrl), frontendUrl);
       errorUrl.searchParams.set(
         'exchangeError',
         err instanceof Error ? err.message : 'Mailbox authentication failed',
