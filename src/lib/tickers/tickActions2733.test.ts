@@ -289,3 +289,144 @@ it('withholds an unresolved loc when the current reader cannot read the entry', 
   expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
   expect(JSON.stringify(out)).not.toContain(tickTaskLoc2733);
 });
+
+it.each([['held', 'mapped'], ['unheld', 'mapped'], ['held', 'unresolved'], ['unheld', 'unresolved']])('full-chain pin12b withholds behind an empty unreadable nearer memory (%s %s)', async (held, state) => {
+  await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.member.id, role: 'ADMIN' } });
+  await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
+  await f.entry('tick.shared');
+  if (state === 'mapped') await f.node(f.base.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.roleA.id } } });
+  const w = await f.worker('Alpha', f.roleA.id, held === 'held' ? f.member.id : null);
+  const t = await f.ticker('Shared');
+  await db.tickerSubscription.create({ data: { tickerId: t.id, workerId: w.id } });
+  const out = await computeDueWakes({ ctx: f.context(f.outside.id), app: f.app, reader: { manager: true, userId: f.outside.id }, requester: { userId: f.outside.id }, now: tickNow2733 });
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  expect(JSON.stringify(out)).not.toContain(tickTaskLoc2733);
+  expect(JSON.stringify(out)).not.toContain(f.base.memory.urn);
+});
+
+it.each(['team-tail', 'worker-tail', 'unresolved-nearer'])('full-chain disclosure gates %s even without a node in that memory', async mode => {
+  await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.member.id, role: 'ADMIN' } });
+  await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
+  await f.entry('tick.shared');
+  if (mode !== 'unresolved-nearer') await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  if (mode === 'team-tail') await db.agent.update({ where: { id: f.team.id }, data: { extendsAgentId: f.roleB.id } });
+  const hidden = mode === 'team-tail' ? f.roleB : mode === 'unresolved-nearer' ? f.roleA : f.base;
+  await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: hidden.id } } });
+  const { w } = await subscribed();
+  const out = await computeDueWakes({ ctx: f.context(f.outside.id), app: f.app, reader: { manager: true, userId: f.outside.id }, requester: { userId: f.outside.id }, now: tickNow2733 });
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  expect(JSON.stringify(out)).not.toContain(tickTaskLoc2733);
+});
+
+it('full-chain rehand checks stored empty chain memories without changing the issued answer or proof', async () => {
+  await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.member.id, role: 'ADMIN' } });
+  await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
+  await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const { w } = await subscribed();
+  const read = () => computeDueWakes({ ctx: f.context(f.outside.id), app: f.app, reader: { manager: true, userId: f.outside.id }, requester: { userId: f.outside.id }, now: tickNow2733 });
+  const first = await read();
+  await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.base.id } } });
+  const out = await read();
+  expect(out.wakes[0].proof).toBe(first.wakes[0].proof);
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  expect(action(await due(), w.id)).toEqual(action(first, w.id));
+});
+
+it.each(['entry', 'task'])('rehand withholds when only the holder loses %s access', async lost => {
+  await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const { w } = await subscribed();
+  const first = await due();
+  expect(action(first, w.id)?.state).toBe('MAPPED');
+  const agent = lost === 'entry' ? f.team : f.roleA;
+  await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: agent.id } } });
+  expect(await memoryGate.canReadMemory(db, f.context(), agent.systemMemoryId)).toBe(true);
+  expect(await memoryGate.canReadMemory(db, f.context(f.member.id), agent.systemMemoryId)).toBe(false);
+  const out = await due();
+  expect(out.wakes[0].proof).toBe(first.wakes[0].proof);
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
+  expect(action(await due(), w.id)).toEqual(action(first, w.id));
+});
+
+it('refuses a departed holder even when another App independently grants every memory read', async () => {
+  await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const { w } = await subscribed();
+  expect(action(await due(), w.id)?.state).toBe('MAPPED');
+  const other = await db.app.create({ data: { organizationId: f.org.id, name: 'Independent read', urn: f.org.urn + ':independent-read' } });
+  await db.appMember.create({ data: { appId: other.id, userId: f.member.id, role: 'member' } });
+  for (const agent of [f.team, f.base, f.roleA]) await db.appAgent.create({ data: { appId: other.id, agentId: agent.id } });
+  await db.appMember.delete({ where: { appId_userId: { appId: f.app.id, userId: f.member.id } } });
+  for (const agent of [f.team, f.base, f.roleA]) expect(await memoryGate.canReadMemory(db, f.context(f.member.id), agent.systemMemoryId)).toBe(true);
+  expect(action(await due(), w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+});
+
+it('does not revive an entry that was in a deleted memory when an unheld wake was issued', async () => {
+  await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const w = await f.worker('Alpha', f.roleA.id, null);
+  const t = await f.ticker('Shared');
+  await db.tickerSubscription.create({ data: { tickerId: t.id, workerId: w.id } });
+  await db.memory.update({ where: { id: f.team.systemMemoryId }, data: { deletedAt: new Date() } });
+  const first = await due();
+  expect(action(first, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  await db.memory.update({ where: { id: f.team.systemMemoryId }, data: { deletedAt: null } });
+  const out = await due();
+  expect(out.wakes[0].proof).toBe(first.wakes[0].proof);
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'UNMAPPED' });
+});
+
+it('keeps fresh same-identity wake metadata while carrying only issued tick answers', async () => {
+  const entry = await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const { w } = await subscribed();
+  const first = await due();
+  const saved = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: w.id } });
+  await db.appWakeReservation.update({ where: { workerId: w.id }, data: { wake: { ...(saved.wake as any), unread: 99, unreadMentions: 98, exempt: true, anchorAtMs: 1 } } });
+  await db.node.update({ where: { id: entry.id }, data: { data: { registerEntry: { code: 'tick.shared', taskLoc: 'tasks:changed' } } } });
+  const again = await due();
+  expect(again.wakes[0].proof).toBe(first.wakes[0].proof);
+  expect(again.wakes[0].wake).toMatchObject({ unread: 0, unreadMentions: 0, exempt: false, anchorAtMs: first.wakes[0].wake.anchorAtMs });
+  expect(action(again, w.id)).toEqual(action(first, w.id));
+});
+
+it('keeps the issued tick answer when only a task reason joins', async () => {
+  const entry = await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  await f.node(f.roleA.systemMemoryId, 'tasks:changed', { isRunnable: true });
+  const { w } = await subscribed();
+  const first = await due();
+  await db.node.update({ where: { id: entry.id }, data: { data: { registerEntry: { code: 'tick.shared', taskLoc: 'tasks:changed' } } } });
+  const owner = await f.worker('Owner');
+  const at = new Date(tickNow2733.getTime() - 1000);
+  const task = await db.agentTask.create({ data: { appId: f.app.id, title: 'Joined task', ownerWorkerId: owner.id, assigneeWorkerId: w.id, assignedAt: at } });
+  await db.agentTeamEvent.create({ data: { appId: f.app.id, taskId: task.id, type: 'task.assigned', subjectWorkerId: w.id, actorUserId: f.admin.id, createdAt: at } });
+  const joined = await due();
+  expect(joined.wakes.find(x => x.workerId === w.id)!.wake.reasons.some(r => r.kind === 'TASK')).toBe(true);
+  expect(action(joined, w.id)).toEqual(action(first, w.id));
+});
+
+it('does not fall through a malformed nearer entry to a valid farther mapping', async () => {
+  await db.agent.update({ where: { id: f.team.id }, data: { extendsAgentId: f.base.id } });
+  await f.entry('tick.shared', '', f.team.systemMemoryId);
+  await f.entry('tick.shared', tickTaskLoc2733, f.base.systemMemoryId);
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const { w } = await subscribed();
+  expect(action(await due(), w.id)).toEqual({ code: 'tick.shared', state: 'UNMAPPED' });
+});
+
+it('projects only public actions in preview, and returns no action when the budget withholds a wake', async () => {
+  const { w } = await subscribed();
+  vi.spyOn(RegisterLookup.prototype, 'entry').mockRejectedValue(new Error('injected lookup failure'));
+  const preview = await computeDueWakes({ ctx: f.context(), app: f.app, reader: { manager: true, userId: f.admin.id }, requester: { userId: f.admin.id }, now: tickNow2733, preview: true });
+  expect(action(preview, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  expect(JSON.stringify(preview)).not.toMatch(/UNKNOWN|entryMemoryIds|taskMemoryId|disclosureMemoryIds/);
+  expect(await db.appWakeReservation.count({ where: { appId: f.app.id } })).toBe(0);
+  await db.app.update({ where: { id: f.app.id }, data: { wakeDailyBudget: 0 } });
+  const exhausted = await due();
+  expect(exhausted.withheld).toBe(1);
+  expect(exhausted.wakes).toEqual([]);
+});

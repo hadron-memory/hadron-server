@@ -44,3 +44,15 @@ it('prints the exact server tick line with the woken role task', async () => {
   expect(result).toContain(page.wakes[0].tickText);
   expect(result).toContain('proof: ');
 });
+
+it('places each code line immediately below its own ticker bullet', async () => {
+  await f.entry('tick.shared');
+  await f.ticker('Shared');
+  await f.ticker('Second');
+  const lines = text(await mcp().callTool('hadron_ticker_list', { appRef: f.app.id })).split('\n');
+  for (const [name, code, entry] of [['Shared', 'tick.shared', 'register task loc ' + tickTaskLoc2733], ['Second', 'tick.second', 'no register entry you can read']]) {
+    const at = lines.findIndex(line => line.startsWith('- ' + name + ' ·'));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lines[at + 1]).toBe('  code ' + code + ' · ' + entry);
+  }
+});

@@ -201,3 +201,21 @@ it('excludes ticker warnings from task history even if a caller erroneously asso
   await flushTaskWarningHistory(c);
   expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'task.warning' } })).toBe(0);
 });
+
+it.each(['own', 'base'])('stops ticker loc and warning reads before an unreadable %s chain link', async hidden => {
+  await db.agent.update({ where: { id: f.team.id }, data: { extendsAgentId: f.base.id } });
+  await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
+  const t = await f.ticker('Engineering');
+  const actual = memoryGate.canReadMemory;
+  vi.spyOn(memoryGate, 'canReadMemory').mockImplementation(async (tx, ctx, id, opts) =>
+    ctx.userId === f.outside.id && id === (hidden === 'own' ? f.team.systemMemoryId : f.base.systemMemoryId) ? false : actual(tx, ctx, id, opts));
+  const read = () => wire('query($ref: String!) { ticker(ref: $ref) { tickCode registerTaskLoc } }', { ref: t.id }, f.context(f.outside.id));
+  const absent = await read();
+  await f.entry('tick.engineering', tickTaskLoc2733, f.base.systemMemoryId);
+  expect(await read()).toEqual(absent);
+  await f.entry('tick.new', tickTaskLoc2733, f.base.systemMemoryId);
+  const created = await wire('mutation($app: String!) { a: createTicker(appRef: $app, input: { name: "New", cadenceSeconds: 600 }) { tickCode registerTaskLoc } }', { app: f.app.id }, f.context(f.outside.id));
+  expect(created.errors).toBeUndefined();
+  expect(created.data?.a).toEqual({ tickCode: 'tick.new', registerTaskLoc: null });
+  expect((created.extensions as any)?.warnings).toEqual([{ path: 'a', code: 'ticker.code.unmapped', text: "No register entry you can read maps this ticker's code to a task, so its wakes will say no task is mapped." }]);
+});
