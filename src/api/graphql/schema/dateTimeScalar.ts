@@ -18,9 +18,9 @@
 // `DateTime` cannot serialize as epoch-millis no matter what the resolver
 // returns.
 //
-// Scope (Holger, 2026-07-30): OUTPUT fields only. Date-valued *input*
-// arguments stay `String` and keep their existing hand-rolled parsing, so this
-// change cannot alter what any client is allowed to send.
+// Original scope (Holger, 2026-07-30): output fields only; existing String
+// date inputs keep their parsing. #2784 adds new optional DateTime window
+// inputs on usageEvents/usageEventsPage without changing any existing input.
 //
 // Wire compatibility: a `DateTime` still travels as a JSON string, so no
 // runtime client breaks. Schema-driven codegen clients do see a new named
@@ -114,9 +114,8 @@ function serializeDateTime(value: unknown): string | null {
 /**
  * ISO 8601 timestamp scalar (issue #205).
  *
- * Output-only in practice: `parseValue` / `parseLiteral` exist so the scalar is
- * well-formed and usable as an input type later, but no argument is declared
- * `DateTime` today. They accept an ISO string and hand back the same string,
+ * `parseValue` / `parseLiteral` serve the optional usage-event window inputs
+ * (#2784). They accept an ISO string and hand back the same string,
  * matching what the `String`-typed date arguments already deliver to resolvers
  * — so adopting the scalar on an input would not change resolver code.
  */

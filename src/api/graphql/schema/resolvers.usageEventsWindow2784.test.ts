@@ -39,8 +39,8 @@ beforeEach(async () => {
 async function read(field: string, variables: Record<string, unknown> = {}, ctx = principal) {
   const selection = field === 'usageEvents' ? '{ id }' : '{ items { id } total hasMore }';
   const result = await server.executeOperation({
-    query: `query($memoryId: ID, $since: DateTime, $until: DateTime, $limit: Int, $offset: Int) {
-      ${field}(memoryId: $memoryId, since: $since, until: $until, limit: $limit, offset: $offset) ${selection}
+    query: `query($memoryId: ID, $nodeId: ID, $since: DateTime, $until: DateTime, $limit: Int, $offset: Int) {
+      ${field}(memoryId: $memoryId, nodeId: $nodeId, since: $since, until: $until, limit: $limit, offset: $offset) ${selection}
     }`,
     variables,
   }, { contextValue: ctx });
@@ -51,6 +51,7 @@ async function read(field: string, variables: Record<string, unknown> = {}, ctx 
 it.each(['usageEvents', 'usageEventsPage'])('%s implements the half-open window through the real schema', async field => {
   for (const [window, expected] of [
     [{ since: times[1], until: times[2] }, [eventIds[1]]],
+    [{ since: '2026-10-02T02:00:00+02:00', until: times[2] }, [eventIds[1]]],
     [{ since: times[1] }, [eventIds[2], eventIds[1]]],
     [{ until: times[1] }, [eventIds[0]]],
     [{}, [...eventIds].reverse()],
@@ -67,8 +68,8 @@ it.each(['usageEvents', 'usageEventsPage'])('%s implements the half-open window 
 it.each(['usageEvents', 'usageEventsPage'])('%s validates range order before memory access', async field => {
   for (const until of [times[1], times[0]]) {
     const errors = [];
-    for (const ref of [memoryId, foreignId, generateId()]) {
-      const result = await read(field, { memoryId: ref, since: times[1], until });
+    for (const resource of [{ memoryId }, { memoryId: foreignId }, { memoryId: generateId() }, { nodeId: generateId() }]) {
+      const result = await read(field, { ...resource, since: times[1], until });
       expect(result.errors).toHaveLength(1);
       expect(result.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
       expect(result.errors![0].message).toMatch(/since.*until/i);
@@ -93,4 +94,65 @@ it.each(['usageEvents', 'usageEventsPage'])('%s never exposes unreadable-memory 
   expect(result.errors).toBeUndefined();
   const value = result.data![field] as any;
   expect((field === 'usageEvents' ? value : value.items).map((row: any) => row.id)).toEqual([eventIds[1]]);
+});
+
+
+it.each(['usageEvents', 'usageEventsPage'])('%s preserves missing/unreadable-memory and App-key refusals with a window', async field => {
+  const appKey: Context = { db, appId: generateId(), roles: [] };
+  for (const [resource, ctx] of [
+    [{ memoryId: foreignId }, principal],
+    [{ memoryId: generateId() }, principal],
+    [{}, appKey],
+  ] as const) {
+    const unwindowed = await read(field, resource, ctx);
+    const windowed = await read(field, { ...resource, since: times[1], until: times[2] }, ctx);
+    expect(unwindowed.errors).toHaveLength(1);
+    expect(windowed.errors?.map(({ message, extensions }) => ({ message, code: extensions?.code }))).toEqual(
+      unwindowed.errors!.map(({ message, extensions }) => ({ message, code: extensions?.code })),
+    );
+    expect(windowed.data).toEqual(unwindowed.data);
+  }
+});
+
+it.each(['usageEvents', 'usageEventsPage'])('%s narrows the existing readable-memory feed, not to own activity', async field => {
+  const otherEvent = await db.usageEvent.create({ data: {
+    id: generateId(), type: 'read', memoryId, userId: null, createdAt: new Date(times[1]),
+  } });
+  const all = await read(field);
+  const windowed = await read(field, { since: times[1], until: times[2] });
+  expect(all.errors).toBeUndefined();
+  expect(windowed.errors).toBeUndefined();
+  const rows = (result: typeof all) => {
+    const value = result.data![field] as any;
+    return (field === 'usageEvents' ? value : value.items) as { id: string }[];
+  };
+  expect(rows(all)).toHaveLength(4);
+  expect(rows(windowed).map(row => row.id).sort()).toEqual([eventIds[1], otherEvent.id].sort());
+});
+
+it.each(['usageEvents', 'usageEventsPage'])('%s keeps its own default and requested limit handling', async field => {
+  await db.usageEvent.createMany({ data: Array.from({ length: 210 }, (_, i) => ({
+    id: generateId(), type: 'read', memoryId, createdAt: new Date(new Date(times[1]).getTime() + i + 1),
+  })) });
+  for (const limit of [undefined, null, 0, 5000]) {
+    // A window encompassing every fixture row must preserve exact row order,
+    // count-only semantics and the legacy list/page difference (issue2817).
+    const all = await read(field, { memoryId, limit });
+    const windowed = await read(field, { memoryId, limit, since: times[0], until: '2026-10-04T00:00:00Z' });
+    expect(all.errors).toBeUndefined();
+    expect(windowed.errors).toBeUndefined();
+    const value = windowed.data![field] as any;
+    const expected = limit === 0 ? 0 : limit == null ? 20 : field === 'usageEvents' ? 213 : 200;
+    expect(field === 'usageEvents' ? value : value.items).toHaveLength(expected);
+    // Unique timestamps avoid claiming a new ordering guarantee for legacy ties.
+    if (field === 'usageEvents') expect(value.map((row: any) => row.id).sort()).toEqual(
+      (all.data![field] as any[]).map(row => row.id).sort(),
+    );
+    else expect(windowed.data).toEqual(all.data);
+  }
+});
+
+it('direct delegates reject invalid timestamps without relying on Prisma validation', async () => {
+  await expect(resolvers.Query.usageEvents(null, { since: 'invalid' }, principal)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  await expect(resolvers.Query.usageEventsPage(null, { until: 'invalid' }, principal)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
 });
