@@ -4,6 +4,7 @@
  * for matching or authorization. Written by the cor:agt:050:09 set and by the task's assignee, nobody else.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -77,6 +78,15 @@ describe('create and read #2420', () => {
     await M.updateAgentTask({}, { taskId: child.id, input: { properties: { child: true } } }, ctx(assignee.id));
     await M.updateAgentTask({}, { taskId: task.id, input: { properties: { root: 2 } } }, ctx());
     expect((await stored(child.id)).properties).toEqual({ child: true });
+    expect((await stored()).properties).toEqual({ root: 2 });
+    // A grandchild: made by the child's assignee under the child, it holds only its own value too.
+    await M.assignAgentTask({}, { taskId: child.id, assignee: { user: sibling.id } }, ctx(assignee.id));
+    const grand = await M.createAgentTask({}, { input: { parentTaskId: child.id, title: 'Grandchild' } }, ctx(sibling.id));
+    expect((await stored(grand.id)).properties).toBeNull();
+    await M.updateAgentTask({}, { taskId: grand.id, input: { properties: { grand: true } } }, ctx(sibling.id));
+    await M.updateAgentTask({}, { taskId: child.id, input: { properties: { child: 2 } } }, ctx(assignee.id));
+    expect((await stored(grand.id)).properties).toEqual({ grand: true });
+    expect((await stored(child.id)).properties).toEqual({ child: 2 });
     expect((await stored()).properties).toEqual({ root: 2 });
   });
 
@@ -305,11 +315,42 @@ describe('contract #2420', () => {
     expect(await db.agentTask.count()).toBe(before);
   });
 
-  it('never changes matching: requirements and the chosen worker are the same with and without properties', async () => {
+  it('stores requirements identically with and without properties, whatever the properties say', async () => {
     const plain = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Plain', source: 's', requirements: { role: 'server-engineer' } } }, ctx());
     const withProps = await M.createAgentTask({}, { input: { appRef: app.id, title: 'With', source: 's', requirements: { role: 'server-engineer' }, properties: { requirements: { role: 'other' }, familyIn: ['x'] } } }, ctx());
     expect((await stored(plain.id)).requirements).toEqual((await stored(withProps.id)).requirements);
     expect((await stored(withProps.id)).requirements).toEqual({ role: 'server-engineer' });
+  });
+
+  it('no matcher code reads a task\'s properties (never matcher input, cor:agt:050:28)', () => {
+    for (const file of ['../../../lib/agentTasks/matcher.ts', './resolvers.agentTaskMatching.ts']) {
+      const source = readFileSync(new URL(file, import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+      expect(source, file).not.toMatch(/\bproperties\b/);
+    }
+  });
+
+  it('a team whose Team Agent cannot be chosen (two carry a roles: branch) refuses every non-null write, never reads as no schema', async () => {
+    const otherMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Other system', urn: `${org.urn}:other-system`, class: 'system' } });
+    await db.node.create({ data: { id: generateId(), memoryId: otherMemory.id, loc: 'roles:other', name: 'Other' } });
+    const other = await db.agent.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other`, systemMemoryId: otherMemory.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: other.id } });
+    await putSchema({ type: 'object', required: ['review'] });
+    await expect(setProps({ review: {} })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'Amb', source: 's', properties: { review: {} } } }, ctx()))
+      .rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await setProps(null);
+  });
+
+  it('bounds nesting at 64 levels so a small deeply nested value is refused typed, not an internal error', async () => {
+    const nested = (levels: number) => JSON.parse(`${'{"a":'.repeat(levels)}1${'}'.repeat(levels)}`);
+    await setProps(nested(64));
+    await expect(setProps(nested(65))).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    const deep = nested(2_500);
+    expect(Buffer.byteLength(JSON.stringify(deep), 'utf8')).toBeLessThan(16_384);
+    await expect(setProps(deep)).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'Deep', source: 's', properties: deep } }, ctx()))
+      .rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    expect((await stored()).properties).toEqual(nested(64));
   });
 });
 
