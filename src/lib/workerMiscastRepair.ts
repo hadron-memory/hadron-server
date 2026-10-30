@@ -98,6 +98,10 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
   const pristine = await pristineGeneratedTickerIds(db, worker.id);
   for (const ref of workerReferenceInventory) {
     if (ref.model === 'Session') continue; // empty ended bindings are disposable
+    // #2736 (Holger R2, cor:agt:040:03): a bind's served-prompt record of one of THESE disposable sessions is the stint's
+    // own audit record, not use of the worker; it goes with the session. Any row that is not exactly that still counts.
+    const ownBind = ref.model === 'ServedPrompt' && sessionIds.length
+      ? Prisma.sql` AND NOT (kind = 'BIND' AND session_id IN (${Prisma.join(sessionIds)}))` : Prisma.empty;
     // A pristine generated ticker, and the worker's own subscription to it, is the cast's bookkeeping (S8).
     const skip = pristine.length === 0 ? Prisma.empty
       : ref.table === 'tickers' ? Prisma.sql` AND id NOT IN (${Prisma.join(pristine)})`
@@ -107,15 +111,17 @@ export async function miscastHasReferences(db: Reader, worker: { id: string; mem
     const skipEvents = ref.table === 'agent_team_events'
       ? Prisma.sql` AND NOT (${selfBookkeeping(worker.id)})` : Prisma.empty;
     const rows = await db.$queryRaw<Array<{ present: boolean }>>(Prisma.sql`
-      SELECT EXISTS (SELECT 1 FROM ${quoted(ref.table)} WHERE ${quoted(ref.column)} = ${worker.id}${skip}${skipEvents}) AS present`);
+      SELECT EXISTS (SELECT 1 FROM ${quoted(ref.table)} WHERE ${quoted(ref.column)} = ${worker.id}${skip}${skipEvents}${ownBind}) AS present`);
     if (rows[0].present) return true;
   }
   if (sessionIds.length) {
     for (const model of Prisma.dmmf.datamodel.models) {
       for (const field of model.fields.filter((f) => f.kind === 'scalar' && /sessionId$/i.test(f.name))) {
+        // #2736: the bind record of a disposable session is removed with it (the FK cascades; see `ownBind` above).
+        const bindRecord = model.name === 'ServedPrompt' ? Prisma.sql` AND kind <> 'BIND'` : Prisma.empty;
         const rows = await db.$queryRaw<Array<{ present: boolean }>>(Prisma.sql`
           SELECT EXISTS (SELECT 1 FROM ${quoted(model.dbName ?? model.name)}
-          WHERE ${quoted(field.dbName ?? field.name)} IN (${Prisma.join(sessionIds)})) AS present`);
+          WHERE ${quoted(field.dbName ?? field.name)} IN (${Prisma.join(sessionIds)})${bindRecord}) AS present`);
         if (rows[0].present) return true;
       }
     }
