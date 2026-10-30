@@ -938,9 +938,10 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         // can't be typed as a line is dropped and today's nudge goes out, logging the worker and a closed reason, never the text.
         const tickLine = typeableTickText(w.tickText);
         if (typeof w.tickText === 'string' && w.tickText !== '' && !tickLine) log(`${ts} ${name}: tick line not typeable; the wake goes without it`);
-        // The coordinator's base-tick sentence stays unless that ticker's OWN action is MAPPED (the server's line then names the task).
+        // The coordinator's base-tick sentence stays unless that ticker's OWN action is MAPPED AND the server's line that names the
+        // task is actually typed: a null, absent or dropped line leaves the task named nowhere, so the base tick stays (BLIND P2).
         const mappedBase = new Set<string>();
-        for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.name && BASE_TICK_TICKERS.has(r.ticker.name) && r.action?.state === 'MAPPED') mappedBase.add(r.ticker.name);
+        if (tickLine) for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.name && BASE_TICK_TICKERS.has(r.ticker.name) && r.action?.state === 'MAPPED') mappedBase.add(r.ticker.name);
         const text = (tickLine ? `${tickLine} ` : '') + (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine, mappedBase);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...newWork])].sort();

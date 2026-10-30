@@ -87,8 +87,8 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   (coordinator-system:tasks:on-base-tick): first the tagged check: …; then the
   sweep of your owned tasks, alarms and ready heads", so the nudge never tells
   a coordinator to skip its sweep (#2138, Marco #26709), unless that
-  `coordinator-tick` reason's own `action.state` is `MAPPED` (#2754): then the
-  server's tick line already names the task and the nudge carries the ordinary
+  `coordinator-tick` reason's own `action.state` is `MAPPED` and the server's
+  tick line is typed with it (#2754): then that line already names the task and the nudge carries the ordinary
   tagged check. Under UNMAPPED, UNRESOLVED, WITHHELD or no action (an App-key
   credential usually sees WITHHELD) the base-tick sentence stays, so a
   coordinator is never told less than before; another ticker's state never
