@@ -206,6 +206,8 @@ export const ALARM_EVENT_TYPES = [
   'assignment.unassignable',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
+  // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
+  'alarm.post-limit',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 

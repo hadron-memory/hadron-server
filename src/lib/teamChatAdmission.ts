@@ -22,6 +22,7 @@
  */
 
 import type { Prisma } from '@prisma/client';
+import { toNaiveUtc } from './sessionActivity.js';
 
 /** A message blocks an identical one for this long after it was admitted. */
 export const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
@@ -72,4 +73,38 @@ export async function findEarlierDuplicate(
     if (target === args.replyTargetId && c.seq != null) return c.seq;
   }
   return null;
+}
+
+/** #2014 — a worker's rolling post limits, counted across every Channel by the admission clock. */
+export const POST_LIMITS = [
+  { windowMs: 60 * 1000, max: 10, name: '10 per minute' },
+  { windowMs: 60 * 60 * 1000, max: 60, name: '60 per hour' },
+] as const;
+
+/**
+ * The limit a worker's next post would break at `admittedAt`, or null. A message counts while `createdAt > admittedAt -
+ * window` (the same column and clock the duplicate rule reads; soft-deleted messages still count, they were posted).
+ * `resetsAt` is when the oldest counted message leaves that window, i.e. the earliest a post can be admitted again.
+ * Called under the worker's admission lock, so the count cannot move between this read and the append.
+ */
+export async function findBrokenPostLimit(
+  tx: Prisma.TransactionClient,
+  workerId: string,
+  admittedAt: Date,
+): Promise<{ name: string; max: number; resetsAt: Date } | null> {
+  let broken: { name: string; max: number; resetsAt: Date } | null = null;
+  // Every window is judged: a post is admitted only once ALL of them clear, so the reset (and the limit named) is the
+  // breached window that clears LAST, never the first one found.
+  for (const limit of POST_LIMITS) {
+    const cutoff = new Date(admittedAt.getTime() - limit.windowMs);
+    // The oldest of the newest `max` messages decides the reset: the post is admitted once it ages out.
+    const rows = await tx.$queryRaw<{ created_at: Date }[]>`
+      SELECT created_at FROM nodes
+      WHERE node_type = 'chat-message' AND created_by_worker_id = ${workerId} AND created_at > ${toNaiveUtc(cutoff)}::timestamp
+      ORDER BY created_at DESC LIMIT ${limit.max}`;
+    if (rows.length < limit.max) continue;
+    const resetsAt = new Date(rows[rows.length - 1]!.created_at.getTime() + limit.windowMs);
+    if (!broken || resetsAt > broken.resetsAt) broken = { name: limit.name, max: limit.max, resetsAt };
+  }
+  return broken;
 }
