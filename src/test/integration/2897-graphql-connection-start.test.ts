@@ -47,9 +47,12 @@ beforeAll(async () => {
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  // The authorize URL is built from BASE_URL; point it at this server so the test can follow it.
+  process.env.BASE_URL = baseUrl;
 });
 
 afterAll(async () => {
+  delete process.env.BASE_URL;
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
@@ -134,14 +137,21 @@ describe('startConnection: the happy path and its single-use points', () => {
   });
 
   it('a nonce minted for one provider does not redeem at another provider', async () => {
-    const { authorizeUrl } = await startAsAdmin();
-    const res = await fetch(`${baseUrl}/auth/microsoft?nonce=${nonceOf(authorizeUrl)}`, { redirect: 'manual' });
-    expect(res.status).toBe(400);
+    process.env.MICROSOFT_CLIENT_ID = 'ms-client-id';
+    try {
+      const { authorizeUrl } = await startAsAdmin();
+      const res = await fetch(`${baseUrl}/auth/microsoft?nonce=${nonceOf(authorizeUrl)}`, { redirect: 'manual' });
+      expect(res.status).toBe(400);
+      // ...and it is still good at the provider it was minted for.
+      expect((await fetch(authorizeUrl, { redirect: 'manual' })).status).toBe(302);
+    } finally {
+      delete process.env.MICROSOFT_CLIENT_ID;
+    }
   });
 
   it('accepts a user acting as themselves through a user API key too, not only a portal JWT', async () => {
     const { mintUserApiKey } = await import('../../middleware/auth.js');
-    const { rawKey } = await mintUserApiKey(db, { userId: adminId, label: 'cli', createdBy: adminId });
+    const { rawKey } = await mintUserApiKey(db, { userId: adminId, label: 'cli', createdBy: adminId, issuedVia: 'portal' });
     const res = await fetch(`${baseUrl}/graphql`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${rawKey}` },
@@ -291,6 +301,12 @@ describe('startConnection: refusals, each with its own code and no nonce minted'
     const r = await gql(START('GMAIL', orgId), adminId);
     expect(code(r)).toEqual(['CONNECTION_PROVIDER_NOT_CONFIGURED']);
     expect(await rows()).toHaveLength(0);
+  });
+
+  it('a non-ADMIN learns nothing about configuration: FORBIDDEN, not CONNECTION_PROVIDER_NOT_CONFIGURED', async () => {
+    delete process.env.GMAIL_CLIENT_ID;
+    const r = await gql(START('GMAIL', orgId), memberId);
+    expect(code(r)).toEqual(['FORBIDDEN']);
   });
 
   it('an unconfigured provider is reported before the nonce, so a retry after configuration still works', async () => {
