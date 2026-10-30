@@ -7782,8 +7782,8 @@ export const typeDefs = `#graphql
     recoveryNode(nodeRef: ID!): RecoveryNode
     "Page through retained deleted nodes you can recover. Default 20, maximum 200; total counts all accessible results. No timed purge. hrn:node:hadronmemory.com:specs:cor:api:120:04"
     recoveryNodes(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryNodesPage!
-    "Inspect live edges and accessible deleted endpoints in one memory you can read and write. Default 20, maximum 200. hrn:node:hadronmemory.com:specs:cor:api:110:02"
-    recoveryEdges(memoryRef: ID!, limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
+    "Inspect live edges and accessible deleted endpoints in one memory you can read and write. Default 20, maximum 200. edgeIds (1 to 200 ids) restricts the result, total included, to those edges; an id that is not a visible edge of this memory is absent. hrn:node:hadronmemory.com:specs:cor:api:110:02"
+    recoveryEdges(memoryRef: ID!, edgeIds: [ID!], limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
     "#2441: the schedules and webhooks of an App that the caller may adopt, with their adoption state. Authorization first, then ordered by (name, kind, id) and paged: limit defaults to 20, maximum 50; after is the previous page's nextCursor. MANUAL triggers are never listed (consent is per run); omitted says so. Only an adopter sees any row."
