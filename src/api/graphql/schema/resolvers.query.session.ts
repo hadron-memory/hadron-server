@@ -9,6 +9,7 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
+import { z } from 'zod';
 import { Prisma } from '../../../generated/prisma/index.js';
 import {
   type ToolCalendarEvent,
@@ -84,6 +85,9 @@ async function sessionsWhere(
  * The `where` shared by `usageEvents` and `usageEventsPage` (#2212 A1): the READER gate, the loc/nodeId
  * addressing rules and the accessible-memory scope, all resolved before any query.
  */
+// Like task-list bounds (#2692), usage windows require unambiguous instants.
+const usageWindowInstant = z.string().datetime({ offset: true });
+
 async function usageEventsWhere(
   ctx: Context,
   { type, memoryId, nodeId, loc, since, until }: {
@@ -94,11 +98,12 @@ async function usageEventsWhere(
       requireRole(ctx, 'READER');
       // #2784: a half-open activity window narrows the existing scope. Reject
       // its order before resolving any resource, so the error reveals no access.
+      if ((since != null && !usageWindowInstant.safeParse(since).success) ||
+          (until != null && !usageWindowInstant.safeParse(until).success)) {
+        throw new GraphQLError('since and until must be ISO date-times with Z or an explicit offset', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const start = since == null ? undefined : new Date(since);
       const end = until == null ? undefined : new Date(until);
-      if ((start && Number.isNaN(start.getTime())) || (end && Number.isNaN(end.getTime()))) {
-        throw new GraphQLError('since and until must be valid timestamps', { extensions: { code: 'BAD_USER_INPUT' } });
-      }
       if (start && end && start >= end) {
         throw new GraphQLError('since must be earlier than until', { extensions: { code: 'BAD_USER_INPUT' } });
       }
