@@ -46,6 +46,12 @@ describe('#2832 the direct-children rule (filter-only)', () => {
     expect(sorted(await kids(''))).toEqual(['top1', 'top2']);
   });
 
+  it('the root is exact in the database too: its total and a one-row page come from the SQL, not from a re-check', async () => {
+    expect((await kids('', { includeTotal: true })).total).toBe(2);
+    expect(locs(await kids('', { limit: 1, offset: 1, sort: 'loc' }))).toEqual(['top2']);
+    expect((await kids('top1', { includeTotal: true })).total).toBe(2);
+  });
+
   it('a top-level loc lists its one-segment children and not its grandchildren', async () => {
     expect(sorted(await kids('top1'))).toEqual(['top1:a', 'top1:b']);
   });
