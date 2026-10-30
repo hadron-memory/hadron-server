@@ -15,6 +15,8 @@ export type StoredTickAction = {
   taskUrn?: string;
   entryMemoryIds?: string[];
   taskMemoryId?: string;
+  /** Issue-time complete chains for per-read disclosure; never returned to the caller. */
+  disclosureMemoryIds?: string[];
 };
 type Item = { workerId: string; wake: WorkerWake };
 type App = { id: string; organizationId: string | null; ownerUserId: string | null };
@@ -37,6 +39,7 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
       const lookups = new Map<string, RegisterLookup>();
       const readerLookup = new RegisterLookup(tx, txCtx, app.id, deadline);
       const teamMemoryId = await readerLookup.teamMemory();
+      const teamChain = teamMemoryId ? await readerLookup.chain(teamMemoryId) : [];
       const holders = new Map<string, Promise<Context | null>>();
       const holder = (id: string): Promise<Context | null> => {
         let found = holders.get(id);
@@ -66,13 +69,14 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
             ? reason.action as StoredTickAction : { code, state: 'UNKNOWN' };
           if (refresh.has(item.workerId)) {
             answer = { code, state: 'UNKNOWN' };
-            if (!teamMemoryId) answer = { code, state: 'UNMAPPED', entryMemoryIds: [] };
+            if (!teamMemoryId) answer = { code, state: 'UNMAPPED', entryMemoryIds: [], disclosureMemoryIds: [] };
             else if (lookup) {
               const entry = await lookup.entry(code);
-              if (entry.state === 'UNMAPPED') answer = { code, state: 'UNMAPPED', entryMemoryIds: entry.checkedMemoryIds };
+              if (entry.state === 'UNMAPPED') answer = { code, state: 'UNMAPPED', entryMemoryIds: entry.checkedMemoryIds, disclosureMemoryIds: teamChain };
               else if (entry.state === 'FOUND') {
-                answer = { code, state: 'UNRESOLVED', taskLoc: entry.taskLoc, entryMemoryIds: entry.checkedMemoryIds };
+                answer = { code, state: 'UNRESOLVED', taskLoc: entry.taskLoc, entryMemoryIds: entry.checkedMemoryIds, disclosureMemoryIds: teamChain };
                 const memoryId = worker?.agent?.deletedAt ? null : worker?.agent?.systemMemoryId;
+                if (memoryId) answer.disclosureMemoryIds = [...new Set([...teamChain, ...await readerLookup.chain(memoryId)])];
                 const hit = memoryId ? await lookup.task(memoryId, entry.taskLoc) : null;
                 if (hit) {
                   answer.taskMemoryId = hit.memoryId;
@@ -82,7 +86,13 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
             }
           }
           answers.set(k, answer);
-          let disclose = answer.state !== 'UNKNOWN' && (!!auth || answer.state === 'UNMAPPED' && answer.entryMemoryIds?.length === 0);
+          let disclose = answer.state !== 'UNKNOWN' && !!answer.disclosureMemoryIds && (!!auth || answer.state === 'UNMAPPED' && answer.entryMemoryIds?.length === 0);
+          // R1 refinement requires complete chains, including empty and farther memories.
+          // Gate the complete stored topology for the reader, while preserving worker-side resolution.
+          for (const id of answer.disclosureMemoryIds ?? []) {
+            if (!disclose) break;
+            disclose = await readerLookup.readable(txCtx, id, 'reader');
+          }
           for (const id of answer.entryMemoryIds ?? []) {
             if (!disclose) break;
             disclose = await readerLookup.readable(txCtx, id, 'reader') && await readerLookup.readable(auth!, id, principal);

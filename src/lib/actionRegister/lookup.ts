@@ -15,7 +15,7 @@ export function registerTaskLoc(data: unknown, code: string): string | null {
 /** Legacy warning semantics: nearest effective entry, then gate; never fall through on refusal/malformed data. */
 export async function registerEntry(tx: Prisma.TransactionClient, memoryId: string, code: string, readable: (id: string) => Promise<boolean>): Promise<{ taskLoc: string; memoryId: string } | null> {
   const hit = await findEffectiveNodeIdByLoc(tx, memoryId, 'register:' + code);
-  const node = hit && await readable(hit.memoryId) ? await tx.node.findUnique({ where: { id: hit.id }, select: { data: true, deletedAt: true } }) : null;
+  const node = hit && await readable(hit.memoryId) ? await tx.node.findFirst({ where: { id: hit.id, memoryId: hit.memoryId, deletedAt: null }, select: { data: true, deletedAt: true } }) : null;
   const taskLoc = registerTaskLoc(node?.deletedAt ? null : node?.data, code);
   return taskLoc && hit ? { taskLoc, memoryId: hit.memoryId } : null;
 }
@@ -26,7 +26,7 @@ export async function nearestRoleTask(tx: Prisma.TransactionClient, memoryId: st
   const hit = await findEffectiveNodeIdByLoc(tx, memoryId, loc);
   if (!hit) return null;
   if (!await readable(hit.memoryId)) return { memoryId: hit.memoryId, task: null };
-  const node = await tx.node.findUnique({ where: { id: hit.id }, select: { loc: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } } });
+  const node = await tx.node.findFirst({ where: { id: hit.id, memoryId: hit.memoryId, deletedAt: null }, select: { loc: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } } });
   return { memoryId: hit.memoryId, task: node && !node.deletedAt && !node.memory.deletedAt && node.isRunnable
     ? { loc: node.loc, urn: 'hrn:node:' + node.memory.urn + ':' + node.loc } : null };
 }
@@ -41,10 +41,22 @@ export class RegisterLookup {
   private entries = new Map<string, Promise<RegisterEntry>>();
   private tasks = new Map<string, ReturnType<typeof nearestRoleTask>>();
   private readability = new Map<string, Promise<boolean>>();
+  private chains = new Map<string, Promise<string[]>>();
   private team: Promise<string | null> | undefined;
   constructor(readonly tx: Prisma.TransactionClient, readonly ctx: Context, readonly appId: string, readonly deadline: number, readonly ungatedWorker = false, readonly teamMemoryHint?: string | null) {}
 
   checkDeadline(): void { if (Date.now() >= this.deadline) throw new Error('Register read deadline'); }
+
+  /** Complete bounded topology for the tick reader's whole-chain disclosure gate. */
+  chain(memoryId: string): Promise<string[]> {
+    this.checkDeadline();
+    let result = this.chains.get(memoryId);
+    if (!result) {
+      result = systemMemoryChain(this.tx, memoryId).then(links => links.length ? links.map(link => link.memoryId) : [memoryId]);
+      this.chains.set(memoryId, result);
+    }
+    return result;
+  }
 
   readable(ctx: Context, memoryId: string, principalKey: string): Promise<boolean> {
     this.checkDeadline();
@@ -83,22 +95,22 @@ export class RegisterLookup {
   private async readEntry(code: string): Promise<RegisterEntry> {
     const memoryId = await this.teamMemory();
     if (!memoryId) return { state: 'UNMAPPED', checkedMemoryIds: [] };
-    const chain = await systemMemoryChain(this.tx, memoryId);
+    const chain = await this.chain(memoryId);
     const checkedMemoryIds: string[] = [];
     let malformed = false;
-    for (const link of chain.length ? chain : [{ memoryId }]) {
+    for (const id of chain) {
       this.checkDeadline();
-      checkedMemoryIds.push(link.memoryId);
-      if (!await this.readable(this.ctx, link.memoryId, 'reader')) return { state: 'WITHHELD', checkedMemoryIds };
+      checkedMemoryIds.push(id);
+      if (!await this.readable(this.ctx, id, 'reader')) return { state: 'WITHHELD', checkedMemoryIds };
       if (malformed) continue; // no farther mapping may replace the nearest malformed entry
       const node = await this.tx.node.findFirst({
-        where: { memoryId: link.memoryId, loc: 'register:' + code, deletedAt: null,
-          ...(link.memoryId !== memoryId ? { nodeType: { not: 'comment' }, OR: [{ role: null }, { NOT: [{ role: 'boot-prompt' }, { role: { startsWith: 'boot-prompt.' } }] }] } : {}) },
+        where: { memoryId: id, loc: 'register:' + code, deletedAt: null,
+          ...(id !== memoryId ? { nodeType: { not: 'comment' }, OR: [{ role: null }, { NOT: [{ role: 'boot-prompt' }, { role: { startsWith: 'boot-prompt.' } }] }] } : {}) },
         select: { data: true, memory: { select: { deletedAt: true } } },
       });
       if (!node) continue;
       const loc = node.memory.deletedAt ? null : registerTaskLoc(node.data, code);
-      if (loc) return { state: 'FOUND', taskLoc: loc, memoryId: link.memoryId, checkedMemoryIds };
+      if (loc) return { state: 'FOUND', taskLoc: loc, memoryId: id, checkedMemoryIds };
       malformed = true;
     }
     return { state: 'UNMAPPED', checkedMemoryIds };

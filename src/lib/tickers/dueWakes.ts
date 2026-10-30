@@ -810,9 +810,15 @@ export async function computeDueWakes(args: {
             i.exempt = have.wake.exempt;
             i.proof = signFor(i.workerId, have.wake);
           }
-          // The same identity must carry the stored answer too (annotations are deliberately outside identity).
-          i.wake = have.wake;
-          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake, absorbed: have.absorbed_keys });
+          else {
+            // Guidance is issued once, while same-identity display metadata stays fresh.
+            i.wake = { ...i.wake, reasons: i.wake.reasons.map(r => {
+              if (r.kind !== 'TICK') return r;
+              const old = have.wake.reasons.find(old => old.kind === 'TICK' && old.tickerId === r.tickerId);
+              return { ...r, action: old?.kind === 'TICK' ? old.action : undefined };
+            }) };
+          }
+          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: i.wake, absorbed: have.absorbed_keys });
           passes(i);
           continue;
         }

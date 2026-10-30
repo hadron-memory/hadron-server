@@ -123,8 +123,8 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   }
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
-    `  code ${t.tickCode} · ${registerLoc ? 'register task loc ' + registerLoc : 'no register entry you can read'}`,
     `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}· reasons ${(t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+')}`,
+    `  code ${t.tickCode} · ${registerLoc ? 'register task loc ' + registerLoc : 'no register entry you can read'}`,
     `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
   ].join('\n');
