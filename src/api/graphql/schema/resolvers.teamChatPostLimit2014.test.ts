@@ -202,7 +202,7 @@ describe('#2014 the alarm', () => {
     const wakes = (await pendingTaskWakes(db, [boss.id], new Date())).get(boss.id) ?? [];
     expect(wakes).toHaveLength(1);
     expect(wakes[0]).toMatchObject({ event: 'ALARM', handle: 'LIMIT' });
-    expect(wakes[0]!.title).toMatch(/Liam hit the team-chat post limit/);
+    expect(wakes[0]!.title).toMatch(/Liam's team-chat post was refused by the post limit/);
     await db.agentTeamEvent.updateMany({ where: { type: 'alarm.post-limit' }, data: { acknowledgedAt: new Date(), acknowledgedByWorkerId: boss.id } });
     expect((await pendingTaskWakes(db, [boss.id], new Date())).get(boss.id) ?? []).toHaveLength(0);
   });
