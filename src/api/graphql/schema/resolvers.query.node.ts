@@ -1866,9 +1866,12 @@ export const nodeQueries = {
           return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
         }
         innerFilter = { ...f, memoryIds: requested };
-      } else if (scopeRes.kind === 'global') {
-        innerOrgId = scopeRes.orgScopeId;
       }
+      // #1987: the global view's materialised memory list must still pass
+      // through the org narrowing in core (the App-memory exclusion of the
+      // runnable catalogue); the list is already within that org, so for every
+      // other query the extra organizationId clause changes nothing.
+      if (scopeRes.kind === 'global') innerOrgId = scopeRes.orgScopeId;
       const inner = await core({ ...coreArgs, filter: innerFilter, orgId: innerOrgId });
       return { ...inner, scope: info, degraded: mergeDegradedCodes(inner.degraded, narrowed) };
     },
