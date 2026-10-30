@@ -11002,7 +11002,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
                 `\n\n${prompt}`
               : briefing.refusal
                 ? `\n(No boot briefing: the boot prompt cannot be served — ${briefing.refusal}.)`
-                : '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)') +
+                : seesWorkingState
+                  ? '\n(No boot briefing: the role agent carries no systemPrompt template and this worker has no promptOverride.)'
+                  : '') +
             (await describeServedWorker(ctx, worker)) +
             renderWorkerContinuity(continuity as RenderableContinuity | null),
         );

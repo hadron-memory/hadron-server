@@ -290,6 +290,12 @@ describe('#1149 hadron_get_worker delegates to the profile read and keeps workin
     expect(text).not.toContain('Boot briefing');
   });
 
+  it('does not claim the worker has no template or override when the reader cannot see them (#2918)', async () => {
+    const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
+    expect(text).not.toContain('carries no systemPrompt template');
+    expect(text).not.toContain('No boot briefing');
+  });
+
   it('a departed participant gets no recovery line for its own still-open session', async () => {
     const own = await db.session.create({
       data: { id: generateId(), appId: appA.id, userId: contributor.id, agentId: orgAgent.id, workerId: teamDan.id, role: 'server-engineer' },
