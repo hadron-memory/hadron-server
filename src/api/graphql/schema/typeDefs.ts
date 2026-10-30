@@ -12741,7 +12741,14 @@ export const typeDefs = `#graphql
     SESSION_WORKER_NOT_IN_APP are retired; CHANNEL_HOST_NOT_WRITABLE is the
     successor code.
 
-    Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE,
+    A worker's post that repeats its own earlier message is refused: the same worker
+    (across its sessions), the same Channel, exactly the same body and the same reply
+    target (or none on both sides), earlier than ten minutes ago, with TEAM_CHAT_DUPLICATE.
+    The earlier message was posted, so do not retry: the text and the typed fields
+    (earlierSeq, channelId) name it. Nothing is stored. A post made as the human
+    (no session) is not judged.
+
+    Error codes (extensions.code): TEAM_CHAT_BODY_TOO_LARGE, TEAM_CHAT_DUPLICATE,
     TEAM_CHAT_REPLY_NOT_FOUND, SESSION_NOT_FOUND, SESSION_ENDED,
     SESSION_NOT_LIVE (dormant or ineligible for lapsed-session resume),
     SESSION_NOT_WORKER_BOUND, CHANNEL_HOST_NOT_WRITABLE, WORKER_RETIRED,
@@ -12770,7 +12777,8 @@ export const typeDefs = `#graphql
     \`@team.<head>.all\` target refuses the whole post TEAM_CHAT_TEAM_HEAD_INVALID. createTeamChatMessage is the
     appRef → App.defaultChannel convenience over this — one gate, two entry
     points. A Channel you may not read is CHANNEL_NOT_FOUND; one you may read
-    but not post into is FORBIDDEN.
+    but not post into is FORBIDDEN. A worker's identical repeat within ten minutes is
+    refused TEAM_CHAT_DUPLICATE, exactly as createTeamChatMessage documents.
     """
     createChannelMessage(
       channelRef: ID!

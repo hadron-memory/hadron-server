@@ -83,8 +83,7 @@ async function footprint(ch: Ch) {
   ]);
   return { messages, edges, rootData: root.data, lastSeq: channelRow.lastSeq, lastMessageAt: channelRow.lastMessageAt?.toISOString() ?? null };
 }
-const backdate = (nodeId: string, ms: number) =>
-  db.$executeRaw`UPDATE nodes SET created_at = clock_timestamp() - make_interval(secs => ${ms / 1000}) WHERE id = ${nodeId}`;
+const backdate = (nodeId: string, ms: number) => db.node.update({ where: { id: nodeId }, data: { createdAt: new Date(Date.now() - ms) } });
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -139,6 +138,13 @@ describe('#2015 the refusal', () => {
     const bare = await workerSays(liam, 'plain');
     expect((await workerSays(liam, 'plain', a.seq)).seq).toBeGreaterThan(bare.seq); // a target vs none
     await expect(workerSays(liam, 'plain')).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_DUPLICATE', earlierSeq: bare.seq } }); // none vs none
+  });
+
+  it('a removed replies-to edge is no reply identity: the post is then a plain duplicate of a plain one', async () => {
+    const a = await humanSays(manager.id, 'question A');
+    const first = await workerSays(liam, 'ack', a.seq);
+    await db.edge.updateMany({ where: { memoryId: channel.memoryId, name: 'replies-to', source: { seq: first.seq, messageChannelId: channel.id } }, data: { deletedAt: new Date() } });
+    await expect(workerSays(liam, 'ack')).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_DUPLICATE', earlierSeq: first.seq } });
   });
 
   it('names the most recent matching message', async () => {
