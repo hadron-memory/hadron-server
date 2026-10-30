@@ -82,7 +82,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
-import { assertCastable, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
+import { assertCastable, provisionCastGrants, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
@@ -1105,9 +1105,9 @@ export const workerMutations = {
             }
             const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
-            // Preserve #2458's deciding licence/role check on the transaction.
-            // This remains read-only: install/changeWorkerAgent own grant provisioning.
-            const { agent: castAgent } = await assertCastable(tx, freshApp, agent.id);
+            // #2458's deciding licence/role check, on the transaction. It only PLANS the missing same-org grants
+            // (#2906); they are written below, once nothing that returns a value can still end the cast.
+            const { agent: castAgent, provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
             const castRole = castAgent.personaRole ?? null;
             if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
               throw roleOverrideRefused(appId, castRole, requestedRole);
@@ -1117,6 +1117,9 @@ export const workerMutations = {
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
+            // #2906 / cor:agt:040:08: provision the missing same-org grants in THIS transaction. Placed after the
+            // NAME_TAKEN return, which commits, so a refused name leaves none; any later throw rolls them back.
+            await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
             const workerIds = [plannedWorkerId, ...(freshTarget.reportingHeadId ? [freshTarget.reportingHeadId] : [])].sort();
             await tx.$queryRaw`SELECT id FROM workers WHERE id = ANY(${workerIds}::text[]) ORDER BY id FOR UPDATE`;
             const castWorkerRow = await tx.worker.create({
