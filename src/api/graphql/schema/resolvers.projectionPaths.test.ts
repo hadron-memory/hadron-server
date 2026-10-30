@@ -39,7 +39,7 @@ const create = (door: string, name: string) => door === 'personal'
   ? M.createMemory({}, { name, memoryClass: 'personal' }, ctx(plain.id))
   : door === 'app' ? M.createAppMemory({}, { appRef: app.id, name }, ctx(admin.id))
   : M.createMemoryInApp({}, { appRef: app.id, agentRef: agent.id, memoryClass: 'app', name }, ctx(admin.id));
-const inputs = ['..:escaped', 'a:..:b', '.:current', 'a:.', '..:..:escaped'];
+const inputs = ['..:escaped', 'a:..:b', '.:current', 'a:.', '..:..:escaped', String.raw`a\..`, String.raw`..\x`];
 for (const door of ['personal', 'app', 'installed']) {
   describe(`projection input ${door}`, () => {
     it.each(inputs.map((name, i) => [i, name] as const))('refuses invalid case %i before persistence', async (_i, name) => {
@@ -51,7 +51,7 @@ for (const door of ['personal', 'app', 'installed']) {
       expect(existsSync(join(target, '.node'))).toBe(false);
       expect(readdirSync(projection.root)).toEqual([]);
     });
-    it.each(['a..b', 'x.y', 'Has Space', 'ünï'])('preserves ordinary input %s', async name => {
+    it.each(['a..b', 'x.y', 'Has Space', 'ünï', String.raw`back\slash`])('preserves ordinary input %s', async name => {
       const memory = await create(door, name);
       expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
       expect(existsSync(join(projection.root, ...name.split(':'), '.node', 'node.yaml'))).toBe(true);
