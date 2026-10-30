@@ -466,6 +466,22 @@ describe('single-node restore', () => {
     expect((await Q.memoryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(1);
     expect((await Q.recoveryEdges({}, { memoryRef: memoryId }, ctx())).total).toBe(1);
   });
+  it('drops a live endpoint under any deleted ancestor at a \':\' boundary, never under a mere string prefix (#2810)', async () => {
+    const hub = await node('hub', { deletedAt: null });
+    await node('d');
+    await node('x:y');
+    await node('e:');
+    await node('ab');
+    const live = (loc: string) => node(loc, { deletedAt: null });
+    const hidden = [await live('d:c'), await live('x:y:z:w'), await live('e::f')];
+    const shown = [await live('abc:q'), await live('x:yz'), await live('e')];
+    for (const target of [...hidden, ...shown]) {
+      await db.edge.create({ data: { memoryId, sourceId: hub.id, targetId: target.id, loc: `hub:to:${target.id}` } });
+    }
+    const graph = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(graph.items.map((edge: any) => edge.target.id).sort()).toEqual(shown.map((target) => target.id).sort());
+    expect(graph.total).toBe(shown.length);
+  });
   it('removes a foreign reader-only tombstone from recovery graph count and page', async () => {
     const live = await node('a', { deletedAt: null });
     const foreignMemory = await db.memory.create({ data: { class: 'knowledge', name: 'Other', urn: 'other2175.example:corpus',
