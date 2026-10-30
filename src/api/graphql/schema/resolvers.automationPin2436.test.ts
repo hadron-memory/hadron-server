@@ -8,6 +8,8 @@
  * text; the positive pins pass on main and pin the shared predicate against drift.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
+import { Client } from 'pg';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -199,5 +201,223 @@ describe('#2436 who may adopt an App-only trigger', () => {
     const ctx = f.ctx(f.platformAdmin, ['ADMIN']);
     const detail = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef }, ctx);
     await expect(M.approveAutomation({}, { triggerKind: 'SCHEDULE', triggerRef, expectedHash: detail.hash }, ctx)).resolves.toBe(true);
+  });
+});
+
+/**
+ * #2580: the adoption door decides twice — an unlocked load, then a fresh load under the trigger-row lock inside
+ * withAuthorizedTx — and the second decision is the one that counts. These pins hold that line with the real
+ * gate, locks and writes; the only test seam is a delegating db that pauses the door's `$transaction` entry, i.e.
+ * after the admitted pre-lock load and before the locked reload. While it is paused, a SECOND connection takes away
+ * the deciding org role and COMMITs, then the door is released. Nothing else admits the actor: the App is
+ * org-owned (no owner arm), the actor carries no platform role, and the trigger has no run-as user.
+ */
+describe('#2580 the locked reload decides adoption, not the pre-lock load', () => {
+  /** Delegates everything to the real client; `$transaction` waits for release first. */
+  function pausingDb() {
+    let paused!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((r) => { paused = r; });
+    const gate = new Promise<void>((r) => { release = r; });
+    const proxy = new Proxy(db, {
+      get(target, prop) {
+        if (prop === '$transaction') {
+          return async (...args: unknown[]) => { paused(); await gate; return (target.$transaction as any)(...args); };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return { db: proxy, reached, release };
+  }
+
+  /** The revocation, on its own connection, committed before the paused door resumes. */
+  async function revokeOnOwnConnection(userId: string, orgId: string, how: 'demoted' | 'removed') {
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      const sql = how === 'demoted'
+        ? "UPDATE org_members SET role = 'CONTRIBUTOR' WHERE user_id = $1 AND organization_id = $2"
+        : 'UPDATE org_members SET deleted_at = now() WHERE user_id = $1 AND organization_id = $2';
+      const { rowCount } = await client.query(sql, [userId, orgId]);
+      expect(rowCount).toBe(1);
+    } finally {
+      await client.end();
+    }
+  }
+
+  /** The three consent-writing doors, all thin resolvers over the one adoptionDoor. */
+  const WRITE_DOORS = {
+    approveAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, hash: string, ctx: unknown) => M.approveAutomation({}, { ...input, expectedHash: hash }, ctx),
+    reAdoptAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, hash: string, ctx: unknown) => M.reAdoptAutomation({}, { ...input, expectedHash: hash }, ctx),
+    declineAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, _hash: string, ctx: unknown) => M.declineAutomation({}, input, ctx),
+  } as const;
+
+  /** An ADOPTED trigger whose graph has since changed, so every door would write if admitted: approve and
+   * re-adopt would rebind to the new hash, decline would revoke. */
+  async function adoptedThenChanged(role: 'ADMIN' | 'OWNER') {
+    const f = await orgFixture();
+    const actor = role === 'ADMIN' ? f.orgAdmin : f.orgOwner;
+    const input = { triggerKind: 'SCHEDULE' as const, triggerRef: (await f.appOnly('Interleave flow')).id };
+    const first = await Q.previewAutomation({}, input, f.ctx(actor));
+    expect(await M.approveAutomation({}, { ...input, expectedHash: first.hash }, f.ctx(actor))).toBe(true);
+    await db.node.update({ where: { id: first.entryId }, data: { content: 'changed after adoption' } });
+    const next = await Q.previewAutomation({}, input, f.ctx(actor));
+    expect(next.hash).not.toBe(first.hash);
+    const user = await db.user.findUniqueOrThrow({ where: { id: actor.id }, select: { roles: true } });
+    expect(user.roles).not.toContain('ADMIN');
+    expect(user.roles).not.toContain('OWNER');
+    expect(f.app).toMatchObject({ ownerUserId: null, organizationId: f.org.id });
+    return { f, actor, input, hash: next.hash as string };
+  }
+
+  for (const door of Object.keys(WRITE_DOORS) as Array<keyof typeof WRITE_DOORS>) {
+    for (const role of ['ADMIN', 'OWNER'] as const) {
+      for (const how of ['demoted', 'removed'] as const) {
+        it(`${door}: an org ${role} ${how} between the admitted load and the locked reload is refused, nothing written`, async () => {
+          const { f, actor, input, hash } = await adoptedThenChanged(role);
+          const before = await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } });
+          const events = await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } });
+          const pause = pausingDb();
+          const order: string[] = [];
+
+          const call = WRITE_DOORS[door](input, hash, { ...f.ctx(actor), db: pause.db }).then(
+            (v: unknown) => { order.push('door-returned'); return v; },
+            (e: unknown) => { order.push('door-threw'); return e; },
+          );
+          try {
+            await pause.reached;
+            order.push('admitted-load-paused');
+            await revokeOnOwnConnection(actor.id, f.org.id, how);
+            order.push('revocation-committed');
+          } finally {
+            pause.release();
+          }
+          const err = await call;
+
+          expect(order).toEqual(['admitted-load-paused', 'revocation-committed', 'door-threw']);
+          expect(err).toBeInstanceOf(GraphQLError);
+          expect(err).toMatchObject({ message: DENIED, extensions: { code: 'FORBIDDEN' } });
+          expect(await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } })).toEqual(before);
+          expect(await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } })).toEqual(events);
+        });
+      }
+
+      it(`${door}: the same paused call by an org ${role} whose role is unchanged writes once (admitted control)`, async () => {
+        const { f, actor, input, hash } = await adoptedThenChanged(role);
+        const before = await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } });
+        const events = await db.automationAdoptionEvent.count({ where: { appId: f.app.id } });
+        const pause = pausingDb();
+
+        const call = WRITE_DOORS[door](input, hash, { ...f.ctx(actor), db: pause.db });
+        await pause.reached;
+        pause.release();
+
+        await expect(call).resolves.toBe(true);
+        const after = await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } });
+        expect(after.automationPin).not.toEqual(before.automationPin);
+        if (door === 'declineAutomation') expect(after.automationPin).toBeNull();
+        expect(await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id }, orderBy: { createdAt: 'desc' }, take: 1 })).toEqual([
+          expect.objectContaining({ action: door === 'declineAutomation' ? 'REVOKE' : 'APPROVE', actorUserId: actor.id }),
+        ]);
+        expect(await db.automationAdoptionEvent.count({ where: { appId: f.app.id } })).toBe(events + 1);
+      });
+    }
+  }
+});
+
+/**
+ * #2580: canAdopt conceals ONLY a FORBIDDEN from the shared tenant gate as its plain who-may refusal; any other fault
+ * from the userless (App-only) authority check must escape as itself, so an outage never reads as "you may not".
+ * The seam is the org-membership read requireOrgRole makes — the first orgMember read any door reaches
+ * (requireAdopterContext and liveApp never read it). A human actor throughout: a run principal never reaches
+ * canAdopt (requireAdopterContext refuses it first).
+ */
+describe('#2580 a non-FORBIDDEN fault from the App-only authority check escapes unchanged', () => {
+  /** Delegates everything; `orgMember.findFirst` throws `fault` while armed. */
+  function faultingDb(fault: Error) {
+    const state = { armed: true, hits: 0 };
+    const members = new Proxy(db.orgMember, {
+      get(target, prop) {
+        if (prop === 'findFirst') {
+          return async (...args: unknown[]) => {
+            if (state.armed) { state.hits++; throw fault; }
+            return (target.findFirst as any)(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const proxy = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'orgMember') return members;
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    return { db: proxy, state };
+  }
+
+  /** Every admission surface by name; each reaches canAdopt through load(). */
+  const ALL_DOORS = {
+    previewAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, ctx: unknown) => Q.previewAutomation({}, input, ctx),
+    automationApproval: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, ctx: unknown) => Q.automationApproval({}, input, ctx),
+    approveAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, ctx: unknown) => M.approveAutomation({}, { ...input, expectedHash: 'a'.repeat(64) }, ctx),
+    declineAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, ctx: unknown) => M.declineAutomation({}, input, ctx),
+    reAdoptAutomation: (input: { triggerKind: 'SCHEDULE'; triggerRef: string }, ctx: unknown) => M.reAdoptAutomation({}, { ...input, expectedHash: 'a'.repeat(64) }, ctx),
+  } as const;
+
+  async function adoptedTrigger() {
+    const f = await orgFixture();
+    const input = { triggerKind: 'SCHEDULE' as const, triggerRef: (await f.appOnly('Fault flow')).id };
+    const pin = await Q.previewAutomation({}, input, f.ctx(f.orgAdmin));
+    expect(await M.approveAutomation({}, { ...input, expectedHash: pin.hash }, f.ctx(f.orgAdmin))).toBe(true);
+    const before = await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } });
+    const events = await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } });
+    const unchanged = async () => {
+      expect(await db.agentSchedule.findUniqueOrThrow({ where: { id: input.triggerRef } })).toEqual(before);
+      expect(await db.automationAdoptionEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } })).toEqual(events);
+    };
+    return { f, input, unchanged };
+  }
+
+  it('the exact injected fault escapes every door, with consent and events unchanged', async () => {
+    const { f, input, unchanged } = await adoptedTrigger();
+    for (const [door, call] of Object.entries(ALL_DOORS)) {
+      const sentinel = new Error(`#2580 injected membership-read fault (${door})`);
+      const faulting = faultingDb(sentinel);
+      const err = await call(input, { ...f.ctx(f.orgAdmin), db: faulting.db }).catch((e: unknown) => e);
+      expect(err, door).toBe(sentinel);
+      expect(faulting.state.hits, door).toBe(1);
+    }
+    await unchanged();
+  });
+
+  it('a FORBIDDEN from the same read is concealed as the plain who-may refusal on every door', async () => {
+    const { f, input, unchanged } = await adoptedTrigger();
+    for (const [door, call] of Object.entries(ALL_DOORS)) {
+      const forbidden = new GraphQLError('#2580 injected tenant-gate refusal', { extensions: { code: 'FORBIDDEN' } });
+      const faulting = faultingDb(forbidden);
+      const err = await call(input, { ...f.ctx(f.orgAdmin), db: faulting.db }).catch((e: unknown) => e);
+      expect(err, door).not.toBe(forbidden);
+      expect(err, door).toMatchObject({ message: DENIED, extensions: { code: 'FORBIDDEN' } });
+    }
+    await unchanged();
+  });
+
+  it('the same delegating db, disarmed, admits the org ADMIN on every door (admitted control)', async () => {
+    const { f, input } = await adoptedTrigger();
+    const faulting = faultingDb(new Error('never thrown'));
+    faulting.state.armed = false;
+    const ctx = { ...f.ctx(f.orgAdmin), db: faulting.db };
+    const detail = await Q.automationApproval({}, input, ctx);
+    expect(detail.state).toBe('ADOPTED');
+    await expect(Q.previewAutomation({}, input, ctx)).resolves.toMatchObject({ hash: detail.hash });
+    await expect(M.reAdoptAutomation({}, { ...input, expectedHash: detail.hash }, ctx)).resolves.toBe(true);
+    await expect(M.approveAutomation({}, { ...input, expectedHash: detail.hash }, ctx)).resolves.toBe(true);
+    await expect(M.declineAutomation({}, input, ctx)).resolves.toBe(true);
+    expect(await db.automationAdoptionEvent.count({ where: { appId: f.app.id } })).toBe(4);
+    expect(faulting.state.hits).toBe(0);
   });
 });
