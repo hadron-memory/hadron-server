@@ -10,6 +10,7 @@ import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { loadStallInputs, stallCandidates, effectiveWindows, raiseStallAlarm } from '../../../lib/agentTasks/stall.js';
+import { appendTaskEvent } from '../../../lib/agentTasks/events.js';
 import { createMcpServerInstance } from '../../../mcp/server.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -73,6 +74,18 @@ describe('task edit #2645',()=>{
   const key=await db.appKey.create({data:{appId:app.id,keyHash:generateId(),keyPreview:'test'}});
   await expect(M.updateAgentTask({}, {taskId:task.id,input:{title:'No'}},{db,appId:app.id,appKeyId:key.id,roles:[]})).rejects.toMatchObject({extensions:{code:'TASK_NOT_FOUND'}});
   expect(await edited()).toHaveLength(0);
+ });
+ it('refuses an impersonation session even when the impersonated user owns the task',async()=>{
+  const impersonation={sessionId:generateId(),actorUserId:manager.id,orgId:app.organizationId,expiresAt:new Date(Date.now()+3600_000)};
+  await expect(M.updateAgentTask({}, {taskId:task.id,input:{title:'Impersonated'}},{...ctx(),impersonation})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+  expect((await db.agentTask.findUniqueOrThrow({where:{id:task.id}})).title).toBe('Original');expect(await edited()).toHaveLength(0);
+ });
+ it('stores task.edited payloads only for editable field names',async()=>{
+  const actor={userId:owner.id,workerId:null,agentId:null};
+  await expect(appendTaskEvent(db,{appId:app.id,taskId:task.id,actor,event:{type:'task.edited',fields:['source' as any]}})).rejects.toThrow(/Unsupported task edit field/);
+  expect(await edited()).toHaveLength(0);
+  await appendTaskEvent(db,{appId:app.id,taskId:task.id,actor,event:{type:'task.edited',fields:['title','title']}});
+  expect((await edited())[0].payload).toEqual({fields:['title']});
  });
  it.each(['finished','cancelled'])('refuses even a no-op edit on %s',async status=>{
   await db.agentTask.update({where:{id:task.id},data:status==='finished'?{status,startedAt:new Date(),finishedAt:new Date(),resultOutcome:'done'}:{status,cancelledAt:new Date()}});
