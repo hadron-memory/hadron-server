@@ -126,9 +126,11 @@ const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
 
 /** Open one episode and raise its alarm, in one transaction. Null when the worker already has an open episode. */
 async function raise(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, dark: DarkWorker, windowMs: number, now: Date): Promise<string | null> {
+  let chainEmpty = false;
   try {
-    return await db.$transaction(async (tx) => {
+    const eventId = await db.$transaction(async (tx) => {
       const chain = await darkAlarmChain(tx, app, dark.workerId);
+      chainEmpty = chain.length === 0;
       const eventId = generateId();
       const payload: Prisma.InputJsonObject = {
         reason: dark.reason,
@@ -150,6 +152,10 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
       // SERIALIZABLE like `raiseStallAlarm`: the chain names manager users, sealed, and `mergeUsers` refuses to merge an
       // account named in an open alarm. A raise racing a merge is a read-write cycle Postgres aborts on one side.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    // #2807: with no reporting line and no manager the alarm opens and nobody is woken. The alarm stays readable as it
+    // is; this one line, once per raised episode and after the commit, is how an operator learns of it. Ids only.
+    if (chainEmpty) console.warn(JSON.stringify({ event: 'dark_worker.chain_empty', appId: app.id, workerId: dark.workerId, eventId }));
+    return eventId;
   } catch (err) {
     if (isSerializationFailure(err)) return null; // lost a race (another pass, or a merge): the next pass decides again
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return null; // another pass opened it
