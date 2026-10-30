@@ -1,3 +1,4 @@
+import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -4126,14 +4127,15 @@ const ROOT_LOC_ATOM_MAX_BYTES = 255;
  * #2730: a memory's root node takes the caller's `name` as its loc, and the
  * projection throws a server fault for a loc it cannot write. Refuse exactly
  * those inputs as BAD_USER_INPUT before any write: an empty last atom, an atom
- * over the filesystem's component limit, or a NUL or slash. Everything the
- * projection accepts today (spaces, Unicode, internal empty atoms) stays legal,
+ * over the filesystem's component limit, a reserved path component, or a NUL
+ * or slash. Other inputs (spaces, Unicode, internal empty atoms) stay legal,
  * so this is not the shared loc grammar (`validateLoc`).
  */
 export function assertMemoryRootLoc(name: string): void {
   const atoms = name.split(':');
   let reason: string | null = null;
   if (atoms[atoms.length - 1] === '') reason = 'its last ":"-separated segment is empty';
+  else if (atoms.some(hasReservedProjectionComponent)) reason = 'it contains a reserved path segment';
   else if (/[\0/]/.test(name)) reason = 'it contains a NUL or "/" character';
   else if (atoms.some(a => Buffer.byteLength(a, 'utf8') > ROOT_LOC_ATOM_MAX_BYTES)) {
     reason = `a ":"-separated segment is longer than ${ROOT_LOC_ATOM_MAX_BYTES} bytes`;

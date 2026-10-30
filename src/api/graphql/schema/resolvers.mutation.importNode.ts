@@ -53,6 +53,7 @@ export interface ImportNodeInput {
   taskArgs?: Record<string, unknown> | null;
   /** App to run under — PK or URN. Falls back to the caller's active App (ctx.appId). */
   appRef?: string | null;
+  agentRef?: string | null;
 }
 
 export const importNodeMutations = {
@@ -116,7 +117,7 @@ export const importNodeMutations = {
     // run itself is minted after the write (it needs the stored node's URN).
     let taskRun: {
       entryNodeUrn: string;
-      app: { id: string; organizationId: string };
+      app: { id: string; organizationId: string; agentId: string | null };
       runAsSelf: boolean;
       importedMemoryUrn: string;
     } | null = null;
@@ -158,7 +159,7 @@ export const importNodeMutations = {
       // never leaves an orphaned imported node. The run is minted after the
       // write (it needs the stored node's URN) via mintManualRun — WITHOUT
       // re-running the gate. mintAppRun's dynamic quota check stays at mint time.
-      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf });
+      const app = await assertManualRunAllowed(ctx, { entryNodeUrn, appRef: runAppRef, runAsSelf, agentRef: input.agentRef });
       taskRun = { entryNodeUrn, app, runAsSelf, importedMemoryUrn: importedMemory.urn };
     }
 
