@@ -138,6 +138,19 @@ describe('#2790 tickDueAt: a TICK reason carries its own oldest unacknowledged t
     expect(iso(tickOf(disabled, t.id).tickDueAt)).toBe(want);
   });
 
+  it('two workers on one ticker with different acknowledgements each see their own oldest unacknowledged tick (Riana G4)', async () => {
+    const now = Date.now();
+    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: at(now - 3700 * SEC) }); // ticks 1..6 have fallen
+    await subscribe(t.id, liam.id);
+    await subscribe(t.id, rook.id);
+    await db.workerDeliveryTick.create({ data: { workerId: rook.id, tickerId: t.id, lastAckedTick: 3, ackedAt: at(now - DAY) } });
+    await say(channel, 'plain news');
+    const page = await due(ctx(manager.id));
+    const of = (id: string) => page.wakes.find((w: any) => w.worker.id === id);
+    expect(iso(tickOf(of(liam.id), t.id).tickDueAt)).toBe(at(now - 3700 * SEC + 600 * SEC).toISOString());
+    expect(iso(tickOf(of(rook.id), t.id).tickDueAt)).toBe(at(now - 3700 * SEC + 4 * 600 * SEC).toISOString());
+  });
+
   it('two tickers, A with an old unacknowledged tick and B with a fresh one: each shows its own; a TICK-only wake anchors on the smallest', async () => {
     const now = Date.now();
     const a = await mkTicker({ name: 'A', slug: `a-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: at(now - 3000 * SEC) });
