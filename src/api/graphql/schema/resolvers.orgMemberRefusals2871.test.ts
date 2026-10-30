@@ -84,7 +84,7 @@ describe('#2871 org-member refusals are typed', () => {
     expect(formatted.message).toBe('User is not a member of this organization');
   });
 
-  it('a caller whose admin role is revoked while queued gets no typed target miss', async () => {
+  it.each(['updateOrgMember', 'removeOrgMember'])('%s: a caller whose admin role is revoked while queued gets no typed target miss', async (mutation) => {
     // The typed NOT_FOUND must not be thrown before the caller's live authority
     // is re-established: otherwise a just-revoked admin learns that the target
     // is absent from the org.
@@ -107,7 +107,7 @@ describe('#2871 org-member refusals are typed', () => {
     await locked;
     let outcome: Promise<{ code?: string; message: string }> | undefined;
     try {
-      outcome = refusal(() => M.updateOrgMember(null, { orgId, userId: strangerId, role: 'READER' }, ctx(adminId)));
+      outcome = refusal(() => M[mutation](null, { orgId, userId: strangerId, role: 'READER' }, ctx(adminId)));
       await waitForLockWaiters(db, 1);
       release();
       await revoker;

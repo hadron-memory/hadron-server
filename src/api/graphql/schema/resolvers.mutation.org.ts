@@ -795,13 +795,16 @@ export const orgMutations = {
                 AND deleted_at IS NULL`;
             if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
             existingRole = rows[0]?.role ?? null;
-            if (!existingRole) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
             if (ctx.userId) {
               await tx.$queryRaw`
                 SELECT id FROM org_members
                 WHERE organization_id = ${resolvedOrgId} AND user_id = ${ctx.userId}
                   AND deleted_at IS NULL FOR SHARE`;
             }
+            // The typed miss comes only after the caller's locking read above:
+            // a caller revoked while queued must hit 40001 (then FORBIDDEN),
+            // never learn that the target is absent (#2871).
+            if (!existingRole) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
           },
           lockMode: 'exclusive',
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
