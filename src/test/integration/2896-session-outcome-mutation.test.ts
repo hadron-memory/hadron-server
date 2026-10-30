@@ -159,8 +159,10 @@ describe('recordSessionOutcome — the mutation', () => {
     const id = await mkSession(appA.id, owner.id);
     const old = new Date('2026-01-01T00:00:00Z');
     await db.$executeRaw`UPDATE sessions SET updated_at = ${old}, started_at = ${old} WHERE id = ${id}`;
+    const lapsed = (await row(id)).updatedAt?.getTime();
+    expect(lapsed).toBeLessThan(Date.now() - 86_400_000);
     await M.recordSessionOutcome({}, { sessionId: id, outcome: 0.5 }, asOwner());
-    expect((await row(id)).updatedAt.getTime()).toBe(old.getTime());
+    expect((await row(id)).updatedAt?.getTime()).toBe(lapsed);
   });
 });
 
@@ -200,7 +202,7 @@ describe('parity — the same inputs through the route and the mutation store th
     }
     // The refusals agree on WHICH refusal, mapped to each surface's shape.
     const target = await mkSession(appA.id, owner.id);
-    const pairs: [Promise<{ status: number }>, Promise<{ code: string }>, number, string][] = [
+    const pairs: [Promise<{ status: number; body: unknown }>, Promise<{ code: string }>, number, string][] = [
       [rest(target, ownerJwt, { outcome: 9 }), code(M.recordSessionOutcome({}, { sessionId: target, outcome: 9 }, asOwner())), 400, 'BAD_USER_INPUT'],
       [rest(target, strangerJwt), code(M.recordSessionOutcome({}, { sessionId: target, outcome: 0.8 }, asStranger())), 403, 'FORBIDDEN'],
       [rest('nope', ownerJwt), code(M.recordSessionOutcome({}, { sessionId: 'nope', outcome: 0.8 }, asOwner())), 404, 'BAD_USER_INPUT'],
