@@ -3388,13 +3388,12 @@ export const workerFieldResolvers = {
      * gate (owner / org READER), masked to null on deny: an AppMember who is
      * not an org member can read the Worker but must not reach App.keys /
      * App.members through it (the same #552 class as `agent` above).
-     * #1149: the App object is also WORKING STATE, so a profile or Details
-     * reader (an org READER who is not a participant) gets null here even
-     * though Query.app admits it. Both gates, because participation must not
-     * widen App.keys / App.members past Query.app's audience either.
+     * #1149: the Profile tier never widens this. Reached by naming one worker,
+     * Worker.app still answers only whoever Query.app admits, and the paths
+     * that returned it before (a session-nested Worker) are unchanged
+     * (cor:dmo:050:11, Vera's reading in team chat #53179).
      */
     app: async (worker: { appId: string }, _: unknown, ctx: Context) => {
-      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
       const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
       if (!app || app.deletedAt) return null;
       try {

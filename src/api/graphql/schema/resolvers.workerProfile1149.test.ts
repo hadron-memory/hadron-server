@@ -194,10 +194,15 @@ describe('#1149 Details tier: `agent` follows the cast Agent\'s own visibility',
     expect(r.data?.worker).toEqual({ promptOverride: null, heldByUserId: null, createdBy: null });
   });
 
-  it('nor the App object: `app` is working state, even though Query.app would admit this reader', async () => {
-    const r = await readWorker(teamDan.id, ctx(orgReader.id), 'name app { id name }');
-    expect(r.errors).toBeUndefined();
-    expect(r.data?.worker).toEqual({ name: 'Dan', app: null });
+  it('`app` keeps Query.app\'s own audience: the profile never widens it', async () => {
+    // The org READER may read the App through Query.app, so Worker.app answers it
+    // here as on the session-nested path (#980); the stranger, whom Query.app
+    // refuses, gets null although the profile admits it.
+    const asReader = await readWorker(teamDan.id, ctx(orgReader.id), 'name app { id name }');
+    expect(asReader.errors).toBeUndefined();
+    expect(asReader.data?.worker).toEqual({ name: 'Dan', app: { id: appA.id, name: 'Team' } });
+    const asStranger = await readWorker(teamDan.id, ctx(stranger.id), 'name app { id }');
+    expect(asStranger.data?.worker).toEqual({ name: 'Dan', app: null });
   });
 });
 
