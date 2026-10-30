@@ -68,14 +68,15 @@ describe('projection writer boundary', () => {
   });
 });
 
-it('writer refusal alone preserves the documented persistence limit', async () => {
+it('writer refusal alone preserves containment and root rollback', async () => {
   // This suppresses only input validation to isolate the filesystem fence; authorization gates remain live.
   const input = vi.spyOn(rootHelpers, 'assertMemoryRootLoc').mockImplementation(() => undefined);
   try {
     await expect(create('personal', '..:residue')).rejects.toThrow();
     expect(existsSync(resolve(projection.root, '..', 'residue'))).toBe(false);
-    // Transactional cleanup belongs to the separately tracked root-write rollback work.
-    expect(await db.memory.count()).toBe(1);
+    // Main now includes #2728: a root write refusal rolls the Memory transaction back.
+    expect(await db.memory.count()).toBe(0);
+    expect(await db.node.count()).toBe(0);
   } finally { input.mockRestore(); }
 });
 
