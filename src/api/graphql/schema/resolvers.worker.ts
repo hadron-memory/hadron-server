@@ -83,7 +83,6 @@ import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, provisionCastGrants, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
-import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import {
@@ -1923,9 +1922,9 @@ export const workerMutations = {
           extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE', workerId: worker.id },
         });
       }
-      for (const grantAgentId of provisionGrantsFor) {
-        if (freshApp.organizationId) await ensureAgentOrgGrant(tx, freshApp.organizationId, grantAgentId, { createdBy: ctx.userId ?? null });
-      }
+      // #2917: the plan above is a read made before this write, and the write is ON CONFLICT DO NOTHING, so a
+      // concurrent revoked row would leave it stale; provisionCastGrants judges the licence again (as the cast does).
+      await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
       try {
         await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
         await tx.worker.update({
