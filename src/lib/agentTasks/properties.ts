@@ -38,11 +38,12 @@ export const TASK_PROPERTIES_SCHEMA_MAX_BYTES = 64 * 1024;
 export const TASK_PROPERTIES_SCHEMA_MAX_DEPTH = 32;
 /**
  * Bounds on what validating may COST, not only on bytes (§10 P2-1 at b99c4fc1: a ref-free 64 KiB schema of ~60k nodes
- * cost ~1 s of event loop per write). A schema may hold this many objects and arrays, and a write is refused when
+ * cost ~1 s of event loop per write; at 1000 nodes / 2M pairs, ~480 ms per cached write, and enum leaves went uncounted).
+ * A schema may hold this many values, leaves included, and a write is refused when
  * schema nodes x value nodes passes the work budget. Team schemas run to tens of nodes; both bounds are far above that.
  */
-export const TASK_PROPERTIES_SCHEMA_MAX_NODES = 1000;
-export const TASK_PROPERTIES_VALIDATION_BUDGET = 2_000_000;
+export const TASK_PROPERTIES_SCHEMA_MAX_NODES = 500;
+export const TASK_PROPERTIES_VALIDATION_BUDGET = 200_000;
 
 /** Where the team's schema lives in the Team Agent's system memory; its `data` holds a JSON Schema (draft-07). */
 export const TASK_PROPERTIES_SCHEMA_LOC = 'schema:task-properties';
@@ -161,9 +162,9 @@ function schemaNodeCount(schema: object): number | null {
   const stack: Array<[unknown, number]> = [[schema, 1]];
   while (stack.length > 0) {
     const [node, depth] = stack.pop() as [unknown, number];
+    if (++nodes > TASK_PROPERTIES_SCHEMA_MAX_NODES) return null;
     if (node === null || typeof node !== 'object') continue;
     if (depth > TASK_PROPERTIES_SCHEMA_MAX_DEPTH) return null;
-    if (++nodes > TASK_PROPERTIES_SCHEMA_MAX_NODES) return null;
     if (!Array.isArray(node)) {
       const o = node as Record<string, unknown>;
       if (typeof o.pattern === 'string') return null;

@@ -371,17 +371,20 @@ describe('contract #2420', () => {
   });
 
   it('bounds what validating costs: a ref-free wide schema is unusable and a schema x value work budget refuses an oversized pair (§10 P2-1)', async () => {
-    // ~3,000 small nodes, about 50 KB: inside the byte and depth bounds, so only the node cap refuses it.
+    // ~3,000 small nodes (50 KB), and a 9,000-leaf enum (a handful of objects but many leaves): inside the byte and depth bounds, so only the node cap refuses them.
     const wide = { type: 'object', additionalProperties: { anyOf: Array.from({ length: 3000 }, () => ({ type: 'string' })) } };
+    const enumLeaves = { type: 'object', additionalProperties: { enum: Array.from({ length: 9000 }, (_, i) => i) } };
     const node = await putSchema({ type: 'object' });
+    await db.node.update({ where: { id: node.id }, data: { data: enumLeaves } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
     await db.node.update({ where: { id: node.id }, data: { data: wide } });
     const big: Record<string, number> = {};
     for (let i = 0; i < 800; i++) big[`k${i}`] = i;
     const started = Date.now();
     await expect(setProps(big)).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
     expect(Date.now() - started).toBeLessThan(500);
-    // Under the node cap but over the work budget: 900 schema nodes x a 2,500-node value.
-    const mid = { type: 'object', additionalProperties: { anyOf: Array.from({ length: 890 }, () => ({ type: 'string', minLength: 9 })) } };
+    // Under the node cap (~400 nodes) but over the work budget: x a ~2,400-node value.
+    const mid = { type: 'object', additionalProperties: { anyOf: Array.from({ length: 130 }, () => ({ type: 'string', minLength: 9 })) } };
     await db.node.update({ where: { id: node.id }, data: { data: mid } });
     await expect(setProps({ a: Array.from({ length: 2400 }, (_, i) => i % 10) })).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
   });
