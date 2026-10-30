@@ -108,7 +108,9 @@ test('ties keep first-occurrence order and bucketed names merge in the same plac
   assert.equal(JSON.stringify(await reduceText(JSON.stringify(snap), 5, { top: 2 })), JSON.stringify(legacyReduce(snap, { top: 2 })));
 });
 
-test('a multi-byte character split across Buffer chunks decodes as one character', async () => {
+// CTOR_NAME admits ASCII only, so a non-ASCII name buckets as '(other)' however its bytes decode; this pins that Buffer
+// input reduces the same as text, not the decoder itself.
+test('Buffer chunks that split a multi-byte character reduce the same as text', async () => {
   const snap = snapOf([['object', 8, 5], ['object', 21, 6], ['object', 9, 7]], NAME_POOL);
   const bytes = Buffer.from(JSON.stringify(snap), 'utf8');
   for (const size of [1, 2, 3, 5]) {
@@ -136,6 +138,22 @@ test('a snapshot longer than V8\'s string limit reduces from a stubbed reader', 
     rows: [{ type: 'string', name: '(string)', count: 1, selfSize: 400 }, { type: 'object', name: 'Map', count: 2, selfSize: 150 }],
   });
   assertReductionShape(r);
+}, 120_000);
+
+test('a constructor name longer than the string limit is bucketed without being held', async () => {
+  // Only the string-table entries named nodes point at are kept, and only up to a bound: this one would not fit in a
+  // JavaScript string, so it must be recognised as too long to publish while it is still streaming past.
+  const [before, after] = JSON.stringify(snapOf([['object', 0, 10], ['object', 1, 20]], ['Map', 'PLACEHOLDER'])).split('PLACEHOLDER');
+  const pad = 'N'.repeat(1 << 20);
+  let total = 0;
+  async function* reader() {
+    total += before.length; yield before;
+    for (let i = 0; i < 513; i++) { total += pad.length; yield pad; }
+    total += after.length; yield after;
+  }
+  const r = await reduceSnapshotStream(reader());
+  assert(total > V8_STRING_LIMIT);
+  assert.deepEqual(r.rows, [{ type: 'object', name: '(other)', count: 1, selfSize: 20 }, { type: 'object', name: 'Map', count: 1, selfSize: 10 }]);
 }, 120_000);
 
 test('a snapshot whose nodes come before their meta is refused, not misread', async () => {
