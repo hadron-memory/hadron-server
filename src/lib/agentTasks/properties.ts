@@ -29,6 +29,14 @@ export const TASK_PROPERTIES_MAX_BYTES = 16 * 1024;
  */
 export const TASK_PROPERTIES_MAX_DEPTH = 64;
 
+/**
+ * Bounds on the TEAM's schema (§10 review of #2877): it is authored by whoever writes the Team Agent's system memory
+ * or a base Agent's, and it runs synchronously on the shared event loop against a value the writer controls, so an
+ * unbounded schema is a way to freeze every tenant on the process.
+ */
+export const TASK_PROPERTIES_SCHEMA_MAX_BYTES = 64 * 1024;
+export const TASK_PROPERTIES_SCHEMA_MAX_DEPTH = 32;
+
 /** Where the team's schema lives in the Team Agent's system memory; its `data` holds a JSON Schema (draft-07). */
 export const TASK_PROPERTIES_SCHEMA_LOC = 'schema:task-properties';
 
@@ -104,19 +112,21 @@ export async function checkAgainstTeamSchema(
   });
   const schema = node && !node.memory.deletedAt ? node.data : null;
   if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) throw unusable();
+  if (!schemaIsUsable(schema)) throw unusable();
   let validate: ReturnType<Ajv['compile']>;
   try {
-    // One instance per check: Ajv caches every compiled schema object for the life of the instance.
-    validate = new Ajv({ strict: false, allErrors: false, logger: false }).compile(schema as object);
+    validate = compileSchema(schema);
   } catch {
     throw unusable();
   }
   if ((validate as { $async?: boolean }).$async) throw unusable();
   if (!validate(value)) {
+    // The path in the WRITER's own value and the failing keyword only: ajv's message would echo the schema's text
+    // (required names, enum values, limits) to a writer who may not be able to read the schema's memory.
     const first = validate.errors?.[0];
     throw refusal(
       'PROPERTIES_SCHEMA_VIOLATION',
-      `properties do not satisfy the team's ${TASK_PROPERTIES_SCHEMA_LOC}: ${first?.instancePath || '(root)'} ${first?.message ?? 'is invalid'}.`,
+      `properties do not satisfy the team's ${TASK_PROPERTIES_SCHEMA_LOC}: ${first?.instancePath || '(root)'} fails "${first?.keyword ?? 'schema'}".`,
     );
   }
 }
@@ -125,6 +135,44 @@ export async function checkAgainstTeamSchema(
  * The Team Agent's system memory. No Team Agent at all means no schema can exist. Two or more candidates is NOT "no
  * schema": the platform cannot tell which Agent's schema applies, so it refuses rather than skip the check.
  */
+/**
+ * Whether a schema is within bounds and free of regex keywords. Regular expressions are refused outright: `pattern`
+ * and `patternProperties` run the engine's backtracking RegExp, and a catastrophic pattern such as `^(a+)+$` takes
+ * seconds on a 28-character value and hours on a 40-character one, on the event loop every tenant shares. Walked
+ * without recursion so a deeply nested schema cannot overflow the stack. A property merely NAMED `pattern` is fine (its
+ * value is a sub-schema, not a string); one named `patternProperties` is refused with the keyword, fail-closed.
+ */
+function schemaIsUsable(schema: object): boolean {
+  const stack: Array<[unknown, number]> = [[schema, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop() as [unknown, number];
+    if (node === null || typeof node !== 'object') continue;
+    if (depth > TASK_PROPERTIES_SCHEMA_MAX_DEPTH) return false;
+    if (!Array.isArray(node)) {
+      const o = node as Record<string, unknown>;
+      if (typeof o.pattern === 'string') return false;
+      if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return false;
+    }
+    for (const child of Object.values(node)) stack.push([child, depth + 1]);
+  }
+  return Buffer.byteLength(canonicalJson(schema), 'utf8') <= TASK_PROPERTIES_SCHEMA_MAX_BYTES;
+}
+
+/** Compiled validators by the hash of their schema's canonical JSON, so a hot team schema compiles once. */
+const compiled = new Map<string, ReturnType<Ajv['compile']>>();
+const COMPILED_CAP = 32;
+
+function compileSchema(schema: object): ReturnType<Ajv['compile']> {
+  const key = createHash('sha256').update(canonicalJson(schema)).digest('hex');
+  const hit = compiled.get(key);
+  if (hit) return hit;
+  // One instance per schema: Ajv caches every compiled schema object for the life of the instance.
+  const validate = new Ajv({ strict: false, allErrors: false, logger: false }).compile(schema);
+  if (compiled.size >= COMPILED_CAP) compiled.delete(compiled.keys().next().value as string);
+  compiled.set(key, validate);
+  return validate;
+}
+
 async function teamSystemMemoryId(txCtx: Context, appId: string): Promise<string | null> {
   try {
     return (await locateTeamAgent(txCtx, appId, undefined)).systemMemoryId;

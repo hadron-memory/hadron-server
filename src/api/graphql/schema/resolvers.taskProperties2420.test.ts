@@ -343,15 +343,15 @@ describe('contract #2420', () => {
 
   it('a schema with a regex keyword is unusable, so a catastrophic pattern never runs on the shared event loop (§10 P1)', async () => {
     const hostile = 'a'.repeat(28) + '!';
+    const node = await putSchema({ type: 'object' });
     for (const schema of [
       { type: 'object', properties: { k: { type: 'string', pattern: '^(a+)+$' } } },
       { type: 'object', patternProperties: { '^(a+)+$': { type: 'string' } } },
     ]) {
-      const node = await putSchema(schema);
+      await db.node.update({ where: { id: node.id }, data: { data: schema } });
       const started = Date.now();
       await expect(setProps({ k: hostile })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
       expect(Date.now() - started).toBeLessThan(500);
-      await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
     }
   });
 
@@ -382,7 +382,7 @@ describe('contract #2420', () => {
   it('a violation names the path and keyword only, never the schema\'s own text (§10 P3-1)', async () => {
     await putSchema({ type: 'object', required: ['SECRET_FIELD_NAME'], properties: { tier: { enum: ['HIDDEN_A', 'HIDDEN_B'] } } });
     for (const bad of [{ other: 1 }, { SECRET_FIELD_NAME: 1, tier: 'x' }]) {
-      const err: any = await setProps(bad, assignee.id).catch((e) => e);
+      const err: any = await setProps(bad, assignee.id).catch((e: any) => e);
       expect(err.extensions.code).toBe('PROPERTIES_SCHEMA_VIOLATION');
       expect(err.message).not.toMatch(/SECRET_FIELD_NAME|HIDDEN_A|HIDDEN_B/);
     }
