@@ -124,6 +124,14 @@ describe('#2861 — org App: who sees the free-standing app memory', () => {
     expect(team.sources.map((s) => s.kind)).toEqual(['TEAM_SPACE']);
   });
 
+  it('a LEGACY (pre-#723, unkeyed, urn-recognised) team space keeps TEAM_SPACE only, never APP_MEMORY', async () => {
+    const legacy = await db.memory.create({ data: {
+      class: 'app', name: 'Legacy team', urn: `${org.urn}:app:alpha:shared`, organizationId: org.id, appId,
+    } });
+    const row = (await scope('member')).find((r) => r.memoryId === legacy.id);
+    expect(row?.sources.map((x) => x.kind)).toEqual(['TEAM_SPACE']);
+  });
+
   it('a worker\'s working memory is not a free-standing app memory (it stays out for a participant, and Tenant is in)', async () => {
     await appMemory('WorkerMem');
     await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: 'Iris', slug: 'iris', memoryId: mem.WorkerMem! } });

@@ -32,7 +32,7 @@ import {
 } from './resolvers.helpers.js';
 
 /** Why a memory is in an App's scope (cor:dmo:050:17). */
-export type AppMemorySourceKind = 'AGENT_SYSTEM' | 'AGENT_LINK' | 'INHERITED_BASE' | 'TEAM_SPACE';
+export type AppMemorySourceKind = 'AGENT_SYSTEM' | 'AGENT_LINK' | 'INHERITED_BASE' | 'TEAM_SPACE' | 'APP_MEMORY';
 export type AppMemorySource = { kind: AppMemorySourceKind; agentId: string | null };
 
 /** The caller's App memory scope, or null when nothing is in it. */
@@ -43,7 +43,7 @@ export type AppNodeScope = {
   sources: Map<string, AppMemorySource[]>;
 };
 
-const SOURCE_RANK: Record<AppMemorySourceKind, number> = { AGENT_SYSTEM: 0, AGENT_LINK: 1, INHERITED_BASE: 2, TEAM_SPACE: 3 };
+const SOURCE_RANK: Record<AppMemorySourceKind, number> = { AGENT_SYSTEM: 0, AGENT_LINK: 1, INHERITED_BASE: 2, TEAM_SPACE: 3, APP_MEMORY: 4 };
 
 /**
  * Admit the caller to an App's nodes and compute the memories they read.
@@ -161,9 +161,38 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
     ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
     : [];
 
+  // #2861 (cor:dmo:050:17, S6/S7) — the App's FREE-STANDING app memories: the
+  // rows `createAppMemory` makes (appId set, class 'app', no Agent link, not the
+  // team space). Same audience as the team space and the same condition, for the
+  // same reason: `participant`, never `orgAuthorized`, so a non-participant org
+  // READER keeps exactly the scope they have today. No new predicate: the nodes
+  // reach `appNodes` through this same scope, and the read gate is unchanged.
+  // Excluded by column (worker working memory, session memory, install memory,
+  // another App's rows by `appId`), by the team-space resolver (adopted AND
+  // legacy-by-URN rows, whose columns look the same), and by any live Agent link
+  // (that row is already an AGENT_LINK source, not a second kind).
+  const teamSpace = new Set(teamSpaceIds);
+  const appMemoryIds = participant
+    ? (await ctx.db.memory.findMany({
+        where: {
+          appId: resolvedAppId,
+          class: 'app',
+          deletedAt: null,
+          isInstallMemory: false,
+          installOfAgentId: null,
+          sharedMemoryOfAgentId: null,
+          userMemoryOfAgentId: null,
+          workerOf: { none: {} },
+          agentItems: { none: { deletedAt: null } },
+        },
+        select: { id: true },
+      })).map((m) => m.id).filter((id) => !teamSpace.has(id))
+    : [];
+  const appMemory = new Set(appMemoryIds);
+
   // Org readers retain the resolver's multi-Agent scope. Participants
   // outside that group receive the primary Agent fold used by MCP reads.
-  const candidateMemoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
+  const candidateMemoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds, ...appMemoryIds])];
 
   // Keep this App's memories only. An Agent installed in two Apps can link
   // memories scoped to each; the shared fold already applies this rule,
@@ -195,10 +224,10 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
     list.push(source);
     sources.set(memoryId, list);
   };
-  const teamSpace = new Set(teamSpaceIds);
   for (const { id } of scoped) {
     for (const p of provenance.get(id) ?? []) add(id, { kind: p.system ? 'AGENT_SYSTEM' : 'AGENT_LINK', agentId: p.agentId });
     if (teamSpace.has(id)) add(id, { kind: 'TEAM_SPACE', agentId: null });
+    if (appMemory.has(id)) add(id, { kind: 'APP_MEMORY', agentId: null });
   }
   // A base memory is listed only when at least one of its nodes is inherited
   // into the scope: a fully overridden base shows nothing on appNodes.

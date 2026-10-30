@@ -380,7 +380,7 @@ export const typeDefs = `#graphql
     memoryUrn: String!
     name: String!
     class: MemoryClass!
-    "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE), then by agent install order."
+    "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE, APP_MEMORY), then by agent install order."
     sources: [AppMemorySource!]!
     """
     Advisory: whether this caller, in this request's context, may create a node
@@ -397,7 +397,7 @@ export const typeDefs = `#graphql
   "#2190: one reason a memory is in an App's scope."
   type AppMemorySource {
     kind: AppMemorySourceKind!
-    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only: when it does not resolve to an Agent this caller may read, show the source kind without a name."
+    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE and APP_MEMORY. An id only: when it does not resolve to an Agent this caller may read, show the source kind without a name."
     agentId: ID
   }
 
@@ -410,6 +410,14 @@ export const typeDefs = `#graphql
     INHERITED_BASE
     "The App's own team space, listed for App participants only."
     TEAM_SPACE
+    """
+    One of the App's free-standing app memories: an app-class memory this App
+    holds that is not its team space and that no Agent links, such as
+    createAppMemory makes. Listed for App participants only; an org READER who
+    is not a participant gets neither the memory nor its nodes
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:17, hadron-server#2861).
+    """
+    APP_MEMORY
   }
 
   type AgentsPage {
