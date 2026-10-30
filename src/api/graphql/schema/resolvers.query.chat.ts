@@ -14,9 +14,14 @@ import {
   deriveChatTitle,
   isMemoryReadableCached,
 } from './resolvers.helpers.js';
+import { chatServedPromptsById } from './resolvers.servedPrompt.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 export const chatQueries = {
+    // #2862 (cor:agt:040:03): the record-only read by chat id, for the App manager the rule names. Self-authorizing and
+    // concealing exactly as `Chat.servedPrompts` is, because it IS that implementation; never a refusal, never a Chat.
+    chatServedPrompts: (_: unknown, { chatId, limit, offset }: { chatId: string; limit?: number | null; offset?: number | null }, ctx: Context) =>
+      chatServedPromptsById(chatId, { limit, offset }, ctx),
     myChats: async (
       _: unknown,
       { agentRef, limit, offset }: { agentRef: string; limit?: number; offset?: number },
