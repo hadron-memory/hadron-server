@@ -255,7 +255,7 @@ describe('connection management stays org-ADMIN', () => {
       await db.connectionGrant.create({
         data: { id: generateId(), connectionId, granteeAppId: app.id, grantedByUserId: owner.id, scopes: ['mail.read'] },
       });
-      const principal = { appId: app.id, roles: [] as string[] };
+      const principal: Partial<Context> = { appId: app.id, roles: [] };
 
       // Control: this exact principal is authorized for an operation through the grant, so the Delete denial
       // below cannot be a principal the gate refuses anyway.
