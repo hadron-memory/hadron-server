@@ -223,13 +223,27 @@ describe('#1346 anonymous encrypted promotion', () => {
 
 
   it.each([1500, 3000])('promotes %s live nodes without the default five-second transaction ceiling', async count => {
+    const fixtureStarted = performance.now();
     await db.node.createMany({ data: Array.from({ length: count - 1 }, (_, index) => ({
       id: generateId(), memoryId, loc: `capacity:${index}`, name: `Node ${index}`,
       content: `capacity content ${index}`, abstract: `capacity abstract ${index}`, data: { index },
     })) });
+    const fixtureMs = Math.round(performance.now() - fixtureStarted);
+    const complete = memoryMutations.encryptMemory;
+    let completionMs: number | null = null;
+    const completion = vi.spyOn(memoryMutations, 'encryptMemory').mockImplementation(async (...args) => {
+      const started = performance.now();
+      try { return await complete(...args); }
+      finally { completionMs = Math.round(performance.now() - started); }
+    });
     const started = performance.now();
-    await promote();
-    console.info(`#1346 ${count}-node promotion including completion: ${Math.round(performance.now() - started)}ms`);
+    try { await promote(); }
+    finally {
+      completion.mockRestore();
+      console.info(`#1346 ${count}-node promotion phases: ${JSON.stringify({
+        fixtureMs, promotionIncludingCompletionMs: Math.round(performance.now() - started), completionMs,
+      })}`);
+    }
     expect(await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).toMatchObject({
       isEncrypted: true, class: 'private', anonymousExpiresAt: null,
     });
