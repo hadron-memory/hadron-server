@@ -36,9 +36,13 @@ export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, li
       const raced = isSerializationFailure(err) || (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002');
       if (!raced) throw err;
       if (attempt >= MAX_ATTEMPTS) {
-        // Out of retries: only a COMMITTED open episode proves an alarm exists for this hour. Without one, the failure is
+        // Out of retries: only a COMMITTED, fresh open episode proves an alarm exists for this hour. Without one, the failure is
         // propagated (the post stays refused and unstored, and the caller sees an error, never a refusal with no alarm).
-        if (await db.postLimitEpisode.count({ where: { workerId, endedAt: null } }) > 0) return null;
+        // Fresh means opened within the hour on the DATABASE clock: a stale open episode is no proof this refusal has an alarm.
+        const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`
+          SELECT count(*) AS n FROM post_limit_episodes
+          WHERE worker_id = ${workerId} AND ended_at IS NULL AND opened_at + interval '1 hour' > (clock_timestamp() AT TIME ZONE 'UTC')`;
+        if (n > 0n) return null;
         console.error(JSON.stringify({ event: 'post_limit.alarm_not_raised', workerId, attempts: attempt }));
         throw err;
       }

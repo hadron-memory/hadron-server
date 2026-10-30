@@ -248,4 +248,15 @@ describe('#2014 the alarm', () => {
     try { expect(await raisePostLimitAlarm(db, liam.id, '10 per minute')).toBeNull(); } finally { spy.mockRestore(); }
     expect(await alarms()).toHaveLength(1);
   });
+
+  it('a STALE open episode (older than an hour) is no proof: an exhausted raise still propagates', async () => {
+    await post(liam, 10, 'a');
+    await workerSays(liam, 'x').catch(() => undefined);
+    await db.postLimitEpisode.updateMany({ data: { openedAt: new Date(Date.now() - 61 * MIN) } });
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((() =>
+      Promise.reject(new Prisma.PrismaClientKnownRequestError('could not serialize access', { code: 'P2034', clientVersion: 'test' }))) as any);
+    let err: unknown;
+    try { err = await raisePostLimitAlarm(db, liam.id, '10 per minute').catch((e) => e); } finally { spy.mockRestore(); }
+    expect(err).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+  });
 });
