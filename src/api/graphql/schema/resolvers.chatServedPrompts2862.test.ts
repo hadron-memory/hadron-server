@@ -79,6 +79,13 @@ describe('#2862 — Query.chatServedPrompts', () => {
     expect(p.total).toBe(3);
   });
 
+  it('an impersonating App manager gets an empty page on an App-backed chat, on the query and the field alike', async () => {
+    const imp = { impersonation: { sessionId: 'x' } as never };
+    expect(await query('manager', chatId, {}, imp)).toEqual(EMPTY);
+    expect(await field('manager', chatId, {}, imp)).toEqual(EMPTY);
+    expect((await query('manager')).total).toBe(3);
+  });
+
   it('the chat\'s end user who does not manage the App gets an empty page', async () => {
     expect(await query('enduser')).toEqual(EMPTY);
   });
