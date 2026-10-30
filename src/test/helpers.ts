@@ -603,5 +603,5 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   const id = generateId();
   const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
-  return { userId: user.id, appId, organizationId, roles: [] as string[] };
+  return { userId: user.id, appId, organizationId, roles: [] as Array<'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER'> };
 }
