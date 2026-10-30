@@ -8256,7 +8256,10 @@ export const typeDefs = `#graphql
 
     """
     Usage events (most recent first), optionally filtered by type, memoryId,
-    or nodeId.
+    nodeId, or time. since is inclusive and until is exclusive: since <= createdAt < until.
+    Bounds must be ISO date-times with Z or an explicit offset.
+    Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
+    Windowing does not change scope (hrn:node:hadronmemory.com:specs:cor:acl:090:01).
 
     Access control (#250): results are always scoped to memories the caller
     may read (org membership / subscriptions / public / owned personal+private
@@ -8288,12 +8291,16 @@ export const typeDefs = `#graphql
     nodeUsage(loc:) above — same match, same gate (PR-986 review, Codex P2).
     Mutually exclusive with nodeId (BAD_USER_INPUT when both are passed).
     """
-    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, limit: Int, offset: Int): [UsageEvent!]!
+    usageEvents(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): [UsageEvent!]!
     """
     #2212 - \`usageEvents\` as a page: the same READER gate, the same loc/nodeId rules and the same readable-memory
-    scope, ordered newest first with an id tiebreak, with the real total. Sizes as \`tickersPage\`.
+    scope, ordered newest first with an id tiebreak, with the windowed total.
+    since is inclusive and until is exclusive: since <= createdAt < until.
+    Bounds must be ISO date-times with Z or an explicit offset.
+    Either bound may be omitted; invalid bounds or since >= until are BAD_USER_INPUT.
+    hrn:node:hadronmemory.com:specs:cor:acl:090:01; paging: hrn:node:hadronmemory.com:specs:cor:api:120:04. Sizes as \`tickersPage\`.
     """
-    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, limit: Int, offset: Int): UsageEventPage!
+    usageEventsPage(type: String, memoryId: ID, nodeId: ID, loc: String, since: DateTime, until: DateTime, limit: Int, offset: Int): UsageEventPage!
 
     """
     Revision history for a node, most recent first.
