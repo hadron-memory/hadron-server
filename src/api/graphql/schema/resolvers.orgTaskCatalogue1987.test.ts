@@ -3,6 +3,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 
 // #1987 (R208 A, cor:api:060:04): the organisation's task catalogue (the org
 // Task Nodes page: findNodes with orgId + isRunnable, and the skill export of
@@ -57,6 +58,20 @@ describe('#1987 org task catalogue excludes App-memory tasks', () => {
   it.each(['owner', 'participant'])('%s: the predefined global view omits the App task too', async who => {
     const hits = await Q.findNodes({}, { scope: 'global', orgId, filter: { isRunnable: true } }, context(who));
     expect(locs(hits)).toEqual(['tasks:org-task']);
+  });
+
+  // The global view with NO explicit orgId resolves the org from the caller's
+  // single membership and materialises its memory list (LOCAL CR on aa658441).
+  it.each(['owner', 'participant'])('%s: global without orgId omits the App task (GraphQL)', async who => {
+    const hits = await Q.findNodes({}, { scope: 'global', filter: { isRunnable: true } }, context(who));
+    expect(locs(hits)).toEqual(['tasks:org-task']);
+  });
+
+  it.each(['owner', 'participant'])('%s: global without orgId omits the App task (MCP hadron_find_nodes)', async who => {
+    const srv = createTestableMcpServer({ ...context(who), clientId: `user:${users[who]}` });
+    const text = await srv.callToolText('hadron_find_nodes', { scope: 'global', isRunnable: true });
+    expect(text).toContain('tasks:org-task');
+    expect(text).not.toContain('tasks:app-task');
   });
 
   // No ruling covers org-scoped NON-runnable search (R208 A is the task
