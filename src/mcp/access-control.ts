@@ -111,6 +111,8 @@ export async function getAppMemoryAccess(
     callerUserId?: string | null;
     allAgents?: boolean;
     memberAdmitted?: boolean;
+    /** #1376: the principal is a bare App key (no user, not an AppRun): the Agent's items admit it nothing. */
+    credentialOnly?: boolean;
     /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
     provenance?: Map<string, AgentProvenance[]>;
   } = {},
@@ -171,6 +173,8 @@ export async function getAppMemoryAccess(
   for (const install of app.appAgents) {
     const agentAccess = getPrimaryAgentAccess(
       { ...app, appAgents: [install] }, licensedAgentIds, liveSystemIds,
+      // #1376 (R201): an item is a limit, never a grant, so a credential-only principal gets none of its Agent's items.
+      !opts.credentialOnly,
     );
     for (const [memoryId, level] of agentAccess) {
       if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
@@ -354,6 +358,8 @@ function getPrimaryAgentAccess(
   app: AppAccessRow,
   licensedAgentIds: ReadonlySet<string>,
   liveSystemIds: ReadonlySet<string>,
+  /** False for a credential-only principal (#1376): the Agent's own system memory folds, its items do not. */
+  itemsAdmitted: boolean,
 ): Map<string, string> {
   const primary = app.appAgents[0]?.agent ?? null;
   if (!primary || primary.deletedAt) return new Map();
@@ -380,7 +386,7 @@ function getPrimaryAgentAccess(
   const systemMemoryId = foreignUserOwned(primary.ownerUserId) ||
     !primary.systemMemoryId || !liveSystemIds.has(primary.systemMemoryId)
     ? null : primary.systemMemoryId;
-  const memoryItems = primary.memoryItems
+  const memoryItems = (itemsAdmitted ? primary.memoryItems : [])
     .filter((item) => item.memory != null &&
       // Personal/private rows remain candidates for appNodes' per-memory
       // owner + subscription gate; legacy knowledge/app holdings never do.
@@ -470,6 +476,9 @@ export async function getPrincipalAppMemoryAccess(
         includeTeamSpace: !sessionIsolated,
         callerUserId: principal.userId ?? null,
         memberAdmitted: !principal.impersonation,
+        // An AppRun with no on-behalf-of user is also userless but is the App acting, not a credential: its reach
+        // keeps the fold until explicit App authority exists for unattended runs (#1376, tracked in the PR body).
+        credentialOnly: !principal.userId && !isRunPrincipal(principal),
       }),
     });
   } else if (principal.userId) {
