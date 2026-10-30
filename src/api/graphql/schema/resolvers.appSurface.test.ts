@@ -545,7 +545,7 @@ describe('memories — App-key orgId', () => {
       data: {
         id: generateId(), organizationId: orgId, appId: appA.id,
         urn: `${orgId}:memory-list-internal`, name: 'A internal',
-        class: 'knowledge', visibility: 'ORGANIZATION',
+        class: 'knowledge', visibility: 'PUBLIC', // #1376: PUBLIC is what a bare key keeps through an item
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: internal.id, role: 'read' } });
@@ -572,7 +572,7 @@ describe('memories — App-key orgId', () => {
       data: {
         id: generateId(), organizationId: orgId, appId: app.id,
         urn: `${orgId}:mm-appkey-own`, name: 'own app memory',
-        class: 'knowledge', visibility: 'ORGANIZATION',
+        class: 'knowledge', visibility: 'PUBLIC', // #1376: PUBLIC is what a bare key keeps through an item
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: own.id, role: 'read' } });

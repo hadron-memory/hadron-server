@@ -14,7 +14,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
-import { getPrincipalAppMemoryAccess } from '../../mcp/access-control.js';
+import { getMemoryAccess, getPrincipalAppMemoryAccess } from '../../mcp/access-control.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -156,7 +156,7 @@ describe('#1376 — a userless App key is not admitted by its Agent’s item', (
 });
 
 describe('#1376 — what a bare key keeps', () => {
-  it('its own App’s scoped knowledge, read-only: the App’s own memory, not a grant from outside it', async () => {
+  it('its own App’s scoped knowledge is NOT kept through an item: the read would exist only because of the item (Riana, P2 2)', async () => {
     const { app, rawKey } = await createDbAppWithKey(db, `own-${generateId()}`, homeOrgId);
     const agent = await db.agent.create({ data: { id: generateId(), organizationId: homeOrgId, name: 'own', urn: `ag-own-${generateId()}` } as never });
     await createDbAppAgent(db, app.id, agent.id);
@@ -165,8 +165,20 @@ describe('#1376 — what a bare key keeps', () => {
     });
     const node = await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'OWN SCOPED' } });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: scoped.id, role: 'read-write' } });
-    expect((await gql(rawKey, READ, { r: node.id })).data?.node?.content).toBe('OWN SCOPED');
-    expect((await getPrincipalAppMemoryAccess(db, { appId: app.id })).get(scoped.id)).toBe('READ_ONLY');
+    expect((await gql(rawKey, READ, { r: node.id })).data?.node?.content ?? null).toBeNull();
+    expect((await getPrincipalAppMemoryAccess(db, { appId: app.id })).has(scoped.id)).toBe(false);
+  });
+
+  it('a session-bound bare key does not reach item-linked org knowledge either (Dara, P2)', async () => {
+    const { appId, agentId, appKey } = await link('homeOrg', 'read-write');
+    const session = await db.session.create({ data: { id: generateId(), appId, agentId, memoryId: mem.homeOrg!.id } as never });
+    expect((await getMemoryAccess(db, { appId, sessionId: session.id } as never)).has(mem.homeOrg!.id)).toBe(false);
+    const response = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${appKey}`, 'x-hadron-session': session.id },
+      body: JSON.stringify({ query: READ, variables: { r: mem.homeOrg!.nodeId } }),
+    });
+    expect(((await response.json()) as Gql).data?.node?.content ?? null).toBeNull();
   });
 });
 

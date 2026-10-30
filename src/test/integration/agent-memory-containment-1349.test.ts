@@ -291,7 +291,8 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
   });
 
   it('session scope: a session naming a foreign ORG memory through its agent link admits nothing', async () => {
-    for (const [target, admitted] of [['foreignOrg', false], ['homeOrg', true]] as const) {
+    for (const [target, admitted] of [['foreignOrg', false], ['homeOrg', false]] as const) {
+      // #1376: every caller is a userless key, for which an item never admits (Dara, P2)
       const { appId, agentId } = await legacyLink(target, 'read-write');
       const session = await db.session.create({
         data: { id: generateId(), appId, agentId, memoryId: mem[target]!.id } as never,
@@ -317,6 +318,15 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
     expect(response.errors, JSON.stringify(response)).toBeDefined();
     expect(await db.node.count({ where: { memoryId: mem.foreignPersonal!.id } })).toBe(before);
+  });
+
+  it('#1376 legacy startChat: a bare key writes nothing into org knowledge through a read-write item (Riana, P2 1)', async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const before = await db.node.count({ where: { memoryId: mem.homeOrg!.id } });
+    const response = await gql(link.appKey, 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', { agent: link.agentId });
+    expect(response.errors, JSON.stringify(response)).toBeDefined();
+    expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
   });
 
   it("asset upload target: never another user's personal memory through a read-write link", async () => {
@@ -386,7 +396,7 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
 });
 
 describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's control; the exception stays Proposed)", () => {
-  it('an App-scoped memory of App X, linked to an agent: X reads it as before; another App installing the agent does not', async () => {
+  it('an App-scoped memory of App X, linked to an agent: a bare key X no longer reads it (#1376); another App installing the agent does not', async () => {
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: homeOrgId, name: 'same-app', urn: `ag-same-app-${suffix}` } as never,
     });
@@ -402,7 +412,8 @@ describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's contro
     });
     const node = await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'X SCOPED' } });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: scoped.id, role: 'read' } });
-    expect((await gql(x.rawKey, READ, { r: node.id })).data?.node?.content).toBe('X SCOPED');
+    // #1376: a bare key no longer reads its own App-scoped memory through an item (Riana, P2 2)
+    expect((await gql(x.rawKey, READ, { r: node.id })).data?.node ?? null).toBeNull();
     expect((await gql(y.rawKey, READ, { r: node.id })).data?.node ?? null).toBeNull();
   });
 });

@@ -1090,7 +1090,8 @@ describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
     expect(await db.agentMemoryItem.findFirst({ where: { agentId: secondAgentId, memoryId: mem.appX!.id }, select: { role: true } }))
       .toEqual({ role: 'read' });
-    expect(await readsContent(appXKey, 'appX')).toBe('APP X KNOWLEDGE');
+    // #1376: the attach is no read grant to a bare key; the link row above is the proof.
+    expect(await readsContent(appXKey, 'appX')).toBeNull();
   });
 
   it('does not treat a creator-scoped legacy holding as App knowledge', async () => {
@@ -1906,7 +1907,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     const memoryUrn = created.data!.createMemoryInApp.urn as string;
     const node = await db.node.findFirstOrThrow({ where: { memoryId } });
     await db.node.update({ where: { id: node.id }, data: { content: 'CROSS ORG RUNBOOK' } });
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 
     const unrelated = await db.agent.create({
       data: { id: generateId(), organizationId: victimOrgId, name: 'uninstalled foreign', urn: `victim-${suffix}:uninstalled-foreign` } as never,
@@ -1916,7 +1917,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect(touch.errors, JSON.stringify(touch.errors)).toBeUndefined();
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).toBeNull();
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: unrelated.id, memoryId } })).deletedAt).not.toBeNull();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 
     // Both grants belong to the caller: App admin and foreign Agent admin.
     const both = await db.user.create({ data: { id: generateId(), handle: `both-${suffix}` } });
@@ -1930,7 +1931,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect((await gql(appKey, READ, { r: node.id })).data?.node).toBeNull();
     const restored = await gql(bothKey, ATTACH, { g: agent.id, m: memoryUrn, r: 'read' });
     expect(restored.errors, JSON.stringify(restored.errors)).toBeUndefined();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 
     // The old owner-change route must refuse this App-scoped memory. The
     // dedicated transfer path reports the App scope as a dependent blocker.
@@ -1940,7 +1941,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId).toBe(attackerOrgId);
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).toBeNull();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
   });
 
   it('keeps a user-owned App link only while its foreign Agent subscription is live', async () => {
