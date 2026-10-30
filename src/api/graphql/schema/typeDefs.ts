@@ -9882,6 +9882,17 @@ export const typeDefs = `#graphql
     """
     subscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
 
+    """
+    #2096 — apply the Agent's current ticker templates to ONE existing worker (the repair for workers cast before the
+    templates existed; hrn:node:hadronmemory.com:specs:cor:agt:080:33, :20). Whoever manages the App, acting as themselves:
+    not the worker, not its holder as such, not a reportsTo chain. Creates only the template tickers the worker is missing,
+    each owned by and subscribed to it, and never edits or deletes any existing ticker or subscription; a template the
+    worker already has a live ticker for is reported under alreadyPresent and left as it is. A template below the App's
+    cadence floor is created at the floor; if the App's live-ticker cap cannot take every missing ticker, or a generated
+    name is already a live ticker's, the whole call is refused and nothing is created. Never automatic, never across workers.
+    """
+    applyAgentTickerTemplates(workerRef: String!): ApplyAgentTickerTemplatesResult!
+
     "#1747 — end a worker subscription. The same callers as subscribeWorker, and the worker itself, always."
     unsubscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
 
@@ -13924,6 +13935,29 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     endedAt: DateTime
     endedReason: TickerSubscriptionEndReason
+  }
+
+  """
+  #2096 — a template as the apply operation reports it: its id and name only. Deliberately NOT AgentTickerTemplate:
+  that type's agent field default-resolves the whole Agent, and whoever manages an App need not be able to read
+  the Agent it installed (the same reason ReleasedFromUser is not User, hrn:node:hadronmemory.com:specs:cor:acl:110:01).
+  """
+  type AppliedTickerTemplate {
+    id: ID!
+    name: String!
+  }
+
+  "#2096 — one ticker an apply created, with the template it came from and its effective cadence (the App's floor may have raised it, R92)."
+  type AppliedTickerTemplateTicker {
+    ticker: Ticker!
+    template: AppliedTickerTemplate!
+    effectiveCadenceSeconds: Int!
+  }
+
+  "#2096 — what applyAgentTickerTemplates did: what it created, and the templates the worker already had (a second call is a visible no-op)."
+  type ApplyAgentTickerTemplatesResult {
+    created: [AppliedTickerTemplateTicker!]!
+    alreadyPresent: [AppliedTickerTemplate!]!
   }
 
   type SubscribeResult {
