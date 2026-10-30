@@ -3,6 +3,7 @@ import { RegisterLookup } from '../actionRegister/lookup.js';
 import { renderTickText } from './tickActions.js';
 import * as effectiveMemory from '../effectiveSystemMemory.js';
 import { acknowledgeWakes } from './acknowledge.js';
+import * as memoryGate from '../../mcp/access-control.js';
 import { db } from '../../integrations/db/client.js';
 import { tickFixture2733, tickNow2733, tickTaskLoc2733 } from '../../test/tickRegister2733.js';
 import { computeDueWakes } from './dueWakes.js';
@@ -91,6 +92,8 @@ it('never falls through an unreadable nearest role task to a readable base', asy
 });
 
 it('re-gates stored mapped answers for a manager who cannot read the task', async () => {
+  // The holder keeps its independent org grant when the App install is removed; only the reader loses access.
+  await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.member.id, role: 'ADMIN' } });
   await f.entry('tick.shared');
   await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
   await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
@@ -248,7 +251,7 @@ it('does not erase the issued answer when a later reader gate fails transiently'
 it('bounds a slow lookup with the real PostgreSQL statement timeout and keeps the wake', async () => {
   const { w } = await subscribed();
   vi.spyOn(RegisterLookup.prototype, 'entry').mockImplementation(async function(this: RegisterLookup) {
-    await this.tx.$queryRawUnsafe('SELECT pg_sleep(0.4)');
+    await this.tx.$queryRawUnsafe('SELECT 1 AS ok FROM pg_sleep(0.4)');
     return { state: 'UNMAPPED', checkedMemoryIds: [] };
   });
   const out = await due();
@@ -273,4 +276,16 @@ it('never consults another tenant register or this App install memory', async ()
   expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'UNMAPPED' });
   expect(JSON.stringify(out)).not.toContain('tasks:other-tenant');
   expect(JSON.stringify(out)).not.toContain('tasks:install-only');
+});
+
+it('withholds an unresolved loc when the current reader cannot read the entry', async () => {
+  await f.entry('tick.shared');
+  const { w } = await subscribed();
+  expect(action(await due(), w.id)).toEqual({ code: 'tick.shared', state: 'UNRESOLVED', taskLoc: tickTaskLoc2733 });
+  await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
+  const original = memoryGate.canReadMemory;
+  vi.spyOn(memoryGate, 'canReadMemory').mockImplementation((client, auth, id, opts) => auth.userId === f.outside.id && id === f.team.systemMemoryId ? Promise.resolve(false) : original(client, auth, id, opts));
+  const out = await computeDueWakes({ ctx: f.context(f.outside.id), app: f.app, reader: { manager: true, userId: f.outside.id }, requester: { userId: f.outside.id }, now: tickNow2733 });
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  expect(JSON.stringify(out)).not.toContain(tickTaskLoc2733);
 });

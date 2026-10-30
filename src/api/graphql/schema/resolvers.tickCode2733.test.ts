@@ -1,8 +1,10 @@
 import { ApolloServer } from '@apollo/server';
-import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
+import { emitTaskWarnings, flushTaskWarningHistory } from './resolvers.taskWarnings.js';
 import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { generateId } from '../../../lib/id.js';
+import * as memoryGate from '../../../mcp/access-control.js';
 import { db } from '../../../integrations/db/client.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -13,6 +15,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const M = resolvers.Mutation as any;
 const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
+beforeAll(() => server.start());
 afterAll(() => server.stop());
 let f: Awaited<ReturnType<typeof tickFixture2733>>;
 beforeEach(async () => { f = await tickFixture2733(); });
@@ -63,7 +66,10 @@ it('keeps template codes on generated copies across rename and deletion', async 
   const out = await wire('query($agent: String!) { agentTickerTemplates(agentRef: $agent) { id tickCode } }', { agent: f.roleA.id });
   expect(out.errors).toBeUndefined();
   expect((out.data?.agentTickerTemplates as any[])[0].tickCode).toBe('tick.next-tick');
+  const runtimeCodes = () => wire('query($app: String!) { tickers(appRef: $app) { tickCode } }', { app: f.app.id });
+  expect((await runtimeCodes()).data?.tickers).toEqual([{ tickCode: 'tick.shared-tick' }, { tickCode: 'tick.shared-tick' }]);
   await M.deleteAgentTickerTemplate({}, { id: template.id, expectedRevision: changed.revision }, f.context());
+  expect((await runtimeCodes()).data?.tickers).toEqual([{ tickCode: 'tick.shared-tick' }, { tickCode: 'tick.shared-tick' }]);
   expect((await db.ticker.findMany({ where: { sourceTemplateId: template.id } })).map(t => (t as any).tickCode)).toEqual(['tick.shared-tick', 'tick.shared-tick']);
 });
 
@@ -107,6 +113,9 @@ it.each(['zero', 'two'])('warns when there are %s Team Agents', async mode => {
 
 it('files no warning on a refused create or any update', async () => {
   const t = await f.ticker('Engineering');
+  const refusedCtx = f.context();
+  await expect(f.ticker('Engineering', {}, refusedCtx)).rejects.toMatchObject({ extensions: { code: 'TICKER_NAME_TAKEN' } });
+  expect(refusedCtx.taskWarnings ?? []).toEqual([]);
   const refused = await wire('mutation($app: String!) { createTicker(appRef: $app, input: { name: "Engineering", cadenceSeconds: 600 }) { id } }', { app: f.app.id });
   expect(refused.errors?.[0].extensions?.code).toBe('TICKER_NAME_TAKEN');
   expect((refused.extensions as any)?.warnings).toBeUndefined();
@@ -159,4 +168,36 @@ it('App-key routers see only readable guidance through the real schema', async (
   for (const wake of (denied.data?.dueWakes as any).wakes) expect(wake.reasons[0].action).toEqual({ code: 'tick.shared', state: 'WITHHELD', taskLoc: null, taskUrn: null });
   expect(JSON.stringify(denied)).not.toContain(tickTaskLoc2733);
   expect(JSON.stringify(denied)).not.toContain(f.roleA.memory.urn);
+});
+
+it('an unreadable entry produces the same fixed warning and null ticker loc as absence', async () => {
+  await f.entry('tick.hidden');
+  const original = memoryGate.canReadMemory;
+  vi.spyOn(memoryGate, 'canReadMemory').mockImplementation((client, auth, id, opts) => id === f.team.systemMemoryId ? Promise.resolve(false) : original(client, auth, id, opts));
+  const query = 'mutation($app: String!) { createTicker(appRef: $app, input: { name: "Hidden", cadenceSeconds: 600 }) { tickCode registerTaskLoc } }';
+  const out = await wire(query, { app: f.app.id });
+  expect(out.errors).toBeUndefined();
+  expect(out.data?.createTicker).toEqual({ tickCode: 'tick.hidden', registerTaskLoc: null });
+  expect((out.extensions as any)?.warnings).toEqual([{ path: 'createTicker', code: 'ticker.code.unmapped', text: "No register entry you can read maps this ticker's code to a task, so its wakes will say no task is mapped." }]);
+});
+
+it('non-TICK reasons expose null action and a task-only wake has null tickText through GraphQL', async () => {
+  const w = await f.worker('Alpha');
+  const task = await db.agentTask.create({ data: { appId: f.app.id, title: 'Assigned task', ownerUserId: f.admin.id, assigneeWorkerId: w.id, assignedAt: new Date() } });
+  await db.agentTeamEvent.create({ data: { appId: f.app.id, taskId: task.id, type: 'task.assigned', subjectWorkerId: w.id, actorUserId: f.admin.id } });
+  const out = await wire('query($app: String!) { dueWakes(appRef: $app) { wakes { tickText reasons { kind action { code state } } } } }', { app: f.app.id });
+  expect(out.errors).toBeUndefined();
+  const wakes = (out.data?.dueWakes as any).wakes;
+  expect(wakes).toHaveLength(1);
+  expect(wakes[0].tickText).toBeNull();
+  expect(wakes[0].reasons).toEqual([{ kind: 'TASK', action: null }]);
+});
+
+it('excludes ticker warnings from task history even if a caller erroneously associates a task', async () => {
+  const task = await db.agentTask.create({ data: { appId: f.app.id, title: 'Existing task', ownerUserId: f.admin.id } });
+  const c = f.context();
+  await emitTaskWarnings(c, undefined, f.app.id, { codes: ['ticker.code.unmapped'], taskId: task.id });
+  expect(c.taskWarningHistory ?? []).toEqual([]);
+  await flushTaskWarningHistory(c);
+  expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'task.warning' } })).toBe(0);
 });
