@@ -121,6 +121,23 @@ describe('#2790 tickDueAt: a TICK reason carries its own oldest unacknowledged t
     expect(w.reasons.find((r: any) => r.kind === 'MENTION').tickDueAt).toBeNull();
   });
 
+  it('a re-handed TICK reason keeps its tickDueAt after the subscription ends, or the ticker is disabled (Diego P2-1)', async () => {
+    const anchor = Date.now() - 1000 * SEC;
+    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: at(anchor) });
+    await subscribe(t.id, liam.id);
+    await say(channel, 'old news for you', mention('liam'));
+    const first = (await due(ctx(manager.id))).wakes[0];
+    const want = at(anchor + 600 * SEC).toISOString();
+    expect(iso(tickOf(first, t.id).tickDueAt)).toBe(want);
+    await M.unsubscribeWorker({}, { tickerRef: t.id, workerRef: liam.id }, ctx(manager.id));
+    const ended = (await due(ctx(manager.id))).wakes[0];
+    expect(ended.reasons.map((r: any) => r.kind).sort()).toEqual(['MENTION', 'TICK']);
+    expect(iso(tickOf(ended, t.id).tickDueAt)).toBe(want);
+    await db.ticker.update({ where: { id: t.id }, data: { enabled: false } });
+    const disabled = (await due(ctx(manager.id))).wakes[0];
+    expect(iso(tickOf(disabled, t.id).tickDueAt)).toBe(want);
+  });
+
   it('two tickers, A with an old unacknowledged tick and B with a fresh one: each shows its own; a TICK-only wake anchors on the smallest', async () => {
     const now = Date.now();
     const a = await mkTicker({ name: 'A', slug: `a-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: at(now - 3000 * SEC) });
