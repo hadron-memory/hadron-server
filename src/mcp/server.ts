@@ -3693,7 +3693,7 @@ export function createMcpServerInstance(
   server.tool('hadron_list_recovery_nodes', 'List retained deleted nodes in one live memory that you can read and write. Ordinary reads return live nodes only.',
     recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryNodes({}, args, recoveryCtx())))));
   server.tool('hadron_list_recovery_edges', 'Inspect live edges and accessible deleted endpoints in one memory that you can read and write. Unavailable endpoints are excluded from the page and total.',
-    recoveryPageArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
+    recoveryEdgesArgs, async (args) => recoveryCall(async () => textResult(JSON.stringify(await resolvers.Query.recoveryEdges({}, args, recoveryCtx())))));
   server.tool('hadron_get_recovery_node', 'Read retained deleted-node content in a live memory that you can read and write. Returns the stored body without expanding templates or includes.',
     SHAPE_HADRON_GET_RECOVERY_NODE, async (args) => recoveryCall(async () => {
       const ctx = recoveryCtx();
@@ -12347,6 +12347,11 @@ const recoveryPageArgs = {
   memoryRef: z.string().describe('One live memory ID or qualified URN.'),
   limit: z.number().int().nullable().optional().describe('Default 20 (also null), maximum 200; use total to fetch remaining pages.'),
   offset: z.number().int().nullable().optional().describe('Page offset, default 0.'),
+};
+
+const recoveryEdgesArgs = {
+  ...recoveryPageArgs,
+  edgeIds: z.array(z.string()).nullable().optional().describe('Restrict the result, total included, to these edge ids (1 to 200). An id that is not a visible edge of this memory is absent.'),
 };
 
 const governedDoorArgs = {
