@@ -90,6 +90,7 @@ export class GeneratedTickerNameTakenError extends Error {
 /** One planned ticker of a cast: what the template asks for and what the App's floor makes of it (R92). */
 export type PlannedTicker = {
   templateId: string;
+  templateName: string;
   templateRevision: number;
   tickCode: string;
   name: string;
@@ -110,15 +111,19 @@ export type PlannedTicker = {
  * Reasons are not re-validated here: a template is validated when written and the CHECK keeps it so.
  */
 export async function planGeneratedTickers(
-  tx: Prisma.TransactionClient, args: { appId: string; agentId: string; workerName: string },
+  tx: Prisma.TransactionClient, args: { appId: string; agentId: string; workerName: string; onlyTemplateIds?: ReadonlySet<string> },
 ): Promise<PlannedTicker[]> {
-  const templates = await liveTemplates(tx, args.agentId);
+  // `onlyTemplateIds` is #2096's apply: plan, cap arithmetic and name checks then cover just the missing templates.
+  // Omitted (every cast and the preview), it is the whole live set, exactly as before.
+  const all = await liveTemplates(tx, args.agentId);
+  const templates = args.onlyTemplateIds ? all.filter((t) => args.onlyTemplateIds!.has(t.id)) : all;
   if (templates.length === 0) return [];
   const settings = await tx.app.findUniqueOrThrow({ where: { id: args.appId }, select: { tickerMinCadenceSeconds: true, tickerLiveCap: true } });
   const live = await tx.ticker.count({ where: { appId: args.appId, deletedAt: null } });
   if (live + templates.length > settings.tickerLiveCap) throw new GeneratedTickerLimitError(live, templates.length, settings.tickerLiveCap);
   const plans = templates.map((t) => ({
     templateId: t.id,
+    templateName: t.name,
     templateRevision: t.revision,
     tickCode: templateTickCode(t.name),
     name: generatedTickerName(t.name, args.workerName),
@@ -170,9 +175,17 @@ export async function instantiateAgentTickerTemplates(
     WHERE aa.app_id = ${args.appId} AND aa.agent_id = ${args.agentId} AND a.deleted_at IS NULL FOR SHARE OF aa, a`;
   if (installed.length === 0) throw new GeneratedAgentNotInstalledError(args.appId);
   const plans = await planGeneratedTickers(tx, { appId: args.appId, agentId: args.agentId, workerName: args.worker.name });
+  return writeGeneratedTickers(tx, { appId: args.appId, worker: args.worker, createdBy: args.createdBy, plans });
+}
+
+/** Write the planned tickers (each owned by the worker, with its subscription) in the caller's transaction. */
+async function writeGeneratedTickers(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; worker: { id: string; name: string }; createdBy: string | null; plans: PlannedTicker[] },
+): Promise<Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }>> {
   const actor = currentActor();
   const made: Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }> = [];
-  for (const plan of plans) {
+  for (const plan of args.plans) {
     const slug = await nextFreeTickerSlug(tx, args.appId, plan.name);
     const stamp = {
       createdBy: args.createdBy, createdByWorkerId: actor.workerId, createdByAgentId: actor.agentId,
@@ -199,6 +212,36 @@ export async function instantiateAgentTickerTemplates(
     made.push({ tickerId: ticker.id, subscriptionId: subscription.id, plan });
   }
   return made;
+}
+
+/**
+ * #2096 (R97 B): apply the Agent's CURRENT templates to a worker that already exists, creating only the template
+ * tickers it is missing. The caller (a manager-run mutation) holds the App ticker lock and the worker row FOR SHARE
+ * and has re-read the worker's liveness. Here: the Agent's template set (shared), the installation re-check, then
+ * the idempotence read (a LIVE ticker with this worker + template is present and is never edited, whatever its
+ * revision or cadence), and the same plan and write a cast uses, restricted to the missing templates, so the R92
+ * clamp and the aggregate cap hold for the call as a whole and any refusal rolls the caller's transaction back.
+ */
+export async function applyAgentTickerTemplates(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; agentId: string; worker: { id: string; name: string }; createdBy: string | null },
+): Promise<{ created: Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }>; alreadyPresent: TemplateRow[] }> {
+  await lockAgentTemplates(tx, args.agentId, 'shared');
+  const installed = await tx.$queryRaw<Array<{ ok: number }>>`
+    SELECT 1 AS ok FROM app_agents aa JOIN agents a ON a.id = aa.agent_id
+    WHERE aa.app_id = ${args.appId} AND aa.agent_id = ${args.agentId} AND a.deleted_at IS NULL FOR SHARE OF aa, a`;
+  if (installed.length === 0) throw new GeneratedAgentNotInstalledError(args.appId);
+  const templates = await liveTemplates(tx, args.agentId);
+  const have = new Set(
+    (await tx.ticker.findMany({
+      where: { generatedForWorkerId: args.worker.id, deletedAt: null, sourceTemplateId: { in: templates.map((t) => t.id) } },
+      select: { sourceTemplateId: true },
+    })).map((t) => t.sourceTemplateId),
+  );
+  const missing = new Set(templates.filter((t) => !have.has(t.id)).map((t) => t.id));
+  const plans = await planGeneratedTickers(tx, { appId: args.appId, agentId: args.agentId, workerName: args.worker.name, onlyTemplateIds: missing });
+  const created = await writeGeneratedTickers(tx, { appId: args.appId, worker: args.worker, createdBy: args.createdBy, plans });
+  return { created, alreadyPresent: templates.filter((t) => have.has(t.id)) };
 }
 
 /**
