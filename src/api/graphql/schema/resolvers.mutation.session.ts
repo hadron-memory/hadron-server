@@ -98,7 +98,6 @@ import {
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { recordSessionOutcome as recordOutcome } from '../../../lib/sessionOutcome.js';
-import { oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
 import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
 import {
   consumeResumeClaim,
@@ -115,6 +114,24 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
+import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
+import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { getProjectBaseUrl } from '../../../lib/baseUrl.js';
+import {
+  ConnectProviderNotConfiguredError,
+  getConnectProvider,
+  issueConnectStart,
+} from '../../../integrations/mailboxConnect.js';
+
+/** `ConnectionProvider` enum value -> the emailClient provider key a connect flow is mounted under (#2897). */
+const CONNECTION_PROVIDER_KEYS: Record<string, string> = {
+  MS_EXCHANGE: 'ms-exchange',
+  GMAIL: 'gmail',
+  GOOGLE_CAL: 'google-cal',
+  GOOGLE_DRIVE: 'google-drive',
+};
 
 /**
  * Strip explicit GraphQL nulls from a CalendarEventTimeInput so the tool's
@@ -2520,6 +2537,71 @@ export const sessionMutations = {
      * write or provider teardown; a repeat delete answers as missing. Only the
      * authorization failure maps to the denial: infrastructure errors stay errors.
      */
+    /**
+     * #2897 — start a connection's OAuth flow from GraphQL (the CLI's door; cor:api:240:02). The start itself is
+     * `issueConnectStart`, the one REST `POST /auth/{provider}/start` also uses. What is decided HERE is who may
+     * call it: this mints a credential-bearing start for a person's mailbox, calendar or Drive, so it follows the
+     * App-key-management rule (cor:dmo:050:05): a user acting as themselves, never an App key, a bound worker
+     * session, an impersonated request or an MCP-only OAuth credential.
+     */
+    startConnection: async (
+      _: unknown,
+      { provider, orgRef }: { provider: string; orgRef: string },
+      ctx: Context,
+    ) => {
+      if (ctx.impersonation) throw forbiddenError();
+      if (!ctx.userId) {
+        throw new GraphQLError('Starting a connection needs a signed-in user.', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      // An App run on behalf of the org's ADMIN carries both appId and userId; the grant is the App's, not theirs.
+      if (ctx.appId || currentActor().workerId) throw forbiddenError();
+      const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
+      if (surfaceRefusal) {
+        throw new GraphQLError(
+          oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface and cannot start a connection.'),
+          { extensions: { code: 'FORBIDDEN', ...surfaceRefusal } },
+        );
+      }
+      // An unknown org answers exactly like an org the caller does not administer: no existence oracle.
+      let orgId: string;
+      try {
+        orgId = (await resolveOrgRef(ctx.db, orgRef)).id;
+      } catch (err) {
+        if (err instanceof OrganizationNotFoundError) throw authorizationDenied();
+        throw err;
+      }
+      const cfg = getConnectProvider(CONNECTION_PROVIDER_KEYS[provider] ?? '');
+      try {
+        if (!cfg) {
+          // Not mounted on this server: the same answer as an unconfigured provider, after the org gate.
+          await requireOrgRole(ctx, orgId, 'ADMIN');
+          throw new ConnectProviderNotConfiguredError(provider);
+        }
+        const { nonce, expiresAt } = await issueConnectStart(cfg, {
+          userId: ctx.userId,
+          roles: ctx.roles,
+          orgId,
+          redirect: '/',
+          origin: 'graphql',
+        });
+        return {
+          provider,
+          orgId,
+          authorizeUrl: `${getProjectBaseUrl()}/auth/${cfg.routeName}?nonce=${nonce}`,
+          expiresAt,
+        };
+      } catch (err) {
+        if (err instanceof ConnectProviderNotConfiguredError) {
+          throw new GraphQLError(`${provider} connections are not configured on this server.`, {
+            extensions: { code: 'CONNECTION_PROVIDER_NOT_CONFIGURED', provider },
+          });
+        }
+        throw err;
+      }
+    },
+
     deleteExchangeConnection: async (_: unknown, { id }: { id: string }, ctx: Context) => {
       const connection = await ctx.db.exchangeConnection.findFirst({ where: { id, deletedAt: null } });
       if (!connection) throw authorizationDenied();

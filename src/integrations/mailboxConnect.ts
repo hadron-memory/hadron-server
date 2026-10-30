@@ -13,7 +13,12 @@
  */
 import crypto from 'crypto';
 import type { Express } from 'express';
-import { issueExchangeStartNonce, redeemExchangeStartNonce } from '../auth/authHandoff.js';
+import {
+  EXCHANGE_START_TTL_MS,
+  issueExchangeStartNonce,
+  redeemExchangeStartNonce,
+  type ExchangeStartOrigin,
+} from '../auth/authHandoff.js';
 import { verifyAuthenticatedJwt } from '../auth/index.js';
 import { requireOrgRole } from '../api/graphql/schema/resolvers.helpers.js';
 import { createToolConnection, deleteToolConnection, subscribeToolFolder } from '../lib/emailClient.js';
@@ -49,11 +54,115 @@ export interface MailboxConnectConfig {
   subscribeInbox?: boolean;
 }
 
+/** The provider's connect flow is not configured on this server (REST 503, GraphQL CONNECTION_PROVIDER_NOT_CONFIGURED). */
+export class ConnectProviderNotConfiguredError extends Error {
+  constructor(public readonly provider: string) {
+    super(`${provider} connections are not configured on this server`);
+    this.name = 'ConnectProviderNotConfiguredError';
+  }
+}
+
+const connectProviders = new Map<string, MailboxConnectConfig>();
+
+/** The mounted connect flow for an emailClient provider key, or undefined when none is mounted. */
+export function getConnectProvider(provider: string): MailboxConnectConfig | undefined {
+  return connectProviders.get(provider);
+}
+
+export interface ConnectStart {
+  nonce: string;
+  expiresAt: Date;
+}
+
+/**
+ * The ONE start of a mailbox/calendar/Drive connect flow (#477, #506, #2897), shared by `POST /auth/{provider}/start`
+ * and the GraphQL `startConnection`: the caller must be an ADMIN of the org (#506), the provider must be configured,
+ * and the result is a single-use, short-TTL nonce bound to this provider. The caller has already authenticated the
+ * principal; this decides what that principal may start.
+ *
+ * Role first, configuration second: a caller who may not connect in this org learns nothing about whether the
+ * provider is configured. Throws the org gate's own error, or {@link ConnectProviderNotConfiguredError}.
+ */
+export async function issueConnectStart(
+  cfg: MailboxConnectConfig,
+  args: {
+    userId: string;
+    roles: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] | undefined;
+    orgId: string;
+    redirect: string;
+    origin: ExchangeStartOrigin;
+  },
+): Promise<ConnectStart> {
+  await requireOrgRole({ db, userId: args.userId, roles: args.roles }, args.orgId, 'ADMIN');
+  if (!cfg.isConfigured()) throw new ConnectProviderNotConfiguredError(cfg.routeName);
+  const issuedAt = Date.now();
+  const nonce = await issueExchangeStartNonce({
+    userId: args.userId,
+    orgId: args.orgId,
+    redirect: args.redirect,
+    provider: cfg.provider,
+    origin: args.origin,
+  });
+  return { nonce, expiresAt: new Date(issuedAt + EXCHANGE_START_TTL_MS) };
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  'ms-exchange': 'Microsoft 365',
+  gmail: 'Gmail',
+  'google-cal': 'Google Calendar',
+  'google-drive': 'Google Drive',
+};
+
+/** RFC 6749 §4.1.2.1 and OIDC error codes; anything else a provider sends is shown as `provider_error`. */
+const STABLE_PROVIDER_ERRORS = new Set([
+  'access_denied',
+  'invalid_request',
+  'unauthorized_client',
+  'unsupported_response_type',
+  'invalid_scope',
+  'server_error',
+  'temporarily_unavailable',
+  'interaction_required',
+  'login_required',
+  'consent_required',
+]);
+
+const escapeHtml = (s: string): string =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+/**
+ * The server-hosted end of a flow started from GraphQL (#2897): plain HTML with no portal dependency. Success names
+ * the provider and the org; the error form shows only a generic sentence and a stable code, never provider text, a
+ * thrown message or a token. The CLI confirms by listing connections, so this page is informational.
+ */
+function sendConnectDonePage(
+  res: import('express').Response,
+  page: { provider: string; ok: true; orgName: string | null } | { provider: string; ok: false; code: string },
+): void {
+  const label = escapeHtml(PROVIDER_LABELS[page.provider] ?? page.provider);
+  const body = page.ok
+    ? `<h1>${label} connected</h1><p>${page.orgName ? `Connected to <strong>${escapeHtml(page.orgName)}</strong>. ` : ''}You can close this tab and return to the terminal.</p>`
+    : `<h1>${label} was not connected</h1><p>The connection could not be completed. You can close this tab and return to the terminal.</p><p>Error code: <code>${escapeHtml(page.code)}</code></p>`;
+  res
+    .status(200)
+    .set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+    })
+    .send(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${label}</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}code{background:#eee;padding:0 .25rem}</style></head><body>${body}</body></html>`,
+    );
+}
+
 /** Mount the three mailbox-connect routes for one provider. */
 export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfig): void {
+  connectProviders.set(cfg.provider, cfg);
   const pendingStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; expiresAt: number }
+    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; expiresAt: number }
   >();
 
   // #477 Sink 2 — mailbox-connect OAuth start. The portal calls this
@@ -103,10 +212,16 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     // orgId straight to the callback's ExchangeConnection upsert). Require
     // org ADMIN — the same role deleteExchangeConnection enforces.
     // requireOrgRole short-circuits for platform ADMIN/OWNER and rejects
-    // revoked (soft-deleted) members.
+    // revoked (soft-deleted) members. The gate and the provider-bound nonce
+    // are the shared start (#2897), the same one GraphQL `startConnection` uses.
     try {
-      await requireOrgRole({ db, userId, roles }, orgId, 'ADMIN');
+      const { nonce } = await issueConnectStart(cfg, { userId, roles, orgId, redirect, origin: 'portal' });
+      res.json({ nonce });
     } catch (err) {
+      if (err instanceof ConnectProviderNotConfiguredError) {
+        res.status(503).json({ error: `${cfg.routeName} connections are not configured on this server` });
+        return;
+      }
       // Only the explicit authorization failure is a 403 — an unexpected
       // fault (DB outage, transient Prisma error) must surface as 500, not
       // masquerade as "not an admin" (PR-509 Copilot review).
@@ -115,13 +230,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         return;
       }
       respondInternalFault(res, `${cfg.routeName}/start`, err);
-      return;
     }
-
-    // Provider-bound: this nonce redeems only at THIS provider's authorize
-    // route — the ADMIN approval above is for connecting this provider.
-    const nonce = await issueExchangeStartNonce({ userId, orgId, redirect, provider: cfg.provider });
-    res.json({ nonce });
   });
 
   app.get(`/auth/${cfg.routeName}`, async (req, res) => {
@@ -156,6 +265,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       orgId: started.orgId,
       userId: started.userId,
       redirect: started.redirect,
+      origin: started.origin,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
@@ -172,6 +282,18 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
     if (oauthError) {
+      // A refused flow consumes its state too, so it cannot be replayed into a success. #2897: the origin lives on
+      // the pending state, so a GraphQL-started flow ends on the server page instead of the portal.
+      const refused = state ? pendingStates.get(state) : undefined;
+      if (state) pendingStates.delete(state);
+      if (refused?.origin === 'graphql') {
+        sendConnectDonePage(res, {
+          provider: cfg.provider,
+          ok: false,
+          code: STABLE_PROVIDER_ERRORS.has(oauthError) ? oauthError : 'provider_error',
+        });
+        return;
+      }
       const errorUrl = new URL('/app/dashboard', frontendUrl);
       errorUrl.searchParams.set('exchangeError', oauthError);
       errorUrl.searchParams.set('provider', cfg.provider);
@@ -221,6 +343,10 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       // review).
       const forbidden = err instanceof Error && err.message === 'Forbidden';
       if (!forbidden) console.error(`${cfg.routeName}/callback re-check error:`, err);
+      if (pending.origin === 'graphql') {
+        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: forbidden ? 'not_authorized' : 'server_error' });
+        return;
+      }
       const errorUrl = new URL('/app/dashboard', frontendUrl);
       errorUrl.searchParams.set('exchangeError', forbidden ? 'not_authorized' : 'server_error');
       errorUrl.searchParams.set('provider', cfg.provider);
@@ -323,6 +449,13 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       // `exchangeError`/`exchangeConnected` are the pre-#580 portal contract
       // (Microsoft-era names, kept for compatibility); `provider` tells the
       // portal WHICH connect flow this outcome belongs to.
+      if (pending.origin === 'graphql') {
+        const org = await db.organization
+          .findUnique({ where: { id: pending.orgId }, select: { name: true } })
+          .catch(() => null);
+        sendConnectDonePage(res, { provider: cfg.provider, ok: true, orgName: org?.name ?? null });
+        return;
+      }
       const successUrl = new URL(pending.redirect, frontendUrl);
       successUrl.searchParams.set('exchangeConnected', '1');
       successUrl.searchParams.set('provider', cfg.provider);
@@ -334,6 +467,10 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       // refresh token + auto-renewing subscriptions with no core record.
       if (identity) {
         void deleteToolConnection(identity.provider, identity.id);
+      }
+      if (pending.origin === 'graphql') {
+        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: 'connection_failed' });
+        return;
       }
       const errorUrl = new URL(pending.redirect, frontendUrl);
       errorUrl.searchParams.set(
