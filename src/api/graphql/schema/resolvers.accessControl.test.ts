@@ -6,6 +6,7 @@ import {
   createDbNode,
   createDbAppWithKey,
   createDbAppAgent,
+  createDbAppMember,
 } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { buildSchema } from 'graphql';
@@ -31,6 +32,9 @@ let userA: { id: string };
 let userB: { id: string };
 let appReader: { id: string };
 let appContributor: { id: string };
+// #1376: an App key with no user behind it is not admitted by its Agent's item; writes and the
+// item's cap are proven through an App member (a user behind the request).
+let appMember: { id: string };
 
 function ctx(overrides: Partial<Context> = {}): Context {
   return { db, ...overrides };
@@ -102,6 +106,12 @@ beforeEach(async () => {
   appContributor = contribApp.app;
   await createDbAppAgent(db, appContributor.id, contribAgent.id);
 
+  appMember = await db.user.create({
+    data: { githubId: 1003, githubUsername: 'app-member', roles: ['READER'] },
+  });
+  await createDbAppMember(db, appReader.id, appMember.id);
+  await createDbAppMember(db, appContributor.id, appMember.id);
+
   // Seed nodes
   await createDbNode(db, { loc: 'org-a.repo.nodeA', memoryId: graphA.id });
   await createDbNode(db, { loc: 'org-b.repo.nodeB', memoryId: graphB.id });
@@ -135,9 +145,16 @@ describe('findNodes access control', () => {
     expect(nodes[0].loc).toBe('org-b.repo.nodeB');
   });
 
-  it('App-keyed caller (no session) sees its agent-linked memories — same getAppMemoryAccess reach as the MCP read gates (the pre-fix [] made every MCP find_nodes delegation return empty)', async () => {
+  it('App-keyed caller (no session, no user) does NOT see its agent-linked org memory — an item is a limit, never a grant (#1376)', async () => {
     const nodes = await listNodes(
       {}, ctx({ appId: appReader.id }),
+    );
+    expect(nodes).toHaveLength(0);
+  });
+
+  it('App member (user behind the App key) sees its agent-linked memories — same getAppMemoryAccess reach as the MCP read gates (the pre-fix [] made every MCP find_nodes delegation return empty)', async () => {
+    const nodes = await listNodes(
+      {}, ctx({ appId: appReader.id, userId: appMember.id }),
     );
     expect(nodes).toHaveLength(1);
     expect(nodes[0].loc).toBe('org-a.repo.nodeA');
@@ -226,7 +243,7 @@ describe('Mutation.createNode access control', () => {
     const node = await resolvers.Mutation.createNode(
       null,
       { input: { memoryId: graphA.id, loc: 'org-a.repo.new', name: 'new' } },
-      ctx({ appId: appContributor.id }),
+      ctx({ appId: appContributor.id, userId: appMember.id }),
     );
     expect(node.loc).toBe('org-a.repo.new');
   });
@@ -236,7 +253,7 @@ describe('Mutation.createNode access control', () => {
       resolvers.Mutation.createNode(
         null,
         { input: { memoryId: graphA.id, loc: 'org-a.repo.new2', name: 'new2' } },
-        ctx({ appId: appReader.id }),
+        ctx({ appId: appReader.id, userId: appMember.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -283,7 +300,7 @@ describe('Mutation.deleteNode access control', () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
       { nodeRef: target.id },
-      ctx({ appId: appContributor.id }),
+      ctx({ appId: appContributor.id, userId: appMember.id }),
     );
     expect(result).toBe(true);
   });
@@ -296,7 +313,7 @@ describe('Mutation.deleteNode access control', () => {
       resolvers.Mutation.deleteNode(
         null,
         { nodeRef: target.id },
-        ctx({ appId: appReader.id }),
+        ctx({ appId: appReader.id, userId: appMember.id }),
       ),
     ).rejects.toThrow('Forbidden');
   });
@@ -330,7 +347,7 @@ describe('Mutation.deleteNode access control', () => {
     const result = await resolvers.Mutation.deleteNode(
       null,
       { nodeRef: `${memoryRow.urn}:org-a.repo.nodeA` },
-      ctx({ appId: appContributor.id }),
+      ctx({ appId: appContributor.id, userId: appMember.id }),
     );
     expect(result).toBe(true);
   });
@@ -354,7 +371,7 @@ describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
     const node = await resolvers.Mutation.moveNode(
       null,
       { sourceRef: await nodeAId(), targetUrn: targetInA('org-a.repo.movedNode') },
-      ctx({ appId: appContributor.id }),
+      ctx({ appId: appContributor.id, userId: appMember.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedNode');
   });
@@ -377,7 +394,7 @@ describe('Mutation.moveNode access control (#564 sourceRef/targetUrn)', () => {
     const node = await resolvers.Mutation.moveNode(
       null,
       { sourceRef: 'org-a:org-a/repo:org-a.repo.nodeA', targetUrn: targetInA('org-a.repo.movedByUrn') },
-      ctx({ appId: appContributor.id }),
+      ctx({ appId: appContributor.id, userId: appMember.id }),
     );
     expect(node.loc).toBe('org-a.repo.movedByUrn');
   });
@@ -448,7 +465,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
           ],
           edges: [{ sourceLoc: 'bulk.new', targetLoc: 'bulk.new-runnable', name: 'rel' }],
         },
-        ctx({ appId: appContributor.id }),
+        ctx({ appId: appContributor.id, userId: appMember.id }),
       )).rejects.toMatchObject({ extensions: { code: 'REPLACE_SUBTREE_RETIRED' } });
     }
 
@@ -462,11 +479,11 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
   it('preserves write authorization and concealed-memory errors', async () => {
     await expect(resolvers.Mutation.replaceSubtree(
       null, { ownerRepo: 'org-a/repo', memoryId: graphA.id, nodes: [], edges: [] },
-      ctx({ appId: appReader.id }),
+      ctx({ appId: appReader.id, userId: appMember.id }),
     )).rejects.toThrow('Forbidden');
     await expect(resolvers.Mutation.replaceSubtree(
       null, { ownerRepo: 'org-b/repo', memoryId: graphB.id, nodes: [], edges: [] },
-      ctx({ appId: appContributor.id }),
+      ctx({ appId: appContributor.id, userId: appMember.id }),
     )).rejects.toThrow(`MEMORY_NOT_FOUND: ${graphB.id}`);
   });
 });
