@@ -67,7 +67,7 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'MCP Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
+      systemPrompt: 'You are {{worker.name}}, a {{worker.role}}.',
     },
     ctx,
   );
@@ -101,7 +101,7 @@ describe('hadron_cast_worker (#974)', () => {
       name: 'Zoe',
     });
     expect(out).toContain('Worker cast: **Zoe** (backend-engineer)');
-    // The boot briefing is the agent's template with {{name}}/{{role}} bound.
+    // The boot briefing is the agent's template with {{worker.name}}/{{worker.role}} bound.
     expect(out).toContain('Boot briefing:');
     expect(out).toContain('You are Zoe, a backend-engineer.');
     // The full operation ran: a real Worker row, id echoed for session binding.

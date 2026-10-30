@@ -4473,7 +4473,7 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
-    "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
+    "Templated Agent prompt. {{worker.name}}/{{worker.role}} bind to the Agent in chats or the named Worker in briefings; the old {{name}}/{{role}} tokens no longer bind (#1772)."
     systemPrompt: String
     """
     #2045 — the canonical URN of the compiled boot prompt this Agent's pointer names now
@@ -5274,7 +5274,7 @@ export const typeDefs = `#graphql
     app: App
     """
     The worker's boot prompt, resolved: the agent's systemPrompt template
-    with {{name}}/{{role}} bound, then promptOverride appended as its own
+    with {{worker.name}}/{{worker.role}} bound, then promptOverride appended as its own
     paragraph. Null when the agent carries no template and the worker no
     override.
     """
@@ -5387,7 +5387,7 @@ export const typeDefs = `#graphql
     agentId: ID!
     agentName: String!
     """
-    The composed boot prompt, post {{name}}/{{role}} substitution with
+    The composed boot prompt, post {{worker.name}}/{{worker.role}} substitution with
     promptOverride appended — the same composition Worker.prompt performs,
     reviewable BEFORE the name is permanent. Null when the agent carries no
     template and no override was given.
@@ -11499,7 +11499,7 @@ export const typeDefs = `#graphql
     (org XOR user).
 
     personaRole and systemPrompt are the persona dressing (cor:agt:020:01) —
-    the reusable role plus the '{{name}}'-templated prompt. The NAMED
+    the reusable role plus the '{{worker.name}}'-templated prompt. The NAMED
     identity is a Worker, cast with castWorker; names never live on agents.
 
     orgId accepts the org's ID or URN.
