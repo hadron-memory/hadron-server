@@ -90,6 +90,8 @@ describe('#2843 committed competing writes under real authority anchor waits', (
     let release!: () => void, held!: () => void;
     const gate = new Promise<void>(r => release = r), ready = new Promise<void>(r => held = r);
     const org = race === 'org-transfer' ? await db.organization.create({ data: {name:'New',urn:'new2843.test'} }) : null;
+    // The same caller could authorize in the new tenant: only the observed tuple comparison must defeat this stale create.
+    if (org) await db.orgMember.create({data:{organizationId:org.id,userId:owner.id,role:'ADMIN'}});
     const revoker = db.$transaction(async tx => {
       await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
       if (race === 'transfer') await tx.app.update({ where: {id:app.id}, data: {ownerUserId:stranger.id} });
@@ -101,7 +103,7 @@ describe('#2843 committed competing writes under real authority anchor waits', (
     });
     await ready;
     let settled = false;
-    const pending = create().then(row => ({row}), error => ({error})).finally(() => { settled = true; });
+    const pending = create().then((row: unknown) => ({row}), (error: unknown) => ({error})).finally(() => { settled = true; });
     try {
       await waitForLockWaiters(db, 1, 2000);
       expect(settled, 'creator must really wait behind the competing App writer').toBe(false);
