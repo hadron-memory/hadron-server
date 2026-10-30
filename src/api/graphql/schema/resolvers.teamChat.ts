@@ -1059,10 +1059,6 @@ async function postToChannelRoot(
     if (postingWorkerId) {
       await lockWorkerPostAdmission(tx, postingWorkerId);
       admittedAt = await admissionTime(tx);
-      // #2014 — the rolling limits, counted under the same lock and clock. The refusal is thrown as a sentinel: it rolls this
-      // transaction back (nothing is stored), and the caller raises the alarm in its OWN committed transaction.
-      const broken = await findBrokenPostLimit(tx, postingWorkerId, admittedAt);
-      if (broken) throw new PostRateLimited(postingWorkerId, broken.name, broken.resetsAt);
       // An encrypted body is ciphertext at rest: no equality read can match, so none is made (no key plumbing, R13/R43).
       const earlierSeq = memEncInfo.isEncrypted
         ? null
@@ -1073,6 +1069,11 @@ async function postToChannelRoot(
           { extensions: { code: 'TEAM_CHAT_DUPLICATE', earlierSeq, channelId: incarnation.id } },
         );
       }
+      // #2014 — the rolling limits, counted under the same lock and clock, AFTER the duplicate rule: an identical post is refused as a
+      // duplicate (do not retry) whatever the count, so it never raises the rate alarm. The refusal is thrown as a sentinel: it rolls this
+      // transaction back (nothing is stored), and the caller raises the alarm in its OWN committed transaction.
+      const broken = await findBrokenPostLimit(tx, postingWorkerId, admittedAt);
+      if (broken) throw new PostRateLimited(postingWorkerId, broken.name, broken.resetsAt);
     }
     // #1842 — the reply-target fold (Holger, #10394): when the target was
     // authored by a WORKER, that worker counts as mentioned, recorded at
@@ -1209,7 +1210,7 @@ async function postToChannelRoot(
       // #2014: the post is refused and nothing was stored; the alarm (once an hour) commits on its own.
       await raisePostLimitAlarm(ctx.db, e.workerId, e.limit);
       throw new GraphQLError(
-        `You have reached the team-chat post limit (${e.limit}). Do not retry in a loop: wait until ${e.resetsAt.toISOString()}, then post once.`,
+        `Your message was NOT posted: you have reached the team-chat post limit (${e.limit}). Do not retry in a loop: wait until ${e.resetsAt.toISOString()}, then post once.`,
         { extensions: { code: 'TEAM_CHAT_POST_RATE_LIMITED', limit: e.limit, resetsAt: e.resetsAt.toISOString() } },
       );
     }

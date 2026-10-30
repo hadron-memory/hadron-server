@@ -125,6 +125,13 @@ describe('#2014 the limit', () => {
     expect(new Date(err.extensions.resetsAt).getTime()).toBeGreaterThan(Date.now() + 2 * MIN);
   });
 
+  it('an identical post at the quota boundary is refused as a duplicate, not as a rate limit, and raises no alarm', async () => {
+    await post(liam, 10, 'a');
+    const err: any = await workerSays(liam, 'a 3').catch((e) => e);
+    expect(err.extensions.code).toBe('TEAM_CHAT_DUPLICATE');
+    expect(await alarms()).toHaveLength(0);
+  });
+
   it('is per worker: another worker is unaffected', async () => {
     await post(liam, 10, 'a');
     await expect(workerSays(rook, 'hello')).resolves.toBeTruthy();
