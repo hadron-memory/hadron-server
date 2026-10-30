@@ -299,6 +299,21 @@ describe('the search sees exactly what a read shows (differential against the re
   });
 });
 
+describe('the match sees the message body only, never its envelope', () => {
+  it.each(both)('%s: text that is only in the envelope (author name, team tag label and head id) matches nothing', async (_n, search) => {
+    await db.node.create({
+      data: {
+        id: generateId(), memoryId: memory.id, loc: `${channel.loc}:messages:env`, name: 'env', nodeType: 'chat-message', seq: 1, messageChannelId: channel.id, content: 'plain body',
+        data: { authorUserId: manager.id, authorName: 'sentinelauthor', mentions: [], teamTagsVersion: 1, teamTags: [{ headId: 'h1', label: 'sentineltag' }] },
+      } as never,
+    });
+    for (const q of ['sentinelauthor', 'sentineltag', 'h1']) {
+      expect(seqs(await search(member.id, q)), q).toEqual([]);
+    }
+    expect(seqs(await search(member.id, 'plain body'))).toEqual([1]);
+  });
+});
+
 describe('a search is not a read', () => {
   it('moves no read position, delivered mark, check stamp or session, and records no attention', async () => {
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: member.id, heldAt: new Date() }, select: { id: true } });
