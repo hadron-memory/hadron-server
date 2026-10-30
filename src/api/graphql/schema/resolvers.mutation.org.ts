@@ -41,6 +41,7 @@ import {
   ORG_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
+import { isUniqueViolationOn, HANDLE_TARGETS } from '../../../auth/userProvision.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
@@ -117,14 +118,27 @@ export const orgMutations = {
             if (current.principal_id) await releasePrincipal(tx, current.principal_id);
             principalData = { principalId: principal.id };
           }
-          const updated = await tx.user.update({
-            where: { id: userId },
-            data: {
-              ...(name !== undefined ? { name } : {}),
-              ...handleData,
-              ...principalData,
-            },
-          });
+          // #2868: the pool mint above only sees REGISTERED owners. A User whose
+          // `principal_id` is NULL still holds its handle through the
+          // `users_handle_lower_uniq` functional index, so that collision
+          // surfaces here as P2002 — translate it to the same RootNameTakenError
+          // (and so the same refusal text) a registered owner yields. The
+          // transaction rolls back whole: the mint and the release above leave
+          // no trace, and the unregistered owner's handle is not touched.
+          let updated;
+          try {
+            updated = await tx.user.update({
+              where: { id: userId },
+              data: {
+                ...(name !== undefined ? { name } : {}),
+                ...handleData,
+                ...principalData,
+              },
+            });
+          } catch (err) {
+            if (renaming && newHandle && isUniqueViolationOn(err, HANDLE_TARGETS)) throw new RootNameTakenError(newHandle);
+            throw err;
+          }
           // Propagate only when the handle actually changed — the rewrite is
           // FK-scoped + idempotent, so this guard is just churn avoidance.
           if (renaming) {
