@@ -147,6 +147,38 @@ describe('#2257 flag ON — POST /auth/email', () => {
     expect(sendMagicLinkMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['invalid-input-secret', 'not_configured'],
+    ['missing-input-secret', 'not_configured'],
+    ['internal-error', 'provider_error'],
+  ])('success:false with Cloudflare error code %s is the platform\'s problem, not the visitor\'s: 503 %s', async (code, reason) => {
+    enable();
+    siteverify.mockResolvedValue(new Response(JSON.stringify({ success: false, 'error-codes': [code] }), { status: 200 }));
+    const r = await postAuthEmail(withToken(uniqueEmail(), 'any'));
+    expect(r.status).toBe(503);
+    expect(r.json).toEqual({ error: 'bot_check_failed', reason });
+    expect(sendMagicLinkMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['invalid-input-response', 'missing-input-response', 'timeout-or-duplicate'])(
+    'success:false with visitor-side code %s stays 403 invalid_token',
+    async (code) => {
+      enable();
+      siteverify.mockResolvedValue(new Response(JSON.stringify({ success: false, 'error-codes': [code] }), { status: 200 }));
+      const r = await postAuthEmail(withToken(uniqueEmail(), 'any'));
+      expect(r.status).toBe(403);
+      expect(r.json).toEqual({ error: 'bot_check_failed', reason: 'invalid_token' });
+    },
+  );
+
+  it('the Cloudflare call carries an abort signal so a stalled provider cannot hang the request', async () => {
+    enable();
+    await postAuthEmail(withToken(uniqueEmail(), 'good-token'));
+    const init = siteverify.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal!.aborted).toBe(false);
+  });
+
   it('secret unset: refused 503 not_configured without calling Cloudflare', async () => {
     enable(null);
     const r = await postAuthEmail(withToken(uniqueEmail(), 'any'));
