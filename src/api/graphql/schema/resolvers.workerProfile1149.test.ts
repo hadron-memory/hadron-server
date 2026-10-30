@@ -21,6 +21,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -263,5 +264,44 @@ describe('#1149 the profile never widens a list', () => {
     expect(list.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
     const byName = await run('query($a: ID!) { worker(ref: "Dan", appRef: $a) { id } }', { a: appA.id }, ctx(stranger.id));
     expect(byName.errors?.[0]).toMatchObject({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND' } });
+  });
+});
+
+describe('#1149 hadron_get_worker delegates to the profile read and keeps working state masked', () => {
+  const auth = (userId: string) => ({ userId, roles: ['READER' as const] });
+
+  it('the stranger reads the name and URN, with no liveness flag, override or briefing', async () => {
+    const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
+    expect(text).toContain('**Dan** (server-engineer)');
+    expect(text).toContain(`Worker URN: ${danUrn()}`);
+    expect(text).not.toMatch(/\b(taken|free)\b/);
+    expect(text).not.toContain('secret override');
+    expect(text).not.toContain('Boot briefing');
+  });
+
+  it('a participant still sees the liveness flag', async () => {
+    const text = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
+    expect(text).toContain('**Dan** (server-engineer) — free');
+  });
+});
+
+describe('#1149 the profile fields judge the App, not the path that reached the Worker', () => {
+  const W = resolvers.Worker as unknown as Record<string, (w: unknown, a: unknown, c: Context) => Promise<unknown>>;
+  const row = () => db.worker.findUniqueOrThrow({ where: { id: teamDan.id } });
+
+  it('appUrn, appName and ownerName mask to null for a principal the profile gate refuses', async () => {
+    const w = await row();
+    for (const c of [{ db, roles: [] } as Context, { db, roles: [], appId: appB.id } as Context]) {
+      expect(await W.appUrn(w, {}, c)).toBeNull();
+      expect(await W.appName(w, {}, c)).toBeNull();
+      expect(await W.ownerName(w, {}, c)).toBeNull();
+    }
+  });
+
+  it('and answer for a signed-in stranger', async () => {
+    const w = await row();
+    expect(await W.appUrn(w, {}, ctx(stranger.id))).toBe(`hrn:app:${orgA.urn}:team`);
+    expect(await W.appName(w, {}, ctx(stranger.id))).toBe('Team');
+    expect(await W.ownerName(w, {}, ctx(stranger.id))).toBe(orgA.urn);
   });
 });

@@ -5052,11 +5052,26 @@ export const typeDefs = `#graphql
     """
     The App's canonical URN (the same value App.urn returns, e.g.
     hrn:app:acme.com:team), as a scalar identity suitable for cross-App
-    worker lists. Null when the caller cannot inspect this App's workers. This
+    worker lists. PROFILE field (#1149, hrn:node:hadronmemory.com:specs:cor:dmo:050:11):
+    null only for a caller who may not see this worker's profile. This
     intentionally does not return the App object, whose nested keys and
     members have a narrower read audience.
     """
     appUrn: String
+    """
+    #1149 — the App's display name ('Team'), so a worker's profile page can say
+    whose staff it is without the App object. PROFILE field
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:11): readable by any signed-in user who
+    names the worker; null for a caller who may not see its profile.
+    """
+    appName: String
+    """
+    #1149 — the owner atom of the worker's URN: the user handle of a user-owned
+    App or the organization slug of an org App, and nothing more (no display
+    name, no email). PROFILE field, gated like appName; also null when the App's
+    URN predates the grammar-v2 shape (as urn).
+    """
+    ownerName: String
     agentId: ID!
     "The worker's name ('Iris') — the identity every surface renders."
     name: String!
@@ -5248,9 +5263,14 @@ export const typeDefs = `#graphql
     judge its age from checkedAt. Null until a host reports, and masked to null on the same read gate as checkStatus.
     """
     terminal: WorkerTerminal
-    "The role-agent behind the casting."
+    """
+    The role-agent behind the casting. DETAILS tier (#1149,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:11): resolved for whoever the Agent's own
+    visibility admits (PUBLIC, else READER on the Agent), evaluated per read;
+    null otherwise and for a deleted Agent.
+    """
     agent: Agent
-    "The App whose staff this casting fills."
+    "The App whose staff this casting fills. Never part of a worker's profile (#1149): null unless the caller may read the App itself."
     app: App
     """
     The worker's boot prompt, resolved: the agent's systemPrompt template
@@ -5270,9 +5290,11 @@ export const typeDefs = `#graphql
     """
     continuity: WorkerContinuity
     createdAt: DateTime!
+    "Who cast this worker. WORKING-STATE field (#1149): null for a caller who may see only the worker's profile."
     createdBy: String
     "Retirement instant — a retired worker stops authoring and takes no new sessions; the name stays reserved."
     retiredAt: DateTime
+    "Who retired this worker. WORKING-STATE field (#1149), masked like createdBy."
     retiredBy: String
     """
     #2047 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: the boot prompt served to this worker's open session. Readable by whoever may read the worker's
@@ -9506,10 +9528,16 @@ export const typeDefs = `#graphql
     lost to a context compaction, instead of opening a second session or
     forcing a takeover of itself.
 
-    Authorization: an AppMember of the worker's App (any role), an org member
-    with CONTRIBUTOR+ on its org, the owner of a user-owned App, or the App's
-    own key. For the NAME form the gate runs BEFORE the lookup and a denial is
-    reported as WORKER_NOT_FOUND, so the roster is not an existence oracle.
+    Authorization (#1149, hrn:node:hadronmemory.com:specs:cor:dmo:050:11): by id or URN,
+    any signed-in user reads the worker's PROFILE (identity scalars, appName,
+    ownerName, appUrn), and \`agent\` when the Agent's own visibility admits
+    them; the working-state fields stay masked unless the caller participates
+    in the App (an AppMember at any role, org CONTRIBUTOR+, the owner of a
+    user-owned App, or the App's own key). An anonymous caller, another App's
+    key or run, a support session outside the App's org and a deleted App are
+    refused WORKER_NOT_FOUND exactly as an absent worker. The NAME form stays
+    participant-only: its gate runs BEFORE the lookup and a denial is reported
+    as WORKER_NOT_FOUND, so the roster is not an existence oracle.
     """
     worker(ref: ID!, appRef: ID): Worker
 

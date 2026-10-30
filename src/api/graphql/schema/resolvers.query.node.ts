@@ -58,7 +58,7 @@ import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemorySc
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
-import { requireWorkerReadAccess } from './resolvers.worker.js';
+import { requireWorkerProfileAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
@@ -689,13 +689,15 @@ export const nodeQueries = {
           if (!worker) return null;
           const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
           if (!app || app.deletedAt) return null;
-          // The SHARED worker read gate, not a hand-rolled copy — a bespoke
-          // admin-or-member check here would drift from the `workers` query's
-          // (CLAUDE.md authorization invariants). App participants at any role,
-          // the App's own key, or the owner of a user-owned App.
+          // #1149: a worker link opens the worker's PROFILE, so this is the
+          // SHARED profile gate `worker(ref)` uses, not a hand-rolled copy
+          // (CLAUDE.md authorization invariants): any signed-in user, the App's
+          // own key, impersonation bounded to the App's org. Narrow catch: only
+          // the gate's denial reads as unresolvable.
           try {
-            await requireWorkerReadAccess(ctx, app);
-          } catch {
+            await requireWorkerProfileAccess(ctx, app);
+          } catch (e) {
+            if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
             return null;
           }
           // A RETIRED worker still resolves: retirement never frees the name or

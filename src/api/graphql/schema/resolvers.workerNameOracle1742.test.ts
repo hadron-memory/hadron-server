@@ -22,6 +22,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -104,9 +105,27 @@ const OUTSIDERS: Array<[string, () => Context]> = [
   ["another App's key", () => ({ db, roles: [], appId: foreignApp.id } as Context)],
 ];
 
+/**
+ * #1149 (cor:dmo:050:11): `Query.worker` by id or URN opens a worker's PROFILE
+ * to any signed-in user, so for that surface the caller who cannot know about
+ * the worker is one the profile gate refuses: anonymous, or another App's key.
+ * Every other surface keeps the participant gate and the signed-in outsider.
+ */
+const anonymous = (): Context => ({ db, roles: [] } as Context);
+const outsiderFor = (surface: string): Context => (surface === 'Query.worker' ? anonymous() : ctx(outsider.id));
+const SIGNED_IN = new Set(['a signed-in user with no membership', "another org's CONTRIBUTOR"]);
+
 describe('#1742 the oracle is closed: an unreadable App answers like an absent worker', () => {
   for (const [surface, call] of SURFACES) {
     for (const [who, as] of OUTSIDERS) {
+      if (surface === 'Query.worker' && SIGNED_IN.has(who)) {
+        it(`${surface}, ${who}: reads the profile instead (#1149)`, async () => {
+          expect(((await call(as(), danUrn())) as { id: string }).id).toBe(dan.id);
+          expect(await envelopeOf(call(as(), nobodyUrn())))
+            .toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND', workerRef: nobodyUrn() } });
+        });
+        continue;
+      }
       it(`${surface}, ${who}: a real name and a guessed one get the same refusal`, async () => {
         const real = await envelopeOf(call(as(), danUrn()));
         const guessed = await envelopeOf(call(as(), nobodyUrn()));
@@ -117,16 +136,16 @@ describe('#1742 the oracle is closed: an unreadable App answers like an absent w
     }
 
     it(`${surface}: the same ref answers byte-identically before and after its worker is deleted`, async () => {
-      const before = await envelopeOf(call(ctx(outsider.id), danUrn()));
+      const before = await envelopeOf(call(outsiderFor(surface), danUrn()));
       await db.worker.delete({ where: { id: dan.id } });
-      const after = await envelopeOf(call(ctx(outsider.id), danUrn()));
+      const after = await envelopeOf(call(outsiderFor(surface), danUrn()));
       expect(JSON.stringify(before)).toBe(JSON.stringify(after));
     });
 
     it(`${surface}: the id form is closed too`, async () => {
-      const real = await envelopeOf(call(ctx(outsider.id), dan.id));
+      const real = await envelopeOf(call(outsiderFor(surface), dan.id));
       const absentId = generateId();
-      const absent = await envelopeOf(call(ctx(outsider.id), absentId));
+      const absent = await envelopeOf(call(outsiderFor(surface), absentId));
       expect(real).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND', workerRef: dan.id } });
       expect(absent).toEqual({ message: 'Worker not found.', extensions: { code: 'WORKER_NOT_FOUND', workerRef: absentId } });
     });
@@ -180,9 +199,14 @@ describe('#1742 controls: readers keep their answers', () => {
         return Reflect.get(target, prop, receiver);
       },
     }) as Context['db'];
-    for (const [, call] of SURFACES) {
-      await expect(call({ db: broken, userId: outsider.id, roles: ['READER'] } as Context, danUrn()))
-        .rejects.toThrow('database unavailable');
+    for (const [surface, call] of SURFACES) {
+      // #1149: the profile gate admits a signed-in user without a membership
+      // lookup, so Query.worker's participant arm is driven by a run principal
+      // acting for that user, which the profile gate sends to the participant gate.
+      const c = surface === 'Query.worker'
+        ? ({ db: broken, ...runAuthContext({ id: generateId(), appId: foreignApp.id, userId: outsider.id, organizationId: otherOrg.id }) } as Context)
+        : ({ db: broken, userId: outsider.id, roles: ['READER'] } as Context);
+      await expect(call(c, danUrn())).rejects.toThrow('database unavailable');
     }
   });
 });
@@ -194,10 +218,14 @@ describe('#1742 MCP delegates, so its worker tools are closed as well', () => {
     ['hadron_update_worker', (ref) => ({ workerRef: ref, promptOverride: 'x' })],
     ['hadron_set_worker_reports_to', (ref) => ({ workerRef: ref, reportsTo: null })],
   ];
+  // #1149: hadron_get_worker reads the PROFILE for any signed-in user
+  // (resolvers.workerProfile1149.test.ts), so its outsider is another App's key.
+  const outsiderAuth = (tool: string) =>
+    tool === 'hadron_get_worker' ? ({ appId: foreignApp.id, roles: [] as const } as never) : auth(outsider.id);
   for (const [tool, args] of tools) {
     it(`${tool}: a real name and a guessed one read the same to an outsider`, async () => {
-      const real = await createTestableMcpServer(auth(outsider.id)).callToolText(tool, args(danUrn()));
-      const guessed = await createTestableMcpServer(auth(outsider.id)).callToolText(tool, args(nobodyUrn()));
+      const real = await createTestableMcpServer(outsiderAuth(tool)).callToolText(tool, args(danUrn()));
+      const guessed = await createTestableMcpServer(outsiderAuth(tool)).callToolText(tool, args(nobodyUrn()));
       expect(real).not.toMatch(/not authorized|forbidden/i);
       expect(real.replace(danUrn(), '<ref>')).toBe(guessed.replace(nobodyUrn(), '<ref>'));
     });
