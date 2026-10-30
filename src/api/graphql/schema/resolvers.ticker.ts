@@ -146,7 +146,7 @@ type TickerSettings = {
 };
 export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
-  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true, deliveryDarkAlarmWindowSeconds: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
@@ -622,6 +622,7 @@ export async function writeAppSettings(
       standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
+      darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
     validateDeliverySettings(delivery, patch);
     await tx.app.update({
@@ -634,6 +635,7 @@ export async function writeAppSettings(
         deliveryStandbyEnabled: delivery.standbyEnabled,
         deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
         deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
+        deliveryDarkAlarmWindowSeconds: delivery.darkAlarmWindowSeconds,
       },
     });
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
@@ -734,10 +736,15 @@ async function writeWorkerIsolation(
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
+      // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
+      // An isolation that already expired keeps its own expiry as the end (the latest anchor wins).
+      const prior = await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { isolatedUntil: true, exemptEndedAt: true } });
+      const ended = prior?.isolatedUntil ? (prior.isolatedUntil.getTime() > now.getTime() ? now : prior.isolatedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
         create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null },
+        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(kept ? { exemptEndedAt: kept } : {}) },
       });
     }
     const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
@@ -920,9 +927,19 @@ const wakeAndGrantMutations = {
         );
       }
       const u = updatedStamp(txCtx);
+      // #2755: clearing a pause that is still running erases when the exemption ended; keep that moment (a clear
+      // of a pause that already ended, or of none, restarts nothing).
+      const clearedNow = new Date();
+      const prior = input.clearPause && pausedUntil === undefined
+        ? await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { pausedUntil: true, exemptEndedAt: true } })
+        : null;
+      // A pause that already expired keeps its own expiry as the end (the latest anchor wins).
+      const ended = prior?.pausedUntil ? (prior.pausedUntil.getTime() > clearedNow.getTime() ? clearedNow : prior.pausedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       const change = {
         ...(input.mentions != null ? { mentions: input.mentions } : {}),
         ...(pausedUntil !== undefined ? { pausedUntil } : input.clearPause ? { pausedUntil: null } : {}),
+        ...(kept ? { exemptEndedAt: kept } : {}),
       };
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },

@@ -22,6 +22,7 @@ import { mcpRequestSessionContext } from './requestSession.js';
  * worker on an App key reads as itself through it.
  */
 import { renderCheckStatusShort } from '../lib/workerCheckStatus.js';
+import { renderTerminal } from '../lib/workerTerminal.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -67,6 +68,8 @@ type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPl
   pausedUntil?: Date | null;
   heldBy?: { id: string; handle: string | null; name: string | null } | null;
   checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
+  /** #2771 — the host's latest terminal report, already behind the working-state gate. */
+  terminal?: import('../lib/workerTerminal.js').StoredWorkerTerminal | null;
 };
 /** The seven values of an App's stall schedule (cor:agt:050:14–:17, :10, 070:01, :02), in the order the tools render them. */
 const STALL_SCHEDULE_KEYS = [
@@ -141,6 +144,8 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4
     r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
+    // #2771: read only; the age is the reader's to judge.
+    r.terminal ? renderTerminal(r.terminal, asOf) : null,
     // #2223: already behind the working-state and name gates by the time it reaches a row.
     r.heldBy ? `held by ${r.heldBy.handle ? `@${r.heldBy.handle} (hrn:user:${r.heldBy.handle})` : `user ${r.heldBy.id}`}${r.heldBy.name ? ` ${r.heldBy.name}` : ''}` : null,
   ].filter(Boolean);
@@ -205,7 +210,8 @@ export async function renderEvent(e: EventRow, ctx: Context): Promise<string> {
   const subject = (await E.subjectWorker(e as never, {}, ctx)) as Party;
   // #2553: the handle first, then the id (one read: the event row carries only the id).
   const handle = e.taskId ? (await ctx.db.agentTask.findUnique({ where: { id: e.taskId }, select: { handle: true } }))?.handle ?? null : null;
-  const payload = e.payload && Object.keys(e.payload).length ? ` ${JSON.stringify(e.payload)}` : '';
+  const shown = (await E.payload(e as never, {}, ctx)) as Record<string, unknown> | null; // #2755: evidence only for a reader of the worker's internals
+  const payload = shown && Object.keys(shown).length ? ` ${JSON.stringify(shown)}` : '';
   const line = `- ${e.createdAt.toISOString()} ${e.type}${e.severity ? ' [ALARM]' : ''} (id: ${e.id})` +
     `${e.taskId ? ` task ${handle ? `${handle} ` : ''}${e.taskId}` : ''}${e.severity ? '' : ` by ${partyLabel(actor)}`}` +
     `${subject ? ` → ${partyLabel(subject)}` : ''}${payload}`;

@@ -95,8 +95,8 @@ async function workerStatus(name: string, userId = member.id) {
 
 describe('the status on the roster and on worker get (they agree)', () => {
   it('NO_SESSION: never bound', async () => {
-    expect(await rosterStatus('Anne')).toEqual({ status: 'NO_SESSION', pendingReason: null, lastCheckedAt: null });
-    expect(await workerStatus('Anne')).toEqual({ status: 'NO_SESSION', pendingReason: null, lastCheckedAt: null });
+    expect(await rosterStatus('Anne')).toMatchObject({ status: 'NO_SESSION', pendingReason: null, lastCheckedAt: null });
+    expect(await workerStatus('Anne')).toMatchObject({ status: 'NO_SESSION', pendingReason: null, lastCheckedAt: null });
   });
 
   it('PENDING NO_TASK: bound, no open task', async () => {
@@ -115,8 +115,8 @@ describe('the status on the roster and on worker get (they agree)', () => {
   it('OK: a fresh assignment to a worker that never checked', async () => {
     await bind('Kit', 120);
     await assign('Kit', 2);
-    expect(await rosterStatus('Kit')).toEqual({ status: 'OK', pendingReason: null, lastCheckedAt: null });
-    expect(await workerStatus('Kit')).toEqual({ status: 'OK', pendingReason: null, lastCheckedAt: null });
+    expect(await rosterStatus('Kit')).toMatchObject({ status: 'OK', pendingReason: null, lastCheckedAt: null });
+    expect(await workerStatus('Kit')).toMatchObject({ status: 'OK', pendingReason: null, lastCheckedAt: null });
   });
 
   it('OVERDUE: assigned and checked long ago, and lastCheckedAt is reported', async () => {

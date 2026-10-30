@@ -17,6 +17,8 @@
  *      the `resetting` marks they held (cor:agt:050:27). It runs after the
  *      host-operation settle so an operation timed out this pass ends its
  *      reset in the same pass.
+ *   7. (#2755) raise the dark-worker alarm for each worker that is OVERDUE or has a wake unacknowledged past the
+ *      App's window, once per episode, and end the episodes that cleared (cor:agt:100:06, Proposed).
  *
  * No claim race, unlike the scheduler: every write is idempotent on its own
  * key (the episode's unique index, a conditional wake stamp, a conditional
@@ -36,18 +38,26 @@ import { sweepSessionEndRequests } from '../lib/hostOperations/sessionEnd.js';
 import { sweepUnreportedHostOperations } from '../lib/hostOperations/settle.js';
 import { anchorNow } from '../lib/stopSignals/state.js';
 import { sweepContextResets } from '../lib/contextReset/contextReset.js';
+import { evaluateDarkWorkers } from '../lib/agentTasks/darkWorker.js';
 
-export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number };
+export type TaskStallTickResult = { raised: number; woken: number; cleared: number; undeliverable: number; sessionEnds: number; hostOperationsSettled: number; contextResetsEnded: number; darkRaised: number };
 
 /** One pass at `now`. Each step runs even when an earlier one failed. */
 export async function taskStallTick(db: PrismaClient, now = new Date()): Promise<TaskStallTickResult> {
-  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 };
+  const result: TaskStallTickResult = { raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0 };
   // #2022: the monotonic half of `now`'s sample, so a raise decides at its own moment (stall.ts raiseStallAlarm).
   const anchor = anchorNow();
   try {
     result.raised = (await evaluateStalls(db, now, anchor)).length;
   } catch (err) {
     console.error('[task-stall] evaluation failed:', err);
+  }
+  // #2755: before the escalation below, so an episode whose conditions cleared is ended first and its next owner is not
+  // woken on a stale schedule (the task alarms re-derive that inside wakeDueOwners; the dark alarm settles it here).
+  try {
+    result.darkRaised = (await evaluateDarkWorkers(db, now)).length;
+  } catch (err) {
+    console.error('[task-stall] dark-worker evaluation failed:', err);
   }
   try {
     result.woken = await wakeDueOwners(db, now);

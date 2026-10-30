@@ -925,6 +925,23 @@ export const memoryMutations = {
       // PUBLIC while this call observes no PUBLIC agent. This early pass stays
       // as the fail-fast, ahead of the URN/alias writes.
       if (visibility !== undefined) {
+        // #2573: the same two-direction class/visibility guard createMemory
+        // applies (spec 023 FR-024), judged before anything is written. A
+        // memory's class never changes here, so the stored class decides.
+        // Without it the write reaches chk_memory_group_visibility and
+        // surfaces as INTERNAL_SERVER_ERROR.
+        if (memory.class === 'group' && visibility !== 'GROUP') {
+          throw new GraphQLError(
+            'Group-class memory must have visibility=GROUP (spec 023 FR-024).',
+            { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
+          );
+        }
+        if (memory.class !== 'group' && visibility === 'GROUP') {
+          throw new GraphQLError(
+            'visibility=GROUP requires class=group (spec 023 FR-024).',
+            { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
+          );
+        }
         await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
       // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
