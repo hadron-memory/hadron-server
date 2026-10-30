@@ -193,6 +193,12 @@ describe('#1149 Details tier: `agent` follows the cast Agent\'s own visibility',
     const r = await readWorker(teamDan.id, ctx(orgReader.id), 'promptOverride heldByUserId createdBy');
     expect(r.data?.worker).toEqual({ promptOverride: null, heldByUserId: null, createdBy: null });
   });
+
+  it('nor the App object: `app` is working state, even though Query.app would admit this reader', async () => {
+    const r = await readWorker(teamDan.id, ctx(orgReader.id), 'name app { id name }');
+    expect(r.errors).toBeUndefined();
+    expect(r.data?.worker).toEqual({ name: 'Dan', app: null });
+  });
 });
 
 describe('#1149 Working state: participants read exactly what they read before', () => {
@@ -277,6 +283,19 @@ describe('#1149 hadron_get_worker delegates to the profile read and keeps workin
     expect(text).not.toMatch(/\b(taken|free)\b/);
     expect(text).not.toContain('secret override');
     expect(text).not.toContain('Boot briefing');
+  });
+
+  it('a departed participant gets no recovery line for its own still-open session', async () => {
+    const own = await db.session.create({
+      data: { id: generateId(), appId: appA.id, userId: contributor.id, agentId: orgAgent.id, workerId: teamDan.id, role: 'server-engineer' },
+    });
+    const before = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
+    expect(before).toContain(`Your active session: ${own.id}`);
+    await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: contributor.id }, data: { deletedAt: new Date() } });
+    const after = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
+    expect(after).toContain('**Dan** (server-engineer)');
+    expect(after).not.toContain(own.id);
+    expect(after).not.toContain('Your active session');
   });
 
   it('a participant still sees the liveness flag', async () => {
