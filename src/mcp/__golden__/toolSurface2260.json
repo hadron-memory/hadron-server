@@ -89,6 +89,10 @@
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
+   "hadron_task_update",
+   "0c2ea733c9d62b4dd3a618fc5378d68e54fcb068dbb008dcf548d27951bfeea2"
+  ],
+  [
    "hadron_task_assign",
    "1b698cd1e925ebde075e75715b7eb4e1d54000061b31ccdf7f2d25ca01bf0a54"
   ],
@@ -130,7 +134,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "4ba438cfcf3a65f11293e79afaa56904e35b3ca36d2f40703da74f7cae2d5b11"
   ],
   [
    "hadron_alarm_ack",
@@ -639,6 +643,10 @@
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
+   "hadron_task_update",
+   "0c2ea733c9d62b4dd3a618fc5378d68e54fcb068dbb008dcf548d27951bfeea2"
+  ],
+  [
    "hadron_task_assign",
    "1b698cd1e925ebde075e75715b7eb4e1d54000061b31ccdf7f2d25ca01bf0a54"
   ],
@@ -680,7 +688,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "4ba438cfcf3a65f11293e79afaa56904e35b3ca36d2f40703da74f7cae2d5b11"
   ],
   [
    "hadron_alarm_ack",
@@ -1189,6 +1197,10 @@
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
+   "hadron_task_update",
+   "0c2ea733c9d62b4dd3a618fc5378d68e54fcb068dbb008dcf548d27951bfeea2"
+  ],
+  [
    "hadron_task_assign",
    "1b698cd1e925ebde075e75715b7eb4e1d54000061b31ccdf7f2d25ca01bf0a54"
   ],
@@ -1230,7 +1242,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "4ba438cfcf3a65f11293e79afaa56904e35b3ca36d2f40703da74f7cae2d5b11"
   ],
   [
    "hadron_alarm_ack",
@@ -1723,6 +1735,10 @@
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
   ],
   [
+   "hadron_task_update",
+   "0c2ea733c9d62b4dd3a618fc5378d68e54fcb068dbb008dcf548d27951bfeea2"
+  ],
+  [
    "hadron_task_assign",
    "1b698cd1e925ebde075e75715b7eb4e1d54000061b31ccdf7f2d25ca01bf0a54"
   ],
@@ -1764,7 +1780,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "4ba438cfcf3a65f11293e79afaa56904e35b3ca36d2f40703da74f7cae2d5b11"
   ],
   [
    "hadron_alarm_ack",

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // Agent tasks — #1705 (Task Management slice T1, epic #1704).
@@ -102,6 +103,8 @@ import {
   appendTaskEvent,
   eventActor,
   TASK_EVENT_TYPES,
+  TASK_EDIT_FIELDS,
+  type TaskEditField,
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
@@ -1111,6 +1114,41 @@ export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx:
 }
 
 export const agentTaskMutations = {
+  /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
+  updateAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input: Record<string, unknown> }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it.", { taskId });
+      }
+      refuseEnded(task);
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !(TASK_EDIT_FIELDS as readonly string[]).includes(k))) {
+        throw badInput('Name only editable task fields; source and lifecycle fields are fixed.');
+      }
+      const data: Prisma.AgentTaskUpdateInput = {};
+      const fields: TaskEditField[] = [];
+      for (const field of TASK_EDIT_FIELDS) {
+        if (!Object.hasOwn(input, field)) continue;
+        let value: unknown;
+        switch (field) {
+          case 'title': value = normalizeTitle(input.title as string); break;
+          case 'description': value = optionalText(input.description as string | null, TASK_DESCRIPTION_MAX, 'description'); break;
+          case 'tags': value = normalizeTags(input.tags as string[] | null); break;
+          case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
+          case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
+          case 'closeSessionWhenDone':
+            if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
+            value = input.closeSessionWhenDone ?? false; break;
+        }
+        if (isDeepStrictEqual(task[field], value)) continue;
+        fields.push(field);
+        Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
+      }
+      if (fields.length === 0) return;
+      // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
+      const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+      await tx.agentTask.update({ where: { id: task.id }, data: { ...data, ...updatedStamp(ctx) } });
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.edited', fields }, createdAt: at });
+    }),
   setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority }: { taskRef: string; priority: number }, ctx: Context) => {
     const value = taskPriority(priority);
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {

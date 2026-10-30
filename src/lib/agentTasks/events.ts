@@ -32,6 +32,7 @@ export const TASK_EVENT_TYPES = [
   'task.ready',
   'task.warning',
   'task.released', 'task.priority', 'task.blocker-added', 'task.blocker-removed',
+  'task.edited',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -52,10 +53,13 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning'] as const;
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
+
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'closeSessionWhenDone'] as const;
+export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
@@ -76,6 +80,7 @@ export type TaskEventPayload =
   | { type: 'task.released' }
   | { type: 'task.priority'; priority: number }
   | { type: 'task.blocker-added' | 'task.blocker-removed'; blockerTaskId: string }
+  | { type: 'task.edited'; fields: TaskEditField[] }
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
@@ -101,6 +106,9 @@ function partyJson(p: TaskParty): Prisma.InputJsonObject {
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
+    case 'task.edited':
+      if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
+      return { fields: [...new Set(e.fields)] };
     case 'task.warning':
       if (!(RECORDED_TASK_WARNING_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task warning history code');
       return { code: e.code };
