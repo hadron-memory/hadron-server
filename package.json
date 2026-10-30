@@ -57,6 +57,7 @@
     "@simplewebauthn/server": "14.0.3",
     "@types/pg": "^8.20.0",
     "ai": "7.0.14",
+    "ajv": "8.20.0",
     "bcrypt": "^5.1.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
