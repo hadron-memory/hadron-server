@@ -10937,7 +10937,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // actually makes the guarantee independent — and it is naturally
         // bounded, since it is one person's sessions on one worker.
         const driving = liveHere[0] ?? null;
-        const myRows = auth.userId
+        // #1149: the caller's own session is working state too. A departed
+        // participant keeps an open row until it ends, and must not be handed
+        // its id through the profile read.
+        const myRows = auth.userId && seesWorkingState
           ? await db.session.findMany({
               where: {
                 workerId: worker.id, endedAt: null, deletedAt: null,
