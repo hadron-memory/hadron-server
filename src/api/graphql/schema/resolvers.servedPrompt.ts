@@ -56,6 +56,24 @@ async function mayManageApp(ctx: Context, appId: string): Promise<boolean> {
   return app ? managesApp(ctx, app) : false;
 }
 
+/**
+ * A chat's served-prompt records, by chat id alone: the ONE implementation behind `Chat.servedPrompts` and
+ * `Query.chatServedPrompts` (#2862), so the two cannot drift. It needs no Chat object, so it hands the caller nothing
+ * about the chat but its records.
+ */
+export async function chatServedPromptsById(chatId: string, args: PageArgs, ctx: Context) {
+  if (!bootPromptServingEnabled()) return EMPTY_PAGE;
+  // The chat's App is the one its records name; a chat with no record has nothing to read.
+  // The authorized App is the chat's FIRST record's (deterministic: lowest ordinal), and only records under THAT App are
+  // returned: authorizing one App's record must never hand over another App's rows for the same chat.
+  const first = await ctx.db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'asc' }, select: { appId: true } });
+  if (!first) return EMPTY_PAGE;
+  // A chat held in a memory no App owns is recorded under no App (Vera #42133): there is no App whose manager reads it, so
+  // until Holger rules who does, only a platform admin (never an impersonation) reads it.
+  if (first.appId === null ? ctx.impersonation || !isPlatformAdmin(ctx) : !(await mayManageApp(ctx, first.appId))) return EMPTY_PAGE;
+  return recordsPage(ctx, { chatId, appId: first.appId }, args);
+}
+
 /** The fields mounted on `Session`, `Worker`, `AppRun` and `Chat`. */
 export const servedPromptOwnerFields = {
   /** `Session.servedPrompts` — a bind's record(s). */
@@ -87,18 +105,7 @@ export const servedPromptOwnerFields = {
   },
 
   /** `Chat.servedPrompts` — a chat's records (once at start, again when its served revision changed). */
-  chatServedPrompts: async (c: { id: string }, args: PageArgs, ctx: Context) => {
-    if (!bootPromptServingEnabled()) return EMPTY_PAGE;
-    // The chat's App is the one its records name; a chat with no record has nothing to read.
-    // The authorized App is the chat's FIRST record's (deterministic: lowest ordinal), and only records under THAT App are
-    // returned: authorizing one App's record must never hand over another App's rows for the same chat.
-    const first = await ctx.db.servedPrompt.findFirst({ where: { chatId: c.id }, orderBy: { ordinal: 'asc' }, select: { appId: true } });
-    if (!first) return EMPTY_PAGE;
-    // A chat held in a memory no App owns is recorded under no App (Vera #42133): there is no App whose manager reads it, so
-    // until Holger rules who does, only a platform admin (never an impersonation) reads it.
-    if (first.appId === null ? ctx.impersonation || !isPlatformAdmin(ctx) : !(await mayManageApp(ctx, first.appId))) return EMPTY_PAGE;
-    return recordsPage(ctx, { chatId: c.id, appId: first.appId }, args);
-  },
+  chatServedPrompts: (c: { id: string }, args: PageArgs, ctx: Context) => chatServedPromptsById(c.id, args, ctx),
 };
 
 /** Revision keys that still exist: the node's current revision (which has no history row yet) or a history row. */

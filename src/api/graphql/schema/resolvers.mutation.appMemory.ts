@@ -6,7 +6,7 @@
  * The mutations below are the explicit, caller-invokable way to add every
  * App-associable memory class to a chosen App:
  *
- *   - createAppMemory (#2661) — new org-admin-only app-class creation without
+ *   - createAppMemory (#2661, #2843) — new tenant-managed app-class creation without
  *     selecting an Agent; no existing memory attachment.
  *   - createMemoryInApp — create a new memory born App-scoped (app | knowledge |
  *     personal | private).
@@ -41,7 +41,7 @@ import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
@@ -192,12 +192,18 @@ async function withAppMemoryAuthorityTx<T>(
   );
 }
 
+/** #2843 / cor:acl:010:01: a user tenant's ACTUAL owner, or the existing org ADMIN gate; no user-App platform bypass. */
+async function requireAppMemoryCreator(ctx: Context, app: { organizationId: string | null; ownerUserId: string | null }): Promise<void> {
+  if (app.organizationId) await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+  else if (!ctx.userId || app.ownerUserId !== ctx.userId) throw authorizationDenied();
+}
+
 export const appMemoryMutations = {
   /**
    * #2661 / cor:acl:010:01: NEW free-standing app memory, not an Agent's
-   * install memory. The org-admin gate is shared; the principal restriction
-   * admits only a person acting as themselves. App/org authority anchors order
-   * both installation removal and membership revocation before the decision.
+   * install memory. #2843 admits the user-owned App's actual owner as ruled
+   * by D2; org Apps keep the shared ADMIN gate. Only a person acting as
+   * themselves creates. App/tenant anchors fence ownership, uninstall and revocation.
    */
   createAppMemory: async (
     _: unknown,
@@ -209,27 +215,29 @@ export const appMemoryMutations = {
     if (!ctx.userId || ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
       throw authorizationDenied();
     }
-    if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
-    const { id } = await resolveAppRef(ctx.db, appRef);
-    const observed = await ctx.db.app.findUniqueOrThrow({ where: { id } });
-    if (!observed.organizationId) {
-      if (observed.ownerUserId !== ctx.userId) throw authorizationDenied();
-      throw new GraphQLError('Creating an app memory for a user-owned App is not yet supported.', {
-        extensions: { code: 'USER_OWNED_APP_UNSUPPORTED' },
-      });
+    let id: string;
+    try { ({ id } = await resolveAppRef(ctx.db, appRef)); }
+    catch (error) {
+      // #2843: a stranger and an unknown/deleted App have one public answer.
+      if (error instanceof AppNotFoundError) throw authorizationDenied();
+      throw error;
     }
-    await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
-    // #2730: the root node's loc is `name`; refuse an unprojectable one after the gate.
+    const observed = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+    if (observed.deletedAt || observed.uninstalledAt) throw authorizationDenied();
+    await requireAppMemoryCreator(ctx, observed);
+    if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
+    // #2730: refuse an unprojectable root after authorization, before any write.
     assertMemoryRootLoc(name);
-    const observedOrgId = observed.organizationId; // narrowed here; the closure below loses it
     return withFsProjectionRollback(() => withAuthorizedTx(ctx, [
-      { kind: 'org', id: observedOrgId }, { kind: 'app', id },
+      ...(observed.organizationId ? [{ kind: 'org' as const, id: observed.organizationId }] : []),
+      ...(observed.ownerUserId ? [{ kind: 'user' as const, id: observed.ownerUserId }] : []),
+      { kind: 'app', id },
     ], async txCtx => {
       const current = await txCtx.db.app.findUniqueOrThrow({ where: { id } });
       if (current.organizationId !== observed.organizationId || current.ownerUserId !== observed.ownerUserId) {
         throw authorizationDenied();
       }
-      await requireOrgRole(txCtx, observed.organizationId!, 'ADMIN');
+      await requireAppMemoryCreator(txCtx, current);
       // Uninstall takes the App anchor exclusively. Its committed removal is
       // observed here after any wait, and cannot pass this writer until commit.
       const installed = await txCtx.db.appAgent.findFirst({
@@ -239,12 +247,17 @@ export const appMemoryMutations = {
         extensions: { code: 'AGENT_NOT_INSTALLED' },
       });
     }, async tx => {
-      const org = await tx.organization.findUniqueOrThrow({ where: { id: observed.organizationId! }, select: { urn: true } });
+      // Reload the canonical name after any anchor wait (e.g. an owner rename).
+      const locked = await tx.app.findUniqueOrThrow({ where: { id } });
+      // Same flat tenant root as createMemoryInApp; ownerUserId is tenancy, not a personal pivot.
+      const root = locked.organizationId
+        ? (await tx.organization.findUniqueOrThrow({ where: { id: locked.organizationId }, select: { urn: true } })).urn
+        : locked.urn.split(':')[0]!;
       const urn = await mintMemoryUrnV2(tx, {
-        root: org.urn, desiredSlug: deriveSlugFromName(name), authorRoot: observed.urn.split(':').pop()!,
+        root, desiredSlug: deriveSlugFromName(name), authorRoot: locked.urn.split(':').pop()!,
       });
       const memory = await tx.memory.create({ data: {
-        id: generateId(), organizationId: observed.organizationId, appId: id,
+        id: generateId(), organizationId: observed.organizationId, ownerUserId: observed.ownerUserId, appId: id,
         urn, name, shortDescription, description, tags: tags ?? [], class: 'app',
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,

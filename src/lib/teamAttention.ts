@@ -1716,6 +1716,7 @@ export async function maybeAdvanceOwnChannelRead(
     sinceSeq?: number | null;
     beforeSeq?: number | null;
     mentionsRef?: string | null;
+    replyToSeq?: number | null;
     teamHeadRef?: string | null;
     untagged?: boolean | null;
     limit?: number | null;
@@ -1757,8 +1758,8 @@ export async function maybeAdvanceOwnChannelRead(
   // #1628: attribution is activity even when the caller will acknowledge only
   // after validating and delivering the page. Never skip the heartbeat above.
   if (args.advanceReadState === false) return null;
-  // S3: a team-head filtered read is a window, not the contiguous tail: it never advances the mark.
-  if (args.teamHeadRef != null || args.untagged != null) return null;
+  // Team-tag and reply-filtered reads are partial windows, never a contiguous tail acknowledgement.
+  if (args.replyToSeq != null || args.teamHeadRef != null || args.untagged != null) return null;
   if (args.mentionsRef) return advanceOwnMentionsRead(ctx, session, args);
   if (args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0) return null;
   // #1536: no cursor and no offset now selects the newest page. Even when
@@ -1819,13 +1820,13 @@ async function advanceOwnChannelReadFenced(
   args: Parameters<typeof maybeAdvanceOwnChannelRead>[1],
   expected: number,
 ): Promise<number | null> {
-  if (args.advanceReadState !== false && args.mentionsRef) {
+  if (args.advanceReadState !== false && args.replyToSeq == null && args.mentionsRef) {
     return advanceOwnMentionsRead(ctx, session, args, { expected });
   }
   const out = await ctx.db.$transaction(async (tx) => {
     const effects = await fencedCheckEffects(ctx, tx, session, args.channelId, expected);
     if (effects.refused || args.advanceReadState === false) return { effects, advanced: null as number | null };
-    const advanced = args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0 || (args.sinceSeq == null && args.offset == null)
+    const advanced = args.replyToSeq != null || args.beforeSeq != null || (args.offset ?? 0) !== 0 || (args.limit ?? 1) <= 0 || (args.sinceSeq == null && args.offset == null)
       ? null
       : await advanceUnfilteredRead(ctx, tx as never, session.workerId, args);
     return { effects, advanced };

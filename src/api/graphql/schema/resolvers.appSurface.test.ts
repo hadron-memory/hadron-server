@@ -18,6 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import {
   cleanDb,
   createDbAppWithKey,
+  createDbAppMember,
   createDbOrgAndGraph,
 } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -489,8 +490,12 @@ describe('memories — App-key orgId', () => {
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
+    // #1376: a bare key no longer reaches org memory through an item; an App member (a user behind the key,
+    // not an org member) keeps the fold, which is what the malformed-role cap applies to.
+    const member = await db.user.create({ data: { githubId: 7781, githubUsername: 'invalid-role-member', roles: ['READER'] } });
+    await createDbAppMember(db, app.id, member.id);
     const page = await resolvers.Query.memories(
-      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
+      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id, userId: member.id }),
     );
     const ids = page.items.map((m: { id: string }) => m.id);
     expect(ids).toContain(memoryId);
@@ -540,7 +545,7 @@ describe('memories — App-key orgId', () => {
       data: {
         id: generateId(), organizationId: orgId, appId: appA.id,
         urn: `${orgId}:memory-list-internal`, name: 'A internal',
-        class: 'knowledge', visibility: 'ORGANIZATION',
+        class: 'knowledge', visibility: 'PUBLIC', // #1376: PUBLIC is what a bare key keeps through an item
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: internal.id, role: 'read' } });
@@ -549,22 +554,43 @@ describe('memories — App-key orgId', () => {
     const b = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id }));
     expect(a.items.map((m: { id: string }) => m.id)).toContain(internal.id);
     expect(b.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
-    expect(b.items.map((m: { id: string }) => m.id)).toContain(memoryId);
+    // #1376: the org memory the shared Agent's item links is reached through an App member, not a bare key.
+    expect(b.items.map((m: { id: string }) => m.id)).not.toContain(memoryId);
+    const member = await db.user.create({ data: { githubId: 7782, githubUsername: 'memory-list-member', roles: ['READER'] } });
+    await createDbAppMember(db, appB.id, member.id);
+    const bm = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id, userId: member.id }));
+    expect(bm.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
+    expect(bm.items.map((m: { id: string }) => m.id)).toContain(memoryId);
   });
 
   it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
     const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
+    // #1376: a bare key is not admitted to the org memory the Agent's item links (an App member is); what it
+    // still reaches is its own App's scoped memory, so the org gate is proven against that one.
+    const own = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: orgId, appId: app.id,
+        urn: `${orgId}:mm-appkey-own`, name: 'own app memory',
+        class: 'knowledge', visibility: 'PUBLIC', // #1376: PUBLIC is what a bare key keeps through an item
+      },
+    });
+    await db.agentMemoryItem.create({ data: { agentId, memoryId: own.id, role: 'read' } });
+    const member = await db.user.create({ data: { githubId: 7783, githubUsername: 'mm-appkey-member', roles: ['READER'] } });
+    await createDbAppMember(db, app.id, member.id);
+    const memberAll = await resolvers.Query.memories({}, {}, ctx({ appId: app.id, userId: member.id }));
+    expect(memberAll.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
     const appCtx = ctx({ appId: app.id });
 
-    // No orgId → the App's memories (agent's memoryItem → the test memory).
+    // No orgId → the App's memories (its own scoped memory; the item's org memory only for a member).
     const all = await resolvers.Query.memories({}, {}, appCtx);
-    expect(all.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    expect(all.items.some((m: { id: string }) => m.id === own.id)).toBe(true);
+    expect(all.items.some((m: { id: string }) => m.id === memoryId)).toBe(false);
 
     // orgId == the App's own org → same memories (a match-or-empty gate, NOT a
     // per-memory ownership filter — so subscribed-in memories would survive too).
     const scoped = await resolvers.Query.memories({}, { orgId }, appCtx);
-    expect(scoped.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    expect(scoped.items.some((m: { id: string }) => m.id === own.id)).toBe(true);
 
     // A different org → empty page (the App has no other active-org context).
     const other = await db.organization.create({

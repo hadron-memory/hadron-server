@@ -699,6 +699,8 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- and the App ticker-settings bounds. One source, shared verbatim with migration
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
+\ir ticker-tick-code-invariants.sql
+\ir ticker-generated-live-unique.sql
 \ir agent-ticker-template-invariants.sql
 \ir delivery-settings-invariants.sql
 \ir channel-checks-invariants.sql
@@ -811,6 +813,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
+
+-- #2014: the team-chat post limit's episodes and their worker fence.
+\ir post-limit-invariants.sql
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql

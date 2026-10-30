@@ -3394,6 +3394,7 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
+  postLimitEpisodes       PostLimitEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -3815,6 +3816,7 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
+  postLimitEpisodes PostLimitEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
@@ -5723,6 +5725,10 @@ model AgentTask {
   assigneeUserId       String?   @map("assignee_user_id")
   /// For the matcher (T3): `{ role?, familyIn?, familyNotIn?, excludeWorkerIds? }`.
   requirements         Json?
+  /// #2420 (cor:agt:050:28): this task's OWN optional, platform-opaque JSON object (the team's namespaces: review
+  /// schedule, complexity, a seat's reviewed head). Never inherited, never matcher or authorization input; written by
+  /// the cor:agt:050:09 set and the task's assignee, validated against the Team Agent's `schema:task-properties`.
+  properties           Json?
   /// 'backlog' | 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
   /// 'backlog' (#1754): parked — no assignee, not matched, never waited on, no alarms.
   status               String    @default("pending")
@@ -5786,10 +5792,6 @@ model AgentTask {
   @@map("agent_tasks")
 }
 
-/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
-/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
-/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
-/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
 /// #2644: same-App acyclic dependency graph, guarded by task-blocker-invariants.sql.
 model AgentTaskBlocker {
   taskId String @map("task_id")
@@ -5802,6 +5804,10 @@ model AgentTaskBlocker {
   @@map("agent_task_blockers")
 }
 
+/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
+/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
+/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
+/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
 model AgentTaskCounter {
   id           String  @id @default(cuid())
   appId        String  @map("app_id")
@@ -5863,6 +5869,7 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
+  postLimitEpisode PostLimitEpisode?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -5923,6 +5930,26 @@ model DarkWorkerEpisode {
 
   @@index([appId, endedAt])
   @@map("dark_worker_episodes")
+}
+
+/// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
+/// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
+/// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
+/// episode older than an hour is closed (`endedAt = openedAt + 1 hour`) by the next refusal, which then opens a new one.
+model PostLimitEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("post_limit_episodes")
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one
@@ -6314,6 +6341,8 @@ model Ticker {
   appId             String    @map("app_id")
   name              String
   slug              String
+  /// Permanent action-register code, snapped from the template name for generated tickers.
+  tickCode          String    @map("tick_code")
   cadenceSeconds    Int       @map("cadence_seconds")
   anchorAt          DateTime  @default(now()) @map("anchor_at")
   /// `{ timezone, windows: [{ days: [1..7], from: "22:00", to: "07:00" }] }`.
@@ -6331,8 +6360,8 @@ model Ticker {
   ownerWorkerId     String?   @map("owner_worker_id")
   /// #2024 (S8): set only on a ticker the platform generated at cast from an Agent ticker template. The template
   /// is a plain reference (no FK, so removing a template never cascades into runtime state) and the revision is
-  /// the one the ticker was made from; `generatedForWorkerId` is the worker it was made for. The unique
-  /// (generatedForWorkerId, sourceTemplateId) makes a retried cast unable to mint a second instance.
+  /// the one the ticker was made from; `generatedForWorkerId` is the worker it was made for. A partial unique
+  /// (generatedForWorkerId, sourceTemplateId) over live rows makes a retried cast unable to mint a second live instance.
   sourceTemplateId       String? @map("source_template_id")
   sourceTemplateRevision Int?    @map("source_template_revision")
   generatedForWorkerId   String? @map("generated_for_worker_id")
@@ -6358,7 +6387,12 @@ model Ticker {
   deliveryTicks WorkerDeliveryTick[]
 
   @@unique([appId, slug], map: "tickers_app_slug_uniq")
-  @@unique([generatedForWorkerId, sourceTemplateId], map: "tickers_generated_uniq")
+  // #2096: ONE LIVE generated ticker per (worker, template) — enforced by the PARTIAL unique index
+  // `tickers_generated_live_uniq WHERE generated_for_worker_id IS NOT NULL AND deleted_at IS NULL` (raw SQL: the
+  // 20261030120000 migration + prisma/ticker-generated-live-unique.sql via post-push.sql + src/test/globalSetup.ts,
+  // which must stay in sync). A @@unique would be non-partial and make a soft-deleted generated ticker block its
+  // recreation by the apply operation (the slack_connections / apps_urn_active_uniq precedent).
+  @@index([generatedForWorkerId, sourceTemplateId], map: "tickers_generated_idx")
   @@index([appId, deletedAt])
   @@map("tickers")
 }

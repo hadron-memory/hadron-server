@@ -33,7 +33,10 @@
 // succession of cor:agt:080:18 (Proposed).
 
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
+import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
+import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
+import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
@@ -76,6 +79,10 @@ import { isWorkerDormant } from '../../../lib/sessionActivity.js';
 import { loadWorkersActivity } from './resolvers.worker.js';
 import { nextFreeTickerSlug } from '../../../lib/tickers/tickerSlug.js';
 import { TickerNotFoundError, composeTickerUrn, resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
+import {
+  GeneratedAgentNotInstalledError, GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
+  applyAgentTickerTemplates,
+} from '../../../lib/tickers/agentTickerTemplates.js';
 
 // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -370,8 +377,21 @@ async function workerForRead(ctx: Context, ref: string) {
   return worker;
 }
 
+const tickerEntryReads = new WeakMap<Context, Map<string, Promise<RegisterEntry>>>();
+function readTickerEntry(ctx: Context, appId: string, code: string): Promise<RegisterEntry> {
+  let memo = tickerEntryReads.get(ctx);
+  if (!memo) { memo = new Map(); tickerEntryReads.set(ctx, memo); }
+  const key = appId + '\u0000' + code;
+  let result = memo.get(key);
+  if (!result) {
+    result = boundedRead(ctx, (tx, deadline) => new RegisterLookup(tx, { ...ctx, db: tx } as unknown as Context, appId, deadline).entry(code));
+    memo.set(key, result);
+  }
+  return result;
+}
+
 const crudMutations = {
-  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context) => {
+  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     // Shape that needs no row, checked before the transaction.
     const name = cleanName(input.name);
@@ -380,7 +400,7 @@ const crudMutations = {
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? new Date() : parseDate(input.anchorAt, 'anchorAt');
-    return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    const ticker = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
       await lockAppTickers(tx, fresh.id);
       const settings = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
       const cadence = checkCadence(input.cadenceSeconds, settings);
@@ -396,7 +416,7 @@ const crudMutations = {
       const slug = await nextFreeTickerSlug(tx, fresh.id, name);
       return tx.ticker.create({
         data: {
-          appId: fresh.id, name, slug, cadenceSeconds: cadence, anchorAt,
+          appId: fresh.id, name, slug, tickCode: tickCodeOfSlug(slug), cadenceSeconds: cadence, anchorAt,
           quietHours: quiet ?? Prisma.DbNull, channelIds, relevance,
           reasons,
           enabled: input.enabled ?? true,
@@ -407,6 +427,11 @@ const crudMutations = {
         },
       });
     });
+    try {
+      const entry = await readTickerEntry(ctx, app.id, ticker.tickCode);
+      if (entry.state !== 'FOUND') await emitTaskWarnings(ctx, info, app.id, { codes: ['ticker.code.unmapped'] });
+    } catch { /* Advice never changes the committed ticker; failed reads do not produce a warning. */ }
+    return ticker;
   },
 
   updateTicker: async (_: unknown, { ref, input }: { ref: string; input: TickerPatch }, ctx: Context) => {
@@ -891,7 +916,78 @@ async function announceGrantUse(
   }
 }
 
+/** The typed refusals of #2096's apply; the messages say what was NOT done, never another worker's or App's detail. */
+function applyRefusal(e: unknown): GraphQLError | null {
+  if (e instanceof GeneratedTickerLimitError) {
+    return taskError(
+      'TICKER_LIMIT_REACHED',
+      `${e.message.replace('this cast', 'this call')} Delete a ticker, or ask whoever manages the App to raise the limit; nothing was created.`,
+      { liveCap: e.liveCap, live: e.live, adding: e.adding },
+    );
+  }
+  if (e instanceof GeneratedTickerNameTakenError) {
+    return taskError('TICKER_NAME_TAKEN', `${e.message} Rename or delete that ticker and run this again; nothing was created.`, { name: e.name });
+  }
+  if (e instanceof GeneratedAgentNotInstalledError) {
+    return taskError('WORKER_AGENT_NOT_INSTALLED', 'The Agent is no longer installed in this App, so nothing was created.', { appId: e.appId });
+  }
+  if (e instanceof GeneratedNameTooLongError) {
+    return taskError('BAD_USER_INPUT', `${e.message} Nothing was created.`, { workerName: e.workerName });
+  }
+  return null;
+}
+
 const subscriptionMutations = {
+  /**
+   * #2096 (R97 B, R92 A): apply the Agent's CURRENT ticker templates to ONE existing worker, creating only the
+   * template tickers it is missing (the repair for workers cast before the templates existed). Whoever manages the
+   * App, a person acting as themselves: not the worker, not its holder as such, not a reportsTo chain, never an
+   * impersonation or a bare App key (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :33).
+   *
+   * Lock order, the one retireWorker and every ticker write take: the shared transaction gate (authority anchors),
+   * the App ticker lock, the worker row FOR SHARE, then the Agent's template set (shared) and the installation
+   * re-check inside `applyAgentTickerTemplates`. No worker-name lock: no name is allocated here. The worker's
+   * liveness is re-read after its row lock (`lockWorker` filters nothing), and the manager decision is made in the
+   * same transaction, so a demotion or a retirement that commits first is seen and any refusal writes nothing.
+   */
+  applyAgentTickerTemplates: async (_: unknown, { workerRef }: { workerRef: string }, ctx: Context) => {
+    let id: string;
+    try {
+      ({ id } = await resolveWorkerRef(ctx.db, workerRef));
+    } catch (e) {
+      if (e instanceof WorkerNotFoundError) throw workerNotFound(workerRef);
+      throw e;
+    }
+    const seen = await ctx.db.worker.findUnique({ where: { id }, select: { appId: true } });
+    const app = seen ? await loadApp(ctx, seen.appId) : null;
+    const actor = app ? await resolveTaskActor(ctx, app) : null;
+    if (!seen || !app || !actor) throw workerNotFound(workerRef);
+    try {
+      return await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
+        await lockAppTickers(tx, fresh.id);
+        const w = await lockWorker(tx, id);
+        if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
+        if (!(await actorManagesApp(txCtx, fresh, actor))) {
+          throw taskError('FORBIDDEN', 'Only whoever manages this App can apply an Agent\'s ticker templates to a worker.');
+        }
+        const r = await applyAgentTickerTemplates(tx, {
+          appId: fresh.id, agentId: w.agentId, worker: { id: w.id, name: w.name }, createdBy: txCtx.userId ?? null,
+        });
+        const made = await tx.ticker.findMany({ where: { id: { in: r.created.map((c) => c.tickerId) } } });
+        return {
+          created: r.created.map((c) => ({
+            ticker: made.find((t) => t.id === c.tickerId)!,
+            template: { id: c.plan.templateId, name: c.plan.templateName },
+            effectiveCadenceSeconds: c.plan.effectiveCadenceSeconds,
+          })),
+          alreadyPresent: r.alreadyPresent.map((t) => ({ id: t.id, name: t.name })),
+        };
+      });
+    } catch (e) {
+      throw applyRefusal(e) ?? e;
+    }
+  },
+
   subscribeWorker: (_: unknown, a: { tickerRef: string; workerRef: string }, ctx: Context) =>
     changeSubscription(ctx, a.tickerRef, a.workerRef, 'subscribe'),
   unsubscribeWorker: (_: unknown, a: { tickerRef: string; workerRef: string }, ctx: Context) =>
@@ -1022,6 +1118,12 @@ async function actorRef(ctx: Context, workerId: string | null, userId: string | 
 
 export const tickerFieldResolvers = {
   Ticker: {
+    registerTaskLoc: async (t: TickerRow, _: unknown, ctx: Context) => {
+      try {
+        const entry = await readTickerEntry(ctx, t.appId, t.tickCode);
+        return entry.state === 'FOUND' ? entry.taskLoc : null;
+      } catch { return null; }
+    },
     urn: async (t: TickerRow, _: unknown, ctx: Context) => {
       const app = await ctx.db.app.findUnique({ where: { id: t.appId }, select: { urn: true } });
       if (!app) return null;

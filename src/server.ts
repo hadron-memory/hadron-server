@@ -37,6 +37,7 @@ import {
   parseAppleUserField,
   resolveAppleUser,
 } from './auth/index.js';
+import { requireSignupBotCheck } from './auth/turnstile.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
 import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
@@ -906,6 +907,9 @@ export async function createServer(): Promise<Express> {
     // ordering is the fix rather than a style choice.
     validateEmailSendRequest,
     emailSendPerIpRateLimit,
+    // #2257: bot check after the no-send validation and before the recipient
+    // limiter, so a refused request neither burns a token nor a victim's budget.
+    requireSignupBotCheck,
     emailRecipientRateLimit,
     async (req, res) => {
       const { redirect } = req.body as { redirect?: string };

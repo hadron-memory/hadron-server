@@ -15,12 +15,19 @@
  * dead App, and one that is PENDING because its team is paused, it is paused, isolated, on standby, or stopped
  * (a `pause` / `halt` stop signal). `NO_TASK` exempts the OVERDUE trigger by itself (such a worker is never OVERDUE)
  * and does NOT exempt the unacknowledged-wake trigger.
+ *
+ * ACTIVE SESSION (#2813, Proposed with the rule): the unacknowledged-wake trigger is also exempt for a worker whose live
+ * session shows activity inside the window (`activeInsideWindow`). The deliverer types a wake only into an idle composer,
+ * so a worker in one long turn ages its wake past the window while working; "doesn't respond" reads as "shows no
+ * activity". The OVERDUE trigger is not touched. ACCEPTED LIMIT: a worker that stays continuously active while its
+ * deliverer never types its wake is not alarmed by this trigger; that is a stuck delivery (cor:agt:050:26, not built,
+ * hadron-server#2021), which this alarm does not claim to cover.
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 import { generateId } from '../id.js';
-import { toNaiveUtc } from '../sessionActivity.js';
+import { loadLastEventBySession, recentlyTouchedFilter, sessionActivityAt, toNaiveUtc } from '../sessionActivity.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckStatus.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { computeDueWakes } from '../tickers/dueWakes.js';
@@ -59,10 +66,42 @@ async function darkWorkersOf(
   }
   if (eligible.size === 0) return out;
   const wakeAges = await unackedWakeAges(db, app, new Map([...eligible].map(([id, s]) => [id, s.resumedAt])), app.deliveryDarkAlarmWindowSeconds, now);
+  // Only a worker that would be dark by the wake alone needs its activity read; OVERDUE is decided without it.
+  const active = await activeInsideWindow(
+    db,
+    [...eligible].filter(([id, s]) => s.status !== 'OVERDUE' && wakeAges.has(id)).map(([id]) => id),
+    app.deliveryDarkAlarmWindowSeconds,
+    now,
+  );
   for (const [workerId, status] of eligible) {
     const oldestWakeAgeSeconds = wakeAges.get(workerId) ?? null;
     if (status.status === 'OVERDUE') out.set(workerId, { workerId, reason: 'overdue', status, oldestWakeAgeSeconds });
-    else if (oldestWakeAgeSeconds !== null) out.set(workerId, { workerId, reason: 'wake-unacked', status, oldestWakeAgeSeconds });
+    else if (oldestWakeAgeSeconds !== null && !active.has(workerId)) out.set(workerId, { workerId, reason: 'wake-unacked', status, oldestWakeAgeSeconds });
+  }
+  return out;
+}
+
+/**
+ * #2813: the workers among `workerIds` with a LIVE session driven inside the window, i.e. whose `sessionActivityAt` (the
+ * platform's one derivation: startedAt, the heartbeat, the latest counted UsageEvent) is LATER than `now - window`, so a
+ * worker last active exactly one window ago is no longer exempt. Only a LIVE session counts: the query takes
+ * unended, undeleted rows that are inside their hard expiry and their idle window (`recentlyTouchedFilter`, the
+ * prefilter `isSessionLive` agrees with row for row, cor:agt:020:11), and anything active inside this shorter window
+ * is inside the idle one. Only the worker's own driving writes those inputs: a host key writes no session (cor:agt:070:04) and
+ * the deliverer's `dueWakes` read and `acknowledgeWakes` touch none of them, so the delivery side cannot hide a dark worker.
+ */
+async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowSeconds: number, now: Date): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (workerIds.length === 0) return out;
+  const sessions = await db.session.findMany({
+    where: { workerId: { in: workerIds }, endedAt: null, deletedAt: null, ...recentlyTouchedFilter(now) },
+    select: { id: true, workerId: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, endedAt: true, expiresAt: true },
+  });
+  const lastEvents = await loadLastEventBySession(db as never, sessions.map((s) => s.id));
+  const since = now.getTime() - windowSeconds * 1000;
+  for (const s of sessions) {
+    if (!s.workerId || out.has(s.workerId)) continue;
+    if (sessionActivityAt(s, lastEvents.get(s.id)).getTime() > since) out.add(s.workerId);
   }
   return out;
 }
@@ -126,9 +165,11 @@ const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
 
 /** Open one episode and raise its alarm, in one transaction. Null when the worker already has an open episode. */
 async function raise(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, dark: DarkWorker, windowMs: number, now: Date): Promise<string | null> {
+  let chainEmpty = false;
   try {
-    return await db.$transaction(async (tx) => {
+    const eventId = await db.$transaction(async (tx) => {
       const chain = await darkAlarmChain(tx, app, dark.workerId);
+      chainEmpty = chain.length === 0;
       const eventId = generateId();
       const payload: Prisma.InputJsonObject = {
         reason: dark.reason,
@@ -150,6 +191,10 @@ async function raise(db: PrismaClient, app: { id: string; organizationId: string
       // SERIALIZABLE like `raiseStallAlarm`: the chain names manager users, sealed, and `mergeUsers` refuses to merge an
       // account named in an open alarm. A raise racing a merge is a read-write cycle Postgres aborts on one side.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    // #2807: with no reporting line and no manager the alarm opens and nobody is woken. The alarm stays readable as it
+    // is; this one line, once per raised episode and after the commit, is how an operator learns of it. Ids only.
+    if (chainEmpty) console.warn(JSON.stringify({ event: 'dark_worker.chain_empty', appId: app.id, workerId: dark.workerId, eventId }));
+    return eventId;
   } catch (err) {
     if (isSerializationFailure(err)) return null; // lost a race (another pass, or a merge): the next pass decides again
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return null; // another pass opened it

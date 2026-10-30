@@ -1,4 +1,5 @@
 import { mentionReach, mentionReachSql, reachEnvelopeOf } from '../mentionReach.js';
+import { enrichTickWakes } from './tickActions.js';
 // dueWakes — #1748, cor:agt:080:08–:15, :22, :23 (plan §4.2, §4.2a, §6.1).
 //
 // The loading around the pure rule in wakeRule.ts: who the caller may read, the
@@ -73,6 +74,7 @@ export type DueWakeOut = {
   wake: WorkerWake;
   availability: { state: string; reason: string | null; until: Date | null; setAt: Date } | null;
   proof: string;
+  tickText: string | null;
   /** R63 (#2017): when the wake may be typed and the latest a busy worker may be made to wait, from the earliest waiting reason. */
   timing: { anchorAt: Date; deliverAfter: Date; busyDeadline: Date };
   /**
@@ -419,6 +421,7 @@ export async function computeDueWakes(args: {
   const standbyHeadOf = new Map(standbyRows.map((r) => [r.id, r.head]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
+  const tickersForAnnotations = new Map(subs.map(s => [s.tickerId, s.ticker]));
   for (const s of subs) subsOf.set(s.workerId, [...(subsOf.get(s.workerId) ?? []), s]);
   const deliveredOf = new Map(deliveryChannels.map((d) => [`${d.workerId}:${d.channelId}`, d]));
   const tickAckOf = new Map(deliveryTicks.map((d) => [`${d.workerId}:${d.tickerId}`, d]));
@@ -526,7 +529,7 @@ export async function computeDueWakes(args: {
       issuedAt: now.getTime(),
       wakeKey: wakeIdentity(identityOf(wake)),
     });
-  const issued: Array<Omit<DueWakeOut, 'timing' | 'tickDueAt'> & { exempt: boolean }> = [];
+  const issued: Array<Omit<DueWakeOut, 'timing' | 'tickText' | 'tickDueAt'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
   for (const w of workers) {
@@ -666,12 +669,17 @@ export async function computeDueWakes(args: {
       const ticker = tickerOf.get(r.tickerId);
       if (ticker) tickDueAt.set(r.tickerId, oldestUnackedTickAt(ticker, tickAckOf.get(`${i.workerId}:${r.tickerId}`)?.lastAckedTick ?? 0, r.k));
     }
-    wakes.push({ ...out, timing, tickDueAt });
+    wakes.push({ ...out, timing, tickDueAt, tickText: null });
   };
   // #2755: a PREVIEW is the pure derivation above and nothing else: no reservation, no budget slot, no proof
   // acknowledgement state touched. The dark-worker alarm reads it as the platform, so it must not spend the budget.
   if (args.preview) {
     for (const i of issued) passes(i);
+    const annotations = await enrichTickWakes(ctx, app, wakes, new Set(wakes.map(w => w.workerId)), tickersForAnnotations);
+    for (const w of wakes) {
+      const a = annotations.get(w.workerId);
+      if (a) { w.wake = a.visible; w.tickText = a.tickText; }
+    }
     return { status: 'OK', withheld: 0, wakes, dormant: [], nextAfter, budgetNotice: null };
   }
   if (issued.length > 0) {
@@ -728,6 +736,7 @@ export async function computeDueWakes(args: {
       await loadTickers(tx, rows.map((r) => r.wake));
       let consumed = used + live.size;
       const reserve: Array<{ workerId: string; key: string; wake: WorkerWake; absorbed?: string[] }> = [];
+      const refreshTicks = new Set<string>();
       wakes.length = 0;
       withheld = 0;
       for (const i of issued) {
@@ -778,6 +787,16 @@ export async function computeDueWakes(args: {
           // the current wake: still ONE reservation and ONE slot for the worker, and the old proof still acknowledges
           // exactly what it names.
           if (absorbsNewReason(have.wake, i.wake)) {
+            const had = reasonKeys(have.wake);
+            if ([...reasonKeys(i.wake)].some(k => k.startsWith('T:') && !had.has(k))) refreshTicks.add(i.workerId);
+            else {
+              // A task/stop join does not re-resolve tick guidance already issued.
+              i.wake = { ...i.wake, reasons: i.wake.reasons.map(r => {
+                if (r.kind !== 'TICK') return r;
+                const old = have.wake.reasons.find(old => old.kind === 'TICK' && old.tickerId === r.tickerId);
+                return { ...r, action: old?.kind === 'TICK' ? old.action : undefined };
+              }) };
+            }
             // The descendant remembers every key it absorbed: that lineage, not "some reservation exists", is what lets an
             // earlier proof of the same wake be acknowledged without a second charge (acknowledge.ts).
             reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake, absorbed: [...new Set([...have.absorbed_keys, have.wake_key])] });
@@ -791,7 +810,15 @@ export async function computeDueWakes(args: {
             i.exempt = have.wake.exempt;
             i.proof = signFor(i.workerId, have.wake);
           }
-          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake, absorbed: have.absorbed_keys });
+          else {
+            // Guidance is issued once, while same-identity display metadata stays fresh.
+            i.wake = { ...i.wake, reasons: i.wake.reasons.map(r => {
+              if (r.kind !== 'TICK') return r;
+              const old = have.wake.reasons.find(old => old.kind === 'TICK' && old.tickerId === r.tickerId);
+              return { ...r, action: old?.kind === 'TICK' ? old.action : undefined };
+            }) };
+          }
+          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: i.wake, absorbed: have.absorbed_keys });
           passes(i);
           continue;
         }
@@ -801,7 +828,17 @@ export async function computeDueWakes(args: {
           consumed++;
           reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake });
         }
+        refreshTicks.add(i.workerId);
         passes(i);
+      }
+      const annotations = await enrichTickWakes(ctx, app, wakes, refreshTicks, tickersForAnnotations);
+      for (const w of wakes) {
+        const a = annotations.get(w.workerId);
+        if (a) { w.wake = a.visible; w.tickText = a.tickText; }
+      }
+      for (const r of reserve) {
+        const a = annotations.get(r.workerId);
+        if (a) r.wake = a.stored;
       }
       const nowNaive = toNaiveUtc(now);
       for (const { workerId, key, wake, absorbed } of reserve) {

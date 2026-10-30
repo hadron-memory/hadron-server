@@ -2259,7 +2259,7 @@ export function createMcpServerInstance(
     'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
     'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
     'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
-    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
+    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
     'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
@@ -3301,7 +3301,7 @@ export function createMcpServerInstance(
   // #2661: one creation policy, delegated to the GraphQL resolver.
   server.tool(
     'hadron_create_app_memory',
-    'Create a NEW app-class memory in an org-owned App with an installed Agent. Requires the owning org ADMIN/OWNER acting as themselves, outside a worker session. App keys, runs, impersonation and user-owned Apps are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
+    'Create a NEW app-class memory in an App with an installed Agent. Requires the owning org ADMIN/OWNER or the actual owner of a user-owned App acting as themselves, outside a worker session. App keys, runs and impersonation are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
     SHAPE_HADRON_CREATE_APP_MEMORY,
     async ({ app, name, shortDescription, description, tags }) => {
       const ctx: Context = {
@@ -4528,9 +4528,10 @@ export function createMcpServerInstance(
         if (filterMemoryIds.length === 0) {
           return textResult(`${scopeNoteLine(scopeRes)}\n\nFound 0 node(s) — ${memSelectors.length ? 'the memories you named are outside this scope' : 'this scope lists no memory you can read'}.`);
         }
-      } else if (scopeRes?.kind === 'global') {
-        scopeOrgId = scopeRes.orgScopeId ?? undefined;
       }
+      // #1987: as in the resolver, the global view's materialised list still
+      // takes the org narrowing (App-memory exclusion of the runnable catalogue).
+      if (scopeRes?.kind === 'global') scopeOrgId = scopeRes.orgScopeId ?? undefined;
       // Every scoped return below — passages, the vector diagnostics, the node
       // list — starts with the disclosure (Codex + Copilot on PR #1161).
       const scopePrefix = scopeRes ? `${scopeNoteLine(scopeRes)}\n\n` : '';
@@ -8785,6 +8786,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         urn?: unknown;
         args?: unknown;
         appRef?: unknown;
+        agentRef?: unknown;
         runAsSelf?: unknown;
       };
       const taskHint = typeof a.task === 'string' ? a.task.trim() : '';
@@ -8795,6 +8797,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ? (a.args as Record<string, string>)
           : undefined;
       const appRef = typeof a.appRef === 'string' && a.appRef.trim() ? a.appRef.trim() : undefined;
+      const agentRef = typeof a.agentRef === 'string' && a.agentRef.trim() ? a.agentRef.trim() : undefined;
       const runAsSelf = a.runAsSelf === true;
 
       // Single run chokepoint: MCP resolves the task to a concrete node URN via
@@ -8820,14 +8823,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           try {
             const runId = await resolvers.Mutation.runTask(
               {},
-              { nodeRef: nodeUrn, args, appRef, runAsSelf },
+              { nodeRef: nodeUrn, args, appRef, agentRef, runAsSelf },
               ctx,
             );
             return textResult(
               `Run started: ${runId}\nRead its status, output and path with hadron_get_run(ref: "${runId}").`,
             );
           } catch (err) {
-            return toolErrorResult(err, () => `Could not start run: ${(err as Error).message}`, 'hadron_run_task');
+            // #2735: the one typed refusal an agent must be able to act on by name.
+            const typed = (err as { extensions?: { code?: unknown } }).extensions?.code === 'RUN_AGENT_REQUIRED' ? '[RUN_AGENT_REQUIRED] ' : '';
+            return toolErrorResult(err, () => `Could not start run: ${typed}${(err as Error).message}`, 'hadron_run_task');
           }
         }
         const loaded = await loadNodeForRun(nodeUrn);
@@ -9735,7 +9740,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   /** Read a Channel by id or address — the team-chat read's Channel-addressed twin. */
   const readChannel = async (
     channelRef: string,
-    args: { sinceSeq?: number; beforeSeq?: number; mentions?: string; teamHeadRef?: string; untagged?: boolean; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
+    args: { replyToSeq?: number; sinceSeq?: number; beforeSeq?: number; mentions?: string; teamHeadRef?: string; untagged?: boolean; limit?: number; offset?: number; session?: string; expectedIncarnation?: number },
   ) => {
     try {
       // #1353: capture applies to any user-principal session read — the pilot
@@ -9757,7 +9762,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         : chatCtx();
       const page = await resolvers.Query.channelMessages(
         {},
-        { channelRef, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, teamHeadRef: args.teamHeadRef ?? null, untagged: args.untagged ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
+        { channelRef, replyToSeq: args.replyToSeq ?? null, sinceSeq: args.sinceSeq ?? null, beforeSeq: args.beforeSeq ?? null, mentionsRef: args.mentions ?? null, teamHeadRef: args.teamHeadRef ?? null, untagged: args.untagged ?? null, limit: args.limit ?? null, offset: args.offset ?? null, expectedIncarnation: args.expectedIncarnation ?? null },
         resolverCtx,
       );
       if (captured && args.session) {
@@ -9766,6 +9771,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             channelId: captured.id,
             capturedHead: captured.lastSeq,
             sessionRef: args.session,
+            replyToSeq: args.replyToSeq,
             sinceSeq: args.sinceSeq,
             beforeSeq: args.beforeSeq,
             mentionsRef: args.mentions,
@@ -10156,11 +10162,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_channel_read',
     'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049). With no cursor or offset, returns the newest page, ascending by seq; sinceSeq reads forward and beforeSeq pages backward. A Channel you may not read is [channel_not_found].',
     SHAPE_HADRON_CHANNEL_READ,
-    async ({ channel, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, expectedIncarnation }) => {
+    async ({ channel, replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, expectedIncarnation }) => {
       // A blank session is no session, for every consumer below (#1362 review).
       const session = typeof rawSession === 'string' ? rawSession.trim() || undefined : rawSession;
       await heartbeatSession(session);
-      return readChannel(channel, { sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
+      return readChannel(channel, { replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
     },
   );
 
@@ -10274,7 +10280,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     'hadron_team_chat_read',
     'Read the team App\'s chat (#939), newest page by default, ascending within the page. sinceSeq (including 0) reads forward; beforeSeq pages backward; explicit offset retains oldest-first paging. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     SHAPE_HADRON_TEAM_CHAT_READ,
-    async ({ sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
+    async ({ replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session: rawSession, app, channel, expectedIncarnation, monitor, monitorFor, acknowledge }) => {
       // A blank session is no session, for every consumer below (#1362 review):
       // otherwise the MCP layer drops the bound session as "explicit" while
       // maybeAdvanceOwnChannelRead's trim falls back to it.
@@ -10282,8 +10288,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!monitor && (monitorFor !== undefined || acknowledge !== undefined)) {
         return refusalResult('[bad_user_input] monitorFor and acknowledge require monitor:true.');
       }
-      if (monitor && (teamHeadRef !== undefined || untagged !== undefined || sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
-        return refusalResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass sinceSeq, beforeSeq, mentions or offset.');
+      if (monitor && (replyToSeq !== undefined || teamHeadRef !== undefined || untagged !== undefined || sinceSeq !== undefined || beforeSeq !== undefined || mentions !== undefined || offset !== undefined)) {
+        return refusalResult('[bad_user_input] monitor:true owns the cursor and mention routing; do not pass replyToSeq, sinceSeq, beforeSeq, mentions or offset.');
       }
       if (monitor && limit !== undefined && limit < 1) {
         return refusalResult('[bad_user_input] monitor:true requires a positive limit.');
@@ -10295,7 +10301,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // contract: it needs no active App. Monitor mode still needs an App to
       // decide which of this operator's live Worker sessions participate.
       if (!monitor && channel !== undefined) {
-        return readChannel(channel, { sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
+        return readChannel(channel, { replyToSeq, sinceSeq, beforeSeq, mentions, teamHeadRef, untagged, limit, offset, session, expectedIncarnation });
       }
 
       let appRef = app;
@@ -10331,6 +10337,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           {},
           {
             appRef,
+            replyToSeq: replyToSeq ?? null,
             sinceSeq: sinceSeq ?? null,
             beforeSeq: beforeSeq ?? null,
             mentionsRef: mentions ?? null,
@@ -10353,6 +10360,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               channelId: captured.channelId,
               capturedHead: captured.lastSeq,
               sessionRef: session,
+              replyToSeq,
               sinceSeq,
               beforeSeq,
               mentionsRef: mentions,
@@ -10384,6 +10392,40 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             : `Error: ${e instanceof Error ? e.message : 'team-chat read failed'}`,
           'hadron_team_chat_read',
         );
+      }
+    },
+  );
+
+  // ── #2299 hadron_team_chat_search ────────────────────────────────────────────
+
+  server.tool(
+    'hadron_team_chat_search',
+    'Search ONE chat\'s history (#2299, cor:agt:020:04): the team App\'s chat, or the Channel named by channel. A literal, case-insensitive substring of the message text (% _ and the backslash are ordinary characters); query is 2 to 200 characters, counted as typed. Newest first; limit defaults to 20 and is clamped to 50. Each call scans at most 1,000 messages: the result says whether the search reached the start of the history (complete) or stopped, and gives the cursor to continue with. An empty page that is not complete may continue; "no matches" is only ever a complete search. Returns message references only (seq and URN, no text): read the message with hadron_team_chat_read / hadron_channel_read to see it. It matches what a read shows, goes through the same access as a read, and NEVER moves your read position or counts as attention. A chat in an encrypted memory is refused [team_chat_search_encrypted].',
+    SHAPE_HADRON_TEAM_CHAT_SEARCH,
+    async ({ query, limit, cursor, app, channel }) => {
+      try {
+        let page;
+        if (channel !== undefined) {
+          page = await resolvers.Query.channelMessageSearch({}, { channelRef: channel, query, limit: limit ?? null, cursor: cursor ?? null }, chatCtx());
+        } else {
+          let appRef = app;
+          if (!appRef) {
+            const appScopeError = requireAppScope();
+            if (appScopeError) return appScopeError;
+            appRef = auth.appId ?? undefined;
+            if (!appRef) return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+          }
+          page = await resolvers.Query.teamChatSearch({}, { appRef, query, limit: limit ?? null, cursor: cursor ?? null }, chatCtx());
+        }
+        const envelope = page.channelId != null && page.channelIncarnation != null ? `\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+        const state = page.complete
+          ? (page.items.length === 0 ? 'No matches (the search reached the start of the history).' : 'The search reached the start of the history.')
+          : `The search stopped before the start of the history${page.items.length === 0 ? ' with no match yet' : ''}; continue with cursor: ${page.cursor}`;
+        const lines = page.items.map((m: { seq: number; urn: string | null; nodeId: string }) => `#${m.seq} ${m.urn ?? `node ${m.nodeId}`}`);
+        return textResult(`${page.items.length} match(es):\n${lines.join('\n')}${lines.length ? '\n' : ''}\n${state}${envelope}`);
+      } catch (e) {
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat search failed'}`, 'hadron_team_chat_search');
       }
     },
   );
@@ -12832,6 +12874,12 @@ const SHAPE_HADRON_RUN_TASK = {
     .boolean()
     .optional()
     .describe('Attribute the executed run to the calling user (only with appRef).'),
+  agentRef: z
+    .string()
+    .optional()
+    .describe(
+      "Agent (PK or URN) the executed run is served as (#2735). Only with appRef. Omit to use the App's single installed Agent; an App with several installed Agents refuses with RUN_AGENT_REQUIRED.",
+    ),
 };
 
 const SHAPE_HADRON_START_SESSION = {
@@ -12919,6 +12967,7 @@ const SHAPE_HADRON_CHANNEL_POST = {
 };
 
 const SHAPE_HADRON_CHANNEL_READ = {
+  replyToSeq: z.number().int().optional().describe('Only direct replies to this seq, excluding the target. Missing or deleted target refuses TEAM_CHAT_REPLY_NOT_FOUND. AND-composes with other filters; not combinable with monitor:true.'),
   channel: z.string().describe('The Channel — its id, or its address (the chat root node URN hadron_list_channels prints). Copy one of those; a ref naming nothing reads as a Channel you may not see.'),
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD: only messages with seq strictly less than this, newest page of those. Ignores offset.'),
@@ -12941,6 +12990,7 @@ const SHAPE_HADRON_TEAM_CHAT_POST = {
 };
 
 const SHAPE_HADRON_TEAM_CHAT_READ = {
+  replyToSeq: z.number().int().optional().describe('Only direct replies to this seq, excluding the target. Missing or deleted target refuses TEAM_CHAT_REPLY_NOT_FOUND. AND-composes with other filters; not combinable with monitor:true.'),
   sinceSeq: z.number().int().optional().describe('Only messages with seq strictly greater than this watermark.'),
   beforeSeq: z.number().int().optional().describe('Page BACKWARD (#1116): only messages with seq strictly LESS than this, returning the NEWEST such page — pass the oldest seq you have seen. Stable under concurrent posting where offset is not. Ignores offset.'),
   teamHeadRef: z.string().optional().describe('Filter by an authorized stable team-head ID; mutually exclusive with untagged.'),
@@ -12960,6 +13010,14 @@ const SHAPE_HADRON_TEAM_CHAT_READ = {
     seq: z.number().int().min(0).describe('Exact sequence from the returned checkpoint.'),
     proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
   })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
+};
+
+const SHAPE_HADRON_TEAM_CHAT_SEARCH = {
+  query: z.string().describe('The text to find: a literal, case-insensitive substring, 2 to 200 characters counted as typed (no trimming). % _ and the backslash have no special meaning.'),
+  limit: z.number().int().optional().describe('Matches per page (default 20; a larger value is clamped to 50; below 1 is refused).'),
+  cursor: z.string().optional().describe('The continuation from the previous page of THIS search (same query, chat and caller); any other use is [team_chat_search_cursor_invalid].'),
+  app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the active App. Ignored when channel is given.'),
+  channel: z.string().optional().describe('Search THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
 };
 
 const SHAPE_HADRON_TEAM_ATTENTION = {

@@ -239,8 +239,10 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
     const access = await getMemoryAccess(db, auth);
 
-    expect(access.size).toBe(2);
+    // #1376: a bare App key keeps only the Agent's own system memory; the item-linked ORGANIZATION knowledge is not a grant.
+    expect(access.size).toBe(1);
     expect(access.has(systemMemoryId)).toBe(true);
+    expect(access.has(knowledgeMemoryId)).toBe(false);
   });
 
   it('returns empty when no appId AND no userId is set', async () => {
@@ -432,9 +434,11 @@ describe('getMemoryAccess — direct org-read (portal parity)', () => {
 
     const access = await getMemoryAccess(db, { appId: app.id, organizationId: orgId });
 
-    // Only the Agent's two memories — the orphan org memory is NOT visible to
-    // an App Key principal even though it lives in the same org.
-    expect(access.size).toBe(2);
+    // #1376: only the Agent's own system memory — neither the orphan org memory nor the
+    // item-linked ORGANIZATION knowledge reaches a bare App key.
+    expect(access.size).toBe(1);
+    expect(access.has(systemMemoryId)).toBe(true);
+    expect(access.has(knowledgeMemoryId)).toBe(false);
     expect(access.has(orphan.id)).toBe(false);
   });
 });
@@ -593,7 +597,8 @@ describe('getAccessibleMemoryIds', () => {
     const ids = await getAccessibleMemoryIds(db, auth);
 
     expect(ids).not.toBeNull();
-    expect(new Set(ids)).toEqual(new Set([systemMemoryId, knowledgeMemoryId]));
+    // #1376: a bare App key's ids are the Agent's system memory only (an item is a limit, not a grant).
+    expect(new Set(ids)).toEqual(new Set([systemMemoryId]));
   });
 
   it('returns null (means: all memories) for ADMIN', async () => {

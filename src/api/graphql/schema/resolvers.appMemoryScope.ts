@@ -26,13 +26,14 @@ import {
   isOwnerOrOrgMember,
   requireMemoryWriteAccess,
   requireOwnerOrOrgRole,
+  resolveAppFreeStandingMemoryIds,
   resolveAppTeamSpaceMemoryIds,
   safeCanonicalUrn,
   type Context,
 } from './resolvers.helpers.js';
 
 /** Why a memory is in an App's scope (cor:dmo:050:17). */
-export type AppMemorySourceKind = 'AGENT_SYSTEM' | 'AGENT_LINK' | 'INHERITED_BASE' | 'TEAM_SPACE';
+export type AppMemorySourceKind = 'AGENT_SYSTEM' | 'AGENT_LINK' | 'INHERITED_BASE' | 'TEAM_SPACE' | 'APP_MEMORY';
 export type AppMemorySource = { kind: AppMemorySourceKind; agentId: string | null };
 
 /** The caller's App memory scope, or null when nothing is in it. */
@@ -43,7 +44,7 @@ export type AppNodeScope = {
   sources: Map<string, AppMemorySource[]>;
 };
 
-const SOURCE_RANK: Record<AppMemorySourceKind, number> = { AGENT_SYSTEM: 0, AGENT_LINK: 1, INHERITED_BASE: 2, TEAM_SPACE: 3 };
+const SOURCE_RANK: Record<AppMemorySourceKind, number> = { AGENT_SYSTEM: 0, AGENT_LINK: 1, INHERITED_BASE: 2, TEAM_SPACE: 3, APP_MEMORY: 4 };
 
 /**
  * Admit the caller to an App's nodes and compute the memories they read.
@@ -161,9 +162,18 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
     ? await resolveAppTeamSpaceMemoryIds(ctx.db, resolvedAppId)
     : [];
 
+  // #2861 (cor:dmo:050:17 S6/S7) — the App's free-standing app memories
+  // (`createAppMemory`), under exactly the team space's admission and for the
+  // same reason: the audience is the App PARTICIPANT, which an org READER
+  // is not. Same `participant` value, so the two arms cannot drift apart.
+  // The App-isolation filter below still drops any other App's row.
+  const freeStandingIds = participant
+    ? await resolveAppFreeStandingMemoryIds(ctx.db, resolvedAppId, teamSpaceIds)
+    : [];
+
   // Org readers retain the resolver's multi-Agent scope. Participants
   // outside that group receive the primary Agent fold used by MCP reads.
-  const candidateMemoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds])];
+  const candidateMemoryIds = [...new Set([...agentMemoryIds, ...teamSpaceIds, ...freeStandingIds])];
 
   // Keep this App's memories only. An Agent installed in two Apps can link
   // memories scoped to each; the shared fold already applies this rule,
@@ -196,9 +206,11 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
     sources.set(memoryId, list);
   };
   const teamSpace = new Set(teamSpaceIds);
+  const freeStanding = new Set(freeStandingIds);
   for (const { id } of scoped) {
     for (const p of provenance.get(id) ?? []) add(id, { kind: p.system ? 'AGENT_SYSTEM' : 'AGENT_LINK', agentId: p.agentId });
     if (teamSpace.has(id)) add(id, { kind: 'TEAM_SPACE', agentId: null });
+    if (freeStanding.has(id)) add(id, { kind: 'APP_MEMORY', agentId: null });
   }
   // A base memory is listed only when at least one of its nodes is inherited
   // into the scope: a fully overridden base shows nothing on appNodes.

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // Agent tasks — #1705 (Task Management slice T1, epic #1704).
@@ -102,10 +103,13 @@ import {
   appendTaskEvent,
   eventActor,
   TASK_EVENT_TYPES,
+  TASK_EDIT_FIELDS,
+  type TaskEditField,
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
 
@@ -467,8 +471,8 @@ function actorIs(actor: TaskActor, workerId: string | null, userId: string | nul
   if (actor.kind === 'worker') return workerId !== null && workerId === actor.workerId;
   return workerId === null && userId !== null && userId === actor.userId;
 }
-const isOwner = (actor: TaskActor, t: TaskRow): boolean => actorIs(actor, t.ownerWorkerId, t.ownerUserId);
-const isAssignee = (actor: TaskActor, t: TaskRow): boolean =>
+const isOwner = (actor: TaskActor, t: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): boolean => actorIs(actor, t.ownerWorkerId, t.ownerUserId);
+const isAssignee = (actor: TaskActor, t: Pick<TaskRow, 'assigneeWorkerId' | 'assigneeUserId'>): boolean =>
   actorIs(actor, t.assigneeWorkerId, t.assigneeUserId);
 
 /**
@@ -496,7 +500,7 @@ export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskAct
  * It stops at the first worker that reports to nobody; a retired worker
  * reports to nobody, so a chain never runs through one.
  */
-async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskActor, task: TaskRow): Promise<boolean> {
+async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId'>): Promise<boolean> {
   if (actor.kind !== 'worker' || !task.ownerWorkerId) return false;
   let current = task.ownerWorkerId;
   for (let hops = 0; hops < 1000; hops++) {
@@ -510,8 +514,20 @@ async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskAc
 }
 
 /** The task's owner, whoever manages the App, or (#1726) a worker the owner reports to. */
-async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow): Promise<boolean> {
+async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): Promise<boolean> {
   return isOwner(actor, task) || (await actorManagesApp(txCtx, app, actor)) || (await actorCoordinatesOwner(tx, actor, task));
+}
+
+/**
+ * #2420 (cor:agt:050:28): who may write a task's `properties` — the cor:agt:050:09 set (owner, a worker the owner
+ * reports to, whoever manages the App) AND the task's own assignee; nobody else. Asked of a task row or, at creation,
+ * of the facts the new row will carry.
+ */
+async function mayWriteProperties(
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor,
+  task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId' | 'assigneeWorkerId' | 'assigneeUserId'>,
+): Promise<boolean> {
+  return (await mayDirectTask(tx, txCtx, app, actor, task)) || isAssignee(actor, task);
 }
 
 function sameActor(a: TaskActor, b: TaskActor): boolean {
@@ -911,6 +927,8 @@ type CreateInput = {
   status?: string | null;
   /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. */
   project?: boolean | null;
+  /** #2420 (cor:agt:050:28): the task's own properties; left out, not refused, for a creator who may not write them. */
+  properties?: unknown;
 };
 
 /**
@@ -923,6 +941,8 @@ async function insertTask(
     app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
     tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
+    /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
+    properties?: Prisma.InputJsonObject | null;
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
     /** #1754: a backlog task is parked, never queued (cor:agt:050:02). Default pending. */
     status?: 'backlog' | 'pending';
@@ -979,6 +999,7 @@ async function insertTask(
       status: a.status ?? 'pending',
       parentTaskId: parentId,
       requirements: a.requirements ?? Prisma.DbNull,
+      properties: a.properties ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
       ...partyColumns('assignee', a.assignee),
       ...(a.assignee ? a.assigned : {}),
@@ -992,6 +1013,12 @@ async function insertTask(
     // event stream — and so to the alarm chain — from creation.
     event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null },
   });
+  if (a.properties) {
+    await appendTaskEvent(tx, {
+      appId: a.app.id, taskId: created.id, actor: a.evActor,
+      event: { type: 'task.properties-changed', from: null, to: propertiesFingerprint(a.properties) },
+    });
+  }
   if (a.assignee) {
     await appendTaskEvent(tx, {
       appId: a.app.id, taskId: created.id, actor: a.evActor,
@@ -1111,6 +1138,63 @@ export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx:
 }
 
 export const agentTaskMutations = {
+  /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
+  updateAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input: Record<string, unknown> }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      // #2420 (cor:agt:050:28): the task's assignee may write its `properties` and nothing else; a patch that names
+      // any other field needs the cor:agt:050:09 set, and is refused whole.
+      const named = input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input) : [];
+      const assigneeWritesProperties = named.length > 0 && named.every(k => k === 'properties') && isAssignee(actor, task);
+      if (!assigneeWritesProperties && !(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it; its assignee may write only its properties.", { taskId });
+      }
+      refuseEnded(task);
+      if (!input || typeof input !== 'object' || Array.isArray(input) || named.some(k => k !== 'properties' && !(TASK_EDIT_FIELDS as readonly string[]).includes(k))) {
+        throw badInput('Name only editable task fields; source and lifecycle fields are fixed.');
+      }
+      const data: Prisma.AgentTaskUpdateInput = {};
+      const fields: TaskEditField[] = [];
+      // #2420: omitted leaves the value, an object replaces the whole of it, null clears it (and skips the schema).
+      let propertiesChange: { from: PropertiesFingerprint | null; to: PropertiesFingerprint | null } | null = null;
+      if (input.properties !== undefined) {
+        const next = input.properties === null ? null : normalizeTaskProperties(input.properties);
+        if (next !== null) await checkAgainstTeamSchema(tx, txCtx, app.id, next);
+        if (!isDeepStrictEqual(task.properties, next)) {
+          Object.assign(data, { properties: next === null ? Prisma.DbNull : next });
+          propertiesChange = {
+            from: task.properties === null ? null : propertiesFingerprint(task.properties),
+            to: next === null ? null : propertiesFingerprint(next),
+          };
+        }
+      }
+      for (const field of TASK_EDIT_FIELDS) {
+        if (!Object.hasOwn(input, field)) continue;
+        let value: unknown;
+        switch (field) {
+          case 'title': value = normalizeTitle(input.title as string); break;
+          case 'description': value = optionalText(input.description as string | null, TASK_DESCRIPTION_MAX, 'description'); break;
+          case 'tags': value = normalizeTags(input.tags as string[] | null); break;
+          case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
+          case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
+          case 'closeSessionWhenDone':
+            if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
+            value = input.closeSessionWhenDone ?? false; break;
+        }
+        if (isDeepStrictEqual(task[field], value)) continue;
+        fields.push(field);
+        Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
+      }
+      if (fields.length === 0 && !propertiesChange) return;
+      // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
+      const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+      await tx.agentTask.update({ where: { id: task.id }, data: { ...data, ...updatedStamp(ctx) } });
+      if (fields.length > 0) {
+        await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.edited', fields }, createdAt: at });
+      }
+      if (propertiesChange) {
+        await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.properties-changed', ...propertiesChange }, createdAt: at });
+      }
+    }),
   setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority }: { taskRef: string; priority: number }, ctx: Context) => {
     const value = taskPriority(priority);
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
@@ -1194,7 +1278,7 @@ export const agentTaskMutations = {
      * task, under the parent's row lock — so a caller who may not create here
      * learns nothing from which of them would be refused.
      */
-    const resolveParties = async (txCtx: Context, app: TaskApp) => {
+    const resolveParties = async (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => {
       const requirements = await normalizeRequirements(txCtx, app, input.requirements);
       let owner: TaskParty = actorParty(actor);
       if (input.owner) {
@@ -1219,7 +1303,19 @@ export const agentTaskMutations = {
         }
       }
       const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
-      return { requirements, owner, assignee };
+      // #2420 (cor:agt:050:28): a creator sets properties only when it is one of their writers for THIS new task (its
+      // owner, someone above the owner, a manager, or the assignee it names); any other creator gets the task made
+      // without them, never a refusal, and the value is not even judged (nothing to learn from its validation).
+      let properties: Prisma.InputJsonObject | null = null;
+      if (input.properties !== undefined && input.properties !== null
+        && await mayWriteProperties(tx, txCtx, app, actor, {
+          ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null,
+          assigneeWorkerId: assignee?.workerId ?? null, assigneeUserId: assignee?.userId ?? null,
+        })) {
+        properties = normalizeTaskProperties(input.properties);
+        await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+      }
+      return { requirements, owner, assignee, properties };
     };
 
     const refused = parentId ? () => notFound(parentId) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
@@ -1238,14 +1334,14 @@ export const agentTaskMutations = {
         }
         refuseEnded(parent);
       }
-      const { requirements, owner, assignee } = await resolveParties(txCtx, app);
+      const { requirements, owner, assignee, properties } = await resolveParties(tx, txCtx, app);
       if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
         throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
       }
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       const made = await insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status, priority,
+        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
       const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });

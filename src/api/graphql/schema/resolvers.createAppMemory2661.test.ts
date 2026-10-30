@@ -82,10 +82,10 @@ describe('#2661 new free-standing app memory', () => {
   it('refuses an empty name before writing', async () => {
     await refused(ctx(admin.id), {name:'   '}, 'BAD_USER_INPUT');
   });
-  it('refuses a user-owned App with a typed answer even for its owner', async () => {
+  it('admits the user-owned App owner after D2 (#2843)', async () => {
     const personal = await db.app.create({ data: { name: 'Own', urn: 'u2661:own', ownerUserId: admin.id } });
     await db.appAgent.create({ data: { appId: personal.id, agentId: agent.id } });
-    await refused(ctx(admin.id), { appRef: personal.id }, 'USER_OWNED_APP_UNSUPPORTED');
+    expect(await create(ctx(admin.id), { appRef: personal.id })).toMatchObject({ ownerUserId: admin.id, organizationId: null, appId: personal.id, class: 'app' });
   });
   it('conceals the user-owned refusal from a stranger', async () => {
     const personal = await db.app.create({data:{name:'Own',urn:'u2661:own',ownerUserId:admin.id}});
@@ -101,12 +101,12 @@ describe('#2661 new free-standing app memory', () => {
     await db.appAgent.deleteMany({ where: { appId: app.id } });
     await refused(ctx(admin.id), {}, 'AGENT_NOT_INSTALLED');
   });
-  it('MCP preserves the no-Agent and user-owned refusal answers', async () => {
+  it('MCP preserves the no-Agent refusal for either tenant kind (#2843)', async () => {
     const auth = { userId: admin.id, roles: [] as any[], clientId: `user:${admin.id}` };
     await db.appAgent.deleteMany({where:{appId:app.id}});
     expect(await createTestableMcpServer(auth).callToolText('hadron_create_app_memory', {app:app.id,name:'No Agent'})).toBe('Error: This App has no Agent installed.');
     const own = await db.app.create({data:{name:'Own',urn:'u2661:own',ownerUserId:admin.id}});
-    expect(await createTestableMcpServer(auth).callToolText('hadron_create_app_memory', {app:own.id,name:'Own'})).toBe('Error: Creating an app memory for a user-owned App is not yet supported.');
+    expect(await createTestableMcpServer(auth).callToolText('hadron_create_app_memory', {app:own.id,name:'Own'})).toBe('Error: This App has no Agent installed.');
     expect(await db.memory.count()).toBe(0);
   });
   it('does not count a deleted Agent as an installation', async () => {

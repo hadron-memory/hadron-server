@@ -1169,7 +1169,16 @@ export const nodeQueries = {
       // #463: push the org narrowing straight into the scope queries (rather
       // than selecting all ids then intersecting) so the admin/broad path never
       // materializes every memory id just to filter it down.
-      const orgWhere = orgScopeId ? { organizationId: orgScopeId } : {};
+      // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
+      // only the organisation's own memories, never an App's. A memory that
+      // belongs to an App carries app_id (required for class 'app', set for an
+      // App-scoped knowledge/group, #653), so the runnable listing narrows to
+      // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
+      // only: it composes with the accessible set above and adds no audience.
+      // Org-scoped non-runnable search is deliberately unchanged (no ruling).
+      const orgWhere = orgScopeId
+        ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
+        : {};
 
       let scopeIds: string[];
       if (explicitIds) {
@@ -1869,9 +1878,12 @@ export const nodeQueries = {
           return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
         }
         innerFilter = { ...f, memoryIds: requested };
-      } else if (scopeRes.kind === 'global') {
-        innerOrgId = scopeRes.orgScopeId;
       }
+      // #1987: the global view's materialised memory list must still pass
+      // through the org narrowing in core (the App-memory exclusion of the
+      // runnable catalogue); the list is already within that org, so for every
+      // other query the extra organizationId clause changes nothing.
+      if (scopeRes.kind === 'global') innerOrgId = scopeRes.orgScopeId;
       const inner = await core({ ...coreArgs, filter: innerFilter, orgId: innerOrgId });
       return { ...inner, scope: info, degraded: mergeDegradedCodes(inner.degraded, narrowed) };
     },
