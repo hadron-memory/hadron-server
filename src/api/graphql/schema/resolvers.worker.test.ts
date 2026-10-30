@@ -1332,7 +1332,7 @@ describe('Worker field resolvers', () => {
     expect(resolvedApp?.id).toBe(app.id);
   });
 
-  it('prompt binds {{name}}/{{role}} and appends the override as its own paragraph', async () => {
+  it('prompt leaves legacy {{name}}/{{role}} as written (#1772 step 3) and appends the override as its own paragraph', async () => {
     const worker = await cast({
       agentRef: roleAgent.id,
       name: 'Zoe',
@@ -1340,7 +1340,7 @@ describe('Worker field resolvers', () => {
     });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBe(
-      'You are Zoe, a backend-engineer on this team.\nWork from your own memories.\n\nPrefer boring solutions.',
+      'You are {{name}}, a {{role}} on this team.\nWork from your own memories.\n\nPrefer boring solutions.',
     );
   });
 

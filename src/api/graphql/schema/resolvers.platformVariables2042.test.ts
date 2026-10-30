@@ -53,10 +53,9 @@ describe('one pass over the authored source (blind review P2-1, P3-1)', () => {
     'worker.url': '', 'session.llmModel': 'm-1',
   };
 
-  it('legacy and platform tokens bind together, so a legacy value holding a platform token stays literal', () => {
-    const legacy = { name: '{{agent.name}}', role: '{{session.llmModel}}' };
-    expect(applyPlatformVariables('{{name}}|{{worker.name}}|{{role}}', { ...values, 'worker.name': legacy.name }, legacy)).toBe(
-      '{{agent.name}}|{{agent.name}}|{{session.llmModel}}',
+  it('a platform value holding a legacy or platform token stays literal, and legacy tokens bind nothing (#1772 step 3)', () => {
+    expect(applyPlatformVariables('{{name}}|{{worker.name}}|{{role}}', { ...values, 'worker.name': '{{agent.name}}' })).toBe(
+      '{{name}}|{{agent.name}}|{{role}}',
     );
   });
 
@@ -135,7 +134,7 @@ describe('composeWorkerPrompt — filled at each bind', () => {
   it('a legacy role value holding a platform token is served literally (composition level)', async () => {
     const w = await cast('Fay', '{{session.llmModel}}');
     await db.agent.update({ where: { id: agentId }, data: { systemPrompt: '{{role}}|{{worker.role}}' } });
-    expect(await prompt(w.id, { llmModel: 'm-9' })).toBe('{{session.llmModel}}|{{session.llmModel}}');
+    expect(await prompt(w.id, { llmModel: 'm-9' })).toBe('{{role}}|{{session.llmModel}}');
   });
 
   it('platform variables in a worker override are filled, with a template and with the override alone', async () => {

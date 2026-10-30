@@ -196,16 +196,15 @@ describe('#2047 run', () => {
   });
 });
 
-// #2702: a run replays its recorded variables, and the legacy tokens bind from them in the same pass.
-describe('#2702 served run binds the legacy {{name}} / {{role}} tokens', () => {
-  it('binds {{name}} and {{role}} from the values recorded with the run', async () => {
+// #1772 step 3: a run no longer binds the legacy tokens from its recorded values.
+describe('#1772 step 3: served run leaves legacy {{name}} / {{role}} tokens as written', () => {
+  it('renders {{name}} and {{role}} literally', async () => {
     await db.agent.update({ where: { id: agentId }, data: { personaRole: 'runner-role' } });
     await compiledPointer('You are {{name}}, the {{role}}.');
     const run = await mint({ userId, agentId });
     const { deps: d, llm } = deps();
     expect(await executeAppRun(db, run.id, d)).toBe('completed');
     const system = llm.mock.calls[0]![1].system!;
-    expect(system.startsWith('You are Runner, the runner-role.\n\n')).toBe(true);
-    expect(system).not.toMatch(/\{\{(name|role)\}\}/);
+    expect(system.startsWith('You are {{name}}, the {{role}}.\n\n')).toBe(true);
   });
 });
