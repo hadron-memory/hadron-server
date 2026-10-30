@@ -73,8 +73,13 @@ async function say(body: string, mentions: string[]) {
     tx.node.create({ data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: body, data: { mentions } } }),
     { asChannel: true });
 }
-const bind = (name: string, touched: Date) =>
-  db.session.create({ data: { id: generateId(), appId: app.id, userId: user.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(T0.getTime() - 120 * MIN), updatedAt: touched } });
+// A QUIET live session: since #2813 a session driven inside the alarm window exempts the wake-unacked trigger, and these
+// pins are about the chain, not the activity exemption (pinned in darkWorkerActive2813.test.ts). The second argument
+// only documents how long the test keeps the session in play.
+const bind = (name: string, _liveUntil: Date) => {
+  const startedAt = new Date(T0.getTime() - 120 * MIN);
+  return db.session.create({ data: { id: generateId(), appId: app.id, userId: user.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', startedAt, updatedAt: startedAt } });
+};
 const exemptEndedAt = async (name: string) => (await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: w[name].id } })).exemptEndedAt?.getTime();
 const holderCtx = (): Context => ({ db, userId: user.id, roles: ['READER'] });
 const M = resolvers.Mutation as any;
