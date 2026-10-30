@@ -33,6 +33,7 @@ export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, li
     try {
       return await attemptRaise(db, workerId, limit);
     } catch (err) {
+      if (err instanceof EpisodeAlreadyOpen) return null;
       const raced = isSerializationFailure(err) || (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002');
       if (!raced) throw err;
       if (attempt >= MAX_ATTEMPTS) {
@@ -49,6 +50,8 @@ export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, li
     }
   }
 }
+
+class EpisodeAlreadyOpen extends Error {}
 
 async function attemptRaise(db: PrismaClient, workerId: string, limit: string): Promise<string | null> {
   return await db.$transaction(async (tx) => {
@@ -69,6 +72,11 @@ async function attemptRaise(db: PrismaClient, workerId: string, limit: string): 
       await tx.$executeRaw`
         UPDATE post_limit_episodes SET ended_at = opened_at + interval '1 hour'
         WHERE worker_id = ${workerId} AND ended_at IS NULL AND opened_at + interval '1 hour' <= ${at}::timestamp`;
+      // An open episode (this hour's alarm already exists) raises nothing. Checked BEFORE the event is written: the event
+      // stream is append-only (a trigger refuses UPDATE and DELETE), so a row written and then abandoned could never be
+      // removed, only rolled back with the transaction.
+      const open = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM post_limit_episodes WHERE worker_id = ${workerId} AND ended_at IS NULL LIMIT 1`;
+      if (open.length > 0) return null;
       const chain = await darkAlarmChain(tx, w.app, workerId);
       const eventId = generateId();
       const payload: Prisma.InputJsonObject = { limit };
@@ -76,15 +84,13 @@ async function attemptRaise(db: PrismaClient, workerId: string, limit: string): 
         INSERT INTO agent_team_events (id, app_id, type, task_id, subject_worker_id, severity, chain, payload, created_at, episode_start)
         VALUES (${eventId}, ${w.appId}, ${POST_LIMIT_EVENT_TYPE}, NULL, ${workerId}, 'alarm', ${JSON.stringify(chain.map(partyJson))}::jsonb,
                 ${JSON.stringify(payload)}::jsonb, ${at}::timestamp, NULL)`;
-      // The partial unique index decides: a row exists only when no open episode did.
+      // The partial unique index is the backstop: an insert that finds an open episode (a race the check above cannot see)
+      // aborts this transaction, so the event is rolled back with it.
       const opened = await tx.$executeRaw`
         INSERT INTO post_limit_episodes (id, app_id, worker_id, event_id, opened_at)
         VALUES (${generateId()}, ${w.appId}, ${workerId}, ${eventId}, ${at}::timestamp)
         ON CONFLICT DO NOTHING`;
-      if (opened === 0) {
-        await tx.$executeRaw`DELETE FROM agent_team_events WHERE id = ${eventId}`;
-        return null;
-      }
+      if (opened === 0) throw new EpisodeAlreadyOpen();
       // cor:agt:050:19 — the nearest owner is woken now; owner i falls due i windows later, unless acknowledged first.
       const windowMs = w.app.deliveryDarkAlarmWindowSeconds * 1000;
       await tx.agentTeamAlarmSchedule.createMany({

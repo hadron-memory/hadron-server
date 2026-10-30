@@ -158,7 +158,8 @@ describe('#2014 the alarm', () => {
 
   it('a second refusal in the same hour raises nothing more', async () => {
     await post(liam, 10, 'a');
-    for (let i = 0; i < 3; i++) await workerSays(liam, `x${i}`).catch(() => undefined);
+    // Every refusal is the typed rate refusal (never an internal error from the alarm path), and only the first alarms.
+    for (let i = 0; i < 3; i++) await expect(workerSays(liam, `x${i}`)).rejects.toMatchObject({ extensions: { code: 'TEAM_CHAT_POST_RATE_LIMITED' } });
     expect(await alarms()).toHaveLength(1);
   });
 
@@ -177,7 +178,7 @@ describe('#2014 the alarm', () => {
   it('two concurrent over-limit posts raise exactly one alarm', async () => {
     await post(liam, 10, 'a');
     const results = await Promise.allSettled([workerSays(liam, 'p'), workerSays(liam, 'q'), workerSays(liam, 'r')]);
-    expect(results.every((r) => r.status === 'rejected')).toBe(true);
+    expect(results.every((r) => r.status === 'rejected' && (r.reason as any).extensions?.code === 'TEAM_CHAT_POST_RATE_LIMITED')).toBe(true);
     expect(await alarms()).toHaveLength(1);
     expect(await db.postLimitEpisode.count()).toBe(1);
   });
