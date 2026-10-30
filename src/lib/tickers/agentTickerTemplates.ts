@@ -19,6 +19,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { TICKER_NAME_MAX } from './bounds.js';
 import { nextFreeTickerSlug } from './tickerSlug.js';
+import { templateTickCode } from './tickCode.js';
 
 /** The only template shape that exists; the CHECK on `agent_ticker_templates` refuses any other. */
 export const TEMPLATE_SHAPE_VERSION = 1;
@@ -90,6 +91,7 @@ export class GeneratedTickerNameTakenError extends Error {
 export type PlannedTicker = {
   templateId: string;
   templateRevision: number;
+  tickCode: string;
   name: string;
   requestedCadenceSeconds: number;
   effectiveCadenceSeconds: number;
@@ -118,6 +120,7 @@ export async function planGeneratedTickers(
   const plans = templates.map((t) => ({
     templateId: t.id,
     templateRevision: t.revision,
+    tickCode: templateTickCode(t.name),
     name: generatedTickerName(t.name, args.workerName),
     requestedCadenceSeconds: t.cadenceSeconds,
     effectiveCadenceSeconds: Math.max(t.cadenceSeconds, settings.tickerMinCadenceSeconds),
@@ -177,7 +180,7 @@ export async function instantiateAgentTickerTemplates(
     };
     const ticker = await tx.ticker.create({
       data: {
-        appId: args.appId, name: plan.name, slug, cadenceSeconds: plan.effectiveCadenceSeconds,
+        appId: args.appId, name: plan.name, slug, tickCode: plan.tickCode, cadenceSeconds: plan.effectiveCadenceSeconds,
         quietHours: plan.quietHours === null ? Prisma.DbNull : (plan.quietHours as Prisma.InputJsonValue),
         channelIds: [], relevance: plan.relevance, reasons: plan.reasons, enabled: true,
         ownerWorkerId: args.worker.id,

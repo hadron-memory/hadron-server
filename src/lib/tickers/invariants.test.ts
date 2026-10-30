@@ -36,13 +36,13 @@ describe('ticker-invariants.sql (#1747)', () => {
       const agent = await db.agent.create({ data: { id: generateId(), name: 'A', organizationId: org.id, urn: `${org.urn}:a` } as never });
       appId = (await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'T', urn: `${org.urn}:t` } })).id;
       workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'W', slug: 'w' } })).id;
-      tickerId = (await db.ticker.create({ data: { appId, name: 'E', slug: 'e', cadenceSeconds: 600, ownerUserId: user.id } })).id;
+      tickerId = (await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'E', slug: 'e', cadenceSeconds: 600, ownerUserId: user.id } })).id;
     });
 
     const bad = (p: Promise<unknown>, re: RegExp) => expect(p).rejects.toThrow(re);
 
     it('a ticker has exactly one owner and a bounded cadence, a closed relevance, a well-formed slug', async () => {
-      const base = { appId, name: 'X', slug: 'x', cadenceSeconds: 600 };
+      const base = { tickCode: 'tick.fixture', appId, name: 'X', slug: 'x', cadenceSeconds: 600 };
       await bad(db.ticker.create({ data: base }), /chk_tickers_shape/);
       await bad(db.ticker.create({ data: { ...base, ownerUserId: 'u', ownerWorkerId: workerId } }), /chk_tickers_shape/);
       await bad(db.ticker.create({ data: { ...base, ownerWorkerId: workerId, cadenceSeconds: 86_401 } }), /chk_tickers_shape/);
@@ -52,7 +52,7 @@ describe('ticker-invariants.sql (#1747)', () => {
 
     it('a live name is unique ignoring case; the slug is unique forever', async () => {
       const mk = (name: string, slug: string, extra: Record<string, unknown> = {}) =>
-        db.ticker.create({ data: { appId, name, slug, cadenceSeconds: 600, ownerWorkerId: workerId, ...extra } });
+        db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name, slug, cadenceSeconds: 600, ownerWorkerId: workerId, ...extra } });
       await bad(mk('e', 'other'), /Unique constraint|tickers_app_name_live_uniq/);
       await db.ticker.update({ where: { id: tickerId }, data: { deletedAt: new Date() } });
       await expect(mk('E', 'e2')).resolves.toBeTruthy();

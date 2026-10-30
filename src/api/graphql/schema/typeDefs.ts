@@ -9792,7 +9792,8 @@ export const typeDefs = `#graphql
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
     task.finish.open-children, and from #2607 task.cancel.open-children on
-    cancelAgentTask and alarm.ack.outside-chain on acknowledgeAlarm); a client must tolerate unknown codes. \`text\` is
+    cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
+    a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
     blocks and never reveals another worker's state to a caller who could not
@@ -13582,6 +13583,8 @@ export const typeDefs = `#graphql
 
   "One merged wake: every reason, one seq range per channel. A wake never moves a read position."
   type DueWake {
+    "One server-written tick line, null without a tick (hrn:node:hadronmemory.com:specs:cor:agt:080:26). Names are flattened; repeated task URNs appear once."
+    tickText: String
     worker: Worker!
     reasons: [WakeReason!]!
     channels: [DueChannel!]!
@@ -13622,6 +13625,8 @@ export const typeDefs = `#graphql
   }
 
   type WakeReason {
+    "The tick's role-task guidance, gated for the reader on every read; null for other reasons (hrn:node:hadronmemory.com:specs:cor:agt:080:23)."
+    action: TickAction
     kind: WakeKind!
     ticker: Ticker
     """
@@ -13637,6 +13642,27 @@ export const typeDefs = `#graphql
     task: DueTaskReason
     "#2022 — set for kind STOP."
     stop: DueStopReason
+  }
+
+  "What the register says this tick asks of the woken worker, as far as the reader may read (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  enum TickActionState {
+    "A readable entry and runnable task."
+    MAPPED
+    "No mapping in the fully readable Team Agent chain, or no single Team Agent."
+    UNMAPPED
+    "The readable entry's loc has no usable task in the worker's chain."
+    UNRESOLVED
+    "Code-only guidance: resolve the task yourself. Includes failed reads."
+    WITHHELD
+  }
+  type TickAction {
+    "Permanent tick code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
+    code: String!
+    state: TickActionState!
+    "The readable entry's loc, including when no usable task was found."
+    taskLoc: String
+    "The readable runnable task nearest in the woken worker's Agent chain."
+    taskUrn: String
   }
 
   "#2022 — whether a stop notice tells the worker to stop or that it may resume."
@@ -13794,6 +13820,8 @@ export const typeDefs = `#graphql
   one; the cast raises it to the App's floor. Reasons are never empty.
   """
   type AgentTickerTemplate {
+    "The code future generated tickers receive, derived from this template's current name (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
+    tickCode: String!
     id: ID!
     agent: Agent!
     "Counts edits; an update or delete must name the revision it saw, and a stale one is refused with TICKER_TEMPLATE_REVISION_MISMATCH."
@@ -13835,6 +13863,10 @@ export const typeDefs = `#graphql
   computed from the App and the permanent slug. Ticks are computed, not stored; nothing reads a ticker until due wakes ship.
   """
   type Ticker {
+    "Permanent stored action-register code; generated copies retain their template's code at generation (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
+    tickCode: String!
+    "The readable Team Agent register entry's loc, without resolving any worker's task; null on absence, refusal or read failure (hrn:node:hadronmemory.com:specs:cor:agt:080:01)."
+    registerTaskLoc: String
     id: ID!
     "The canonical URN. Null when it cannot be composed."
     urn: String

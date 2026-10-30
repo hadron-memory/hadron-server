@@ -18,7 +18,9 @@
  * gate for that fact (`maySeeWorkerInternals`, the gate `Worker.checkStatus` masks on); to anyone else they are
  * simply absent.
  *
- * Register. The code→role-task mapping lives in the App's Team Agent's system memory as `register:<code>` nodes
+ * Register. Shared lookup primitives live in lib/actionRegister/lookup.ts, also used by tick wakes (#2733).
+ * The ticker.code.unmapped warning uses this same carrier and never records a task event.
+ * The code→role-task mapping lives in the App's Team Agent's system memory as `register:<code>` nodes
  * (`data.registerEntry = { code, taskLoc }`, R137). The effective Team Agent is found the way team roles find it
  * (`locateTeamAgent`); `register:<code>` resolves through ITS chain; the entry's `taskLoc` then resolves through the
  * CALLER's own Agent chain (nearest wins). A caller with no Agent (a person, an ambiguous or refused session) gets no
@@ -29,11 +31,12 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { appendTaskEvent, eventActor, RECORDED_TASK_WARNING_CODES, type EventActor, type RecordedTaskWarningCode } from '../../../lib/agentTasks/events.js';
 import { currentActor } from '../../../lib/requestActor.js';
-import { findEffectiveNodeIdByLoc } from '../../../lib/effectiveSystemMemory.js';
 import { loadAvailabilityByFamily } from '../../../lib/agentTasks/availability.js';
 import { loadWorkerCheckStatuses } from '../../../lib/workerCheckStatus.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { locateTeamAgent, maySeeWorkerInternals } from './resolvers.worker.js';
+import { registerEntry, nearestRoleTask } from '../../../lib/actionRegister/lookup.js';
+export { registerTaskLoc } from '../../../lib/actionRegister/lookup.js';
 
 export const TASK_WARNING_CODES = [
   'task.create.no-source',
@@ -44,6 +47,7 @@ export const TASK_WARNING_CODES = [
   // #2607 (action register phase 3): ungated, fixed text, about the caller's own act.
   'task.cancel.open-children',
   'alarm.ack.outside-chain',
+  'ticker.code.unmapped',
 ] as const;
 export type TaskWarningCode = (typeof TASK_WARNING_CODES)[number];
 
@@ -56,6 +60,7 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
   'task.finish.open-children': 'This task still has open child tasks.',
   'task.cancel.open-children': 'This task still has open child tasks; cancelling it does not end them.',
   'alarm.ack.outside-chain': 'You acknowledged an alarm outside its chain, as a manager of the App.',
+  'ticker.code.unmapped': "No register entry you can read maps this ticker's code to a task, so its wakes will say no task is mapped.",
 };
 
 export type TaskWarningRegister =
@@ -280,22 +285,13 @@ async function resolveRegistersIn(
     if (Date.now() >= deadline) return; // aggregate bound: the rest stay code + text only
     const key = `${appId}\u0000${agentId}\u0000${code}`;
     if (!teamMemoryId) { state.registers.set(key, { state: 'unmapped' }); continue; }
-    const entry = await findEffectiveNodeIdByLoc(tx, teamMemoryId, `register:${code}`);
-    const node = entry && (await readable(entry.memoryId))
-      ? await tx.node.findUnique({ where: { id: entry.id }, select: { data: true, deletedAt: true } })
-      : null;
-    const taskLoc = registerTaskLoc(node?.deletedAt ? null : node?.data, code);
+    const entry = await registerEntry(tx, teamMemoryId, code, readable);
+    const taskLoc = entry?.taskLoc;
     if (!taskLoc) { state.registers.set(key, { state: 'unmapped' }); continue; }
     if (!caller || caller.deletedAt || !caller.systemMemoryId) { state.registers.set(key, { state: 'unresolved' }); continue; }
-    const hit = await findEffectiveNodeIdByLoc(tx, caller.systemMemoryId, taskLoc);
-    const task = hit && (await readable(hit.memoryId))
-      ? await tx.node.findUnique({
-          where: { id: hit.id },
-          select: { loc: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } },
-        })
-      : null;
-    if (!task || task.deletedAt || task.memory.deletedAt || !task.isRunnable) { state.registers.set(key, { state: 'unresolved' }); continue; }
-    state.registers.set(key, { state: 'mapped', taskLoc: task.loc, taskUrn: `hrn:node:${task.memory.urn}:${task.loc}` });
+    const task = (await nearestRoleTask(tx, caller.systemMemoryId, taskLoc, readable))?.task;
+    if (!task) { state.registers.set(key, { state: 'unresolved' }); continue; }
+    state.registers.set(key, { state: 'mapped', taskLoc: task.loc, taskUrn: task.urn });
   }
 }
 
@@ -323,14 +319,6 @@ export async function resolveRegisters(ctx: Context, appId: string, codes: reado
     if (r) out.set(code, r);
   }
   return out;
-}
-
-/** The `taskLoc` of a well-formed register entry for `code`, else null (a malformed entry reads as unmapped). */
-export function registerTaskLoc(data: unknown, code: string): string | null {
-  const entry = (data as { registerEntry?: { code?: unknown; taskLoc?: unknown } } | null | undefined)?.registerEntry;
-  if (!entry || entry.code !== code) return null;
-  const loc = entry.taskLoc;
-  return typeof loc === 'string' && loc.trim() !== '' && loc.length <= 512 ? loc : null;
 }
 
 /**

@@ -76,7 +76,7 @@ export type StopWakeReason = {
   interrupt: boolean;
 };
 
-export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number } | TaskWakeReason | StopWakeReason;
+export type WakeReason = { kind: 'MENTION' } | { kind: 'TICK'; tickerId: string; k: number; action?: import('./tickActions.js').StoredTickAction | import('./tickActions.js').PublicTickAction } | TaskWakeReason | StopWakeReason;
 
 /** A task wake handed to the rule: already gated for the requester, oldest first. */
 export type TaskWakeInput = Omit<TaskWakeReason, 'kind'> & { /** R63: the task event's time (ms), the anchor of a task reason. */ atMs?: number };

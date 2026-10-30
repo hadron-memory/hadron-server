@@ -33,7 +33,10 @@
 // succession of cor:agt:080:18 (Proposed).
 
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
+import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
+import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
+import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
@@ -370,8 +373,21 @@ async function workerForRead(ctx: Context, ref: string) {
   return worker;
 }
 
+const tickerEntryReads = new WeakMap<Context, Map<string, Promise<RegisterEntry>>>();
+function readTickerEntry(ctx: Context, appId: string, code: string): Promise<RegisterEntry> {
+  let memo = tickerEntryReads.get(ctx);
+  if (!memo) { memo = new Map(); tickerEntryReads.set(ctx, memo); }
+  const key = appId + '\u0000' + code;
+  let result = memo.get(key);
+  if (!result) {
+    result = boundedRead(ctx, (tx, deadline) => new RegisterLookup(tx, { ...ctx, db: tx } as unknown as Context, appId, deadline).entry(code));
+    memo.set(key, result);
+  }
+  return result;
+}
+
 const crudMutations = {
-  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context) => {
+  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     // Shape that needs no row, checked before the transaction.
     const name = cleanName(input.name);
@@ -380,7 +396,7 @@ const crudMutations = {
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? new Date() : parseDate(input.anchorAt, 'anchorAt');
-    return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    const ticker = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
       await lockAppTickers(tx, fresh.id);
       const settings = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
       const cadence = checkCadence(input.cadenceSeconds, settings);
@@ -396,7 +412,7 @@ const crudMutations = {
       const slug = await nextFreeTickerSlug(tx, fresh.id, name);
       return tx.ticker.create({
         data: {
-          appId: fresh.id, name, slug, cadenceSeconds: cadence, anchorAt,
+          appId: fresh.id, name, slug, tickCode: tickCodeOfSlug(slug), cadenceSeconds: cadence, anchorAt,
           quietHours: quiet ?? Prisma.DbNull, channelIds, relevance,
           reasons,
           enabled: input.enabled ?? true,
@@ -407,6 +423,11 @@ const crudMutations = {
         },
       });
     });
+    try {
+      const entry = await readTickerEntry(ctx, app.id, ticker.tickCode);
+      if (entry.state !== 'FOUND') await emitTaskWarnings(ctx, info, app.id, { codes: ['ticker.code.unmapped'] });
+    } catch { /* Advice never changes the committed ticker; failed reads do not produce a warning. */ }
+    return ticker;
   },
 
   updateTicker: async (_: unknown, { ref, input }: { ref: string; input: TickerPatch }, ctx: Context) => {
@@ -1022,6 +1043,12 @@ async function actorRef(ctx: Context, workerId: string | null, userId: string | 
 
 export const tickerFieldResolvers = {
   Ticker: {
+    registerTaskLoc: async (t: TickerRow, _: unknown, ctx: Context) => {
+      try {
+        const entry = await readTickerEntry(ctx, t.appId, t.tickCode);
+        return entry.state === 'FOUND' ? entry.taskLoc : null;
+      } catch { return null; }
+    },
     urn: async (t: TickerRow, _: unknown, ctx: Context) => {
       const app = await ctx.db.app.findUnique({ where: { id: t.appId }, select: { urn: true } });
       if (!app) return null;
