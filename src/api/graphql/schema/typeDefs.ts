@@ -5506,6 +5506,38 @@ export const typeDefs = `#graphql
   }
 
   """
+  The provider a connection is made to: a Microsoft 365 mailbox, a Gmail
+  mailbox, a Google Calendar or a Google Drive. Each is its own OAuth client
+  and its own capability tool.
+  """
+  enum ConnectionProvider {
+    MS_EXCHANGE
+    GMAIL
+    GOOGLE_CAL
+    GOOGLE_DRIVE
+  }
+
+  """
+  The start of a connection's OAuth flow (#2897). Open authorizeUrl in a
+  browser; the consent step belongs to the provider and the browser ends on a
+  page this server hosts, so the portal is not involved. Confirm the result by
+  listing the org's connections.
+  """
+  type ConnectionStart {
+    provider: ConnectionProvider!
+    "The org the connection will be attached to."
+    orgId: ID!
+    """
+    The server URL to open in a browser. Its nonce is single-use and short-lived
+    (expiresAt); a second visit is refused. Treat the URL like a password until
+    it has been opened once.
+    """
+    authorizeUrl: String!
+    "When authorizeUrl stops working. Start again after this."
+    expiresAt: DateTime!
+  }
+
+  """
   A connected PROVIDER ACCOUNT (identity record) — despite the name, this
   one type carries mailboxes, calendars and Drive accounts alike; the
   provider field below says which, and each routes to its own capability
@@ -11701,6 +11733,23 @@ export const typeDefs = `#graphql
     # Exchange integration (connection created via OAuth at /auth/microsoft)
     deleteExchangeConnection(id: ID!): Boolean!
     testExchangeConnection(id: ID!): Boolean!
+
+    """
+    Start the OAuth flow that connects a mailbox, calendar or Drive to an org
+    (#2897; hrn:node:hadronmemory.com:specs:cor:api:240:02). The same start as
+    POST /auth/{provider}/start, which stays for the portal: the same org-ADMIN
+    gate and the same single-use, provider-bound nonce. A flow started here ends
+    on a page the server hosts, not on the portal.
+
+    Only a signed-in user acting as themselves may call it: a portal sign-in or
+    a user API key, who is an ADMIN of orgRef (ID or URN). An App key, a bound
+    worker session, an impersonated request and an OAuth credential limited to
+    the MCP surface are refused, because this mints a credential-bearing start
+    for a person's mailbox, calendar or Drive (hrn:node:hadronmemory.com:specs:cor:dmo:050:05).
+    A caller who is not an ADMIN, and an unknown org, get the same Forbidden.
+    An unconfigured provider is CONNECTION_PROVIDER_NOT_CONFIGURED.
+    """
+    startConnection(provider: ConnectionProvider!, orgRef: ID!): ConnectionStart!
 
     """
     Register a Slack workspace install (spec 043). orgRef/appRef accept ID

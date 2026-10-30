@@ -219,6 +219,16 @@ describe('#964 — castWorkerPreview', () => {
     expect(p.prompt).toBe('You are {{ worker.name }}, a backend-engineer.');
   });
 
+  it('leaves legacy {{name}} / {{role}} literal in the preview, template and override, while the closed set binds (#2902, #1772 step 3)', async () => {
+    // The preview is a live path: only a retained record replay still binds the legacy tokens (applyRecordedVariables).
+    await db.agent.update({
+      where: { id: roleAgent.id },
+      data: { systemPrompt: 'Hi {{name}}, a {{role}}: {{worker.name}} / {{worker.role}}.' },
+    });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen', promptOverride: 'Also {{name}} / {{role}} / {{worker.name}}.' });
+    expect(p.prompt).toBe('Hi {{name}}, a {{role}}: Gwen / backend-engineer.\n\nAlso {{name}} / {{role}} / Gwen.');
+  });
+
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {
     await expectCode(preview(ctx(outsider.id), { role: 'backend-engineer', name: 'Gwen' }), 'FORBIDDEN');
     // Staffing is a human act — the pure App-key principal is denied for the
