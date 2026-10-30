@@ -171,6 +171,9 @@ function schemaNodeCount(schema: object): number | null {
       if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return null;
       // References let a flat, tiny schema describe an exponential evaluation tree (a chain of anyOf [$ref, $ref] is 2^N
       // branches and exhausts the heap). Without them evaluation cost is bounded by schema nodes x value nodes, capped by the node cap and the work budget.
+      // uniqueItems compares every pair of an array's items, so its cost is quadratic in the array and no schema-nodes x
+      // value-nodes budget bounds it (60 allOf copies against a 1,600-item array cost 0.5-1.1 s per write).
+      if (o.uniqueItems === true) return null;
       if (typeof o.$ref === 'string' || typeof o.$recursiveRef === 'string' || typeof o.$dynamicRef === 'string') return null;
     }
     for (const child of Object.values(node)) stack.push([child, depth + 1]);

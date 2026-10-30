@@ -389,6 +389,27 @@ describe('contract #2420', () => {
     await expect(setProps({ a: Array.from({ length: 2400 }, (_, i) => i % 10) })).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
   });
 
+  it('refuses uniqueItems, whose pairwise comparison no nodes x values budget bounds (§10 P2-1 at 6e7aac8e)', async () => {
+    const node = await putSchema({ type: 'object' });
+    const quadratic = { type: 'object', allOf: Array.from({ length: 60 }, () => ({ properties: { a: { type: 'array', uniqueItems: true } } })) };
+    await db.node.update({ where: { id: node.id }, data: { data: quadratic } });
+    const started = Date.now();
+    await expect(setProps({ a: Array.from({ length: 1600 }, (_, i) => i) })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    expect(Date.now() - started).toBeLessThan(500);
+    // uniqueItems:false and a property merely named uniqueItems stay usable.
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { a: { type: 'array', uniqueItems: false }, uniqueItems: { type: 'number' } } } } });
+    await setProps({ a: [1, 1], uniqueItems: 1 });
+  });
+
+  it('pins the schema node cap at 500 values: 500 is usable, 501 is not', async () => {
+    const node = await putSchema({ type: 'object' });
+    // {enum: [N leaves]} counts the object, the array and N leaves: N + 2 values.
+    await db.node.update({ where: { id: node.id }, data: { data: { enum: Array.from({ length: 498 }, (_, i) => i) } } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    await db.node.update({ where: { id: node.id }, data: { data: { enum: Array.from({ length: 499 }, (_, i) => i) } } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+  });
+
   it('a schema node may have a property named pattern as long as no regex keyword is used', async () => {
     await putSchema({ type: 'object', properties: { pattern: { type: 'string' } } });
     await setProps({ pattern: 'anything' });
