@@ -63,10 +63,15 @@ const mint = (over: { provider?: string; origin?: 'portal' | 'graphql'; userId?:
   });
 const url = (nonce: string, route = 'gmail') => `${baseUrl}/auth/${route}?nonce=${nonce}`;
 const fieldOf = (html: string, name: string) => new RegExp(`name="${name}" value="([^"]*)"`).exec(html)![1];
-const post = (route: string, body: Record<string, string>) =>
+/** A browser binding for tests that post directly; `null` sends no cookie at all. */
+const B = 'ab'.repeat(16);
+const post = (route: string, body: Record<string, string>, cookieBinding: string | null = B) =>
   fetch(`${baseUrl}/auth/${route}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      ...(cookieBinding ? { cookie: `hadron_connect_bind=${cookieBinding}` } : {}),
+    },
     body: new URLSearchParams(body),
     redirect: 'manual',
   });
@@ -116,7 +121,7 @@ describe('POST /auth/{provider}', () => {
   it('redeems once: a second confirmation is refused', async () => {
     const nonce = await mint();
     expect((await confirmConnect(url(nonce))).status).toBe(302);
-    const again = await post('gmail', { nonce, token: connectInterstitialToken('gmail', nonce) });
+    const again = await post('gmail', { nonce, token: connectInterstitialToken('gmail', nonce, B) });
     expect(again.status).toBe(400);
   });
 
@@ -128,17 +133,41 @@ describe('POST /auth/{provider}', () => {
     expect((await confirmConnect(url(nonce))).status).toBe(302);
   });
 
+  it('a token fetched in one browser does not confirm in another (no cookie, or another browser binding)', async () => {
+    const nonce = await mint();
+    // The page is fetched with no cookie jar of the victim's: the attacker holds the token and its binding.
+    const page = await fetch(url(nonce), { redirect: 'manual' });
+    const token = fieldOf(await page.text(), 'token');
+    const attackerBinding = /hadron_connect_bind=([0-9a-f]{32})/.exec(page.headers.get('set-cookie') ?? '')![1];
+    expect((await post('gmail', { nonce, token }, null)).status).toBe(400);
+    expect((await post('gmail', { nonce, token }, 'cd'.repeat(16))).status).toBe(400);
+    expect((await post('gmail', { nonce, token }, 'not-a-binding')).status).toBe(400);
+    const row = await db.authHandoffCode.findFirstOrThrow({ where: { kind: { startsWith: 'exchange_start' } } });
+    expect(row.redeemedAt).toBeNull();
+    // ...and it does confirm in the browser that received the page.
+    expect((await post('gmail', { nonce, token }, attackerBinding)).status).toBe(302);
+  });
+
+  it('the page sets the binding as an HttpOnly, SameSite=Strict cookie scoped to the route, and a second tab reuses it', async () => {
+    const nonce = await mint();
+    const first = await fetch(url(nonce), { redirect: 'manual' });
+    const cookie = first.headers.get('set-cookie')!;
+    expect(cookie).toMatch(/^hadron_connect_bind=[0-9a-f]{32}; Path=\/auth\/gmail; Max-Age=120; HttpOnly; SameSite=Strict/);
+    const again = await fetch(url(nonce), { redirect: 'manual', headers: { cookie: cookie.split(';')[0] } });
+    expect(fieldOf(await again.text(), 'token')).toBe(fieldOf(await first.text(), 'token'));
+  });
+
   it('a token for one nonce, or one provider, fails for another', async () => {
     const a = await mint();
     const b = await mint();
-    expect((await post('gmail', { nonce: b, token: connectInterstitialToken('gmail', a) })).status).toBe(400);
-    expect((await post('gmail', { nonce: a, token: connectInterstitialToken('ms-exchange', a) })).status).toBe(400);
-    expect((await post('gmail', { nonce: a, token: connectInterstitialToken('gmail', a) })).status).toBe(302);
+    expect((await post('gmail', { nonce: b, token: connectInterstitialToken('gmail', a, B) })).status).toBe(400);
+    expect((await post('gmail', { nonce: a, token: connectInterstitialToken('ms-exchange', a, B) })).status).toBe(400);
+    expect((await post('gmail', { nonce: a, token: connectInterstitialToken('gmail', a, B) })).status).toBe(302);
   });
 
   it('judges eligibility before redeeming: an ex-admin POST is refused and the nonce stays unredeemed', async () => {
     const nonce = await mint();
-    const token = connectInterstitialToken('gmail', nonce);
+    const token = connectInterstitialToken('gmail', nonce, B);
     await db.orgMember.updateMany({ where: { organizationId: orgId, userId: adminId }, data: { deletedAt: new Date() } });
     expect((await post('gmail', { nonce, token })).status).toBe(400);
     const row = await db.authHandoffCode.findFirstOrThrow({ where: { kind: { startsWith: 'exchange_start' } } });
@@ -147,7 +176,7 @@ describe('POST /auth/{provider}', () => {
 
   it('503s while the provider is unconfigured, without burning the nonce', async () => {
     const nonce = await mint();
-    const token = connectInterstitialToken('gmail', nonce);
+    const token = connectInterstitialToken('gmail', nonce, B);
     delete process.env.GMAIL_CLIENT_ID;
     expect((await post('gmail', { nonce, token })).status).toBe(503);
     process.env.GMAIL_CLIENT_ID = 'gmail-client-id.apps.googleusercontent.example';
@@ -196,7 +225,7 @@ describe('one refusal for every shape', () => {
       await db.authHandoffCode.deleteMany({});
       const nonce = await make();
       const get = await snapshot(await fetch(url(nonce), { redirect: 'manual' }));
-      const postRes = await snapshot(await post('gmail', { nonce, token: connectInterstitialToken('gmail', nonce) }));
+      const postRes = await snapshot(await post('gmail', { nonce, token: connectInterstitialToken('gmail', nonce, B) }));
       seen[`${name}:get`] = get;
       seen[`${name}:post`] = postRes;
     }

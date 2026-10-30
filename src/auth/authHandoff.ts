@@ -270,18 +270,25 @@ const CONNECT_INTERSTITIAL_KEY_LABEL = 'hadron:connect-interstitial:v1';
 
 /**
  * The per-page token of the connect interstitial (#2908): HMAC over the provider and the SHA-256 of the nonce, keyed
- * by HMAC(JWT_SECRET, {@link CONNECT_INTERSTITIAL_KEY_LABEL}). It binds the POST to a page this server rendered for
- * this nonce at this provider; a token for one nonce or provider fails for another.
+ * and a random per-browser value, keyed by HMAC(JWT_SECRET, {@link CONNECT_INTERSTITIAL_KEY_LABEL}). It binds the POST
+ * to a page this server rendered for this nonce at this provider, FOR THE BROWSER THAT RECEIVED IT: the browser value
+ * rides in an HttpOnly cookie set with the page, so a token fetched in one browser and auto-submitted from another
+ * (a cross-site form post into the victim's browser, which carries no such cookie) fails.
  */
-export function connectInterstitialToken(provider: string, nonce: string): string {
+export function connectInterstitialToken(provider: string, nonce: string, browserBinding: string): string {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error('JWT_SECRET is required for the connect interstitial');
   const key = createHmac('sha256', secret).update(CONNECT_INTERSTITIAL_KEY_LABEL).digest();
-  return createHmac('sha256', key).update(JSON.stringify([provider, sha256(nonce)])).digest('hex');
+  return createHmac('sha256', key).update(JSON.stringify([provider, sha256(nonce), browserBinding])).digest('hex');
 }
 
 /** Constant-time check of a presented interstitial token; false for anything that is not the exact token. */
-export function connectInterstitialTokenValid(provider: string, nonce: string, presented: unknown): boolean {
+export function connectInterstitialTokenValid(
+  provider: string,
+  nonce: string,
+  browserBinding: string,
+  presented: unknown,
+): boolean {
   if (typeof presented !== 'string') return false;
-  return hashesEqual(connectInterstitialToken(provider, nonce), presented);
+  return hashesEqual(connectInterstitialToken(provider, nonce, browserBinding), presented);
 }

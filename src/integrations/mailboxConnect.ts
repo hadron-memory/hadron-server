@@ -160,6 +160,21 @@ function sendConnectDonePage(
     );
 }
 
+const BINDING_COOKIE = 'hadron_connect_bind';
+const BINDING_PATTERN = /^[0-9a-f]{32}$/;
+
+/** The browser-binding value a request carries, or null (absent or malformed). Cookies are parsed by hand: no parser is mounted. */
+function readBindingCookie(header: string | undefined): string | null {
+  for (const part of (header ?? '').split(';')) {
+    const [name, ...rest] = part.trim().split('=');
+    if (name === BINDING_COOKIE) {
+      const value = rest.join('=');
+      return BINDING_PATTERN.test(value) ? value : null;
+    }
+  }
+  return null;
+}
+
 /**
  * The connect confirmation page (#2908): server-hosted HTML naming the provider, the organization and who asked, with
  * one Continue button that POSTs the nonce and a per-page token back. Every interpolated value is escaped. No
@@ -167,7 +182,7 @@ function sendConnectDonePage(
  */
 function sendConnectConfirmPage(
   res: Response,
-  page: { provider: string; action: string; nonce: string; token: string; orgName: string; initiator: string },
+  page: { provider: string; action: string; nonce: string; token: string; binding: string; orgName: string; initiator: string },
 ): void {
   const label = escapeHtml(PROVIDER_LABELS[page.provider] ?? page.provider);
   res
@@ -179,6 +194,8 @@ function sendConnectConfirmPage(
       'X-Frame-Options': 'DENY',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
+      // Strict: the confirming POST is same-site from this very page, and a cross-site form post must not carry it.
+      'Set-Cookie': `${BINDING_COOKIE}=${page.binding}; Path=${page.action}; Max-Age=${Math.ceil(EXCHANGE_START_TTL_MS / 1000)}; HttpOnly; SameSite=Strict${(process.env.BASE_URL ?? '').startsWith('https://') ? '; Secure' : ''}`,
     })
     .send(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect ${label}</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}button{font:inherit;padding:.5rem 1rem}</style></head><body><h1>Connect ${label}</h1><p><strong>${escapeHtml(page.initiator)}</strong> asked to connect ${label} to <strong>${escapeHtml(page.orgName)}</strong>.</p><p>Continue only if you expect this. You will be sent to ${label} to sign in and approve.</p><form method="post" action="${escapeHtml(page.action)}"><input type="hidden" name="nonce" value="${escapeHtml(page.nonce)}"><input type="hidden" name="token" value="${escapeHtml(page.token)}"><button type="submit">Continue</button></form></body></html>`,
@@ -315,11 +332,14 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         refuseNonce(res);
         return;
       }
+      // A second tab in the same browser reuses the binding, so the first page's token keeps working.
+      const binding = readBindingCookie(req.headers.cookie) ?? crypto.randomBytes(16).toString('hex');
       sendConnectConfirmPage(res, {
         provider: cfg.provider,
         action: `/auth/${cfg.routeName}`,
         nonce,
-        token: connectInterstitialToken(cfg.provider, nonce),
+        token: connectInterstitialToken(cfg.provider, nonce, binding),
+        binding,
         orgName: who.orgName,
         initiator: who.initiator,
       });
@@ -341,9 +361,10 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     }
     let started: Awaited<ReturnType<typeof redeemExchangeStartNonce>>;
     try {
-      // A wrong or missing token, or an initiator who may no longer connect, is refused before the claim, so it
+      // A wrong or missing token or browser binding, or an initiator who may no longer connect, is refused before the claim, so it
       // does not burn a nonce the right page could still use.
-      if (!connectInterstitialTokenValid(cfg.provider, nonce, body.token)) {
+      const binding = readBindingCookie(req.headers.cookie);
+      if (!binding || !connectInterstitialTokenValid(cfg.provider, nonce, binding, body.token)) {
         refuseNonce(res);
         return;
       }
