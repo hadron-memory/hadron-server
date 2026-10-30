@@ -3301,7 +3301,7 @@ export function createMcpServerInstance(
   // #2661: one creation policy, delegated to the GraphQL resolver.
   server.tool(
     'hadron_create_app_memory',
-    'Create a NEW app-class memory in an org-owned App with an installed Agent. Requires the owning org ADMIN/OWNER acting as themselves, outside a worker session. App keys, runs, impersonation and user-owned Apps are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
+    'Create a NEW app-class memory in an App with an installed Agent. Requires the owning org ADMIN/OWNER or the actual owner of a user-owned App acting as themselves, outside a worker session. App keys, runs and impersonation are refused. No existing-memory attachment. App participants read and write it; the Agent owner gains no access. Does not select the new memory.',
     SHAPE_HADRON_CREATE_APP_MEMORY,
     async ({ app, name, shortDescription, description, tags }) => {
       const ctx: Context = {
