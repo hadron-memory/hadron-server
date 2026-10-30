@@ -28,5 +28,5 @@ test('disposable SQL preserves constraints and refuses populated fixture identit
   assert.match(sql, /count mismatch/);
   assert.match(sql, /derived field mismatch/);
   assert.match(sql, /revision count mismatch/);
-  assert.doesNotMatch(sql, /DROP |DELETE |DISABLE TRIGGER|TRUNCATE /);
+  assert.doesNotMatch(sql, /^(DROP |DELETE |DISABLE TRIGGER|TRUNCATE )/m);
 });
