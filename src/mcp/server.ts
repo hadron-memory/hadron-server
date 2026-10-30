@@ -8784,6 +8784,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         urn?: unknown;
         args?: unknown;
         appRef?: unknown;
+        agentRef?: unknown;
         runAsSelf?: unknown;
       };
       const taskHint = typeof a.task === 'string' ? a.task.trim() : '';
@@ -8794,6 +8795,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           ? (a.args as Record<string, string>)
           : undefined;
       const appRef = typeof a.appRef === 'string' && a.appRef.trim() ? a.appRef.trim() : undefined;
+      const agentRef = typeof a.agentRef === 'string' && a.agentRef.trim() ? a.agentRef.trim() : undefined;
       const runAsSelf = a.runAsSelf === true;
 
       // Single run chokepoint: MCP resolves the task to a concrete node URN via
@@ -8819,14 +8821,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           try {
             const runId = await resolvers.Mutation.runTask(
               {},
-              { nodeRef: nodeUrn, args, appRef, runAsSelf },
+              { nodeRef: nodeUrn, args, appRef, agentRef, runAsSelf },
               ctx,
             );
             return textResult(
               `Run started: ${runId}\nRead its status, output and path with hadron_get_run(ref: "${runId}").`,
             );
           } catch (err) {
-            return toolErrorResult(err, () => `Could not start run: ${(err as Error).message}`, 'hadron_run_task');
+            // #2735: the one typed refusal an agent must be able to act on by name.
+            const typed = (err as { extensions?: { code?: unknown } }).extensions?.code === 'RUN_AGENT_REQUIRED' ? '[RUN_AGENT_REQUIRED] ' : '';
+            return toolErrorResult(err, () => `Could not start run: ${typed}${(err as Error).message}`, 'hadron_run_task');
           }
         }
         const loaded = await loadNodeForRun(nodeUrn);
@@ -12833,6 +12837,12 @@ const SHAPE_HADRON_RUN_TASK = {
     .boolean()
     .optional()
     .describe('Attribute the executed run to the calling user (only with appRef).'),
+  agentRef: z
+    .string()
+    .optional()
+    .describe(
+      "Agent (PK or URN) the executed run is served as (#2735). Only with appRef. Omit to use the App's single installed Agent; an App with several installed Agents refuses with RUN_AGENT_REQUIRED.",
+    ),
 };
 
 const SHAPE_HADRON_START_SESSION = {

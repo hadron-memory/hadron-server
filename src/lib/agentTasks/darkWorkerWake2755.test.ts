@@ -61,9 +61,15 @@ async function say(body: string, mentions: string[]) {
     tx.node.create({ data: { id: generateId(), memoryId: channel.memoryId, loc: `${channel.loc}:messages:${msgNum}`, name: msgNum, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: body, data: { mentions } } }),
     { asChannel: true });
 }
-/** A live session, started two hours before T0 and still driven at `touched`. */
-const bind = (name: string, touched: Date) =>
-  db.session.create({ data: { id: generateId(), appId: app.id, userId: user.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date(T0.getTime() - 120 * MIN), updatedAt: touched } });
+/**
+ * A live session, started two hours before T0 and NOT driven since (#2813: a heartbeat inside the window exempts the
+ * wake-unacked trigger, and these pins are about the trigger itself). The second argument only documents how long the
+ * test keeps the session in play; the session-activity exemption is pinned in darkWorkerActive2813.test.ts.
+ */
+const bind = (name: string, _liveUntil: Date) => {
+  const startedAt = new Date(T0.getTime() - 120 * MIN);
+  return db.session.create({ data: { id: generateId(), appId: app.id, userId: user.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', startedAt, updatedAt: startedAt } });
+};
 const assign = (name: string) =>
   db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: user.id, assigneeWorkerId: w[name].id, assignedAt: new Date(T0.getTime() - 5 * MIN) } });
 const alarms = (name: string) => db.agentTeamEvent.findMany({ where: { subjectWorkerId: w[name].id, type: 'alarm.dark-worker' }, orderBy: { createdAt: 'asc' } });
@@ -121,7 +127,6 @@ describe('#2755 a due wake left unacknowledged past the window', () => {
     await say('ping @liam', ['liam']);
     // checks the channel (no longer OVERDUE) while the wake stays unacknowledged past the window: same episode
     await db.channelReadState.create({ data: { workerId: w.Liam.id, appId: app.id, channelId: channel.id, lastSeenSeq: 0, lastCheckedAt: after(90) } });
-    await db.session.updateMany({ where: { workerId: w.Liam.id }, data: { updatedAt: after(95) } });
     expect(await evaluateDarkWorkers(db, after(95))).toEqual([]);
     expect(await db.darkWorkerEpisode.count({ where: { workerId: w.Liam.id, endedAt: null } })).toBe(1);
     expect(await alarms('Liam')).toHaveLength(1);
@@ -132,7 +137,6 @@ describe('#2755 a due wake left unacknowledged past the window', () => {
     await say('hello @tove', ['tove']);
     expect(await evaluateDarkWorkers(db, after(40))).toHaveLength(1);
     await db.channelReadState.create({ data: { workerId: w.Tove.id, appId: app.id, channelId: channel.id, lastSeenSeq: 1_000_000, lastCheckedAt: after(41) } });
-    await db.session.updateMany({ where: { workerId: w.Tove.id }, data: { updatedAt: after(42) } });
     expect(await evaluateDarkWorkers(db, after(42))).toEqual([]);
     expect(await db.darkWorkerEpisode.count({ where: { workerId: w.Tove.id, endedAt: { not: null } } })).toBe(1);
   });

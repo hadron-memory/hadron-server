@@ -26,6 +26,7 @@ import { generateId } from '../../lib/id.js';
 import { existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
+import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
@@ -413,7 +414,7 @@ const syncGraphFromGithubAsSystem = async (
     }).catch(() => {});
 
     const slug = graphName.includes(':') ? graphName.split(':').slice(1).join(':') : graphName;
-    const localPath = join(GRAPHS_PATH, organization.urn, slug);
+    const localPath = pathUnderGraphsRoot(GRAPHS_PATH, organization.urn, slug);
     const ownerRepo = extractOwnerRepo(graph.source);
 
     // 1. Get installation token (requires GitHub App installation)
