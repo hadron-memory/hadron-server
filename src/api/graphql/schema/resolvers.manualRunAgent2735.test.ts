@@ -99,6 +99,58 @@ describe('#2735 single installed Agent is the default', () => {
   });
 });
 
+describe('#2850 (follow-up to #2849) not-installed refusals: same-org, URN and one answer', () => {
+  /** The refusal as MCP reports it: the text of the tool result, with the code in brackets. */
+  const message = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.message as string; } };
+
+  it('a same-org Agent that exists but is not installed is refused on GraphQL and MCP, with nothing written', async () => {
+    await install(agentA);
+    // agentB is in the App's own org and live, but has no appAgent row here.
+    expect(await code(M.runTask({}, { nodeRef: taskUrn, appRef: appId, agentRef: agentB }, ctx()))).toBe('BAD_USER_INPUT');
+    expect(await code(M.triggerAppRun({}, { input: { appRef: appId, entryNodeUrn: entryUrn, agentRef: agentB } }, ctx()))).toBe('BAD_USER_INPUT');
+    expect(await code(M.importNode({}, { input: importInput({ agentRef: agentB }) }, ctx()))).toBe('BAD_USER_INPUT');
+    const text = await mcp().callToolText('hadron_run_task', { urn: taskUrn, appRef: appId, agentRef: agentB });
+    expect(text).toContain('agentRef does not name an agent installed in this App.');
+    expect(text).not.toContain('Run started');
+    expect(await runs()).toHaveLength(0);
+    expect(await importedNodes()).toBe(0);
+  });
+
+  it('a named installed Agent is accepted by its URN, not only its id, on every surface', async () => {
+    await install(agentA);
+    await install(agentB);
+    const urn = (await db.agent.findUniqueOrThrow({ where: { id: agentB } })).urn;
+    const ref = `hrn:agent:${urn}`;
+    const viaTask = await M.runTask({}, { nodeRef: taskUrn, appRef: appId, agentRef: ref }, ctx());
+    const viaTrigger = await M.triggerAppRun({}, { input: { appRef: appId, entryNodeUrn: entryUrn, agentRef: ref } }, ctx());
+    const viaImport = await M.importNode({}, { input: importInput({ agentRef: ref }) }, ctx());
+    expect(await mcp().callToolText('hadron_run_task', { urn: taskUrn, appRef: appId, agentRef: ref })).toContain('Run started');
+    const all = await runs();
+    expect(all).toHaveLength(4);
+    expect(all.every((r) => r.agentId === agentB)).toBe(true);
+    expect([viaTask, viaTrigger.id, viaImport.jobId].every((id) => all.some((r) => r.id === id))).toBe(true);
+  });
+
+  it('a foreign-org Agent and an unknown Agent get the SAME message, and it names neither id (#1946 ruling A)', async () => {
+    await install(agentA);
+    const refused = async (agentRef: string) => [
+      await message(M.runTask({}, { nodeRef: taskUrn, appRef: appId, agentRef }, ctx())),
+      await message(M.triggerAppRun({}, { input: { appRef: appId, entryNodeUrn: entryUrn, agentRef } }, ctx())),
+      await message(M.importNode({}, { input: importInput({ agentRef }) }, ctx())),
+    ];
+    const unknownId = generateId();
+    const foreign = await refused(foreignAgent);
+    const unknown = await refused(unknownId);
+    expect(foreign).toEqual(unknown);
+    for (const m of foreign) {
+      expect(m).toBe('agentRef does not name an agent installed in this App.');
+      expect(m).not.toContain(foreignAgent);
+      expect(m).not.toContain(unknownId);
+    }
+    expect(await runs()).toHaveLength(0);
+  });
+});
+
 describe('#2735 several installed Agents', () => {
   beforeEach(async () => { await install(agentA); await install(agentB); });
 
