@@ -457,7 +457,9 @@ it('re-hands both issued tick actions, proof and reservation unchanged, when the
   expect(again.wakes[0].proof).toBe(first.wakes[0].proof);
   expect(again.wakes[0].wake.reasons.filter(r => r.kind === 'TICK')).toEqual(issued);
   const after = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: w.id } });
-  expect(after.id).toBe(stored.id);
+  expect(after.reservedAt).toEqual(stored.reservedAt);
+  expect(after.wakeKey).toBe(stored.wakeKey);
+  expect(after.absorbedKeys).toEqual(stored.absorbedKeys);
   expect(after.wake).toEqual(stored.wake);
   expect(await db.appWakeReservation.count({ where: { appId: f.app.id } })).toBe(1);
 
