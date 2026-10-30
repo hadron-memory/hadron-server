@@ -36,6 +36,13 @@ export const TASK_PROPERTIES_MAX_DEPTH = 64;
  */
 export const TASK_PROPERTIES_SCHEMA_MAX_BYTES = 64 * 1024;
 export const TASK_PROPERTIES_SCHEMA_MAX_DEPTH = 32;
+/**
+ * Bounds on what validating may COST, not only on bytes (§10 P2-1 at b99c4fc1: a ref-free 64 KiB schema of ~60k nodes
+ * cost ~1 s of event loop per write). A schema may hold this many objects and arrays, and a write is refused when
+ * schema nodes x value nodes passes the work budget. Team schemas run to tens of nodes; both bounds are far above that.
+ */
+export const TASK_PROPERTIES_SCHEMA_MAX_NODES = 1000;
+export const TASK_PROPERTIES_VALIDATION_BUDGET = 2_000_000;
 
 /** Where the team's schema lives in the Team Agent's system memory; its `data` holds a JSON Schema (draft-07). */
 export const TASK_PROPERTIES_SCHEMA_LOC = 'schema:task-properties';
@@ -112,7 +119,11 @@ export async function checkAgainstTeamSchema(
   });
   const schema = node && !node.memory.deletedAt ? node.data : null;
   if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) throw unusable();
-  if (!schemaIsUsable(schema)) throw unusable();
+  const schemaNodes = schemaNodeCount(schema);
+  if (schemaNodes === null) throw unusable();
+  if (schemaNodes * valueNodeCount(value) > TASK_PROPERTIES_VALIDATION_BUDGET) {
+    throw refusal('PROPERTIES_TOO_LARGE', 'properties are too large to validate against the team\'s schema; send a smaller value.');
+  }
   let validate: ReturnType<Ajv['compile']>;
   try {
     validate = compileSchema(schema);
@@ -120,7 +131,14 @@ export async function checkAgainstTeamSchema(
     throw unusable();
   }
   if ((validate as { $async?: boolean }).$async) throw unusable();
-  if (!validate(value)) {
+  let valid: boolean;
+  try {
+    valid = validate(value) as boolean;
+  } catch {
+    // e.g. a RangeError from a very wide anyOf: the schema cannot be used, not an internal error.
+    throw unusable();
+  }
+  if (!valid) {
     // The path in the WRITER's own value and the failing keyword only: ajv's message would echo the schema's text
     // (required names, enum values, limits) to a writer who may not be able to read the schema's memory.
     const first = validate.errors?.[0];
@@ -132,29 +150,43 @@ export async function checkAgainstTeamSchema(
 }
 
 /**
- * Whether a schema is within bounds and free of regex and reference keywords. Regular expressions are refused outright: `pattern`
+ * The schema's node count, or null when it is out of bounds (size, depth, node cap) or uses regex or reference keywords. Regular expressions are refused outright: `pattern`
  * and `patternProperties` run the engine's backtracking RegExp, and a catastrophic pattern such as `^(a+)+$` takes
  * seconds on a 28-character value and hours on a 40-character one, on the event loop every tenant shares. Walked
  * without recursion so a deeply nested schema cannot overflow the stack. A property merely NAMED `pattern` is fine (its
  * value is a sub-schema, not a string); one named `patternProperties` is refused with the keyword, fail-closed.
  */
-function schemaIsUsable(schema: object): boolean {
+function schemaNodeCount(schema: object): number | null {
+  let nodes = 0;
   const stack: Array<[unknown, number]> = [[schema, 1]];
   while (stack.length > 0) {
     const [node, depth] = stack.pop() as [unknown, number];
     if (node === null || typeof node !== 'object') continue;
-    if (depth > TASK_PROPERTIES_SCHEMA_MAX_DEPTH) return false;
+    if (depth > TASK_PROPERTIES_SCHEMA_MAX_DEPTH) return null;
+    if (++nodes > TASK_PROPERTIES_SCHEMA_MAX_NODES) return null;
     if (!Array.isArray(node)) {
       const o = node as Record<string, unknown>;
-      if (typeof o.pattern === 'string') return false;
-      if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return false;
+      if (typeof o.pattern === 'string') return null;
+      if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return null;
       // References let a flat, tiny schema describe an exponential evaluation tree (a chain of anyOf [$ref, $ref] is 2^N
-      // branches and exhausts the heap). Without them evaluation cost is bounded by schema nodes x value nodes, both capped.
-      if (typeof o.$ref === 'string' || typeof o.$recursiveRef === 'string' || typeof o.$dynamicRef === 'string') return false;
+      // branches and exhausts the heap). Without them evaluation cost is bounded by schema nodes x value nodes, capped by the node cap and the work budget.
+      if (typeof o.$ref === 'string' || typeof o.$recursiveRef === 'string' || typeof o.$dynamicRef === 'string') return null;
     }
     for (const child of Object.values(node)) stack.push([child, depth + 1]);
   }
-  return Buffer.byteLength(canonicalJson(schema), 'utf8') <= TASK_PROPERTIES_SCHEMA_MAX_BYTES;
+  return Buffer.byteLength(canonicalJson(schema), 'utf8') <= TASK_PROPERTIES_SCHEMA_MAX_BYTES ? nodes : null;
+}
+
+/** Objects, arrays and leaves of a value, counted without recursion; the work a validator does is proportional to it. */
+function valueNodeCount(value: unknown): number {
+  let n = 0;
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    n++;
+    if (node !== null && typeof node === 'object') for (const c of Object.values(node)) stack.push(c);
+  }
+  return n;
 }
 
 /** Compiled validators by the hash of their schema's canonical JSON, so a hot team schema compiles once. */
