@@ -10420,7 +10420,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const state = page.complete
           ? (page.items.length === 0 ? 'No matches (the search reached the start of the history).' : 'The search reached the start of the history.')
           : `The search stopped before the start of the history${page.items.length === 0 ? ' with no match yet' : ''}; continue with cursor: ${page.cursor}`;
-        const lines = page.items.map((m: { seq: number; urn: string | null }) => `#${m.seq}${m.urn ? ` ${m.urn}` : ''}`);
+        const lines = page.items.map((m: { seq: number; urn: string | null; nodeId: string }) => `#${m.seq} ${m.urn ?? `node ${m.nodeId}`}`);
         return textResult(`${page.items.length} match(es):\n${lines.join('\n')}${lines.length ? '\n' : ''}\n${state}${envelope}`);
       } catch (e) {
         if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);

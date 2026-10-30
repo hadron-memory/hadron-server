@@ -72,6 +72,20 @@ describe('hadron_team_chat_search', () => {
     }
   });
 
+  it('keeps the node id when the host memory URN cannot be emitted, so a match is never a bare seq', async () => {
+    const s = server(admin.id);
+    await post(s, 'Deploy the Staging build');
+    const gql = await Q.teamChatSearch({}, { appRef: app.id, query: 'deploy' }, { db, userId: admin.id, roles: ['READER'] });
+    expect(gql.items[0].urn).not.toBeNull();
+    // A pre-v2 COMPOUND memory urn: the message urn is null, the node id is the only handle left.
+    await db.memory.update({ where: { id: memoryId }, data: { urn: `${org.urn}:team:agent-${generateId().slice(0, 8)}:shared` } });
+    const nullUrn = await Q.teamChatSearch({}, { appRef: app.id, query: 'deploy' }, { db, userId: admin.id, roles: ['READER'] });
+    expect(nullUrn.items[0].urn).toBeNull();
+    const out = await s.callToolText('hadron_team_chat_search', { query: 'deploy' });
+    expect(out).toContain('#1');
+    expect(out).toContain(nullUrn.items[0].nodeId);
+  });
+
   it('refuses the bounds and a bad limit with the typed codes, the same for a stranger', async () => {
     for (const who of [admin.id, stranger.id]) {
       const out = await server(who).callToolText('hadron_team_chat_search', { query: 'x', app: app.id });
