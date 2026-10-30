@@ -603,8 +603,12 @@ async function resolveAuthorship(state: AuthoredState, ctx: Context) {
  * #2715 — at most this many per-parent reconcile transactions in flight per request. GraphQL resolves a list's
  * `Node.revision` fields concurrently; unbounded, a 200-node `nodeBatch` asks the pool for 200 interactive
  * transactions at once, and those queued past `maxWait` (2 s) fail with Prisma P2028. Production's default pool is 5
- * (Prisma 6.19.2, physical CPUs x 2 + 1); 4 leaves one connection for the rest of the server. The rest wait here,
- * app-side, where no start deadline applies.
+ * (Prisma 6.19.2, physical CPUs x 2 + 1). The rest wait here, app-side, where no start deadline applies.
+ *
+ * #2721 — the bound is per request, not a reservation of pool capacity: two concurrent requests may request 8 of these
+ * transactions against that 5-connection pool, and nothing here caps the process. What was tested is up to 20
+ * concurrent 200-node batches at pool 5 with no P2028 (the #2720 QA receipt); other request concurrency, pool sizes
+ * and deployments are untested. Reserving capacity for the rest of the server would need a process-wide limiter.
  */
 export const NODE_RECONCILE_CONCURRENCY = 4;
 

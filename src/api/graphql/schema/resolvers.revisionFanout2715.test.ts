@@ -138,3 +138,75 @@ describe('#2715 CONTROLS: what the bound must not change', () => {
     expect(JSON.stringify(out)).not.toContain('theirs');
   });
 });
+
+describe('#2721 a rejected reconcile releases its slot', () => {
+  /** Distinct parents, more than NODE_RECONCILE_CONCURRENCY, so some queue behind the cap. */
+  const K = 10;
+  /** Diagnostic bound on each wait: a stranded queue fails here with a message, not at the test timeout. */
+  const HANG_MS = 10_000;
+
+  it('an early rejection frees its slot at once; every other queued reconcile settles, at most 4 in flight, slots drained', SLOW, async () => {
+    const sentinel = new Error('#2721 sentinel: reconcile rejected');
+    const track = { inFlight: 0, max: 0 };
+    // Field reconciles (maxWait 2000, requested from inside a limiter slot) are held at the gate until the test lets them go.
+    const held: Array<{ go: () => void; fail: () => void }> = [];
+    const settled: Array<Promise<unknown>> = [];
+    let releasing = false;
+    let onStart = () => {};
+    let ctx: Context;
+    const gated = new Proxy(db, {
+      get(target, prop) {
+        if (prop !== '$transaction') return Reflect.get(target, prop, target);
+        return (fn: unknown, opts?: { maxWait?: number }) => {
+          if (typeof fn !== 'function' || opts?.maxWait !== 2_000 || !ctx.nodeReconcileSlots?.active) {
+            return (target.$transaction as any)(fn, opts);
+          }
+          const p = new Promise((resolve, reject) => {
+            const go = () => { (target.$transaction as any)(fn, opts).then(resolve, reject); };
+            held.push({ go, fail: () => reject(sentinel) });
+            if (releasing) go();
+          });
+          settled.push(p);
+          onStart();
+          return p;
+        };
+      },
+    }) as typeof db;
+    ctx = ctxFor(gated, track);
+    const starts = (n: number) => new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`stranded: ${held.length} of ${n} reconciles started, slots ${JSON.stringify(ctx.nodeReconcileSlots && { active: ctx.nodeReconcileSlots.active, waiting: ctx.nodeReconcileSlots.waiting.length })}`)), HANG_MS);
+      onStart = () => { if (held.length >= n) { clearTimeout(timer); resolve(); } };
+      onStart();
+    });
+
+    const response = batch(ctx, 'id revision', `memory: "$m", locPrefix: "batch:n00"`);
+    // The cap: four held, and the rest wait app-side rather than reaching the pool.
+    await starts(4);
+    await new Promise((r) => setImmediate(r));
+    expect(held).toHaveLength(4);
+    expect(ctx.nodeReconcileSlots!.waiting).toHaveLength(K - 4);
+
+    // Reject the earliest. Its slot must pass to the next queued reconcile before any other one settles.
+    held[0].fail();
+    await starts(5);
+    expect(held).toHaveLength(5);
+
+    // Release everything else, in order; later starts run as they arrive.
+    releasing = true;
+    for (const h of held.slice(1)) h.go();
+    await starts(K);
+    const res = await response;
+    const outcomes = await Promise.allSettled(settled);
+    // The response does not wait for siblings of a failed non-null field; after the last transaction only microtasks
+    // remain (the fast path does no further I/O), so one turn lets every slot's finally run.
+    await new Promise((r) => setImmediate(r));
+
+    expect(res.errors?.map((e) => [e.originalError, e.path?.slice(0, 2), e.path?.at(-1)])).toEqual([[sentinel, ['nodeBatch', 'nodes'], 'revision']]);
+    expect(outcomes).toHaveLength(K);
+    expect(outcomes[0]).toEqual({ status: 'rejected', reason: sentinel });
+    expect(outcomes.slice(1).map((o) => o.status)).toEqual(Array(K - 1).fill('fulfilled'));
+    expect(track.max).toBeLessThanOrEqual(4); // NODE_RECONCILE_CONCURRENCY
+    expect(track.inFlight).toBe(0);
+    expect(ctx.nodeReconcileSlots).toEqual({ active: 0, waiting: [] });
+  });
+});
