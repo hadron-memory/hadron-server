@@ -6136,6 +6136,8 @@ export const typeDefs = `#graphql
     taskArgs: JSON
     "App to run the task under — PK or URN. Falls back to the caller's active App. Only meaningful with taskRef."
     appRef: ID
+    "The Agent the task run is served as (PK or URN), installed in the App. Omit to use the App's single installed Agent; an App with several refuses with RUN_AGENT_REQUIRED before anything is written (#2735). Only meaningful with taskRef."
+    agentRef: ID
   }
 
   """
@@ -6482,6 +6484,8 @@ export const typeDefs = `#graphql
     budgetActions: Int
     "App — ref: PK or fully-qualified URN."
     appRef: String!
+    "The Agent the run is served as (PK or URN), installed in the App. Omit to use the App's single installed Agent; an App with several refuses with RUN_AGENT_REQUIRED (#2735)."
+    agentRef: ID
     entryNodeUrn: String!
     eventData: JSON
     runAsSelf: Boolean
@@ -10687,7 +10691,7 @@ export const typeDefs = `#graphql
     the caller. Without appRef, behavior is unchanged.
     Spec cor:api:060.
     """
-    runTask(nodeRef: String!, args: JSON, appRef: ID, runAsSelf: Boolean): String!
+    runTask(nodeRef: String!, args: JSON, appRef: ID, runAsSelf: Boolean, agentRef: ID): String!
 
     """
     Import external content into a node (#457, sync v1). Source: exactly one
