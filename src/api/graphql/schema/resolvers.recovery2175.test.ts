@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolvers, type Context } from './resolvers.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { parseDataKey } from '../../../lib/crypto.js';
@@ -607,11 +608,31 @@ describe('recoveryEdges(edgeIds:) (#2818)', () => {
   });
   it.each([0, 201])('refuses %i ids as BAD_USER_INPUT before resolving the memory or querying', async (count) => {
     const raw = vi.spyOn(db, '$queryRaw');
+    const lookups = [vi.spyOn(db.memory, 'findFirst'), vi.spyOn(db.memory, 'findMany'), vi.spyOn(db.memory, 'findUnique')];
     try {
       const edgeIds = Array.from({ length: count }, () => generateId());
       for (const memoryRef of [memoryId, generateId()]) {
         await expect(Q.recoveryEdges({}, { memoryRef, edgeIds }, ctx())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
       }
+      expect(raw).not.toHaveBeenCalled();
+      for (const lookup of lookups) expect(lookup).not.toHaveBeenCalled();
+    } finally { raw.mockRestore(); for (const lookup of lookups) lookup.mockRestore(); }
+  });
+  it.each([
+    { label: 'READER-only', principal: () => ({ userId: readerId }) },
+    { label: 'impersonation', principal: () => ({ impersonation: { orgId: 'set-below' } }) },
+    { label: 'run:', principal: () => ({ clientId: 'run:synthetic' }) },
+  ])('refuses a $label caller the same way with valid edgeIds, before any edge query', async ({ principal }) => {
+    const { edges: e } = await graph();
+    const caller = { ...ctx(), ...principal() } as Context;
+    if (caller.impersonation) {
+      caller.impersonation = { ...caller.impersonation,
+        orgId: (await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId! };
+    }
+    const raw = vi.spyOn(db, '$queryRaw');
+    try {
+      await expect(Q.recoveryEdges({}, { memoryRef: memoryId }, caller)).rejects.toThrow(MemoryNotFoundError);
+      await expect(Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: [e.live.id, e.retained.id] }, caller)).rejects.toThrow(MemoryNotFoundError);
       expect(raw).not.toHaveBeenCalled();
     } finally { raw.mockRestore(); }
   });
