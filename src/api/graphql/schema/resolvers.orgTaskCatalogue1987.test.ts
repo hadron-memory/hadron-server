@@ -53,6 +53,20 @@ describe('#1987 org task catalogue excludes App-memory tasks', () => {
     expect(locs(await catalogue(who))).toEqual(['tasks:org-task']);
   });
 
+  // The predefined 'global' ("this organisation") view is the same org narrowing.
+  it.each(['owner', 'participant'])('%s: the predefined global view omits the App task too', async who => {
+    const hits = await Q.findNodes({}, { scope: 'global', orgId, filter: { isRunnable: true } }, context(who));
+    expect(locs(hits)).toEqual(['tasks:org-task']);
+  });
+
+  // No ruling covers org-scoped NON-runnable search (R208 A is the task
+  // catalogue); this pins that the fix leaves it exactly as it was.
+  it('org-scoped non-runnable search is unchanged (still reaches an App memory its caller reads)', async () => {
+    await db.node.create({ data: { id: generateId(), memoryId: appMemoryId, loc: 'notes:app-note', name: 'note', content: 'note', isRunnable: false } });
+    const hits = await Q.findNodes({}, { orgId, filter: { isRunnable: false } }, context('participant'));
+    expect(locs(hits)).toEqual(['notes:app-note']);
+  });
+
   it('control: the same participant reaches the App task within the App memory', async () => {
     const hits = await Q.findNodes({}, { filter: { memoryIds: [appMemoryId], isRunnable: true } }, context('participant'));
     expect(locs(hits)).toEqual(['tasks:app-task']);
