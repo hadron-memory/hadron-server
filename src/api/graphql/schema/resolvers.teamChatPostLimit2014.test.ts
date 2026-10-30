@@ -14,6 +14,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { runAsActor } from '../../../lib/requestActor.js';
+import { raisePostLimitAlarm } from '../../../lib/agentTasks/postLimit.js';
 import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
 import { type Context } from './resolvers.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
@@ -186,5 +187,15 @@ describe('#2014 the alarm', () => {
     expect(wakes[0]!.title).toMatch(/Liam hit the team-chat post limit/);
     await db.agentTeamEvent.updateMany({ where: { type: 'alarm.post-limit' }, data: { acknowledgedAt: new Date(), acknowledgedByWorkerId: boss.id } });
     expect((await pendingTaskWakes(db, [boss.id], new Date())).get(boss.id) ?? []).toHaveLength(0);
+  });
+
+  it('raises nothing for a retired worker, an uninstalled App or a soft-deleted App', async () => {
+    await db.worker.update({ where: { id: rook.id }, data: { retiredAt: new Date() } });
+    expect(await raisePostLimitAlarm(db, rook.id, '10 per minute')).toBeNull();
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
+    expect(await raisePostLimitAlarm(db, liam.id, '10 per minute')).toBeNull();
+    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null, deletedAt: new Date() } });
+    expect(await raisePostLimitAlarm(db, liam.id, '10 per minute')).toBeNull();
+    expect(await alarms()).toHaveLength(0);
   });
 });

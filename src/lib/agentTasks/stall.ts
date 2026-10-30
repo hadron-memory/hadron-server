@@ -780,7 +780,8 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     const endedEvents = new Set(
       due.filter((d) => d.taskId && d.episodeStart && ended.has(alarmEpisodeKey(d.taskId, d.type, d.episodeStart))).map((d) => d.eventId),
     );
-    // #2755: a dark-worker alarm is task-less; its episode ended when `dark_worker_episodes` says so.
+    // #2755: a dark-worker alarm is task-less; its episode ended when `dark_worker_episodes` says so. (#2014: a post-limit
+    // alarm has no such condition: it escalates until acknowledged, and its episode only de-duplicates it.)
     const darkIds = due.filter((d) => d.type === 'alarm.dark-worker').map((d) => d.eventId);
     if (darkIds.length) {
       const over = await tx.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true } });

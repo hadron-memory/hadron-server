@@ -3394,6 +3394,7 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
+  postLimitEpisodes       PostLimitEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -3815,6 +3816,7 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
+  postLimitEpisodes PostLimitEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
   /// The worker's name ("Iris") — the identity every surface renders.
@@ -5863,6 +5865,7 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
+  postLimitEpisode PostLimitEpisode?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
   @@index([appId, createdAt])
@@ -5923,6 +5926,26 @@ model DarkWorkerEpisode {
 
   @@index([appId, endedAt])
   @@map("dark_worker_episodes")
+}
+
+/// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
+/// de-duplicates the alarm raised with it (agent_team_events, type `alarm.post-limit`); the alarm itself stays open until
+/// acknowledged. At most one OPEN row per worker (partial unique index in prisma/post-limit-invariants.sql); an open
+/// episode older than an hour is closed (`endedAt = openedAt + 1 hour`) by the next refusal, which then opens a new one.
+model PostLimitEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("post_limit_episodes")
 }
 
 /// #1706 — one worker's availability for work (cor:agt:060:02). At most one

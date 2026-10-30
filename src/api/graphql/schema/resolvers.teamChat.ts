@@ -38,7 +38,8 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
-import { admissionTime, findEarlierDuplicate, lockWorkerPostAdmission } from '../../../lib/teamChatAdmission.js';
+import { raisePostLimitAlarm } from '../../../lib/agentTasks/postLimit.js';
+import { admissionTime, findBrokenPostLimit, findEarlierDuplicate, lockWorkerPostAdmission } from '../../../lib/teamChatAdmission.js';
 import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -999,7 +1000,9 @@ async function postToChannelRoot(
   let messageLoc: string | null = null;
   // #2015: the admission instant of a worker's post, stamped into its createdAt below; null for a human or system post.
   let admittedAt: Date | null = null;
-  const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  let appended: { seq: number; inserted: Date };
+  try {
+  appended = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1056,6 +1059,10 @@ async function postToChannelRoot(
     if (postingWorkerId) {
       await lockWorkerPostAdmission(tx, postingWorkerId);
       admittedAt = await admissionTime(tx);
+      // #2014 — the rolling limits, counted under the same lock and clock. The refusal is thrown as a sentinel: it rolls this
+      // transaction back (nothing is stored), and the caller raises the alarm in its OWN committed transaction.
+      const broken = await findBrokenPostLimit(tx, postingWorkerId, admittedAt);
+      if (broken) throw new PostRateLimited(postingWorkerId, broken.name, broken.resetsAt);
       // An encrypted body is ciphertext at rest: no equality read can match, so none is made (no key plumbing, R13/R43).
       const earlierSeq = memEncInfo.isEncrypted
         ? null
@@ -1197,6 +1204,16 @@ async function postToChannelRoot(
     }
     return row.createdAt;
   }, { asChannel: true });
+    } catch (e) {
+      if (!(e instanceof PostRateLimited)) throw e;
+      // #2014: the post is refused and nothing was stored; the alarm (once an hour) commits on its own.
+      await raisePostLimitAlarm(ctx.db, e.workerId, e.limit);
+      throw new GraphQLError(
+        `You have reached the team-chat post limit (${e.limit}). Do not retry in a loop: wait until ${e.resetsAt.toISOString()}, then post once.`,
+        { extensions: { code: 'TEAM_CHAT_POST_RATE_LIMITED', limit: e.limit, resetsAt: e.resetsAt.toISOString() } },
+      );
+    }
+  const { seq, inserted: createdAt } = appended;
 
   // #1061 — a chat message IS a node, so posting one is a write on the team's
   // shared chat memory. This was one of the largest blind spots in the old
@@ -1239,6 +1256,11 @@ async function postToChannelRoot(
  * team chat to post into or is gone; it never creates one.
  */
 class NoticeNotClaimed extends Error {}
+
+/** #2014: a worker's post refused by the rate limit; carries what the typed error and the alarm need. */
+class PostRateLimited extends Error {
+  constructor(readonly workerId: string, readonly limit: string, readonly resetsAt: Date) { super(limit); }
+}
 
 /**
  * Could a notice be posted into this App's team chat right now? (Read-only; nothing is created or restored.) Needs a
