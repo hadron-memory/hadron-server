@@ -6333,8 +6333,8 @@ model Ticker {
   ownerWorkerId     String?   @map("owner_worker_id")
   /// #2024 (S8): set only on a ticker the platform generated at cast from an Agent ticker template. The template
   /// is a plain reference (no FK, so removing a template never cascades into runtime state) and the revision is
-  /// the one the ticker was made from; `generatedForWorkerId` is the worker it was made for. The unique
-  /// (generatedForWorkerId, sourceTemplateId) makes a retried cast unable to mint a second instance.
+  /// the one the ticker was made from; `generatedForWorkerId` is the worker it was made for. A partial unique
+  /// (generatedForWorkerId, sourceTemplateId) over live rows makes a retried cast unable to mint a second live instance.
   sourceTemplateId       String? @map("source_template_id")
   sourceTemplateRevision Int?    @map("source_template_revision")
   generatedForWorkerId   String? @map("generated_for_worker_id")
@@ -6360,7 +6360,12 @@ model Ticker {
   deliveryTicks WorkerDeliveryTick[]
 
   @@unique([appId, slug], map: "tickers_app_slug_uniq")
-  @@unique([generatedForWorkerId, sourceTemplateId], map: "tickers_generated_uniq")
+  // #2096: ONE LIVE generated ticker per (worker, template) — enforced by the PARTIAL unique index
+  // `tickers_generated_live_uniq WHERE generated_for_worker_id IS NOT NULL AND deleted_at IS NULL` (raw SQL: the
+  // 20261030120000 migration + prisma/ticker-generated-live-unique.sql via post-push.sql + src/test/globalSetup.ts,
+  // which must stay in sync). A @@unique would be non-partial and make a soft-deleted generated ticker block its
+  // recreation by the apply operation (the slack_connections / apps_urn_active_uniq precedent).
+  @@index([generatedForWorkerId, sourceTemplateId], map: "tickers_generated_idx")
   @@index([appId, deletedAt])
   @@map("tickers")
 }

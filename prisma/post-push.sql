@@ -695,6 +695,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261011020000_tickers (pinned by src/lib/tickers/invariants.test.ts).
 \ir ticker-invariants.sql
 \ir ticker-tick-code-invariants.sql
+\ir ticker-generated-live-unique.sql
 \ir agent-ticker-template-invariants.sql
 \ir delivery-settings-invariants.sql
 \ir channel-checks-invariants.sql
