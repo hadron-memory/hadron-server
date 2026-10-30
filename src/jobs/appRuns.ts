@@ -1,3 +1,4 @@
+import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
 import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../lib/automation/pins.js';
 /**
@@ -51,7 +52,7 @@ import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
 import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
-import { applyPlatformVariables } from '../lib/personaDescription.js';
+import { applyPlatformVariables, legacyFromValues } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -59,8 +60,6 @@ export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
 export const RUN_QUEUE_GROUP = 'run-worker';
 
 // Tunables (env-overridable where operations will want dials).
-const DEFAULT_RUN_TOKEN_BUDGET = intEnv('RUN_DEFAULT_TOKEN_BUDGET', 100_000);
-const DEFAULT_RUN_ACTION_BUDGET = intEnv('RUN_DEFAULT_ACTION_BUDGET', 50);
 const DEFAULT_RUN_TIMEOUT_MS = intEnv('RUN_DEFAULT_TIMEOUT_MS', 120_000);
 // D-MN-3: bound for hops the token/action budgets can't see (a routing-only
 // cycle costs nothing) — budgetActions is the REAL ceiling for LLM hops.
@@ -380,7 +379,8 @@ export async function consumeActionTicket(
 
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
-export interface MintAppRunArgs {
+/** Budget fields apply only to MANUAL; SCHEDULE/WEBHOOK always read durable setup, ignoring caller amounts. */
+export interface MintAppRunArgs extends TriggerRunBudgets {
   /** Internal interactive caller; never accepted from trigger/event data. */
   consentPrincipal?: import('../middleware/auth.js').AuthContext;
   organizationId: string;
@@ -529,6 +529,18 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // The snapshot stores only PRESENT links — an absent layer contributes
   // nothing to the conjunction, then or later.
   const presentLinks = chainLinks.filter((l): l is NonNullable<typeof l> => l != null);
+  // Read trigger budgets from durable setup, never eventData or webhook arguments.
+  // MANUAL has no reusable trigger row: its validated input is persisted in the run's initial snapshot.
+  const requestedBudgets = args.triggerKind === 'SCHEDULE'
+    ? await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
+    : args.triggerKind === 'WEBHOOK'
+      ? await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
+      : args.triggerKind === 'MANUAL' ? triggerBudgetPatch(args) : null;
+  if ((args.triggerKind === 'SCHEDULE' || args.triggerKind === 'WEBHOOK') && !requestedBudgets) {
+    throw new RunLaunchDeniedError('Trigger not found or no longer active in this App.', 'TRIGGER_DISABLED');
+  }
+  const budgets = effectiveRunBudgets(requestedBudgets ?? {});
+
   // Quota tier 1: runs/day per App AND per org (both must pass — consume
   // app first, refund on org denial to keep the counters truthful).
   if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', QUOTA_RUNS_PER_DAY_APP))) {
@@ -633,20 +645,24 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
       scopeSnapshot: (scopeSnapshot ?? undefined) as never,
       registerSnapshot: (registerSnapshot ?? undefined) as never,
-      budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
-      budgetActions: DEFAULT_RUN_ACTION_BUDGET,
+      budgetTokens: budgets.budgetTokens,
+      budgetActions: budgets.budgetActions,
       // #832: snapshot the MINTED budget so a client can render "spent vs
       // budget" — the two columns above are live-decremented remainders.
-      budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
-      budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
+      budgetTokensInitial: budgets.budgetTokens,
+      budgetActionsInitial: budgets.budgetActions,
       costMicroCents: 0n,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
     },
   });
   const createAndRecord = async (client: Prisma.TransactionClient) => {
+    // #2047 PR-C: the revision is selected HERE, in the transaction that records it, under the compiled node's share lock
+    // (resolveServedBootPrompt), so cap-pruning cannot remove it between selection and record. The early resolve above
+    // is only the refusal preflight: a refused launch writes nothing.
+    const served = await resolveServedBootPrompt(client, { surface: 'run', appId: args.appId, agent: { id: runServing!.agent.id, name: runServing!.agent.name } });
     const created = await createRun(client);
-    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, runServing!.served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
+    await recordServedPrompt(client, { kind: 'RUN', runId: created.id, appId: args.appId, agentId: runServing!.agent.id }, served, { ...agentPlatformValues(runServing!.agent), 'session.llmModel': runModel });
     return created;
   };
   // A caller already inside a transaction (the webfetch event ingress) passes its transaction client, which cannot open
@@ -886,7 +902,8 @@ async function executeAppRunInner(
       if (record) {
         const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
         if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
-        servedText = applyPlatformVariables(content, record.variables as unknown as Parameters<typeof applyPlatformVariables>[1]);
+        const values = record.variables as unknown as Parameters<typeof applyPlatformVariables>[1];
+        servedText = applyPlatformVariables(content, values, legacyFromValues(values));
       }
     }
     const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);

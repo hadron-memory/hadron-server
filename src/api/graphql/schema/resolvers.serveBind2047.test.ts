@@ -158,3 +158,27 @@ describe('#2047 bind', () => {
     expect(read.text ?? '').not.toContain('current text');
   });
 });
+
+// #2702: the converted prompts keep the legacy {{name}} / {{role}} tokens until the live-node token audit (#1772), so the
+// served path binds them in the same pass as the platform variables, from the values the bind filled.
+describe('#2702 served text binds the legacy {{name}} / {{role}} tokens', () => {
+  const LEGACY = 'You are {{name}}, filling the {{role}} role. Sign as {{name}}.';
+
+  it('a read with no record (what a bind would be served now) binds the worker name and role', async () => {
+    await pointAgent(await compiled(LEGACY));
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const text = (await composeWorkerPrompt(ctx(), w as never)).text!;
+    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris.');
+    expect(text).not.toMatch(/\{\{(name|role)\}\}/);
+  });
+
+  it("a recorded session's replay binds the recorded name and role, not today's", async () => {
+    await pointAgent(await compiled(LEGACY));
+    const session = await bind();
+    await db.worker.update({ where: { id: worker.id }, data: { name: 'Renamed', role: 'renamed-role' } });
+    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const text = (await composeWorkerPrompt(ctx({ sessionId: session.id }), w as never)).text!;
+    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris.');
+    expect(text).not.toMatch(/\{\{(name|role)\}\}/);
+  });
+});

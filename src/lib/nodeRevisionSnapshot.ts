@@ -349,7 +349,7 @@ function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
  * pre-move history belonged there).
  */
 export async function createNodeRevision(
-  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node' | 'nodeSignature'>,
+  db: Pick<PrismaClient, 'nodeRevision' | 'memory' | 'node' | 'nodeSignature' | '$queryRaw'>,
   data: Prisma.NodeRevisionUncheckedCreateInput,
 ): Promise<void> {
   // #696/#1323: Node.revSeq names the LIVE state. Snapshot the pre-edit state
@@ -446,6 +446,9 @@ export async function createNodeRevision(
  * - #2063 (hrn:node:hadronmemory.com:specs:cor:dmo:150:07): the newest
  *   revision the existing approval predicate qualifies, including a covered
  *   non-carrier. Includes themselves add no retention exemption.
+ * - #2047 (cor:dmo:150:07, cor:dmo:060:04): the compiled revision an open
+ *   session or an unfinished run was served (`served_prompts`). Revision
+ *   identity there is `Node.revSeq`, which is `NodeRevision.revNo`.
  *
  * Deliberate deletion (`deleteNodeRevision`, `clearNodeHistory`, restore) is
  * not governed by this and stays allowed. A legacy row with no revNo can carry
@@ -453,19 +456,41 @@ export async function createNodeRevision(
  * stays prunable.
  */
 export async function revisionsExemptFromPruning(
-  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision' | 'node' | 'memory'> | Prisma.TransactionClient,
+  db: Pick<PrismaClient, 'nodeSignature' | 'nodeRevision' | 'node' | 'memory' | '$queryRaw'> | Prisma.TransactionClient,
   nodeId: string,
   memoryId: string,
 ): Promise<Set<number>> {
-  const [signed, carriers] = await Promise.all([
+  const [signed, carriers, servedOpen] = await Promise.all([
     db.nodeSignature.findMany({ where: { nodeId }, select: { revision: true }, distinct: ['revision'] }),
     db.nodeRevision.findMany({
       where: { nodeId, memoryId, approvalHash: { not: null }, revNo: { not: null } },
       select: { revNo: true },
     }),
+    // #2047 (cor:dmo:150:07): the compiled revision an OPEN session or an unfinished run was served. A chat's record
+    // retains nothing (the rule names sessions and runs), and an owner that has ended releases its own revision only.
+    db.$queryRaw<Array<{ rev: number }>>`
+      SELECT DISTINCT sp.served_rev_seq AS rev
+      FROM served_prompts sp
+      LEFT JOIN sessions s ON sp.kind = 'BIND' AND s.id = sp.session_id
+      LEFT JOIN app_runs r ON sp.kind = 'RUN' AND r.id = sp.run_id
+      WHERE sp.compiled_node_id = ${nodeId}
+        AND ((sp.kind = 'BIND' AND s.id IS NOT NULL AND s.ended_at IS NULL)
+          OR (sp.kind = 'RUN' AND r.status IN ('PENDING', 'RUNNING')))`,
   ]);
   const out = new Set<number>(signed.map((s) => s.revision));
   for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
+  for (const sv of servedOpen) out.add(Number(sv.rev));
+  // #2751: absence, not a bounded qualification scan, can prove there is
+  // nothing approved to retain. Check ALL hashed carriers for this node:
+  // the memory-scoped exemption list above misses legacy NULL-memory rows.
+  // Foreign/invalid carriers conservatively keep the existing full scan;
+  // only revisionApprovalOf decides whether their evidence qualifies.
+  // Use the caller's same locked write transaction for the live hash read.
+  const [anyCarrier, live] = await Promise.all([
+    db.nodeRevision.findFirst({ where: { nodeId, approvalHash: { not: null } }, select: { id: true } }),
+    db.node.findUnique({ where: { id: nodeId }, select: { approvalHash: true } }),
+  ]);
+  if (!anyCarrier && live?.approvalHash == null) return out;
   // The serving helper's default scan cap is an answer budget, not permission
   // to prune an older qualifying revision. Examine the entire retained set
   // plus the live candidate here; keep exactly the helper's current/historical

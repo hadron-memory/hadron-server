@@ -33,7 +33,10 @@
 // succession of cor:agt:080:18 (Proposed).
 
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
+import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
+import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
+import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
@@ -122,10 +125,19 @@ async function writeInApp<T>(
 
 // ── Validation ────────────────────────────────────────────────────────────
 
+/**
+ * C0 (incl. NUL, TAB, LF, CR, ESC), DEL, C1 (incl. NEL), and the Unicode line/paragraph
+ * separators. The wake nudge types a ticker name into a worker's terminal header, so a
+ * name that spans lines or carries an escape sequence would read as separate input. (#2756)
+ */
+// eslint-disable-next-line no-control-regex
+const NAME_CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/;
+
 export function cleanName(raw: unknown): string {
   const name = typeof raw === 'string' ? raw.trim() : '';
   if (name === '') throw badInput('A ticker needs a name.');
   if (name.length > TICKER_NAME_MAX) throw badInput(`A ticker name is at most ${TICKER_NAME_MAX} characters.`);
+  if (NAME_CONTROL_CHARS.test(name)) throw badInput('A ticker name cannot contain control characters or line breaks.');
   return name;
 }
 
@@ -137,7 +149,7 @@ type TickerSettings = {
 };
 export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
-  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true, deliveryDarkAlarmWindowSeconds: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
@@ -361,8 +373,21 @@ async function workerForRead(ctx: Context, ref: string) {
   return worker;
 }
 
+const tickerEntryReads = new WeakMap<Context, Map<string, Promise<RegisterEntry>>>();
+function readTickerEntry(ctx: Context, appId: string, code: string): Promise<RegisterEntry> {
+  let memo = tickerEntryReads.get(ctx);
+  if (!memo) { memo = new Map(); tickerEntryReads.set(ctx, memo); }
+  const key = appId + '\u0000' + code;
+  let result = memo.get(key);
+  if (!result) {
+    result = boundedRead(ctx, (tx, deadline) => new RegisterLookup(tx, { ...ctx, db: tx } as unknown as Context, appId, deadline).entry(code));
+    memo.set(key, result);
+  }
+  return result;
+}
+
 const crudMutations = {
-  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context) => {
+  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     // Shape that needs no row, checked before the transaction.
     const name = cleanName(input.name);
@@ -371,7 +396,7 @@ const crudMutations = {
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? new Date() : parseDate(input.anchorAt, 'anchorAt');
-    return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    const ticker = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
       await lockAppTickers(tx, fresh.id);
       const settings = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
       const cadence = checkCadence(input.cadenceSeconds, settings);
@@ -387,7 +412,7 @@ const crudMutations = {
       const slug = await nextFreeTickerSlug(tx, fresh.id, name);
       return tx.ticker.create({
         data: {
-          appId: fresh.id, name, slug, cadenceSeconds: cadence, anchorAt,
+          appId: fresh.id, name, slug, tickCode: tickCodeOfSlug(slug), cadenceSeconds: cadence, anchorAt,
           quietHours: quiet ?? Prisma.DbNull, channelIds, relevance,
           reasons,
           enabled: input.enabled ?? true,
@@ -398,6 +423,11 @@ const crudMutations = {
         },
       });
     });
+    try {
+      const entry = await readTickerEntry(ctx, app.id, ticker.tickCode);
+      if (entry.state !== 'FOUND') await emitTaskWarnings(ctx, info, app.id, { codes: ['ticker.code.unmapped'] });
+    } catch { /* Advice never changes the committed ticker; failed reads do not produce a warning. */ }
+    return ticker;
   },
 
   updateTicker: async (_: unknown, { ref, input }: { ref: string; input: TickerPatch }, ctx: Context) => {
@@ -613,6 +643,7 @@ export async function writeAppSettings(
       standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
+      darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
     validateDeliverySettings(delivery, patch);
     await tx.app.update({
@@ -625,6 +656,7 @@ export async function writeAppSettings(
         deliveryStandbyEnabled: delivery.standbyEnabled,
         deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
         deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
+        deliveryDarkAlarmWindowSeconds: delivery.darkAlarmWindowSeconds,
       },
     });
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
@@ -693,6 +725,15 @@ const isolationForbidden = () => taskError(
   'Only a person managing this App, or the person holding this worker, acting as themselves, can isolate it or lift its isolation.',
 );
 
+/** #2660 / cor:agt:080:29: the same person-manager-or-holder predicate for the writer and its capability. S7 availability is separate. */
+async function canManageWorkerIsolation(
+  ctx: Context, app: TaskApp, actor: TaskActor | null,
+  worker: { heldByUserId: string | null; retiredAt: Date | null },
+): Promise<boolean> {
+  if (!actor || actor.kind !== 'user' || ctx.impersonation || ctx.sessionBindingRefused || app.uninstalledAt || worker.retiredAt) return false;
+  return await actorManagesApp(ctx, app, actor) || worker.heldByUserId === actor.userId;
+}
+
 /**
  * The ONE isolation writer (GraphQL and MCP both reach it). Its only audience is a human acting as themselves who manages the
  * App or holds the worker: a worker session (even a manager's), an App key and an impersonation are refused, and the row
@@ -712,15 +753,19 @@ async function writeWorkerIsolation(
   const row = await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
-    const manages = await actorManagesApp(txCtx, fresh, actor);
-    if (!manages && w.heldByUserId !== actor.userId) throw isolationForbidden();
+    if (!(await canManageWorkerIsolation(txCtx, fresh, actor, w))) throw isolationForbidden();
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
+      // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
+      // An isolation that already expired keeps its own expiry as the end (the latest anchor wins).
+      const prior = await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { isolatedUntil: true, exemptEndedAt: true } });
+      const ended = prior?.isolatedUntil ? (prior.isolatedUntil.getTime() > now.getTime() ? now : prior.isolatedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
         create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null },
+        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(kept ? { exemptEndedAt: kept } : {}) },
       });
     }
     const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
@@ -903,9 +948,19 @@ const wakeAndGrantMutations = {
         );
       }
       const u = updatedStamp(txCtx);
+      // #2755: clearing a pause that is still running erases when the exemption ended; keep that moment (a clear
+      // of a pause that already ended, or of none, restarts nothing).
+      const clearedNow = new Date();
+      const prior = input.clearPause && pausedUntil === undefined
+        ? await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { pausedUntil: true, exemptEndedAt: true } })
+        : null;
+      // A pause that already expired keeps its own expiry as the end (the latest anchor wins).
+      const ended = prior?.pausedUntil ? (prior.pausedUntil.getTime() > clearedNow.getTime() ? clearedNow : prior.pausedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       const change = {
         ...(input.mentions != null ? { mentions: input.mentions } : {}),
         ...(pausedUntil !== undefined ? { pausedUntil } : input.clearPause ? { pausedUntil: null } : {}),
+        ...(kept ? { exemptEndedAt: kept } : {}),
       };
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
@@ -988,6 +1043,12 @@ async function actorRef(ctx: Context, workerId: string | null, userId: string | 
 
 export const tickerFieldResolvers = {
   Ticker: {
+    registerTaskLoc: async (t: TickerRow, _: unknown, ctx: Context) => {
+      try {
+        const entry = await readTickerEntry(ctx, t.appId, t.tickCode);
+        return entry.state === 'FOUND' ? entry.taskLoc : null;
+      } catch { return null; }
+    },
     urn: async (t: TickerRow, _: unknown, ctx: Context) => {
       const app = await ctx.db.app.findUnique({ where: { id: t.appId }, select: { urn: true } });
       if (!app) return null;
@@ -1034,6 +1095,12 @@ export const tickerFieldResolvers = {
   },
 
   WorkerWakeSettings: {
+    canManageIsolation: async (w: { workerId: string }, _: unknown, ctx: Context) => {
+      // Keep the existing read refusal before computing a permission; never reveal an unreadable worker.
+      const worker = await workerForRead(ctx, w.workerId);
+      const app = await appOf(ctx, worker.appId);
+      return canManageWorkerIsolation(ctx, app, await resolveTaskActor(ctx, app), worker);
+    },
     worker: (w: { workerId: string }, _: unknown, ctx: Context) => ctx.db.worker.findUnique({ where: { id: w.workerId } }),
     subscriptions: (w: { workerId: string }, _: unknown, ctx: Context) =>
       ctx.db.tickerSubscription.findMany({

@@ -154,8 +154,10 @@ async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/agent-task-stall-invariants.sql', import.meta.url), 'utf8'));
   // #1707 — session model family, host registrations.
   await client.query(readFileSync(new URL('../../prisma/agent-task-matching-invariants.sql', import.meta.url), 'utf8'));
+  await client.query(readFileSync(new URL('../../prisma/task-blocker-invariants.sql', import.meta.url), 'utf8'));
   // #1747 — tickers, subscriptions, wake settings, app grants, App ticker bounds.
   await client.query(readFileSync(new URL('../../prisma/ticker-invariants.sql', import.meta.url), 'utf8'));
+  await client.query(readFileSync(new URL('../../prisma/ticker-tick-code-invariants.sql', import.meta.url), 'utf8'));
   await client.query(readFileSync(new URL('../../prisma/worker-team-choice-invariants.sql', import.meta.url), 'utf8'));
   // #2043 — a compiled boot prompt keeps its role.
   await client.query(readFileSync(new URL('../../prisma/boot-prompt-invariants.sql', import.meta.url), 'utf8'));

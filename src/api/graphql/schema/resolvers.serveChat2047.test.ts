@@ -153,3 +153,14 @@ describe('#2047 chat', () => {
     expect(new Set(recs.map((r) => r.ordinal)).size).toBe(3);
   });
 });
+
+// #2702: a chat binds no worker, so the legacy tokens bind to the Agent, exactly as the pre-serve chat path did.
+describe('#2702 served chat binds the legacy {{name}} / {{role}} tokens', () => {
+  it('binds {{name}} to the Agent name and {{role}} to its persona role', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'helper' } });
+    await compiled('You are {{name}}, the {{role}}.');
+    const start = await M.startChat({}, { agentId: agent.id }, ctx());
+    expect(start.systemMessage).toContain('You are chat-agent, the helper.');
+    expect(start.systemMessage).not.toMatch(/\{\{(name|role)\}\}/);
+  });
+});

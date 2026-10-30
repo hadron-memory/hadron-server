@@ -149,8 +149,9 @@ describe('numbering', () => {
     const update = typeDefs.match(/input \w*(?:Update|Edit|Move|Reparent)\w*AgentTask\w* \{[^}]*\}/g) ?? [];
     for (const block of update) expect(block).not.toMatch(/parentTaskId/);
     const ops = Object.keys(M).filter((n) => /agenttask/i.test(n));
-    // #2645 adds descriptive editing, with parent still absent from its patch.
-    expect(ops.filter((n) => /(move|reparent|update|edit)/i.test(n))).toEqual(['updateAgentTask']);
+    // #2645 adds descriptive editing, with parent still absent from its patch. Match the operation verb:
+    // removeAgentTaskBlocker unlinks a dependency, never reparents a task.
+    expect(ops.filter((n) => /^(move|reparent|update|edit)/i.test(n))).toEqual(['updateAgentTask']);
   });
 
   it('an explicit number spends its counter: the next allocation never repeats it; an explicit handle must match its parent', async () => {
@@ -362,9 +363,9 @@ describe('AT0 is the platform\'s own row (rev 6)', () => {
 
 describe('the migration', () => {
   const migrationSql = () => readFileSync(new URL('../../../../prisma/migrations/20261027100000_agent_task_number/migration.sql', import.meta.url), 'utf8');
-  const invariants = () => readFileSync(new URL('../../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8');
+  const invariants = () => readFileSync(new URL('../../../../prisma/agent-task-number-invariants.sql', import.meta.url), 'utf8').split('\n-- #2666:')[0]!;
 
-  it('carries a byte-identical copy of the invariants file', () => {
+  it('carries a byte-identical copy of the original invariants file', () => {
     expect(migrationSql().endsWith(invariants())).toBe(true);
   });
 

@@ -26,7 +26,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
@@ -132,7 +132,7 @@ export async function serveChatPrompt(
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
   const variables = agentPlatformValues(agent);
-  return { text: applyPlatformVariables(served.content, variables), served, variables: { ...variables } };
+  return { text: applyPlatformVariables(served.content, variables, legacyFromValues(variables)), served, variables: { ...variables } };
 }
 
 /**

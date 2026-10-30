@@ -71,6 +71,31 @@ export async function agentBaseChain(db: Db, agentId: string): Promise<string[]>
 }
 
 /**
+ * `agentBaseChain` for many roots at once (#2608, Atilla's BLIND P2): one
+ * recursive walk seeded with every root, chains kept apart by the root column.
+ * Same edges, same MAX_WALK, same nearest-first order per root as the
+ * singular — a roster's worth of per-agent walks becomes one statement.
+ */
+export async function agentBaseChains(db: Db, agentIds: string[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>(agentIds.map((id) => [id, []]));
+  if (!agentIds.length) return out;
+  const rows = await db.$queryRaw<Array<{ root: string; id: string }>>`
+    WITH RECURSIVE up(root, id, depth) AS (
+      SELECT a.id, a.extends_agent_id, 1 FROM agents a
+      WHERE a.id = ANY(${agentIds}::text[]) AND a.extends_agent_id IS NOT NULL
+      UNION ALL
+      SELECT up.root, a.extends_agent_id, up.depth + 1 FROM agents a JOIN up ON a.id = up.id
+      WHERE a.extends_agent_id IS NOT NULL AND up.depth < ${MAX_WALK}
+    )
+    SELECT root, id FROM up ORDER BY root, depth`;
+  for (const r of rows) {
+    const chain = out.get(r.root);
+    if (chain) chain.push(r.id);
+  }
+  return out;
+}
+
+/**
  * The longest run of live Agents below `agentId`: 0 when no live Agent
  * extends it, 1 when only direct children do, and so on.
  */

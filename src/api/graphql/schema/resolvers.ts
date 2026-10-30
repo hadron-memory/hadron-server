@@ -1,3 +1,5 @@
+import { registerRolePickQueries } from './resolvers.registerRolePick.js';
+import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
 // GraphQL resolver map — thin assembler.
@@ -196,6 +198,8 @@ export const resolvers = {
     ...hostOperationQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
+    ...registerRoleCandidateQueries,
+    ...registerRolePickQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
     ...scopeQueries,

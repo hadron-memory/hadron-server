@@ -111,6 +111,27 @@ describe('#2047 run', () => {
     expect(await db.servedPrompt.count()).toBe(0);
   });
 
+  it('#2047 PR-C: the revision is selected inside the launch transaction, so one approved after the preflight is the one recorded', async () => {
+    const node = await compiledPointer('v1');
+    const racing = new Proxy(db, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv);
+        if (prop !== '$transaction') return typeof v === 'function' ? v.bind(target) : v;
+        return async (...args: unknown[]) => {
+          // Between the refusal preflight and the transaction: revision 2 is compiled and approved.
+          const n = await db.node.findUniqueOrThrow({ where: { id: node } });
+          await db.nodeRevision.create({ data: { nodeId: node, memoryId, loc: n.loc, name: n.name, content: n.content, revNo: n.revSeq, tags: [], approvedAt: n.approvedAt, approvedByInfo: n.approvedByInfo, approvalHash: n.approvalHash } as never });
+          await withCompileWrite(() => db.node.update({ where: { id: node }, data: { content: 'v2', revSeq: 2, contentRevSeq: 2 } }));
+          await db.compiledPromptRevision.create({ data: { compiledNodeId: node, compiledRevNo: 2, contentHash: sha256Hex('v2'), targetKind: 'AGENT', targetAgentId: agentId, provenance: provenance() as never, occurrenceCount: 1 } });
+          await db.node.update({ where: { id: node }, data: { approvedRevNo: 2, approvedAt: new Date(), approvedByInfo: 't', approvalHash: computeApprovalHash({ title: 'compiled', abstract: null, content: 'v2' }) } });
+          return (v as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as typeof db;
+    const run = await mintAppRun(racing, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never);
+    expect((await db.servedPrompt.findFirstOrThrow({ where: { runId: run.id } })).servedRevSeq).toBe(2);
+  });
+
   it('records the serve with the run and prefixes the compiled text, variables filled, to the system prompt', async () => {
     const node = await compiledPointer('You are {{agent.name}}.');
     const run = await mint({ userId, agentId });
@@ -172,5 +193,19 @@ describe('#2047 run', () => {
     expect((await db.servedPrompt.findFirstOrThrow({ where: { runId: run.id } })).variables).toMatchObject({ 'session.llmModel': '' });
     aiConfigFault.error = new Error('registry down');
     expect(await code(mint({ userId, agentId }))).toBe('registry down');
+  });
+});
+
+// #2702: a run replays its recorded variables, and the legacy tokens bind from them in the same pass.
+describe('#2702 served run binds the legacy {{name}} / {{role}} tokens', () => {
+  it('binds {{name}} and {{role}} from the values recorded with the run', async () => {
+    await db.agent.update({ where: { id: agentId }, data: { personaRole: 'runner-role' } });
+    await compiledPointer('You are {{name}}, the {{role}}.');
+    const run = await mint({ userId, agentId });
+    const { deps: d, llm } = deps();
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    const system = llm.mock.calls[0]![1].system!;
+    expect(system.startsWith('You are Runner, the runner-role.\n\n')).toBe(true);
+    expect(system).not.toMatch(/\{\{(name|role)\}\}/);
   });
 });

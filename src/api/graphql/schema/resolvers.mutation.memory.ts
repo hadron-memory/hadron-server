@@ -155,12 +155,14 @@ import {
   resolveMemoryRefArg,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
+  assertMemoryRootLoc,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
 import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -691,6 +693,11 @@ export const memoryMutations = {
         );
       }
 
+      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
+      // after the gates and before ensureUserHandle, the tombstone reclaim or
+      // any create.
+      assertMemoryRootLoc(name);
+
       // The URN root is the owner principal's bare namespace atom — an org
       // domain (`baragaun.com`) or, for the user-owned path, the caller's
       // handle (`holger`). ensureUserHandle mints+persists a handle if the
@@ -711,7 +718,9 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${memoryUrn}" already exists`);
+          throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
 
@@ -719,7 +728,7 @@ export const memoryMutations = {
       // owner in the same transaction as the Memory create, so the
       // Memory is never persisted in a zero-owner state (which would
       // be effectively unreachable to anyone, including the creator).
-      const memory = await ctx.db.$transaction(async (tx) => {
+      const memory = await withFsProjectionRollback(() => ctx.db.$transaction(async (tx) => {
         const created = await tx.memory.create({
           data: {
             id: generateId(),
@@ -807,17 +816,17 @@ export const memoryMutations = {
             },
           });
         }
+        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
+        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
+        const rootName = name.split(':').pop() ?? name;
+        await createNode({
+          memoryId: created.id,
+          loc: name,
+          name: rootName,
+          description: 'Root node for this memory.',
+        }, tx);
         return created;
-      });
-
-      // Create the root node for this memory
-      const rootName = name.split(':').pop() ?? name;
-      await createNode({
-        memoryId: memory.id,
-        loc: name,
-        name: rootName,
-        description: 'Root node for this memory.',
-      });
+      }));
 
       return memory;
     },
@@ -918,6 +927,23 @@ export const memoryMutations = {
       // PUBLIC while this call observes no PUBLIC agent. This early pass stays
       // as the fail-fast, ahead of the URN/alias writes.
       if (visibility !== undefined) {
+        // #2573: the same two-direction class/visibility guard createMemory
+        // applies (spec 023 FR-024), judged before anything is written. A
+        // memory's class never changes here, so the stored class decides.
+        // Without it the write reaches chk_memory_group_visibility and
+        // surfaces as INTERNAL_SERVER_ERROR.
+        if (memory.class === 'group' && visibility !== 'GROUP') {
+          throw new GraphQLError(
+            'Group-class memory must have visibility=GROUP (spec 023 FR-024).',
+            { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
+          );
+        }
+        if (memory.class !== 'group' && visibility === 'GROUP') {
+          throw new GraphQLError(
+            'visibility=GROUP requires class=group (spec 023 FR-024).',
+            { extensions: { code: 'INVALID_GROUP_MEMORY_VISIBILITY' } },
+          );
+        }
         await assertMemoryVisibilityChangeAllowed(ctx.db, memory, visibility);
       }
       // #1349 (@codex, PR #1357): narrowing out of PUBLIC also REVOKES the
@@ -1493,7 +1519,9 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${newUrn}" already exists`);
+          throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
 
@@ -1714,7 +1742,9 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${newUrn}" already exists`);
+          throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
 
@@ -1983,13 +2013,19 @@ export const memoryMutations = {
       if (memory.visibility !== 'PUBLIC') {
         // Reached only by a caller who can open the memory (#1381 refused the
         // rest above), so this refusal discloses nothing they did not know.
-        throw new Error('Only public memories can be subscribed to by other organizations');
+        throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
       }
 
       await requireOrgRole(ctx, resolvedOrgId, 'ADMIN');
 
       if (memory.organizationId === resolvedOrgId) {
-        throw new Error('Owner organization has implicit access and cannot subscribe');
+        throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
       }
 
       return withAuthorizedMemoryTx(
@@ -1999,10 +2035,16 @@ export const memoryMutations = {
           await requireOrgRole(txCtx, resolvedOrgId, 'ADMIN');
           const current = await txCtx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
           if (current.visibility !== 'PUBLIC') {
-            throw new Error('Only public memories can be subscribed to by other organizations');
+            throw new GraphQLError(
+          'Only public memories can be subscribed to by other organizations',
+          { extensions: { code: 'SUBSCRIPTION_REQUIRES_PUBLIC_MEMORY' } },
+        );
           }
           if (current.organizationId === resolvedOrgId) {
-            throw new Error('Owner organization has implicit access and cannot subscribe');
+            throw new GraphQLError(
+          'Owner organization has implicit access and cannot subscribe',
+          { extensions: { code: 'OWNER_ORG_CANNOT_SUBSCRIBE' } },
+        );
           }
         },
         (tx) => tx.memorySubscription.create({
