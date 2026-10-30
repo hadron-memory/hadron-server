@@ -1810,6 +1810,37 @@ export async function resolveAppTeamSpaceMemoryIds(
   return rows.filter((r) => keep.has(r.id)).map((r) => r.id);
 }
 
+/**
+ * #2861 (cor:dmo:050:17) — the App's FREE-STANDING app memories: the
+ * `createAppMemory` rows (cor:acl:010:01), app-class and App-scoped but neither
+ * the team space nor linked by any live Agent item. Identity only, like
+ * {@link resolveAppTeamSpaceMemoryIds}: pair with {@link isAppParticipant}.
+ *
+ * Built on the same column filter, so a Worker's working memory and a session
+ * memory stay out, and `teamSpaceIds` (passed in, already resolved by the
+ * caller) is subtracted so a legacy unkeyed team space is not a second kind.
+ * A memory an Agent links is that Agent's source, not this one.
+ */
+export async function resolveAppFreeStandingMemoryIds(
+  db: Context['db'],
+  appId: string,
+  teamSpaceIds: readonly string[],
+): Promise<string[]> {
+  const rows = await db.memory.findMany({
+    where: {
+      ...appTeamSpaceColumnFilter(appId),
+      sharedMemoryOfAgentId: null,
+      isInstallMemory: false,
+      installOfAgentId: null,
+      agentItems: { none: { deletedAt: null } },
+      ...(teamSpaceIds.length > 0 ? { id: { notIn: [...teamSpaceIds] } } : {}),
+    },
+    select: { id: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return rows.map((r) => r.id);
+}
+
 /** Row shape shared by the masked mappers below (no key material leaves). */
 export interface AiServiceConfigRow {
   id: string;
