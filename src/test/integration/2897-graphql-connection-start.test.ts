@@ -29,6 +29,7 @@ vi.mock('../../lib/emailClient.js', async (importOriginal) => ({
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { confirmConnect } from '../connectInterstitial.js';
 import { generateId } from '../../lib/id.js';
 import { signJwt } from '../../auth/index.js';
 import { createToolConnection } from '../../lib/emailClient.js';
@@ -117,7 +118,7 @@ async function startAsAdmin() {
 
 /** Redeem the nonce at the browser leg and return the `state` the provider would echo back. */
 async function consent(authorizeUrl: string): Promise<string> {
-  const res = await fetch(authorizeUrl, { redirect: 'manual' });
+  const res = await confirmConnect(authorizeUrl);
   expect(res.status).toBe(302);
   return new URL(res.headers.get('location')!).searchParams.get('state')!;
 }
@@ -148,7 +149,7 @@ describe('startConnection: the happy path and its single-use points', () => {
     const row = await db.authHandoffCode.findFirstOrThrow({ where: { kind: { startsWith: 'exchange_start' } } });
     expect(row.kind).toBe(`exchange_start:${provider}:graphql`);
     // The nonce works at that route and nowhere else: the browser leg answers a redirect, not 400/503.
-    expect((await fetch(start.authorizeUrl, { redirect: 'manual' })).status).toBe(302);
+    expect((await confirmConnect(start.authorizeUrl)).status).toBe(302);
   });
 
   it('single-use point 1: the nonce redeems once at GET /auth/{provider}, a second redemption is refused', async () => {
@@ -174,7 +175,7 @@ describe('startConnection: the happy path and its single-use points', () => {
     const res = await fetch(`${baseUrl}/auth/microsoft?nonce=${nonceOf(authorizeUrl)}`, { redirect: 'manual' });
     expect(res.status).toBe(400);
     // ...and it is still good at the provider it was minted for.
-    expect((await fetch(authorizeUrl, { redirect: 'manual' })).status).toBe(302);
+    expect((await confirmConnect(authorizeUrl)).status).toBe(302);
   });
 
   it('accepts a user acting as themselves through a user API key too, not only a portal JWT', async () => {
