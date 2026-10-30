@@ -13,11 +13,13 @@ import type { Node } from '../../index.d.js';
 export const saveNodeToFs = async (
   node: Partial<Node>,
   sourcesPath: string,
-): Promise<{ error?: string }> => {
+): Promise<{ error?: string; written?: { yaml?: string; topic?: string } }> => {
   if (!node.loc) {
     return { error: 'Node has no loc' };
   }
 
+  // #2731: what has reached disk so far, reported even when a later write throws.
+  const written: { yaml?: string; topic?: string } = {};
   try {
     // Derive directory path: micromentor-org:mmdata:services → micromentor-org/mmdata/services
     const dirPath = pathUnderGraphsRoot(sourcesPath, ...node.loc.split(':'));
@@ -34,15 +36,19 @@ export const saveNodeToFs = async (
     if (node.alias) meta.alias = node.alias;
     if (node.tags && node.tags.length > 0) meta.tags = node.tags;
 
-    writeFileSync(join(nodeDir, 'node.yaml'), stringify(meta), 'utf-8');
+    const yaml = stringify(meta);
+    writeFileSync(join(nodeDir, 'node.yaml'), yaml, 'utf-8');
+    written.yaml = yaml;
 
     // Write topic.md
     if (node.content) {
       writeFileSync(join(nodeDir, 'topic.md'), node.content, 'utf-8');
+      written.topic = node.content;
     }
 
-    return {};
+    // #2731: what this call wrote, so a rollback removes only its own bytes.
+    return { written };
   } catch (error) {
-    return { error: (error as Error).message };
+    return { error: (error as Error).message, written };
   }
 };
