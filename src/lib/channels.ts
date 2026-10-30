@@ -155,6 +155,28 @@ export async function assertNoChannelOverlap(
  * poison the transaction — so a transactional caller MUST hold the ancestor
  * lock, which serializes the race away.
  */
+/**
+ * #2622 (Riana §10 P2): a chat's transcript lives at `<root>:messages:`, and
+ * every transcript reader + the seq allocator address a chat by that prefix —
+ * so a chat ROOT whose own loc contains a `messages` SEGMENT is ambiguous:
+ * the #992 index derives identity from the loc before the FIRST `:messages:`,
+ * which folds such a root's posts into an ANCESTOR's identity while the
+ * allocator scans the root's own prefix. The index then refuses posts the
+ * allocator cannot see colliding — permanently (soft-deleted rows count by
+ * design). Reserving the segment at the address boundary is what keeps the
+ * index's identity and the allocator's prefix the SAME chat. `messages` stays
+ * a legal segment for ordinary nodes (the message container is literally
+ * named `messages`) — only a Channel ADDRESS may not carry one.
+ */
+export function refuseReservedChatAddressSegment(loc: string): void {
+  if (loc.split(':').includes('messages')) {
+    throw new GraphQLError(
+      `"${loc}" cannot host a Channel: "messages" is a reserved loc segment for chat addresses (a chat's transcript lives at "<loc>:messages:"), so an address containing it would be merged into another chat's message sequence (#992). Choose an address without a "messages" segment.`,
+      { extensions: { code: 'LOC_RESERVED_SEGMENT', segment: 'messages', loc } },
+    );
+  }
+}
+
 export async function ensureChannelRow(
   db: PrismaClient | Prisma.TransactionClient,
   args: {
@@ -170,6 +192,7 @@ export async function ensureChannelRow(
     resetForReuse?: boolean;
   },
 ): Promise<ChannelRow> {
+  refuseReservedChatAddressSegment(args.loc);
   let row = await db.channel.findUnique({ where: { chatRootNodeId: args.rootId } });
   if (!row) {
     try {
@@ -416,6 +439,7 @@ export async function ensureChannelWithRoot(
     authorizeLockedHost?: (tx: Prisma.TransactionClient) => Promise<void>;
   },
 ): Promise<{ channel: ChannelRow; rootId: string }> {
+  refuseReservedChatAddressSegment(args.loc);
   const memory = await db.memory.findFirst({
     where: { id: args.memoryId, deletedAt: null },
     select: { id: true, class: true },

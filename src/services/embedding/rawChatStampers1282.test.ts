@@ -67,9 +67,19 @@ it('a cross-memory subtree move restamps controls but not record turns under the
   for (const row of rows) expect(row.embeddingWorkToken === null).toBe(isRawChatNode(row));
 });
 it('Channel creation guards structural ancestors and revival keeps the eligible chat root', async () => {
-  await ensureChannelWithRoot(db, { memoryId, loc: 'archive:messages:old:thread', name: 'thread', createdBy: null });
-  const ancestor = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'archive:messages:old', memoryId } } });
+  // #2622: a Channel ADDRESS may no longer carry a `messages` segment
+  // (LOC_RESERVED_SEGMENT), so a freshly created structural ancestor can no
+  // longer be raw-chat-classified by its loc — the reachable guard is an
+  // ADOPTED raw-chat ancestor row. Channel creation must leave it unstamped
+  // while the fresh clean ancestor above it gets its obligation.
+  await db.node.create({ data: { id: generateId(), memoryId, loc: 'archive:old', name: 'stray turn', nodeType: 'chat-message', content: 'stray', createdBy: null } });
+  await ensureChannelWithRoot(db, { memoryId, loc: 'archive:old:thread', name: 'thread', createdBy: null });
+  const ancestor = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'archive:old', memoryId } } });
+  expect(ancestor.nodeType).toBe('chat-message');
   expect(ancestor.embeddingWorkToken).toBeNull();
+  expect(ancestor.embeddingPendingAt).toBeNull();
+  const cleanAncestor = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'archive', memoryId } } });
+  expect(cleanAncestor.embeddingWorkToken).not.toBeNull();
   await db.node.create({ data: { id: generateId(), memoryId, loc: 'revived', name: 'revived', nodeType: 'chat', deletedAt: new Date() } });
   const { rootId } = await ensureChannelWithRoot(db, { memoryId, loc: 'revived', name: 'revived', createdBy: null });
   const root = await db.node.findUniqueOrThrow({ where: { id: rootId } });

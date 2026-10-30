@@ -14,7 +14,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbWorkerAttribution } from '../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution, suspendChatSeqUniqueness } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
@@ -344,7 +344,9 @@ describe('#1783 — aggregatePlaintextWindow edge semantics', () => {
 
   it('the frontier row is one a target actually COUNTED, as the row walk had it (duplicate seqs)', async () => {
     // Two rows at seq 5 (a pre-#919 artifact): the higher loc is the target's own post, which the
-    // walk skipped, so the counted frontier is the lower-loc row.
+    // walk skipped, so the counted frontier is the lower-loc row. Planting
+    // the duplicate needs #992's constraint aside (see the helper).
+    await suspendChatSeqUniqueness(db);
     await put(4, { mentions: [] });
     await put(5, { mentions: [] }, '5a');
     await createDbWorkerAttribution(db, user.id, 'w-target');
