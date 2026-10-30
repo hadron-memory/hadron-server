@@ -4946,6 +4946,43 @@ export const typeDefs = `#graphql
     teamTags: [TeamTagSnapshot!]
   }
 
+  """
+  One match of a chat-history search (#2299, hrn:node:hadronmemory.com:specs:cor:agt:020:04): the canonical message
+  reference a read returns, and nothing else. No body, no snippet: the caller reads the message to see it.
+  """
+  type TeamChatSearchMatch {
+    "The message node's id."
+    nodeId: ID!
+    "The message's canonical URN, as TeamChatMessage.urn (null when it would not resolve back to the message)."
+    urn: String
+    seq: Int!
+    "The Channel searched."
+    channelId: ID!
+    "That Channel's incarnation at the search."
+    channelIncarnation: Int!
+  }
+
+  """
+  One page of a chat-history search (#2299, hrn:node:hadronmemory.com:specs:cor:agt:020:04). Newest first. A call stops at
+  a full page or at the scan bound, whichever comes first: complete is true only when the search reached the start of the
+  history, and then there is no cursor. An empty page with complete false means the scan bound fired before any match: it
+  may continue with the cursor. No matches is only ever an empty page with complete true.
+  """
+  type TeamChatSearchPage {
+    items: [TeamChatSearchMatch!]!
+    "True when the search reached the start of the history (no cursor), false when it stopped at a full page or the scan bound."
+    complete: Boolean!
+    """
+    Opaque continuation, bound to the query, the Channel, its incarnation and the caller; any other use is
+    TEAM_CHAT_SEARCH_CURSOR_INVALID. After a full page it resumes after the last match; after the scan bound it resumes
+    below the last scanned message, so nothing is scanned twice or skipped. Null when complete.
+    """
+    cursor: String
+    "The Channel searched. NULL only when the App has no team chat yet (then complete is true and the page empty)."
+    channelId: ID
+    channelIncarnation: Int
+  }
+
   type TeamChatMessagesPage {
     items: [TeamChatMessage!]!
     """
@@ -9355,6 +9392,25 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
     ): TeamChatMessagesPage!
+
+    """
+    Search a team App's chat history (#2299, hrn:node:hadronmemory.com:specs:cor:agt:020:04): a literal,
+    case-insensitive substring of the message text (% _ and the backslash are ordinary characters), newest first, one
+    channel at a time, through the same read gate as teamChatMessages. The search matches what a read shows (the canonical
+    read projection), returns references only, and never moves a read position, delivered mark or attention.
+    query is 2 to 200 characters (code points, untrimmed); outside that is TEAM_CHAT_SEARCH_QUERY_LENGTH, answered the same
+    for every caller before any message is read. limit defaults to 20 and is clamped to 50 (below 1 is BAD_USER_INPUT).
+    Each call scans at most 1,000 messages; see TeamChatSearchPage for complete and cursor. A chat hosted in an encrypted
+    memory is TEAM_CHAT_SEARCH_ENCRYPTED, never an empty page. An App with no team chat yet answers the complete empty page.
+    appRef accepts the entity's ID or URN.
+    """
+    teamChatSearch(appRef: ID!, query: String!, limit: Int, cursor: String): TeamChatSearchPage!
+
+    """
+    Search ANY Channel's history by ref (its id, or its address), the Channel-addressed twin of teamChatSearch with the
+    same contract (#2299). A Channel you may not read, or one that does not exist, is CHANNEL_NOT_FOUND, identically.
+    """
+    channelMessageSearch(channelRef: ID!, query: String!, limit: Int, cursor: String): TeamChatSearchPage!
 
     """
     Spec 049 Phase 8 — read ANY Channel by ref (its id, or its address —

@@ -2259,7 +2259,7 @@ export function createMcpServerInstance(
     'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
     'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
     'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
-    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_attention',
+    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search', 'hadron_team_attention',
     'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
     'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
     'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
@@ -10394,6 +10394,40 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
+  // ── #2299 hadron_team_chat_search ────────────────────────────────────────────
+
+  server.tool(
+    'hadron_team_chat_search',
+    'Search ONE chat\'s history (#2299, cor:agt:020:04): the team App\'s chat, or the Channel named by channel. A literal, case-insensitive substring of the message text (% _ and the backslash are ordinary characters); query is 2 to 200 characters, counted as typed. Newest first; limit defaults to 20 and is clamped to 50. Each call scans at most 1,000 messages: the result says whether the search reached the start of the history (complete) or stopped, and gives the cursor to continue with. An empty page that is not complete may continue; "no matches" is only ever a complete search. Returns message references only (seq and URN, no text): read the message with hadron_team_chat_read / hadron_channel_read to see it. It matches what a read shows, goes through the same access as a read, and NEVER moves your read position or counts as attention. A chat in an encrypted memory is refused [team_chat_search_encrypted].',
+    SHAPE_HADRON_TEAM_CHAT_SEARCH,
+    async ({ query, limit, cursor, app, channel }) => {
+      try {
+        let page;
+        if (channel !== undefined) {
+          page = await resolvers.Query.channelMessageSearch({}, { channelRef: channel, query, limit: limit ?? null, cursor: cursor ?? null }, chatCtx());
+        } else {
+          let appRef = app;
+          if (!appRef) {
+            const appScopeError = requireAppScope();
+            if (appScopeError) return appScopeError;
+            appRef = auth.appId ?? undefined;
+            if (!appRef) return textResult('No App context — pass the app parameter or select one with hadron_set_active_app.');
+          }
+          page = await resolvers.Query.teamChatSearch({}, { appRef, query, limit: limit ?? null, cursor: cursor ?? null }, chatCtx());
+        }
+        const envelope = page.channelId != null && page.channelIncarnation != null ? `\nchannel ${page.channelId} incarnation ${page.channelIncarnation}` : '';
+        const state = page.complete
+          ? (page.items.length === 0 ? 'No matches (the search reached the start of the history).' : 'The search reached the start of the history.')
+          : `The search stopped before the start of the history${page.items.length === 0 ? ' with no match yet' : ''}; continue with cursor: ${page.cursor}`;
+        const lines = page.items.map((m: { seq: number; urn: string | null }) => `#${m.seq}${m.urn ? ` ${m.urn}` : ''}`);
+        return textResult(`${page.items.length} match(es):\n${lines.join('\n')}${lines.length ? '\n' : ''}\n${state}${envelope}`);
+      } catch (e) {
+        if (e instanceof ScopeGraphQLError) return refusalResult(`[${String(e.extensions?.code ?? 'ERROR').toLowerCase()}] ${e.message}`);
+        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'team-chat search failed'}`, 'hadron_team_chat_search');
+      }
+    },
+  );
+
   // ── #1353 internal-pilot compact attention ───────────────────────────────────
 
   // #1353: discovery follows the user principal — the pilot operator
@@ -12973,6 +13007,14 @@ const SHAPE_HADRON_TEAM_CHAT_READ = {
     seq: z.number().int().min(0).describe('Exact sequence from the returned checkpoint.'),
     proof: z.string().describe('Opaque server proof from the returned checkpoint; binds Worker + Channel + sequence.'),
   })).max(TEAM_CHAT_MONITOR_MAX_TARGETS).optional().describe('With monitor:true, deliberately advance these server-issued checkpoints after routing/action succeeded.'),
+};
+
+const SHAPE_HADRON_TEAM_CHAT_SEARCH = {
+  query: z.string().describe('The text to find: a literal, case-insensitive substring, 2 to 200 characters counted as typed (no trimming). % _ and the backslash have no special meaning.'),
+  limit: z.number().int().optional().describe('Matches per page (default 20; a larger value is clamped to 50; below 1 is refused).'),
+  cursor: z.string().optional().describe('The continuation from the previous page of THIS search (same query, chat and caller); any other use is [team_chat_search_cursor_invalid].'),
+  app: z.string().optional().describe('The team App — an App URN or ID. Omit to use the active App. Ignored when channel is given.'),
+  channel: z.string().optional().describe('Search THIS Channel (its id or address, from hadron_list_channels) instead of the App\'s default team chat.'),
 };
 
 const SHAPE_HADRON_TEAM_ATTENTION = {

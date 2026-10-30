@@ -46,6 +46,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.assets",
   "Query.automationApprovals",
   "Query.calendarEvents",
+  "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
@@ -99,6 +100,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.teamAttentionPage",
   "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
+  "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
   "Query.teamStopSignals",
   "Query.teamWorkItems",

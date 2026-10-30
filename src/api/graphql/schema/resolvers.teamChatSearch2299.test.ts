@@ -183,6 +183,12 @@ describe('paging and the scan bound', () => {
     expect(p2.complete).toBe(true);
   });
 
+  it.each(both)('%s: a page that fills exactly on the oldest message has reached the start: complete, no cursor', async (_n, search) => {
+    await bulk(3, s => `needle ${s}`);
+    expect(await search(member.id, 'needle', { limit: 3 })).toMatchObject({ complete: true, cursor: null });
+    expect(await search(member.id, 'needle', { limit: 2 })).toMatchObject({ complete: false });
+  });
+
   it.each(both)('%s: no match in a short chat is the complete empty page', async (_n, search) => {
     await say(manager.id, 'hello');
     const p = await search(member.id, 'zzz');
@@ -239,7 +245,9 @@ describe('authorization is the read gate, live on every page', () => {
     await db.appMember.deleteMany({ where: { appId: app.id, userId: member.id } });
     const err = await viaChannel(member.id, 'needle', { limit: 10, cursor: p1.cursor }).catch((e: any) => e);
     expect(err.extensions.code).toBe('CHANNEL_NOT_FOUND');
-    expect(err.message).not.toMatch(/needle|\d{2}/);
+    const read = await Q.channelMessages({}, { channelRef: channel.id }, ctx(member.id)).catch((e: any) => e);
+    expect(err.message).toBe(read.message);
+    expect(err.message).not.toMatch(/needle/);
   });
 });
 
