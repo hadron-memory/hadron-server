@@ -92,6 +92,9 @@ export async function findBrokenPostLimit(
   workerId: string,
   admittedAt: Date,
 ): Promise<{ name: string; max: number; resetsAt: Date } | null> {
+  let broken: { name: string; max: number; resetsAt: Date } | null = null;
+  // Every window is judged: a post is admitted only once ALL of them clear, so the reset (and the limit named) is the
+  // breached window that clears LAST, never the first one found.
   for (const limit of POST_LIMITS) {
     const cutoff = new Date(admittedAt.getTime() - limit.windowMs);
     // The oldest of the newest `max` messages decides the reset: the post is admitted once it ages out.
@@ -99,9 +102,9 @@ export async function findBrokenPostLimit(
       SELECT created_at FROM nodes
       WHERE node_type = 'chat-message' AND created_by_worker_id = ${workerId} AND created_at > ${toNaiveUtc(cutoff)}::timestamp
       ORDER BY created_at DESC LIMIT ${limit.max}`;
-    if (rows.length >= limit.max) {
-      return { name: limit.name, max: limit.max, resetsAt: new Date(rows[rows.length - 1]!.created_at.getTime() + limit.windowMs) };
-    }
+    if (rows.length < limit.max) continue;
+    const resetsAt = new Date(rows[rows.length - 1]!.created_at.getTime() + limit.windowMs);
+    if (!broken || resetsAt > broken.resetsAt) broken = { name: limit.name, max: limit.max, resetsAt };
   }
-  return null;
+  return broken;
 }

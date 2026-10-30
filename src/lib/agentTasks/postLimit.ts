@@ -16,8 +16,7 @@ import type { AlarmChain } from './events.js';
 import { isSerializationFailure } from './stall.js';
 
 export const POST_LIMIT_EVENT_TYPE = 'alarm.post-limit';
-/** An episode lasts an hour: a refusal after that opens a new one. */
-const EPISODE_MS = 60 * 60 * 1000;
+const MAX_ATTEMPTS = 5;
 
 const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
   p.workerId ? { workerId: p.workerId } : { userId: p.userId as string, ...(p.via ? { via: p.via } : {}) };
@@ -27,8 +26,25 @@ const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
  * null (an episode is open, the worker or App is exempt, or a concurrent refusal raised it first).
  */
 export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, limit: string): Promise<string | null> {
-  try {
-    return await db.$transaction(async (tx) => {
+  // A serialization failure or unique race means a competing transaction touched the same rows, which proves nothing about
+  // whether it committed THIS hour's alarm: run again. The rerun sees the committed episode (and raises nothing) or finds
+  // none and raises. Only when the retries run out is it given up, loudly.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await attemptRaise(db, workerId, limit);
+    } catch (err) {
+      const raced = isSerializationFailure(err) || (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002');
+      if (!raced) throw err;
+      if (attempt >= MAX_ATTEMPTS) {
+        console.error(JSON.stringify({ event: 'post_limit.alarm_not_raised', workerId, attempts: attempt }));
+        return null;
+      }
+    }
+  }
+}
+
+async function attemptRaise(db: PrismaClient, workerId: string, limit: string): Promise<string | null> {
+  return await db.$transaction(async (tx) => {
       await lockWorkerPostAdmission(tx, workerId);
       const w = await tx.worker.findUnique({
         where: { id: workerId },
@@ -71,9 +87,4 @@ export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, li
       // SERIALIZABLE like the dark-worker alarm: the chain names manager users, sealed, and `mergeUsers` refuses to merge an
       // account named in an open alarm.
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-  } catch (err) {
-    if (isSerializationFailure(err)) return null; // a concurrent refusal raised it
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') return null;
-    throw err;
-  }
 }

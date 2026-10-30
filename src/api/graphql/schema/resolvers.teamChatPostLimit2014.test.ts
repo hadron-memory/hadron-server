@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -115,6 +116,15 @@ describe('#2014 the limit', () => {
     expect(err.extensions).toMatchObject({ code: 'TEAM_CHAT_POST_RATE_LIMITED', limit: '60 per hour' });
   });
 
+  it('with both windows breached, resetsAt is when the LAST breached window clears and names that window', async () => {
+    for (let round = 0; round < 5; round++) { await post(liam, 10, `r${round}`); await age(liam, 2 * MIN + round); }
+    await post(liam, 10, 'now'); // 10 in the minute AND 60 in the hour
+    const err: any = await workerSays(liam, 'x').catch((e) => e);
+    expect(err.extensions.limit).toBe('60 per hour');
+    // Hour-based: the minute window alone would reset within 60s.
+    expect(new Date(err.extensions.resetsAt).getTime()).toBeGreaterThan(Date.now() + 2 * MIN);
+  });
+
   it('is per worker: another worker is unaffected', async () => {
     await post(liam, 10, 'a');
     await expect(workerSays(rook, 'hello')).resolves.toBeTruthy();
@@ -197,5 +207,19 @@ describe('#2014 the alarm', () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null, deletedAt: new Date() } });
     expect(await raisePostLimitAlarm(db, liam.id, '10 per minute')).toBeNull();
     expect(await alarms()).toHaveLength(0);
+  });
+
+  it('a serialization conflict is retried, not swallowed: the first refusal still raises its alarm', async () => {
+    await post(liam, 10, 'a');
+    const real = db.$transaction.bind(db);
+    let failed = 0;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((...args: any[]) => {
+      if (failed++ < 2) return Promise.reject(new Prisma.PrismaClientKnownRequestError('could not serialize access', { code: 'P2034', clientVersion: 'test' }));
+      return (real as any)(...args);
+    }) as any);
+    try {
+      expect(await raisePostLimitAlarm(db, liam.id, '10 per minute')).not.toBeNull();
+    } finally { spy.mockRestore(); }
+    expect(await alarms()).toHaveLength(1);
   });
 });
