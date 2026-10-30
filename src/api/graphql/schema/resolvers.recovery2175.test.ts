@@ -536,3 +536,108 @@ describe('single-node restore', () => {
     await expect(M.restoreNode({}, { nodeRef: n.id }, { ...ctx(), clientId: 'run:synthetic' })).rejects.toThrow();
   });
 });
+
+describe('recoveryEdges(edgeIds:) (#2818)', () => {
+  /** Shown, ancestor-hidden, unreadable, unrecoverable and deleted edges, plus a foreign memory's edge. */
+  async function graph() {
+    const hub = await node('hub', { deletedAt: null });
+    const retained = await node('r');
+    await node('p');
+    const underDeleted = await node('p:c', { deletedAt: null });
+    const live = await node('l', { deletedAt: null });
+    const readOnly = await db.memory.create({ data: { class: 'knowledge', name: 'ReadOnly', urn: 'readonly2818.example:corpus',
+      organization: { create: { name: 'ReadOnly', urn: 'readonly2818.example' } } } });
+    await db.orgMember.create({ data: { organizationId: readOnly.organizationId!, userId: writerId, role: 'READER' } });
+    const readable = await db.node.create({ data: { memoryId: readOnly.id, loc: 'live', name: 'Readable' } });
+    const unrecoverable = await db.node.create({ data: { memoryId: readOnly.id, loc: 'gone', name: 'Gone', deletedAt: new Date() } });
+    const sealed = await db.memory.create({ data: { class: 'knowledge', name: 'Sealed', urn: 'sealed2818.example:corpus',
+      organization: { create: { name: 'Sealed', urn: 'sealed2818.example' } } } });
+    const secret = await db.node.create({ data: { memoryId: sealed.id, loc: 'secret', name: 'Secret' } });
+    const edge = (sourceId: string, targetId: string, loc: string, extra: Record<string, unknown> = {}) =>
+      db.edge.create({ data: { memoryId, sourceId, targetId, loc, ...extra } });
+    const edges = {
+      retained: await edge(hub.id, retained.id, 'hub:to:r'),
+      underDeleted: await edge(hub.id, underDeleted.id, 'hub:to:pc'),
+      live: await edge(hub.id, live.id, 'hub:to:l'),
+      readable: await edge(hub.id, readable.id, 'hub:to:readable'),
+      unrecoverable: await edge(hub.id, unrecoverable.id, 'hub:to:gone'),
+      sealed: await edge(hub.id, secret.id, 'hub:to:secret'),
+      deleted: await edge(hub.id, live.id, 'hub:gone:l', { deletedAt: new Date() }),
+      foreign: await db.edge.create({ data: { memoryId: readOnly.id, sourceId: readable.id, targetId: readable.id, loc: 'live:self:live' } }),
+    };
+    return { hub, readOnly, sealed, edges };
+  }
+  const ids = (page: any) => page.items.map((item: any) => item.id);
+
+  it('equals the unrestricted result filtered to the requested ids, items and total', async () => {
+    const { hub, edges: e } = await graph();
+    const full = await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx());
+    expect(ids(full).sort()).toEqual([e.retained.id, e.live.id, e.readable.id].sort());
+    const sets = [
+      Object.values(e).map((edge) => edge.id).concat(generateId(), hub.id),
+      [e.underDeleted.id, e.unrecoverable.id, e.sealed.id, e.deleted.id, e.foreign.id],
+      [e.live.id, e.live.id, e.underDeleted.id],
+      [e.retained.id, e.readable.id],
+    ];
+    for (const set of sets) {
+      const expected = full.items.filter((item: any) => set.includes(item.id));
+      const restricted = await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: set, limit: 200 }, ctx());
+      expect(restricted).toEqual({ total: expected.length, items: expected });
+    }
+    const paged = await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: [e.retained.id, e.readable.id, e.live.id], limit: 1, offset: 1 }, ctx());
+    expect(paged).toEqual({ total: 3, items: full.items.slice(1, 2) });
+  });
+  it('keeps an unreadable or unrecoverable endpoint absent with and without edgeIds', async () => {
+    const { edges: e } = await graph();
+    for (const masked of [e.sealed.id, e.unrecoverable.id, e.underDeleted.id]) {
+      expect(ids(await Q.recoveryEdges({}, { memoryRef: memoryId, limit: 200 }, ctx()))).not.toContain(masked);
+      expect(await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: [masked] }, ctx())).toEqual({ total: 0, items: [] });
+    }
+  });
+  it('authorizes only the endpoint memories of the requested edges', async () => {
+    const { readOnly, sealed, edges: e } = await graph();
+    const lookups = vi.spyOn(db.memory, 'findUnique');
+    try {
+      await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: [e.live.id] }, ctx());
+      const looked = lookups.mock.calls.map(([args]) => (args as { where: { id?: string } }).where.id);
+      expect(looked).toContain(memoryId);
+      expect(looked).not.toContain(readOnly.id);
+      expect(looked).not.toContain(sealed.id);
+    } finally { lookups.mockRestore(); }
+  });
+  it.each([0, 201])('refuses %i ids as BAD_USER_INPUT before resolving the memory or querying', async (count) => {
+    const raw = vi.spyOn(db, '$queryRaw');
+    try {
+      const edgeIds = Array.from({ length: count }, () => generateId());
+      for (const memoryRef of [memoryId, generateId()]) {
+        await expect(Q.recoveryEdges({}, { memoryRef, edgeIds }, ctx())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      expect(raw).not.toHaveBeenCalled();
+    } finally { raw.mockRestore(); }
+  });
+  it('accepts exactly 200 ids and treats null as omitted', async () => {
+    const { edges: e } = await graph();
+    const edgeIds = [e.live.id, ...Array.from({ length: 199 }, () => generateId())];
+    expect(ids(await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds }, ctx()))).toEqual([e.live.id]);
+    expect((await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: null }, ctx())).total).toBe(3);
+  });
+  it('serves the same restriction over GraphQL and MCP', async () => {
+    const { edges: e } = await graph();
+    const set = [e.retained.id, e.sealed.id, e.readable.id];
+    const direct = JSON.parse(JSON.stringify(await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: set }, ctx())));
+    const schema = buildSchema(typeDefs);
+    const read = await graphql({ schema, source: `query($m: ID!, $ids: [ID!]) { recoveryEdges(memoryRef: $m, edgeIds: $ids) { total items { id } } }`,
+      variableValues: { m: memoryId, ids: set }, contextValue: ctx(), fieldResolver: (parent, args, context, info) => {
+        const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined;
+        const resolver = fields?.[info.fieldName];
+        return typeof resolver === 'function' ? resolver(parent, args, context, info) : defaultFieldResolver(parent, args, context, info);
+      } });
+    expect(read.errors).toBeUndefined();
+    expect(read.data).toEqual({ recoveryEdges: { total: 2, items: direct.items.map((item: any) => ({ id: item.id })) } });
+    const writer = createTestableMcpServer({ userId: writerId, roles: [], clientId: `user:${writerId}` });
+    expect(JSON.parse(await writer.callToolText('hadron_list_recovery_edges', { memoryRef: memoryId, edgeIds: set }))).toEqual(direct);
+    expect(await writer.callTool('hadron_list_recovery_edges', { memoryRef: memoryId, edgeIds: [] })).toMatchObject({
+      isError: true, content: [{ type: 'text', text: expect.stringMatching(/^\[bad_user_input\] /) }],
+    });
+  });
+});
