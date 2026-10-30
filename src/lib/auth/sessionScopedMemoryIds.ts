@@ -45,7 +45,7 @@
  */
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { isAgentInstalledAndLicensed, isGrantedAgentMemoryRole } from '../appAgent.js';
+import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { isActiveAgentSubscription } from '../agentSubscription.js';
 
 /**

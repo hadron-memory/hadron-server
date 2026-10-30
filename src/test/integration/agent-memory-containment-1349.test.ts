@@ -329,6 +329,20 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
   });
 
+  it('#1376 session-bound startChat: a bare key never takes an item-linked org memory from Session.memoryId (Diego, P1)', async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: mem.homeOrg!.id } as never });
+    const before = await db.node.count({ where: { memoryId: mem.homeOrg!.id } });
+    const response = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': session.id },
+      body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', variables: { agent: link.agentId } }),
+    });
+    expect(((await response.json()) as { errors?: unknown }).errors).toBeDefined();
+    expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
+  });
+
   it("asset upload target: never another user's personal memory through a read-write link", async () => {
     const stranger = await db.user.create({ data: { id: generateId(), handle: `s-${generateId()}`, githubUsername: `s-${generateId()}` } });
     const { agentId } = await legacyLink('foreignPersonal', 'read-write');
