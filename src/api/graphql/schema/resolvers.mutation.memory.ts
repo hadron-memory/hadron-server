@@ -717,7 +717,9 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${memoryUrn}" already exists`);
+          throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
 
@@ -1516,7 +1518,9 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${newUrn}" already exists`);
+          throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
 
@@ -1737,7 +1741,9 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${newUrn}" already exists`);
+          throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
 

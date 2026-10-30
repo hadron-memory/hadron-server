@@ -8,6 +8,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { getAccessibleMemoryIds } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -86,16 +87,18 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
   });
 
   it('d. oracle: the response is identical for a holder the caller can see and one they cannot', async () => {
-    // The caller is a plain org member; one holder is theirs (visible), the
-    // other a group memory they hold no membership in (not visible).
-    const asOther = (): Context => ({ db, userId: otherId, roles: ['READER'] });
-    await M.createMemory({}, { orgId, name: 'visible', vectorIndexEnabled: false }, asOther());
-    await db.memory.create({
+    // The caller (org admin) can see their own memory; another member's
+    // private memory in the same org is not visible to them.
+    await M.createMemory({}, { orgId, name: 'visible', vectorIndexEnabled: false }, ctx());
+    const hiddenHolder = await db.memory.create({
       data: {
-        id: generateId(), name: 'hidden', urn: `${orgUrn}:hidden`, organizationId: orgId, class: 'group',
+        id: generateId(), name: 'hidden', urn: `${orgUrn}:hidden`, organizationId: orgId,
+        userId: otherId, class: 'private',
       },
     });
-    const attempt = (name: string) => M.createMemory({}, { orgId, name, vectorIndexEnabled: false }, asOther());
+    // Premise: the holder really is invisible to this caller.
+    expect(await getAccessibleMemoryIds(ctx(), hiddenHolder.id)).toEqual([]);
+    const attempt = (name: string) => M.createMemory({}, { orgId, name, vectorIndexEnabled: false }, ctx());
     const v = await refusal(attempt('visible'));
     const h = await refusal(attempt('hidden'));
     expect(v.extensions?.code).toBe('CONFLICT');
