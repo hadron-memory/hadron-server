@@ -593,3 +593,15 @@ export async function createDbWorkerAttribution(db: PrismaClient, userId: string
 export async function tombstoneNodes(db: PrismaClient, ids: readonly string[]): Promise<void> {
   await db.node.updateMany({ where: { id: { in: [...ids] }, deletedAt: null }, data: { deletedAt: new Date(), deletedBy: null } });
 }
+
+/**
+ * #1376: the principal a MANUAL run's setup consent is captured under. Production passes the caller's own context
+ * (`triggerAgentRun`); a bare `{ appId }` default is a credential-only shape, which no longer reads org memory through
+ * the Agent's items. A fixture that mints a run directly passes a real creator: an org reader acting through the App.
+ */
+export async function createDbRunConsentPrincipal(db: PrismaClient, organizationId: string, appId: string) {
+  const id = generateId();
+  const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
+  await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
+  return { userId: user.id, appId, organizationId, roles: [] as Array<'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER'> };
+}
