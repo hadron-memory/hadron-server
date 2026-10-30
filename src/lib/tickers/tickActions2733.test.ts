@@ -430,3 +430,38 @@ it('projects only public actions in preview, and returns no action when the budg
   expect(exhausted.withheld).toBe(1);
   expect(exhausted.wakes).toEqual([]);
 });
+
+it('re-hands both issued tick actions, proof and reservation unchanged, when the fresh wake has a different identity (#2851)', async () => {
+  // cor:agt:080:23: a re-handed wake carries what it carried when issued; cor:agt:080:12: acknowledgement covers what the issued form named.
+  const sharedEntry = await f.entry('tick.shared');
+  await f.entry('tick.next', 'tasks:second');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  await f.node(f.roleA.systemMemoryId, 'tasks:second', { isRunnable: true });
+  await f.node(f.roleA.systemMemoryId, 'tasks:changed', { isRunnable: true });
+  const { w, t: shared } = await subscribed();
+  const next = await f.ticker('Next');
+  const nextSub = await db.tickerSubscription.create({ data: { tickerId: next.id, workerId: w.id } });
+  const first = await due();
+  const issued = first.wakes[0].wake.reasons.filter(r => r.kind === 'TICK') as any[];
+  expect(issued.map(r => [r.tickerId, r.action.state, r.action.taskLoc]).sort()).toEqual([
+    [shared.id, 'MAPPED', tickTaskLoc2733], [next.id, 'MAPPED', 'tasks:second'],
+  ].sort());
+  const stored = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: w.id } });
+
+  // The fresh wake now has one reason, so its identity differs from the stored one; the register entry also moves.
+  await db.tickerSubscription.delete({ where: { id: nextSub.id } });
+  await db.node.update({ where: { id: sharedEntry.id }, data: { data: { registerEntry: { code: 'tick.shared', taskLoc: 'tasks:changed' } } } });
+  const again = await due();
+
+  expect(again.wakes).toHaveLength(1);
+  expect(again.wakes[0].proof).toBe(first.wakes[0].proof);
+  expect(again.wakes[0].wake.reasons.filter(r => r.kind === 'TICK')).toEqual(issued);
+  const after = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: w.id } });
+  expect(after.id).toBe(stored.id);
+  expect(after.wake).toEqual(stored.wake);
+  expect(await db.appWakeReservation.count({ where: { appId: f.app.id } })).toBe(1);
+
+  const ack = await acknowledgeWakes({ ctx: f.context(), requester: { userId: f.admin.id }, proofs: [again.wakes[0].proof], mayReadWorker: async () => true, now: tickNow2733 });
+  expect(ack.acknowledged).toBe(1);
+  expect((await db.workerDeliveryTick.findMany({ where: { workerId: w.id } })).map(r => r.tickerId).sort()).toEqual([shared.id, next.id].sort());
+});
