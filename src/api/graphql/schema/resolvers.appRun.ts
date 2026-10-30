@@ -309,8 +309,8 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
  */
 export async function assertManualRunAllowed(
   ctx: Context,
-  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null },
-): Promise<{ id: string; organizationId: string }> {
+  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null; agentRef?: string | null },
+): Promise<{ id: string; organizationId: string; agentId: string | null }> {
   const app = await requireManualRunAccess(ctx, input.appRef);
   assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
   // runAsSelf REQUIRES an authenticated user — surface it here (pre-write) too.
@@ -344,7 +344,31 @@ export async function assertManualRunAllowed(
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
-  return app;
+  // #2735 / cor:agt:040:10: which Agent the run is served as. Resolved here so
+  // every refusal lands before a caller's write (importNode).
+  return { ...app, agentId: await resolveManualRunAgent(ctx, app.id, input.agentRef) };
+}
+
+/**
+ * The Agent a MANUAL run is served as (#2735, cor:agt:040:10; Holger's R1): the
+ * named Agent, which must be installed in the App; else the App's single
+ * installed Agent; else, with several and none named, `RUN_AGENT_REQUIRED`. An
+ * App with no installed Agent yields null and keeps today's refusal at mint.
+ */
+async function resolveManualRunAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string | null> {
+  const named = await resolveInstalledAgent(ctx, appId, agentRef);
+  if (named) return named;
+  const installed = await ctx.db.appAgent.findMany({ where: { appId }, select: { agentId: true }, take: 2 });
+  if (installed.length > 1) {
+    throw new GraphQLError('This App has several installed Agents: pass agentRef to name the one the run is served as.', {
+      extensions: { code: 'RUN_AGENT_REQUIRED' },
+    });
+  }
+  return installed[0]?.agentId ?? null;
 }
 
 /**
@@ -362,7 +386,7 @@ export async function assertManualRunAllowed(
  */
 export async function mintManualRun(
   ctx: Context,
-  app: { id: string; organizationId: string },
+  app: { id: string; organizationId: string; agentId?: string | null },
   input: {
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
@@ -379,6 +403,7 @@ export async function mintManualRun(
       publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
+      agentId: app.agentId ?? null,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
       consentPrincipal: ctx,
@@ -402,6 +427,7 @@ export async function triggerManualRun(
   ctx: Context,
   input: {
     appRef: string;
+    agentRef?: string | null;
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
@@ -641,6 +667,7 @@ export const appRunMutations = {
     }: {
       input: {
         appRef: string;
+        agentRef?: string | null;
         entryNodeUrn: string;
         eventData?: Record<string, unknown> | null;
         runAsSelf?: boolean | null;
