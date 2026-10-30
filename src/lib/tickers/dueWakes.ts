@@ -35,6 +35,7 @@ import { decryptNodeFields } from '../nodeCrypto.js';
 import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
 import { onStandbySql, standbyAdmitsSql } from './standby.js';
 import { s7Available } from './s7Availability.js';
+import { oldestUnackedTickAt, type TickerSchedule } from './ticks.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
@@ -76,6 +77,12 @@ export type DueWakeOut = {
   tickText: string | null;
   /** R63 (#2017): when the wake may be typed and the latest a busy worker may be made to wait, from the earliest waiting reason. */
   timing: { anchorAt: Date; deliverAfter: Date; busyDeadline: Date };
+  /**
+   * #2790 (cor:agt:080:23): per TICK reason, that ticker's OLDEST unacknowledged tick up to the reason's tick, worked out in
+   * this read from the subscription's acknowledged tick. It is the value `wakeRule` folds into `anchorAtMs`, so the
+   * wake's anchor is at or before each of these. Never stored: the signed wake and its reservation do not carry it.
+   */
+  tickDueAt: Map<string, Date>;
 };
 
 export type DueWakesResult = {
@@ -522,7 +529,7 @@ export async function computeDueWakes(args: {
       issuedAt: now.getTime(),
       wakeKey: wakeIdentity(identityOf(wake)),
     });
-  const issued: Array<Omit<DueWakeOut, 'timing' | 'tickText'> & { exempt: boolean }> = [];
+  const issued: Array<Omit<DueWakeOut, 'timing' | 'tickText' | 'tickDueAt'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
   for (const w of workers) {
@@ -639,6 +646,16 @@ export async function computeDueWakes(args: {
   let withheld = 0;
   const wakes: DueWakeOut[] = [];
   const deliverySettings = await loadDeliverySettings(db, app.id);
+  // #2790 (Diego P2-1): a re-handed TICK reason can outlive its subscription (unsubscribed, disabled, deleted), so its
+  // schedule is read from the ticker row itself, read-only, for any reason the live-subscription map does not cover.
+  const tickerOf = new Map<string, TickerSchedule>();
+  for (const s of subs) tickerOf.set(s.ticker.id, s.ticker);
+  const loadTickers = async (reader: Pick<typeof db, 'ticker'>, wakeList: Array<{ reasons: WorkerWake['reasons'] }>) => {
+    const missing = [...new Set(wakeList.flatMap((w) => w.reasons.flatMap((r) => (r.kind === 'TICK' && !tickerOf.has(r.tickerId) ? [r.tickerId] : []))))];
+    if (missing.length === 0) return;
+    for (const t of await reader.ticker.findMany({ where: { id: { in: missing }, appId: app.id } })) tickerOf.set(t.id, t);
+  };
+  await loadTickers(db, issued.map((i) => i.wake));
   const passes = (i: (typeof issued)[number]) => {
     const { exempt: _e, ...out } = i;
     const anchorMs = i.wake.anchorAtMs ?? now.getTime();
@@ -646,7 +663,13 @@ export async function computeDueWakes(args: {
     const timing = hasStop(i.wake)
       ? { anchorAt: new Date(anchorMs), deliverAfter: now, busyDeadline: now }
       : { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) };
-    wakes.push({ ...out, timing, tickText: null });
+    const tickDueAt = new Map<string, Date>();
+    for (const r of i.wake.reasons) {
+      if (r.kind !== 'TICK') continue;
+      const ticker = tickerOf.get(r.tickerId);
+      if (ticker) tickDueAt.set(r.tickerId, oldestUnackedTickAt(ticker, tickAckOf.get(`${i.workerId}:${r.tickerId}`)?.lastAckedTick ?? 0, r.k));
+    }
+    wakes.push({ ...out, timing, tickDueAt, tickText: null });
   };
   // #2755: a PREVIEW is the pure derivation above and nothing else: no reservation, no budget slot, no proof
   // acknowledgement state touched. The dark-worker alarm reads it as the platform, so it must not spend the budget.
@@ -710,6 +733,7 @@ export async function computeDueWakes(args: {
       const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake; absorbed_keys: string[] }>>(Prisma.sql`
         SELECT worker_id, wake_key, wake, absorbed_keys FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
       const live = new Map(rows.map((r) => [r.worker_id, r]));
+      await loadTickers(tx, rows.map((r) => r.wake));
       let consumed = used + live.size;
       const reserve: Array<{ workerId: string; key: string; wake: WorkerWake; absorbed?: string[] }> = [];
       const refreshTicks = new Set<string>();

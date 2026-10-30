@@ -396,12 +396,14 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         for (const w of page.wakes) {
           const why = [w.tickText, ...(w.reasons as Row[])
             .filter(r => r.kind !== 'TICK' || !w.tickText)
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))].filter(Boolean)
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}${r.tickDueAt ? ` tickDueAt ${iso(r.tickDueAt)}` : ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))].filter(Boolean)
             .join(' + ');
+          const tickTimes = w.tickText ? (w.reasons as Row[]).filter(r => r.kind === 'TICK' && r.tickDueAt)
+            .map(r => `tick ${r.ticker?.name ?? ''} tickDueAt ${iso(r.tickDueAt)}`).join(' · ') : '';
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
             `- ${w.worker.name}: ${why} · ${w.unread} unread (${w.unreadMentions} mention${w.unreadMentions === 1 ? '' : 's'}) · ${ch}` +
-              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  anchor ${iso(w.anchorAt)} · deliverAfter ${iso(w.deliverAfter)} · busyDeadline ${iso(w.busyDeadline)}\n  proof: ${w.proof}`,
+              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}${tickTimes ? '\n  ' + tickTimes : ''}\n  anchor ${iso(w.anchorAt)} · deliverAfter ${iso(w.deliverAfter)} · busyDeadline ${iso(w.busyDeadline)}\n  proof: ${w.proof}`,
           );
         }
         const dormant = (page.dormant as Row[]).map((d) => `${d.worker.name} (${d.mentions})`);
