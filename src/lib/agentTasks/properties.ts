@@ -22,6 +22,13 @@ import { findEffectiveNodeIdByLoc } from '../effectiveSystemMemory.js';
 /** The bound on a task's canonical-JSON `properties` (cor:agt:050:28, Proposed: engineering may adjust). */
 export const TASK_PROPERTIES_MAX_BYTES = 16 * 1024;
 
+/**
+ * How deeply a value may nest. A small value can nest thousands of levels (2,500 levels is 15 KB), which would
+ * overflow the recursion that canonicalizes, stores and validates it, so depth is bounded before any of those run.
+ * Team namespaces nest a handful of levels; the bound is far above that.
+ */
+export const TASK_PROPERTIES_MAX_DEPTH = 64;
+
 /** Where the team's schema lives in the Team Agent's system memory; its `data` holds a JSON Schema (draft-07). */
 export const TASK_PROPERTIES_SCHEMA_LOC = 'schema:task-properties';
 
@@ -44,10 +51,26 @@ export function propertiesFingerprint(value: unknown): PropertiesFingerprint {
   return { bytes: Buffer.byteLength(text, 'utf8'), sha256: createHash('sha256').update(text).digest('hex') };
 }
 
-/** Checks 1 and 2: the value must be a JSON object within the bound. Returns it for the write. */
+/** Whether `value` nests deeper than `max` levels, found without recursion so a hostile value cannot overflow the stack. */
+function nestsDeeperThan(value: object, max: number): boolean {
+  const stack: Array<[object, number]> = [[value, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop() as [object, number];
+    if (depth > max) return true;
+    for (const child of Object.values(node)) {
+      if (child !== null && typeof child === 'object') stack.push([child, depth + 1]);
+    }
+  }
+  return false;
+}
+
+/** Checks 1 and 2: the value must be a JSON object within the size and depth bounds. Returns it for the write. */
 export function normalizeTaskProperties(value: unknown): Prisma.InputJsonObject {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw refusal('PROPERTIES_NOT_AN_OBJECT', 'properties must be a JSON object (or null to clear them).');
+  }
+  if (nestsDeeperThan(value, TASK_PROPERTIES_MAX_DEPTH)) {
+    throw refusal('PROPERTIES_TOO_LARGE', `properties may nest at most ${TASK_PROPERTIES_MAX_DEPTH} levels deep.`);
   }
   if (Buffer.byteLength(canonicalJson(value), 'utf8') > TASK_PROPERTIES_MAX_BYTES) {
     throw refusal('PROPERTIES_TOO_LARGE', `properties may hold at most ${TASK_PROPERTIES_MAX_BYTES} bytes of JSON.`);
@@ -98,12 +121,22 @@ export async function checkAgainstTeamSchema(
   }
 }
 
+/**
+ * The Team Agent's system memory. No Team Agent at all means no schema can exist. Two or more candidates is NOT "no
+ * schema": the platform cannot tell which Agent's schema applies, so it refuses rather than skip the check.
+ */
 async function teamSystemMemoryId(txCtx: Context, appId: string): Promise<string | null> {
   try {
     return (await locateTeamAgent(txCtx, appId, undefined)).systemMemoryId;
   } catch (e) {
     const code = (e as { extensions?: { code?: string } }).extensions?.code;
-    if (code === 'TEAM_AGENT_NOT_FOUND' || code === 'TEAM_AGENT_AMBIGUOUS') return null;
+    if (code === 'TEAM_AGENT_NOT_FOUND') return null;
+    if (code === 'TEAM_AGENT_AMBIGUOUS') {
+      throw refusal(
+        'PROPERTIES_SCHEMA_UNUSABLE',
+        `More than one installed Agent carries a roles: branch, so the team's ${TASK_PROPERTIES_SCHEMA_LOC} cannot be chosen and no properties can be set until the team has one Team Agent.`,
+      );
+    }
     throw e;
   }
 }
