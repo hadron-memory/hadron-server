@@ -367,6 +367,51 @@ export const typeDefs = `#graphql
     total: Int!
   }
 
+  "#2190: one page of an App's memory scope."
+  type AppScopedMemoryPage {
+    items: [AppScopedMemory!]!
+    "Size of the caller's whole scope, so a client knows when it has every page."
+    total: Int!
+  }
+
+  "#2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): one memory in an App's scope. A leaf: no nested Memory or Agent."
+  type AppScopedMemory {
+    memoryId: ID!
+    memoryUrn: String!
+    name: String!
+    class: MemoryClass!
+    "Every reason this memory is in scope. Never empty. Ordered by kind (AGENT_SYSTEM, AGENT_LINK, INHERITED_BASE, TEAM_SPACE), then by agent install order."
+    sources: [AppMemorySource!]!
+    """
+    Advisory: whether this caller, in this request's context, may create a node
+    in this memory (the createNode gate). Memory-level only: it never makes an
+    inherited node editable, and every write is still decided by the server.
+    Offer a row as an upload or new-node target only when viewerCanWrite is true
+    AND at least one of its sources has a kind other than INHERITED_BASE. A
+    memory present only as an inherited base belongs to the base Agent, and
+    other Apps read it too.
+    """
+    viewerCanWrite: Boolean!
+  }
+
+  "#2190: one reason a memory is in an App's scope."
+  type AppMemorySource {
+    kind: AppMemorySourceKind!
+    "The installed or base Agent, for AGENT_SYSTEM, AGENT_LINK and INHERITED_BASE; null for TEAM_SPACE. An id only: when it does not resolve to an Agent this caller may read, show the source kind without a name."
+    agentId: ID
+  }
+
+  enum AppMemorySourceKind {
+    "The system memory of an Agent installed in this App."
+    AGENT_SYSTEM
+    "A memory linked to an Agent installed in this App."
+    AGENT_LINK
+    "A base Agent's system memory, with nodes inherited by an installed Agent's system memory (hrn:node:hadronmemory.com:specs:cor:dmo:050:14)."
+    INHERITED_BASE
+    "The App's own team space, listed for App participants only."
+    TEAM_SPACE
+  }
+
   type AgentsPage {
     items: [Agent!]!
     total: Int!
@@ -5159,6 +5204,11 @@ export const typeDefs = `#graphql
     gate as hasLiveSession.
     """
     checkStatus: WorkerCheckStatus
+    """
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a host made for this worker. Stored, decides nothing;
+    judge its age from checkedAt. Null until a host reports, and masked to null on the same read gate as checkStatus.
+    """
+    terminal: WorkerTerminal
     "The role-agent behind the casting."
     agent: Agent
     "The App whose staff this casting fills."
@@ -6338,6 +6388,10 @@ export const typeDefs = `#graphql
 
   "Recurring trigger (cor:agt:010, D-2026-07-04-E)."
   type AgentSchedule {
+    "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetTokens: Int
+    "Optional per-run action limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetActions: Int
     id: ID!
     organizationId: ID!
     appId: ID!
@@ -6369,6 +6423,10 @@ export const typeDefs = `#graphql
   }
 
   input CreateAgentScheduleInput {
+    "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetTokens: Int
+    "Optional per-run action limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetActions: Int
     "App the run executes as — ref: PK or fully-qualified URN."
     appRef: String!
     name: String!
@@ -6395,6 +6453,10 @@ export const typeDefs = `#graphql
   }
 
   input UpdateAgentScheduleInput {
+    "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetTokens: Int
+    "Optional per-run action limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetActions: Int
     name: String
     "Providing cron switches the schedule to recurring (clears runAt)."
     cron: String
@@ -6414,6 +6476,10 @@ export const typeDefs = `#graphql
   }
 
   input TriggerAppRunInput {
+    "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetTokens: Int
+    "Optional per-run action limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetActions: Int
     "App — ref: PK or fully-qualified URN."
     appRef: String!
     entryNodeUrn: String!
@@ -6472,6 +6538,10 @@ export const typeDefs = `#graphql
 
   "Webhook trigger (D-2026-05-02). The secret is NEVER exposed here — the URL is returned once at create/rotate."
   type AgentWebhook {
+    "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetTokens: Int
+    "Optional per-run action limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetActions: Int
     id: ID!
     organizationId: ID!
     appId: ID!
@@ -6506,6 +6576,10 @@ export const typeDefs = `#graphql
   }
 
   input CreateAgentWebhookInput {
+    "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetTokens: Int
+    "Optional per-run action limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
+    budgetActions: Int
     "App — ref: PK or fully-qualified URN."
     appRef: String!
     "Lowercase alphanumeric/dash, 1-64 chars — part of the URL."
@@ -7800,6 +7874,8 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
+      "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
+      text: String
       "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
       overdue: Boolean
       "Inclusive creation-time lower bound."
@@ -8120,6 +8196,9 @@ export const typeDefs = `#graphql
     templates are NOT compiled (unlike the single-node 'node' read), since this
     is a bulk source read for lint / audit / migration and compiling per node
     would re-introduce the N+1 it eliminates.
+    Requested edge fields share a 2000-row budget for this batch result; exceeding
+    it returns BAD_USER_INPUT. Read large edge sets through the paged edges query.
+    Unselected edges and endpoint bodies are not prefetched by the batch read.
     """
     nodeBatch(refs: [ID!], memory: ID, locPrefix: String): NodeBatchResult!
 
@@ -8837,6 +8916,20 @@ export const typeDefs = `#graphql
     comments. Filters on approvalState or minted always exclude comments.
     """
     appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
+
+    """
+    #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
+    reads for this caller, one row per memory with every reason it is in scope,
+    ordered by memoryUrn and paged (default 20, cap 200; over the cap returns a
+    page of the cap). Same entry and admission as appNodes, so an external App
+    participant appNodes admits is answered here too, and a refused caller gets
+    appNodes' error. Every memory in the caller's scope is listed, including
+    empty ones, so nothing is withheld; total 0 means no memories, and is also
+    the answer for an App in a soft-deleted organization. Rows are leaves.
+
+    Accepts the App's ID or URN.
+    """
+    appMemoryScope(appRef: ID!, limit: Int, offset: Int): AppScopedMemoryPage!
 
     """
     Slim, paginated node list for rendering a memory's graph view (issue #466).
@@ -9817,6 +9910,16 @@ export const typeDefs = `#graphql
     among them: AVAILABILITY_NOT_PERMITTED.
     """
     setHostWorkerAvailability(input: SetHostWorkerAvailabilityInput!): WorkerAvailability!
+    """
+    #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — a host reports the terminal state of workers it
+    registers, as classified by its on-host sweep. The server builds what it stores (Worker.terminal): the host comes
+    from the key and its registration, the time from the server, and no screen text of any kind is accepted. A
+    malformed input refuses the whole call and stores nothing (BAD_USER_INPUT); a worker this host does not register is
+    refused for that item only (WORKER_NOT_FOUND, as setHostWorkerAvailability); an older report than the stored one
+    is skipped (TERMINAL_REPORT_STALE). The result carries the alarm verdict, computed and returned, never stored.
+    The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
+    """
+    setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
     """
     #1709 — issue an operation to one of the App's registered hosts (hrn:node:hadronmemory.com:specs:cor:agt:070:05).
     A type outside the closed set is HOST_OPERATION_TYPE_UNKNOWN (hrn:node:hadronmemory.com:specs:cor:agt:070:03), a
@@ -13800,6 +13903,8 @@ export const typeDefs = `#graphql
     checkPeriodSeconds: Int!
     "#2138: a worker with a task is OVERDUE after this many missed periods plus 5 minutes. Whole number, 1..100; default 2."
     failedChecksToOverdue: Int!
+    "#2755: a worker's due wake left unacknowledged this long raises the dark-worker alarm. Whole seconds, 300..86400; default 1800. Independent of stuckWindowSeconds."
+    darkAlarmWindowSeconds: Int!
     "Stored configuration; default false. Enabling is refused until standby behavior ships."
     standbyEnabled: Boolean!
     "False until S7 supplies standby behavior; configuration alone has no effect."
@@ -13817,6 +13922,8 @@ export const typeDefs = `#graphql
     checkPeriodSeconds: Int
     "#2138: whole number, 1..100."
     failedChecksToOverdue: Int
+    "#2755: whole seconds, 300..86400."
+    darkAlarmWindowSeconds: Int
   }
 
   "#1747 — an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
@@ -13983,7 +14090,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable; availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
@@ -13998,6 +14105,7 @@ export const typeDefs = `#graphql
     chain: JSON
     acknowledgedBy: AgentTaskParty
     acknowledgedAt: DateTime
+    "A dark-worker alarm's payload carries its reason (overdue, wake-unacked) and window for every reader; its evidence (lastCheckedAt, oldestWakeAgeSeconds) only for a reader of the worker's internals."
     payload: JSON!
     createdAt: DateTime!
     """
@@ -14315,6 +14423,113 @@ export const typeDefs = `#graphql
     until: DateTime
   }
 
+  "#2771 — what a host's sweep saw in a worker's terminal."
+  enum WorkerTerminalState {
+    busy
+    idle
+    locked
+    dark
+  }
+
+  "#2771 — what the terminal's input prompt looked like."
+  enum WorkerTerminalPrompt {
+    empty
+    not_empty
+    menu
+    unknown
+  }
+
+  "#2771 — why a terminal is locked or dark: a closed code (hadron-cli#1187), never text from the screen."
+  enum WorkerTerminalReason {
+    model_at_capacity
+    token_budget_exhausted
+    rate_limited
+    guardrail_triggered
+    menu_or_question
+    shed_staged_not_relaunched
+    unrecognized
+    no_turn_for_due_ticker
+    no_terminal
+    bare_shell
+    no_agent
+  }
+
+  "#2771 — the host that made a worker's latest terminal report: its id from the key, its label from its registration."
+  type WorkerTerminalHost {
+    id: String!
+    label: String!
+  }
+
+  """
+  #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — a worker's latest terminal report, stored as the
+  server built it. It decides nothing (no check status, availability, matcher, stall rule or alarm). Judge its age
+  from checkedAt and reportedAt. Null until a host first reports; null to a reader without the Working-state gate.
+  """
+  type WorkerTerminal {
+    host: WorkerTerminalHost!
+    status: WorkerTerminalState!
+    prompt: WorkerTerminalPrompt!
+    "Required for locked and dark, null otherwise."
+    reason: WorkerTerminalReason
+    lastTurnAt: DateTime
+    "When the host classified the terminal."
+    checkedAt: DateTime!
+    "When the server stored the report."
+    reportedAt: DateTime!
+  }
+
+  "#2771 — one worker's terminal report. There is no free-text field."
+  input WorkerTerminalReportInput {
+    "A worker this host registers: its id, URN or name within the App."
+    worker: String!
+    status: WorkerTerminalState!
+    prompt: WorkerTerminalPrompt!
+    "Required for locked and dark; refused for busy and idle."
+    reason: WorkerTerminalReason
+    "When the worker's last turn ended, not after checkedAt."
+    lastTurnAt: DateTime
+    "When the host classified the terminal, not more than two minutes ahead of the server."
+    checkedAt: DateTime!
+  }
+
+  input SetHostWorkerTerminalsInput {
+    appRef: String!
+    "One to 200 reports, a worker at most once."
+    reports: [WorkerTerminalReportInput!]!
+  }
+
+  "#2771 — a worker by id and URN only: a host key is not given a Worker object."
+  type WorkerTerminalRef {
+    id: ID!
+    urn: String!
+  }
+
+  "#2771 — a report not stored for one worker: WORKER_NOT_FOUND or TERMINAL_REPORT_STALE."
+  type WorkerTerminalRefusal {
+    "The worker as the host named it."
+    worker: String!
+    code: String!
+  }
+
+  "#2771 — a coordinator this host registers whose stored status is locked or dark."
+  type WorkerTerminalAlarm {
+    worker: WorkerTerminalRef!
+    status: WorkerTerminalState!
+    reason: WorkerTerminalReason
+  }
+
+  type SetHostWorkerTerminalsResult {
+    stored: [WorkerTerminalRef!]!
+    refused: [WorkerTerminalRefusal!]!
+    """
+    The alarm verdict, computed after the write and returned, never stored: coordinators of the App this host registers
+    whose stored status is locked or dark, leaving out a paused or stopped worker and a paused or halted team.
+    """
+    alarm: [WorkerTerminalAlarm!]!
+    "True when the App has no coordinator (a worker with the coordinator role that is not retired)."
+    noCoordinator: Boolean!
+  }
+
   input IssueHostOperationInput {
     appRef: String!
     "The registered host to run it."
@@ -14534,6 +14749,8 @@ export const typeDefs = `#graphql
     reportsToRetired: Boolean!
     "#2138 §3.4 (experimental) — whether it is checking its team channel as expected."
     checkStatus: WorkerCheckStatus
+    "#2771 — the latest terminal report a host made for it (Worker.terminal); null on the same read gate as checkStatus."
+    terminal: WorkerTerminal
     "The worker's own stored pause timestamp, including expired history; use checkStatus for current pause state. Separate from team pause and availability."
     pausedUntil: DateTime
     "The worker's top open assignment you can read, for display only. STARTED before PENDING, then oldest assignment (null last), creation time and id. Null when none is readable; ending a session does not clear an assignment."

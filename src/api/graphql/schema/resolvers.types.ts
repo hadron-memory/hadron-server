@@ -1,4 +1,5 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
+import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
 import { plainRunFailure } from '../../../lib/automation/plainReason.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
@@ -33,7 +34,7 @@ import {
 } from '../../../lib/urnEmit.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
-import type { InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
+import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
 // Spec 049 Phase 3b — AppRun.scope: the mint snapshot as the caller may read it.
 import { parseRunScopeSnapshot, resolveRunScope, scopeInfoOf } from '../../../lib/scopes.js';
@@ -410,6 +411,17 @@ async function resolveEdgeEndpoint(
   e: { memoryId?: string; sourceId: string; targetId: string; source?: unknown; target?: unknown },
   side: 'source' | 'target',
 ): Promise<unknown | null> {
+  const inherited = batchInheritedEndpoint(e, side);
+  if (inherited) {
+    const { endpoint, via } = inherited;
+    // Metadata admission is not a body grant: recheck the exact effective
+    // node when the endpoint object is selected, preserving the child view.
+    const row = await loadEdgeEndpointNode(ctx, endpoint.id) as { id: string; memoryId: string; loc: string; role?: string | null; deletedAt: Date | null } | null;
+    if (!row || row.deletedAt || row.memoryId !== endpoint.memoryId || row.loc !== endpoint.loc) return null;
+    if ((endpoint.inheritedFrom || endpoint.memoryId === via) && !(await servedEndpointInEffect(ctx.db, via, endpoint.loc, { id: endpoint.id, memoryId: endpoint.memoryId, inheritedFrom: endpoint.inheritedFrom ?? null }, row))) return null;
+    if (!endpoint.inheritedFrom && !(await isMemoryReadableCached(ctx, row.memoryId))) return null;
+    return endpoint.inheritedFrom ? { ...row, inheritedFrom: endpoint.inheritedFrom } : row;
+  }
   const wantId = side === 'source' ? e.sourceId : e.targetId;
   const wantPre = side === 'source' ? e.source : e.target;
   const otherId = side === 'source' ? e.targetId : e.sourceId;
@@ -950,6 +962,8 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),
+    incomingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'in'),
     /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */
     lintWarnings: (
       n: { id: string; memoryId: string; content: string | null; role?: string | null; nodeType?: string | null },

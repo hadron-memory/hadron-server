@@ -126,7 +126,8 @@ async function note(taskId: string, t: string, by: { id: string } = anne) {
 const tick = (t: string) => taskStallTick(db, at(t));
 const alarms = (type?: string) =>
   db.agentTeamEvent.findMany({
-    where: { severity: 'alarm', ...(type ? { type } : {}) },
+    // The four stall rules' alarms: #2755's task-less dark-worker alarm is pinned in darkWorker2755.test.ts.
+    where: { severity: 'alarm', type: type ?? { not: 'alarm.dark-worker' } },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
 const wakes = (eventId: string) => db.agentTeamAlarmSchedule.findMany({ where: { eventId }, orderBy: { chainIndex: 'asc' } });
@@ -536,7 +537,7 @@ describe('cor:agt:050:13 — exactly one alarm per stall episode', () => {
   it('a re-run of the same pass is a no-op', async () => {
     await assignedToAnne('10:00');
     expect((await tick('10:15')).raised).toBe(1);
-    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 });
+    expect(await tick('10:15')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: 0 });
     expect(await alarms()).toHaveLength(1);
   });
 
@@ -1142,7 +1143,8 @@ describe('#1754 — backlog and the stall rules (cor:agt:050:02, :17)', () => {
     expect(await wakes(a.id)).toHaveLength(3); // ada (child owner), liam (root owner), then the App manager (#1761)
     await db.agentTask.update({ where: { id: child.id }, data: { status: 'backlog' } });
     // Row 1 fell due at 09:01; the 09:10 pass closes it (nobody is woken) and raises nothing new.
-    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0 });
+    // #2755: the fixture's worker is silent (OVERDUE), which is the dark-worker alarm's business, not this stall rule's.
+    expect(await tick('09:10')).toEqual({ raised: 0, woken: 0, cleared: 0, undeliverable: 0, sessionEnds: 0, hostOperationsSettled: 0, contextResetsEnded: 0, darkRaised: expect.any(Number) });
     expect(await alarms('assignment.unassignable')).toHaveLength(1);
     expect((await wakes(a.id))[1]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });
     expect((await wakes(a.id))[2]).toMatchObject({ wokenAt: null, endedAt: at('09:10') });

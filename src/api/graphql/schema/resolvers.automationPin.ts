@@ -119,9 +119,14 @@ async function storedConsent(db: Context['db'], kind: AutomationTriggerKind, id:
 }
 type Facts = { facts: TriggerFacts; name: string | null };
 function factsOf(kind: AutomationTriggerKind, row: Record<string, unknown>): Facts {
-  if (kind === 'SCHEDULE') return { name: String(row.name), facts: { kind, schedule: { cron: (row.cron as string | null) ?? null, timezone: String(row.timezone ?? 'UTC'), runAt: (row.runAt as Date | null) ?? null, enabled: row.enabled !== false } } };
-  if (kind === 'WEBHOOK') return { name: String(row.name), facts: { kind } };
-  return { name: null, facts: { kind } };
+  // #2479: a live balance can be zero (exhausted), not a configured limit.
+  // Legacy manual runs without initial snapshots retain the default setup view; never use their live counters.
+  const budgets = kind === 'MANUAL'
+    ? { budgetTokens: row.budgetTokensInitial as number | null, budgetActions: row.budgetActionsInitial as number | null }
+    : { budgetTokens: row.budgetTokens as number | null, budgetActions: row.budgetActions as number | null };
+  if (kind === 'SCHEDULE') return { name: String(row.name), facts: { kind, budgets, schedule: { cron: (row.cron as string | null) ?? null, timezone: String(row.timezone ?? 'UTC'), runAt: (row.runAt as Date | null) ?? null, enabled: row.enabled !== false } } };
+  if (kind === 'WEBHOOK') return { name: String(row.name), facts: { kind, budgets } };
+  return { name: null, facts: { kind, budgets } };
 }
 
 const MAX_PAGE = 50;

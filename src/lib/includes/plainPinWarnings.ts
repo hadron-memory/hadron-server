@@ -23,7 +23,8 @@ export async function plainPinWarnings(
   // Advice runs after commit; pre-write role/memory memos are not a history
   // read at this later point. Reuse the shared gate with all request caches dropped.
   ctx = withoutRequestCaches(ctx);
-  // Advice cannot make an otherwise legal write require the reader role.
+  // #2750: retain this advisory precheck even though nodeRevisionsScope also
+  // requires READER: that gate throws, but role-less post-write advice is silent.
   if (!ctx.roles?.some(r => ['OWNER', 'ADMIN', 'CONTRIBUTOR', 'READER'].includes(r))) return [];
   let tags;
   try { tags = parseIncludeTags(content); }
@@ -58,8 +59,11 @@ export async function plainPinWarnings(
     if (!live || (!snapshot && live.revSeq !== revision)) continue;
     const readableSnapshot = snapshot ? await ctx.db.nodeRevision.findFirst({
       where: { id: snapshot.id, nodeId: target.id,
-        OR: [{ memoryId: scope.memoryId }, { memoryId: null },
-          ...(scope.accessible === null ? [{}] : [{ memoryId: { in: scope.accessible } }])],
+        // #2750 / cor:dmo:150:07: unrestricted history admits the capture
+        // above and applies no SQL memory filter. An empty OR arm is not TRUE.
+        ...(scope.accessible === null ? {} : {
+          OR: [{ memoryId: scope.memoryId }, { memoryId: null }, { memoryId: { in: scope.accessible } }],
+        }),
       }, select: { approvalHash: true },
     }) : null;
     if (snapshot && !readableSnapshot) continue;

@@ -10,10 +10,11 @@
  * engineer node they see came through the child (ruling 4).
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import * as nodeCrypto from '../../../lib/nodeCrypto.js';
 
 const Q = resolvers.Query as any;
 const N = (resolvers as any).Node;
@@ -254,4 +255,25 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
     expect(unclassified).toEqual([]);
     expect(fields.length).toBeGreaterThan(40);
   });
+});
+
+
+it('nodeBatch rechecks inherited eligibility after identity selection and before the next body hydration', async () => {
+  const original = nodeCrypto.decryptNodesBatch;
+  let inserted = false;
+  const spy = vi.spyOn(nodeCrypto, 'decryptNodesBatch').mockImplementation((async (...args: Parameters<typeof original>) => {
+    const result = await original(...args);
+    if (!inserted && (args[1][0] as { id?: string })?.id === ids.engRelease) {
+      await node('newOverride', backend.mem, 'tasks:ship');
+      inserted = true;
+    }
+    return result;
+  }) as typeof original);
+  const refs = [`hrn:node:${backend.memUrn}:processes:release`, `hrn:node:${backend.memUrn}:tasks:ship`];
+  try {
+    const result = await Q.nodeBatch({}, { refs }, ctx(reader));
+    expect(inserted).toBe(true);
+    expect(result.nodes.map((n: any) => n.id)).toEqual([ids.engRelease]);
+    expect(result.unavailable).toEqual([refs[1]]);
+  } finally { spy.mockRestore(); }
 });

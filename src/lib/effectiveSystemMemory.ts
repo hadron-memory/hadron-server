@@ -413,33 +413,70 @@ export async function resolveInheritedEdges(
     via: string;
     direction: 'out' | 'in';
     canReadMemory: (memoryId: string) => Promise<boolean>;
+    /** Batch reads bound retained authorized results and page raw edge metadata, not endpoint bodies. */
+    maxResults?: number;
+    /** MCP projections render endpoint identity/name, never endpoint bodies. */
+    endpointMetadataOnly?: boolean;
+    /** GraphQL batch edge objects hydrate a selected endpoint lazily, after the shared edge budget. */
+    identityOnly?: boolean;
+    onLimit?: () => never;
   },
 ) {
   const chain = await systemMemoryChain(db as Db, args.via);
   const inChain = new Set(chain.map((l) => l.memoryId));
   const far = args.direction === 'out' ? 'target' : 'source';
-  const edges = await db.edge.findMany({
+  const bounded = args.maxResults !== undefined;
+  const pageSize = 128;
+  const endpointIdentity = { id: true, memoryId: true, loc: true, role: true, deletedAt: true } as const;
+  const endpointMetadata = { ...endpointIdentity, name: true } as const;
+  let cursor: string | undefined;
+  const readPage = () => db.edge.findMany({
     where: args.direction === 'out'
       ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
       : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
-    include: { [far]: true } as { target: true } | { source: true },
-    orderBy: { loc: 'asc' },
+    ...(!bounded ? { include: { [far]: args.endpointMetadataOnly ? { select: endpointMetadata } : true } as unknown as { target: true } | { source: true } } : {}),
+    orderBy: bounded ? [{ loc: 'asc' }, { id: 'asc' }] : { loc: 'asc' },
+    ...(bounded ? { take: pageSize, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) } : {}),
   });
+  let edges = await readPage();
   type EdgeRow = (typeof edges)[number];
   type NodeRow = NonNullable<Awaited<ReturnType<typeof db.node.findUnique>>>;
+  const readEndpoint = async (id: string): Promise<NodeRow | null> => args.identityOnly
+    ? await db.node.findUnique({ where: { id }, select: endpointIdentity }) as NodeRow | null
+    : args.endpointMetadataOnly
+      ? await db.node.findUnique({ where: { id }, select: endpointMetadata }) as NodeRow | null
+      : await db.node.findUnique({ where: { id } });
   const out: Array<ResolvedInheritedEdge<EdgeRow, NodeRow>> = [];
-  for (const edge of edges) {
-    const endpoint = (edge as unknown as Record<string, NodeRow>)[far]!;
-    if (!inChain.has(endpoint.memoryId)) {
-      if (await args.canReadMemory(endpoint.memoryId)) out.push({ edge, endpoint });
-      continue;
+  const checkLimit = () => {
+    if (args.maxResults === undefined || out.length <= args.maxResults) return;
+    if (args.onLimit) args.onLimit();
+    throw new Error('Inherited edge result limit exceeded.');
+  };
+  do {
+    for (const edge of edges) {
+      const endpoint = bounded
+        ? await db.node.findUnique({ where: { id: args.direction === 'out' ? edge.targetId : edge.sourceId }, select: endpointIdentity })
+        : (edge as unknown as Record<string, NodeRow>)[far]!;
+      if (!endpoint || endpoint.deletedAt) continue;
+      if (!inChain.has(endpoint.memoryId)) {
+        if (await args.canReadMemory(endpoint.memoryId)) {
+          const row = bounded ? await readEndpoint(endpoint.id) : endpoint as NodeRow;
+          if (row && row.memoryId === endpoint.memoryId && row.loc === endpoint.loc && !row.deletedAt) out.push({ edge, endpoint: row });
+        }
+        checkLimit();
+        continue;
+      }
+      const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
+      if (!effective) continue;
+      const row = effective.id === endpoint.id && !bounded ? endpoint as NodeRow : await readEndpoint(effective.id);
+      if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
+      out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
+      checkLimit();
     }
-    const effective = await findEffectiveNodeIdByLoc(db as Db, args.via, endpoint.loc);
-    if (!effective) continue;
-    const row = effective.id === endpoint.id ? endpoint : await db.node.findUnique({ where: { id: effective.id } });
-    if (!row || !(await servedEndpointInEffect(db as Db, args.via, endpoint.loc, effective, row))) continue;
-    out.push({ edge, endpoint: effective.inheritedFrom ? { ...row, inheritedFrom: effective.inheritedFrom } : row });
-  }
+    if (!bounded || edges.length < pageSize) break;
+    cursor = edges.at(-1)!.id;
+    edges = await readPage();
+  } while (edges.length);
   return out;
 }
 

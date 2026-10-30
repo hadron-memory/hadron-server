@@ -152,6 +152,8 @@ export function taskError(code: string, message: string, ext: Record<string, unk
 }
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+/** #2664: the longest `text` filter, after trimming. */
+const TASK_TEXT_FILTER_MAX = 200;
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 const forbidden = (message = 'You are not a participant of this App.'): GraphQLError =>
   taskError('FORBIDDEN', message);
@@ -1623,6 +1625,7 @@ type ListArgs = {
   tagsAny?: string[] | null;
   tagsAll?: string[] | null;
   source?: string | null;
+  text?: string | null;
   overdue?: boolean | null;
   createdAfter?: unknown;
   createdBefore?: unknown;
@@ -1672,6 +1675,18 @@ export const agentTaskQueries = {
     if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
     if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
     if (args.source != null) filters.push({ source: args.source });
+    if (args.text != null) {
+      // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
+      // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
+      // `contains` does NOT escape LIKE wildcards, so %, _ and \ are escaped here and match literally.
+      const text = args.text.trim();
+      if (text.length < 1 || text.length > TASK_TEXT_FILTER_MAX) throw badInput(`text must be 1 to ${TASK_TEXT_FILTER_MAX} characters after trimming.`);
+      const like = text.replace(/[\\%_]/g, '\\$&');
+      filters.push({ OR: [
+        { title: { contains: like, mode: 'insensitive' } },
+        { description: { contains: like, mode: 'insensitive' } },
+      ] });
+    }
     for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
       const range: { gte?: Date; lte?: Date } = {};
       for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
@@ -1872,6 +1887,11 @@ export const agentTaskFieldResolvers = {
       t.assignedAt ? partyView(ctx, t.assignedByWorkerId, t.assignedByWorkerId ? null : t.assignedBy) : null,
   },
   AgentTeamEvent: {
+    // #2755: a dark-worker alarm's evidence is for a reader of the worker's internals; every other payload is as written.
+    payload: async (e: { type: string; appId: string; payload: unknown }, _: unknown, ctx: Context) => {
+      const { eventPayloadFor } = await import('../../../lib/agentTasks/darkWorker.js');
+      return eventPayloadFor(e, ctx);
+    },
     severity: (e: { severity: string | null }) => (e.severity === 'alarm' ? 'ALARM' : null),
     actor: (e: { actorWorkerId: string | null; actorUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),

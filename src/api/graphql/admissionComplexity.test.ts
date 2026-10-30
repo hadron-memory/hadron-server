@@ -39,6 +39,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appMemoryScope",
   "Query.appNodes",
   "Query.appRuns",
   "Query.apps",

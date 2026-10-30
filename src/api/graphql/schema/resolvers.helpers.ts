@@ -2864,8 +2864,10 @@ export const ORG_INCLUDE = {
 // straight N+1. Full row (not a select): the Worker type's scalar fields all
 // come from it, and its OWN field resolvers (app/agent — which self-guard,
 // #552) fetch on demand.
+// Session.events is resolved lazily with its own access gate and SQL limit.
+// A nested take across multiple sessions fetches all event rows in Prisma's
+// query strategy before trimming them, even when events were not selected.
 export const SESSION_INCLUDE = {
-  events: { orderBy: { createdAt: 'desc' as const }, take: 50 },
   worker: true,
 };
 

@@ -676,6 +676,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 
 -- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
 -- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
+\ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
 
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
@@ -802,3 +803,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- the #1162 fence file: it puts the record's worker/session columns under that fence function.
 \ir served-prompt-invariants.sql
 \ir served-prompt-app-invariants.sql
+
+-- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
+\ir dark-alarm-invariants.sql
+
+-- #2479: per-trigger run budget limits.
+\ir trigger-run-budget-invariants.sql

@@ -547,6 +547,7 @@ const SHAPE_HADRON_DELIVERY_SETTINGS_SET = {
     standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
     checkPeriodSeconds: z.number().nullable().optional().describe('#2138: whole seconds 60..86400; a worker with a task is expected to check its team channel this often. Set together with the team ticker cadence.'),
     failedChecksToOverdue: z.number().nullable().optional().describe('#2138: whole number 1..100; OVERDUE after this many missed periods + 5 minutes.'),
+    darkAlarmWindowSeconds: z.number().nullable().optional().describe('#2755: whole seconds 300..86400, default 1800; a due wake unacknowledged this long raises the dark-worker alarm. Independent of stuckWindowSeconds.'),
   }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
   session: SESSION_WRITE,
 };
