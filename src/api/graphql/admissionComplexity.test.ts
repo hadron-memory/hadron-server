@@ -20,6 +20,8 @@ import {
 
 const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
+  "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
+  "AgentTask.blocks", // Same shared dependency page resolver.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
@@ -37,6 +39,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appMemoryScope",
   "Query.appNodes",
   "Query.appRuns",
   "Query.apps",
@@ -85,6 +88,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.recoveryEdges",
   "Query.recoveryNodes",
   "Query.registerEntries",
+  "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
   "Query.secrets",

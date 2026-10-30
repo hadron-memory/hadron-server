@@ -182,7 +182,7 @@ describe('ticker tools: who acts', () => {
   });
 
   it('tells the caller when a grant use could not be announced', async () => {
-    const t = await db.ticker.create({ data: { appId: app.id, name: 'Slow', slug: 'slow', cadenceSeconds: 600, ownerUserId: member.id } });
+    const t = await db.ticker.create({ data: { tickCode: 'tick.fixture', appId: app.id, name: 'Slow', slug: 'slow', cadenceSeconds: 600, ownerUserId: member.id } });
     await M.grantApp({}, { appRef: app.id, workerRef: anne.id, name: 'TICKER_SUBSCRIBE_WORKERS' }, { db, userId: admin.id, roles: ['READER'] });
     const sh = mcp(authOf(holder.id));
     const asAnne = await session({ userId: holder.id, appId: app.id, workerId: anne.id });

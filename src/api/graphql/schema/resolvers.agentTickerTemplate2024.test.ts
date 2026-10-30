@@ -217,7 +217,7 @@ describe('#2024 cast instantiation', () => {
 
   it('a generated name that is already a live ticker refuses the whole cast', async () => {
     await declare('Base tick');
-    await db.ticker.create({ data: { appId, name: 'base tick · iris', slug: 'taken', cadenceSeconds: 600, ownerUserId: ctx.userId } });
+    await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'base tick · iris', slug: 'taken', cadenceSeconds: 600, ownerUserId: ctx.userId } });
     expect(await refusal(cast('Iris'))).toBe('TICKER_NAME_TAKEN');
     expect(await db.worker.count({ where: { appId } })).toBe(0);
   });
@@ -237,13 +237,13 @@ describe('#2024 cast instantiation', () => {
     const t = await declare('Base tick');
     const iris = await cast('Iris');
     await expect(db.ticker.create({
-      data: { appId, name: 'dup', slug: 'dup', cadenceSeconds: 600, ownerWorkerId: iris.id, sourceTemplateId: t.id, sourceTemplateRevision: 1, generatedForWorkerId: iris.id },
+      data: { tickCode: 'tick.fixture', appId, name: 'dup', slug: 'dup', cadenceSeconds: 600, ownerWorkerId: iris.id, sourceTemplateId: t.id, sourceTemplateRevision: 1, generatedForWorkerId: iris.id },
     })).rejects.toThrow();
   });
 
   it('provenance is all-or-nothing and owned by the worker it was made for (CHECK)', async () => {
     await expect(db.ticker.create({
-      data: { appId, name: 'half', slug: 'half', cadenceSeconds: 600, ownerUserId: ctx.userId, sourceTemplateId: 'x' },
+      data: { tickCode: 'tick.fixture', appId, name: 'half', slug: 'half', cadenceSeconds: 600, ownerUserId: ctx.userId, sourceTemplateId: 'x' },
     })).rejects.toThrow();
   });
 
@@ -275,8 +275,8 @@ describe('#2024 retirement and repair', () => {
     await declare('Base tick');
     const iris = await cast('Iris');
     const henry = await cast('Henry');
-    const runtime = await db.ticker.create({ data: { appId, name: 'Iris runtime', slug: 'iris-runtime', cadenceSeconds: 600, ownerWorkerId: iris.id } });
-    const appTicker = await db.ticker.create({ data: { appId, name: 'App wide', slug: 'app-wide', cadenceSeconds: 600, ownerUserId: ctx.userId } });
+    const runtime = await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'Iris runtime', slug: 'iris-runtime', cadenceSeconds: 600, ownerWorkerId: iris.id } });
+    const appTicker = await db.ticker.create({ data: { tickCode: 'tick.fixture', appId, name: 'App wide', slug: 'app-wide', cadenceSeconds: 600, ownerUserId: ctx.userId } });
     const henrysGenerated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: henry.id } });
     // Henry subscribes to Iris's generated ticker, to show those subscriptions end too.
     const irisGenerated = await db.ticker.findFirstOrThrow({ where: { generatedForWorkerId: iris.id } });
@@ -593,5 +593,24 @@ describe('#2024 lock protocol (two-connection barriers)', () => {
     h.release(); await h.holder;
     expect(await writing).toBe('FORBIDDEN');
     expect(await db.agentTickerTemplate.count({ where: { agentId } })).toBe(0);
+  });
+});
+
+describe('#2756 template names refuse control characters', () => {
+  const BAD = ['a\nb', 'a\rb', 'a\tb', 'a\u001b[2Jb', 'a\u0000b', 'a\u007fb', 'a\u0085b', 'a\u2028b', 'a\u2029b'];
+
+  it('create refuses each class with BAD_USER_INPUT and stores nothing; Unicode still passes', async () => {
+    for (const name of BAD) expect(await refusal(declare(name))).toBe('BAD_USER_INPUT');
+    expect(await db.agentTickerTemplate.count({ where: { agentId } })).toBe(0);
+    await expect(declare('Équipe 工程 🚀')).resolves.toMatchObject({ name: 'Équipe 工程 🚀' });
+  });
+
+  it('update refuses each class and leaves the template unchanged', async () => {
+    const t = await declare('Heartbeat');
+    for (const name of BAD) {
+      expect(await refusal(M.updateAgentTickerTemplate({}, { id: t.id, expectedRevision: 1, input: { name, cadenceSeconds: 3600 } }, ctx))).toBe('BAD_USER_INPUT');
+    }
+    const row = await db.agentTickerTemplate.findUniqueOrThrow({ where: { id: t.id } });
+    expect(row).toMatchObject({ name: 'Heartbeat', revision: 1, cadenceSeconds: 600 });
   });
 });

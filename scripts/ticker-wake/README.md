@@ -56,6 +56,22 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
 
 ## Contract
 
+- **The server's tick line (#2754, cor:agt:080:23, :26).** `dueWakes` selects
+  `tickText` on each wake. When it is a non-empty string the script can type as
+  one line (1 to 4,000 characters, no control character, tab, line break, U+2028
+  or U+2029), the typed text starts with it, byte for byte, then one space, then
+  the rest (the displaced "Fresh tick request" prefix, the nudge, the open-task
+  line). It is the server's whole line, even when it re-names a task an earlier
+  send named, and the script never trims, parses or re-renders it. A null or
+  absent `tickText` adds nothing. One the script can't type as a line is
+  dropped: today's nudge goes out and the pass logs the worker's name and
+  `tick line not typeable`, never the text. The line changes nothing else:
+  which wakes are delivered, coverage keys, receipts, the ack and its proof,
+  the gates and their order. **Deploy order:** the server with
+  `DueWake.tickText` and `WakeReason.action` (#2733) must be live before this
+  script runs anywhere, since a server without them rejects the whole read and
+  the pass stops; updating the checkout on orca1 is a separate host grant, and
+  `once --dry` comes first.
 - **Nudge (#2138 §5.2).** One line that names the exact commands, checked
   against the released CLI v0.26.0: run `hadron team chat read --mentions-me
   --limit 1` (it prints `cursor #C; channel head #H`), then `hadron team chat
@@ -70,7 +86,13 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   asks for the coordinator's base tick instead: "run your base tick
   (coordinator-system:tasks:on-base-tick): first the tagged check: …; then the
   sweep of your owned tasks, alarms and ready heads", so the nudge never tells
-  a coordinator to skip its sweep (#2138, Marco #26709). Why two reads: a read without `--since` returns only the newest
+  a coordinator to skip its sweep (#2138, Marco #26709), unless that
+  `coordinator-tick` reason's own `action.state` is `MAPPED` and the server's
+  tick line is typed with it (#2754): then that line already names the task and the nudge carries the ordinary
+  tagged check. Under UNMAPPED, UNRESOLVED, WITHHELD or no action (an App-key
+  credential usually sees WITHHELD) the base-tick sentence stays, so a
+  coordinator is never told less than before; another ticker's state never
+  counts. Why two reads: a read without `--since` returns only the newest
   page (George, #2156 P2), so marking through its head could bury older
   tagged messages; `--since C --all` walks every page forward from the read
   mark and fails as a whole if a page fails. Each read samples its head before

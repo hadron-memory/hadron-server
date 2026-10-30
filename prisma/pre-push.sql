@@ -158,3 +158,4 @@ END $$;
 
 -- #2025: App delivery settings/high-floor backfill before a non-wiping schema push.
 \ir delivery-settings-pre-push.sql
+\ir ticker-tick-code-pre-push.sql

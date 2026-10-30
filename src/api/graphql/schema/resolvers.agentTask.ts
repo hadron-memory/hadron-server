@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // Agent tasks — #1705 (Task Management slice T1, epic #1704).
 //
@@ -74,7 +76,7 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 import { normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { GraphQLError } from 'graphql';
 import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
-import { type Context, isAppParticipant, clampListTake, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, isAppParticipant, clampListTake, withoutRequestCaches, pageArgs, pageEnvelope } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AppNotFoundError, WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -101,6 +103,8 @@ import {
   appendTaskEvent,
   eventActor,
   TASK_EVENT_TYPES,
+  TASK_EDIT_FIELDS,
+  type TaskEditField,
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
@@ -151,6 +155,8 @@ export function taskError(code: string, message: string, ext: Record<string, unk
 }
 const notFound = (taskId: string): GraphQLError =>
   taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+/** #2664: the longest `text` filter, after trimming. */
+const TASK_TEXT_FILTER_MAX = 200;
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 const forbidden = (message = 'You are not a participant of this App.'): GraphQLError =>
   taskError('FORBIDDEN', message);
@@ -744,6 +750,7 @@ export async function inTaskWriteTx<T>(
   options: {
     lockMode?: 'shared' | 'exclusive';
     stopFence?: 'shared' | 'exclusive';
+    taskGraph?: 'shared' | 'exclusive';
     /**
      * #2162: the workers whose per-worker assignment lock this write takes (src/lib/agentTasks/workerLock.ts), right
      * after the reportsTo graph and BEFORE the app_members and workers rows below, so every task write takes it in
@@ -780,6 +787,7 @@ export async function inTaskWriteTx<T>(
         lockMode: options.lockMode,
         afterLock: async (tx) => {
           await lockStopFence(tx, app.id, options.stopFence ?? 'shared');
+          await lockTaskGraph(tx, app.id, options.taskGraph ?? 'shared');
           // #1726: the reportsTo graph, SHARED, before any membership or worker
           // row (src/lib/workerReportsTo.ts, the lock protocol). The chain arm
           // of cor:agt:050:09 then reads a graph no writer can change before
@@ -821,7 +829,7 @@ async function mutateTask(
    * in between, the write is retried once, then refused TASK_CONFLICT. `workers` are named by the write itself (a new
    * assignee).
    */
-  locks: { assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
+  locks: { taskGraph?: 'shared' | 'exclusive'; assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskRef);
   if (!readable) throw notFound(taskRef);
@@ -844,7 +852,7 @@ async function mutateTask(
         if (!task || task.appId !== freshApp.id) throw notFound(taskRef);
         if (locks.assignee && task.assigneeWorkerId !== expected) throw new AssigneeMoved();
         await act(tx, task, actor, freshApp, txCtx, new Set([expected, ...named].filter((id): id is string => Boolean(id))));
-      }, { lockWorkerIds: [expected, ...named] });
+      }, { lockWorkerIds: [expected, ...named], taskGraph: locks.taskGraph });
       break;
     } catch (e) {
       if (!(e instanceof AssigneeMoved)) throw e;
@@ -893,6 +901,8 @@ type CreateInput = {
   appRef?: string | null;
   parentTaskId?: string | null;
   title: string;
+  priority?: number | null;
+  blockedBy?: string[] | null;
   description?: string | null;
   source?: string | null;
   owner?: PartyInput;
@@ -914,7 +924,7 @@ async function insertTask(
   tx: Prisma.TransactionClient,
   a: {
     app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
-    tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean;
+    tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
     /** #1754: a backlog task is parked, never queued (cor:agt:050:02). Default pending. */
@@ -968,6 +978,7 @@ async function insertTask(
       handle,
       title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
       closeSessionWhenDone: a.closeSessionWhenDone,
+      priority: a.priority ?? 1,
       status: a.status ?? 'pending',
       parentTaskId: parentId,
       requirements: a.requirements ?? Prisma.DbNull,
@@ -1056,7 +1067,109 @@ export async function createRootTaskForRun(
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
 }
 
+/** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
+async function requireTaskDirection(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow) {
+  if (!(await mayDirectTask(tx, txCtx, app, actor, task))) throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task sets its priority or blockers.', { taskId: task.id });
+}
+/** Unknown, unreadable and cross-App blocker refs have the same concealed answer. */
+async function blockerRef(ctx: Context, appId: string, ref: string): Promise<string> {
+  const id = await resolveTaskRef(ctx, ref, appId);
+  const row = id ? await ctx.db.agentTask.findUnique({ where: { id }, select: { appId: true, handle: true } }) : null;
+  if (!row || row.appId !== appId) throw notFound(ref);
+  return id!;
+}
+function requireBlockerState(task: TaskRow) {
+  if (task.status !== 'backlog' && task.status !== 'pending') throw taskError('TASK_INVALID_TRANSITION', 'Blockers change only on backlog or pending tasks.', { taskId: task.id });
+}
+
+/**
+ * #2644 / cor:agt:050:01: the in-transaction priority door, also for #2645.
+ * Caller must enter inTaskWriteTx and lock the task before calling; this
+ * function owns the value, authority, lifecycle, write and event together.
+ */
+export async function setTaskPriorityInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, value: number) {
+  const priority = taskPriority(value);
+  await requireTaskDirection(tx, txCtx, app, actor, task);
+  refuseEnded(task);
+  await tx.agentTask.update({ where: { id: task.id }, data: { priority, ...updatedStamp(txCtx) } });
+  await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(txCtx.userId), event: { type: 'task.priority', priority } });
+}
+/**
+ * #2644 / cor:agt:050:02: the in-transaction link door, also for #2645.
+ * Enter inTaskWriteTx with taskGraph: 'exclusive', BEFORE locking the task.
+ * Never upgrade a shared graph lock after taking a task row. Never open a nested
+ * transaction from an edit; post-commit matching is the outer caller's job.
+ */
+export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, ref: string, operation: 'add' | 'remove') {
+  await requireTaskDirection(tx, txCtx, app, actor, task);
+  requireBlockerState(task);
+  const id = await blockerRef(txCtx, app.id, ref);
+  const existed = await tx.agentTaskBlocker.count({ where: { taskId: task.id, blockerTaskId: id } });
+  if (operation === 'add') await addTaskBlocker(tx, task.id, id);
+  else await removeTaskBlocker(tx, task.id, id);
+  if ((operation === 'add' && !existed) || (operation === 'remove' && existed)) {
+    await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(txCtx.userId),
+      event: { type: operation === 'add' ? 'task.blocker-added' : 'task.blocker-removed', blockerTaskId: id } });
+  }
+}
+
 export const agentTaskMutations = {
+  /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
+  updateAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input: Record<string, unknown> }, ctx: Context) =>
+    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+        throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, edits it.", { taskId });
+      }
+      refuseEnded(task);
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !(TASK_EDIT_FIELDS as readonly string[]).includes(k))) {
+        throw badInput('Name only editable task fields; source and lifecycle fields are fixed.');
+      }
+      const data: Prisma.AgentTaskUpdateInput = {};
+      const fields: TaskEditField[] = [];
+      for (const field of TASK_EDIT_FIELDS) {
+        if (!Object.hasOwn(input, field)) continue;
+        let value: unknown;
+        switch (field) {
+          case 'title': value = normalizeTitle(input.title as string); break;
+          case 'description': value = optionalText(input.description as string | null, TASK_DESCRIPTION_MAX, 'description'); break;
+          case 'tags': value = normalizeTags(input.tags as string[] | null); break;
+          case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
+          case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
+          case 'closeSessionWhenDone':
+            if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
+            value = input.closeSessionWhenDone ?? false; break;
+        }
+        if (isDeepStrictEqual(task[field], value)) continue;
+        fields.push(field);
+        Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
+      }
+      if (fields.length === 0) return;
+      // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
+      const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+      await tx.agentTask.update({ where: { id: task.id }, data: { ...data, ...updatedStamp(ctx) } });
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.edited', fields }, createdAt: at });
+    }),
+  setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority }: { taskRef: string; priority: number }, ctx: Context) => {
+    const value = taskPriority(priority);
+    const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      await setTaskPriorityInTx(tx, txCtx, app, actor, task, value);
+    });
+    await matchAfterChange(ctx.db, task.appId);
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
+  },
+  addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
+    const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add');
+    }, { taskGraph: 'exclusive' });
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
+  },
+  removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
+    const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+      await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove');
+    }, { taskGraph: 'exclusive' });
+    await matchAfterChange(ctx.db, task.appId);
+    return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
+  },
   /**
    * Create a task (cor:agt:050:06 root, :07 child). A root task: any App
    * participant; its owner defaults to the creator, and the creator may name
@@ -1098,6 +1211,7 @@ export const agentTaskMutations = {
     }
     requireWritable(ctx, app);
 
+    const priority = taskPriority(input.priority);
     const title = normalizeTitle(input.title);
     const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
     const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
@@ -1168,11 +1282,19 @@ export const agentTaskMutations = {
       }
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
-      return insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status,
+      const made = await insertTask(tx, {
+        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
-    }, { lockWorkerIds: [lockedAssignee] });
+      const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+      if (input.priority !== undefined || input.blockedBy !== undefined) {
+        await requireTaskDirection(tx, txCtx, app, actor, row);
+      }
+      for (const ref of [...new Set(input.blockedBy ?? [])]) {
+        await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
+      }
+      return made;
+    }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
     if (made.queued) await matchAfterChange(ctx.db, app.id);
@@ -1385,6 +1507,7 @@ export const agentTaskMutations = {
       if (task.status !== 'pending') {
         throw taskError('TASK_INVALID_TRANSITION', 'This task has already started.', { taskId, status: task.status });
       }
+      if (task.blocked) throw taskError('TASK_BLOCKED', 'This task has an open blocker.', { taskId });
       // #2162: unreachable while the claim requires no open task, and asserted here as a guard, not a path.
       await refuseResettingAssignee(tx, app.id, task.assigneeWorkerId);
       await tx.agentTask.update({
@@ -1540,6 +1663,7 @@ type ListArgs = {
   tagsAny?: string[] | null;
   tagsAll?: string[] | null;
   source?: string | null;
+  text?: string | null;
   overdue?: boolean | null;
   createdAfter?: unknown;
   createdBefore?: unknown;
@@ -1581,9 +1705,26 @@ export const agentTaskQueries = {
     withReadableApp(ctx, args.appRef, async (c, app) => {
     // Narrow only after the existing App read gate. All filters run in SQL before paging.
     const filters: Prisma.AgentTaskWhereInput[] = [];
+    for (const [name, tags] of [['tagsAny', args.tagsAny], ['tagsAll', args.tagsAll]] as const) {
+      // #2696: the bounds a task's own tags obey, so the read and write limits cannot drift.
+      if (tags && tags.length > TASK_TAGS_MAX) throw badInput(`${name} takes at most ${TASK_TAGS_MAX} tags.`);
+      if (tags?.some((t) => t.length > TASK_TAG_MAX)) throw badInput(`A ${name} tag is longer than ${TASK_TAG_MAX} characters.`);
+    }
     if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
     if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
     if (args.source != null) filters.push({ source: args.source });
+    if (args.text != null) {
+      // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
+      // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
+      // `contains` does NOT escape LIKE wildcards, so %, _ and \ are escaped here and match literally.
+      const text = args.text.trim();
+      if (text.length < 1 || text.length > TASK_TEXT_FILTER_MAX) throw badInput(`text must be 1 to ${TASK_TEXT_FILTER_MAX} characters after trimming.`);
+      const like = text.replace(/[\\%_]/g, '\\$&');
+      filters.push({ OR: [
+        { title: { contains: like, mode: 'insensitive' } },
+        { description: { contains: like, mode: 'insensitive' } },
+      ] });
+    }
     for (const [prefix, field] of [['created', 'createdAt'], ['started', 'startedAt'], ['finished', 'finishedAt']] as const) {
       const range: { gte?: Date; lte?: Date } = {};
       for (const [suffix, op] of [['After', 'gte'], ['Before', 'lte']] as const) {
@@ -1726,8 +1867,23 @@ export async function partyView(ctx: Context, workerId: string | null, userId: s
   return null;
 }
 
+/** #2644: bounded same-App dependency reads use the task's normal participant/key gate. */
+async function taskRelations(ctx: Context, id: string, direction: 'blockedBy' | 'blocks', args: { limit?: number | null; offset?: number | null }) {
+  const { take, skip } = pageArgs(args);
+  return (await withReadableTask(ctx, id, async (c, r) => {
+    const where: Prisma.AgentTaskWhereInput = { appId: r.task.appId,
+      ...(direction === 'blockedBy' ? { dependentLinks: { some: { taskId: r.task.id } } } : { blockerLinks: { some: { blockerTaskId: r.task.id } } }) };
+    const [items, total] = await Promise.all([
+      c.db.agentTask.findMany({ where, orderBy: { id: 'asc' }, take, skip }), c.db.agentTask.count({ where }),
+    ]);
+    return pageEnvelope(items, total, skip);
+  })) ?? pageEnvelope([], 0, skip);
+}
+
 export const agentTaskFieldResolvers = {
   AgentTask: {
+    blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
+    blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
     taskNumber: (t: TaskRow) => String(t.taskNumber),
@@ -1769,6 +1925,11 @@ export const agentTaskFieldResolvers = {
       t.assignedAt ? partyView(ctx, t.assignedByWorkerId, t.assignedByWorkerId ? null : t.assignedBy) : null,
   },
   AgentTeamEvent: {
+    // #2755: a dark-worker alarm's evidence is for a reader of the worker's internals; every other payload is as written.
+    payload: async (e: { type: string; appId: string; payload: unknown }, _: unknown, ctx: Context) => {
+      const { eventPayloadFor } = await import('../../../lib/agentTasks/darkWorker.js');
+      return eventPayloadFor(e, ctx);
+    },
     severity: (e: { severity: string | null }) => (e.severity === 'alarm' ? 'ALARM' : null),
     actor: (e: { actorWorkerId: string | null; actorUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),

@@ -2884,10 +2884,12 @@ export const sessionMutations = {
         args: argsInput,
         appRef,
         runAsSelf,
+        agentRef,
       }: {
         nodeRef: string;
         args?: unknown;
         appRef?: string | null;
+        agentRef?: string | null;
         runAsSelf?: boolean | null;
       },
       ctx: Context,
@@ -3063,6 +3065,7 @@ export const sessionMutations = {
         assertFullyQualifiedUrn(nodeUrn, 'node');
         const run = await triggerManualRun(ctx, {
           appRef,
+          agentRef,
           entryNodeUrn: nodeUrn,
           // Pass the ORIGINAL structured args (not stringArgs) so eventData keeps
           // its JSON shape for audit + downstream consumers — the assemble path

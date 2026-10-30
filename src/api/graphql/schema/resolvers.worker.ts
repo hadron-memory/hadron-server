@@ -81,10 +81,11 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { appendWorkerCastingEvent, eventActor } from '../../../lib/agentTasks/events.js';
+import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import {
   type Context,
   requireOrgRole,
@@ -1137,6 +1138,11 @@ export const workerMutations = {
               },
               select: { id: true, name: true, slug: true },
             });
+            // #2766: the cast is recorded in its own transaction; a later refusal rolls it back with the worker.
+            await appendWorkerCastEvent(tx, {
+              appId, actor: eventActor(ctx.userId), workerId: castWorkerRow.id, agentId: agent.id, role: castRole,
+              reportsToWorkerId: choice.kind === 'REPORTS_TO' ? freshTarget.reportingHeadId : null,
+            });
             if (choice.kind !== 'UNSET') {
               await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: eventActor(ctx.userId), setBy: 'cast' });
             }
@@ -1255,6 +1261,7 @@ export const workerMutations = {
         // keep their value; the roster flags them (`reportsToRetired`) rather
         // than the platform silently clearing a structure someone set.
         if (retired.count > 0) {
+          await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: eventActor(ctx.userId), workerId: worker.id });
           await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
           // with it, reason WORKER_RETIRED (history kept, never deleted).
@@ -1919,6 +1926,8 @@ export const workerMutations = {
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
+        // #2766: recorded last, so any refusal above leaves no event; the row is gone, the id stays in the history.
+        await appendWorkerDeletedEvent(tx, { appId: current.appId, actor: eventActor(ctx.userId), workerId: worker.id });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
       // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
@@ -3220,6 +3229,16 @@ export const workerFieldResolvers = {
         memoize: info?.operation?.operation === 'query',
       });
       return statuses.get(worker.id) ?? null;
+    },
+    /**
+     * #2771 (proposed cor:agt:070:09) — the latest terminal report a host made for this worker. Working-state
+     * internals: the same gate as checkStatus (cor:dmo:050:11), null to anyone else. The Prisma row carries the raw
+     * JSON, so this resolver is what keeps it from a reader who fails the gate. Decides nothing.
+     */
+    terminal: async (worker: { appId: string; terminal?: unknown }, _: unknown, ctx: Context) => {
+      if (!worker.terminal) return null;
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return workerTerminalView(worker.terminal as StoredWorkerTerminal);
     },
     /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
