@@ -396,6 +396,13 @@ describe('contract #2420', () => {
     const started = Date.now();
     await expect(setProps({ a: Array.from({ length: 1600 }, (_, i) => i) })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
     expect(Date.now() - started).toBeLessThan(500);
+    // The same words in a name map or as literal data are not the keyword (Diego's P2 at 1defe438).
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { uniqueItems: true } } } });
+    await setProps({ uniqueItems: 'ordinary property' });
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', const: { uniqueItems: true } } } });
+    await setProps({ uniqueItems: true });
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { a: { type: 'array', items: { uniqueItems: true } } } } } });
+    await expect(setProps({ a: [] })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
     // uniqueItems:false and a property merely named uniqueItems stay usable.
     await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { a: { type: 'array', uniqueItems: false }, uniqueItems: { type: 'number' } } } } });
     await setProps({ a: [1, 1], uniqueItems: 1 });

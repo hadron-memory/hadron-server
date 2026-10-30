@@ -150,6 +150,11 @@ export async function checkAgainstTeamSchema(
   }
 }
 
+/** Where a value sits in a schema: a schema (keywords apply), a map of names to schemas, or literal data. */
+type SchemaPosition = 'schema' | 'map' | 'data';
+const SCHEMA_DATA_KEYWORDS = new Set(['const', 'enum', 'default', 'examples']);
+const SCHEMA_MAP_KEYWORDS = new Set(['properties', 'definitions', '$defs', 'dependencies']);
+
 /**
  * The schema's node count, or null when it is out of bounds (size, depth, node cap) or uses regex or reference keywords. Regular expressions are refused outright: `pattern`
  * and `patternProperties` run the engine's backtracking RegExp, and a catastrophic pattern such as `^(a+)+$` takes
@@ -159,13 +164,15 @@ export async function checkAgainstTeamSchema(
  */
 function schemaNodeCount(schema: object): number | null {
   let nodes = 0;
-  const stack: Array<[unknown, number]> = [[schema, 1]];
+  const stack: Array<[unknown, number, SchemaPosition]> = [[schema, 1, 'schema']];
   while (stack.length > 0) {
-    const [node, depth] = stack.pop() as [unknown, number];
+    const [node, depth, position] = stack.pop() as [unknown, number, SchemaPosition];
     if (++nodes > TASK_PROPERTIES_SCHEMA_MAX_NODES) return null;
     if (node === null || typeof node !== 'object') continue;
     if (depth > TASK_PROPERTIES_SCHEMA_MAX_DEPTH) return null;
-    if (!Array.isArray(node)) {
+    // Keywords are judged only where the validator reads them: a property-name map ({"uniqueItems": true} under
+    // `properties` is a boolean subschema) and literal data (`const`, `enum`, ...) are counted but never inspected.
+    if (position === 'schema' && !Array.isArray(node)) {
       const o = node as Record<string, unknown>;
       if (typeof o.pattern === 'string') return null;
       if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return null;
@@ -176,7 +183,15 @@ function schemaNodeCount(schema: object): number | null {
       if (o.uniqueItems === true) return null;
       if (typeof o.$ref === 'string' || typeof o.$recursiveRef === 'string' || typeof o.$dynamicRef === 'string') return null;
     }
-    for (const child of Object.values(node)) stack.push([child, depth + 1]);
+    for (const [key, child] of Object.entries(node)) {
+      let childPosition: SchemaPosition = 'schema';
+      if (position === 'data') childPosition = 'data';
+      else if (position === 'schema' && !Array.isArray(node)) {
+        if (SCHEMA_DATA_KEYWORDS.has(key)) childPosition = 'data';
+        else if (SCHEMA_MAP_KEYWORDS.has(key)) childPosition = 'map';
+      }
+      stack.push([child, depth + 1, childPosition]);
+    }
   }
   return Buffer.byteLength(canonicalJson(schema), 'utf8') <= TASK_PROPERTIES_SCHEMA_MAX_BYTES ? nodes : null;
 }
