@@ -199,7 +199,7 @@ describe('ticks and relevance through the whole loader', () => {
     await say(channel, 'plain news');
     const page = await due(ctx(manager.id));
     expect(page.wakes).toHaveLength(1);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null, tickDueAt: expect.any(Date) }]);
     expect(page.wakes[0].channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
     expect(page.wakes[0]).toMatchObject({ unread: 1, unreadMentions: 0 });
   });
@@ -382,7 +382,7 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
     await db.ticker.update({ where: { id: quiet.id }, data: { reasons: ['every-tick'] } });
     const page = await due(ctx(manager.id));
     expect(ids(page)).toEqual([liam.id]);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null, tickDueAt: expect.any(Date) }]);
     expect(page.wakes[0].channels).toEqual([]);
     expect(page.wakes[0]).toMatchObject({ unread: 0, unreadMentions: 0 });
     const ack = await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, ctx(manager.id));
