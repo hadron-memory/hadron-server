@@ -136,12 +136,11 @@ describe('#1376 — a userless App key is not admitted by its Agent’s item', (
     expect((await getPrincipalAppMemoryAccess(db, { appId })).has(mem.homeOrg!.id)).toBe(false);
   });
 
-  it('PUBLIC knowledge is no exception: a key with no item cannot read it, so the item adds none', async () => {
-    const bare = await createDbAppWithKey(db, `bare-${generateId()}`, homeOrgId);
-    expect(await reads(bare.rawKey, 'homePublic')).toBeNull();
+  it('PUBLIC knowledge stays readable by the key (its own rule, cor:acl:010:01); the item adds no write', async () => {
     const { appId, appKey } = await link('homePublic', 'read-write');
-    expect(await reads(appKey, 'homePublic')).toBeNull();
-    expect(await mcpReads({ appId }, 'homePublic')).toBe(false);
+    expect(await reads(appKey, 'homePublic')).toBe('homePublic SECRET');
+    expect(await mcpReads({ appId }, 'homePublic')).toBe(true);
+    expect((await getPrincipalAppMemoryAccess(db, { appId })).get(mem.homePublic!.id)).toBe('READ_ONLY');
     expect(await writes(appKey, 'homePublic')).toBe(false);
     expect(await mcpWrites({ appId }, 'homePublic')).toBe(false);
   });
@@ -153,6 +152,21 @@ describe('#1376 — a userless App key is not admitted by its Agent’s item', (
     });
     await db.agent.update({ where: { id: agentId }, data: { systemMemoryId: sys.id } as never });
     expect((await getPrincipalAppMemoryAccess(db, { appId })).get(sys.id)).toBe('READ_ONLY');
+  });
+});
+
+describe('#1376 — what a bare key keeps', () => {
+  it('its own App’s scoped knowledge, read-only: the App’s own memory, not a grant from outside it', async () => {
+    const { app, rawKey } = await createDbAppWithKey(db, `own-${generateId()}`, homeOrgId);
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: homeOrgId, name: 'own', urn: `ag-own-${generateId()}` } as never });
+    await createDbAppAgent(db, app.id, agent.id);
+    const scoped = await db.memory.create({
+      data: { id: generateId(), urn: `home-${suffix}:own-${generateId()}`, name: 'own', organizationId: homeOrgId, class: 'knowledge', visibility: 'ORGANIZATION', appId: app.id } as never,
+    });
+    const node = await db.node.create({ data: { id: generateId(), memoryId: scoped.id, loc: 'payroll', name: 'p', content: 'OWN SCOPED' } });
+    await db.agentMemoryItem.create({ data: { id: generateId(), agentId: agent.id, memoryId: scoped.id, role: 'read-write' } });
+    expect((await gql(rawKey, READ, { r: node.id })).data?.node?.content).toBe('OWN SCOPED');
+    expect((await getPrincipalAppMemoryAccess(db, { appId: app.id })).get(scoped.id)).toBe('READ_ONLY');
   });
 });
 

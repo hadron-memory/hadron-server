@@ -12,7 +12,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -37,7 +37,7 @@ async function run(writeTo: string, mode: 'replace' | 'append' = 'replace') {
     where: { loc_memoryId: { loc: 'flow:report', memoryId: flowId } },
     data: { data: { output: { writeTo, mode } } as never },
   });
-  const minted = await mintAppRun(db, { organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData: {} });
+  const minted = await mintAppRun(db, { organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData: {}, consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId) });
   const deps: RunExecutionDeps = {
     ...makeProdRunDeps(db),
     resolveConfig: vi.fn(async () => ({ config: { provider: 'anthropic', model: 'test' } }) as never),

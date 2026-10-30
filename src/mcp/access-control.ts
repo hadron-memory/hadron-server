@@ -386,7 +386,15 @@ function getPrimaryAgentAccess(
   const systemMemoryId = foreignUserOwned(primary.ownerUserId) ||
     !primary.systemMemoryId || !liveSystemIds.has(primary.systemMemoryId)
     ? null : primary.systemMemoryId;
-  const memoryItems = (itemsAdmitted ? primary.memoryItems : [])
+  // #1376: a credential-only principal keeps only what the memory's own rule gives it: PUBLIC knowledge (cor:acl:010:01)
+  // and its own App's scoped memory, both read-only. Everything else an item names is the item acting as a grant, which it never is (cor:dmo:050:09).
+  const candidateItems = itemsAdmitted ? primary.memoryItems
+    : primary.memoryItems
+      .filter((item) => (item.memory?.class === 'knowledge' && item.memory.visibility === 'PUBLIC') ||
+        // and the App's OWN scoped memory (`Memory.appId` = this App): the App's own, not a grant from outside it.
+        ((item.memory?.class === 'knowledge' || item.memory?.class === 'group') && item.memory.appId === app.id))
+      .map((item) => ({ ...item, role: 'read' }));
+  const memoryItems = candidateItems
     .filter((item) => item.memory != null &&
       // Personal/private rows remain candidates for appNodes' per-memory
       // owner + subscription gate; legacy knowledge/app holdings never do.
