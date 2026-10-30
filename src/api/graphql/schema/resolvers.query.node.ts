@@ -1166,7 +1166,16 @@ export const nodeQueries = {
       // #463: push the org narrowing straight into the scope queries (rather
       // than selecting all ids then intersecting) so the admin/broad path never
       // materializes every memory id just to filter it down.
-      const orgWhere = orgScopeId ? { organizationId: orgScopeId } : {};
+      // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
+      // only the organisation's own memories, never an App's. A memory that
+      // belongs to an App carries app_id (required for class 'app', set for an
+      // App-scoped knowledge/group, #653), so the runnable listing narrows to
+      // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
+      // only: it composes with the accessible set above and adds no audience.
+      // Org-scoped non-runnable search is deliberately unchanged (no ruling).
+      const orgWhere = orgScopeId
+        ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
+        : {};
 
       let scopeIds: string[];
       if (explicitIds) {
