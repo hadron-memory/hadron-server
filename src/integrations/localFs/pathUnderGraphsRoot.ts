@@ -2,10 +2,15 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 export class ProjectionPathError extends Error {}
 
+/** Shared by input validation and writers, including either path separator. */
+export function hasReservedProjectionComponent(segment: string): boolean {
+  return segment.split(/[\\/]/).some(atom => atom === '.' || atom === '..');
+}
+
 /** Resolve a projection/checkout destination beneath its configured root, before any filesystem or git work. */
 export function pathUnderGraphsRoot(root: string, ...segments: string[]): string {
   // Refuse special components even when normalization would return inside the root.
-  if (segments.some(segment => segment.split(/[\\/]/).some(atom => atom === '.' || atom === '..'))) {
+  if (segments.some(hasReservedProjectionComponent)) {
     throw new ProjectionPathError('Invalid projection path');
   }
   const base = resolve(root);
