@@ -756,6 +756,10 @@ export const orgMutations = {
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
         async (tx) => {
+        // The typed miss comes only after the in-transaction authorize that
+        // runs before this write: a caller revoked before or while queued must
+        // get FORBIDDEN (or 40001), never learn the target is absent (#2871).
+        if (!existingRole) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
         // Demoting the last LIVE owner would leave the org unmanageable — same
         // invariant removeOrgMember enforces (PR-480 Gemini review; the gap
         // predates the lifecycle change but this is its home).
@@ -801,10 +805,6 @@ export const orgMutations = {
                 WHERE organization_id = ${resolvedOrgId} AND user_id = ${ctx.userId}
                   AND deleted_at IS NULL FOR SHARE`;
             }
-            // The typed miss comes only after the caller's locking read above:
-            // a caller revoked while queued must hit 40001 (then FORBIDDEN),
-            // never learn that the target is absent (#2871).
-            if (!existingRole) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
           },
           lockMode: 'exclusive',
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
