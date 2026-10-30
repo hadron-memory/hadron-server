@@ -79,6 +79,12 @@ describe('createNode seam', () => {
     await expect(createNode({ memoryId: mem.id, loc: 'fsfail2731', name: 'x' })).rejects.toThrow('injected');
     expect(await db.node.count({ where: { loc: 'fsfail2731', memoryId: mem.id } })).toBe(0);
   });
+  it('a partial fs failure (yaml written, topic write throws) leaves no node.yaml', async () => {
+    const loc = 'partial2731';
+    mkdirSync(join(GRAPHS_PATH, loc, '.node', 'topic.md'), { recursive: true }); // a directory where topic.md must go
+    await expect(createNode({ memoryId: mem.id, loc, name: loc, content: 'body' })).rejects.toThrow(/filesystem/);
+    expect(existsSync(yaml(loc))).toBe(false);
+  });
   it('a success still projects, and the projection is not removed', async () => {
     const loc = 'ok2731';
     await createNode({ memoryId: mem.id, loc, name: loc });
@@ -119,4 +125,17 @@ describe.each([
     await create();
     expect(existsSync(yaml(rootLoc))).toBe(true);
   });
+});
+
+it('two identical-field creates at one loc in different orgs: the loser rolling back leaves the committed winner projection', async () => {
+  const orgB = await db.organization.create({ data: { name: 'Fs orphan B', urn: 'fs2731b.test' } });
+  const memB = await db.memory.create({ data: { name: 'B2731', urn: `${orgB.urn}:b2731`, organizationId: orgB.id, class: 'knowledge', visibility: 'ORGANIZATION' } });
+  const loc = 'twoorg2731';
+  await expect(withFsProjectionRollback(() => db.$transaction(async (tx) => {
+    await createNode({ memoryId: mem.id, loc, name: 'same', description: 'Root node for this memory.' }, tx); // A projects
+    await createNode({ memoryId: memB.id, loc, name: 'same', description: 'Root node for this memory.' }); // B writes the same fields, commits
+    throw new Error('A aborts');
+  }))).rejects.toThrow('A aborts');
+  expect(existsSync(yaml(loc))).toBe(true);
+  expect(readFileSync(yaml(loc), 'utf-8')).toContain((await db.node.findFirstOrThrow({ where: { memoryId: memB.id, loc } })).id);
 });

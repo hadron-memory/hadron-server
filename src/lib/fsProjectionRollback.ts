@@ -46,7 +46,9 @@ export const runCleanups = (cleanups: Array<() => void>): void => {
 
 type Files = { yaml?: string | null; topic?: string | null };
 
-const read = (path: string): string | null => (existsSync(path) ? readFileSync(path, 'utf-8') : null);
+const read = (path: string): string | null => {
+  try { return readFileSync(path, 'utf-8'); } catch { return null; } // absent or not a readable file
+};
 
 /** The projection files as they are now, taken before the write so a rollback can put them back. */
 export const snapshotProjection = (loc: string, graphsPath: string): Files => {
@@ -64,7 +66,7 @@ export const projectionCleanupFor = (
   loc: string,
   graphsPath: string,
   prior: Files,
-  written: { yaml: string; topic?: string },
+  written: { yaml?: string; topic?: string },
 ): (() => void) => () => {
   const nodeDir = join(graphsPath, ...loc.split(':'), '.node');
   const restore = (file: string, wrote: string | undefined, before: string | null | undefined) => {

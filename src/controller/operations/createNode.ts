@@ -45,7 +45,10 @@ const createNodeAsSystem = async (
     throw new Error('createNode: a caller-supplied transaction requires withFsProjectionRollback (#2731).');
   }
   const fsPrior = snapshotProjection(loc, GRAPHS_PATH);
-  const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
+  // #2731: the id is minted before the write so the projection's bytes are unique to this call (the
+  // cleanup's ownership proof): two creates at one loc, even with identical fields, never write equal bytes.
+  const id = node.id ?? generateId();
+  const fsResult = await saveNodeToFs({ ...node, id }, GRAPHS_PATH);
   // Ownership is by the bytes this call wrote (a failed write may have written none).
   const undoProjection = fsResult.written ? projectionCleanupFor(loc, GRAPHS_PATH, fsPrior, fsResult.written) : null;
   if (fsResult.error) {
@@ -54,7 +57,6 @@ const createNodeAsSystem = async (
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
-  const id = node.id ?? generateId();
   const serializedTags = serializeTags(node.tags ?? []) as string[];
   const content = node.content ?? null;
   const fields = {
