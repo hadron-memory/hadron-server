@@ -7915,7 +7915,7 @@ export const typeDefs = `#graphql
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
     after), not a continuation. limit defaults to 20 (cap 200).
-    task.warning and task.edited are passive history (never wake, suppress a wake or count as activity); payload is {code} or changed field names only.
+    task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.
     """
     agentTeamEvents(
       appRef: ID!
@@ -14147,6 +14147,13 @@ export const typeDefs = `#graphql
     "Null while the task is queued."
     assignee: AgentTaskParty
     requirements: AgentTaskRequirements
+    """
+    #2420 (hrn:node:hadronmemory.com:specs:cor:agt:050:28): this task's OWN optional JSON object, which the team organises
+    into its own namespaces (review schedule, complexity, a seat's reviewed head). The platform stores and returns it
+    and never reads a key: it is not matcher input and not authorization input. Nothing is inherited, so a child
+    returns its own value (null when unset), never its root's; read the root task for that. Null when none.
+    """
+    properties: JSON
     status: AgentTaskStatus!
     "Derived (hrn:node:hadronmemory.com:specs:cor:agt:050:03): pending with no assignee. Never stored."
     queued: Boolean!
@@ -14975,6 +14982,14 @@ export const typeDefs = `#graphql
     description: String
     tags: [String!]
     requirements: AgentTaskRequirementsInput
+    """
+    #2420 (hrn:node:hadronmemory.com:specs:cor:agt:050:28): omitted leaves the value, a JSON object replaces the whole of
+    it (no merge), null clears it. Writable by the task's owner, a worker the owner reports to, whoever manages the App,
+    and the task's assignee; an assignee's update may name this field and no other. Refused on a finished or cancelled
+    task. A non-object is PROPERTIES_NOT_AN_OBJECT, over 16 KiB of canonical JSON PROPERTIES_TOO_LARGE, a violation of the
+    Team Agent's schema:task-properties PROPERTIES_SCHEMA_VIOLATION, an unusable schema PROPERTIES_SCHEMA_UNUSABLE.
+    """
+    properties: JSON
     "Reanchors only the not-started deadline; null clears the explicit deadline. Existing alarms stay raised."
     startBy: DateTime
     "Null clears to false; omission preserves the stored choice."
@@ -15008,6 +15023,12 @@ export const typeDefs = `#graphql
     "Omit to leave the task queued."
     assignee: AgentTaskPartyInput
     requirements: AgentTaskRequirementsInput
+    """
+    #2420 (hrn:node:hadronmemory.com:specs:cor:agt:050:28): the task's own properties, a JSON object with the same limits
+    and refusal codes as on update. Only set when the creator is one of the task's writers (its owner, someone above the
+    owner, a manager, or the assignee named here); any other creator gets the task made without them, not a refusal.
+    """
+    properties: JSON
     startBy: DateTime
     tags: [String!]
     "Defaults to false: the assignee's session ends only when whoever assigns the task asks (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."

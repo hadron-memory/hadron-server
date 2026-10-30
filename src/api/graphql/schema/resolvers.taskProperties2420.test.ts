@@ -215,7 +215,7 @@ describe('who may write #2420', () => {
   });
 
   it('conceals an unreadable task byte-identically to an absent one', async () => {
-    const hidden = await setProps({ a: 1 }, outsider.id).catch((e) => e);
+    const hidden = await setProps({ a: 1 }, outsider.id).catch((e: any) => e);
     const absent = await M.assignAgentTask({}, { taskId: task.id, assignee: { user: outsider.id } }, ctx(outsider.id)).catch((e: any) => e);
     expect({ message: hidden.message, extensions: hidden.extensions }).toEqual({ message: absent.message, extensions: absent.extensions });
   });
@@ -340,7 +340,7 @@ describe('surfaces #2420', () => {
       expect((await stored()).properties).toEqual({ via: 'mcp' });
       const bad = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: [1] }, session: session.id } });
       expect(bad.isError).toBe(true);
-      expect(JSON.stringify(bad.content)).toContain('PROPERTIES_NOT_AN_OBJECT');
+      expect(JSON.stringify(bad.content)).toContain('[properties_not_an_object]');
       const created = await client.callTool({ name: 'hadron_task_create', arguments: { appRef: app.id, title: 'Mcp', source: 's', properties: { made: 'mcp' }, session: session.id } });
       expect(created.isError).not.toBe(true);
       expect((await db.agentTask.findFirstOrThrow({ where: { title: 'Mcp' } }) as any).properties).toEqual({ made: 'mcp' });

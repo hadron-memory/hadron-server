@@ -180,6 +180,8 @@ export async function renderTask(t: TaskRow, ctx: Context, dependencies: { limit
   if (t.source) lines.push(`  source: ${t.source}`);
   if (t.tags?.length) lines.push(`  tags: ${t.tags.join(', ')}`);
   if (t.requirements) lines.push(`  requirements: ${JSON.stringify(t.requirements)}`);
+  // #2420: the task's own properties (cor:agt:050:28); a reader of the task reads them, and nothing is inherited.
+  if (t.properties) lines.push(`  properties: ${JSON.stringify(t.properties)}`);
   const times = [
     t.startBy ? `start by ${t.startBy.toISOString()}` : null,
     t.assignedAt ? `assigned ${t.assignedAt.toISOString()}` : null,
@@ -397,6 +399,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_task_update',
     'Edit descriptive task fields using assignment authority (Proposed cor:agt:050:09 Editing). ' +
       'Omitted fields stay unchanged; optional empty values clear; tags and requirements replace whole. ' +
+      'properties (#2420) is the task\'s own JSON object and replaces whole; the assignee may write it, and only it. ' +
       'Source and lifecycle fields are fixed. Ended tasks refuse edits; edits are not progress and clear no wake.',
     SHAPE_HADRON_TASK_UPDATE,
     async ({ session, taskId, input }) =>
@@ -505,7 +508,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning and task.edited are passive history (never wake, suppress a wake or count as activity); payload is {code} or changed field names only.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
@@ -629,11 +632,22 @@ const availabilityFields = {
   until: z.string().optional().describe('ISO date-time when an UNAVAILABLE record lapses; in the future.'),
 };
 
+/**
+ * #2420 (cor:agt:050:28): any JSON here, so a non-object reaches the resolver's typed PROPERTIES_NOT_AN_OBJECT
+ * instead of a generic schema error. An object replaces the whole value; null clears it; omit to leave it.
+ */
+const PROPERTIES_ARG = z.unknown().optional().describe(
+  'The task\'s own properties: a JSON object the team organises into namespaces (at most 16 KiB; validated against the ' +
+    'Team Agent\'s schema:task-properties when it has one). An object replaces the whole value, null clears it, omit leaves it. ' +
+    'Writable by the owner, whoever the owner reports to, App managers and the task\'s assignee (the assignee may name no other field).',
+);
+
 const SHAPE_HADRON_TASK_UPDATE = { taskId, input: z.object({
       title: z.string().nullable().optional(), description: z.string().nullable().optional(),
       tags: z.array(z.string()).nullable().optional(),
       requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
       startBy: z.string().nullable().optional(), closeSessionWhenDone: z.boolean().nullable().optional(),
+      properties: PROPERTIES_ARG,
     }).strict().optional(), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_CREATE = {
@@ -655,6 +669,7 @@ const SHAPE_HADRON_TASK_CREATE = {
   }).optional().describe('For the platform\'s matcher.'),
   startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
   tags: z.array(z.string()).optional(),
+  properties: PROPERTIES_ARG,
   closeSessionWhenDone: z.boolean().optional().describe('Default false: the assignee\'s session ends only when you ask (cor:agt:050:10).'),
   status: z.enum(['PENDING', 'BACKLOG']).optional().describe(
     '#1754 (cor:agt:050:02): PENDING (default) or BACKLOG — parked, unassigned, never queued. A BACKLOG task takes no assignee.',

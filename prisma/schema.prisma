@@ -5723,6 +5723,10 @@ model AgentTask {
   assigneeUserId       String?   @map("assignee_user_id")
   /// For the matcher (T3): `{ role?, familyIn?, familyNotIn?, excludeWorkerIds? }`.
   requirements         Json?
+  /// #2420 (cor:agt:050:28): this task's OWN optional, platform-opaque JSON object (the team's namespaces: review
+  /// schedule, complexity, a seat's reviewed head). Never inherited, never matcher or authorization input; written by
+  /// the cor:agt:050:09 set and the task's assignee, validated against the Team Agent's `schema:task-properties`.
+  properties           Json?
   /// 'backlog' | 'pending' | 'started' | 'finished' | 'cancelled' (cor:agt:050:02).
   /// 'backlog' (#1754): parked — no assignee, not matched, never waited on, no alarms.
   status               String    @default("pending")
