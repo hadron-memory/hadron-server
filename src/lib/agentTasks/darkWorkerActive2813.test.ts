@@ -16,6 +16,9 @@ import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { evaluateDarkWorkers } from './darkWorker.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { runAsActor } from '../requestActor.js';
+import { APP_KEY_PREFIX, hashAppKey } from '../../middleware/auth.js';
+import { randomBytes } from 'node:crypto';
+import { sessionActivityAt } from '../sessionActivity.js';
 import { setS7AvailableForTest } from '../tickers/s7Availability.js';
 
 vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -122,6 +125,14 @@ describe('#2813 session activity inside the window exempts wake-unacked', () => 
     expect((await alarms('Tove'))[0].payload).toMatchObject({ reason: 'wake-unacked' });
   });
 
+  it('activity on an ENDED session of the worker exempts nothing while its live session is quiet', async () => {
+    await bind('Tove', QUIET);
+    const ended = await db.session.create({ data: { id: generateId(), appId: app.id, userId: user.id, workerId: w.Tove.id, agentId: agent.id, type: 'DEVELOPER', startedAt: after(-60), updatedAt: after(39), endedAt: after(39) } });
+    await db.usageEvent.create({ data: { id: generateId(), type: 'node_read', sessionId: ended.id, appId: app.id, userId: user.id, countsAsActivity: true, createdAt: after(39) } as any });
+    await say('hello @tove', ['tove']);
+    expect(await evaluateDarkWorkers(db, after(40))).toHaveLength(1);
+  });
+
   it('honours the App\'s own window', async () => {
     await db.app.update({ where: { id: app.id }, data: { deliveryDarkAlarmWindowSeconds: 600 } });
     await bind('Tove', after(20));
@@ -160,6 +171,28 @@ describe('#2813 only the worker\'s own driving is activity (cor:agt:020:03, cor:
     const after_ = await db.session.findUniqueOrThrow({ where: { id: s.id } });
     expect(after_.updatedAt?.getTime()).toBe(before.updatedAt?.getTime());
     expect(await db.usageEvent.count({ where: { sessionId: s.id } })).toBe(0);
+  });
+
+  it('the deliverer\'s own credential, a scoped App key (the host poller), neither writes activity nor hides a dark worker', async () => {
+    const s = await bind('Tove', QUIET);
+    await say('hello @tove', ['tove']);
+    const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'host' } });
+    await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: user.id } });
+    const keyCtx = { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as unknown as Context;
+    const read = async () => {
+      const row = await db.session.findUniqueOrThrow({ where: { id: s.id } });
+      return { updatedAt: row.updatedAt?.getTime(), activityAt: sessionActivityAt(row).getTime(), events: await db.usageEvent.count({ where: { sessionId: s.id } }) };
+    };
+    const before = await read();
+    const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
+    expect(page.wakes.length).toBeGreaterThan(0); // the key branch ran and returned the wake
+    // The poller's other call.
+    expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await read()).toEqual(before);
+    // and the worker is still alarmed on its own quiet activity once a new wake ages past the window
+    await say('again @tove', ['tove']);
+    expect(await evaluateDarkWorkers(db, after(40))).toHaveLength(1);
   });
 
   it('an exempt worker becomes dark once its OWN activity ages past the window', async () => {
