@@ -497,6 +497,10 @@
    "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
   ],
   [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
+  ],
+  [
    "hadron_team_attention",
    "7e67b341d6922623609806680624d1f233bc7a2f331a8b4e849277b84bf5ff5f"
   ],
@@ -1049,6 +1053,10 @@
   [
    "hadron_team_chat_read",
    "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
+  ],
+  [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
   ],
   [
    "hadron_team_attention",
@@ -1605,6 +1613,10 @@
    "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
   ],
   [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
+  ],
+  [
    "hadron_list_workers",
    "c5c0738a019c4782cf9726e5c8e82e9a0622eda6733e8b3135b8155559d87d6e"
   ],
@@ -2141,6 +2153,10 @@
   [
    "hadron_team_chat_read",
    "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
+  ],
+  [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
   ],
   [
    "hadron_list_workers",
