@@ -5792,10 +5792,6 @@ model AgentTask {
   @@map("agent_tasks")
 }
 
-/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
-/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
-/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
-/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
 /// #2644: same-App acyclic dependency graph, guarded by task-blocker-invariants.sql.
 model AgentTaskBlocker {
   taskId String @map("task_id")
@@ -5808,6 +5804,10 @@ model AgentTaskBlocker {
   @@map("agent_task_blockers")
 }
 
+/// #2553: the last number issued under one parent: `parentTaskId` NULL is the App's project counter. Its own table, so a
+/// task create serializes against other creates under the SAME parent only and never takes the App row exclusively
+/// (the App row stays a shared authority anchor). The one-row-per-App project counter is a partial unique index in
+/// prisma/agent-task-number-invariants.sql (Prisma cannot model it; NULLs are distinct in the unique below).
 model AgentTaskCounter {
   id           String  @id @default(cuid())
   appId        String  @map("app_id")
