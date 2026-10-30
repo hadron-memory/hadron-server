@@ -47,6 +47,10 @@ import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } fro
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 
+/** #2871: expected org-member refusals are typed so the boundary does not mask them. */
+const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
+  new GraphQLError(message, { extensions: { code } });
+
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
  * conflict; re-throw anything else. Use as a `.catch()` on a mint transaction.
@@ -691,7 +695,7 @@ export const orgMutations = {
             where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
           });
           if (existing && !existing.deletedAt) {
-            throw new Error('User is already a member of this organization');
+            throw orgMemberRefusal('CONFLICT', 'User is already a member of this organization');
           }
           if (existing) {
             return tx.orgMember.update({
@@ -760,7 +764,7 @@ export const orgMutations = {
             where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
           });
           if (owners <= 1) {
-            throw new Error('Cannot demote the last owner of an organization');
+            throw orgMemberRefusal('CONFLICT', 'Cannot demote the last owner of an organization');
           }
         }
         if ((existingRole === 'OWNER' || existingRole === 'ADMIN') &&
@@ -791,7 +795,7 @@ export const orgMutations = {
                 AND deleted_at IS NULL`;
             if (Boolean(rows[0]) !== Boolean(fresh[0])) throw new AuthoritySnapshotStale();
             existingRole = rows[0]?.role ?? null;
-            if (!existingRole) throw new Error('User is not a member of this organization');
+            if (!existingRole) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
             if (ctx.userId) {
               await tx.$queryRaw`
                 SELECT id FROM org_members
@@ -831,9 +835,12 @@ export const orgMutations = {
         [{ kind: 'org', id: resolvedOrgId }, { kind: 'user', id: resolvedUserId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
         async (tx) => {
-        const member = await tx.orgMember.findUniqueOrThrow({
+        const member = await tx.orgMember.findUnique({
           where: { organizationId_userId: { organizationId: resolvedOrgId, userId: resolvedUserId } },
         });
+        // A user who never held a row is not a member (#2871); a revoked row is
+        // the idempotent case below.
+        if (!member) throw orgMemberRefusal('NOT_FOUND', 'User is not a member of this organization');
         // Already revoked → idempotent success. Checked BEFORE the last-owner
         // guard: a revoked ex-OWNER isn't in the live owners count, so the
         // guard would otherwise mis-fire "last owner" on a no-op re-removal.
@@ -846,7 +853,7 @@ export const orgMutations = {
             where: { organizationId: resolvedOrgId, role: 'OWNER', deletedAt: null },
           });
           if (owners <= 1) {
-            throw new Error('Cannot remove the last owner of an organization');
+            throw orgMemberRefusal('CONFLICT', 'Cannot remove the last owner of an organization');
           }
         }
         await assertIssuerInvitationSnapshotFresh(tx, ctx.db, resolvedOrgId, resolvedUserId);
