@@ -196,15 +196,17 @@ describe('#2047 run', () => {
   });
 });
 
-// #1772 step 3: a run no longer binds the legacy tokens from its recorded values.
-describe('#1772 step 3: served run leaves legacy {{name}} / {{role}} tokens as written', () => {
-  it('renders {{name}} and {{role}} literally', async () => {
+// #1772 step 3 (review P2): a run replays its RECORDED revision and variables, so a legacy token in that revision still binds from
+// the recorded values: a retained record is reconstructed as it was served, whatever the live binding does today.
+describe('#1772 step 3: a recorded run still binds legacy {{name}} / {{role}} from its recorded values', () => {
+  it('binds {{name}} and {{role}} from the values recorded with the run', async () => {
     await db.agent.update({ where: { id: agentId }, data: { personaRole: 'runner-role' } });
     await compiledPointer('You are {{name}}, the {{role}}.');
     const run = await mint({ userId, agentId });
     const { deps: d, llm } = deps();
     expect(await executeAppRun(db, run.id, d)).toBe('completed');
     const system = llm.mock.calls[0]![1].system!;
-    expect(system.startsWith('You are {{name}}, the {{role}}.\n\n')).toBe(true);
+    expect(system.startsWith('You are Runner, the runner-role.\n\n')).toBe(true);
+    expect(system).not.toMatch(/\{\{(name|role)\}\}/);
   });
 });

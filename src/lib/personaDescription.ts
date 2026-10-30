@@ -47,3 +47,20 @@ export function applyPlatformVariables(template: string, values: PlatformVariabl
     (_match, key: string) => values[key as keyof PlatformVariableValues],
   );
 }
+
+/**
+ * #1772 step 3 review P2: a RECORD replay (a session's or a run's recorded revision, read again) is reconstructed as it was
+ * served, so a legacy `{{name}}` / `{{role}}` held by that old revision still binds, from the RECORDED `worker.name` /
+ * `worker.role`, in the same single pass as the closed set. Live reads never call this: only a retained record can hold a
+ * revision written before the token migration (#2704), and its audit sees current text, not history. A record whose
+ * values lack either key leaves the tokens as written rather than printing "undefined".
+ */
+export function applyRecordedVariables(template: string, values: PlatformVariableValues): string {
+  const name = values['worker.name'];
+  const role = values['worker.role'];
+  const legacy = typeof name === 'string' && typeof role === 'string' ? { name, role } : null;
+  return template.replace(
+    /\{\{(name|role|worker\.name|worker\.role|agent\.name|worker\.reportsTo\.name|worker\.signature|worker\.trailer|worker\.url|session\.llmModel)\}\}/g,
+    (match, key: string) => (key === 'name' || key === 'role' ? (legacy ? legacy[key] : match) : values[key as keyof PlatformVariableValues]),
+  );
+}

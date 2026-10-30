@@ -22,3 +22,19 @@ describe('#1772 step 3: legacy tokens no longer bind', () => {
     expect(persona).not.toHaveProperty('legacyFromValues');
   });
 });
+
+describe('#1772 step 3 review P2: a record replay still binds the legacy tokens from its RECORDED values', () => {
+  it('binds {{name}}/{{role}} and the closed set in one pass; a value holding a token stays literal', () => {
+    expect(persona.applyRecordedVariables('{{name}}|{{role}}|{{worker.name}}', values)).toBe('Iris|tester|Iris');
+    expect(persona.applyRecordedVariables('{{name}}|{{worker.name}}', { ...values, 'worker.name': '{{agent.name}}' })).toBe('{{agent.name}}|{{agent.name}}');
+  });
+
+  it('a record lacking either recorded key leaves the tokens as written, never "undefined"', () => {
+    const { 'worker.role': _r, ...partial } = values;
+    expect(persona.applyRecordedVariables('{{name}} {{role}} {{worker.name}}', partial as typeof values)).toBe('{{name}} {{role}} Iris');
+  });
+
+  it('the live binder still leaves them literal', () => {
+    expect(persona.applyPlatformVariables('{{name}} {{role}}', values)).toBe('{{name}} {{role}}');
+  });
+});

@@ -161,7 +161,7 @@ describe('#2047 bind', () => {
 
 // #1772 step 3: the legacy {{name}} / {{role}} binding is deleted (G3: no live served text holds one). A token left in served
 // text renders as written, like any text outside the closed set; {{worker.name}} / {{worker.role}} are the only binders.
-describe('#1772 step 3: served text leaves legacy {{name}} / {{role}} tokens as written', () => {
+describe('#1772 step 3: LIVE served text leaves legacy {{name}} / {{role}} tokens as written', () => {
   const LEGACY = 'You are {{name}}, filling the {{role}} role. Sign as {{name}}. ({{worker.name}}/{{worker.role}})';
 
   it('a read with no record leaves the legacy tokens and binds the closed-set ones', async () => {
@@ -171,12 +171,13 @@ describe('#1772 step 3: served text leaves legacy {{name}} / {{role}} tokens as 
     expect(text).toContain('You are {{name}}, filling the {{role}} role. Sign as {{name}}. (Iris/tester)');
   });
 
-  it("a recorded session's replay leaves them too, and binds the recorded closed-set values", async () => {
+  it("a recorded session's replay still binds them from the RECORDED values: a record is reconstructed as it was served (#1772 review P2)", async () => {
     await pointAgent(await compiled(LEGACY));
     const session = await bind();
     await db.worker.update({ where: { id: worker.id }, data: { name: 'Renamed', role: 'renamed-role' } });
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const text = (await composeWorkerPrompt(ctx({ sessionId: session.id }), w as never)).text!;
-    expect(text).toContain('You are {{name}}, filling the {{role}} role. Sign as {{name}}. (Iris/tester)');
+    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris. (Iris/tester)');
+    expect(text).not.toMatch(/\{\{(name|role)\}\}/);
   });
 });
