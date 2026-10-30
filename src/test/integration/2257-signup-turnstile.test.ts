@@ -29,7 +29,7 @@ const FIELD = 'cf-turnstile-response';
 let server: Server;
 let baseUrl: string;
 const realFetch = globalThis.fetch;
-let siteverify: ReturnType<typeof vi.fn>;
+let siteverify: ReturnType<typeof vi.fn<(input: unknown, init?: RequestInit) => Promise<Response>>>;
 
 beforeAll(async () => {
   const app = await createServer();
@@ -45,8 +45,8 @@ afterAll(async () => {
 beforeEach(() => {
   sendMagicLinkMock.mockReset();
   sendMagicLinkMock.mockResolvedValue(undefined);
-  siteverify = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
-  vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+  siteverify = vi.fn<(input: unknown, init?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+  vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) =>
     String(input) === SITEVERIFY ? siteverify(input, init) : realFetch(input, init),
   );
 });
@@ -135,6 +135,7 @@ describe('#2257 flag ON — POST /auth/email', () => {
   it.each([
     ['network error', () => Promise.reject(new Error('boom'))],
     ['HTTP 500', () => Promise.resolve(new Response('x', { status: 500 }))],
+    ['HTTP 500 that still says success', () => Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 500 }))],
     ['non-JSON body', () => Promise.resolve(new Response('<html>', { status: 200 }))],
     ['JSON without a boolean success', () => Promise.resolve(new Response(JSON.stringify({ ok: 1 }), { status: 200 }))],
   ])('provider failure (%s): refused 503 provider_error, never fail-open', async (_n, impl) => {
