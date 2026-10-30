@@ -196,8 +196,9 @@ describe('#2047 run', () => {
   });
 });
 
-// #2702: a run replays its recorded variables, and the legacy tokens bind from them in the same pass.
-describe('#2702 served run binds the legacy {{name}} / {{role}} tokens', () => {
+// #1772 step 3 (review P2): a run replays its RECORDED revision and variables, so a legacy token in that revision still binds from
+// the recorded values: a retained record is reconstructed as it was served, whatever the live binding does today.
+describe('#1772 step 3: a recorded run still binds legacy {{name}} / {{role}} from its recorded values', () => {
   it('binds {{name}} and {{role}} from the values recorded with the run', async () => {
     await db.agent.update({ where: { id: agentId }, data: { personaRole: 'runner-role' } });
     await compiledPointer('You are {{name}}, the {{role}}.');

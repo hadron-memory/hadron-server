@@ -3,7 +3,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  * #974 (re-cut) — the Worker model (spec cor:dmo:050:11, cor:agt:020:01/:02).
  *
  * A persona is universal DRESSING on an Agent (`personaRole` + the
- * `systemPrompt` template with {{name}}/{{role}} placeholders); the Worker is
+ * `systemPrompt` template with {{worker.name}}/{{worker.role}} placeholders); the Worker is
  * the named casting of an installed agent into an App — the local identity
  * ("Iris") that does attributable work. `castWorker` mints nothing: it casts
  * an EXISTING installed agent under a name, allocating the name against the
@@ -59,7 +59,7 @@ async function expectCode(p: Promise<unknown>, code: string) {
 
 /** The role-agent's persona dressing — bound per-worker at read time. */
 const TEMPLATE =
-  'You are {{name}}, a {{role}} on this team.\nWork from your own memories.';
+  'You are {{worker.name}}, a {{worker.role}} on this team.\nWork from your own memories.';
 
 let org: { id: string; urn: string };
 let admin: { id: string };
@@ -143,7 +143,7 @@ beforeEach(async () => {
   await createRoleNode(teamAgent.systemMemoryId, 'backend-engineer');
 
   // The role-agent — the persona dressing lives HERE (#974): personaRole is
-  // the role-resolution key, systemPrompt the {{name}}/{{role}} template.
+  // the role-resolution key, systemPrompt the {{worker.name}}/{{worker.role}} template.
   const role = await M.createAgent(
     {},
     {
@@ -1332,16 +1332,20 @@ describe('Worker field resolvers', () => {
     expect(resolvedApp?.id).toBe(app.id);
   });
 
-  it('prompt binds {{name}}/{{role}} and appends the override as its own paragraph', async () => {
-    const worker = await cast({
-      agentRef: roleAgent.id,
-      name: 'Zoe',
-      promptOverride: 'Prefer boring solutions.',
-    });
-    const prompt = await W.prompt(worker, {}, ctx(admin.id));
-    expect(prompt).toBe(
-      'You are Zoe, a backend-engineer on this team.\nWork from your own memories.\n\nPrefer boring solutions.',
-    );
+  it('prompt leaves legacy {{name}}/{{role}} as written (#1772 step 3) and appends the override as its own paragraph', async () => {
+    const legacy = 'You are {{name}}, a {{role}} on this team.\nWork from your own memories.';
+    await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: legacy } });
+    try {
+      const worker = await cast({
+        agentRef: roleAgent.id,
+        name: 'Zoe',
+        promptOverride: 'Prefer boring solutions.',
+      });
+      const prompt = await W.prompt(worker, {}, ctx(admin.id));
+      expect(prompt).toBe(`${legacy}\n\nPrefer boring solutions.`);
+    } finally {
+      await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: TEMPLATE } });
+    }
   });
 
   it('prompt binds the CASTING role, which is the agent personaRole (#2458, R222)', async () => {

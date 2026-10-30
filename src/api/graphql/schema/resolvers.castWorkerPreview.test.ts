@@ -86,7 +86,7 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'CWP Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{name}}, a {{role}}.',
+      systemPrompt: 'You are {{worker.name}}, a {{worker.role}}.',
     },
     ctx(admin.id),
   );
@@ -202,21 +202,31 @@ describe('#964 — castWorkerPreview', () => {
   it('binds a template without a name token as written; hasNamePlaceholder is retired and null (#2049)', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are a {{role}}.' },
+      data: { systemPrompt: 'You are a {{worker.role}}.' },
     });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
 
-  it('binds only the exact token: "{{ name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
+  it('binds only the exact token: "{{ worker.name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
     await db.agent.update({
       where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are {{ name }}, a {{role}}.' },
+      data: { systemPrompt: 'You are {{ worker.name }}, a {{worker.role}}.' },
     });
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBeNull();
-    expect(p.prompt).toBe('You are {{ name }}, a backend-engineer.');
+    expect(p.prompt).toBe('You are {{ worker.name }}, a backend-engineer.');
+  });
+
+  it('leaves legacy {{name}} / {{role}} literal in the preview, template and override, while the closed set binds (#2902, #1772 step 3)', async () => {
+    // The preview is a live path: only a retained record replay still binds the legacy tokens (applyRecordedVariables).
+    await db.agent.update({
+      where: { id: roleAgent.id },
+      data: { systemPrompt: 'Hi {{name}}, a {{role}}: {{worker.name}} / {{worker.role}}.' },
+    });
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen', promptOverride: 'Also {{name}} / {{role}} / {{worker.name}}.' });
+    expect(p.prompt).toBe('Hi {{name}}, a {{role}}: Gwen / backend-engineer.\n\nAlso {{name}} / {{role}} / Gwen.');
   });
 
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {

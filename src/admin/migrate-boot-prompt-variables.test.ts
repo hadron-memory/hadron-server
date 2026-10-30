@@ -5,7 +5,6 @@ import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../test/helpers.j
 import { generateId } from '../lib/id.js';
 import { composeWorkerPrompt } from '../api/graphql/schema/resolvers.worker.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
-import { applyPlatformVariables } from '../lib/personaDescription.js';
 import { compileBootPrompt } from '../api/graphql/schema/compileBootPrompt.js';
 import { createOperatorConversionContext } from '../lib/auth/operatorConversion.js';
 import { convertBootPrompts } from './convert-boot-prompts.js';
@@ -101,7 +100,7 @@ describe('#2704 — migration', () => {
     const pointerBefore = (await db.agent.findUniqueOrThrow({ where: { id: agent.id } })).bootPromptNodeId;
     const before = await composeWorkerPrompt({ db, userId: adminId, roles: [], clientId: `user:${adminId}` } as Context, { ...w, role: null });
     expect(before.refusal ?? null).toBeNull();
-    expect(before.text).toContain('You are iris, the coordinator.'); // #2705: the served path binds the legacy tokens
+    expect(before.text).toContain('You are {{name}}, the {{role}}.'); // #1772 step 3: the legacy tokens no longer bind, so the rename is what makes them bind
 
     const report = await migrate();
     expect(report).toMatchObject({ applied: true, migrated: 1, failed: 0 });
@@ -115,7 +114,7 @@ describe('#2704 — migration', () => {
     expect(approved(source)).toBe(true);
     expect(row.systemPrompt).toBe('You are {{name}}, the {{role}}.'); // the retired column is not edited
     const after = await composeWorkerPrompt({ db, userId: adminId, roles: [], clientId: `user:${adminId}` } as Context, { ...w, role: null });
-    expect(after.text).toBe(before.text); // the rename changes nothing a worker is served
+    expect(after.text).toContain('You are iris, the coordinator.');
     expect(after.text).not.toMatch(/\{\{(name|role|worker\.[a-zA-Z.]+|agent\.name|session\.llmModel)\}\}/);
     expect((await auditBootPromptTokens(db)).legacyBindingRemovable).toBe(true);
   });
@@ -167,13 +166,6 @@ describe('#2704 — migration', () => {
     // A retry (source already renamed, compiled still holding the token) completes.
     expect(await migrate()).toMatchObject({ migrated: 1, failed: 0 });
     expect((await compiledOf('agent', agent.id)).content).toBe('Hi {{worker.name}}');
-  });
-
-  it('renames tokens without changing the rendered text, for a worker whose own role differs from the persona role', () => {
-    const vars = { 'worker.name': 'Ada', 'worker.role': 'reviewer', 'agent.name': 'Coord', 'worker.reportsTo.name': '', 'worker.signature': '', 'worker.trailer': '', 'worker.url': '', 'session.llmModel': '' };
-    const before = 'I am {{name}}, a {{role}}.';
-    const legacy = { name: vars['worker.name'], role: vars['worker.role'] };
-    expect(applyPlatformVariables(renameLegacyTokens(before), vars)).toBe(applyPlatformVariables(before, vars, legacy));
   });
 
   it('a dry run fails a row whose source drifted from the served text, as apply would', async () => {
