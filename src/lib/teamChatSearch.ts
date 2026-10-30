@@ -57,6 +57,9 @@ export function searchBinding(query: string, channelId: string, incarnation: num
   return createHash('sha256').update(parts.map((p) => `${p.length}:${p}`).join('|')).digest('hex').slice(0, 32);
 }
 
+/** `Node.seq` is a 32-bit Int: a bound above it is no seq the column can hold, so it is a bad cursor, not a query. */
+const MAX_SEQ = 2147483647;
+
 const cursorInvalid = (): GraphQLError =>
   new GraphQLError('The search cursor is not valid for this search.', { extensions: { code: 'TEAM_CHAT_SEARCH_CURSOR_INVALID' } });
 
@@ -72,7 +75,7 @@ export function encodeSearchCursor(binding: string, beforeSeq: number): string {
 export function decodeSearchCursor(cursor: string, binding: string): number {
   try {
     const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { b?: unknown; s?: unknown };
-    if (parsed.b === binding && typeof parsed.s === 'number' && Number.isInteger(parsed.s) && parsed.s >= 1) return parsed.s;
+    if (parsed.b === binding && typeof parsed.s === 'number' && Number.isInteger(parsed.s) && parsed.s >= 1 && parsed.s <= MAX_SEQ) return parsed.s;
   } catch {
     // fall through to the one refusal
   }

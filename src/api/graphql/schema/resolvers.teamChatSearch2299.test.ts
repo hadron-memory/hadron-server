@@ -196,6 +196,18 @@ describe('paging and the scan bound', () => {
   });
 });
 
+describe('a correctly bound cursor with an out-of-range seq', () => {
+  it('is refused with the one typed cursor refusal, never reaching the database', async () => {
+    await bulk(60, s => `needle ${s}`);
+    const p1 = await viaChannel(member.id, 'needle', { limit: 10 });
+    const bound = JSON.parse(Buffer.from(p1.cursor, 'base64url').toString('utf8')) as { b: string };
+    for (const s of [2147483648, 1e100, Number.MAX_SAFE_INTEGER]) {
+      const forged = Buffer.from(JSON.stringify({ b: bound.b, s })).toString('base64url');
+      expect(await code(viaChannel(member.id, 'needle', { cursor: forged }))).toBe('TEAM_CHAT_SEARCH_CURSOR_INVALID');
+    }
+  });
+});
+
 describe('the cursor is bound to (query, channel, incarnation, caller)', () => {
   it('is refused, identically, for another query, caller, channel, incarnation or garbage', async () => {
     await bulk(60, s => `needle ${s}`);
