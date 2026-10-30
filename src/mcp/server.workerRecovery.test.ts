@@ -40,7 +40,7 @@ let outsider: { id: string };
 let app: { id: string; urn: string };
 let agent: { id: string };
 
-const PERSONA_TEMPLATE = 'You are {{name}}, the {{role}} on this team.';
+const PERSONA_TEMPLATE = 'You are {{worker.name}}, the {{worker.role}} on this team.';
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -127,7 +127,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:null-stamp`,
         name: 'Null stamp', visibility: 'ORGANIZATION',
-        personaRole: 'archivist', systemPrompt: 'You are {{name}}, the {{role}}.',
+        personaRole: 'archivist', systemPrompt: 'You are {{worker.name}}, the {{worker.role}}.',
         updatedAt: null,
       },
     });
@@ -206,7 +206,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
 
     await db.agent.update({
       where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}. The team ships on Fridays.' },
+      data: { systemPrompt: 'You are {{worker.name}}. The team ships on Fridays.' },
     });
 
     const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });

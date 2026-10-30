@@ -52,7 +52,7 @@ import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
 import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
-import { applyPlatformVariables, legacyFromValues } from '../lib/personaDescription.js';
+import { applyPlatformVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -903,7 +903,7 @@ async function executeAppRunInner(
         const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
         if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
         const values = record.variables as unknown as Parameters<typeof applyPlatformVariables>[1];
-        servedText = applyPlatformVariables(content, values, legacyFromValues(values));
+        servedText = applyPlatformVariables(content, values);
       }
     }
     const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);

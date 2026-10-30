@@ -57,7 +57,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPlatformVariables, legacyFromValues, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -2165,7 +2165,7 @@ export const workerQueries = {
     }
 
     // Prompt composition mirrors Worker.prompt exactly: the agent's template
-    // with {{name}}/{{role}} bound, then the override as its own paragraph.
+    // with {{worker.*}} variables bound, then the override as its own paragraph.
     const template = agent.systemPrompt ?? null;
     const previewRole = workerRole ?? agent.personaRole ?? '';
     // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
@@ -2192,7 +2192,7 @@ export const workerQueries = {
       }
     }
     const previewTemplate = servedTemplate !== undefined ? servedTemplate : template;
-    const bound = previewTemplate ? applyPlatformVariables(previewTemplate, values, { name, role: previewRole }) : null;
+    const bound = previewTemplate ? applyPlatformVariables(previewTemplate, values) : null;
     const boundOverride = servedTemplate !== undefined ? null : (override ? applyPlatformVariables(override, values) : override);
     const prompt = bound && boundOverride ? `${bound}\n\n${boundOverride}` : (boundOverride ?? bound);
 
@@ -2542,7 +2542,7 @@ export async function composeWorkerPrompt(
   }
   const template = agent?.systemPrompt ?? null;
   // One pass over each authored text (blind review P2-1/P2-2): the override is boot-prompt text too.
-  const bound = template ? applyPlatformVariables(template, platform, { name: worker.name, role }) : null;
+  const bound = template ? applyPlatformVariables(template, platform) : null;
   const override = worker.promptOverride ? applyPlatformVariables(worker.promptOverride, platform) : worker.promptOverride;
   const authored = bound && override ? `${bound}\n\n${override}` : (override ?? bound);
   const text = !derived ? authored : authored ? `${authored}\n\n${derived}` : derived;
@@ -2578,7 +2578,7 @@ async function readServedWorkerText(
       // The values the bind filled, not today's: a session finishes under the briefing it was given (a rename or a new
       // reports-to must not rewrite it). Today's values fill only a variable the record does not hold.
       const values = { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues;
-      return { text: applyPlatformVariables(content, values, legacyFromValues(values)), refusal: null };
+      return { text: applyPlatformVariables(content, values), refusal: null };
     }
     // An open session of THIS worker with no record began before serving was activated. It is never silently upgraded to
     // the current revision (Attach v3 §5): it reads no prompt and a typed notice until it rebinds.
@@ -2587,7 +2587,7 @@ async function readServedWorkerText(
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
-    return { text: applyPlatformVariables(served.content, platform, legacyFromValues(platform)), refusal: null };
+    return { text: applyPlatformVariables(served.content, platform), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
@@ -3280,9 +3280,9 @@ export const workerFieldResolvers = {
       return app;
     },
     /**
-     * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{name}} and
+     * The worker's boot prompt, resolved (cor:agt:020:01 — "how {{worker.name}} and
      * the override compose is tunable"): the agent's `systemPrompt` template
-     * with `{{name}}`/`{{role}}` bound, then the per-worker `promptOverride`
+     * with `{{worker.name}}`/`{{worker.role}}` bound, then the per-worker `promptOverride`
      * appended as its own paragraph. Null when the agent carries no template
      * and the worker no override.
      */
