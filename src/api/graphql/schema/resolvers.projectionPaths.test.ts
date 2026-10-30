@@ -72,7 +72,10 @@ it('writer refusal alone preserves containment and root rollback', async () => {
   // This suppresses only input validation to isolate the filesystem fence; authorization gates remain live.
   const input = vi.spyOn(rootHelpers, 'assertMemoryRootLoc').mockImplementation(() => undefined);
   try {
-    await expect(create('personal', '..:residue')).rejects.toThrow();
+    await expect(create('personal', '..:residue')).rejects.toThrow(
+      'Failed to save node to filesystem: Invalid projection path',
+    );
+    expect(input).toHaveBeenCalledWith('..:residue');
     expect(existsSync(resolve(projection.root, '..', 'residue'))).toBe(false);
     // Main now includes #2728: a root write refusal rolls the Memory transaction back.
     expect(await db.memory.count()).toBe(0);
