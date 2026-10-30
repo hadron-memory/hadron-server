@@ -9325,6 +9325,9 @@ export const typeDefs = `#graphql
     """
     teamChatMessages(
       appRef: ID!
+      """Direct replies only; target excluded. Unknown/deleted target: TEAM_CHAT_REPLY_NOT_FOUND.
+      AND-composes with all filters; a partial window never advances the read mark."""
+      replyToSeq: Int
       """
       Only false suppresses automatic read-cursor advancement. Session
       attribution, read usage and the eligible owned-session heartbeat remain.
@@ -9355,6 +9358,9 @@ export const typeDefs = `#graphql
     """
     channelMessages(
       channelRef: ID!
+      """Direct replies only; target excluded. Unknown/deleted target: TEAM_CHAT_REPLY_NOT_FOUND.
+      AND-composes with all filters; a partial window never advances the read mark."""
+      replyToSeq: Int
       sinceSeq: Int
       beforeSeq: Int
       mentionsRef: ID

@@ -1320,9 +1320,21 @@ async function readChannelRoot(
   // P1 on PR #941). Everything else this function does is memory-scoped.
   appId: string | null,
   root: ChatRootRow,
-  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
+  args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
-  const { sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  const { replyToSeq, sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  // The outer resolver has already established read access. Validate independently of
+  // cursor/mention filters: a missing target is a refusal, a valid empty thread is not.
+  if (replyToSeq != null) {
+    const target = await ctx.db.node.findFirst({
+      where: { memoryId: root.memoryId,
+        loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
+        nodeType: 'chat-message', deletedAt: null, seq: replyToSeq },
+      select: { id: true },
+    });
+    if (!target) throw new GraphQLError(`replyToSeq ${replyToSeq} does not name a message in this Channel.`,
+      { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } });
+  }
   const metadataVisible = await canReadTeamMetadata(ctx, appId);
   const teamFiltered = teamHeadRef != null || untagged != null;
   if (teamFiltered && !metadataVisible) throw new GraphQLError('Team metadata is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN' } });
@@ -1349,6 +1361,7 @@ async function readChannelRoot(
     // prefix must not surface as fabricated transcript entries.
     nodeType: 'chat-message',
     deletedAt: null,
+    ...(replyToSeq != null ? { NOT: { seq: replyToSeq } } : {}),
     // #1116: the two cursors are opposite ends of one range and compose —
     // sinceSeq is exclusive-above, beforeSeq exclusive-below, and passing
     // both reads a bounded slice. A team message always carries a seq, so
@@ -1405,19 +1418,25 @@ async function readChannelRoot(
     );
   };
 
+  const envelopeFilters: Prisma.NodeWhereInput[] = [];
+  if (replyToSeq != null && !memEncInfo.isEncrypted) {
+    envelopeFilters.push({ data: { path: ['replyToSeq'], equals: replyToSeq } });
+  }
   if (teamFiltered && !memEncInfo.isEncrypted) {
     const predicate: Prisma.NodeWhereInput = selectedHead
       ? { data: { path: ['teamHeadIds'], array_contains: [selectedHead] } }
       : { OR: [{ data: { path: ['teamHeadIds'], equals: Prisma.DbNull } }, { data: { path: ['teamHeadIds'], equals: Prisma.AnyNull } }, { data: { path: ['teamHeadIds'], equals: [] } }] };
     const noHeads = predicate;
-    where.AND = untagged === false ? [{ NOT: noHeads }] : [predicate];
+    envelopeFilters.push(untagged === false ? { NOT: noHeads } : predicate);
   }
-  if (mentionsRef || (teamFiltered && memEncInfo.isEncrypted)) {
+  if (envelopeFilters.length > 0) where.AND = envelopeFilters;
+  if (mentionsRef || ((teamFiltered || replyToSeq != null) && memEncInfo.isEncrypted)) {
     const resolved = mentionsRef && appId !== null ? await resolveMentionTokens(ctx, appId, mentionsRef) : null;
     if (mentionsRef && !resolved) return { items: [], total: 0 };
     const { tokens, workerId } = resolved ?? { tokens: [], workerId: null };
     // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
     const matches = (msg: TeamChatMessageOut): boolean =>
+      (replyToSeq == null || msg.replyToSeq === replyToSeq) &&
       (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
@@ -1605,6 +1624,7 @@ export const teamChatQueries = {
     }: {
       appRef: string;
       advanceReadState?: boolean | null;
+      replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
@@ -1615,7 +1635,11 @@ export const teamChatQueries = {
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
     // #2520: the gate half is ONE function shared with the `team_chat_read` run tool.
     const target = await resolveTeamChatReadTarget(ctx, appRef);
-    if (!target) return { items: [], total: 0 };
+    if (!target) {
+      if (args.replyToSeq != null) throw new GraphQLError(`replyToSeq ${args.replyToSeq} does not name a message in this Channel.`,
+        { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq: args.replyToSeq } });
+      return { items: [], total: 0 };
+    }
     const { appId, root } = target;
     // The attention capture changes ordinary-read semantics only for a
     // caller's exact Worker session. Outside that boundary this extra lookup
@@ -1667,6 +1691,7 @@ export const teamChatQueries = {
     }: {
       channelRef: string;
       advanceReadState?: boolean | null;
+      replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
