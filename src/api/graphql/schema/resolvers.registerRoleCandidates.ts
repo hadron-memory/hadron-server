@@ -1,13 +1,13 @@
 /** #2608 experimental register role picking; a read only, never assignment or routing. */
 import { GraphQLError } from 'graphql';
 import { Prisma, type Agent } from '../../../generated/prisma/index.js';
-import { type Context, clampListTake, getAccessibleMemoryIds, isMemoryReadableCached, requireReadableAgent, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, clampListTake, getAccessibleMemoryIds, isMemoryReadableCached, withoutRequestCaches } from './resolvers.helpers.js';
 import { resolveParticipatedApp } from './resolvers.agentTask.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { registerTaskLoc } from './resolvers.taskWarnings.js';
 import { findEffectiveNodeIdByLoc, findEffectiveNodeIdsByLoc, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { agentBaseChains } from '../../../lib/agentBase.js';
-import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { registerReadableAgents } from './registerReadableAgents2732.js';
 import { OPEN_SESSION_PLACEMENT_JOIN } from '../../../lib/sessionPlacement.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 
@@ -32,7 +32,7 @@ type RoleTask = { depth: number; taskUrn: string };
 type RootEntry = { key: string; memoryId: string; firstId: string; inheritRoot: boolean };
 
 function batchedRoleTasks(
-  c: Context,
+  canReadAgent: (agentId: string) => boolean,
   taskLoc: string,
   rootOf: Map<string, RootEntry | null>,
   hits: Map<string, { id: string; memoryId: string; inheritedFrom: InheritedFrom | null } | null>,
@@ -49,10 +49,7 @@ function batchedRoleTasks(
     const cached = roleTaskByAgent.get(agentId);
     if (cached !== undefined) return cached;
     const miss = () => { roleTaskByAgent.set(agentId, null); return null; };
-    const agent = agentRows.get(agentId) ?? null;
-    try { await requireReadableAgent(c, agent, agentId); }
-    catch (e) { if (e instanceof AgentNotFoundError) return miss(); throw e; }
-    if (!agent) return miss();
+    if (!agentRows.get(agentId) || !canReadAgent(agentId)) return miss();
     // Missing system memories contribute no nodes, but do not erase an Agent link's depth.
     const root = rootOf.get(agentId);
     if (!root || !canRead(root.memoryId)) return miss();
@@ -163,7 +160,8 @@ export async function loadRoleCandidates(tx: Prisma.TransactionClient, c: Contex
       : []);
     const accessible = await getAccessibleMemoryIds(c);
     const canRead = (memoryId: string): boolean => accessible === null || accessible.includes(memoryId);
-    const { roleTask } = batchedRoleTasks(c, taskLoc, rootOf, hits, taskByHit, canRead);
+    const canReadAgent = await registerReadableAgents(c, agentRows.values());
+    const { roleTask } = batchedRoleTasks(canReadAgent, taskLoc, rootOf, hits, taskByHit, canRead);
     for (const w of workers) {
       const match = await roleTask(w.agentId, agentRows, chainOf);
       if (!match) continue;

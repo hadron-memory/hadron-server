@@ -78,9 +78,11 @@ export const recoveryQueries = {
   /** Explicit graph inspection; endpoint authority and ancestor liveness precede SQL count and page. */
   recoveryEdges: async (_: unknown, args: { memoryRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
     const memoryId = await recoveryMemory(ctx, args.memoryRef);
+    // #2810: a UNION of key lookups; an OR join condition cannot use the node primary key.
     const endpointMemories = await ctx.db.$queryRaw<Array<{ memory_id: string }>>`
-      SELECT DISTINCT n.memory_id FROM edges e JOIN nodes n ON n.id = e.source_id OR n.id = e.target_id
-      WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL`;
+      SELECT DISTINCT n.memory_id FROM nodes n WHERE n.id IN (
+        SELECT e.source_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL
+        UNION SELECT e.target_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL)`;
     const readable: string[] = [], recoverable: string[] = [];
     for (const { memory_id: id } of endpointMemories) {
       const memory = await ctx.db.memory.findUnique({ where: { id }, select: { deletedAt: true } });
@@ -88,12 +90,15 @@ export const recoveryQueries = {
       readable.push(id);
       if (await canRecoverMemory(ctx, id)) recoverable.push(id);
     }
-    // Every interpolated value is a bound SQL parameter. Ancestor comparison uses ':' boundaries, not LIKE patterns.
+    // Every interpolated value is a bound SQL parameter. The ancestors are the endpoint loc's ':'-boundary
+    // prefixes (ancestorLocs), probed by equality on (memory_id, loc). #2810: a prefix comparison against
+    // every tombstone cannot use an index and scanned the whole nodes table once per endpoint.
     const endpoint = (alias: 's' | 't') => {
       const n = Prisma.raw(alias);
       return Prisma.sql`(( ${n}.deleted_at IS NULL AND ${n}.memory_id = ANY(${readable}::text[])
         AND NOT EXISTS (SELECT 1 FROM nodes p WHERE p.memory_id = ${n}.memory_id AND p.deleted_at IS NOT NULL
-          AND left(${n}.loc, length(p.loc) + 1) = p.loc || ':'))
+          AND p.loc = ANY(ARRAY(SELECT array_to_string((string_to_array(${n}.loc, ':'))[1:g.i], ':')
+            FROM generate_series(1, cardinality(string_to_array(${n}.loc, ':')) - 1) g(i)))))
         OR (${n}.deleted_at IS NOT NULL AND ${n}.node_type <> ${COMMENT_NODE_TYPE}
           AND ${n}.memory_id = ANY(${recoverable}::text[])))`;
     };
