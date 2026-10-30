@@ -139,3 +139,16 @@ it('two identical-field creates at one loc in different orgs: the loser rolling 
   expect(existsSync(yaml(loc))).toBe(true);
   expect(readFileSync(yaml(loc), 'utf-8')).toContain((await db.node.findFirstOrThrow({ where: { memoryId: memB.id, loc } })).id);
 });
+
+it('same loc and identical topic bytes: the loser rolling back leaves the committed winner topic.md', async () => {
+  const orgB = await db.organization.create({ data: { name: 'Fs orphan C', urn: 'fs2731c.test' } });
+  const memB = await db.memory.create({ data: { name: 'C2731', urn: `${orgB.urn}:c2731`, organizationId: orgB.id, class: 'knowledge', visibility: 'ORGANIZATION' } });
+  const loc = 'topicrace2731';
+  await expect(withFsProjectionRollback(() => db.$transaction(async (tx) => {
+    await createNode({ memoryId: mem.id, loc, name: 'same', content: 'shared body' }, tx);
+    await createNode({ memoryId: memB.id, loc, name: 'same', content: 'shared body' });
+    throw new Error('A aborts');
+  }))).rejects.toThrow('A aborts');
+  expect(readFileSync(join(GRAPHS_PATH, loc, '.node', 'topic.md'), 'utf-8')).toBe('shared body');
+  expect(existsSync(yaml(loc))).toBe(true);
+});

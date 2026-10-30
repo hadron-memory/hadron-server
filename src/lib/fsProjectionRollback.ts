@@ -76,6 +76,9 @@ export const projectionCleanupFor = (
     if (before == null) rmSync(path, { force: true });
     else writeFileSync(path, before, 'utf-8');
   };
+  // node.yaml carries this call's unique node id, so it is the proof of this call's GENERATION: a
+  // topic.md can hold bytes identical to a concurrent create's, so it is touched only while the yaml is still ours.
+  if (written.yaml === undefined || read(join(nodeDir, 'node.yaml')) !== written.yaml) return;
   restore('node.yaml', written.yaml, prior.yaml);
   restore('topic.md', written.topic, prior.topic);
   // Prune the directories this projection may have created, deepest first,
