@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -81,6 +82,42 @@ describe('#2871 org-member refusals are typed', () => {
     );
     expect(formatted.extensions?.code).toBe('NOT_FOUND');
     expect(formatted.message).toBe('User is not a member of this organization');
+  });
+
+  it('a caller whose admin role is revoked while queued gets no typed target miss', async () => {
+    // The typed NOT_FOUND must not be thrown before the caller's live authority
+    // is re-established: otherwise a just-revoked admin learns that the target
+    // is absent from the org.
+    const adminId = (await db.user.create({
+      data: { id: generateId(), githubId: 287190, githubUsername: `revoked-admin-${generateId()}` },
+    })).id;
+    await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: adminId, role: 'ADMIN' } });
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const locked = new Promise<void>((resolve) => { held = resolve; });
+    const revoker = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
+      held();
+      await gate;
+      await tx.orgMember.updateMany({
+        where: { organizationId: orgId, userId: adminId }, data: { deletedAt: new Date() },
+      });
+    }, { timeout: 20_000 });
+    await locked;
+    let outcome: Promise<{ code?: string; message: string }> | undefined;
+    try {
+      outcome = refusal(() => M.updateOrgMember(null, { orgId, userId: strangerId, role: 'READER' }, ctx(adminId)));
+      await waitForLockWaiters(db, 1);
+      release();
+      await revoker;
+      const result = await outcome;
+      expect(result.code).not.toBe('NOT_FOUND');
+      expect(result.message).not.toMatch(/not a member/);
+    } finally {
+      release();
+      await Promise.allSettled([revoker, outcome]);
+    }
   });
 
   it('controls: add, change role, remove, and a repeat removal of a revoked row all succeed', async () => {
