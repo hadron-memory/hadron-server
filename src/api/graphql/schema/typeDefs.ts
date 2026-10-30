@@ -10957,6 +10957,18 @@ export const typeDefs = `#graphql
     updateSession(id: ID!, prNumber: Int, branch: String, llmModel: String, family: String): Session!
 
     """
+    #2896 — report a session's outcome: outcome is a number from 0 to 1, outcomeRef an opaque reference of the
+    reporter's (a ticket, a survey id) and outcomeMeta any JSON it wants kept. The same implementation as
+    POST /sessions/:id/outcome, which stays for edge devices and webhooks. An outcome is a WRITE to the session, so
+    it takes the session write gate: the attributed user, or a pure App key for its own App's user-less session
+    (hrn:node:hadronmemory.com:specs:cor:dmo:070:05); the strict owner of a personal or private memory's session wins
+    over a platform admin (hrn:node:hadronmemory.com:specs:cor:acl:010:02). Reporting is not driving: a lapsed session
+    stays lapsed. A number outside 0..1 is BAD_USER_INPUT; an unknown or deleted session is BAD_USER_INPUT; a refused
+    write is FORBIDDEN, and an OAuth credential limited to the MCP surface is FORBIDDEN with its reason.
+    """
+    recordSessionOutcome(sessionId: ID!, outcome: Float!, outcomeRef: String, outcomeMeta: JSON): Session!
+
+    """
     End a session, and — for a worker-bound one — write its closing handoff
     (#1029). Ending a client's chat session does not end its worker session
     or call this operation. Inactivity alone never ends a session; the reaper
