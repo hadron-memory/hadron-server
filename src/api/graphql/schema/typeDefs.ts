@@ -7913,7 +7913,7 @@ export const typeDefs = `#graphql
     read; the cursor is the (createdAt, id) pair, so events sharing a
     timestamp are never skipped. since is a coarse time filter (strictly
     after), not a continuation. limit defaults to 20 (cap 200).
-    task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.
+    task.warning and task.edited are passive history (never wake, suppress a wake or count as activity); payload is {code} or changed field names only.
     """
     agentTeamEvents(
       appRef: ID!
@@ -9806,6 +9806,15 @@ export const typeDefs = `#graphql
     addAgentTaskBlocker(taskRef: ID!, blockerTaskRef: ID!): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — remove a blocker from a backlog/pending task. Last-blocker release restarts stall clocks and preserves status/assignee. Assigner authority."
     removeAgentTaskBlocker(taskRef: ID!, blockerTaskRef: ID!): AgentTask!
+
+    """
+    #2645 — edit descriptive fields using assignment authority (Proposed Editing rule,
+    hrn:node:hadronmemory.com:specs:cor:agt:050:09). Owner, reporting-chain coordinator or App manager;
+    never an assignee alone or an App key. Ended tasks refuse TASK_ENDED. Omitted fields stay unchanged;
+    empty optional fields clear, tags/requirements replace whole. An edit is not progress and clears no wake.
+    Source is fixed. Event carries changed field names only (hrn:node:hadronmemory.com:specs:cor:agt:050:11).
+    """
+    updateAgentTask(taskId: ID!, input: UpdateAgentTaskInput!): AgentTask!
 
     """
     #1747 — create a ticker in an App (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :18). Any App participant, or a
@@ -14906,6 +14915,18 @@ export const typeDefs = `#graphql
     state: AvailabilityState!
     reason: AvailabilityReason
     until: DateTime
+  }
+
+  "#2645: named fields replace; omission leaves unchanged. Title cannot be empty. Source and lifecycle fields are fixed."
+  input UpdateAgentTaskInput {
+    title: String
+    description: String
+    tags: [String!]
+    requirements: AgentTaskRequirementsInput
+    "Reanchors only the not-started deadline; null clears the explicit deadline. Existing alarms stay raised."
+    startBy: DateTime
+    "Null clears to false; omission preserves the stored choice."
+    closeSessionWhenDone: Boolean
   }
 
   """

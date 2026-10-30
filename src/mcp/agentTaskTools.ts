@@ -85,7 +85,7 @@ type AvailabilityRow = Record<string, any>;
 
 /** The write tools, for the caller-session gate's bookkeeping and tests. */
 export const AGENT_TASK_WRITE_TOOLS = [
-  'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
+  'hadron_task_update', 'hadron_task_create', 'hadron_task_assign', 'hadron_task_reassign', 'hadron_task_start',
   'hadron_task_progress', 'hadron_task_finish', 'hadron_task_cancel',
   'hadron_task_blocker_add', 'hadron_task_blocker_remove', 'hadron_task_priority_set',
   // #1754 — the backlog moves (cor:agt:050:02)
@@ -394,6 +394,16 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     async ({ session, ...args }) => write('hadron_task_priority_set', session, 'Priority set', (ctx) => M.setAgentTaskPriority({}, args, ctx)));
 
   server.tool(
+    'hadron_task_update',
+    'Edit descriptive task fields using assignment authority (Proposed cor:agt:050:09 Editing). ' +
+      'Omitted fields stay unchanged; optional empty values clear; tags and requirements replace whole. ' +
+      'Source and lifecycle fields are fixed. Ended tasks refuse edits; edits are not progress and clear no wake.',
+    SHAPE_HADRON_TASK_UPDATE,
+    async ({ session, taskId, input }) =>
+      write('hadron_task_update', session, 'Updated', ctx => M.updateAgentTask({}, {taskId,input:input ?? {}}, ctx)),
+  );
+
+  server.tool(
     'hadron_task_assign',
     'Assign a task with no assignee — a queued task (pending) or a BACKLOG task: the task\'s owner, a worker the owner ' +
       'reports to, or whoever manages the App (cor:agt:050:09). Assigning a BACKLOG task moves it to pending. A task that ' +
@@ -495,7 +505,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning is passive history (never wakes, suppresses a wake or counts as activity), payload {code} only.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning and task.edited are passive history (never wake, suppress a wake or count as activity); payload is {code} or changed field names only.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
@@ -618,6 +628,13 @@ const availabilityFields = {
     .describe('Required when UNAVAILABLE; refused when AVAILABLE.'),
   until: z.string().optional().describe('ISO date-time when an UNAVAILABLE record lapses; in the future.'),
 };
+
+const SHAPE_HADRON_TASK_UPDATE = { taskId, input: z.object({
+      title: z.string().nullable().optional(), description: z.string().nullable().optional(),
+      tags: z.array(z.string()).nullable().optional(),
+      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
+      startBy: z.string().nullable().optional(), closeSessionWhenDone: z.boolean().nullable().optional(),
+    }).strict().optional(), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_CREATE = {
   priority: z.number().int().optional().describe('Priority1..5 (1 highest), default1; assigner authority required when named.'),
