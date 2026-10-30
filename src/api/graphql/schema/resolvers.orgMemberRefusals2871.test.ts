@@ -120,6 +120,44 @@ describe('#2871 org-member refusals are typed', () => {
     }
   });
 
+  it.each(['updateOrgMember'])('%s: an admin revoked after the pre-check but before the transaction gets no typed target miss', async (mutation) => {
+    // Unqueued interleave: the revoke commits between the resolver's pre-check
+    // and the transaction. The miss must follow the in-transaction authorize.
+    const adminId = (await db.user.create({
+      data: { id: generateId(), githubId: 287191, githubUsername: `revoked-admin-${generateId()}` },
+    })).id;
+    await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: adminId, role: 'ADMIN' } });
+    let revoked = false;
+    const revokeOnce = async () => {
+      if (revoked) return;
+      revoked = true;
+      await db.orgMember.updateMany({
+        where: { organizationId: orgId, userId: adminId }, data: { deletedAt: new Date() },
+      });
+    };
+    const userDelegate = new Proxy((db as any).user, {
+      get(target, prop) {
+        const value = target[prop];
+        return typeof value === 'function'
+          ? async (...args: unknown[]) => { await revokeOnce(); return value.apply(target, args); }
+          : value;
+      },
+    });
+    const racing = new Proxy(db as any, {
+      get(target, prop) {
+        if (prop === 'user') return userDelegate;
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const result = await refusal(() => M[mutation](
+      null, { orgId, userRef: strangerId, role: 'READER' }, { ...ctx(adminId), db: racing } as Context,
+    ));
+    expect(revoked).toBe(true);
+    expect(result.code).not.toBe('NOT_FOUND');
+    expect(result.message).not.toMatch(/not a member/);
+  });
+
   it('controls: add, change role, remove, and a repeat removal of a revoked row all succeed', async () => {
     expect((await M.addOrgMember(null, { orgId, userId: strangerId, role: 'READER' }, ctx(ownerId))).role).toBe('READER');
     expect((await M.updateOrgMember(null, { orgId, userId: strangerId, role: 'CONTRIBUTOR' }, ctx(ownerId))).role)
