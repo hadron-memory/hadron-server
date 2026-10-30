@@ -341,6 +341,73 @@ describe('contract #2420', () => {
     await setProps(null);
   });
 
+  it('a schema with a regex keyword is unusable, so a catastrophic pattern never runs on the shared event loop (§10 P1)', async () => {
+    const hostile = 'a'.repeat(28) + '!';
+    for (const schema of [
+      { type: 'object', properties: { k: { type: 'string', pattern: '^(a+)+$' } } },
+      { type: 'object', patternProperties: { '^(a+)+$': { type: 'string' } } },
+    ]) {
+      const node = await putSchema(schema);
+      const started = Date.now();
+      await expect(setProps({ k: hostile })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+      expect(Date.now() - started).toBeLessThan(500);
+      await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+    }
+  });
+
+  it('a schema node may have a property named pattern as long as no regex keyword is used', async () => {
+    await putSchema({ type: 'object', properties: { pattern: { type: 'string' } } });
+    await setProps({ pattern: 'anything' });
+  });
+
+  it('bounds the schema itself: more than 64 KiB or more than 32 levels deep is unusable', async () => {
+    const node = await putSchema({ type: 'object', description: 'x'.repeat(70_000) });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    let deep: any = { type: 'string' };
+    for (let i = 0; i < 40; i++) deep = { type: 'object', properties: { a: deep } };
+    await db.node.update({ where: { id: node.id }, data: { data: deep } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object' } } });
+    await setProps({ a: 1 });
+  });
+
+  it('a changed schema node applies to the very next write (no stale compiled schema)', async () => {
+    const node = await putSchema({ type: 'object', required: ['one'] });
+    await expect(setProps({ two: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', required: ['two'] } } });
+    await setProps({ two: 1 });
+    await expect(setProps({ one: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+  });
+
+  it('a violation names the path and keyword only, never the schema\'s own text (§10 P3-1)', async () => {
+    await putSchema({ type: 'object', required: ['SECRET_FIELD_NAME'], properties: { tier: { enum: ['HIDDEN_A', 'HIDDEN_B'] } } });
+    for (const bad of [{ other: 1 }, { SECRET_FIELD_NAME: 1, tier: 'x' }]) {
+      const err: any = await setProps(bad, assignee.id).catch((e) => e);
+      expect(err.extensions.code).toBe('PROPERTIES_SCHEMA_VIOLATION');
+      expect(err.message).not.toMatch(/SECRET_FIELD_NAME|HIDDEN_A|HIDDEN_B/);
+    }
+  });
+
+  it('an $async schema, and a schema in a soft-deleted memory, are unusable (§10 P3-2 G10, G12)', async () => {
+    const node = await putSchema({ $async: true, type: 'object' });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.delete({ where: { id: node.id } });
+    const baseMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone-system`, class: 'system' } });
+    const base = await db.agent.create({ data: { organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone`, systemMemoryId: baseMemory.id } });
+    await db.agent.update({ where: { id: agent.id }, data: { extendsAgentId: base.id } });
+    await putSchema({ type: 'object' }, baseMemory.id);
+    await db.memory.update({ where: { id: baseMemory.id }, data: { deletedAt: new Date() } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+  });
+
+  it('a creator who may not write properties is not told anything by an invalid value: the task is made without them (§10 P3-2 G16)', async () => {
+    await putSchema({ type: 'object', required: ['review'] });
+    for (const bad of [[1], 'text', { nope: 1 }, 7]) {
+      const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Quiet', owner: { user: manager.id }, source: 's', properties: bad } }, ctx(sibling.id));
+      expect((await stored(made.id)).properties).toBeNull();
+    }
+  });
+
   it('bounds nesting at 64 levels so a small deeply nested value is refused typed, not an internal error', async () => {
     const nested = (levels: number) => JSON.parse(`${'{"a":'.repeat(levels)}1${'}'.repeat(levels)}`);
     await setProps(nested(64));
