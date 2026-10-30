@@ -196,28 +196,39 @@ describe('#2721 a rejected reconcile releases its slot', () => {
    */
   async function rejectionScenario(r: ReturnType<typeof gatedRequest>, interruptAt?: 'cap' | 'rejected') {
     const response = batch(r.ctx, 'id revision', `memory: "$m", locPrefix: "batch:n00"`);
-    // The cap: four held, and the rest wait app-side rather than reaching the pool.
-    await r.starts(4);
-    await turn();
-    expect(r.held).toHaveLength(4);
-    expect(r.ctx.nodeReconcileSlots!.waiting).toHaveLength(K - 4);
-    if (interruptAt === 'cap') throw new Error('#2889 injected failure at the cap');
+    try {
+      // The cap: four held, and the rest wait app-side rather than reaching the pool.
+      await r.starts(4);
+      await turn();
+      expect(r.held).toHaveLength(4);
+      expect(r.ctx.nodeReconcileSlots!.waiting).toHaveLength(K - 4);
+      if (interruptAt === 'cap') throw new Error('#2889 injected failure at the cap');
 
-    // Reject the earliest. Its slot must pass to the next queued reconcile before any other one settles.
-    r.held[0].fail();
-    await r.starts(5);
-    expect(r.held).toHaveLength(5);
-    if (interruptAt === 'rejected') throw new Error('#2889 injected failure after the rejection');
+      // Reject the earliest. Its slot must pass to the next queued reconcile before any other one settles.
+      r.held[0].fail();
+      await r.starts(5);
+      expect(r.held).toHaveLength(5);
+      if (interruptAt === 'rejected') throw new Error('#2889 injected failure after the rejection');
 
-    // Release everything else, in order; later starts run as they arrive.
-    r.releaseAll();
-    await r.starts(K);
-    const res = await response;
-    const outcomes = await Promise.allSettled(r.settled);
-    // The response does not wait for siblings of a failed non-null field; after the last transaction only microtasks
-    // remain (the fast path does no further I/O), so one turn lets every slot's finally run.
-    await turn();
-    return { res, outcomes };
+      // Release everything else, in order; later starts run as they arrive.
+      r.releaseAll();
+      await r.starts(K);
+      const res = await response;
+      const outcomes = await Promise.allSettled(r.settled);
+      // The response does not wait for siblings of a failed non-null field; after the last transaction only microtasks
+      // remain (the fast path does no further I/O), so one turn lets every slot's finally run.
+      await turn();
+      return { res, outcomes };
+    } finally {
+      // #2889: whatever failed above, open every gate and wait until no new reconcile starts, so nothing is left pending.
+      // Idempotent on success: the gates are already open and the work settled.
+      r.releaseAll();
+      for (let n = -1; n !== r.settled.length;) {
+        n = r.settled.length;
+        await Promise.allSettled([response, ...r.settled]);
+        await turn();
+      }
+    }
   }
 
   it('an early rejection frees its slot at once; every other queued reconcile settles, at most 4 in flight, slots drained', SLOW, async () => {
