@@ -2956,7 +2956,8 @@ describe('#2754 — the server tick line', () => {
     });
   }
 
-  for (const [why, tickText] of [['null', null], ['absent', undefined], ['untypeable', 'tick coordinator-tick: run x\u0007y']] as const) {
+  const BEL = String.fromCharCode(7); // a real control character, built explicitly so no diff view can show it as text
+  for (const [why, tickText] of [['null', null], ['absent', undefined], ['untypeable', `tick coordinator-tick: run x${BEL}y`]] as const) {
     it(`8b. a MAPPED coordinator-tick whose tick line is ${why} keeps the base-tick sentence (the task is named nowhere else)`, async () => {
       f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, tickText)];
       await go();
