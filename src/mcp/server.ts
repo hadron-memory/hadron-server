@@ -4528,9 +4528,10 @@ export function createMcpServerInstance(
         if (filterMemoryIds.length === 0) {
           return textResult(`${scopeNoteLine(scopeRes)}\n\nFound 0 node(s) — ${memSelectors.length ? 'the memories you named are outside this scope' : 'this scope lists no memory you can read'}.`);
         }
-      } else if (scopeRes?.kind === 'global') {
-        scopeOrgId = scopeRes.orgScopeId ?? undefined;
       }
+      // #1987: as in the resolver, the global view's materialised list still
+      // takes the org narrowing (App-memory exclusion of the runnable catalogue).
+      if (scopeRes?.kind === 'global') scopeOrgId = scopeRes.orgScopeId ?? undefined;
       // Every scoped return below — passages, the vector diagnostics, the node
       // list — starts with the disclosure (Codex + Copilot on PR #1161).
       const scopePrefix = scopeRes ? `${scopeNoteLine(scopeRes)}\n\n` : '';
