@@ -11087,7 +11087,9 @@ export const typeDefs = `#graphql
     # Organization membership (platform ADMIN or org OWNER/ADMIN).
     # orgId accepts the entity's ID or URN. userId is keyed by raw ID only —
     # User has no urn column.
-    """Accepts the entity's ID or URN (orgId)."""
+    """
+    Accepts the entity's ID or URN (orgId). A user who is already a live member is refused with CONFLICT.
+    """
     addOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
       orgRef: String
@@ -11097,7 +11099,9 @@ export const typeDefs = `#graphql
       userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
       role: Role!
     ): OrgMember!
-    """Accepts the entity's ID or URN (orgId)."""
+    """
+    Accepts the entity's ID or URN (orgId). Refused with NOT_FOUND when the user is not a live member, and with CONFLICT when it would demote the organization's last live owner.
+    """
     updateOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
       orgRef: String
@@ -11107,7 +11111,9 @@ export const typeDefs = `#graphql
       userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
       role: Role!
     ): OrgMember!
-    """Accepts the entity's ID or URN (orgId)."""
+    """
+    Accepts the entity's ID or URN (orgId). Refused with NOT_FOUND when the user never held a membership, and with CONFLICT when it would remove the last live owner; removing an already-revoked member succeeds again.
+    """
     removeOrgMember(
       "#764 — the organization as an id / slug / hrn:org:<slug> URN. Supply this OR orgId."
       orgRef: String
