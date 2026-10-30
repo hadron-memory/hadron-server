@@ -8,7 +8,7 @@ describe('isPortalPath (#2909)', () => {
     expect(isPortalPath(v, FRONTEND)).toBe(true);
   });
 
-  it.each(['', '//h', '/\\h', '\\h', 'h/x', 'https://h', 'javascript:alert(1)', '\t//h', '/\t/h', '/a b', '/a\u0000b', ' /a'])(
+  it.each(['', '//h', '/\\h', '\\h', 'h/x', 'https://h', 'javascript:alert(1)', '\t//h', '/\t/h', '/a b', '/a\u0000b', ' /a', '/..//evil', '/.//evil', '/%2e%2e//evil', '/a/..//evil'])(
     'refuses %j',
     (v) => {
       expect(isPortalPath(v, FRONTEND)).toBe(false);

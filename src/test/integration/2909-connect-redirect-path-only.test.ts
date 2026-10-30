@@ -96,6 +96,7 @@ const REFUSED: [string, string][] = [
   ['an absolute https URL', 'https://evil.example/x'],
   ['a protocol-relative URL', '//evil.example/x'],
   ['a backslash after the slash', '/\\evil.example/x'],
+  ['a dot segment that resolves to a protocol-relative path', '/..//evil.example/x'],
   ['a tab before a protocol-relative URL', '\t//evil.example/x'],
   ['a tab inside the slashes', '/\t/evil.example/x'],
   ['a newline inside the slashes', '/\n/evil.example/x'],
