@@ -368,6 +368,21 @@ async function requireMemorySubscription(
   });
 }
 
+
+/**
+ * #2819: a memory create/clone/extract onto a URN a live memory already holds.
+ * CONFLICT is the code the CLI maps to exit 5; it was a plain Error, which
+ * surfaced as INTERNAL_SERVER_ERROR. The message is unchanged and carries only
+ * the URN the caller supplied, so the refusal is identical whether or not the
+ * caller can see the holder (the existence check ignores visibility): no
+ * holder id, owner or visibility is added.
+ */
+function memoryUrnConflict(urn: string): GraphQLError {
+  return new GraphQLError(`A memory with URN "${urn}" already exists`, {
+    extensions: { code: 'CONFLICT' },
+  });
+}
+
 export const memoryMutations = {
     mergeMemories: async (
       _: unknown,
@@ -717,7 +732,7 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${memoryUrn}" already exists`);
+          throw memoryUrnConflict(memoryUrn);
         }
       }
 
@@ -1516,7 +1531,7 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${newUrn}" already exists`);
+          throw memoryUrnConflict(newUrn);
         }
       }
 
@@ -1737,7 +1752,7 @@ export const memoryMutations = {
           // #1468 — refused for a stamped corpus still holding a spec.
           await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
         } else {
-          throw new Error(`A memory with URN "${newUrn}" already exists`);
+          throw memoryUrnConflict(newUrn);
         }
       }
 
