@@ -62,7 +62,7 @@ async function say(ch: typeof channel, body: string, data: Record<string, unknow
 }
 const mention = (...mentions: string[]) => ({ mentions });
 const mkTicker = (over: Record<string, unknown> = {}) =>
-  db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: `eng-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), ...over } });
+  db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: `eng-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), ...over } });
 const subscribe = (tickerId: string, workerId: string) =>
   db.tickerSubscription.create({ data: { id: generateId(), tickerId, workerId, createdBy: manager.id } });
 const due = (c: Context, extra: Record<string, unknown> = {}) => Q.dueWakes({}, { appRef: app.id, ...extra }, c);

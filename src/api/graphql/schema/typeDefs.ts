@@ -9782,7 +9782,8 @@ export const typeDefs = `#graphql
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
     task.finish.open-children, and from #2607 task.cancel.open-children on
-    cancelAgentTask and alarm.ack.outside-chain on acknowledgeAlarm); a client must tolerate unknown codes. \`text\` is
+    cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
+    a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
     { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
     blocks and never reveals another worker's state to a caller who could not

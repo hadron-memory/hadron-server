@@ -247,7 +247,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   server.tool(
     'hadron_ticker_list',
     'List the live tickers of a team App, with their cadence, owner and subscribers (cor:agt:080). A ticker is a named, ' +
-      'cadenced wake schedule; workers subscribe to the ones they want. Readable by the App\'s participants.',
+      'cadenced wake schedule; workers subscribe to the ones they want. Shows the permanent tick code and the register entry loc you may read, without resolving a worker task. Readable by the App\'s participants.',
     SHAPE_HADRON_TICKER_LIST,
     async ({ appRef, session }) =>
       read(session, async (ctx) => {
@@ -262,7 +262,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'hadron_ticker_create',
     'Create a ticker in a team App (cor:agt:080:18). Any App participant, or a session bound to a worker of the App, up to ' +
       'the App\'s live-ticker cap (20 by default). You become its owner. Its slug, and so its URN, is derived from the name ' +
-      'and permanent. The cadence is in seconds, from the App\'s floor (120 by default) to 86400.',
+      'and permanent. So is its tick code. A code without a readable register entry produces a warn-only ticker.code.unmapped after success. The cadence is in seconds, from the App\'s floor (120 by default) to 86400.',
     SHAPE_HADRON_TICKER_CREATE,
     async ({ session, appRef, ...input }) =>
       write('hadron_ticker_create', session, async (ctx) => {
@@ -387,7 +387,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       'channel and a PROOF: deliver the nudge, then pass the proof to hadron_ack_wakes. Reading wakes never moves anyone\'s ' +
       'read position. Allowed for a worker\'s holder (their workers) and whoever manages the App (all). Never due: a retired, ' +
       'paused or dormant worker; an unavailable, unheld or session-less worker IS still due. `dormant` lists dormant workers ' +
-      'with mentions waiting. A channel you cannot read is left out entirely.',
+      'with mentions waiting. A channel you cannot read is left out entirely. The server tick line names each readable role task, otherwise the code and guidance to resolve it yourself.',
     SHAPE_HADRON_DUE_WAKES,
     async ({ session, appRef, ...rest }) =>
       readWakes(session, async (ctx) => {
@@ -484,7 +484,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   server.tool(
     'hadron_agent_ticker_template_list',
     'List the ticker templates an Agent declares (#2024). Casting a worker from the Agent creates these tickers for the worker ' +
-      'and subscribes it; a template edit reaches only FUTURE casts. Readable by anyone who can read the Agent.',
+      'and subscribes it; a template edit reaches only FUTURE casts. Shows the code future copies receive from the current template name. Readable by anyone who can read the Agent.',
     SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST,
     async ({ agentRef, session }) => read(session, async (ctx) => {
       const rows = await Q.agentTickerTemplates({}, { agentRef }, ctx);

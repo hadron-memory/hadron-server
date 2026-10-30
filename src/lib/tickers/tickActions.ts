@@ -82,13 +82,15 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
             }
           }
           answers.set(k, answer);
-          const memoryIds = [...(answer.entryMemoryIds ?? []), ...(answer.taskMemoryId ? [answer.taskMemoryId] : [])];
           let disclose = answer.state !== 'UNKNOWN' && (!!auth || answer.state === 'UNMAPPED' && answer.entryMemoryIds?.length === 0);
-          for (const id of memoryIds) {
+          for (const id of answer.entryMemoryIds ?? []) {
             if (!disclose) break;
-            disclose = await readerLookup.readable(txCtx, id, 'reader') &&
-              (id === answer.taskMemoryId && answer.state === 'UNRESOLVED' || await readerLookup.readable(auth!, id, principal));
+            disclose = await readerLookup.readable(txCtx, id, 'reader') && await readerLookup.readable(auth!, id, principal);
           }
+          // A worker-side unreadable nearest task is UNRESOLVED, not a farther task (acceptance 11).
+          // This never relaxes the entry gate, even when entry and task share one memory.
+          if (disclose && answer.taskMemoryId) disclose = await readerLookup.readable(txCtx, answer.taskMemoryId, 'reader') &&
+            (answer.state === 'UNRESOLVED' || await readerLookup.readable(auth!, answer.taskMemoryId, principal));
           visible.set(k, disclose ? { code: answer.code, state: answer.state as PublicTickAction['state'], ...(answer.taskLoc ? { taskLoc: answer.taskLoc } : {}), ...(answer.taskUrn ? { taskUrn: answer.taskUrn } : {}) } : { code: answer.code, state: 'WITHHELD' });
         }
       }
@@ -101,7 +103,8 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
     const stored: WorkerWake = { ...item.wake, reasons: item.wake.reasons.map(r => {
       if (r.kind !== 'TICK') return r;
       const code = names.get(r.tickerId)?.tickCode ?? r.action?.code ?? 'tick.unknown';
-      return { ...r, action: answers.get(key(item.workerId, r.tickerId)) ?? { code, state: 'UNKNOWN' as const } };
+      const kept = !refresh.has(item.workerId) && r.action && 'entryMemoryIds' in r.action ? r.action as StoredTickAction : null;
+      return { ...r, action: answers.get(key(item.workerId, r.tickerId)) ?? kept ?? { code, state: 'UNKNOWN' as const } };
     }) };
     const publicWake: WorkerWake = { ...item.wake, reasons: item.wake.reasons.map(r => {
       if (r.kind !== 'TICK') return r;

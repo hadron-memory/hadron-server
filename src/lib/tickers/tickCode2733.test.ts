@@ -3,6 +3,7 @@ import { expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { tickerSlugBase } from './tickerSlug.js';
 import { TASK_WARNING_CODES } from '../../api/graphql/schema/resolvers.taskWarnings.js';
+import * as teamEvents from '../agentTasks/events.js';
 
 const migration = readFileSync(new URL('../../../prisma/migrations/20261030021000_ticker_tick_code/migration.sql', import.meta.url), 'utf8');
 const statements = migration.replace(/--[^\n]*/g, '').split(';').map(s => s.trim()).filter(Boolean);
@@ -34,6 +35,9 @@ it('backfills all four legacy shapes and exactly matches JS slug derivation, ind
 
 it('reserves tick. outside the warning code list and mirrors the CHECK in post-push and the test harness', () => {
   expect(TASK_WARNING_CODES.some(c => c.startsWith('tick.'))).toBe(false);
+  const eventTypes = Object.entries(teamEvents).filter(([key, value]) => key.endsWith('_EVENT_TYPES') && Array.isArray(value)).flatMap(([, value]) => value as readonly string[]);
+  expect(eventTypes.some(c => c.startsWith('tick.'))).toBe(false);
+  expect(TASK_WARNING_CODES.at(-1)).toBe('ticker.code.unmapped');
   const source = readFileSync(new URL('../../../prisma/ticker-tick-code-invariants.sql', import.meta.url), 'utf8');
   const check = "CHECK (tick_code LIKE 'tick.%' AND length(tick_code) > 5)";
   expect(source).toContain(check);

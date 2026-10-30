@@ -18,8 +18,8 @@ export async function tickFixture2733() {
   const outside = await db.user.create({ data: { githubId: 273303, githubUsername: 'tick-outside', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const context = (userId = admin.id, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra });
-  async function agent(name: string) {
-    const made = await M.createAgent({}, { orgId: org.id, name }, context());
+  async function agent(name: string, orgId = org.id) {
+    const made = await M.createAgent({}, { orgId, name }, context());
     const row = await db.agent.findUniqueOrThrow({ where: { id: made.id } });
     if (!row.systemMemoryId) throw new Error('Fixture agent has no system memory');
     const memory = await db.memory.findUniqueOrThrow({ where: { id: row.systemMemoryId } });
@@ -48,5 +48,5 @@ export async function tickFixture2733() {
       name, cadenceSeconds: 600, reasons: ['EVERY_TICK'],
       anchorAt: new Date(tickNow2733.getTime() - 600_000).toISOString(), ...extra,
     } }, c);
-  return { org, app, admin, member, outside, team, base, roleA, roleB, context, node, entry, worker, ticker };
+  return { org, app, admin, member, outside, team, base, roleA, roleB, context, node, entry, worker, ticker, agent };
 }

@@ -233,3 +233,44 @@ it('lets the reader alone decide an unheld worker, including a later reader on t
   expect(action(first, w.id)?.state).toBe('WITHHELD');
   expect(action(await due(), w.id)?.state).toBe('MAPPED');
 });
+
+it('does not erase the issued answer when a later reader gate fails transiently', async () => {
+  await f.entry('tick.shared');
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const { w } = await subscribed();
+  const first = await due();
+  const failure = vi.spyOn(RegisterLookup.prototype, 'teamMemory').mockRejectedValueOnce(new Error('reader failure'));
+  expect(action(await due(), w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  failure.mockRestore();
+  expect(action(await due(), w.id)).toEqual(action(first, w.id));
+});
+
+it('bounds a slow lookup with the real PostgreSQL statement timeout and keeps the wake', async () => {
+  const { w } = await subscribed();
+  vi.spyOn(RegisterLookup.prototype, 'entry').mockImplementation(async function(this: RegisterLookup) {
+    await this.tx.$queryRawUnsafe('SELECT pg_sleep(0.4)');
+    return { state: 'UNMAPPED', checkedMemoryIds: [] };
+  });
+  const out = await due();
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
+  expect(out.wakes[0].proof).toBeTruthy();
+  const stored = await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: w.id } });
+  expect((stored.wake as any).reasons[0].action.state).toBe('UNKNOWN');
+});
+
+it('never consults another tenant register or this App install memory', async () => {
+  const otherOrg = await db.organization.create({ data: { name: 'Other tenant', urn: 'other-' + f.org.urn } });
+  await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: f.admin.id, role: 'ADMIN' } });
+  const otherTeam = await f.agent('Other Team', otherOrg.id);
+  const otherApp = await db.app.create({ data: { organizationId: otherOrg.id, name: 'Other App', urn: otherOrg.urn + ':team' } });
+  await db.appAgent.create({ data: { appId: otherApp.id, agentId: otherTeam.id } });
+  await f.node(otherTeam.systemMemoryId, 'roles');
+  await f.entry('tick.shared', 'tasks:other-tenant', otherTeam.systemMemoryId);
+  const install = await db.memory.create({ data: { name: 'Install memory', urn: f.org.urn + ':install', organizationId: f.org.id, class: 'system', appId: f.app.id, isInstallMemory: true, installOfAgentId: f.team.id } });
+  await f.entry('tick.shared', 'tasks:install-only', install.id);
+  const { w } = await subscribed();
+  const out = await due();
+  expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'UNMAPPED' });
+  expect(JSON.stringify(out)).not.toContain('tasks:other-tenant');
+  expect(JSON.stringify(out)).not.toContain('tasks:install-only');
+});

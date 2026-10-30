@@ -8,7 +8,7 @@ UPDATE tickers SET tick_code = 'tick.' || slug WHERE source_template_id IS NULL;
 WITH names AS (
   SELECT id, regexp_replace(
     regexp_replace(translate(replace(name, U&'\0130', U&'i\0307'),
-      'ABCDEFGHIJKLMNOPQRSTUVWXYZK', 'abcdefghijklmnopqrstuvwxyzk'),
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZK', 'abcdefghijklmnopqrstuvwxyzk') COLLATE "C",
       '[^a-z0-9._-]+', '-', 'g'), '^[._-]+|[._-]+$', '', 'g') AS atom
   FROM agent_ticker_templates
 ), codes AS (
