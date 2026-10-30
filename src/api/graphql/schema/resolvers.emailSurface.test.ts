@@ -248,6 +248,27 @@ describe('connection management stays org-ADMIN', () => {
       expect((await expectUntouched()).deletedAt).toBeNull();
     });
 
+    it('denies an App-key principal that holds a real scoped ConnectionGrant: the grant opens operations, never Delete (cor:dmo:080:04)', async () => {
+      const app = await db.app.create({
+        data: { id: generateId(), name: 'GrantApp', urn: 'mailorg.test:grantapp', organizationId: orgId },
+      });
+      await db.connectionGrant.create({
+        data: { id: generateId(), connectionId, granteeAppId: app.id, grantedByUserId: owner.id, scopes: ['mail.read'] },
+      });
+      const principal = { appId: app.id, roles: [] as string[] };
+
+      // Control: this exact principal is authorized for an operation through the grant, so the Delete denial
+      // below cannot be a principal the gate refuses anyway.
+      vi.mocked(runEmailOperation).mockResolvedValueOnce({ messages: [] });
+      const op = await run(MESSAGES_QUERY(connectionId), principal);
+      expect(op.errors).toBeUndefined();
+      expect(vi.mocked(runEmailOperation)).toHaveBeenCalledTimes(1);
+
+      const r = await run(DELETE(connectionId), principal);
+      expect(denial(r)).toEqual([['Forbidden', 'FORBIDDEN']]);
+      expect((await expectUntouched()).deletedAt).toBeNull();
+    });
+
     it('denies an App-key principal holding no org role', async () => {
       const r = await run(DELETE(connectionId), { appId: 'app-1', roles: [] });
       expect(denial(r)).toEqual([['Forbidden', 'FORBIDDEN']]);
@@ -304,9 +325,12 @@ describe('connection management stays org-ADMIN', () => {
       }, { timeout: 20_000 });
       await locked;
       const a = run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+      // Declared outside the try so the finally can reach it: an assertion or barrier timeout before B starts
+      // must not leave a started request behind, and one that never started must not be awaited.
+      let b: ReturnType<typeof run> | undefined;
       try {
         await waitForLockWaitersOfType(db, 'transactionid', 1);
-        const b = run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
+        b = run(DELETE(connectionId), { userId: orgAdmin.id, roles: ['READER'] });
         await waitForLockWaitersOfType(db, 'advisory', 1);
         release();
         await holder;
@@ -315,8 +339,14 @@ describe('connection management stays org-ADMIN', () => {
         expect(denial(results.find((r) => r.errors)!)).toEqual([['Forbidden', 'FORBIDDEN']]);
         expect(vi.mocked(deleteToolConnection)).toHaveBeenCalledTimes(1);
       } finally {
+        // Release the holder first so every waiter can finish, then drain every request that was started.
         release();
-        await Promise.allSettled([holder, a]);
+        await Promise.allSettled([holder, a, ...(b ? [b] : [])]);
+        // Runs on success and on assertion failure alike: nothing is left blocked on a lock once drained.
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: number }>>`
+          SELECT count(*)::int AS waiting FROM pg_locks
+          WHERE NOT granted AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
+        expect(waiting).toBe(0);
       }
     });
 
