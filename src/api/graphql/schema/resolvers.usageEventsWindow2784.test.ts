@@ -156,3 +156,36 @@ it('direct delegates reject invalid timestamps without relying on Prisma validat
   await expect(resolvers.Query.usageEvents(null, { since: 'invalid' }, principal)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   await expect(resolvers.Query.usageEventsPage(null, { until: 'invalid' }, principal)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
 });
+
+
+it.each(['usageEvents', 'usageEventsPage'])('%s requires explicit-offset ISO instants before resource resolution', async field => {
+  for (const bound of ['since', 'until']) {
+    for (const value of ['10/02/2026', '2026-10-02', '2026-10-02T00:00:00', '2026-02-30T00:00:00Z', 'not-a-date']) {
+      const messages = [];
+      for (const resource of [{ memoryId }, { memoryId: foreignId }, { memoryId: generateId() }, { nodeId: generateId() }]) {
+        const result = await read(field, { ...resource, [bound]: value });
+        expect(result.errors, `${field} ${bound}=${value}`).toHaveLength(1);
+        expect(result.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
+        messages.push(result.errors![0].message);
+      }
+      expect(new Set(messages).size).toBe(1);
+    }
+  }
+});
+
+it.each(['usageEvents', 'usageEventsPage'])('%s validates inline bounds as instants and accepts explicit offsets', async field => {
+  const selection = field === 'usageEvents' ? '{ id }' : '{ items { id } total }';
+  for (const bound of ['since', 'until']) {
+    for (const value of ['10/02/2026', '2026-10-02', '2026-10-02T00:00:00', '2026-02-30T00:00:00Z']) {
+      const result = await server.executeOperation({ query: `{ ${field}(memoryId: "${memoryId}", ${bound}: "${value}") ${selection} }` }, { contextValue: principal });
+      if (result.body.kind !== 'single') throw new Error('Expected a single response');
+      expect(result.body.singleResult.errors, `${bound}=${value}`).toHaveLength(1);
+      expect(result.body.singleResult.errors![0].extensions?.code).toBe('BAD_USER_INPUT');
+    }
+  }
+  const result = await server.executeOperation({ query: `{ ${field}(memoryId: "${memoryId}", since: "2026-10-02T02:00:00+02:00", until: "${times[2]}") ${selection} }` }, { contextValue: principal });
+  if (result.body.kind !== 'single') throw new Error('Expected a single response');
+  expect(result.body.singleResult.errors).toBeUndefined();
+  const value = result.body.singleResult.data![field] as any;
+  expect((field === 'usageEvents' ? value : value.items).map((row: any) => row.id)).toEqual([eventIds[1]]);
+});
