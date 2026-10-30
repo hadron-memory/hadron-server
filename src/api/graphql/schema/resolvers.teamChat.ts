@@ -66,6 +66,9 @@ import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { recordCheckMiss } from '../../../lib/channelReadState.js';
+import {
+  TEAM_CHAT_SEARCH_SCAN_CAP, assertSearchQuery, decodeSearchCursor, encodeSearchCursor, searchBinding, searchCallerKey, searchPageSize,
+} from '../../../lib/teamChatSearch.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -1526,6 +1529,72 @@ async function readChannelRoot(
   return { items, total };
 }
 
+/**
+ * #2299 — search ONE channel's history (cor:agt:020:04, "Searching a chat's history"). The caller has already passed the
+ * read gate; this is everything after it. It matches against {@link projectMessage}, the same projection a read returns,
+ * so nothing a read withholds can be matched, counted, shown or encoded in the cursor; and it returns references only
+ * (no body, no snippet, no count). It writes nothing: no read mark, no usage, no heartbeat.
+ *
+ * A host in an encrypted memory is refused outright: its stored text is ciphertext, and decrypting a history to scan it
+ * is not a read the caller asked for. An empty page therefore only ever means a completed search.
+ */
+async function searchChannelRoot(
+  ctx: Context,
+  root: ChatRootRow,
+  channel: { id: string; incarnation: number },
+  args: { query: string; limit: number; cursor: string | null },
+): Promise<TeamChatSearchPageOut> {
+  const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  if (memEncInfo.isEncrypted) {
+    throw new GraphQLError('This chat is hosted in an encrypted memory and cannot be searched.', { extensions: { code: 'TEAM_CHAT_SEARCH_ENCRYPTED' } });
+  }
+  const binding = searchBinding(args.query, channel.id, channel.incarnation, searchCallerKey(ctx));
+  const before = args.cursor == null ? null : decodeSearchCursor(args.cursor, binding);
+  const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
+  const rows = await ctx.db.node.findMany({
+    where: {
+      memoryId: root.memoryId,
+      loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
+      nodeType: 'chat-message',
+      deletedAt: null,
+      seq: before != null ? { lt: before } : { not: null },
+    },
+    orderBy: [{ seq: 'desc' }, { createdAt: 'desc' }, { loc: 'desc' }],
+    select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true },
+    take: TEAM_CHAT_SEARCH_SCAN_CAP,
+  });
+  const needle = args.query.toLowerCase();
+  const items: TeamChatSearchPageOut['items'] = [];
+  let filledAt = -1;
+  for (let i = 0; i < rows.length; i++) {
+    const msg = projectMessage(rows[i]!, memEncInfo, memBareUrn);
+    if (!msg.body.toLowerCase().includes(needle)) continue;
+    items.push({ nodeId: msg.nodeId, urn: msg.urn, seq: msg.seq, channelId: channel.id, channelIncarnation: channel.incarnation });
+    if (items.length >= args.limit) { filledAt = i; break; }
+  }
+  // Fewer rows than the bound means the scan reached the start of the history; exactly the bound means it may not have.
+  const reachedStart = rows.length < TEAM_CHAT_SEARCH_SCAN_CAP;
+  const page = { items, channelId: channel.id, channelIncarnation: channel.incarnation };
+  if (filledAt >= 0) {
+    // A full page continues after the last match returned.
+    if (filledAt === rows.length - 1 && reachedStart) return { ...page, complete: true, cursor: null };
+    return { ...page, complete: false, cursor: encodeSearchCursor(binding, items[items.length - 1]!.seq) };
+  }
+  if (reachedStart) return { ...page, complete: true, cursor: null };
+  // The scan bound fired first: resume just below the LAST SCANNED seq, so nothing is scanned twice or skipped.
+  return { ...page, complete: false, cursor: encodeSearchCursor(binding, rows[rows.length - 1]!.seq ?? 0) };
+}
+
+type TeamChatSearchPageOut = {
+  items: { nodeId: string; urn: string | null; seq: number; channelId: string; channelIncarnation: number }[];
+  complete: boolean;
+  cursor: string | null;
+  channelId: string | null;
+  channelIncarnation: number | null;
+};
+
+const EMPTY_COMPLETE_SEARCH: TeamChatSearchPageOut = { items: [], complete: true, cursor: null, channelId: null, channelIncarnation: null };
+
 export const teamChatMutations = {
   /**
    * #939 — post a message into the team App's chat as a platform operation:
@@ -1726,6 +1795,37 @@ export const teamChatQueries = {
     }
     // The SAME object: the mentions read is recorded against this page's identity (recordMentionsWorker).
     return Object.assign(page, { channelId: readChannel?.id ?? null, channelIncarnation: readChannel?.incarnation ?? null });
+  },
+
+  /**
+   * #2299 — search the team chat's history: the `appRef` convenience over the same search `channelMessageSearch` runs.
+   * The two bound checks come first (fixed numbers, so the refusal is the same for everyone), then the read gate
+   * `teamChatMessages` uses, then the search. No read-state side effect.
+   */
+  teamChatSearch: async (
+    _: unknown,
+    { appRef, query, limit, cursor }: { appRef: string; query: string; limit?: number | null; cursor?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatSearchPageOut> => {
+    assertSearchQuery(query);
+    const take = searchPageSize(limit);
+    const target = await resolveTeamChatReadTarget(ctx, appRef);
+    if (!target) return EMPTY_COMPLETE_SEARCH;
+    const channel = await ctx.db.channel.findFirst({ where: { chatRootNodeId: target.root.id, deletedAt: null }, select: { id: true, incarnation: true } });
+    if (!channel) return EMPTY_COMPLETE_SEARCH;
+    return searchChannelRoot(ctx, target.root, channel, { query, limit: take, cursor: cursor ?? null });
+  },
+
+  /** #2299 — search ANY Channel by ref, through the read gate `channelMessages` uses; unreadable is CHANNEL_NOT_FOUND. */
+  channelMessageSearch: async (
+    _: unknown,
+    { channelRef, query, limit, cursor }: { channelRef: string; query: string; limit?: number | null; cursor?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatSearchPageOut> => {
+    assertSearchQuery(query);
+    const take = searchPageSize(limit);
+    const target = await resolveChannelTarget(ctx, channelRef, 'read');
+    return searchChannelRoot(ctx, target.root, { id: target.channelId, incarnation: target.incarnation.value }, { query, limit: take, cursor: cursor ?? null });
   },
 
   /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
