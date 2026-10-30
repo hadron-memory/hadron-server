@@ -105,6 +105,12 @@ describe('#2861 — a free-standing app memory is listed for App participants (S
     expect(await nodeMemoryKeys('owner', 'mine')).toEqual(['MineTenant']);
   });
 
+  it('a legacy (unkeyed, urn-identified) team space is TEAM_SPACE only, never also APP_MEMORY', async () => {
+    await db.memory.update({ where: { id: mem.TeamSpace! }, data: { sharedMemoryOfAgentId: null, urn: `${org.urn}:main:alpha:shared` } });
+    const rows = await scope('participant');
+    expect(rows.find((r) => r.memoryId === mem.TeamSpace)?.sources).toEqual([{ kind: 'TEAM_SPACE', agentId: null }]);
+  });
+
   it('an Agent-linked memory stays a single AGENT_LINK row, and the team space stays TEAM_SPACE', async () => {
     const rows = await scope('participant');
     expect(rows.find((r) => r.memoryId === mem.Linked)?.sources).toEqual([{ kind: 'AGENT_LINK', agentId: agent.Alpha }]);
