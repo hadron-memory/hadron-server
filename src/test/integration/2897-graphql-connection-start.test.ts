@@ -36,6 +36,16 @@ import { runAsActor } from '../../lib/requestActor.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 
+/** Env vars this suite sets; each is put back to what it was, not deleted. */
+const ENV_KEYS = ['BASE_URL', 'GMAIL_CLIENT_ID', 'MICROSOFT_CLIENT_ID', 'GOOGLE_CAL_CLIENT_ID', 'GOOGLE_DRIVE_CLIENT_ID'] as const;
+const savedEnv: Record<string, string | undefined> = {};
+function restoreEnv() {
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
+}
+
 let server: Server;
 let baseUrl: string;
 let adminId: string;
@@ -43,6 +53,7 @@ let memberId: string;
 let orgId: string;
 
 beforeAll(async () => {
+  for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
   const app = await createServer();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -52,7 +63,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  delete process.env.BASE_URL;
+  restoreEnv();
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 });
 
@@ -75,7 +86,10 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  delete process.env.GMAIL_CLIENT_ID;
+  // Back to the values the suite started with, then the per-test default is re-set by beforeEach.
+  const base = process.env.BASE_URL;
+  restoreEnv();
+  process.env.BASE_URL = base;
 });
 
 const START = (provider: string, orgRef: string) =>
@@ -119,6 +133,24 @@ describe('startConnection: the happy path and its single-use points', () => {
     expect(new Date(start.expiresAt).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it.each([
+    ['MS_EXCHANGE', 'microsoft', 'ms-exchange', 'MICROSOFT_CLIENT_ID'],
+    ['GMAIL', 'gmail', 'gmail', 'GMAIL_CLIENT_ID'],
+    ['GOOGLE_CAL', 'google-cal', 'google-cal', 'GOOGLE_CAL_CLIENT_ID'],
+    ['GOOGLE_DRIVE', 'google-drive', 'google-drive', 'GOOGLE_DRIVE_CLIENT_ID'],
+  ])('%s starts at /auth/%s with a nonce bound to provider %s', async (enumValue, route, provider, envKey) => {
+    process.env[envKey] = 'client-id.example';
+    const r = await gql(START(enumValue, orgId), adminId);
+    expect(r.errors).toBeUndefined();
+    const start = r.data!.startConnection!;
+    expect(start.provider).toBe(enumValue);
+    expect(new URL(start.authorizeUrl).pathname).toBe(`/auth/${route}`);
+    const row = await db.authHandoffCode.findFirstOrThrow({ where: { kind: { startsWith: 'exchange_start' } } });
+    expect(row.kind).toBe(`exchange_start:${provider}:graphql`);
+    // The nonce works at that route and nowhere else: the browser leg answers a redirect, not 400/503.
+    expect((await fetch(start.authorizeUrl, { redirect: 'manual' })).status).toBe(302);
+  });
+
   it('single-use point 1: the nonce redeems once at GET /auth/{provider}, a second redemption is refused', async () => {
     const { authorizeUrl } = await startAsAdmin();
     await consent(authorizeUrl);
@@ -138,15 +170,11 @@ describe('startConnection: the happy path and its single-use points', () => {
 
   it('a nonce minted for one provider does not redeem at another provider', async () => {
     process.env.MICROSOFT_CLIENT_ID = 'ms-client-id';
-    try {
-      const { authorizeUrl } = await startAsAdmin();
-      const res = await fetch(`${baseUrl}/auth/microsoft?nonce=${nonceOf(authorizeUrl)}`, { redirect: 'manual' });
-      expect(res.status).toBe(400);
-      // ...and it is still good at the provider it was minted for.
-      expect((await fetch(authorizeUrl, { redirect: 'manual' })).status).toBe(302);
-    } finally {
-      delete process.env.MICROSOFT_CLIENT_ID;
-    }
+    const { authorizeUrl } = await startAsAdmin();
+    const res = await fetch(`${baseUrl}/auth/microsoft?nonce=${nonceOf(authorizeUrl)}`, { redirect: 'manual' });
+    expect(res.status).toBe(400);
+    // ...and it is still good at the provider it was minted for.
+    expect((await fetch(authorizeUrl, { redirect: 'manual' })).status).toBe(302);
   });
 
   it('accepts a user acting as themselves through a user API key too, not only a portal JWT', async () => {
