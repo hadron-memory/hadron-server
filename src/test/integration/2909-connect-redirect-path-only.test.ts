@@ -29,6 +29,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { signJwt } from '../../auth/index.js';
 import { issueExchangeStartNonce } from '../../auth/authHandoff.js';
+import { confirmConnect } from '../connectInterstitial.js';
 
 const FRONTEND = 'https://portal.example';
 const ENV_KEYS = ['BASE_URL', 'FRONTEND_URL', 'GMAIL_CLIENT_ID'] as const;
@@ -85,7 +86,7 @@ const nonces = () => db.authHandoffCode.count({ where: { kind: { startsWith: 'ex
 
 /** Redeem a nonce at the browser leg and finish the callback; returns the callback response. */
 async function finish(nonce: string, callbackQuery = 'code=c') {
-  const auth = await fetch(`${baseUrl}/auth/gmail?nonce=${nonce}`, { redirect: 'manual' });
+  const auth = await confirmConnect(`${baseUrl}/auth/gmail?nonce=${nonce}`);
   expect(auth.status).toBe(302);
   const state = new URL(auth.headers.get('location')!).searchParams.get('state')!;
   return fetch(`${baseUrl}/auth/gmail/callback?${callbackQuery}&state=${state}`, { redirect: 'manual' });
