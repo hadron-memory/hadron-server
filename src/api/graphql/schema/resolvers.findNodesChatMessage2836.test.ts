@@ -59,8 +59,10 @@ async function seed() {
   await db.node.createMany({
     data: [
       row('chat:root', 'info'),
-      row('chat:root:m1', 'chat-message'),
-      row('chat:root:m2', 'chat-message'),
+      // The messages outrank the record on every lexical score, so a leak at the SQL site
+      // would take the one-row page (the Prisma re-check would then drop it, leaving it empty).
+      { ...row('chat:root:m1', 'chat-message'), abstract: 'deploy deploy deploy deploy', name: 'deploy deploy' },
+      { ...row('chat:root:m2', 'chat-message'), abstract: 'deploy deploy deploy deploy', name: 'deploy deploy' },
       row('chat:root:r1', 'record'),
       row('doc:a', 'info'),
     ],
@@ -87,9 +89,19 @@ describe('findNodes excludes chat-message by default (cor:api:090:02)', () => {
     const kept = await db.node.count({ where: { memoryId: memory.id, deletedAt: null, nodeType: { notIn: ['system', 'chat-message', 'comment'] } } });
     const page = await findNodes({ filter: scope(), limit: 50 });
     expect(page.hits).toHaveLength(kept);
-    // One-row page: the exclusion happens before paging, so no message consumes a slot.
-    const one = await findNodes({ filter: { ...scope(), locPrefix: 'chat:root:' }, sort: 'loc', limit: 1 });
-    expect(locs(one)).toEqual(['chat:root:r1']);
+    // The SQL total (filterCount) is the only place a leak at the SQL site shows in browse.
+    const counted = await findNodes({ filter: scope(), includeTotal: true, limit: 1 });
+    expect(counted.total).toBe(kept);
+    const msgTotal = await findNodes({ filter: { ...scope(), nodeType: 'chat-message' }, includeTotal: true, limit: 1 });
+    expect(msgTotal.total).toBe(2);
+  });
+
+  it('a one-row ranked page is not consumed by a chat-message that outranks the record (SQL site)', async () => {
+    await seed();
+    for (const mode of ['keyword', 'regex'] as const) {
+      const one = await findNodes({ query: 'deploy', mode, filter: { ...scope(), locPrefix: 'chat:root:' }, limit: 1 });
+      expect(one.hits.map((h: any) => h.node.loc), mode).toEqual(['chat:root:r1']);
+    }
   });
 
   it('vector and hybrid keep returning record nodes and never a chat-message (raw chat is not embedded)', async () => {

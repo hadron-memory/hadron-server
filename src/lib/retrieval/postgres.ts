@@ -42,10 +42,9 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.tombstoneMemoryIds !== undefined) {
     parts.push(`(deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[])))`);
   }
-  // Explicit nodeType wins; otherwise exclude system-type and chat-message nodes
-  // (node_type is NOT NULL, default 'info'). `record` stays searchable (cor:api:090:02, #2836).
+  // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
   if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
-  else parts.push(`node_type NOT IN ('system', 'chat-message')`);
+  else parts.push(`node_type <> 'system'`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
   if (flt.role != null) {
