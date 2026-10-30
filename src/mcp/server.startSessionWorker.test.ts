@@ -205,7 +205,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
   it('returns the RESOLVED briefing when the role agent carries a template', async () => {
     await db.agent.update({
       where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}, a {{role}}. Ship carefully.', personaRole: 'backend-engineer' },
+      data: { systemPrompt: 'You are {{worker.name}}, a {{worker.role}}. Ship carefully.', personaRole: 'backend-engineer' },
     });
     await db.worker.update({ where: { id: worker.id }, data: { role: 'backend-engineer' } });
     const srv = createTestableMcpServer(hybridAuth());
@@ -219,16 +219,16 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
     expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(out).toContain('no per-override mtime is tracked');
-    // Rendered live from the template, with {{name}}/{{role}} bound — this is
+    // Rendered live from the template, with {{worker.name}}/{{worker.role}} bound — this is
     // what removes the need for published briefing NODES (hadron-cli#443).
     expect(out).toContain('You are Iris, a backend-engineer. Ship carefully.');
-    expect(out).not.toContain('{{name}}');
+    expect(out).not.toContain('{{worker.name}}');
   });
 
   it('appends the per-worker override to the template', async () => {
     await db.agent.update({
       where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}.', personaRole: 'backend-engineer' },
+      data: { systemPrompt: 'You are {{worker.name}}.', personaRole: 'backend-engineer' },
     });
     await db.worker.update({
       where: { id: worker.id },
