@@ -38,6 +38,7 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { admissionTime, findEarlierDuplicate, lockWorkerPostAdmission } from '../../../lib/teamChatAdmission.js';
 import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -996,6 +997,8 @@ async function postToChannelRoot(
   const messageId = generateId();
   const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
+  // #2015: the admission instant of a worker's post, stamped into its createdAt below; null for a human or system post.
+  let admittedAt: Date | null = null;
   const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
@@ -1041,6 +1044,26 @@ async function postToChannelRoot(
         throw new GraphQLError(
           `replyToSeq ${replyToSeq} does not name a message in this Channel.`,
           { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
+        );
+      }
+    }
+    // #2015 — a worker's admission: serialize this worker across Channels, read the ONE admission instant (the database
+    // clock, after the Channel's lock and this one), and refuse an identical post it already made here inside ten minutes.
+    // Before any stamp authority, session resume, seal, node or edge, so a refusal writes nothing: the throw rolls the
+    // transaction back before the allocator's counter writes (they follow the closure). A genuine human post and the
+    // platform's own carry no worker and are not judged.
+    const postingWorkerId = !opts.system && typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null;
+    if (postingWorkerId) {
+      await lockWorkerPostAdmission(tx, postingWorkerId);
+      admittedAt = await admissionTime(tx);
+      // An encrypted body is ciphertext at rest: no equality read can match, so none is made (no key plumbing, R13/R43).
+      const earlierSeq = memEncInfo.isEncrypted
+        ? null
+        : await findEarlierDuplicate(tx, { memoryId: root.memoryId, channelId: incarnation.id, workerId: postingWorkerId, body, replyTargetId: replyTarget?.id ?? null, admittedAt });
+      if (earlierSeq != null) {
+        throw new GraphQLError(
+          `Identical to your message #${earlierSeq} in this Channel, which was posted: do not retry. Say something different, or reply to #${earlierSeq}.`,
+          { extensions: { code: 'TEAM_CHAT_DUPLICATE', earlierSeq, channelId: incarnation.id } },
         );
       }
     }
@@ -1155,6 +1178,8 @@ async function postToChannelRoot(
         createdByAgentId: authorAgentId,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
+        // #2015: a worker's message is recorded at the instant it was admitted (see teamChatAdmission.ts).
+        ...(admittedAt ? { createdAt: admittedAt } : {}),
       },
     });
     if (replyTarget) {
