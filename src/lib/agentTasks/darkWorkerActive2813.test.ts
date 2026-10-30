@@ -158,7 +158,7 @@ describe('#2813 only the worker\'s own driving is activity (cor:agt:020:03, cor:
     expect(page.wakes.length).toBeGreaterThan(0);
     await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, holderCtx());
     const after_ = await db.session.findUniqueOrThrow({ where: { id: s.id } });
-    expect(after_.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    expect(after_.updatedAt?.getTime()).toBe(before.updatedAt?.getTime());
     expect(await db.usageEvent.count({ where: { sessionId: s.id } })).toBe(0);
   });
 
