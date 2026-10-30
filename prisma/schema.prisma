@@ -2006,8 +2006,10 @@ model Agent {
   /// Display name of this agent.
   name                  String
   description           String?
-  /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
-  /// for a worker briefing, or to this Agent's name/role for a chat.
+  /// Legacy prompt template, served only while BOOT_PROMPT_SERVE_ENABLED is off;
+  /// with serving on, the compiled boot prompt named by bootPromptRef replaces
+  /// it. Only the closed platform variables ({{worker.name}}, {{worker.role}},
+  /// ...) bind in it (cor:dmo:150:08); bare {{name}}/{{role}} stay as written.
   systemPrompt          String?         @map("system_prompt")
   /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
   /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
