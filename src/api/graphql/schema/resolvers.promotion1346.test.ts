@@ -261,6 +261,11 @@ describe('#1346 anonymous encrypted promotion', () => {
         expect(plain).toMatchObject({ content: `capacity content ${index}`, abstract: `capacity abstract ${index}`, data: { index } });
       }
     }
-  }, 90_000);
+  // #2893: this exercises a 120s promotion transaction PLUS the separate
+  // history-completion pass, fixture setup and decryption assertions. The old
+  // 90s outer test deadline could abort valid work before the transaction's
+  // own ceiling. Keep both real sizes and every assertion; allow 60s more for
+  // completion/fixture/checks on the shared CI runner. This is not a latency SLO.
+  }, 180_000);
 
 });
