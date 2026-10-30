@@ -24,6 +24,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { resolveReadableWorkerRef } from './resolvers.worker.js';
 import { deleteUserAccount } from '../../../controller/operations/deleteUser.js';
 import { sessionActivityAt, loadLastEventBySession, isSessionLive } from '../../../lib/sessionActivity.js';
 import { lockWorkerNames } from '../../../lib/workerName.js';
@@ -860,9 +861,14 @@ describe('worker / workers queries', () => {
     expect(worker.name).toBe('Iris');
   });
 
-  it('worker(ref) denies a non-member', async () => {
-    // #1742: a denial answers like an absent worker, so the read is no existence oracle.
-    await expectCode(Q.worker({}, { ref: iris.id }, ctx(outsider.id)), 'WORKER_NOT_FOUND');
+  it('worker(ref) gives a signed-in non-member the profile only (#1149)', async () => {
+    // #1149 (cor:dmo:050:11): naming a worker by id opens its profile to any
+    // signed-in user; the working state stays behind the participant gate.
+    const w = await Q.worker({}, { ref: iris.id }, ctx(outsider.id));
+    expect(w.name).toBe('Iris');
+    expect(await W.promptOverride(w, {}, ctx(outsider.id))).toBeNull();
+    // An anonymous caller is still refused like an absent worker (#1742).
+    await expectCode(Q.worker({}, { ref: iris.id }, { db, roles: [] } as Context), 'WORKER_NOT_FOUND');
   });
 
   it('a pure App-key reads its OWN App staff; a foreign App key is denied', async () => {
@@ -1070,7 +1076,8 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     // the wider historical Session.worker surface; working state is not.
     expect(await W.urn(hidden, {}, ctx(outsider.id))).toContain('visible-identity');
     expect(await W.heldByUserId(hidden, {}, ctx(outsider.id))).toBeNull();
-    expect(await W.appUrn(hidden, {}, ctx(outsider.id))).toBeNull();
+    // #1149: appUrn is a PROFILE field, readable by any signed-in user.
+    expect(await W.appUrn(hidden, {}, ctx(outsider.id))).toMatch(/^hrn:app:/);
     expect(await Q.heldWorkers({}, { userRef: 'visible-target' }, ctx(outsider.id))).toEqual({
       items: [],
       total: 0,
@@ -1233,10 +1240,11 @@ describe('#1344 — heldWorkers across readable Apps', () => {
     }
   });
 
-  it('DIFFERENTIAL: a held worker is on the page exactly when the point read worker(ref) admits it (#1347 review)', async () => {
+  it('DIFFERENTIAL: a held worker is on the page exactly when the participant point read admits it (#1347 review)', async () => {
     // The page's App set (workerReadableAppIds, with a hand-written platform
     // arm) and the point gate (requireWorkerReadAccess) are two implementations
-    // of one audience. This matrix pins them together across principal and
+    // of one audience. #1149: worker(ref) itself now opens the wider PROFILE,
+    // so the point read here is the participant resolve, resolveReadableWorkerRef. This matrix pins them together across principal and
     // App shapes, so a change to either that is not made to the other reds.
     const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'other-org', urn: `other-org-${Date.now()}.com` } });
     const shapes = {
@@ -1271,7 +1279,7 @@ describe('#1344 — heldWorkers across readable Apps', () => {
       const onPage = new Set(page.items.map((row: { id: string }) => row.id));
       expect(page.total, who).toBe(onPage.size);
       for (const [workerId, shape] of workers) {
-        const pointRead = await Q.worker({}, { ref: workerId }, c).then(() => true, () => false);
+        const pointRead = await resolveReadableWorkerRef(c, workerId).then(() => true, () => false);
         expect(onPage.has(workerId), `${who} / ${shape}`).toBe(pointRead);
         if (pointRead) admitted++;
       }

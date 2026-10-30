@@ -247,7 +247,7 @@ const REPLACE_LINT_MAX_NODES = 100;
 import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
-import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses } from '../api/graphql/schema/resolvers.worker.js';
+import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { renderTerminal } from '../lib/workerTerminal.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -10888,8 +10888,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // "driving" here while the roster said idle and a bind succeeded —
         // three surfaces, two answers, which is precisely what cor:agt:020:11
         // exists to forbid. The predicate is the shared one now.
+        //
+        // #1149: whether someone is driving the worker is WORKING STATE
+        // (`hasLiveSession`, cor:dmo:050:11). `Query.worker` now admits a
+        // signed-in caller who may see only the profile, so the taken/free flag
+        // is computed for a participant alone; everyone else gets no flag.
         const nowHere0 = new Date();
-        const openHere = await db.session.findMany({
+        const seesWorkingState = await maySeeWorkerInternals(ctx, worker.appId);
+        const openHere = !seesWorkingState ? [] : await db.session.findMany({
           // The SAME bound as the bind path, filter AND cap (#1120 review,
           // Codex P2 — second round). The first fix here took the cap without
           // the filter, which is the mistake the filter exists to prevent:
@@ -10931,7 +10937,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // actually makes the guarantee independent — and it is naturally
         // bounded, since it is one person's sessions on one worker.
         const driving = liveHere[0] ?? null;
-        const myRows = auth.userId
+        // #1149: the caller's own session is working state too. A departed
+        // participant keeps an open row until it ends, and must not be handed
+        // its id through the profile read.
+        const myRows = auth.userId && seesWorkingState
           ? await db.session.findMany({
               where: {
                 workerId: worker.id, endedAt: null, deletedAt: null,
@@ -10954,10 +10963,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
         const flags: string[] = [];
         if (worker.retiredAt) flags.push('RETIRED');
-        flags.push(driving ? 'taken' : 'free');
+        if (seesWorkingState) flags.push(driving ? 'taken' : 'free');
 
         return textResult(
-          `**${worker.name}**${worker.role ? ` (${worker.role})` : ''} — ${flags.join(', ')}\n` +
+          `**${worker.name}**${worker.role ? ` (${worker.role})` : ''}${flags.length ? ` — ${flags.join(', ')}` : ''}\n` +
             `Worker id: ${worker.id}\n` +
             (workerUrn ? `Worker URN: ${workerUrn}\n` : '') +
             // #1026: THE recovery read is also the read a worker comes to for
