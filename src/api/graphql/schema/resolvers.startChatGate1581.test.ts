@@ -156,7 +156,7 @@ describe('#1581: startChat through a pure App key (resolver level)', () => {
   async function appKeySessionFor(userId: string | null, appId = app.id, sessionAgentId = agent.id) {
     const mem = await db.memory.create({ data: {
       id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:session-${generateId().slice(-8)}`,
-      name: 'session memory', class: 'app', appId,
+      name: 'session memory', class: 'app', appId, userMemoryOfAgentId: sessionAgentId,
     } });
     const session = await db.session.create({ data: {
       id: generateId(), appId, userId, agentId: sessionAgentId, memoryId: mem.id, type: 'CHATBOT', startedAt: new Date(),

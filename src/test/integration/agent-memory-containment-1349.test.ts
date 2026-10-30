@@ -343,6 +343,34 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
     expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id } })).toBe(before);
   });
 
+  it('#1376 session-bound startChat: the App-provisioned session memory (anon app-class, personal) stays a chat target (Riana, P1 on f96eec28)', async () => {
+    for (const cls of ['app', 'personal'] as const) {
+      const link = await legacyLink('homeOrg', 'read');
+      await giveConversation(link.agentId);
+      const owner = await db.user.create({ data: { id: generateId(), handle: `sc-${generateId()}`, githubUsername: `sc-${generateId()}` } });
+      const own = await db.memory.create({
+        data: {
+          id: generateId(), urn: `home-${suffix}:sess-${cls}-${generateId()}`, name: `sess-${cls}`, ...(cls === 'personal' ? {} : { organizationId: homeOrgId }),
+          class: cls, visibility: null, appId: link.appId, userMemoryOfAgentId: link.agentId,
+          ...(cls === 'personal' ? { userId: owner.id, ownerUserId: owner.id } : {}),
+        } as never,
+      });
+      if (cls === 'personal') await db.agentSubscription.create({ data: { userId: owner.id, agentId: link.agentId, activatedAt: new Date() } });
+      const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: own.id, ...(cls === 'personal' ? { userId: owner.id } : {}) } as never });
+      // the gate's input: the session's verified reach holds the provisioned memory (personal: read-only in the access map, still reachable)
+      expect(await sessionScopedMemoryIds(db, link.appId, session.id), cls).toContain(own.id);
+      if (cls === 'personal') continue;
+      const response = await fetch(`${baseUrl}/graphql`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': session.id },
+        body: JSON.stringify({ query: 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }', variables: { agent: link.agentId } }),
+      });
+      const body = (await response.json()) as { errors?: unknown; data?: { startChat?: { chatId?: string } } };
+      expect(body.errors, `${cls}: ${JSON.stringify(body)}`).toBeUndefined();
+      expect(body.data?.startChat?.chatId).toBeTruthy();
+    }
+  });
+
   it("asset upload target: never another user's personal memory through a read-write link", async () => {
     const stranger = await db.user.create({ data: { id: generateId(), handle: `s-${generateId()}`, githubUsername: `s-${generateId()}` } });
     const { agentId } = await legacyLink('foreignPersonal', 'read-write');
