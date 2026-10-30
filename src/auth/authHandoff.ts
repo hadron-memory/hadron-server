@@ -174,11 +174,24 @@ export interface IssueExchangeStartArgs {
    * kind (pre-#580 rows; kept so the helpers stay usable standalone).
    */
   provider?: string;
+  /**
+   * Which door started the flow (#2897). `graphql` ends on the server-hosted done page instead of the portal. Carried
+   * in the stored kind, never in `redirect`, so a caller-chosen redirect string cannot pick the origin. Omitted ⇒ the
+   * portal start (`POST /auth/{provider}/start`), whose rows keep the kind they always had.
+   */
+  origin?: ExchangeStartOrigin;
 }
 
+/** Who started a mailbox-connect flow (#2897). */
+export type ExchangeStartOrigin = 'portal' | 'graphql';
+
+/** Lifetime of a start nonce, exposed so the GraphQL start can report when its URL stops working. */
+export const EXCHANGE_START_TTL_MS = HANDOFF_TTL_MS;
+
 /** The stored kind for a mailbox-connect start nonce. */
-function exchangeStartKind(provider?: string): string {
-  return provider ? `exchange_start:${provider}` : 'exchange_start';
+function exchangeStartKind(provider?: string, origin: ExchangeStartOrigin = 'portal'): string {
+  const base = provider ? `exchange_start:${provider}` : 'exchange_start';
+  return origin === 'graphql' ? `${base}:graphql` : base;
 }
 
 /** Mint an `exchange_start` nonce and return the raw opaque value. */
@@ -187,7 +200,7 @@ export async function issueExchangeStartNonce(args: IssueExchangeStartArgs): Pro
   await db.authHandoffCode.create({
     data: {
       codeHash: sha256(rawCode),
-      kind: exchangeStartKind(args.provider),
+      kind: exchangeStartKind(args.provider, args.origin),
       userId: args.userId,
       orgId: args.orgId,
       redirect: args.redirect,
@@ -201,6 +214,7 @@ export interface RedeemedExchangeStart {
   userId: string;
   orgId: string;
   redirect: string;
+  origin: ExchangeStartOrigin;
 }
 
 /** Redeem an `exchange_start` nonce (atomic single-use + expiry, bound to
@@ -211,13 +225,20 @@ export async function redeemExchangeStartNonce(
   provider?: string,
 ): Promise<RedeemedExchangeStart | null> {
   const codeHash = sha256(code);
+  // Both origins redeem at the same provider-bound authorize route; the kind tells them apart afterwards.
+  const kinds = [exchangeStartKind(provider, 'portal'), exchangeStartKind(provider, 'graphql')];
   const claim = await db.authHandoffCode.updateMany({
-    where: { codeHash, kind: exchangeStartKind(provider), redeemedAt: null, expiresAt: { gt: new Date() } },
+    where: { codeHash, kind: { in: kinds }, redeemedAt: null, expiresAt: { gt: new Date() } },
     data: { redeemedAt: new Date() },
   });
   if (claim.count !== 1) return null;
 
   const row = await db.authHandoffCode.findUnique({ where: { codeHash } });
   if (!row || !row.orgId) return null;
-  return { userId: row.userId, orgId: row.orgId, redirect: row.redirect ?? '/' };
+  return {
+    userId: row.userId,
+    orgId: row.orgId,
+    redirect: row.redirect ?? '/',
+    origin: row.kind === kinds[1] ? 'graphql' : 'portal',
+  };
 }
