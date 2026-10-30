@@ -229,4 +229,23 @@ describe('#2014 the alarm', () => {
     } finally { spy.mockRestore(); }
     expect(await alarms()).toHaveLength(1);
   });
+
+  it('when every attempt conflicts and no episode committed, the failure propagates instead of returning', async () => {
+    await post(liam, 10, 'a');
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((() =>
+      Promise.reject(new Prisma.PrismaClientKnownRequestError('could not serialize access', { code: 'P2034', clientVersion: 'test' }))) as any);
+    let err: unknown;
+    try { err = await raisePostLimitAlarm(db, liam.id, '10 per minute').catch((e) => e); expect(spy.mock.calls.length).toBe(5); } finally { spy.mockRestore(); }
+    expect(err).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect(await alarms()).toHaveLength(0);
+  });
+
+  it('when every attempt conflicts but a competing refusal committed the episode, it returns without raising a second alarm', async () => {
+    await post(liam, 10, 'a');
+    await workerSays(liam, 'x').catch(() => undefined);
+    const spy = vi.spyOn(db, '$transaction').mockImplementation((() =>
+      Promise.reject(new Prisma.PrismaClientKnownRequestError('could not serialize access', { code: 'P2034', clientVersion: 'test' }))) as any);
+    try { expect(await raisePostLimitAlarm(db, liam.id, '10 per minute')).toBeNull(); } finally { spy.mockRestore(); }
+    expect(await alarms()).toHaveLength(1);
+  });
 });

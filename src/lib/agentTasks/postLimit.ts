@@ -28,7 +28,7 @@ const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
 export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, limit: string): Promise<string | null> {
   // A serialization failure or unique race means a competing transaction touched the same rows, which proves nothing about
   // whether it committed THIS hour's alarm: run again. The rerun sees the committed episode (and raises nothing) or finds
-  // none and raises. Only when the retries run out is it given up, loudly.
+  // none and raises. When the retries run out, the failure propagates unless a committed open episode proves the alarm exists.
   for (let attempt = 1; ; attempt++) {
     try {
       return await attemptRaise(db, workerId, limit);
@@ -36,8 +36,11 @@ export async function raisePostLimitAlarm(db: PrismaClient, workerId: string, li
       const raced = isSerializationFailure(err) || (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002');
       if (!raced) throw err;
       if (attempt >= MAX_ATTEMPTS) {
+        // Out of retries: only a COMMITTED open episode proves an alarm exists for this hour. Without one, the failure is
+        // propagated (the post stays refused and unstored, and the caller sees an error, never a refusal with no alarm).
+        if (await db.postLimitEpisode.count({ where: { workerId, endedAt: null } }) > 0) return null;
         console.error(JSON.stringify({ event: 'post_limit.alarm_not_raised', workerId, attempts: attempt }));
-        return null;
+        throw err;
       }
     }
   }
