@@ -47,9 +47,19 @@ export async function verifyTurnstileToken(token: unknown, remoteIp: string | un
       signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS),
     });
     if (!res.ok) return { ok: false, reason: 'provider_error' };
-    const body = (await res.json()) as { success?: unknown } | null;
+    const body = (await res.json()) as { success?: unknown; 'error-codes'?: unknown } | null;
     if (typeof body?.success !== 'boolean') return { ok: false, reason: 'provider_error' };
-    return body.success ? { ok: true } : { ok: false, reason: 'invalid_token' };
+    if (body.success) return { ok: true };
+    // `success:false` also carries Cloudflare's own verdict on OUR side of the
+    // exchange: a bad or missing secret is a deployment fault and an internal
+    // error is the provider's, neither is the visitor's token being wrong.
+    const codes = (body as { 'error-codes'?: unknown })['error-codes'];
+    const list = Array.isArray(codes) ? codes : [];
+    if (list.includes('invalid-input-secret') || list.includes('missing-input-secret')) {
+      return { ok: false, reason: 'not_configured' };
+    }
+    if (list.includes('internal-error')) return { ok: false, reason: 'provider_error' };
+    return { ok: false, reason: 'invalid_token' };
   } catch {
     return { ok: false, reason: 'provider_error' };
   }
