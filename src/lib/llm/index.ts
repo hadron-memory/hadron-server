@@ -62,6 +62,19 @@ export interface LlmResult {
   knobs?: KnobReport[];
 }
 
+/** The compiled chat prompt's single assistant response contract. */
+export interface ChatRespondRequest {
+  system?: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  respondTool?: { description?: string; parameters: Record<string, unknown> };
+  maxTokens?: number;
+  timeoutMs?: number;
+}
+
+export interface ChatRespondResult extends Omit<LlmResult, 'text'> {
+  respond: { message: string; data: Record<string, unknown>; next_stage: string | null };
+}
+
 export class LlmInvocationError extends Error {
   constructor(
     message: string,
@@ -633,6 +646,94 @@ export async function generateText(
       provider,
       isTransient(err),
       { cause: err },
+    );
+  }
+}
+
+/**
+ * One server-owned chat model call. This is only the provider invocation: the
+ * caller must separately authorize, budget, persist and apply a chat turn.
+ * Keeping it beside generateText makes every provider use the same guarded
+ * endpoint, apiStyle and credential rules.
+ */
+export async function generateChatRespond(
+  resolved: ResolvedAiConfig,
+  req: ChatRespondRequest,
+): Promise<ChatRespondResult> {
+  const { provider, model } = resolved.config;
+  const respondTool = req.respondTool;
+  if (respondTool) {
+    const optedIn = provider === 'openai-compatible' &&
+      (resolved.config.params as { toolCalling?: unknown } | null | undefined)?.toolCalling === true;
+    // GLM's chat-completions adapter supports the same respond call as the
+    // portal's existing chat path. Unknown compatible hosts must opt in.
+    if (!TOOL_LOOP_PROVIDERS.has(provider) && provider !== 'glm' && !optedIn) {
+      throw new NoToolSupportError(provider);
+    }
+  }
+
+  const system = req.system?.trim();
+  // The welcome turn has no persisted user message. Seed only the provider
+  // request; the synthetic text must never become a chat history row.
+  const messages = req.messages.length > 0
+    ? req.messages
+    : [{ role: 'user' as const, content: 'Please begin the conversation.' }];
+
+  try {
+    const out = await aiGenerateText({
+      model: modelFor(resolved),
+      ...(system ? { system } : {}),
+      messages,
+      ...(respondTool ? {
+        tools: {
+          respond: aiTool({
+            description: respondTool.description ?? 'Respond to the user and extract data',
+            inputSchema: jsonSchema<Record<string, unknown>>(respondTool.parameters as never),
+          }),
+        },
+        toolChoice: { type: 'tool' as const, toolName: 'respond' as const },
+      } : {}),
+      ...(req.maxTokens != null ? { maxOutputTokens: req.maxTokens } : {}),
+      ...(req.timeoutMs != null ? { abortSignal: AbortSignal.timeout(req.timeoutMs) } : {}),
+      maxRetries: 0,
+    });
+
+    let respond: ChatRespondResult['respond'];
+    if (respondTool) {
+      const calls = out.toolCalls;
+      if (calls.length !== 1 || calls[0].toolName !== 'respond') {
+        throw new LlmInvocationError('Chat model did not return exactly one respond call.', provider, false);
+      }
+      const input = calls[0].input;
+      if (!input || typeof input !== 'object' || Array.isArray(input)) {
+        throw new LlmInvocationError('Chat respond input is invalid.', provider, false);
+      }
+      const value = input as Record<string, unknown>;
+      const data = value.data ?? {};
+      const nextStage = value.next_stage ?? null;
+      if (typeof value.message !== 'string' ||
+          !data || typeof data !== 'object' || Array.isArray(data) ||
+          (nextStage !== null && typeof nextStage !== 'string')) {
+        throw new LlmInvocationError('Chat respond input is invalid.', provider, false);
+      }
+      respond = { message: value.message, data: data as Record<string, unknown>, next_stage: nextStage };
+    } else {
+      respond = { message: out.text, data: {}, next_stage: null };
+    }
+
+    return {
+      respond,
+      tokensIn: out.usage?.inputTokens ?? 0,
+      tokensOut: out.usage?.outputTokens ?? 0,
+      provider,
+      model,
+    };
+  } catch (err) {
+    if (err instanceof LlmInvocationError) throw err;
+    // Provider errors may echo request headers. Keep the raw error out of
+    // BOTH message and cause: callers and loggers inspect error.cause too.
+    throw new LlmInvocationError(
+      `Chat LLM call failed (${provider}/${model}).`, provider, isTransient(err),
     );
   }
 }
