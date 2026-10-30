@@ -1,7 +1,9 @@
+import type { GraphQLError } from 'graphql';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 
 // #2867: every expected refusal of acceptInvitation is a typed GraphQLError.
@@ -24,9 +26,9 @@ async function invite(extra: Record<string, unknown> = {}) {
   });
 }
 
-async function refusal(slug: string, userId: string | undefined = inviteeId) {
+async function refusal(slug: string, userId: string | null = inviteeId) {
   try {
-    await M.acceptInvitation(null, { slug }, ctx(userId));
+    await M.acceptInvitation(null, { slug }, ctx(userId ?? undefined));
   } catch (error: any) {
     return { code: error.extensions?.code, message: error.message, typed: error.name === 'GraphQLError' };
   }
@@ -74,7 +76,7 @@ describe('#2867 acceptInvitation refusals are typed', () => {
 
   it('signed out is UNAUTHENTICATED', async () => {
     const issued = await invite();
-    expect(await refusal(issued.slug, undefined)).toMatchObject({ code: 'UNAUTHENTICATED', typed: true });
+    expect(await refusal(issued.slug, null)).toMatchObject({ code: 'UNAUTHENTICATED', typed: true });
   });
 
   it('an expired invitation is BAD_USER_INPUT and leaves no activation', async () => {
@@ -104,11 +106,11 @@ describe('#2867 acceptInvitation refusals are typed', () => {
     expect(await db.userInvitationActivation.count()).toBe(1);
   });
 
-  it('a revoked org invitation (issuer deleted) is BAD_USER_INPUT', async () => {
+  it('control: a deleted issuer is the existing typed FORBIDDEN from the anchor gate', async () => {
     const issued = await invite({ organizationId: orgId });
     await db.user.update({ where: { id: senderId }, data: { deletedAt: new Date() } });
     expect(await refusal(issued.slug)).toMatchObject({
-      code: 'BAD_USER_INPUT', message: 'Invitation has been revoked',
+      code: 'FORBIDDEN', message: 'Forbidden', typed: true,
     });
     expect(await db.userInvitationActivation.count()).toBe(0);
     expect(await db.orgMember.count({ where: { userId: inviteeId } })).toBe(0);
@@ -118,6 +120,18 @@ describe('#2867 acceptInvitation refusals are typed', () => {
     const issued = await invite({ organizationId: orgId });
     await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: senderId, role: 'CONTRIBUTOR' } });
     expect(await refusal(issued.slug)).toMatchObject({ code: 'BAD_USER_INPUT', message: 'Invitation has been revoked' });
+  });
+
+  it('through the response formatter the unknown slug keeps its code and message', async () => {
+    let thrown: unknown;
+    try { await M.acceptInvitation(null, { slug: 'doesnotexist' }, ctx(inviteeId)); } catch (e) { thrown = e; }
+    const error = thrown as GraphQLError;
+    const formatted = formatGraphQLError(
+      { message: error.message, extensions: { ...error.extensions }, path: ['acceptInvitation'] },
+      error,
+    );
+    expect(formatted.message).toBe('Invitation not found');
+    expect(formatted.extensions?.code).toBe('NOT_FOUND');
   });
 
   it('control: a valid slug still accepts', async () => {

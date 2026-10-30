@@ -47,6 +47,12 @@ import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } fro
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 
+/** #2867: acceptInvitation's typed refusals, so the boundary does not mask them. */
+const invitationNotFound = () =>
+  new GraphQLError('Invitation not found', { extensions: { code: 'NOT_FOUND' } });
+const invitationRevoked = () =>
+  new GraphQLError('Invitation has been revoked', { extensions: { code: 'BAD_USER_INPUT' } });
+
 /**
  * Map a `RootNameTakenError` from the #692 principal pool to a user-facing
  * conflict; re-throw anything else. Use as a `.catch()` on a mint transaction.
@@ -562,14 +568,18 @@ export const orgMutations = {
       { slug }: { slug: string },
       ctx: Context,
     ) => {
-      if (!ctx.userId) throw new Error('You must be signed in to accept an invitation');
+      if (!ctx.userId) {
+        throw new GraphQLError('You must be signed in to accept an invitation', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
 
       // Resolve only the anchor shape outside the transaction. The invitation
       // and activation decisions are re-read after its row lock below.
       const candidate = await ctx.db.userInvitation.findUnique({
         where: { slug }, select: { id: true, organizationId: true, senderUserId: true },
       });
-      if (!candidate) throw new Error('Invitation not found');
+      if (!candidate) throw invitationNotFound();
       return withAuthorizedTx(
         ctx,
         [
@@ -583,20 +593,24 @@ export const orgMutations = {
           });
           if (!invite || invite.deletedAt || invite.organizationId !== candidate.organizationId ||
               invite.senderUserId !== candidate.senderUserId) {
-            throw new Error('Invitation not found');
+            throw invitationNotFound();
           }
-          if (invite.expiresAt && invite.expiresAt < new Date()) throw new Error('Invitation has expired');
+          if (invite.expiresAt && invite.expiresAt < new Date()) throw new GraphQLError('Invitation has expired', { extensions: { code: 'BAD_USER_INPUT' } });
           if (invite.maxActivations && invite.activations.length >= invite.maxActivations) {
-            throw new Error('Invitation has reached its maximum number of uses');
+            throw new GraphQLError('Invitation has reached its maximum number of uses', {
+              extensions: { code: 'CONFLICT' },
+            });
           }
           if (invite.activations.some((a) => a.userId === ctx.userId)) {
-            throw new Error('You have already accepted this invitation');
+            throw new GraphQLError('You have already accepted this invitation', {
+              extensions: { code: 'CONFLICT' },
+            });
           }
           if (invite.organizationId && invite.senderUserId) {
             const issuer = await tx.user.findFirst({
               where: { id: invite.senderUserId, deletedAt: null }, select: { roles: true },
             });
-            if (!issuer) throw new Error('Invitation has been revoked');
+            if (!issuer) throw invitationRevoked();
             try {
               await requireOrgRole({
                 ...txCtx, userId: invite.senderUserId, roles: issuer.roles,
@@ -605,7 +619,7 @@ export const orgMutations = {
               }, invite.organizationId, 'ADMIN');
             } catch (error) {
               if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') {
-                throw new Error('Invitation has been revoked');
+                throw invitationRevoked();
               }
               throw error;
             }
