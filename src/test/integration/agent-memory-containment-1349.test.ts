@@ -15,10 +15,10 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
-import { getAppMemoryAccess } from '../../mcp/access-control.js';
+import { getAppMemoryAccess, getPrincipalAppMemoryAccess } from '../../mcp/access-control.js';
 import { sharedChatKnowledgeMemoryIds } from '../../api/graphql/schema/chat-scope.js';
 import { sessionScopedMemoryIds } from '../../lib/auth/sessionScopedMemoryIds.js';
 import { resolveAssetTargetMemoryId } from '../../api/graphql/schema/resolvers.helpers.js';
@@ -79,16 +79,23 @@ async function writes(appKey: string, target: string) {
 const lists = async (appKey: string, target: string) =>
   ((await gql(appKey, LIST, { m: mem[target]!.urn })).data?.memoryNodes?.total ?? 0) > 0;
 
-const mcpFor = (appId: string) => createTestableMcpServer({ appId, roles: ['READER'] });
+const mcpFor = (appId: string, userId?: string) => createTestableMcpServer({ appId, userId, roles: ['READER'] });
+
+/** #1376: an App member (a user behind the App), the principal that still reaches memory through the agent's items. */
+async function memberOf(appId: string) {
+  const user = await db.user.create({ data: { id: generateId(), handle: `am-${generateId()}`, githubUsername: `am-${generateId()}` } });
+  await createDbAppMember(db, appId, user.id, 'member');
+  return user.id;
+}
 const nodeUrn = (target: string) => `hrn:node:${mem[target]!.urn.replace(/^hrn:mem:/, '')}:payroll`;
 
-async function mcpReads(appId: string, target: string) {
-  const text = await mcpFor(appId).callToolText('hadron_get_node', { urn: nodeUrn(target) });
+async function mcpReads(appId: string, target: string, userId?: string) {
+  const text = await mcpFor(appId, userId).callToolText('hadron_get_node', { urn: nodeUrn(target) });
   return text.includes(mem[target]!.content);
 }
 
-async function mcpWrites(appId: string, target: string) {
-  const text = await mcpFor(appId).callToolText('hadron_update_node', { urn: nodeUrn(target), content: 'mcp-tampered' });
+async function mcpWrites(appId: string, target: string, userId?: string) {
+  const text = await mcpFor(appId, userId).callToolText('hadron_update_node', { urn: nodeUrn(target), content: 'mcp-tampered' });
   const after = await db.node.findUniqueOrThrow({ where: { id: mem[target]!.nodeId } });
   const wrote = after.content === 'mcp-tampered';
   if (wrote) await db.node.update({ where: { id: after.id }, data: { content: mem[target]!.content } });
@@ -193,24 +200,29 @@ describe('#1349 Slice 1 — a legacy link to another tenant grants nothing it co
 });
 
 describe('#1349 Slice 1 — the link still caps what the App reaches on its own', () => {
-  it('home ORGANIZATION knowledge, read-write: read and write', async () => {
+  it('home ORGANIZATION knowledge, read-write: an App member reads and writes; the bare key does neither (#1376)', async () => {
     const { appId, appKey } = await legacyLink('homeOrg', 'read-write');
-    expect(await reads(appKey, 'homeOrg')).toBe('homeOrg SECRET');
-    expect(await writes(appKey, 'homeOrg')).toBe(true);
-    expect(await mcpWrites(appId, 'homeOrg')).toBe(true);
-  });
-
-  it('home ORGANIZATION knowledge, read: read, and the link still caps the write', async () => {
-    const { appId, appKey } = await legacyLink('homeOrg', 'read');
-    expect(await reads(appKey, 'homeOrg')).toBe('homeOrg SECRET');
+    expect(await reads(appKey, 'homeOrg')).toBeNull();
     expect(await writes(appKey, 'homeOrg')).toBe(false);
-    expect(await mcpWrites(appId, 'homeOrg')).toBe(false);
+    const userId = await memberOf(appId);
+    expect(await mcpReads(appId, 'homeOrg', userId)).toBe(true);
+    expect(await mcpWrites(appId, 'homeOrg', userId)).toBe(true);
   });
 
-  it('home PUBLIC knowledge, read-write: the owning org writes it; PUBLIC changes nothing for it', async () => {
-    const { appKey } = await legacyLink('homePublic', 'read-write');
+  it('home ORGANIZATION knowledge, read: an App member reads, and the link still caps the write; the bare key reads nothing (#1376)', async () => {
+    const { appId, appKey } = await legacyLink('homeOrg', 'read');
+    expect(await reads(appKey, 'homeOrg')).toBeNull();
+    expect(await writes(appKey, 'homeOrg')).toBe(false);
+    const userId = await memberOf(appId);
+    expect(await mcpReads(appId, 'homeOrg', userId)).toBe(true);
+    expect(await mcpWrites(appId, 'homeOrg', userId)).toBe(false);
+  });
+
+  it('home PUBLIC knowledge, read-write: the bare key reads and no longer writes (#1376); an App member writes it', async () => {
+    const { appId, appKey } = await legacyLink('homePublic', 'read-write');
     expect(await reads(appKey, 'homePublic')).toBe('homePublic SECRET');
-    expect(await writes(appKey, 'homePublic')).toBe(true);
+    expect(await writes(appKey, 'homePublic')).toBe(false);
+    expect(await mcpWrites(appId, 'homePublic', await memberOf(appId))).toBe(true);
   });
 
   it('an invalid stored role grants nothing, even on a memory the App could reach', async () => {
@@ -223,9 +235,12 @@ describe('#1349 Slice 1 — the link still caps what the App reaches on its own'
 describe('#1349 Slice 1 — a subscribed memory (Vera\'s control)', () => {
   it('a live CONTRIBUTOR subscription is independent reach: the read-write link reads and writes it', async () => {
     const { appId, appKey } = await legacyLink('foreignSubscribed', 'read-write');
+    // #1376: a bare key gets no item-derived reach, and a subscription is the org's, not the key's; a user behind the App does.
     expect(await reads(appKey, 'foreignSubscribed')).toBe('foreignSubscribed SECRET');
-    expect((await getAppMemoryAccess(db, appId)).get(mem.foreignSubscribed!.id)).toBe('READ_WRITE');
-    expect(await writes(appKey, 'foreignSubscribed')).toBe(true);
+    expect(await writes(appKey, 'foreignSubscribed')).toBe(false);
+    const userId = await memberOf(appId);
+    expect((await getPrincipalAppMemoryAccess(db, { appId, userId })).get(mem.foreignSubscribed!.id)).toBe('READ_WRITE');
+    expect(await mcpWrites(appId, 'foreignSubscribed', userId)).toBe(true);
   });
 
   it('a read link on a subscribed memory still caps the write', async () => {
@@ -338,8 +353,12 @@ describe('#1349 Slice 1 — the folds that read links directly use the same cap'
       const { appId, appKey } = await legacyLink(target, 'read-write');
       const response = await gql(appKey, 'query { memories { items { id } } }', {});
       expect(response.errors).toBeUndefined();
-      expect(response.data?.memories.items.some((m: { id: string }) => m.id === mem[target]!.id)).toBe(want);
-      expect((await mcpFor(appId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(want);
+      // #1376: a bare key lists home ORGANIZATION knowledge no longer; an App member's listing follows the cap.
+      const bareWant = target === 'homeOrg' ? false : want;
+      expect(response.data?.memories.items.some((m: { id: string }) => m.id === mem[target]!.id)).toBe(bareWant);
+      expect((await mcpFor(appId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(bareWant);
+      const userId = await memberOf(appId);
+      expect((await mcpFor(appId, userId).callToolText('hadron_list_memories', {})).includes(mem[target]!.urn)).toBe(want);
     }
   });
 

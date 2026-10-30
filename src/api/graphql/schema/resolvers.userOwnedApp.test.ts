@@ -330,7 +330,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
     expect(ids).not.toContain(ownMem.id);
   });
 
-  it('Query.memories (App-key) still lists an ORG-owned memory (no regression)', async () => {
+  it('Query.memories still lists an ORG-owned memory through an App member (no regression; a bare key does not, #1376)', async () => {
     const orgMem = await db.memory.create({
       data: { id: generateId(), class: 'knowledge', name: 'orgmem', urn: `${generateId()}:orgmem`, organizationId: pubOrgId },
     });
@@ -342,10 +342,20 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
       data: { id: generateId(), name: 'Org App', urn: `${generateId()}:org-app`, organizationId: pubOrgId,
         appAgents: { create: { agentId: agent.id } } },
     });
-    const page = await resolvers.Query.memories(
+    // #1376: the fold over an org-owned memory is for a request with a user behind it (an App member);
+    // a bare key no longer lists it.
+    const member = await db.user.create({ data: { id: generateId(), handle: `uo-org-member-${generateId()}`, roles: ['READER'] } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    const bare = await resolvers.Query.memories(
       null,
       { filter: { memoryClasses: ['knowledge'] } },
       ctx({ appId: app.id }),
+    );
+    expect(bare.items.map((m: { id: string }) => m.id)).not.toContain(orgMem.id);
+    const page = await resolvers.Query.memories(
+      null,
+      { filter: { memoryClasses: ['knowledge'] } },
+      ctx({ appId: app.id, userId: member.id }),
     );
     expect(page.items.map((m: { id: string }) => m.id)).toContain(orgMem.id);
   });
