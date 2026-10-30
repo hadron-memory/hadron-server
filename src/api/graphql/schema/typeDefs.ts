@@ -11075,6 +11075,13 @@ export const typeDefs = `#graphql
     Platform invite — no org association, just onboards a new user
     """
     inviteUser(name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
+    """
+    Accepts an invitation by its acceptance slug (not its id). Refusals are typed:
+    NOT_FOUND for an unknown slug, an id supplied as the slug, or a revoked-by-removal
+    invitation; UNAUTHENTICATED when signed out; BAD_USER_INPUT for an expired invitation or
+    one whose issuer lost the authority to invite; CONFLICT when the invitation has reached
+    its maximum uses or the caller already accepted it. A refusal changes nothing.
+    """
     acceptInvitation(slug: String!): Boolean!
 
     # Organization membership (platform ADMIN or org OWNER/ADMIN).
