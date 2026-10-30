@@ -562,6 +562,9 @@ async function applyTemplateConstraints(client: Client) {
     CREATE INDEX IF NOT EXISTS nodes_msg_channel_seq_loc_c_idx
       ON "nodes" ("message_channel_id", "seq", "loc" COLLATE "C")
       WHERE "node_type" = 'chat-message' AND "deleted_at" IS NULL AND "seq" IS NOT NULL;
+    -- #2832: direct-children read (NodeFilter.childrenOf); mirrors the migration and post-push.sql.
+    CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
+      ON nodes (memory_id, (regexp_replace(loc, '(^|:)[^:]*$', '')));
   `);
 
 }

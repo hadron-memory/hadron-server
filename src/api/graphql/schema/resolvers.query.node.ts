@@ -43,6 +43,7 @@ import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
+import { isDirectChildLoc } from '../../../lib/childLoc.js';
 import {
   parseUrnInput,
   validateUrnType,
@@ -117,6 +118,8 @@ export interface FindNodesArgs {
     isRunnable?: boolean | null;
     role?: string | null;
     locPrefix?: string | null;
+    /** #2832 — direct children of this loc only ("" = top level); null/absent = no filter. */
+    childrenOf?: string | null;
     createdBy?: string | null;
     updatedAfter?: string | null;
     updatedBefore?: string | null;
@@ -1260,6 +1263,11 @@ export const nodeQueries = {
         outgoingEdges: { include: { target: true } },
         incomingEdges: { include: { source: true } },
       } as const;
+      // #2832: every path re-reads its candidates by id through the Prisma `structuredWhere`, which cannot express the
+      // direct-children rule. Re-assert it on the rows read back, so a node that moved or was renamed between ranking
+      // and hydration is never returned against the filter, and an id list from any ranker stays exact.
+      const childrenOnly = <T extends { loc: string }>(rows: T[]): T[] =>
+        f.childrenOf == null ? rows : rows.filter((n) => isDirectChildLoc(n.loc, f.childrenOf!));
 
       const hasQuery = typeof query === 'string' && query.trim() !== '';
 
@@ -1274,6 +1282,7 @@ export const nodeQueries = {
         role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
+        childrenOf: f.childrenOf ?? null,
         createdBy: f.createdBy ?? null,
         updatedAfter: f.updatedAfter ?? null,
         updatedBefore: f.updatedBefore ?? null,
@@ -1313,9 +1322,12 @@ export const nodeQueries = {
         // property-path sort (an ORDER BY over a JSON path Prisma can't express)
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
         // browse (no where, no property sort) keeps the Prisma path below.
-        if (f.where != null || sortProperty != null) {
+        // #2832: the direct-children filter is a SQL expression Prisma cannot write, so it takes this path too.
+        // Order A (pending Holger, rulings item 7): a children read is a sibling list, so unless the caller names a sort it
+        // comes in cor:dmo:020:01 order (Node.seq first, then loc). A different ruling changes only this default.
+        if (f.where != null || sortProperty != null || f.childrenOf != null) {
           const browseSort: BrowseSort | undefined =
-            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : undefined;
+            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : (sort == null || sort === 'relevance') && f.childrenOf != null ? 'seq' : undefined;
           const ids = await provider.filterSearch({
             db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
             includeDeleted: !!f.includeDeleted, sort: browseSort,
@@ -1329,10 +1341,10 @@ export const nodeQueries = {
           // #1345 review (@copilot): the structured filters too, not only scope,
           // so a node that stopped matching (e.g. its role changed) between the
           // SQL filter and this read is not returned against the filter.
-          const rows = await ctx.db.node.findMany({
+          const rows = childrenOnly(await ctx.db.node.findMany({
             where: { id: { in: ids }, memoryId: { in: scopeIds }, ...structuredWhere },
             include: nodeInclude,
-          });
+          }));
           await decryptNodesBatch(ctx.db, rows);
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
@@ -1370,7 +1382,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix || f.childrenOf != null ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
@@ -1390,10 +1402,10 @@ export const nodeQueries = {
             tombstoneMemoryIds: recoverableIds,
           });
         }
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
-          select: { id: true },
-        });
+          select: { id: true, loc: true },
+        }));
         return new Set(rows.map((r) => r.id));
       };
 
@@ -1460,10 +1472,10 @@ export const nodeQueries = {
         // #1345 review (@copilot): re-assert the memory scope at hydration. The
         // candidates were scoped when RANKED, in a separate query; a node moved
         // to another memory in between must not come back from outside scope.
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: candidateIds }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
-        });
+        }));
         await decryptNodesBatch(ctx.db, rows);
         // #719 — a property-path sort re-orders the ranked candidate WINDOW in
         // memory (the vector/hybrid query ranks against node_embeddings, not the
@@ -1538,10 +1550,10 @@ export const nodeQueries = {
         // structured filters when RANKING; re-assert them at hydration, as
         // buildResult does, so a node whose role (or memory, or deletion) changed
         // in between is not returned against the filter it no longer meets.
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: ranked.map((r) => r.nodeId) }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
-        });
+        }));
         await decryptNodesBatch(ctx.db, rows);
         const byId = new Map(rows.map((n) => [n.id, n]));
         const pageRows = ranked
@@ -1737,7 +1749,7 @@ export const nodeQueries = {
             }),
           );
         }
-        const parents = await ctx.db.node.findMany({
+        const parents = childrenOnly(await ctx.db.node.findMany({
           where: {
             id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
             // @copilot: re-assert scope at hydration, as buildResult does.
@@ -1745,7 +1757,7 @@ export const nodeQueries = {
             ...structuredWhere,
           },
           include: { memory: { select: { urn: true } } },
-        });
+        }));
         // #1885 (Diego, #1891 P2-1, chunk mode): the scope's exclusions were a
         // snapshot, so re-check every hydrated parent against the effective
         // set now, before eligibility, paging, usage and passage text. A base
@@ -2343,6 +2355,8 @@ export const nodeQueries = {
           isRunnable?: boolean | null;
           role?: string | null;
           locPrefix?: string | null;
+          /** #2832 — findNodes only; rejected here. */
+          childrenOf?: string | null;
           createdBy?: string | null;
           updatedAfter?: string | null;
           updatedBefore?: string | null;
@@ -2358,6 +2372,12 @@ export const nodeQueries = {
     ) => {
       // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
       // computation, shared with appMemoryScope: a second copy would drift.
+      // #2832: NodeFilter.childrenOf is a findNodes dimension (cor:api:090:02). Reject it rather than silently ignore
+      // it: a caller who asked for direct children must not get the whole list back. It is judged on the argument alone,
+      // before the scope is read, so the refusal says nothing about the App and is the same for every caller.
+      if (filter?.childrenOf != null) {
+        throw new GraphQLError('appNodes: filter.childrenOf is not supported. Use findNodes to read direct children.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
       const scope = await resolveAppNodeScope(ctx, appRef);
       if (!scope) return [];
       const { inheritance } = scope;
