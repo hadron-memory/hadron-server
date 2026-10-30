@@ -4473,7 +4473,7 @@ export const typeDefs = `#graphql
     urn: String!
     name: String!
     description: String
-    "Templated Agent prompt. {{name}}/{{role}} bind to the Agent in chats or the named Worker in briefings."
+    "Templated Agent prompt. {{worker.name}}/{{worker.role}} bind to the Agent in chats or the named Worker in briefings; the old {{name}}/{{role}} tokens no longer bind (#1772)."
     systemPrompt: String
     """
     #2045 — the canonical URN of the compiled boot prompt this Agent's pointer names now
@@ -5254,7 +5254,7 @@ export const typeDefs = `#graphql
     app: App
     """
     The worker's boot prompt, resolved: the agent's systemPrompt template
-    with {{name}}/{{role}} bound, then promptOverride appended as its own
+    with {{worker.name}}/{{worker.role}} bound, then promptOverride appended as its own
     paragraph. Null when the agent carries no template and the worker no
     override.
     """
@@ -5365,7 +5365,7 @@ export const typeDefs = `#graphql
     agentId: ID!
     agentName: String!
     """
-    The composed boot prompt, post {{name}}/{{role}} substitution with
+    The composed boot prompt, post {{worker.name}}/{{worker.role}} substitution with
     promptOverride appended — the same composition Worker.prompt performs,
     reviewable BEFORE the name is permanent. Null when the agent carries no
     template and no override was given.
@@ -5481,6 +5481,38 @@ export const typeDefs = `#graphql
     role: Role!
     activated: Boolean!
     createdAt: DateTime!
+  }
+
+  """
+  The provider a connection is made to: a Microsoft 365 mailbox, a Gmail
+  mailbox, a Google Calendar or a Google Drive. Each is its own OAuth client
+  and its own capability tool.
+  """
+  enum ConnectionProvider {
+    MS_EXCHANGE
+    GMAIL
+    GOOGLE_CAL
+    GOOGLE_DRIVE
+  }
+
+  """
+  The start of a connection's OAuth flow (#2897). Open authorizeUrl in a
+  browser; the consent step belongs to the provider and the browser ends on a
+  page this server hosts, so the portal is not involved. Confirm the result by
+  listing the org's connections.
+  """
+  type ConnectionStart {
+    provider: ConnectionProvider!
+    "The org the connection will be attached to."
+    orgId: ID!
+    """
+    The server URL to open in a browser. Its nonce is single-use and short-lived
+    (expiresAt); a second visit is refused. Treat the URL like a password until
+    it has been opened once.
+    """
+    authorizeUrl: String!
+    "When authorizeUrl stops working. Start again after this."
+    expiresAt: DateTime!
   }
 
   """
@@ -11471,7 +11503,7 @@ export const typeDefs = `#graphql
     (org XOR user).
 
     personaRole and systemPrompt are the persona dressing (cor:agt:020:01) —
-    the reusable role plus the '{{name}}'-templated prompt. The NAMED
+    the reusable role plus the '{{worker.name}}'-templated prompt. The NAMED
     identity is a Worker, cast with castWorker; names never live on agents.
 
     orgId accepts the org's ID or URN.
@@ -11673,6 +11705,23 @@ export const typeDefs = `#graphql
     # Exchange integration (connection created via OAuth at /auth/microsoft)
     deleteExchangeConnection(id: ID!): Boolean!
     testExchangeConnection(id: ID!): Boolean!
+
+    """
+    Start the OAuth flow that connects a mailbox, calendar or Drive to an org
+    (#2897; hrn:node:hadronmemory.com:specs:cor:api:240:02). The same start as
+    POST /auth/{provider}/start, which stays for the portal: the same org-ADMIN
+    gate and the same single-use, provider-bound nonce. A flow started here ends
+    on a page the server hosts, not on the portal.
+
+    Only a signed-in user acting as themselves may call it: a portal sign-in or
+    a user API key, who is an ADMIN of orgRef (ID or URN). An App key, a bound
+    worker session, an impersonated request and an OAuth credential limited to
+    the MCP surface are refused, because this mints a credential-bearing start
+    for a person's mailbox, calendar or Drive (hrn:node:hadronmemory.com:specs:cor:dmo:050:05).
+    A caller who is not an ADMIN, and an unknown org, get the same Forbidden.
+    An unconfigured provider is CONNECTION_PROVIDER_NOT_CONFIGURED.
+    """
+    startConnection(provider: ConnectionProvider!, orgRef: ID!): ConnectionStart!
 
     """
     Register a Slack workspace install (spec 043). orgRef/appRef accept ID

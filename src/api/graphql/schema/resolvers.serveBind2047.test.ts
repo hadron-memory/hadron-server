@@ -159,26 +159,25 @@ describe('#2047 bind', () => {
   });
 });
 
-// #2702: the converted prompts keep the legacy {{name}} / {{role}} tokens until the live-node token audit (#1772), so the
-// served path binds them in the same pass as the platform variables, from the values the bind filled.
-describe('#2702 served text binds the legacy {{name}} / {{role}} tokens', () => {
-  const LEGACY = 'You are {{name}}, filling the {{role}} role. Sign as {{name}}.';
+// #1772 step 3: the legacy {{name}} / {{role}} binding is deleted (G3: no live served text holds one). A token left in served
+// text renders as written, like any text outside the closed set; {{worker.name}} / {{worker.role}} are the only binders.
+describe('#1772 step 3: LIVE served text leaves legacy {{name}} / {{role}} tokens as written', () => {
+  const LEGACY = 'You are {{name}}, filling the {{role}} role. Sign as {{name}}. ({{worker.name}}/{{worker.role}})';
 
-  it('a read with no record (what a bind would be served now) binds the worker name and role', async () => {
+  it('a read with no record leaves the legacy tokens and binds the closed-set ones', async () => {
     await pointAgent(await compiled(LEGACY));
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const text = (await composeWorkerPrompt(ctx(), w as never)).text!;
-    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris.');
-    expect(text).not.toMatch(/\{\{(name|role)\}\}/);
+    expect(text).toContain('You are {{name}}, filling the {{role}} role. Sign as {{name}}. (Iris/tester)');
   });
 
-  it("a recorded session's replay binds the recorded name and role, not today's", async () => {
+  it("a recorded session's replay still binds them from the RECORDED values: a record is reconstructed as it was served (#1772 review P2)", async () => {
     await pointAgent(await compiled(LEGACY));
     const session = await bind();
     await db.worker.update({ where: { id: worker.id }, data: { name: 'Renamed', role: 'renamed-role' } });
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const text = (await composeWorkerPrompt(ctx({ sessionId: session.id }), w as never)).text!;
-    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris.');
+    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris. (Iris/tester)');
     expect(text).not.toMatch(/\{\{(name|role)\}\}/);
   });
 });

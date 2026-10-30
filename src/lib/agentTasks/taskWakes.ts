@@ -75,7 +75,7 @@ const TASKLESS_ALARMS = [
   { type: 'alarm.dark-worker', handle: 'DARK', openEpisodeRequired: true,
     title: Prisma.sql`sw.name || ' has gone dark (' || COALESCE(e.payload ->> 'reason', 'dark') || ')'` },
   { type: 'alarm.post-limit', handle: 'LIMIT', openEpisodeRequired: false,
-    title: Prisma.sql`sw.name || ' hit the team-chat post limit (' || COALESCE(e.payload ->> 'limit', 'limit') || ')'` },
+    title: Prisma.sql`sw.name || '''s team-chat post was refused by the post limit' || CASE WHEN e.payload ->> 'limit' IS NULL THEN '' ELSE ' (' || (e.payload ->> 'limit') || ')' END` },
 ] as const;
 
 const OPEN = Prisma.sql`('pending', 'started')`;

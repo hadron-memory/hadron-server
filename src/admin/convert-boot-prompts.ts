@@ -24,8 +24,8 @@
  * override, exactly as `composeWorkerPrompt` joins them, before platform variables are bound and without the derived
  * register block) must equal the compiled node's text byte for byte, or the row FAILS with nothing approved and no
  * pointer set. The rows whose RENDERED text differs after conversion are listed with the reason: an override's
- * `{{name}}` / `{{role}}` stays literal today (the override is bound without the legacy args) and binds once the
- * compiled node is served (P9, accepted). Text holding an include tag (`{{> …}}`, which the compile would resolve)
+ * `{{name}}` / `{{role}}` was meant to bind once the compiled node was served (P9, accepted); since #1772 step 3 no
+ * legacy token binds anywhere, so such a row now renders the same before and after conversion. Text holding an include tag (`{{> …}}`, which the compile would resolve)
  * fails rather than being edited.
  *
  * Idempotent: a row whose pointer is already set is skipped; an existing source or compiled node is reused when it
