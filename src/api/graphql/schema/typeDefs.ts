@@ -9243,6 +9243,14 @@ export const typeDefs = `#graphql
     resolveAiServiceConfigs(appRef: ID, agentRef: ID): [AiServiceConfig!]!
 
     """
+    #2862 / hrn:node:hadronmemory.com:specs:cor:agt:040:03: a chatbot chat's served-prompt records, by chat id, and nothing
+    else about the chat. The same read as Chat.servedPrompts (newest first, default 50, cap 200): readable only by
+    whoever manages the App named by the chat's first record, and only that App's records. Everyone else, an unknown
+    chat id and serving switched off all get an empty page, never an error. Never returns a Chat.
+    """
+    chatServedPrompts(chatId: ID!, limit: Int, offset: Int): ServedPromptsPage!
+
+    """
     Saved chats for the current user in their personal memory for an
     agent. Newest first.
 
