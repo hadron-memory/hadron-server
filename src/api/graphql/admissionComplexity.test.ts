@@ -49,6 +49,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
+  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
