@@ -355,6 +355,21 @@ describe('contract #2420', () => {
     }
   });
 
+  it('a schema using $ref is unusable, so a tiny anyOf fan-out never freezes or crashes the shared event loop (§10 P1-1 delta)', async () => {
+    const definitions: Record<string, any> = { d24: { type: 'string', minLength: 5 } };
+    for (let i = 23; i >= 0; i--) definitions[`d${i}`] = { anyOf: [{ $ref: `#/definitions/d${i + 1}` }, { $ref: `#/definitions/d${i + 1}` }] };
+    const node = await putSchema({ type: 'object' });
+    for (const schema of [
+      { type: 'object', definitions, properties: { k: { $ref: '#/definitions/d0' } } },
+      { type: 'object', properties: { k: { $ref: '#' } } },
+    ]) {
+      await db.node.update({ where: { id: node.id }, data: { data: schema } });
+      const started = Date.now();
+      await expect(setProps({ k: 'x' })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+  });
+
   it('a schema node may have a property named pattern as long as no regex keyword is used', async () => {
     await putSchema({ type: 'object', properties: { pattern: { type: 'string' } } });
     await setProps({ pattern: 'anything' });

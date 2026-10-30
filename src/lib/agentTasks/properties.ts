@@ -132,11 +132,7 @@ export async function checkAgainstTeamSchema(
 }
 
 /**
- * The Team Agent's system memory. No Team Agent at all means no schema can exist. Two or more candidates is NOT "no
- * schema": the platform cannot tell which Agent's schema applies, so it refuses rather than skip the check.
- */
-/**
- * Whether a schema is within bounds and free of regex keywords. Regular expressions are refused outright: `pattern`
+ * Whether a schema is within bounds and free of regex and reference keywords. Regular expressions are refused outright: `pattern`
  * and `patternProperties` run the engine's backtracking RegExp, and a catastrophic pattern such as `^(a+)+$` takes
  * seconds on a 28-character value and hours on a 40-character one, on the event loop every tenant shares. Walked
  * without recursion so a deeply nested schema cannot overflow the stack. A property merely NAMED `pattern` is fine (its
@@ -152,6 +148,9 @@ function schemaIsUsable(schema: object): boolean {
       const o = node as Record<string, unknown>;
       if (typeof o.pattern === 'string') return false;
       if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return false;
+      // References let a flat, tiny schema describe an exponential evaluation tree (a chain of anyOf [$ref, $ref] is 2^N
+      // branches and exhausts the heap). Without them evaluation cost is bounded by schema nodes x value nodes, both capped.
+      if (typeof o.$ref === 'string' || typeof o.$recursiveRef === 'string' || typeof o.$dynamicRef === 'string') return false;
     }
     for (const child of Object.values(node)) stack.push([child, depth + 1]);
   }
@@ -173,6 +172,10 @@ function compileSchema(schema: object): ReturnType<Ajv['compile']> {
   return validate;
 }
 
+/**
+ * The Team Agent's system memory. No Team Agent at all means no schema can exist. Two or more candidates is NOT "no
+ * schema": the platform cannot tell which Agent's schema applies, so it refuses rather than skip the check.
+ */
 async function teamSystemMemoryId(txCtx: Context, appId: string): Promise<string | null> {
   try {
     return (await locateTeamAgent(txCtx, appId, undefined)).systemMemoryId;
