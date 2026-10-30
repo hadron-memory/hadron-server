@@ -24,6 +24,8 @@ import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { reasonEnum, tickerFieldResolvers } from '../api/graphql/schema/resolvers.ticker.js';
+import { agentTickerTemplateFieldResolvers } from '../api/graphql/schema/resolvers.agentTickerTemplate.js';
+import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
@@ -107,11 +109,12 @@ const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
 async function renderTicker(t: Row, ctx: Context): Promise<string> {
   // Only channels the reader can read: the list is not a grant (the GraphQL field filters the same way).
-  const [urn, owner, subs, readable] = await Promise.all([
+  const [urn, owner, subs, readable, registerLoc] = await Promise.all([
     FT.urn(t as never, {}, ctx),
     FT.owner(t as never, {}, ctx),
     FT.subscribers(t as never, { first: 200 }, ctx),
     FT.channels(t as never, {}, ctx),
+    FT.registerTaskLoc(t as never, {}, ctx),
   ]);
   const names: string[] = [];
   for (const s of subs.items) {
@@ -120,6 +123,7 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   }
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
+    `  code ${t.tickCode} · ${registerLoc ? 'register task loc ' + registerLoc : 'no register entry you can read'}`,
     `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}· reasons ${(t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+')}`,
     `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
@@ -263,7 +267,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     async ({ session, appRef, ...input }) =>
       write('hadron_ticker_create', session, async (ctx) => {
         const t = await M.createTicker({}, { appRef, input }, ctx);
-        return `Created.\n\n${await renderTicker(t, ctx)}`;
+        return `Created.\n\n${await renderTicker(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`;
       }),
   );
 
@@ -390,8 +394,9 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
         const page = await Q.dueWakes({}, { appRef, ...rest }, ctx);
         const lines: string[] = [];
         for (const w of page.wakes) {
-          const why = (w.reasons as Row[])
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
+          const why = [w.tickText, ...(w.reasons as Row[])
+            .filter(r => r.kind !== 'TICK' || !w.tickText)
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))].filter(Boolean)
             .join(' + ');
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
@@ -465,7 +470,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   const renderTemplate = (t: Row): string => {
     const quiet = t.quietHours ? ` · quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : '';
     const reasons = (t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+');
-    return `- ${t.name} · id ${t.id} · revision ${t.revision} · every ${t.cadenceSeconds}s (raised to the App floor at cast) · relevance ${t.relevance} · reasons ${reasons}${quiet}`;
+    return `- ${t.name} · code ${agentTickerTemplateFieldResolvers.AgentTickerTemplate.tickCode(t as never)} · id ${t.id} · revision ${t.revision} · every ${t.cadenceSeconds}s (raised to the App floor at cast) · relevance ${t.relevance} · reasons ${reasons}${quiet}`;
   };
   async function plain(fn: (ctx: Context) => Promise<string>) {
     try {

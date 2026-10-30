@@ -70,7 +70,7 @@ async function say(ch: typeof channel, body: string, data: Record<string, unknow
 }
 const mention = (...mentions: string[]) => ({ mentions });
 const mkTicker = (over: Record<string, unknown> = {}) =>
-  db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: `eng-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), ...over } });
+  db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: `eng-${generateId().slice(-5)}`, cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), ...over } });
 const subscribe = (tickerId: string, workerId: string) =>
   db.tickerSubscription.create({ data: { id: generateId(), tickerId, workerId, createdBy: manager.id } });
 const due = (c: Context, extra: Record<string, unknown> = {}) => Q.dueWakes({}, { appRef: app.id, ...extra }, c);
@@ -199,7 +199,7 @@ describe('ticks and relevance through the whole loader', () => {
     await say(channel, 'plain news');
     const page = await due(ctx(manager.id));
     expect(page.wakes).toHaveLength(1);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: t.id }), task: null, action: { code: 'tick.fixture', state: 'UNMAPPED' } }]);
     expect(page.wakes[0].channels[0]).toMatchObject({ fromSeq: 1, throughSeq: 1 });
     expect(page.wakes[0]).toMatchObject({ unread: 1, unreadMentions: 0 });
   });
@@ -382,7 +382,7 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
     await db.ticker.update({ where: { id: quiet.id }, data: { reasons: ['every-tick'] } });
     const page = await due(ctx(manager.id));
     expect(ids(page)).toEqual([liam.id]);
-    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null }]);
+    expect(page.wakes[0].reasons).toEqual([{ kind: 'TICK', ticker: expect.objectContaining({ id: quiet.id }), task: null, action: { code: 'tick.fixture', state: 'UNMAPPED' } }]);
     expect(page.wakes[0].channels).toEqual([]);
     expect(page.wakes[0]).toMatchObject({ unread: 0, unreadMentions: 0 });
     const ack = await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, ctx(manager.id));
@@ -498,8 +498,8 @@ describe('#2068 (R49/R54) — a ticker with reason every-tick, through the whole
 
   it('a ticker row created before the column existed reads as [read-team-channel] (the migration default), naming no ticker', async () => {
     const id = generateId();
-    await db.$executeRaw`INSERT INTO tickers (id, app_id, name, slug, cadence_seconds, anchor_at, channel_ids, relevance, enabled, owner_user_id, created_at)
-      VALUES (${id}, ${app.id}, 'Old', 'old', 600, now(), '{}', 'ALL', true, ${manager.id}, now())`;
+    await db.$executeRaw`INSERT INTO tickers (id, app_id, name, slug, tick_code, cadence_seconds, anchor_at, channel_ids, relevance, enabled, owner_user_id, created_at)
+      VALUES (${id}, ${app.id}, 'Old', 'old', 'tick.old', 600, now(), '{}', 'ALL', true, ${manager.id}, now())`;
     expect((await db.ticker.findUniqueOrThrow({ where: { id } })).reasons).toEqual(['read-team-channel']);
   });
 });

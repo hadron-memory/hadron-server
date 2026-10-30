@@ -6314,6 +6314,8 @@ model Ticker {
   appId             String    @map("app_id")
   name              String
   slug              String
+  /// Permanent action-register code, snapped from the template name for generated tickers.
+  tickCode          String    @map("tick_code")
   cadenceSeconds    Int       @map("cadence_seconds")
   anchorAt          DateTime  @default(now()) @map("anchor_at")
   /// `{ timezone, windows: [{ days: [1..7], from: "22:00", to: "07:00" }] }`.
