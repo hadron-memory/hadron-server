@@ -125,7 +125,7 @@ export const runCommandAsync: AsyncRunner = (argv) => new Promise((resolveRun) =
     : { code, stdout, stderr }));
 });
 
-export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{worker{id name} reasons{kind ticker{id name} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
+export const QUERY = `query($a:String!,$p:String){dueWakes(appRef:$a,first:100,after:$p){wakes{tickText worker{id name} reasons{kind ticker{id name} action{state} task{id eventId chainIndex event}} proof anchorAt deliverAfter busyDeadline} pageInfo{hasNextPage endCursor}}}`;
 export const ACK = `mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged unchanged}}`;
 /** The worker's own last team-channel check (#2138 §3.4; stamped only through its own session). */
 export const WORKER_CHECK = `query($w:ID!,$a:ID){worker(ref:$w,appRef:$a){id checkStatus{lastCheckedAt}}}`;
@@ -185,6 +185,19 @@ const ALARM_MAX_PAGES = 50;
 const STALL_RULE = /^[a-z][a-z0-9.-]{0,63}$/;
 /** A task id is typed into a terminal, so only a plain id shape is accepted; anything else holds the wake. */
 const TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The longest tick line this script types (about 20 tickers at 200 characters). */
+const TICK_TEXT_MAX = 4000;
+/** C0, DEL and C1 controls (a tab and a line break included), U+2028 and U+2029: nothing that can submit or reshape a typed line. */
+const TICK_TEXT_UNTYPEABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+/**
+ * #2754: the server's tick line, or null when it can't be typed as one line. The server writes it and no reader
+ * rebuilds, wraps or re-renders it (hrn:node:hadronmemory.com:specs:cor:agt:080:26), so it is typed unchanged or not at
+ * all, never "fixed".
+ */
+export function typeableTickText(v: unknown): string | null {
+  return typeof v === 'string' && v.length >= 1 && v.length <= TICK_TEXT_MAX && !TICK_TEXT_UNTYPEABLE.test(v) ? v : null;
+}
 
 type Log = (line: string) => void;
 /**
@@ -921,7 +934,14 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         const openLine = dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id, undefined, clock, deadline, (why) => log(`${ts} ${name}: open-task count unknown (${why}); the wake goes without the line`));
         const unsafe = safeToType();
         if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
-        const text = (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine);
+        // #2754: the server's tick line leads, unchanged (hrn:node:hadronmemory.com:specs:cor:agt:080:23, :26); one that
+        // can't be typed as a line is dropped and today's nudge goes out, logging the worker and a closed reason, never the text.
+        const tickLine = typeableTickText(w.tickText);
+        if (typeof w.tickText === 'string' && w.tickText !== '' && !tickLine) log(`${ts} ${name}: tick line not typeable; the wake goes without it`);
+        // The coordinator's base-tick sentence stays unless that ticker's OWN action is MAPPED (the server's line then names the task).
+        const mappedBase = new Set<string>();
+        for (const r of w.reasons) if (r.kind === 'TICK' && r.ticker?.name && BASE_TICK_TICKERS.has(r.ticker.name) && r.action?.state === 'MAPPED') mappedBase.add(r.ticker.name);
+        const text = (tickLine ? `${tickLine} ` : '') + (displaced ? `Fresh tick request at ${ts}: ` : '') + nudgeText([...newTickers], newTasks, openLine, mappedBase);
         if (dry) { log(`${ts} ${name}: WOULD nudge ${handle}`); return; }
         const coverage = [...new Set([...covered, ...newWork])].sort();
         // The ASSIGNED task identities this send names, kept on the receipt: the assignment wake is gone once the task
@@ -1050,14 +1070,14 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
  * posted after it, and still stamps the check on an empty read. On a failed read nothing is marked, and a read whose
  * output the worker's tool truncated or saved counts only once the worker has read the rest (George's #2156 residual).
  */
-export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>, openTasks = ''): string {
+export function nudgeText(tickers: string[], tasks: Array<string | NudgeTask>, openTasks = '', mappedBase: ReadonlySet<string> = new Set()): string {
   const tagged = 'run `hadron team chat read --mentions-me --limit 1` (it prints `cursor #C; channel head #H`), '
     + 'then `hadron team chat read --mentions-me --since C --all` and act on the tagged messages it returns; '
     + 'only if that read succeeded and you saw all of its output (if your tool truncated or saved it, read the rest first; '
     + 'if you can\'t, don\'t mark), run `hadron team chat mark-read --through H` with the H that read printed';
   // #2138 (Marco #26709): a coordinator's ticker asks for its base tick, the tagged check FIRST and then the sweep, so
   // the nudge never tells a coordinator to skip the sweep. A wake that carries both tickers is the coordinator's.
-  const check = tickers.some((t) => BASE_TICK_TICKERS.has(t))
+  const check = tickers.some((t) => BASE_TICK_TICKERS.has(t) && !mappedBase.has(t))
     ? `run your base tick (${BASE_TICK_TASK}): first the tagged check: ${tagged}; then the sweep of your owned tasks, alarms and ready heads`
     : tagged;
   const rule = 'No unfiltered chat catch-up.';
