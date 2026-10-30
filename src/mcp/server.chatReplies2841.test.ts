@@ -173,3 +173,33 @@ it('a readable App with no canonical chat refuses a requested reply target witho
     expect(await code(Q.teamChatMessages({}, { appRef: other.id, replyToSeq: 1 }, context()))).toBe('TEAM_CHAT_REPLY_NOT_FOUND');
     expect(await db.channel.count({ where: { memory: { appId: other.id } } })).toBe(0);
 });
+it('target existence is scoped to this Channel and memory, not a sibling or another tenant', async () => {
+    const { channel } = await fixture(false);
+    expect(await code(Q.channelMessages({}, { channelRef: release.id, replyToSeq: 3 }, context()))).toBe('TEAM_CHAT_REPLY_NOT_FOUND');
+    const otherOrg = await db.organization.create({ data: { name: 'Other tenant', urn: `other-${generateId()}.com` } });
+    const otherMemory = await db.memory.create({ data: { organizationId: otherOrg.id, name: 'Other memory', urn: `${otherOrg.urn}:chat`, class: 'knowledge' } });
+    await ensureChannelWithRoot(db, { memoryId: otherMemory.id, loc: 'chats:team', name: 'team', createdBy: admin.id });
+    await db.node.create({ data: { memoryId: otherMemory.id, loc: 'chats:team:messages:foreign', name: 'foreign target', nodeType: 'chat-message', seq: 900, content: 'other tenant', data: {} } });
+    expect(await code(Q.channelMessages({}, { channelRef: channel.id, replyToSeq: 900 }, context()))).toBe('TEAM_CHAT_REPLY_NOT_FOUND');
+});
+for (const pinned of [false, true])
+    it(`reply-filtered mentions leave the delivery mark untouched, fenced=${pinned}`, async () => {
+        const { s, channel } = await fixture(false);
+        const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
+        const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Reply reader', slug: 'reply-reader' } });
+        const session = await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, agentId: agent.id, workerId: worker.id } });
+        await s.callToolText('hadron_team_chat_post', { asMe: true, body: '@reply-reader a reply mention', replyToSeq: 1 });
+        await s.callToolText('hadron_team_chat_post', { asMe: true, body: '@reply-reader an unseen non-reply mention' });
+        const args = { channelRef: channel.id, sinceSeq: 0, mentionsRef: worker.id, ...(pinned ? { expectedIncarnation: channel.incarnation } : {}) };
+        const ctx = { ...context(), sessionId: session.id };
+        const page = await Q.channelMessages({}, { ...args, replyToSeq: 1 }, ctx);
+        expect(seqs(page)).toEqual([6]);
+        expect(page.total).toBe(1);
+        const delivery = () => db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: worker.id, channelId: channel.id } } });
+        expect((await delivery())?.deliveredThroughSeq ?? 0).toBe(0);
+        expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: worker.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
+        // Control: the same mentions read without the reply window really can acknowledge both mentions.
+        const allMentions = await Q.channelMessages({}, args, ctx);
+        expect(seqs(allMentions)).toEqual([6, 7]);
+        expect((await delivery())?.deliveredThroughSeq).toBe(7);
+    });
