@@ -2956,6 +2956,15 @@ describe('#2754 — the server tick line', () => {
     });
   }
 
+  for (const [why, tickText] of [['null', null], ['absent', undefined], ['untypeable', 'tick coordinator-tick: run x\u0007y']] as const) {
+    it(`8b. a MAPPED coordinator-tick whose tick line is ${why} keeps the base-tick sentence (the task is named nowhere else)`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, tickText)];
+      await go();
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
   it('9. only the coordinator-tick\'s own state counts: WITHHELD coordinator-tick with a MAPPED team-tick keeps the base-tick sentence', async () => {
     f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'WITHHELD'), mapped(TEAM, 'MAPPED')], proof(['T:1', 'V:1']), [], undefined, FORMS[0])];
     await go();
