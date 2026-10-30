@@ -126,12 +126,13 @@ describe('#1551 authority writer ratchet', () => {
       ['resolvers.mutation.app.ts', 3],
       ['resolvers.mutation.chat.ts', 1],
       ['resolvers.helpers.ts', 2],
+      ['resolvers.worker.ts', 2], // #2906 castWorker + #2917 changeWorkerAgent, via provisionCastGrants (changeWorkerAgent is in DIRECT)
     ]);
     const files = execFileSync('git', ['ls-files', 'src/api/graphql/schema/resolvers*.ts'], { encoding: 'utf8' })
       .split('\n').filter((file) => file && !file.endsWith('.test.ts'));
     const actual = new Map<string, number>();
     for (const file of files) {
-      const count = [...readFileSync(file, 'utf8').matchAll(/\bensureAgent(?:OrgGrant|Subscription)\(/g)].length;
+      const count = [...readFileSync(file, 'utf8').matchAll(/\b(?:ensureAgent(?:OrgGrant|Subscription)|provisionCastGrants)\(/g)].length;
       if (count) actual.set(file.slice(file.lastIndexOf('/') + 1), count);
     }
     expect([...actual].sort()).toEqual([...expectedByFile].sort());
