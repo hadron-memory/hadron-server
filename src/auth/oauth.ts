@@ -55,6 +55,7 @@ import {
   sendMagicLink,
   TOKEN_EXPIRY_MINUTES,
 } from './email.js';
+import { requireSignupBotCheck } from './turnstile.js';
 import { isServerLocalPath } from './server-local-path.js';
 import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
 import { redirectAnchor } from './redirectAnchor.js';
@@ -1875,6 +1876,7 @@ export function buildOAuthRouter(opts: OAuthRouteOptions = {}): Router {
     csrf.doubleCsrfProtection,
     buildValidateAuthorizeEmailSend(csrf),
     opts.emailSendPerIpRateLimit ?? buildEmailSendPerIpRateLimit(),
+    requireSignupBotCheck, // #2257: same placement as POST /auth/email
     opts.emailRecipientRateLimit ?? buildEmailRecipientRateLimit(),
     buildHandleAuthorizeEmailPost(csrf),
   );
