@@ -173,26 +173,37 @@ describe('#2813 only the worker\'s own driving is activity (cor:agt:020:03, cor:
     expect(await db.usageEvent.count({ where: { sessionId: s.id } })).toBe(0);
   });
 
-  it('the deliverer\'s own credential, a scoped App key (the host poller), neither writes activity nor hides a dark worker', async () => {
-    const s = await bind('Tove', QUIET);
-    await say('hello @tove', ['tove']);
-    const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
-    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'host' } });
-    await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: user.id } });
-    const keyCtx = { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as unknown as Context;
-    const read = async () => {
-      const row = await db.session.findUniqueOrThrow({ where: { id: s.id } });
-      return { updatedAt: row.updatedAt?.getTime(), activityAt: sessionActivityAt(row).getTime(), events: await db.usageEvent.count({ where: { sessionId: s.id } }) };
-    };
-    const before = await read();
-    const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
-    expect(page.wakes.length).toBeGreaterThan(0); // the key branch ran and returned the wake
-    // The poller's other call.
-    expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
-    expect(await read()).toEqual(before);
-    // and the worker is still alarmed on its own quiet activity once a new wake ages past the window
-    await say('again @tove', ['tove']);
-    expect(await evaluateDarkWorkers(db, after(40))).toHaveLength(1);
+  // The deliverer's own credential: the host key of orca1's poller (host:operate bound to a live registration that lists
+  // the worker, cor:agt:070:04), and the plainer App key that holds only attention:deliver (a non-host reader of the
+  // workers no host lists). Both run the key branches of dueWakes/acknowledgeWakes, which the human-manager pin above
+  // never reaches.
+  describe.each([{ host: true }, { host: false }])('the deliverer\'s scoped App key, host: $host', ({ host }) => {
+    it('neither writes activity nor hides a dark worker', async () => {
+      const s = await bind('Tove', QUIET);
+      await say('hello @tove', ['tove']);
+      const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
+      const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'poller' } });
+      await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'attention:deliver', grantedByUserId: user.id } });
+      if (host) {
+        await db.appKeyScope.create({ data: { id: generateId(), appKeyId: key.id, scope: 'host:operate', hostId: 'orca1', grantedByUserId: user.id } });
+        const reg = await db.hostRegistration.create({ data: { appId: app.id, hostId: 'orca1', label: 'Orca 1', pollIntervalSeconds: 600, refreshedAt: new Date() } });
+        await db.hostRegistrationWorker.create({ data: { registrationId: reg.id, workerId: w.Tove.id, family: 'claude' } });
+      }
+      const keyCtx = { db, appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as unknown as Context;
+      const read = async () => {
+        const row = await db.session.findUniqueOrThrow({ where: { id: s.id } });
+        return { updatedAt: row.updatedAt?.getTime(), activityAt: sessionActivityAt(row).getTime(), events: await db.usageEvent.count({ where: { sessionId: s.id } }) };
+      };
+      const before = await read();
+      const page = await Q.dueWakes({}, { appRef: app.id }, keyCtx);
+      expect(page.wakes.length).toBeGreaterThan(0); // the key branch ran and returned the wake
+      // The poller's other call.
+      expect(await M.acknowledgeWakes({}, { proofs: [page.wakes[0].proof] }, keyCtx)).toEqual({ acknowledged: 1, unchanged: 0 });
+      expect(await read()).toEqual(before);
+      // and the worker is still alarmed on its own quiet activity once a new wake ages past the window
+      await say('again @tove', ['tove']);
+      expect(await evaluateDarkWorkers(db, after(40))).toHaveLength(1);
+    });
   });
 
   it('an exempt worker becomes dark once its OWN activity ages past the window', async () => {
