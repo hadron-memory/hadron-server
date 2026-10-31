@@ -193,7 +193,6 @@ export async function createServer(): Promise<Express> {
   // AM Q13: absent leaves team record operations unavailable; an invalid
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
-  await assertRateReadiness(db);
   const app = express();
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
@@ -222,6 +221,10 @@ export async function createServer(): Promise<Express> {
   } else {
     app.set('trust proxy', true);
   }
+
+  // Preserve trust-proxy boot validation before the first DB-touching readiness check.
+  // Both prerequisites still complete before this app can listen.
+  await assertRateReadiness(db);
 
   // #557: a production deploy with no webhook secret refuses deliveries (the
   // route answers 503), so say so at BOOT rather than letting the operator
