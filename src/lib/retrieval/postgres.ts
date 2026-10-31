@@ -28,6 +28,7 @@ import { vectorSearchNodes, vectorSearchChunks } from '../../services/embedding/
 import { compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
+import { PARENT_LOC_SQL } from '../childLoc.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
 function paramBuilder(seed: unknown[] = []) {
@@ -54,6 +55,9 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   }
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
+  // #2832 — compared against the SAME expression the expression index is built on, with an equality (never a
+  // LIKE), so the planner uses it and `_` / `%` in a loc stay literal. An empty loc (the mirror root) is nobody's child.
+  if (flt.childrenOf != null) parts.push(`(${PARENT_LOC_SQL} = ${bind(flt.childrenOf)} AND loc <> '')`);
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
   if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
   if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);

@@ -45,6 +45,11 @@ export interface NodeSqlFilter {
   role?: string | null;
   tags?: string[] | null;
   locPrefix?: string | null;
+  /**
+   * #2832 — direct children only (cor:api:090:02): locs that are exactly `<childrenOf>:<one segment>`;
+   * "" means the top-level locs. Null/undefined means no filter, so "" is a value, never "absent".
+   */
+  childrenOf?: string | null;
   createdBy?: string | null;
   updatedAfter?: string | null;
   updatedBefore?: string | null;
