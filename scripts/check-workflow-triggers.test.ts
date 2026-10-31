@@ -146,9 +146,28 @@ describe('check-workflow-triggers: unsupported or dynamic forms are refused, nev
   it('a `true` key (YAML 1.1 `on`) is read even when a plain `on` is also present', () => {
     expect(runOn({ 'bad.yml': 'on: push\ntrue:\n  workflow_run:\njobs: {}\n' }).code).toBe(1);
   });
-  it('an empty workflows directory and a missing one both fail', () => {
+  it('an empty workflows directory fails', () => {
     expect(runOn({}).code).toBe(2);
     expect(runOn({}, false).code).toBe(2);
+  });
+  it('a directory that does not exist fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'wf-guard-missing-'));
+    try {
+      let code = 0;
+      let out = '';
+      try {
+        execFileSync('node', [SCRIPT, join(root, 'no-such-dir')], { encoding: 'utf8', stdio: 'pipe' });
+      } catch (e) {
+        const err = e as { status: number; stderr: string };
+        code = err.status;
+        out = err.stderr;
+      }
+      expect(code).toBe(2);
+      expect(out).toContain(FINDING_PREFIX);
+      expect(out).toContain('cannot read');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -165,6 +184,58 @@ describe('check-workflow-triggers: the scan is a whole-tree property', () => {
   });
   it('non-YAML files in the directory are ignored', () => {
     expect(runOn({ 'ok.yml': wf('on: push'), 'README.md': 'on: workflow_run' }).code).toBe(0);
+  });
+});
+
+describe('check-workflow-triggers: fail-closed matrix, labels and reusable workflows (§10 on #2939)', () => {
+  const m = (matrix: string) => `    strategy:\n      matrix:\n${matrix}`;
+  it('a non-map include entry is refused (an expression string or a nested list)', () => {
+    const expr = m("        include:\n          - '${{ fromJSON(inputs.m) }}'\n");
+    expect(runOn({ 'bad.yml': wf('on: push', '${{ matrix.os }}', expr) }).code).toBe(1);
+    const nested = m('        include:\n          - [{os: self-hosted}]\n');
+    // Beside a readable entry, so only the include-entry refusal (not the zero-label one) can catch it.
+    const mixed = m("        include:\n          - os: ubuntu-latest\n          - '${{ fromJSON(inputs.m) }}'\n");
+    expect(runOn({ 'bad.yml': wf('on: push', '${{ matrix.os }}', mixed) }).code).toBe(1);
+    expect(runOn({ 'bad.yml': wf('on: push', '${{ matrix.os }}', nested) }).code).toBe(1);
+  });
+  it('a matrix reference that resolves to zero labels is refused, not passed as "no runner"', () => {
+    const r = runOn({ 'bad.yml': wf('on: push', '${{ matrix.os }}', m('        foo: [a]\n')) });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/dynamic|resolved/);
+  });
+  it('a matrix key that only exists on the prototype resolves to nothing and is refused', () => {
+    for (const k of ['constructor', 'toString', '__proto__']) {
+      expect(runOn({ 'bad.yml': wf('on: push', `\${{ matrix.${k} }}`, m('        foo: [a]\n')) }).code).toBe(1);
+    }
+  });
+  it('a matrix whose include entries are all maps still resolves and passes', () => {
+    const ok = m('        include:\n          - os: ubuntu-latest\n          - os: ubuntu-24.04\n');
+    expect(runOn({ 'ok.yml': wf('on: push', '${{ matrix.os }}', ok) }).code).toBe(0);
+  });
+  it('labels are trimmed before the self-hosted comparison', () => {
+    expect(runOn({ 'bad.yml': wf('on: push', '[" self-hosted"]') }).code).toBe(1);
+    expect(runOn({ 'bad.yml': wf('on: push', '"self-hosted "') }).code).toBe(1);
+  });
+  it('a job that calls a remote reusable workflow is refused; a local one passes', () => {
+    const remote = 'on: push\njobs:\n  a:\n    uses: some-org/some-repo/.github/workflows/x.yml@main\n';
+    const r = runOn({ 'bad.yml': remote });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/reusable/);
+    expect(runOn({ 'ok.yml': 'on: push\njobs:\n  a:\n    uses: ./.github/workflows/other.yml\n' }).code).toBe(0);
+    expect(runOn({ 'bad2.yml': 'on: push\njobs:\n  a:\n    uses: 5\n' }).code).toBe(1);
+  });
+  it('a cyclic YAML alias is refused with a finding, not crashed on', () => {
+    for (const body of ['on: push\nx: &a\n  - *a\njobs: {}\n', 'on: push\nx: &a {k: *a}\njobs: {}\n']) {
+      const r = runOn({ 'bad.yml': body });
+      expect(r.code).toBe(1);
+      expect(r.out).toMatch(/cyclic|refused/);
+    }
+  });
+  it('the guard workflow refuses to run when the checkout carries its own node_modules', () => {
+    const doc = parse(readFileSync(join(process.cwd(), '.github', 'workflows', 'workflow-guard.yml'), 'utf8'));
+    const install = (Object.values(doc.jobs)[0] as { steps: Array<{ name?: string; run?: string }> }).steps.find((st) => st.name === 'Install the YAML parser');
+    expect(install?.run).toMatch(/find .*node_modules/);
+    expect(install?.run).toMatch(/exit 1/);
   });
 });
 

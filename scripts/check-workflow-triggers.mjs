@@ -41,6 +41,8 @@
  *     scope here; this header and the PR say so rather than imply otherwise.
  *   - Only the literal `self-hosted` label is prohibited. A job that targets a
  *     self-hosted runner by a custom label alone would not be named here.
+ *   - The workflow files of THIS repository are scanned; a job-level `uses:` of a reusable
+ *     workflow in another repository is refused because its runner choice is unreadable.
  *
  * Usage: node scripts/check-workflow-triggers.mjs [workflowsDir]   (default .github/workflows)
  * Exit: 0 clean, 1 a finding or a refusal, 2 the directory is missing or holds no workflow.
@@ -56,11 +58,25 @@ const MATRIX_REF = /^\$\{\{\s*matrix\.([A-Za-z_][\w-]*)\s*\}\}$/;
 
 const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** A YAML merge key anywhere below `v` (an alias-expanded tree has no other trace of it). */
-function hasMergeKey(v) {
-  if (Array.isArray(v)) return v.some(hasMergeKey);
-  if (!isMap(v)) return false;
-  return Object.keys(v).some((k) => k === '<<' || hasMergeKey(v[k]));
+/**
+ * A YAML merge key anywhere below `v` (an alias-expanded tree has no other trace of it).
+ * Returns the string 'cycle' for an alias that points back at its own ancestor, which no
+ * workflow needs and which would otherwise recurse without end.
+ */
+function hasMergeKey(v, seen = new Set()) {
+  if (!Array.isArray(v) && !isMap(v)) return false;
+  if (seen.has(v)) return 'cycle';
+  seen.add(v);
+  try {
+    for (const k of Array.isArray(v) ? v.keys() : Object.keys(v)) {
+      if (!Array.isArray(v) && k === '<<') return true;
+      const r = hasMergeKey(v[k], seen);
+      if (r) return r;
+    }
+    return false;
+  } finally {
+    seen.delete(v);
+  }
 }
 
 function triggerNames(on, out) {
@@ -83,13 +99,19 @@ function matrixValues(matrix, key) {
     if (typeof v === 'string' && !EXPRESSION.test(v)) return vals.push(v), true;
     return false;
   };
-  if (key in matrix && !take(matrix[key])) return null;
+  if (Object.hasOwn(matrix, key) && !take(matrix[key])) return null;
   const inc = matrix.include;
   if (inc !== undefined) {
     if (!Array.isArray(inc)) return null;
-    for (const e of inc) if (isMap(e) && key in e && !take(e[key])) return null;
+    for (const e of inc) {
+      // An entry that is not a mapping (an expression string, a nested list) cannot be
+      // read, so the matrix cannot be: refuse it rather than skip it.
+      if (!isMap(e)) return null;
+      if (Object.hasOwn(e, key) && !take(e[key])) return null;
+    }
   }
-  return vals;
+  // A reference that resolves to nothing must not read as "this job has no runner".
+  return vals.length > 0 ? vals : null;
 }
 
 /** Labels a `runs-on` resolves to; pushes a refusal and returns [] for what it cannot read. */
@@ -115,8 +137,17 @@ function runnerLabels(job, jobId, out) {
   return flat(ro);
 }
 
-/** Findings for one workflow file's text; an empty array means clean. */
+/** Findings for one workflow file's text; an empty array means clean. Never throws. */
 export function checkWorkflowText(text) {
+  try {
+    return checkParsed(text);
+  } catch (e) {
+    // Anything unforeseen is a refusal, never a crash with no finding and never a pass.
+    return [`refused: unexpected failure while reading the file (${String(e?.message ?? e).split('\n')[0]})`];
+  }
+}
+
+function checkParsed(text) {
   const out = [];
   let doc;
   try {
@@ -125,7 +156,9 @@ export function checkWorkflowText(text) {
     return [`refused: not parseable as a single YAML document (${String(e?.message ?? e).split('\n')[0]})`];
   }
   if (!isMap(doc)) return ['refused: the file is not a YAML mapping'];
-  if (hasMergeKey(doc)) return ['refused: contains a YAML merge key (`<<`)'];
+  const merge = hasMergeKey(doc);
+  if (merge === 'cycle') return ['refused: contains a cyclic YAML alias'];
+  if (merge) return ['refused: contains a YAML merge key (`<<`)'];
 
   // YAML 1.1 reads the bare key `on` as boolean true; the 1.2 parser keeps "on".
   const onKeys = ['on', 'true'].filter((k) => k in doc);
@@ -142,10 +175,13 @@ export function checkWorkflowText(text) {
     if (!isMap(job)) { out.push(`refused: job \`${id}\` is not a mapping`); continue; }
     if (!('runs-on' in job)) {
       if (!('uses' in job)) out.push(`refused: job \`${id}\` has neither \`runs-on\` nor \`uses\``);
+      // A reusable workflow from another repository runs under ITS runner choice, which this
+      // gate cannot read; only a workflow in this tree (itself scanned) is accepted.
+      else if (typeof job.uses !== 'string' || !job.uses.startsWith('./')) out.push(`refused: job \`${id}\` calls a reusable workflow that is not in this repository`);
       continue;
     }
     for (const label of runnerLabels(job, id, out)) {
-      if (label.toLowerCase() === PROHIBITED_RUNNER) out.push(`prohibited runner label \`${label}\` in job \`${id}\``);
+      if (label.trim().toLowerCase() === PROHIBITED_RUNNER) out.push(`prohibited runner label \`${label}\` in job \`${id}\``);
     }
   }
   return out;

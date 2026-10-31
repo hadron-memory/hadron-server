@@ -12,9 +12,10 @@ name: Workflow Guard
 # or putting these two files under CODEOWNERS is a repository setting, which this
 # change does not make.
 #
-# It must itself stay inside the rules it enforces: `pull_request` only, a
-# read-only token, no secrets, a GitHub-hosted runner, and it executes nothing
-# from the PR except the checker script. There is deliberately NO `paths:` filter:
+# It must itself stay inside the rules it enforces: it triggers on `pull_request`
+# and on `push` to main only (never the privileged triggers), with a read-only
+# token, no secrets, a GitHub-hosted runner, and it executes nothing from the PR
+# except the checker script. There is deliberately NO `paths:` filter:
 # a filter is exactly the bypass a whole-tree gate exists to close.
 
 on:
@@ -40,6 +41,11 @@ jobs:
       # PR ships runs during the install (the repo's own install would).
       - name: Install the YAML parser
         run: |
+          # A committed node_modules anywhere in the checkout would shadow the pinned parser.
+          if find "$GITHUB_WORKSPACE" -name node_modules -prune | grep -q .; then
+            echo "::error::the checkout contains a node_modules directory; refusing to run the checker beside it"
+            exit 1
+          fi
           npm install --prefix "$RUNNER_TEMP/wfg" --ignore-scripts --no-audit --no-fund --no-package-lock yaml@2.8.3
           ln -s "$RUNNER_TEMP/wfg/node_modules" "$GITHUB_WORKSPACE/node_modules"
       - name: Check workflow triggers and runners
