@@ -7004,3 +7004,53 @@ model IncludeRetentionGeneration {
 
   @@map("include_retention_generation")
 }
+
+/// #1793: server-owned policy; defaults seed once, mode deploys LOG_ONLY.
+model RateLimitPolicy {
+  fieldClass      String   @id @map("field_class")
+  principalLimit  Int      @map("principal_limit")
+  keyLimit        Int      @map("key_limit")
+  ipLimit         Int      @map("ip_limit")
+  windowSeconds   Int      @map("window_seconds")
+  retentionSeconds Int     @default(86400) @map("retention_seconds")
+  enforcementMode String   @default("LOG_ONLY") @map("enforcement_mode")
+  version         Int      @default(1)
+  updatedAt       DateTime @default(now()) @map("updated_at")
+  @@map("rate_limit_policies")
+}
+
+/// #1793: HMAC subjects only. Window-independent advisory locks protect absent rows too.
+model RateLimitBucket {
+  id          String   @id
+  fieldClass  String   @map("field_class")
+  dimension   String
+  subject     String
+  windowStart DateTime @map("window_start")
+  used        BigInt
+  expiresAt   DateTime @map("expires_at")
+  @@unique([fieldClass, dimension, subject, windowStart])
+  @@index([expiresAt])
+  @@map("rate_limit_buckets")
+}
+
+/// #1793: no secrets, only key IDs and fingerprints. Operators fence overlap/drain transitions.
+model RateLimitManifest {
+  id                String   @id
+  keyIds            String[] @map("key_ids")
+  fingerprints      Json
+  overlapStartedAt  DateTime? @map("overlap_started_at")
+  version           Int      @default(1)
+  @@map("rate_limit_manifests")
+}
+
+/// #1793: platform-admin-only configuration audit; contains no subject/counter/secret.
+model RateLimitPolicyAudit {
+  id              String   @id
+  fieldClass      String   @map("field_class")
+  actorId         String   @map("actor_id")
+  before          Json
+  after           Json
+  changeReference String   @map("change_reference")
+  createdAt       DateTime @default(now()) @map("created_at")
+  @@map("rate_limit_policy_audits")
+}

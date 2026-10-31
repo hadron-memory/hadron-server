@@ -1,3 +1,4 @@
+import { assertRateReadiness, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
@@ -192,6 +193,7 @@ export async function createServer(): Promise<Express> {
   // AM Q13: absent leaves team record operations unavailable; an invalid
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
+  await assertRateReadiness(db);
   const app = express();
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
@@ -1854,6 +1856,16 @@ export async function createServer(): Promise<Express> {
   // #1770 — retention for account-merge consent requests: a retired request
   // is deleted 30 days after the later of its expiry and consumption
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
+  // #1793: bounded inactive-counter retention, identical with/without the optional bus.
+  if (process.env.NODE_ENV !== 'test') {
+    const timer = setInterval(() => {
+      void (async () => {
+        for (let pass=0;pass<20;pass++) if ((await cleanupRateBuckets(db)).count < 200) break;
+      })().catch(() => console.error('rate-limit cleanup failed'));
+    }, 60_000);
+    timer.unref();
+  }
+
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
   }

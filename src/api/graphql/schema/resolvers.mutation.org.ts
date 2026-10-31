@@ -186,7 +186,7 @@ export const orgMutations = {
       requireRole(ctx, 'ADMIN');
       if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [s, t] = await Promise.all([resolveUserRef(ctx.db, source), resolveUserRef(ctx.db, target)]);
-      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
+      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId, ctx.limiterIdentity);
     },
 
     approveMergeUsersConsent: async (_: unknown, { proof, source, target }: { proof: string; source: string; target: string }, ctx: Context) =>

@@ -1,0 +1,32 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createServer as httpServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { db } from '../integrations/db/client.js';
+import { cleanDb } from '../test/helpers.js';
+import { createServer } from '../server.js';
+import { signJwt } from '../auth/jwt.js';
+
+vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
+vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithub:vi.fn().mockResolvedValue({error:null})}));
+let server:Server|undefined,client:Client|undefined;
+beforeEach(async()=>{await cleanDb(db);});
+afterEach(async()=>{await client?.close();server?.closeAllConnections();if(server)await new Promise<void>(r=>server!.close(()=>r()));});
+it('#1793 actual SDK and GraphQL share one search allowance and structured refusal',async()=>{
+  const u=await db.user.create({data:{githubId:179399,githubUsername:'rate-wire',roles:['ADMIN']}});
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['ADMIN']});
+  await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
+  client=new Client({name:'rate1793',version:'1'});
+  await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));
+  const first=await client.callTool({name:'hadron_find_nodes',arguments:{query:'*',allMemories:true,limit:1}});
+  expect(first.isError).not.toBe(true);
+  expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
+  const second=await client.callTool({name:'hadron_find_nodes',arguments:{query:'*',allMemories:true,limit:1}});
+  expect(second).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS',retryAfterSeconds:expect.any(Number)}}});
+  const r=await fetch(base+'/graphql',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({query:'query { findNodes(limit:0) { total } }'})});
+  expect(((await r.json()) as { errors: Array<{extensions:Record<string,unknown>}> }).errors[0].extensions).toMatchObject({code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'});
+  expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
+});

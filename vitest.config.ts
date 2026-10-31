@@ -37,6 +37,7 @@ export default defineConfig({
         process.env.TEST_DATABASE_URL ?? 'postgresql://holger@localhost:5432/hadron_test',
       DB_PROVIDER: 'postgresql',
       JWT_SECRET: 'test-secret-at-least-32-characters-!!',
+      RATE_LIMIT_KEYRING: JSON.stringify({ current: 'test', keys: { test: '1'.repeat(64) } }),
       // 64 hex chars = 32 bytes = AES-256 key. Fixed for test reproducibility.
       HADRON_ENCRYPTION_KEY: '0'.repeat(64),
       // GRAPHS_PATH is NOT pinned here: it is per run (#1951), set by

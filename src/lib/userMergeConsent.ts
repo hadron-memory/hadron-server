@@ -1,3 +1,5 @@
+import { admitRateInTx } from './rateLimit/index.js';
+import { transportRateIdentity, type RateIdentity } from './rateLimit/identity.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
@@ -19,7 +21,7 @@ const denied = () => new GraphQLError('Both accounts must approve this merge aft
  * Refuses `MERGE_CONSENT_LIMIT_REACHED`, writing nothing, when the requester
  * already holds {@link MERGE_CONSENT_LIVE_CAP} live proofs (cor:api:010:02).
  */
-export async function beginUserMergeConsent(db: PrismaClient, sourceUserId: string, targetUserId: string, requestedBy: string) {
+export async function beginUserMergeConsent(db: PrismaClient, sourceUserId: string, targetUserId: string, requestedBy: string, rateIdentity?: RateIdentity) {
   if (sourceUserId === targetUserId) throw denied();
   const proof = randomBytes(32).toString('hex');
   return db.$transaction(async tx => {
@@ -37,6 +39,7 @@ export async function beginUserMergeConsent(db: PrismaClient, sourceUserId: stri
     if (live >= MERGE_CONSENT_LIVE_CAP) throw new GraphQLError(
       `You already have ${MERGE_CONSENT_LIVE_CAP} merge requests waiting. Complete one or let it expire, then start another.`,
       { extensions: { code: 'MERGE_CONSENT_LIMIT_REACHED', limit: MERGE_CONSENT_LIVE_CAP } });
+    await admitRateInTx(tx, 'CREDENTIALS', rateIdentity ?? transportRateIdentity({ userId: requestedBy }));
     const expiresAt = new Date(now.getTime() + MERGE_CONSENT_TTL_MS);
     await tx.userMergeConsent.create({ data: { proofHash: digest(proof), sourceUserId, targetUserId, requestedBy,
       scope: SCOPE, createdAt: now, expiresAt } });

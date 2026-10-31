@@ -1,3 +1,4 @@
+import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
@@ -222,6 +223,7 @@ export const resolvers = {
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...meteringQueries,
+    ...rateLimitQueries,
     ...impersonationQueries,
   },
   Mutation: {
@@ -233,6 +235,7 @@ export const resolvers = {
     ...automationPinMutations,
     ...appWriteGrantMutations,
     ...meteringMutations,
+    ...rateLimitMutations,
     ...connectionGrantMutations,
     ...principalGrantMutations,
     ...importNodeMutations,

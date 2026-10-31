@@ -41,9 +41,53 @@ describe('#1793 admin policy contract', () => {
     expect(changed.errors).toBeUndefined();
     expect((changed.data as any).setRateLimitPolicy).toMatchObject({ principalLimit: 2, enforcementMode: 'ENFORCING', version: p.version + 1 });
     expect((await gql(SET, input)).errors?.[0].extensions?.code).toBe('CONFLICT');
+    const keep = await gql(SET,{...input,expectedVersion:p.version+1,principalLimit:2,enforcementMode:null});
+    expect(keep.errors).toBeUndefined();
+    expect((keep.data as any).setRateLimitPolicy).toMatchObject({enforcementMode:'ENFORCING',version:p.version+1});
   });
   it.each([{ appId: 'not-a-human' }, { sessionId: 'bound' }, { clientId: 'run:untrusted' }])('denies non-human admin context %j before policy reads', async extra => {
     const r = await gql(READ, undefined, extra);
     expect(r.errors?.[0].extensions?.code).toBe('FORBIDDEN');
   });
+});
+
+describe('#1793 real consumer refusals', () => {
+  it('charges aliases once each and refuses search before any retrieval', async () => {
+    await gql(READ);
+    await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
+    const r=await gql(`query { first: findNodes(limit:0) { total } second: findNodes(limit:0) { total } }`);
+    expect(r.errors?.filter(e=>e.extensions?.code==='RATE_LIMITED')).toHaveLength(1);
+    expect(r.errors?.find(e=>e.extensions?.code==='RATE_LIMITED')?.extensions).toMatchObject({fieldClass:'FAN_OUT_READS',retryAfterSeconds:expect.any(Number)});
+    const buckets=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS'}});
+    expect(buckets).toHaveLength(1);expect(buckets[0].used).toBe(1n);
+  });
+  it('consent admission shares the proof transaction and preserves its cap', async () => {
+    const { transportRateIdentity }=await import('../../../lib/rateLimit/identity.js');
+    const peer=(await db.user.create({data:{id:generateId(),githubId:179301,githubUsername:'rate-peer'}})).id;
+    await gql(READ);
+    await db.rateLimitPolicy.update({where:{fieldClass:'CREDENTIALS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
+    const c={limiterIdentity:transportRateIdentity({userId},'192.0.2.10')};
+    const query=`mutation { beginMergeUsersConsent(source:"${userId}", target:"${peer}") { proof expiresAt } }`;
+    expect((await gql(query,undefined,c)).errors).toBeUndefined();
+    expect((await gql(query,undefined,c)).errors?.[0].extensions?.code).toBe('RATE_LIMITED');
+    expect(await db.userMergeConsent.count()).toBe(1);
+    expect((await db.rateLimitBucket.findMany()).every(r=>r.used===1n)).toBe(true);
+  });
+  it('real stored-role and presented-key revocation beat a claimed admin role', async () => {
+    await db.user.update({where:{id:userId},data:{roles:['READER']}});
+    expect((await gql(READ)).errors?.[0].extensions?.code).toBe('FORBIDDEN');
+    await db.user.update({where:{id:userId},data:{roles:['ADMIN']}});
+    const key=await db.userApiKey.create({data:{id:generateId(),userId,keyHash:'rate-test-hash',keyPreview:'test',oauthScopes:[],revokedAt:new Date()}});
+    expect((await gql(READ,undefined,{apiKeyId:key.id})).errors?.[0].extensions?.code).toBe('FORBIDDEN');
+  });
+});
+
+it('#1793 refuses invalid limits, immutable settings and arbitrary classes without edits',async()=>{
+  const first=await gql(READ);expect(first.errors).toBeUndefined();
+  const input={fieldClass:'FAN_OUT_READS',expectedVersion:1,principalLimit:1,keyLimit:1,ipLimit:1,changeReference:'reviewed'};
+  expect((await gql(SET,{...input,principalLimit:0})).errors?.[0].extensions?.code).toBe('BAD_USER_INPUT');
+  expect((await gql(SET,{...input,windowSeconds:1})).errors?.[0].extensions?.code).toBe('BAD_USER_INPUT');
+  expect((await gql(SET,{...input,fieldClass:'ARBITRARY'})).errors).toBeDefined();
+  expect((await gql(READ)).data).toEqual(first.data);
+  expect(await db.rateLimitPolicyAudit.count()).toBe(0);
 });

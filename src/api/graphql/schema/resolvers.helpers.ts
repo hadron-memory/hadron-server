@@ -103,6 +103,7 @@ import { unauthenticatedError } from '../../../lib/refusals.js';
 export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
+  limiterIdentity?: Readonly<import('../../../lib/rateLimit/identity.js').RateIdentity>;
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
   /**

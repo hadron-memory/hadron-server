@@ -3358,6 +3358,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        limiterIdentity: auth.limiterIdentity, appKeyId: auth.appKeyId,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
@@ -12252,6 +12253,7 @@ async function handleKnownMcpSession(
     // Credential resolution re-reads the live user after the liveness check
     // above. A demotion between those reads must win before tool dispatch.
     active.auth.roles = presented.roles ?? [];
+    active.auth.limiterIdentity = presented.limiterIdentity;
     // #2123: every principal's session-sensitive consumers receive THIS
     // request's binding result, under the same credential/request lock through
     // dispatch. Keep initialization refusal and retained actor state intact.
