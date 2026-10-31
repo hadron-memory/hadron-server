@@ -219,6 +219,17 @@ async function refuseGovernedEdge(tx: Pick<Prisma.TransactionClient, 'edge'>, ed
   if (edge?.governedKind) throw commentGovernedError('edge', 'edits');
 }
 
+/** #2734: the source and edge are already locked in that order. A real
+ * move may have won since preflight; never carry the old memory's grant into
+ * its new host, or acquire new authority while holding these row locks.
+ */
+async function assertEdgeWriteMemory(tx: Prisma.TransactionClient, edgeId: string, memoryId: string): Promise<void> {
+  const host = await tx.edge.findUnique({ where: { id: edgeId }, select: { memoryId: true, source: { select: { memoryId: true } } } });
+  if (!host || host.memoryId !== memoryId || host.source.memoryId !== memoryId) {
+    throw new GraphQLError('The edge moved while this write waited; re-read it and retry.', { extensions: { code: 'NODE_WRITE_CONFLICT' } });
+  }
+}
+
 // ── Shared node-write core (spec 039 Phase 0 D1) ────────────────────────────
 //
 // The single canonical single-node write path — formerly the upsertNode
@@ -3759,6 +3770,7 @@ export const nodeMutations = {
             extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
           });
         }
+        await assertEdgeWriteMemory(tx, resolvedEdgeId, edgeMem.memoryId);
         await assertNoBootPromptRows(tx, [current.source_id], 'update');
         await refuseGovernedEdge(tx, resolvedEdgeId);
         return tx.edge.update({
@@ -3848,6 +3860,7 @@ export const nodeMutations = {
         if (!lockedEdge || lockedEdge.deleted_at) {
           throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
         }
+        await assertEdgeWriteMemory(tx, resolvedEdgeId, edgeMem.memoryId);
         await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
         await refuseGovernedEdge(tx, resolvedEdgeId);
         await tx.edge.delete({ where: { id: resolvedEdgeId } });
