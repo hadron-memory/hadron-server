@@ -13,6 +13,10 @@ import { computeApprovalHash } from '../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../lib/bootCompile/provenance.js';
 import { safeNodeUrnV2 } from '../lib/urnEmit.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
+import { workerNames } from './e2eWorkerNames.js';
+
+export const E2E_STOCK_ROLES = ['coordinator', 'qa-engineer'] as const;
 
 export const E2E_BOOT_PROMPT = 'You are {{worker.name}}, the synthetic {{worker.role}} fixture.';
 
@@ -56,4 +60,36 @@ export async function seedE2eBootPrompt(db: PrismaClient, input: E2eBootPromptIn
     bootPromptNodeId: compiled.id, bootPromptUrn: safeNodeUrnV2(memory.urn, compiled.loc),
   } });
   return compiled.id;
+}
+
+/**
+ * The E2E seed's stock Agents for one org's team App: per role an Agent on the org's shared system memory, its install,
+ * its read grant on the App memory, the worker's working memory, the worker, and its served boot prompt. scripts/e2e/seed.ts
+ * calls exactly this, and src/test/e2eBootPrompt.test.ts binds what it builds, so the two cannot drift apart.
+ */
+export async function seedE2eStockAgents(db: PrismaClient, o: {
+  org: string; organizationId: string; appId: string; systemMemoryId: string; appMemoryId: string;
+  id: (name: string) => string; approvedAt: Date;
+}): Promise<void> {
+  for (const role of E2E_STOCK_ROLES) {
+    const agentId = o.id(`${o.org}:${role}`);
+    await db.agent.create({ data: { id: agentId, organizationId: o.organizationId,
+      urn: `${o.org}:${role}`, name: role, personaRole: role,
+      systemMemoryId: o.systemMemoryId, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: o.appId, agentId } });
+    await db.agentMemoryItem.create({ data: { id: o.id(`${o.org}:${role}:item`),
+      agentId, memoryId: o.appMemoryId, role: 'read' } });
+    const workerMemoryId = o.id(`${o.org}:${role}:worker-memory`);
+    await db.memory.create({ data: { id: workerMemoryId, organizationId: o.organizationId, appId: o.appId,
+      urn: `${o.org}:${role}-working`, name: `${role} working`, class: 'app', tags: ['e2e'] } });
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: o.id(`${o.org}:${role}:worker`), appId: o.appId, agentId,
+      name: workerNames[role],
+      slug: role === 'coordinator' ? 'test-coordinator' : 'test-reviewer', role, memoryId: workerMemoryId } });
+  }
+  // Only after EVERY Agent is attached: attaching an Agent to a system memory ends every boot-prompt approval already in
+  // it (boot_prompt_approval_entry_agent, prisma/boot-prompt-approval-invariants.sql), and the stock Agents share one.
+  for (const role of E2E_STOCK_ROLES) {
+    await seedE2eBootPrompt(db, { agentId: o.id(`${o.org}:${role}`), memoryId: o.systemMemoryId, slot: role, approvedAt: o.approvedAt,
+      idFor: part => o.id(`${o.org}:${role}:boot-${part}`) });
+  }
 }

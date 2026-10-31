@@ -1,4 +1,3 @@
-import { WORKER_SIGNATURE_DEFAULTS } from '../../src/lib/workerSignature.js';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -6,12 +5,12 @@ import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
 import { resolveServedBootPrompt } from '../../src/lib/bootPrompt/serve.js';
-import { seedE2eBootPrompt, E2E_BOOT_PROMPT } from '../../src/test/e2eBootPrompt.js';
+import { seedE2eStockAgents, E2E_BOOT_PROMPT } from '../../src/test/e2eBootPrompt.js';
 
 // Separate from the narrative dev seed: every principal has global READER
 // except the org-less platform-admin fixture, so org-role journeys exercise
 // tenant gates rather than platform ADMIN.
-import { users, orgs, workerNames, checkDocumentInventory } from './catalog.js';
+import { users, orgs, checkDocumentInventory } from './catalog.js';
 import { provisionSignIns, disconnectSignInDb } from './provision-signins.js';
 const classes = ['knowledge', 'group', 'personal', 'private', 'app', 'system'] as const;
 const id = (name: string) => createHash('sha256').update(`hadron-e2e:${name}`).digest('hex').slice(0, 32);
@@ -86,24 +85,9 @@ async function seed() {
       if (cls === 'group') await db.memoryMember.create({ data: {
         memoryId, userId: owner, role: 'owner' } });
     }
-    for (const role of ['coordinator', 'qa-engineer'] as const) {
-      const agentId = id(`${org}:${role}`);
-      await db.agent.create({ data: { id: agentId, organizationId,
-        urn: `${org}:${role}`, name: role, personaRole: role,
-        systemMemoryId: memoryIds.system, visibility: 'ORGANIZATION' } });
-      await db.appAgent.create({ data: { appId, agentId } });
-      // #2712: no literal prompt and no serving switch any more, so a stock Agent binds only with an approved compiled prompt.
-      await seedE2eBootPrompt(db, { agentId, memoryId: memoryIds.system, slot: role, approvedAt: date,
-        idFor: part => id(`${org}:${role}:boot-${part}`) });
-      await db.agentMemoryItem.create({ data: { id: id(`${org}:${role}:item`),
-        agentId, memoryId: memoryIds.app, role: 'read' } });
-      const workerMemoryId = id(`${org}:${role}:worker-memory`);
-      await db.memory.create({ data: { id: workerMemoryId, organizationId, appId,
-        urn: `${org}:${role}-working`, name: `${role} working`, class: 'app', tags: ['e2e'] } });
-      await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: id(`${org}:${role}:worker`), appId, agentId,
-        name: workerNames[role],
-        slug: role === 'coordinator' ? 'test-coordinator' : 'test-reviewer', role, memoryId: workerMemoryId } });
-    }
+    // The stock Agents, their workers and their served boot prompts (#2712: no literal prompt and no serving switch any
+    // more, so a stock Agent binds only with an approved compiled prompt). Shared with src/test/e2eBootPrompt.test.ts.
+    await seedE2eStockAgents(db, { org, organizationId, appId, systemMemoryId: memoryIds.system, appMemoryId: memoryIds.app, id, approvedAt: date });
     const root = await node(memoryIds.app, 'chats:team', { nodeType: 'chat', data: { lastSeq: 0 } });
     const channel = await db.channel.create({ data: { id: id(`${org}:channel`), memoryId: memoryIds.app,
       loc: 'chats:team', name: 'Team', chatRootNodeId: root.id } });
