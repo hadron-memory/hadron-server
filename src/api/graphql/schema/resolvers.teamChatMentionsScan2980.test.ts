@@ -44,8 +44,8 @@ const WITH_TOTAL = infoFor('{ channelMessages(channelRef: "x") { items { seq } t
 const ITEMS_ONLY = infoFor('{ channelMessages(channelRef: "x") { items { seq } } }');
 
 // The batch size the bounded scan uses; absent on main, where every read is a full scan.
-const tuning = (teamChat as unknown as { CHAT_FILTER_SCAN?: { batch: number } }).CHAT_FILTER_SCAN;
-const defaultBatch = tuning?.batch;
+const tuning = (teamChat as unknown as { CHAT_FILTER_SCAN?: { batch: number; maxBatch: number } }).CHAT_FILTER_SCAN;
+const defaults = tuning ? { ...tuning } : undefined;
 
 type W = { id: string; name: string; holder: string; session: string };
 let org: { id: string; urn: string };
@@ -129,7 +129,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  if (tuning && defaultBatch !== undefined) tuning.batch = defaultBatch;
+  if (tuning && defaults) Object.assign(tuning, defaults);
   sessionKeyCache.evict('ms-2980');
 });
 
@@ -194,8 +194,8 @@ describe('parity: items are the same with and without total, at a batch size tha
   ];
 
   async function compare(c: Context, base: Record<string, unknown>, shape: Record<string, unknown>, expectedAll: number[]) {
-    for (const batch of [1, 2, 3, 200]) {
-      if (tuning) tuning.batch = batch;
+    for (const [batch, maxBatch] of [[1, 1], [2, 2], [3, 3], [1, 64], [200, 51200]]) {
+      if (tuning) Object.assign(tuning, { batch, maxBatch });
       const full = await Q.channelMessages({}, { channelRef: channel.id, ...base, ...shape }, c, WITH_TOTAL);
       const bounded = await Q.channelMessages({}, { channelRef: channel.id, ...base, ...shape }, c, ITEMS_ONLY);
       expect(bounded.items.map((m: any) => m.seq), `batch ${batch}`).toEqual(full.items.map((m: any) => m.seq));
@@ -216,7 +216,7 @@ describe('parity: items are the same with and without total, at a batch size tha
   it.each(shapes.slice(0, 5))('the App convenience read matches too: %s', async (_label, shape) => {
     await history();
     for (const batch of [1, 3]) {
-      if (tuning) tuning.batch = batch;
+      if (tuning) Object.assign(tuning, { batch, maxBatch: batch });
       const full = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: liam.id, ...shape }, ctx(liam.holder), WITH_TOTAL);
       const bounded = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: liam.id, ...shape }, ctx(liam.holder), ITEMS_ONLY);
       expect(bounded.items.map((m: any) => m.seq)).toEqual(full.items.map((m: any) => m.seq));

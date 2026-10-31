@@ -1323,10 +1323,13 @@ export async function postSystemNotice(
 }
 
 /**
- * #2980 — batch size of the in-memory filter branch's bounded scan (`readChannelRoot` with `countAll: false`).
- * Mutable only so a test can exercise batch boundaries with a small Channel.
+ * #2980 — batch sizes of the in-memory filter branch's bounded scan (`readChannelRoot` with `countAll: false`): the
+ * first batch, growing fourfold up to `maxBatch`. Each batch is one query that orders the memory's rows, so a sparse filter
+ * (a worker mentioned rarely) must not pay that per 200 rows across a long history: growth keeps the query count
+ * logarithmic while the common case (a recent match) still reads one small batch. Mutable only so a test can
+ * exercise batch boundaries with a small Channel.
  */
-export const CHAT_FILTER_SCAN = { batch: 200 };
+export const CHAT_FILTER_SCAN = { batch: 200, maxBatch: 51200 };
 
 /**
  * #2980 — the rows strictly past `after` in the read order (seq, createdAt, loc; descending when `backward`). A
@@ -1398,10 +1401,11 @@ async function readChannelRoot(
   /**
    * #2980 — `countAll: false` says the caller will not show `total` (a GraphQL selection without it, `selectsField`).
    * Only the in-memory filter branch uses it: it then scans in batches in the paging direction and stops once the
-   * page is known, and the returned `total` is exact only when that scan reached the end of the range. Otherwise it
-   * is a lower bound strictly greater than `items.length`, which is all the own-read advance reads from it
-   * (`total <= items.length` means exhausted). Every other caller keeps the default, an exact count
-   * (cor:api:120:02, cor:agt:020:04).
+   * page is known, and the returned `total` is exact only when that scan reached the end of the range. Otherwise,
+   * on a forward page, it is a lower bound strictly greater than `items.length`, which is all the own-read advance
+   * reads from it (`total <= items.length` means exhausted); a backward page's total is not meaningful, and the
+   * advance never reads one (it acts only on a `sinceSeq` page without `beforeSeq`). Every other caller keeps the
+   * default, an exact count (cor:api:120:02, cor:agt:020:04).
    */
   opts: { countAll?: boolean } = {},
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
@@ -1540,26 +1544,30 @@ async function readChannelRoot(
       total = matching.length;
     } else {
       // #2980: nobody will see `total`, so read only as far as the page needs: batches in the paging direction,
-      // stopping at one match past the page, so a full page still says whether more exist. Same rows, same order
-      // and the same filter as the full scan above, so `items` are identical (offset is ignored backward, as there).
-      const want = (backward ? 0 : skip) + take + 1;
+      // stopping once the page is known. Same rows, same order and the same filter as the full scan above, so
+      // `items` are identical (offset is ignored backward, as there). A forward page reads one match past itself, so
+      // a full page still says whether more exist: the own-read advance (#2018) reads only forward pages. A
+      // backward page stops at `take`; nothing reads its total.
+      const want = backward ? take : skip + take + 1;
       const found: Hit[] = [];
       let after: { seq: number | null; createdAt: Date; loc: string } | null = null;
+      let batch = CHAT_FILTER_SCAN.batch;
       for (;;) {
         const rows: MessageRow[] = await ctx.db.node.findMany({
           where: after ? { AND: [where, keysetPast(after, backward)] } : where,
           orderBy: readOrder,
           select,
-          take: CHAT_FILTER_SCAN.batch,
+          take: batch,
         });
         for (const r of rows) {
           const msg = projectMessage(r, memEncInfo, memBareUrn, metadataVisible);
           if (matches(msg)) found.push({ row: r, msg });
           if (found.length >= want) break;
         }
-        if (found.length >= want || rows.length < CHAT_FILTER_SCAN.batch) break;
+        if (found.length >= want || rows.length < batch) break;
         const last = rows[rows.length - 1]!;
         after = { seq: last.seq, createdAt: last.createdAt, loc: last.loc };
+        batch = Math.min(batch * 4, Math.max(CHAT_FILTER_SCAN.maxBatch, CHAT_FILTER_SCAN.batch));
       }
       page = backward ? found.slice(0, take).reverse() : found.slice(skip, skip + take);
       total = found.length;
