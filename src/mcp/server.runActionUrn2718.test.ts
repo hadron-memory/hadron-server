@@ -159,6 +159,21 @@ describe('#2718 — hadron_run_action by action URN', () => {
     expect(await run(admin.id, actionUrn(agent.urn, CODE), { who: 'M' })).toContain('RUN-BODY-2718 M');
   });
 
+  it('refuses a healed entry that moved to a memory the caller CAN read when the caller cannot read the Agent\'s system memory', async () => {
+    // The address is the Agent's: cor:agt:110:04 reads it by whoever may read
+    // THAT system memory. The system-memory gate is not masked by the final node
+    // gate here, because the entry now lives somewhere the caller does read.
+    const entry = await registerEntry(memoryId, CODE);
+    const open = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:run-open`, name: 'run-open', class: 'knowledge', visibility: 'PUBLIC' },
+    });
+    await M.moveNode({}, { sourceRef: entry.id, targetUrn: emitNodeUrnV2(open.urn, `register:${CODE}`) }, gqlCtx(admin.id));
+    // Outsider reads the moved entry's memory by node address...
+    expect(await run(outsider.id, emitNodeUrnV2(open.urn, `register:${CODE}`), { who: 'O' })).toContain('RUN-BODY-2718 O');
+    // ...but is not admitted through the Agent's action address (system memory unreadable).
+    expect(await run(outsider.id, actionUrn(agent.urn, CODE))).toBe(notFound(actionUrn(agent.urn, CODE)));
+  });
+
   it('still refuses a non-action, non-node URN with the qualification message', async () => {
     const text = await run(admin.id, 'not-a-urn');
     expect(text).not.toContain('RUN-BODY-2718');

@@ -4914,9 +4914,16 @@ export function createMcpServerInstance(
    * uniform-refusal rule, worn here as the same single not-found message the
    * node form serves. A globally-ambiguous historical entry address stays a
    * LOUD refusal (AmbiguousLegacyUrnError escapes), exactly as in the arm.
+   *
+   * `agentGate: false` (#2718, Vera's ruling (a), cor:agt:110:04) drops the
+   * `agent` arm's gate and keeps only the memory gates: the RUN surface applies
+   * the node-URN spelling's gate (`loadNodeForRun` -> `canReadMemory`), so a
+   * participant who reads the entry's memory runs it under either address. The
+   * default (true) is the READ surface's, unchanged.
    */
   const resolveActionEntryRef = async (
     rawUrn: string,
+    opts: { agentGate?: boolean } = {},
   ): Promise<{ id: string; memoryId: string; loc: string } | null> => {
     let agentId: string;
     let code: string;
@@ -4942,6 +4949,7 @@ export function createMcpServerInstance(
     // admit what the GraphQL arm (ctx.impersonation-aware) refuses.
     // recoveryCtx() is the established shape for this.
     if (
+      opts.agentGate !== false &&
       agent.visibility !== 'PUBLIC' &&
       !(await isOwnerOrOrgMember({ ...scopeCtx(), impersonation: auth.impersonation ?? undefined }, agent))
     ) {
@@ -8466,9 +8474,29 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same read gate, so both spellings give the same outcome for every caller.',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
+      // #2718 — an action URN is a register entry's SECOND address. Resolve it
+      // with the memory gates only (no `agent` arm gate: ruling (a)), then run
+      // the entry through the SAME loader the node spelling uses, so the final
+      // gate and the rendered bundle are one implementation. Every refusal is
+      // ONE message naming nothing (cor:api:140:03): other tenant, unreadable
+      // memory, unknown Agent, missing or malformed code all read alike.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
+        const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
+        if (!entry) return unreadable();
+        let entryUrn: string;
+        try {
+          entryUrn = emitNodeUrnV2(await loadMemoryUrn(entry.memoryId), entry.loc);
+        } catch {
+          return unreadable(); // an unemittable stored loc names no runnable address
+        }
+        const viaEntry = await loadNodeForRun(entryUrn);
+        if ('error' in viaEntry) return unreadable();
+        return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
+      }
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
