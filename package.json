@@ -20,6 +20,7 @@
     "db:dev-from-prod": "scripts/dev-from-prod-snapshot.sh",
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "check:loc-scope": "node scripts/check-loc-scope.mjs",
+    "check:workflow-triggers": "node scripts/check-workflow-triggers.mjs",
     "admin:mint-token": "tsx scripts/admin-mint-token.ts",
     "admin:convert-boot-prompts": "tsx scripts/admin-convert-boot-prompts.ts",
     "admin:migrate-boot-prompt-variables": "tsx scripts/admin-migrate-boot-prompt-variables.ts",
