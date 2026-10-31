@@ -31,7 +31,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
@@ -77,6 +77,7 @@ async function runOnce(body = 'report body'): Promise<{ runId: string; outcome: 
     triggerKind: 'MANUAL',
     entryNodeUrn: ENTRY,
     eventData: {},
+    consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
   const deps: RunExecutionDeps = {
     ...makeProdRunDeps(db),

@@ -54,7 +54,7 @@ beforeEach(async () => {
       memoryId: teamAgent.systemMemoryId,
       loc: 'roles:backend-engineer',
       name: 'backend-engineer',
-      content: 'You are {{name}}, a {{role}}.',
+      content: 'You are {{worker.name}}, a {{worker.role}}.',
       data: { names: ['Iris'] },
     },
   });

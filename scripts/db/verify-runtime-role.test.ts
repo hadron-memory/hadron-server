@@ -216,7 +216,7 @@ describe('runtime-role.sql + verify-runtime-role (#2413 S1)', { timeout: 60_000 
       await resetDb();
       await migrate();
       applyGrants();
-    });
+    }, 60_000);
 
     const pgVersion = async () => Number((await asOwner((c) => c.query('SHOW server_version_num'))).rows[0].server_version_num);
 

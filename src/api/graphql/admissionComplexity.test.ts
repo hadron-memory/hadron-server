@@ -20,6 +20,8 @@ import {
 
 const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
+  "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
+  "AgentTask.blocks", // Same shared dependency page resolver.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
@@ -37,15 +39,18 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appMemoryScope",
   "Query.appNodes",
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
   "Query.automationApprovals",
   "Query.calendarEvents",
+  "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
+  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
@@ -85,6 +90,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.recoveryEdges",
   "Query.recoveryNodes",
   "Query.registerEntries",
+  "Query.registerRoleCandidates", // #2608: limit default 20, cap 200 (clampListTake); below the common 100, so omission overestimates.
   "Query.resendSenders",
   "Query.scopes",
   "Query.secrets",
@@ -94,6 +100,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.teamAttentionPage",
   "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
+  "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
   "Query.teamStopSignals",
   "Query.teamWorkItems",

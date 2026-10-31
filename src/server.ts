@@ -5,6 +5,7 @@ import { mountTeamSpecSchemaRoutes } from './api/teamSpecSchema.js';
 import { readTeamRecordKeys } from './lib/teamSpec/record.js';
 import * as Sentry from '@sentry/node';
 import { ApolloServer, type ApolloServerPlugin, type BaseContext } from '@apollo/server';
+import { memoryPressurePlugin } from './api/graphql/memoryPressurePlugin.js';
 import { expressMiddleware } from '@apollo/server/express4';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
@@ -12,7 +13,6 @@ import rateLimit from 'express-rate-limit';
 import express, { type Express } from 'express';
 import { decodeJwt } from 'jose';
 import { db } from './integrations/db/client.js';
-import { serializeJson } from './integrations/db/provider.js';
 import {
   buildAuthUrl,
   exchangeCode,
@@ -36,6 +36,7 @@ import {
   parseAppleUserField,
   resolveAppleUser,
 } from './auth/index.js';
+import { requireSignupBotCheck } from './auth/turnstile.js';
 import { issueLoginCode, redeemLoginCode } from './auth/authHandoff.js';
 import { startUserDeletionNoticeLoop } from './jobs/sendUserDeletionNotices.js';
 import { startPasskeyRegistrationNoticeLoop } from './jobs/sendPasskeyRegistrationNotices.js';
@@ -67,7 +68,7 @@ import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
 import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
-import { requireOrgRole, requireSessionWriteAccess } from './api/graphql/schema/resolvers.helpers.js';
+import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
@@ -133,7 +134,7 @@ import {
   isGoogleDriveConnectConfigured,
 } from './integrations/googleDrive/auth.js';
 import { mountMailboxConnectRoutes } from './integrations/mailboxConnect.js';
-import { preserveHeartbeatIfLapsed } from './lib/sessionActivity.js';
+import { recordSessionOutcome } from './lib/sessionOutcome.js';
 import { INDEXED_MEMORY_WHERE } from './lib/embedding/indexing.js';
 
 /**
@@ -905,6 +906,9 @@ export async function createServer(): Promise<Express> {
     // ordering is the fix rather than a style choice.
     validateEmailSendRequest,
     emailSendPerIpRateLimit,
+    // #2257: bot check after the no-send validation and before the recipient
+    // limiter, so a refused request neither burns a token nor a victim's budget.
+    requireSignupBotCheck,
     emailRecipientRateLimit,
     async (req, res) => {
       const { redirect } = req.body as { redirect?: string };
@@ -1192,7 +1196,7 @@ export async function createServer(): Promise<Express> {
     includeStacktraceInErrorResponses: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission)],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
@@ -1351,74 +1355,42 @@ export async function createServer(): Promise<Express> {
   app.post('/sessions/:id/outcome', async (req, res) => {
     const { id } = req.params;
     const { outcome, outcomeRef, outcomeMeta } = req.body ?? {};
-    if (typeof outcome !== 'number' || outcome < 0 || outcome > 1) {
-      res
-        .status(400)
-        .json({ error: 'outcome must be a number between 0 and 1' });
-      return;
-    }
     try {
-      // Inside the try: `resolveAuthContext` does DB lookups, and in Express 4
-      // a rejection above the try is an unhandled rejection rather than a
-      // response (the #555 class).
-      const auth = await resolveAuthContext(req, db);
-      const surfaceRefusal = oauthSurfaceRefusal(auth, 'account');
-      if (surfaceRefusal) {
-        // #1303: the prose is unchanged; `code` + `reason` make it matchable.
-        res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...surfaceRefusal });
-        return;
-      }
-
-      // #1647 (cor:dmo:070:05): the outcome of a session is a WRITE to it, so the target goes through the one shared
-      // session-write gate (`requireSessionWriteAccess`): the attributed user, or a pure App key for its own App's
-      // eligible user-less, non-host-launched session, or a platform admin on a session that is not bound to another
-      // user's personal/private memory (strict owner wins, cor:acl:010:02). Contributor status, a hybrid active-App
-      // selection or any App key no longer admits. The principal must still hold SOME credential: an anonymous request
-      // is a 401, not a 403.
-      if (!auth.userId && !auth.appId) {
-        res.status(401).json({ error: 'A credential is required' });
-        return;
-      }
-      const target = await db.session.findUnique({
-        where: { id },
-        select: { appId: true, userId: true, launchOperationId: true, memoryId: true, deletedAt: true },
+      // #2896: the validation, the surface refusal, the credential check and the write gate are ONE function shared
+      // with the GraphQL `recordSessionOutcome`; this route only maps each answer onto its status and body.
+      // `resolveAuthContext` does DB lookups, and in Express 4 a rejection above the try is an unhandled rejection
+      // rather than a response (the #555 class), so the whole call stays inside it.
+      const result = await recordSessionOutcome(db, async () => ({ db, ...(await resolveAuthContext(req, db)) }) as Context, {
+        sessionId: id,
+        outcome,
+        outcomeRef,
+        outcomeMeta,
       });
-      if (!target || target.deletedAt) {
-        res.status(404).json({ error: 'Session not found' });
-        return;
+      switch (result.kind) {
+        case 'out_of_range':
+          res.status(400).json({ error: 'outcome must be a number between 0 and 1' });
+          return;
+        case 'oauth_surface':
+          // #1303: the prose is unchanged; `code` + `reason` make it matchable.
+          res.status(403).json({ error: oauthSurfaceRefusalMessage(result.refusal, 'This OAuth credential is limited to the MCP surface.'), code: 'FORBIDDEN', ...result.refusal });
+          return;
+        case 'no_credential':
+          res.status(401).json({ error: 'A credential is required' });
+          return;
+        case 'not_found':
+          res.status(404).json({ error: 'Session not found' });
+          return;
+        case 'forbidden':
+          // A refusal returns before any write: no outcome, metadata or liveness moves.
+          res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
+          return;
+        case 'ok':
+          res.json({ ok: true });
+          return;
       }
-      try {
-        await requireSessionWriteAccess({ db, ...auth } as Context, target);
-      } catch (refusal) {
-        if ((refusal as { extensions?: { code?: string } })?.extensions?.code !== 'FORBIDDEN') throw refusal;
-        // A refusal returns before any write: no outcome, metadata or liveness moves.
-        res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
-        return;
-      }
-
-      await db.session.update({
-        where: { id },
-        data: {
-          // #1543 — an outcome report is not anyone driving the session.
-          ...(await preserveHeartbeatIfLapsed(db as never, id)),
-          outcome,
-          outcomeRef,
-          outcomeMeta: serializeJson(outcomeMeta) as typeof outcomeMeta,
-        },
-      });
-      res.json({ ok: true });
     } catch (err) {
-      // Distinguish "no such session" from "something else went wrong".
-      // This catch used to answer 404 for EVERY failure, which was survivable
-      // while the only statement inside it was the update — but the auth
-      // lookups now live in here too, and reporting a connection-pool blip as
-      // "Session not found" would send the caller chasing a session id that is
-      // perfectly fine. P2025 is Prisma's record-not-found.
-      const code = (err as { code?: string } | null)?.code;
-      if (code === 'P2025') {
-        res.status(404).json({ error: 'Session not found' });
-        return;
-      }
+      // A database fault is a 500, never "Session not found": reporting a connection-pool blip as a missing session
+      // would send the caller chasing a session id that is perfectly fine.
       Sentry.captureException(err);
       respondInternalFault(res, 'sessions/outcome', err);
     }

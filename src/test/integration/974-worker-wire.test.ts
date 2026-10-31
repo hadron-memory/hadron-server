@@ -141,7 +141,7 @@ beforeAll(async () => {
     ctx,
   );
   roleAgent = { id: role.id };
-  await serveAgentBootPrompt(db, role.id, 'You are {{name}}, a {{role}}.');
+  await serveAgentBootPrompt(db, role.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Wire Team App', urn: `${org.urn}:team` },

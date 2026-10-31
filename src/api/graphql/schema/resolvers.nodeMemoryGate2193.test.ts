@@ -366,13 +366,13 @@ describe('#2193 — App-key and session principals: Node.memory answers as Query
         if (one.data.node) served.push(one.data.node);
       }
       // Stated up front, per principal and node: what the Memory record must answer.
-      // The bare App key reaches the installed Agent's own memories (system, knowledge) and not
-      // the app-owned working memory. A session narrows it to the session's reach (cor:aut:020:02):
+      // The bare App key reaches the installed Agent's own system memory and not the org-owned
+      // knowledge its item links (#1376, R201: an item is a limit, never a grant) nor the app-owned
+      // working memory. A session narrows it to the session's reach (cor:aut:020:02):
       // the Agent's system memory only. Neither reaches a Worker's working memory record
       // (sessionScopedMemoryIds, #1349), though the parent still admits the handoff node.
-      const bare = !headers['x-hadron-session'];
       const expected: Record<string, string | null> = {
-        [node.sys!]: mem.sys!, [node.know!]: bare ? mem.know! : null, [node.handoff!]: null,
+        [node.sys!]: mem.sys!, [node.know!]: null, [node.handoff!]: null,
       };
       expect(served.map((x) => x.id), `${who}: handoff admitted`).toContain(node.handoff);
       for (const [id, memoryId] of Object.entries(expected)) {

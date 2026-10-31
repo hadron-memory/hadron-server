@@ -138,3 +138,124 @@ describe('#2715 CONTROLS: what the bound must not change', () => {
     expect(JSON.stringify(out)).not.toContain('theirs');
   });
 });
+
+describe('#2721 a rejected reconcile releases its slot', () => {
+  /** Distinct parents, more than NODE_RECONCILE_CONCURRENCY, so some queue behind the cap. */
+  const K = 10;
+  /** Diagnostic bound on each wait: a stranded queue fails here with a message, not at the test timeout. */
+  const HANG_MS = 10_000;
+  const sentinel = new Error('#2721 sentinel: reconcile rejected');
+  const turn = () => new Promise((r) => setImmediate(r));
+
+  /** A request whose field reconciles (maxWait 2000, requested from inside a limiter slot) are held at a gate until released. */
+  function gatedRequest() {
+    const track = { inFlight: 0, max: 0 };
+    const held: Array<{ go: () => void; fail: () => void }> = [];
+    const settled: Array<Promise<unknown>> = [];
+    let releasing = false;
+    let onStart = () => {};
+    let ctx: Context;
+    const gated = new Proxy(db, {
+      get(target, prop) {
+        if (prop !== '$transaction') return Reflect.get(target, prop, target);
+        return (fn: unknown, opts?: { maxWait?: number }) => {
+          if (typeof fn !== 'function' || opts?.maxWait !== 2_000 || !ctx.nodeReconcileSlots?.active) {
+            return (target.$transaction as any)(fn, opts);
+          }
+          const p = new Promise((resolve, reject) => {
+            // Each gate opens once, either way, so releasing twice (the scenario, then its cleanup) is a no-op.
+            let open = false;
+            const once = (f: () => void) => () => { if (!open) { open = true; f(); } };
+            const go = once(() => { (target.$transaction as any)(fn, opts).then(resolve, reject); });
+            held.push({ go, fail: once(() => reject(sentinel)) });
+            if (releasing) go();
+          });
+          settled.push(p);
+          onStart();
+          return p;
+        };
+      },
+    }) as typeof db;
+    ctx = ctxFor(gated, track);
+    const starts = (n: number) => new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`stranded: ${held.length} of ${n} reconciles started, slots ${JSON.stringify(ctx.nodeReconcileSlots && { active: ctx.nodeReconcileSlots.active, waiting: ctx.nodeReconcileSlots.waiting.length })}`)), HANG_MS);
+      onStart = () => { if (held.length >= n) { clearTimeout(timer); resolve(); } };
+      onStart();
+    });
+    /** Open every gate, now and for later starts. */
+    const releaseAll = () => {
+      releasing = true;
+      for (const h of held) h.go();
+    };
+    return { ctx, track, held, settled, starts, releaseAll };
+  }
+
+  /**
+   * Hold four, reject the earliest, release the rest. `interruptAt` throws at that stage, as a failing assertion
+   * would, so the cleanup path is exercised too.
+   */
+  async function rejectionScenario(r: ReturnType<typeof gatedRequest>, interruptAt?: 'cap' | 'rejected') {
+    const response = batch(r.ctx, 'id revision', `memory: "$m", locPrefix: "batch:n00"`);
+    try {
+      // The cap: four held, and the rest wait app-side rather than reaching the pool.
+      await r.starts(4);
+      await turn();
+      expect(r.held).toHaveLength(4);
+      expect(r.ctx.nodeReconcileSlots!.waiting).toHaveLength(K - 4);
+      if (interruptAt === 'cap') throw new Error('#2889 injected failure at the cap');
+
+      // Reject the earliest. Its slot must pass to the next queued reconcile before any other one settles.
+      r.held[0].fail();
+      await r.starts(5);
+      expect(r.held).toHaveLength(5);
+      if (interruptAt === 'rejected') throw new Error('#2889 injected failure after the rejection');
+
+      // Release everything else, in order; later starts run as they arrive.
+      r.releaseAll();
+      await r.starts(K);
+      const res = await response;
+      const outcomes = await Promise.allSettled(r.settled);
+      // The response does not wait for siblings of a failed non-null field; after the last transaction only microtasks
+      // remain (the fast path does no further I/O), so one turn lets every slot's finally run.
+      await turn();
+      return { res, outcomes };
+    } finally {
+      // #2889: whatever failed above, open every gate and wait until no new reconcile starts, so nothing is left pending.
+      // Idempotent on success: the gates are already open and the work settled.
+      r.releaseAll();
+      for (let n = -1; n !== r.settled.length;) {
+        n = r.settled.length;
+        await Promise.allSettled([response, ...r.settled]);
+        await turn();
+      }
+    }
+  }
+
+  it('an early rejection frees its slot at once; every other queued reconcile settles, at most 4 in flight, slots drained', SLOW, async () => {
+    const r = gatedRequest();
+    const { res, outcomes } = await rejectionScenario(r);
+
+    expect(res.errors?.map((e) => [e.originalError, e.path?.slice(0, 2), e.path?.at(-1)])).toEqual([[sentinel, ['nodeBatch', 'nodes'], 'revision']]);
+    expect(outcomes).toHaveLength(K);
+    expect(outcomes[0]).toEqual({ status: 'rejected', reason: sentinel });
+    expect(outcomes.slice(1).map((o) => o.status)).toEqual(Array(K - 1).fill('fulfilled'));
+    expect(r.track.max).toBeLessThanOrEqual(4); // NODE_RECONCILE_CONCURRENCY
+    expect(r.track.inFlight).toBe(0);
+    expect(r.ctx.nodeReconcileSlots).toEqual({ active: 0, waiting: [] });
+  });
+
+  // #2889: a failure inside the hold window must not strand the held and queued reconciles.
+  it.each(['cap', 'rejected'] as const)('a failure at the %s stage still releases every held reconcile; all launched work settles, slots drained', SLOW, async (stage) => {
+    const r = gatedRequest();
+    await expect(rejectionScenario(r, stage)).rejects.toThrow(/#2889 injected failure/);
+
+    expect(r.held).toHaveLength(K);
+    const outcomes = await Promise.allSettled(r.settled);
+    expect(outcomes.map((o) => o.status)).toEqual(stage === 'cap'
+      ? Array(K).fill('fulfilled')
+      : ['rejected', ...Array(K - 1).fill('fulfilled')]);
+    expect(r.track.max).toBeLessThanOrEqual(4); // NODE_RECONCILE_CONCURRENCY
+    expect(r.track.inFlight).toBe(0);
+    expect(r.ctx.nodeReconcileSlots).toEqual({ active: 0, waiting: [] });
+  });
+});

@@ -19,6 +19,7 @@ import { createDecipheriv } from 'crypto';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
+import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
@@ -340,7 +341,7 @@ export async function withMirrorCheckout(
  */
 export function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
-  return join(GRAPHS_PATH, orgUrn, slug);
+  return pathUnderGraphsRoot(GRAPHS_PATH, orgUrn, slug);
 }
 
 async function restoreRemote(localPath: string, originalUrl: string): Promise<void> {

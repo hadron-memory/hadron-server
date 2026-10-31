@@ -1,0 +1,522 @@
+/**
+ * #2420 (cor:agt:050:28): every agent task holds its own optional `properties` JSON object. The platform stores,
+ * returns and (when the Team Agent's system memory carries `schema:task-properties`) validates it; it never reads it
+ * for matching or authorization. Written by the cor:agt:050:09 set and by the task's assignee, nobody else.
+ */
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
+import { generateId } from '../../../lib/id.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { createMcpServerInstance } from '../../../mcp/server.js';
+import { resolvers } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+
+const M = resolvers.Mutation as any;
+const Q = resolvers.Query as any;
+let org: any, app: any, owner: any, manager: any, assignee: any, sibling: any, outsider: any, agent: any, systemMemory: any;
+let head: any, worker: any, task: any;
+const ctx = (userId = owner.id) => ({ db, userId, roles: ['READER'] });
+const canonical = (v: unknown): string => {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v && typeof v === 'object') {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as any)[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+};
+const fingerprint = (v: unknown) => ({ bytes: Buffer.byteLength(canonical(v), 'utf8'), sha256: createHash('sha256').update(canonical(v)).digest('hex') });
+const setProps = (properties: unknown, userId = owner.id, taskId = task.id) =>
+  M.updateAgentTask({}, { taskId, input: { properties } }, ctx(userId));
+const stored = async (id = task.id) => (await db.agentTask.findUniqueOrThrow({ where: { id } })) as any;
+const changed = (id = task.id) => db.agentTeamEvent.findMany({ where: { taskId: id, type: 'task.properties-changed' }, orderBy: { createdAt: 'asc' } });
+const putSchema = (data: unknown, memoryId = systemMemory.id) =>
+  db.node.create({ data: { id: generateId(), memoryId, loc: 'schema:task-properties', name: 'Task properties schema', data: data as any } });
+const code = (c: string) => ({ extensions: { code: c } });
+
+beforeEach(async () => {
+  await cleanDb(db);
+  org = await db.organization.create({ data: { name: 'Props', urn: `props-${generateId()}.test` } });
+  [owner, manager, assignee, sibling, outsider] = await Promise.all(
+    ['owner', 'manager', 'assignee', 'sibling', 'outsider'].map((handle) => db.user.create({ data: { handle } })),
+  );
+  app = await db.app.create({ data: { organizationId: org.id, name: 'Props', urn: `${org.urn}:props` } });
+  for (const [u, role] of [[owner, 'member'], [manager, 'owner'], [assignee, 'member'], [sibling, 'member']] as const) {
+    await db.appMember.create({ data: { appId: app.id, userId: u.id, role } });
+  }
+  systemMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Team system', urn: `${org.urn}:team-system`, class: 'system' } });
+  await db.node.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: 'roles:lead', name: 'Lead' } });
+  agent = await db.agent.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team`, systemMemoryId: systemMemory.id } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  head = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Head', slug: 'head', heldByUserId: owner.id } });
+  worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Worker', slug: 'worker', heldByUserId: owner.id, reportsToWorkerId: head.id } });
+  task = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Props task', source: 'fixed', assignee: { user: assignee.id } } }, ctx());
+});
+
+describe('create and read #2420', () => {
+  it('stores properties unchanged on create and returns null when omitted', async () => {
+    expect((await stored()).properties).toBeNull();
+    const value = { review: { tier: 'T2', seats: ['local', 'blind'], sec10: true }, complexity: { score: 7, subscores: {} } };
+    const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'With', source: 's', properties: value } }, ctx());
+    expect((await stored(made.id)).properties).toEqual(value);
+    const events = await changed(made.id);
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toEqual({ from: null, to: fingerprint(value) });
+  });
+
+  it('every task returns its own value: a child and a grandchild never read their root', async () => {
+    await M.updateAgentTask({}, { taskId: task.id, input: { properties: { root: true } } }, ctx());
+    const child = await M.createAgentTask({}, { input: { parentTaskId: task.id, title: 'Child' } }, ctx(assignee.id));
+    expect((await stored(child.id)).properties).toBeNull();
+    await M.updateAgentTask({}, { taskId: child.id, input: { properties: { child: true } } }, ctx(assignee.id));
+    await M.updateAgentTask({}, { taskId: task.id, input: { properties: { root: 2 } } }, ctx());
+    expect((await stored(child.id)).properties).toEqual({ child: true });
+    expect((await stored()).properties).toEqual({ root: 2 });
+    // A grandchild: made by the child's assignee under the child, it holds only its own value too.
+    await M.assignAgentTask({}, { taskId: child.id, assignee: { user: sibling.id } }, ctx(assignee.id));
+    const grand = await M.createAgentTask({}, { input: { parentTaskId: child.id, title: 'Grandchild' } }, ctx(sibling.id));
+    expect((await stored(grand.id)).properties).toBeNull();
+    await M.updateAgentTask({}, { taskId: grand.id, input: { properties: { grand: true } } }, ctx(sibling.id));
+    await M.updateAgentTask({}, { taskId: child.id, input: { properties: { child: 2 } } }, ctx(assignee.id));
+    expect((await stored(grand.id)).properties).toEqual({ grand: true });
+    expect((await stored(child.id)).properties).toEqual({ child: 2 });
+    expect((await stored()).properties).toEqual({ root: 2 });
+  });
+
+  it('a creator outside the writer set gets the properties left out, not refused', async () => {
+    const made = await M.createAgentTask({}, {
+      input: { appRef: app.id, title: 'Named owner', owner: { user: manager.id }, source: 's', properties: { review: { tier: 'T1' } } },
+    }, ctx(sibling.id));
+    expect(made.ownerUserId).toBe(manager.id);
+    expect((await stored(made.id)).properties).toBeNull();
+    expect(await changed(made.id)).toHaveLength(0);
+  });
+
+  it('an App manager naming another owner may set them; the new assignee may too', async () => {
+    const viaManager = await M.createAgentTask({}, {
+      input: { appRef: app.id, title: 'Mgr', owner: { user: owner.id }, source: 's', properties: { a: 1 } },
+    }, ctx(manager.id));
+    expect((await stored(viaManager.id)).properties).toEqual({ a: 1 });
+    const viaAssignee = await M.createAgentTask({}, {
+      input: { appRef: app.id, title: 'Self', owner: { user: manager.id }, assignee: { user: sibling.id }, source: 's', properties: { b: 2 } },
+    }, ctx(sibling.id));
+    expect((await stored(viaAssignee.id)).properties).toEqual({ b: 2 });
+  });
+
+  it('exposes properties through GraphQL create and read', async () => {
+    const apollo = new ApolloServer({ typeDefs, resolvers });
+    const created = await apollo.executeOperation({
+      query: 'mutation($app:ID!,$p:JSON){createAgentTask(input:{appRef:$app,title:"Gql",source:"s",properties:$p}){id properties}}',
+      variables: { app: app.id, p: { review: { head: 'abc' } } },
+    }, { contextValue: ctx() });
+    const out = (created.body as any).singleResult;
+    expect(out.errors).toBeUndefined();
+    expect(out.data.createAgentTask.properties).toEqual({ review: { head: 'abc' } });
+    await apollo.stop();
+  });
+});
+
+describe('update semantics #2420', () => {
+  it('omitted leaves it unchanged, an object replaces the whole value, null clears; each real change is one content-free event', async () => {
+    await setProps({ a: { PRIVATE: 1 }, b: 2 });
+    await M.updateAgentTask({}, { taskId: task.id, input: { description: 'other field' } }, ctx());
+    expect((await stored()).properties).toEqual({ a: { PRIVATE: 1 }, b: 2 });
+    await setProps({ c: 3 });
+    expect((await stored()).properties).toEqual({ c: 3 });
+    await setProps(null);
+    expect((await stored()).properties).toBeNull();
+    const events = await changed();
+    expect(events.map((e) => e.payload)).toEqual([
+      { from: null, to: fingerprint({ a: { PRIVATE: 1 }, b: 2 }) },
+      { from: fingerprint({ a: { PRIVATE: 1 }, b: 2 }), to: fingerprint({ c: 3 }) },
+      { from: fingerprint({ c: 3 }), to: null },
+    ]);
+    expect(JSON.stringify(events)).not.toContain('PRIVATE');
+  });
+
+  it('hashes the canonical JSON, so key order never changes the fingerprint, and an identical write is no event', async () => {
+    await setProps({ b: 1, a: 2 });
+    await setProps({ a: 2, b: 1 });
+    await setProps(null);
+    await setProps(null);
+    const events = await changed();
+    expect(events).toHaveLength(2);
+    expect((events[0].payload as any).to).toEqual(fingerprint({ a: 2, b: 1 }));
+  });
+
+  it('is passive history: it wakes nobody and clears no wake', async () => {
+    const at = (n: number) => new Date(Date.now() - 10_000 + n * 1000);
+    const t = await db.agentTask.create({ data: { appId: app.id, title: 'Wake', ownerWorkerId: worker.id, assigneeWorkerId: worker.id, assignedAt: at(1) } });
+    const assigned = await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.assigned', subjectWorkerId: worker.id, createdAt: at(1) } });
+    await runAsActor({ workerId: worker.id, agentId: agent.id }, () => setProps({ x: 1 }, owner.id, t.id));
+    const wakes = (await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? [];
+    expect(wakes.map((w) => w.eventId)).toContain(assigned.id);
+    expect(wakes.map((w) => w.eventId)).not.toContain((await changed(t.id))[0].id);
+  });
+
+  it.each(['finished', 'cancelled'])('refuses a write to a %s task, for its owner and its assignee', async (status) => {
+    await db.agentTask.update({
+      where: { id: task.id },
+      data: status === 'finished'
+        ? { status, startedAt: new Date(), finishedAt: new Date(), resultOutcome: 'done' }
+        : { status, cancelledAt: new Date() },
+    });
+    await expect(setProps({ x: 1 })).rejects.toMatchObject(code('TASK_ENDED'));
+    await expect(setProps({ x: 1 }, assignee.id)).rejects.toMatchObject(code('TASK_ENDED'));
+    expect((await stored()).properties).toBeNull();
+    expect(await changed()).toHaveLength(0);
+  });
+});
+
+describe('who may write #2420', () => {
+  it('admits the assignee, an App manager and the reporting chain', async () => {
+    await setProps({ by: 'assignee' }, assignee.id);
+    expect((await stored()).properties).toEqual({ by: 'assignee' });
+    await setProps({ by: 'manager' }, manager.id);
+    expect((await stored()).properties).toEqual({ by: 'manager' });
+    await db.agentTask.update({ where: { id: task.id }, data: { ownerUserId: null, ownerWorkerId: worker.id } });
+    await runAsActor({ workerId: head.id, agentId: agent.id }, () => setProps({ by: 'chain' }));
+    expect((await stored()).properties).toEqual({ by: 'chain' });
+    expect((await changed()).map((e) => e.actorWorkerId)).toEqual([null, null, head.id]);
+  });
+
+  it('admits the assignee ONLY for properties: any other field in the same patch refuses the whole call', async () => {
+    await expect(M.updateAgentTask({}, { taskId: task.id, input: { properties: { a: 1 }, title: 'Hijack' } }, ctx(assignee.id)))
+      .rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    await expect(M.updateAgentTask({}, { taskId: task.id, input: {} }, ctx(assignee.id))).rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    const row = await stored();
+    expect(row.title).toBe('Props task');
+    expect(row.properties).toBeNull();
+    expect(await changed()).toHaveLength(0);
+  });
+
+  it('refuses a non-owner non-assignee, including the assignee of a sibling or of the root, and a revoked manager', async () => {
+    const child = await M.createAgentTask({}, { input: { parentTaskId: task.id, title: 'Child', assignee: { user: sibling.id } } }, ctx(assignee.id));
+    await expect(setProps({ a: 1 }, sibling.id, task.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    await expect(setProps({ a: 1 }, assignee.id, child.id)).resolves.toBeDefined(); // the parent's assignee owns its child
+    await expect(setProps({ a: 1 }, outsider.id)).rejects.toBeDefined();
+    await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: manager.id } }, data: { role: 'member' } });
+    await expect(setProps({ a: 1 }, manager.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    expect((await stored()).properties).toBeNull();
+  });
+
+  it('refuses a reassigned-away assignee, and the App key', async () => {
+    await M.reassignAgentTask({}, { taskId: task.id, assignee: { user: sibling.id } }, ctx());
+    await expect(setProps({ a: 1 }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    await setProps({ a: 1 }, sibling.id);
+    const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'test' } });
+    await expect(M.updateAgentTask({}, { taskId: task.id, input: { properties: { k: 1 } } }, { db, appId: app.id, appKeyId: key.id, roles: [] }))
+      .rejects.toMatchObject(code('TASK_NOT_FOUND'));
+    expect((await stored()).properties).toEqual({ a: 1 });
+  });
+
+  it('refuses an impersonation session even when the impersonated user is the assignee', async () => {
+    const impersonation = { sessionId: generateId(), actorUserId: manager.id, orgId: app.organizationId, expiresAt: new Date(Date.now() + 3600_000) };
+    await expect(M.updateAgentTask({}, { taskId: task.id, input: { properties: { a: 1 } } }, { ...ctx(assignee.id), impersonation }))
+      .rejects.toMatchObject(code('FORBIDDEN'));
+    expect((await stored()).properties).toBeNull();
+  });
+
+  it('conceals an unreadable task byte-identically to an absent one', async () => {
+    const hidden = await setProps({ a: 1 }, outsider.id).catch((e: any) => e);
+    const absent = await M.assignAgentTask({}, { taskId: task.id, assignee: { user: outsider.id } }, ctx(outsider.id)).catch((e: any) => e);
+    expect({ message: hidden.message, extensions: hidden.extensions }).toEqual({ message: absent.message, extensions: absent.extensions });
+  });
+
+  it('a read of a task the caller cannot read exposes nothing', async () => {
+    await setProps({ secret: 'PRIVATE' });
+    const apollo = new ApolloServer({ typeDefs, resolvers });
+    const out = await apollo.executeOperation({ query: 'query($id:ID!){agentTask(taskRef:$id){id properties}}', variables: { id: task.id } }, { contextValue: ctx(outsider.id) });
+    await apollo.stop();
+    expect(JSON.stringify((out.body as any).singleResult)).not.toContain('PRIVATE');
+  });
+});
+
+describe('contract #2420', () => {
+  it('refuses a non-object with PROPERTIES_NOT_AN_OBJECT', async () => {
+    for (const bad of [[1], 'text', 7, true]) {
+      await expect(setProps(bad)).rejects.toMatchObject(code('PROPERTIES_NOT_AN_OBJECT'));
+    }
+    expect((await stored()).properties).toBeNull();
+    expect(await changed()).toHaveLength(0);
+  });
+
+  it('bounds the canonical JSON at 16 KiB of UTF-8: exactly at the bound is accepted, one byte over is PROPERTIES_TOO_LARGE', async () => {
+    const wrap = (n: number) => ({ k: 'x'.repeat(n) });
+    const overhead = Buffer.byteLength(canonical(wrap(0)), 'utf8');
+    await setProps(wrap(16_384 - overhead));
+    await expect(setProps(wrap(16_384 - overhead + 1), owner.id)).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    const multibyte = { k: 'é'.repeat(8_192) };
+    await expect(setProps(multibyte)).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    expect(Buffer.byteLength(canonical((await stored()).properties), 'utf8')).toBe(16_384);
+  });
+
+  it('with no schema node, any object within the bound is accepted', async () => {
+    await setProps({ anything: [1, 2, { deep: true }] });
+    expect((await stored()).properties).toEqual({ anything: [1, 2, { deep: true }] });
+  });
+
+  it('with a schema, a violating write is refused PROPERTIES_SCHEMA_VIOLATION and the old value stays', async () => {
+    await putSchema({ type: 'object', properties: { review: { type: 'object', properties: { tier: { enum: ['T1', 'T2', 'T3'] } } } } });
+    await setProps({ review: { tier: 'T2' } });
+    await expect(setProps({ review: { tier: 'T9' } })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    expect((await stored()).properties).toEqual({ review: { tier: 'T2' } });
+    expect(await changed()).toHaveLength(1);
+  });
+
+  it('validates with the platform\'s own read: an assignee who cannot read the schema memory is validated all the same', async () => {
+    await putSchema({ type: 'object', required: ['review'] });
+    await expect(setProps({ other: 1 }, assignee.id)).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    await setProps({ review: {} }, assignee.id);
+  });
+
+  it('an unusable schema refuses every non-null write, never reads as no schema, and a clear still works', async () => {
+    await setProps({ before: 1 });
+    const node = await putSchema({ type: 'not-a-type' });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.update({ where: { id: node.id }, data: { data: ['not', 'a', 'schema'] as any } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.update({ where: { id: node.id }, data: { data: { $ref: 'https://example.invalid/remote.json' } } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await setProps(null);
+    expect((await stored()).properties).toBeNull();
+  });
+
+  it('resolves the schema nearest-first through the Agent base chain; the Agent\'s own node wins', async () => {
+    const baseMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Base system', urn: `${org.urn}:base-system`, class: 'system' } });
+    const base = await db.agent.create({ data: { organizationId: org.id, name: 'Base', urn: `${org.urn}:base`, systemMemoryId: baseMemory.id } });
+    await db.agent.update({ where: { id: agent.id }, data: { extendsAgentId: base.id } });
+    await putSchema({ type: 'object', required: ['fromBase'] }, baseMemory.id);
+    await expect(setProps({ own: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    await setProps({ fromBase: 1 });
+    await putSchema({ type: 'object', required: ['own'] });
+    await setProps({ own: 1 });
+    await expect(setProps({ fromBase: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+  });
+
+  it('a soft-deleted schema node does not apply', async () => {
+    const node = await putSchema({ type: 'object', required: ['never'] });
+    await db.node.update({ where: { id: node.id }, data: { deletedAt: new Date() } });
+    await setProps({ ok: true });
+  });
+
+  it('a create that violates the schema is refused and writes nothing', async () => {
+    await putSchema({ type: 'object', required: ['review'] });
+    const before = await db.agentTask.count();
+    await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'Bad', source: 's', properties: { nope: 1 } } }, ctx()))
+      .rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    expect(await db.agentTask.count()).toBe(before);
+  });
+
+  it('stores requirements identically with and without properties, whatever the properties say', async () => {
+    const plain = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Plain', source: 's', requirements: { role: 'server-engineer' } } }, ctx());
+    const withProps = await M.createAgentTask({}, { input: { appRef: app.id, title: 'With', source: 's', requirements: { role: 'server-engineer' }, properties: { requirements: { role: 'other' }, familyIn: ['x'] } } }, ctx());
+    expect((await stored(plain.id)).requirements).toEqual((await stored(withProps.id)).requirements);
+    expect((await stored(withProps.id)).requirements).toEqual({ role: 'server-engineer' });
+  });
+
+  it('no matcher code reads a task\'s properties (never matcher input, cor:agt:050:28)', () => {
+    for (const file of ['../../../lib/agentTasks/matcher.ts', './resolvers.agentTaskMatching.ts']) {
+      const source = readFileSync(new URL(file, import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+      expect(source, file).not.toMatch(/\bproperties\b/);
+    }
+  });
+
+  it('a team whose Team Agent cannot be chosen (two carry a roles: branch) refuses every non-null write, never reads as no schema', async () => {
+    const otherMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Other system', urn: `${org.urn}:other-system`, class: 'system' } });
+    await db.node.create({ data: { id: generateId(), memoryId: otherMemory.id, loc: 'roles:other', name: 'Other' } });
+    const other = await db.agent.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other`, systemMemoryId: otherMemory.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: other.id } });
+    await putSchema({ type: 'object', required: ['review'] });
+    await expect(setProps({ review: {} })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'Amb', source: 's', properties: { review: {} } } }, ctx()))
+      .rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await setProps(null);
+  });
+
+  it('a schema with a regex keyword is unusable, so a catastrophic pattern never runs on the shared event loop (§10 P1)', async () => {
+    const hostile = 'a'.repeat(28) + '!';
+    const node = await putSchema({ type: 'object' });
+    for (const schema of [
+      { type: 'object', properties: { k: { type: 'string', pattern: '^(a+)+$' } } },
+      { type: 'object', patternProperties: { '^(a+)+$': { type: 'string' } } },
+    ]) {
+      await db.node.update({ where: { id: node.id }, data: { data: schema } });
+      const started = Date.now();
+      await expect(setProps({ k: hostile })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+  });
+
+  it('a schema using $ref is unusable, so a tiny anyOf fan-out never freezes or crashes the shared event loop (§10 P1-1 delta)', async () => {
+    const definitions: Record<string, any> = { d24: { type: 'string', minLength: 5 } };
+    for (let i = 23; i >= 0; i--) definitions[`d${i}`] = { anyOf: [{ $ref: `#/definitions/d${i + 1}` }, { $ref: `#/definitions/d${i + 1}` }] };
+    const node = await putSchema({ type: 'object' });
+    for (const schema of [
+      { type: 'object', definitions, properties: { k: { $ref: '#/definitions/d0' } } },
+      { type: 'object', properties: { k: { $ref: '#' } } },
+    ]) {
+      await db.node.update({ where: { id: node.id }, data: { data: schema } });
+      const started = Date.now();
+      await expect(setProps({ k: 'x' })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+  });
+
+  it('bounds what validating costs: a ref-free wide schema is unusable and a schema x value work budget refuses an oversized pair (§10 P2-1)', async () => {
+    // ~3,000 small nodes (50 KB), and a 9,000-leaf enum (a handful of objects but many leaves): inside the byte and depth bounds, so only the node cap refuses them.
+    const wide = { type: 'object', additionalProperties: { anyOf: Array.from({ length: 3000 }, () => ({ type: 'string' })) } };
+    const enumLeaves = { type: 'object', additionalProperties: { enum: Array.from({ length: 9000 }, (_, i) => i) } };
+    const node = await putSchema({ type: 'object' });
+    await db.node.update({ where: { id: node.id }, data: { data: enumLeaves } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.update({ where: { id: node.id }, data: { data: wide } });
+    const big: Record<string, number> = {};
+    for (let i = 0; i < 800; i++) big[`k${i}`] = i;
+    const started = Date.now();
+    await expect(setProps(big)).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    expect(Date.now() - started).toBeLessThan(500);
+    // Under the node cap (~400 nodes) but over the work budget: x a ~2,400-node value.
+    const mid = { type: 'object', additionalProperties: { anyOf: Array.from({ length: 130 }, () => ({ type: 'string', minLength: 9 })) } };
+    await db.node.update({ where: { id: node.id }, data: { data: mid } });
+    await expect(setProps({ a: Array.from({ length: 2400 }, (_, i) => i % 10) })).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+  });
+
+  it('refuses uniqueItems, whose pairwise comparison no nodes x values budget bounds (§10 P2-1 at 6e7aac8e)', async () => {
+    const node = await putSchema({ type: 'object' });
+    const quadratic = { type: 'object', allOf: Array.from({ length: 60 }, () => ({ properties: { a: { type: 'array', uniqueItems: true } } })) };
+    await db.node.update({ where: { id: node.id }, data: { data: quadratic } });
+    const started = Date.now();
+    await expect(setProps({ a: Array.from({ length: 1600 }, (_, i) => i) })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    expect(Date.now() - started).toBeLessThan(500);
+    // The same words in a name map or as literal data are not the keyword (Diego's P2 at 1defe438).
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { uniqueItems: true } } } });
+    await setProps({ uniqueItems: 'ordinary property' });
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', const: { uniqueItems: true } } } });
+    await setProps({ uniqueItems: true });
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { a: { type: 'array', items: { uniqueItems: true } } } } } });
+    await expect(setProps({ a: [] })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    // uniqueItems:false and a property merely named uniqueItems stay usable.
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', properties: { a: { type: 'array', uniqueItems: false }, uniqueItems: { type: 'number' } } } } });
+    await setProps({ a: [1, 1], uniqueItems: 1 });
+  });
+
+  it('pins the schema node cap at 500 values: 500 is usable, 501 is not', async () => {
+    const node = await putSchema({ type: 'object' });
+    // {enum: [N leaves]} counts the object, the array and N leaves: N + 2 values.
+    await db.node.update({ where: { id: node.id }, data: { data: { enum: Array.from({ length: 498 }, (_, i) => i) } } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    await db.node.update({ where: { id: node.id }, data: { data: { enum: Array.from({ length: 499 }, (_, i) => i) } } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+  });
+
+  it('a schema node may have a property named pattern as long as no regex keyword is used', async () => {
+    await putSchema({ type: 'object', properties: { pattern: { type: 'string' } } });
+    await setProps({ pattern: 'anything' });
+  });
+
+  it('bounds the schema itself: more than 64 KiB or more than 32 levels deep is unusable', async () => {
+    const node = await putSchema({ type: 'object', description: 'x'.repeat(70_000) });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    let deep: any = { type: 'string' };
+    for (let i = 0; i < 40; i++) deep = { type: 'object', properties: { a: deep } };
+    await db.node.update({ where: { id: node.id }, data: { data: deep } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object' } } });
+    await setProps({ a: 1 });
+  });
+
+  it('a changed schema node applies to the very next write (no stale compiled schema)', async () => {
+    const node = await putSchema({ type: 'object', required: ['one'] });
+    await expect(setProps({ two: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    await db.node.update({ where: { id: node.id }, data: { data: { type: 'object', required: ['two'] } } });
+    await setProps({ two: 1 });
+    await expect(setProps({ one: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+  });
+
+  it('a violation names the path and keyword only, never the schema\'s own text (§10 P3-1)', async () => {
+    await putSchema({ type: 'object', required: ['SECRET_FIELD_NAME'], properties: { tier: { enum: ['HIDDEN_A', 'HIDDEN_B'] } } });
+    for (const bad of [{ other: 1 }, { SECRET_FIELD_NAME: 1, tier: 'x' }]) {
+      const err: any = await setProps(bad, assignee.id).catch((e: any) => e);
+      expect(err.extensions.code).toBe('PROPERTIES_SCHEMA_VIOLATION');
+      expect(err.message).not.toMatch(/SECRET_FIELD_NAME|HIDDEN_A|HIDDEN_B/);
+    }
+  });
+
+  it('an $async schema, and a schema in a soft-deleted memory, are unusable (§10 P3-2 G10, G12)', async () => {
+    const node = await putSchema({ $async: true, type: 'object' });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    await db.node.delete({ where: { id: node.id } });
+    const baseMemory = await db.memory.create({ data: { organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone-system`, class: 'system' } });
+    const base = await db.agent.create({ data: { organizationId: org.id, name: 'Gone', urn: `${org.urn}:gone`, systemMemoryId: baseMemory.id } });
+    await db.agent.update({ where: { id: agent.id }, data: { extendsAgentId: base.id } });
+    await putSchema({ type: 'object' }, baseMemory.id);
+    await db.memory.update({ where: { id: baseMemory.id }, data: { deletedAt: new Date() } });
+    await expect(setProps({ a: 1 })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+  });
+
+  it('a creator who may not write properties is not told anything by an invalid value: the task is made without them (§10 P3-2 G16)', async () => {
+    await putSchema({ type: 'object', required: ['review'] });
+    for (const bad of [[1], 'text', { nope: 1 }, 7]) {
+      const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Quiet', owner: { user: manager.id }, source: 's', properties: bad } }, ctx(sibling.id));
+      expect((await stored(made.id)).properties).toBeNull();
+    }
+  });
+
+  it('bounds nesting at 64 levels so a small deeply nested value is refused typed, not an internal error', async () => {
+    const nested = (levels: number) => JSON.parse(`${'{"a":'.repeat(levels)}1${'}'.repeat(levels)}`);
+    await setProps(nested(64));
+    await expect(setProps(nested(65))).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    const deep = nested(2_500);
+    expect(Buffer.byteLength(JSON.stringify(deep), 'utf8')).toBeLessThan(16_384);
+    await expect(setProps(deep)).rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    await expect(M.createAgentTask({}, { input: { appRef: app.id, title: 'Deep', source: 's', properties: deep } }, ctx()))
+      .rejects.toMatchObject(code('PROPERTIES_TOO_LARGE'));
+    expect((await stored()).properties).toEqual(nested(64));
+  });
+});
+
+describe('surfaces #2420', () => {
+  it('GraphQL update with JSON null clears, and an absent key leaves it', async () => {
+    await setProps({ a: 1 });
+    const apollo = new ApolloServer({ typeDefs, resolvers });
+    const run = (query: string, variables: any) => apollo.executeOperation({ query, variables }, { contextValue: ctx() }).then((o) => (o.body as any).singleResult);
+    const keep = await run('mutation($id:ID!){updateAgentTask(taskId:$id,input:{title:"Renamed"}){properties}}', { id: task.id });
+    expect(keep.errors).toBeUndefined();
+    expect(keep.data.updateAgentTask.properties).toEqual({ a: 1 });
+    const clear = await run('mutation($id:ID!,$p:JSON){updateAgentTask(taskId:$id,input:{properties:$p}){properties}}', { id: task.id, p: null });
+    expect(clear.errors).toBeUndefined();
+    expect(clear.data.updateAgentTask.properties).toBeNull();
+    await apollo.stop();
+  });
+
+  it('MCP hadron_task_create and hadron_task_update carry properties through the same resolver', async () => {
+    const session = await db.session.create({ data: { id: generateId(), userId: owner.id } });
+    const server = createMcpServerInstance({ userId: owner.id, roles: ['READER'], clientId: `user:${owner.id}` } as any, () => undefined, { kind: 'multi-app' });
+    const client = new Client({ name: 'props', version: '1' });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(b);
+    await client.connect(a);
+    try {
+      const upd = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: { via: 'mcp' } }, session: session.id } });
+      expect(upd.isError).not.toBe(true);
+      expect((await stored()).properties).toEqual({ via: 'mcp' });
+      const bad = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: [1] }, session: session.id } });
+      expect(bad.isError).toBe(true);
+      expect(JSON.stringify(bad.content)).toContain('[properties_not_an_object]');
+      const created = await client.callTool({ name: 'hadron_task_create', arguments: { appRef: app.id, title: 'Mcp', source: 's', properties: { made: 'mcp' }, session: session.id } });
+      expect(created.isError).not.toBe(true);
+      expect((await db.agentTask.findFirstOrThrow({ where: { title: 'Mcp' } }) as any).properties).toEqual({ made: 'mcp' });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});

@@ -1,5 +1,7 @@
 /**
- * #1705 — the ONLY writer of `agent_team_events` (cor:agt:050:11).
+ * #1705 — the application writer of `agent_team_events` (cor:agt:050:11).
+ * #2644: SQL emits only the fixed empty platform task.released event when
+ * its blocker-state transition commits, including physical FK cascades.
  *
  * An event is append-only in the database (prisma/agent-task-invariants.sql),
  * so this module's job is the half the trigger cannot check: what goes into
@@ -15,6 +17,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
+import type { PropertiesFingerprint } from './properties.js';
 
 /** The task event types T1 writes (cor:agt:050:11; `task.reassigned` is Proposed there). */
 export const TASK_EVENT_TYPES = [
@@ -29,6 +32,10 @@ export const TASK_EVENT_TYPES = [
   'task.parked',
   'task.ready',
   'task.warning',
+  'task.released', 'task.priority', 'task.blocker-added', 'task.blocker-removed',
+  'task.edited',
+  // #2420 (cor:agt:050:28): a change to the task's own properties, sizes and hashes only.
+  'task.properties-changed',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -49,10 +56,13 @@ export const ASSIGNMENT_EVENT_TYPES = ['assignment.queued', 'assignment.matched'
 export const ASSIGNED_EVENT_TYPES = ['task.assigned', 'task.reassigned', 'assignment.matched'] as const;
 
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
-export const PASSIVE_EVENT_TYPES = ['task.warning'] as const;
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
+
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'closeSessionWhenDone'] as const;
+export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
@@ -70,6 +80,12 @@ export type TaskEventPayload =
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.warning'; code: RecordedTaskWarningCode }
+  | { type: 'task.released' }
+  | { type: 'task.priority'; priority: number }
+  | { type: 'task.blocker-added' | 'task.blocker-removed'; blockerTaskId: string }
+  | { type: 'task.edited'; fields: TaskEditField[] }
+  /** #2420: `null` is no properties. Size and SHA-256 of the canonical JSON; never the content (cor:agt:050:28). */
+  | { type: 'task.properties-changed'; from: PropertiesFingerprint | null; to: PropertiesFingerprint | null }
   | { type: 'task.started' }
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
@@ -85,6 +101,13 @@ export function eventActor(userId: string | null | undefined): EventActor {
   return { userId: userId ?? null, workerId: actor.workerId, agentId: actor.agentId };
 }
 
+/** A fingerprint is exactly a byte count and a SHA-256 hex digest: nothing else can ride this event (never content). */
+function fingerprintJson(f: PropertiesFingerprint | null): Prisma.InputJsonObject | null {
+  if (f === null) return null;
+  if (!Number.isSafeInteger(f.bytes) || f.bytes < 0 || !/^[0-9a-f]{64}$/.test(f.sha256)) throw new Error('Unsupported properties fingerprint');
+  return { bytes: f.bytes, sha256: f.sha256 };
+}
+
 function partyJson(p: TaskParty): Prisma.InputJsonObject {
   if (p.workerId) return { workerId: p.workerId };
   // `via: 'manager'` marks a chain entry that is there only because the person managed the App (#1761): it is
@@ -95,6 +118,11 @@ function partyJson(p: TaskParty): Prisma.InputJsonObject {
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
+    case 'task.edited':
+      if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
+      return { fields: [...new Set(e.fields)] };
+    case 'task.properties-changed':
+      return { from: fingerprintJson(e.from), to: fingerprintJson(e.to) };
     case 'task.warning':
       if (!(RECORDED_TASK_WARNING_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task warning history code');
       return { code: e.code };
@@ -106,6 +134,10 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { assignee: partyJson(e.assignee), closeSessionWhenDone: e.closeSessionWhenDone };
     case 'task.reassigned':
       return { from: partyJson(e.from), to: partyJson(e.to), closeSessionWhenDone: e.closeSessionWhenDone };
+    case 'task.priority': return { priority: e.priority };
+    case 'task.blocker-added':
+    case 'task.blocker-removed': return { blockerTaskId: e.blockerTaskId };
+    case 'task.released':
     case 'task.started':
     case 'task.progress':
       return {};
@@ -172,6 +204,10 @@ export const ALARM_EVENT_TYPES = [
   'stall.no-progress',
   'stall.owner-unreactive',
   'assignment.unassignable',
+  // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
+  'alarm.dark-worker',
+  // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
+  'alarm.post-limit',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -396,6 +432,86 @@ export async function appendWorkerCastingEvent(
       },
     },
   });
+}
+
+// ── #2766 (S2a of #2483): who staffed or changed the team ──────────────────
+
+/**
+ * The member and staffing acts the five doors record (cor:agt:050:11, Proposed). Each is appended in the act's own
+ * transaction, after every refusal and before commit, by a person and a worker session alike (`actorWorkerId` is null
+ * for a person). Ids and role words only: no name, email, signature, message text or key.
+ */
+export const STAFFING_EVENT_TYPES = [
+  'member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted',
+] as const;
+export type StaffingEventType = (typeof STAFFING_EVENT_TYPES)[number];
+
+/** The census (`miscastHasReferences`) treats these on the subject worker as the cast's own bookkeeping, not use. */
+export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired'] as const;
+
+async function appendStaffingEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; type: StaffingEventType; subjectWorkerId?: string; payload: Prisma.InputJsonObject },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      subjectWorkerId: args.subjectWorkerId ?? null,
+      payload: args.payload,
+    },
+  });
+}
+
+/** `member.added` (a new membership) or `member.role-changed` (an existing member's role changed); nothing for an unchanged role. */
+export async function appendMemberSetEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; userId: string; priorRole: string | null; role: string },
+): Promise<void> {
+  if (args.priorRole === args.role) return;
+  if (args.priorRole === null) {
+    return appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.added', payload: { userId: args.userId, role: args.role } });
+  }
+  return appendStaffingEvent(tx, {
+    appId: args.appId, actor: args.actor, type: 'member.role-changed',
+    payload: { userId: args.userId, fromRole: args.priorRole, toRole: args.role },
+  });
+}
+
+export async function appendMemberRemovedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; userId: string; role: string },
+): Promise<void> {
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.removed', payload: { userId: args.userId, role: args.role } });
+}
+
+export async function appendWorkerCastEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string; agentId: string; role: string | null; reportsToWorkerId: string | null },
+): Promise<void> {
+  await appendStaffingEvent(tx, {
+    appId: args.appId, actor: args.actor, type: 'worker.cast', subjectWorkerId: args.workerId,
+    payload: { workerId: args.workerId, agentId: args.agentId, role: args.role, reportsToWorkerId: args.reportsToWorkerId },
+  });
+}
+
+export async function appendWorkerRetiredEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string },
+): Promise<void> {
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.retired', subjectWorkerId: args.workerId, payload: { workerId: args.workerId } });
+}
+
+export async function appendWorkerDeletedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; workerId: string },
+): Promise<void> {
+  // The id rides the payload only: a `subject_worker_id` naming a worker that no longer exists is refused by the
+  // worker-reference fence (#1162), and this event is written after the row is gone.
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId } });
 }
 
 /**

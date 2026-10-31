@@ -72,7 +72,7 @@ beforeEach(async () => {
     ctx,
   );
   roleAgent = { id: role.id, urn: role.urn };
-  await serveAgentBootPrompt(db, role.id, 'You are {{name}}, a {{role}}.');
+  await serveAgentBootPrompt(db, role.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'MCP Team App', urn: `${org.urn}:team` },
@@ -102,7 +102,7 @@ describe('hadron_cast_worker (#974)', () => {
       name: 'Zoe',
     });
     expect(out).toContain('Worker cast: **Zoe** (backend-engineer)');
-    // The boot briefing is the agent's served prompt with {{name}}/{{role}} bound.
+    // The boot briefing is the agent's served prompt with {{worker.name}}/{{worker.role}} bound.
     expect(out).toContain('Boot briefing:');
     expect(out).toContain('You are Zoe, a backend-engineer.');
     // The full operation ran: a real Worker row, id echoed for session binding.

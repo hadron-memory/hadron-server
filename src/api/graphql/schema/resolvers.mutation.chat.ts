@@ -26,7 +26,7 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
@@ -70,6 +70,8 @@ import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -121,7 +123,7 @@ export async function serveChatPrompt(
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
   const variables = agentPlatformValues(agent);
-  return { text: applyPlatformVariables(served.content, variables, legacyFromValues(variables)), served, variables: { ...variables } };
+  return { text: applyPlatformVariables(served.content, variables), served, variables: { ...variables } };
 }
 
 /**
@@ -417,7 +419,12 @@ export const chatMutations = {
           where: { id: ctx.sessionId },
           select: { memoryId: true },
         });
-        targetMemoryId = session?.memoryId ?? null;
+        // #1376: the bound session's memory is a target only inside the session's verified reach
+        // (an item-linked org memory in Session.memoryId is not; Diego P1). The same set the read paths use,
+        // so a user's personal/private session memory (read-only in the access map) stays a chat target.
+        targetMemoryId = session?.memoryId &&
+          (await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId)).includes(session.memoryId)
+          ? session.memoryId : null;
       } else if (ctx.userId) {
         const existing = await ctx.db.memory.findFirst({
           where: {
@@ -522,7 +529,8 @@ export const chatMutations = {
           orderBy: { createdAt: 'asc' },
           select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
         });
-        targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        // #1376: an item is never a grant to a userless non-run key (cor:dmo:050:09).
+        targetMemoryId = !ctx.userId && !isRunPrincipal(ctx) ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
       }
 
       if (!targetMemoryId) {

@@ -206,7 +206,7 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
 
   it('returns the RESOLVED briefing when the role agent is served a boot prompt', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'backend-engineer' } });
-    await serveAgentBootPrompt(db, agent.id, 'You are {{name}}, a {{role}}. Ship carefully.');
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}. Ship carefully.');
     await db.worker.update({ where: { id: worker.id }, data: { role: 'backend-engineer' } });
     const srv = createTestableMcpServer(hybridAuth());
     const out = await srv.callToolText('hadron_start_session', {
@@ -219,10 +219,10 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
     expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(out).toContain('(generic Agent row update)');
-    // Rendered live from the served prompt, with {{name}}/{{role}} bound — this is
+    // Rendered live from the served prompt, with {{worker.name}}/{{worker.role}} bound — this is
     // what removes the need for published briefing NODES (hadron-cli#443).
     expect(out).toContain('You are Iris, a backend-engineer. Ship carefully.');
-    expect(out).not.toContain('{{name}}');
+    expect(out).not.toContain('{{worker.name}}');
   });
 
   it('says nothing about briefings when no worker is bound', async () => {

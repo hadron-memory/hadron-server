@@ -9,6 +9,7 @@
 // generated are untouched (snapshot at cast, R96 A); there is no fan-out and no reactivation.
 
 import { GraphQLError } from 'graphql';
+import { templateTickCode } from '../../../lib/tickers/tickCode.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context, requireAgentAccess, resolveReadableAgentRef } from './resolvers.helpers.js';
 import { taskError } from './resolvers.agentTask.js';
@@ -231,6 +232,7 @@ export const agentTickerTemplateFieldResolvers = {
     },
   },
   AgentTickerTemplate: {
+    tickCode: (t: TemplateRow) => templateTickCode(t.name),
     agent: (t: TemplateRow, _: unknown, ctx: Context) => ctx.db.agent.findUnique({ where: { id: t.agentId } }),
     quietHours: (t: TemplateRow) => t.quietHours ?? null,
     reasons: (t: TemplateRow) => t.reasons.map(reasonEnum),

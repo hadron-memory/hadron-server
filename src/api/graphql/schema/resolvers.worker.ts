@@ -44,7 +44,7 @@ import { isEmailUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/us
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { lintWorkerFields, pageLintWarnings } from '../../../lib/bootPromptLint.js';
-import { normalizeUrnForLookup, hasSchemePrefix } from '../../../lib/urn.js';
+import { normalizeUrnForLookup, hasSchemePrefix, parseUrnV2 } from '../../../lib/urn.js';
 import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
@@ -56,7 +56,7 @@ import {
   getMemoryEncryptionInfo,
   decryptNodeFields,
 } from '../../../lib/nodeCrypto.js';
-import { applyPlatformVariables, legacyFromValues, type PlatformVariableValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables, applyRecordedVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
 import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
 import {
@@ -80,14 +80,14 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
-import { appendWorkerCastingEvent, eventActor } from '../../../lib/agentTasks/events.js';
-import { assertCastable, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
-import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
+import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
+import { assertCastable, provisionCastGrants, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import {
   type Context,
   requireOrgRole,
-  requireAgentAccess,
+  requireReadableAgent,
   requireOwnerOrOrgRole,
   isNonReaderAppMember,
   isAppParticipant,
@@ -191,6 +191,39 @@ export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promis
   }
   if (await isAppParticipant(ctx, app)) return;
   throw forbidden();
+}
+
+/**
+ * #1149 — the PROFILE tier's entry gate (hrn:node:hadronmemory.com:specs:cor:dmo:050:11,
+ * "Who may see a worker"; hadron-concept D-2026-08-25-007). A worker signs its
+ * output with a link to its page, so anyone who meets that output must be able
+ * to open it: any signed-in user who NAMES one worker (id, URN, link) may read
+ * its profile. Holger ruled no per-App opt-out in v1 (2026-10-27, team chat
+ * #39369), so nothing here consults the App beyond its lifecycle.
+ *
+ * Admits a superset of `requireWorkerReadAccess`, never a different set:
+ *   - a deleted App refuses for everyone (an uninstalled one stays legible);
+ *   - a support-impersonation session reaches only the App's own org, as in
+ *     the participant gate;
+ *   - a principal with no user reads only its own App's staff (the App key);
+ *   - a run principal is the App's automation acting under a user's id, not a
+ *     person who met the worker's output, so it gets only the participant gate
+ *     (another App's run is refused like another App's key);
+ *   - every other user principal is admitted.
+ *
+ * This gate opens ONLY the profile. Every working-state field keeps its own
+ * `maySeeWorkerInternals` mask, `agent` keeps the Agent's own gate, and no list
+ * (roster, `workers`, the name form) calls this: the profile is reached by
+ * naming a worker, never by enumerating an App.
+ */
+export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Promise<void> {
+  if (app.deletedAt) throw forbidden();
+  if (ctx.impersonation) {
+    if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
+      throw forbidden();
+    }
+  }
+  if (!ctx.userId || isRunPrincipal(ctx)) return requireWorkerReadAccess(ctx, app);
 }
 
 /**
@@ -420,6 +453,25 @@ export async function resolveReadableWorkerRef(
     throw workerNotFound(workerRef);
   }
   return { worker, app };
+}
+
+/**
+ * #1149 — `resolveReadableWorkerRef` for the PROFILE tier: the same resolve and
+ * the same collapse of a denial into `workerNotFound`, judged by
+ * `requireWorkerProfileAccess`. Only the reads that name ONE worker for its
+ * profile (`Query.worker` by id or URN) come through here; every mutation and
+ * every working-state surface keeps `resolveReadableWorkerRef`.
+ */
+async function resolveProfileWorkerRef(ctx: Context, workerRef: string): Promise<WorkerRow> {
+  const worker = await resolveWorkerRefRow(ctx, workerRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: worker.appId } });
+  try {
+    await requireWorkerProfileAccess(ctx, app);
+  } catch (e) {
+    if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+    throw workerNotFound(workerRef);
+  }
+  return worker;
 }
 
 /**
@@ -1098,9 +1150,9 @@ export const workerMutations = {
             }
             const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
-            // Preserve #2458's deciding licence/role check on the transaction.
-            // This remains read-only: install/changeWorkerAgent own grant provisioning.
-            const { agent: castAgent } = await assertCastable(tx, freshApp, agent.id);
+            // #2458's deciding licence/role check, on the transaction. It only PLANS the missing same-org grants
+            // (#2906); they are written below, once nothing that returns a value can still end the cast.
+            const { agent: castAgent, provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
             const castRole = castAgent.personaRole ?? null;
             if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
               throw roleOverrideRefused(appId, castRole, requestedRole);
@@ -1110,6 +1162,9 @@ export const workerMutations = {
             if ((await takenWorkersByName(tx, appId, [candidate])).has(candidate)) return NAME_TAKEN;
             await assertWorkerNameNotConfusable(tx, appId, candidate);
             const slug = await nextFreeWorkerSlug(tx, appId, candidate);
+            // #2906 / cor:agt:040:08: provision the missing same-org grants in THIS transaction. Placed after the
+            // NAME_TAKEN return, which commits, so a refused name leaves none; any later throw rolls them back.
+            await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
             const workerIds = [plannedWorkerId, ...(freshTarget.reportingHeadId ? [freshTarget.reportingHeadId] : [])].sort();
             await tx.$queryRaw`SELECT id FROM workers WHERE id = ANY(${workerIds}::text[]) ORDER BY id FOR UPDATE`;
             const castWorkerRow = await tx.worker.create({
@@ -1129,6 +1184,11 @@ export const workerMutations = {
                 // and the first bind claims it.
               },
               select: { id: true, name: true, slug: true },
+            });
+            // #2766: the cast is recorded in its own transaction; a later refusal rolls it back with the worker.
+            await appendWorkerCastEvent(tx, {
+              appId, actor: eventActor(ctx.userId), workerId: castWorkerRow.id, agentId: agent.id, role: castRole,
+              reportsToWorkerId: choice.kind === 'REPORTS_TO' ? freshTarget.reportingHeadId : null,
             });
             if (choice.kind !== 'UNSET') {
               await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: eventActor(ctx.userId), setBy: 'cast' });
@@ -1248,6 +1308,7 @@ export const workerMutations = {
         // keep their value; the roster flags them (`reportsToRetired`) rather
         // than the platform silently clearing a structure someone set.
         if (retired.count > 0) {
+          await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: eventActor(ctx.userId), workerId: worker.id });
           await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
           // with it, reason WORKER_RETIRED (history kept, never deleted).
@@ -1783,9 +1844,9 @@ export const workerMutations = {
           extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE', workerId: worker.id },
         });
       }
-      for (const grantAgentId of provisionGrantsFor) {
-        if (freshApp.organizationId) await ensureAgentOrgGrant(tx, freshApp.organizationId, grantAgentId, { createdBy: ctx.userId ?? null });
-      }
+      // #2917: the plan above is a read made before this write, and the write is ON CONFLICT DO NOTHING, so a
+      // concurrent revoked row would leave it stale; provisionCastGrants judges the licence again (as the cast does).
+      await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
       try {
         await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
         await tx.worker.update({
@@ -1841,6 +1902,8 @@ export const workerMutations = {
         await tx.session.deleteMany({ where: { workerId: worker.id } });
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
+        // #2766: recorded last, so any refusal above leaves no event; the row is gone, the id stays in the history.
+        await appendWorkerDeletedEvent(tx, { appId: current.appId, actor: eventActor(ctx.userId), workerId: worker.id });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
       // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
@@ -1919,7 +1982,9 @@ export const workerQueries = {
       }
       return ctx.db.worker.findUniqueOrThrow({ where: { id: byName } });
     }
-    const { worker } = await resolveReadableWorkerRef(ctx, ref);
+    // #1149: by id or URN the caller names one worker, so the PROFILE gate
+    // admits; the field resolvers mask everything beyond the profile.
+    const worker = await resolveProfileWorkerRef(ctx, ref);
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 
@@ -2099,7 +2164,7 @@ export const workerQueries = {
       if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
       servedTemplate = null;
     }
-    const prompt = servedTemplate ? applyPlatformVariables(servedTemplate, values, { name, role: previewRole }) : null;
+    const prompt = servedTemplate ? applyPlatformVariables(servedTemplate, values) : null;
 
     // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
     // what is committed now, takes no lock and writes nothing, so a cast may still differ if the App changes.
@@ -2469,7 +2534,7 @@ async function readServedWorkerText(
       // The values the bind filled, not today's: a session finishes under the briefing it was given (a rename or a new
       // reports-to must not rewrite it). Today's values fill only a variable the record does not hold.
       const values = { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues;
-      return { text: applyPlatformVariables(content, values, legacyFromValues(values)), refusal: null };
+      return { text: applyRecordedVariables(content, values), refusal: null };
     }
     // An open session of THIS worker with no record began before serving was activated. It is never silently upgraded to
     // the current revision (Attach v3 §5): it reads no prompt and a typed notice until it rebinds.
@@ -2478,7 +2543,7 @@ async function readServedWorkerText(
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
     const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
-    return { text: applyPlatformVariables(served.content, platform, legacyFromValues(platform)), refusal: null };
+    return { text: applyPlatformVariables(served.content, platform), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
@@ -2603,6 +2668,36 @@ export async function maySeeWorkerInternals(ctx: Context, appId: string): Promis
 }
 
 /**
+ * #1149 — may this caller read the PROFILE fields of `appId`'s workers
+ * (`requireWorkerProfileAccess`), request-memoized like
+ * `maySeeWorkerInternals`. A field resolver consults it rather than trusting
+ * the path that reached the Worker, because nested reaches (`Session.worker`,
+ * `reportsTo`) were never judged by the profile gate.
+ */
+async function maySeeWorkerProfile(ctx: Context, appId: string): Promise<boolean> {
+  type Cache = Map<string, Promise<boolean>>;
+  const holder = ctx as Context & { workerProfileCache?: Cache };
+  const cache = (holder.workerProfileCache ??= new Map());
+  let pending = cache.get(appId);
+  if (!pending) {
+    pending = (async () => {
+      const app = await ctx.db.app.findUnique({ where: { id: appId } });
+      // A deleted App is the gate's own first refusal; judged there, once.
+      if (!app) return false;
+      try {
+        await requireWorkerProfileAccess(ctx, app);
+        return true;
+      } catch (e) {
+        if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
+        return false;
+      }
+    })();
+    cache.set(appId, pending);
+  }
+  return pending;
+}
+
+/**
  * Seed request caches only with facts already proved by heldWorkers' shared
  * authorization predicate. This removes per-App field-resolution queries from
  * the cross-App page without changing what any other Worker surface may see.
@@ -2615,12 +2710,17 @@ function primeHeldWorkerCaches(
   type UrnCache = Map<string, Promise<string | null>>;
   const holder = ctx as Context & {
     workerInternalsCache?: BoolCache;
+    workerProfileCache?: BoolCache;
     workerAppUrnCache?: UrnCache;
   };
   const access = (holder.workerInternalsCache ??= new Map());
+  // #1149: the profile gate admits a superset of the participant gate, so a
+  // participant proved here is a profile reader too.
+  const profile = (holder.workerProfileCache ??= new Map());
   const urns = (holder.workerAppUrnCache ??= new Map());
   for (const app of apps) {
     access.set(app.appId, Promise.resolve(true));
+    profile.set(app.appId, Promise.resolve(true));
     urns.set(app.appId, Promise.resolve(app.appUrn));
   }
 }
@@ -2772,8 +2872,8 @@ export const workerFieldResolvers = {
      * Scalar App identity for cross-App worker pages (#1344). Unlike
      * `Worker.app`, this never returns an App object (and therefore cannot hand
      * an AppMember-only caller App.keys/members through nested resolvers).
-     * Masked behind the worker read gate because historical Session.worker
-     * reaches this type through a wider audience.
+     * #1149: a PROFILE field, so it sits behind the profile gate, which every
+     * nested reach (Session.worker) is still judged by.
      */
     appUrn: async (
       worker: { appId: string },
@@ -2781,7 +2881,7 @@ export const workerFieldResolvers = {
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => {
-      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      if (!(await maySeeWorkerProfile(ctx, worker.appId))) return null;
       const stored = await loadAppUrnForWorker(ctx, worker.appId, {
         memoize: info?.operation?.operation === 'query',
       });
@@ -2789,6 +2889,33 @@ export const workerFieldResolvers = {
       // may be a legacy shape (#1347 review).
       return stored ? safeCanonicalUrn('app', stored) : null;
     },
+    /** #1149 — the App's display name, a PROFILE field (see `maySeeWorkerProfile`). */
+    appName: async (worker: { appId: string }, _: unknown, ctx: Context): Promise<string | null> => {
+      if (!(await maySeeWorkerProfile(ctx, worker.appId))) return null;
+      const app = await ctx.db.app.findUnique({ where: { id: worker.appId }, select: { name: true } });
+      return app?.name ?? null;
+    },
+    /**
+     * #1149 — the owner atom of the worker's URN (user handle or org slug), a
+     * PROFILE field. Read off the SAME URN `urn` returns, so the two cannot
+     * disagree, and null exactly when that URN is.
+     */
+    ownerName: async (
+      worker: { appId: string; slug: string },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string | null> => {
+      if (!(await maySeeWorkerProfile(ctx, worker.appId))) return null;
+      const urn = await resolveWorkerUrnField(worker, ctx, info);
+      return urn === null ? null : parseUrnV2(urn).root;
+    },
+    /** #1149 — who cast the worker: WORKING STATE, masked to null (see maySeeWorkerInternals). */
+    createdBy: async (worker: { appId: string; createdBy: string | null }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.createdBy : null,
+    /** #1149 — who retired the worker: WORKING STATE, masked like createdBy. */
+    retiredBy: async (worker: { appId: string; retiredBy: string | null }, _: unknown, ctx: Context) =>
+      (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.retiredBy : null,
     /**
      * The worker's URN (#991). See `resolveWorkerUrnField`.
      *
@@ -3116,6 +3243,16 @@ export const workerFieldResolvers = {
       return statuses.get(worker.id) ?? null;
     },
     /**
+     * #2771 (proposed cor:agt:070:09) — the latest terminal report a host made for this worker. Working-state
+     * internals: the same gate as checkStatus (cor:dmo:050:11), null to anyone else. The Prisma row carries the raw
+     * JSON, so this resolver is what keeps it from a reader who fails the gate. Decides nothing.
+     */
+    terminal: async (worker: { appId: string; terminal?: unknown }, _: unknown, ctx: Context) => {
+      if (!worker.terminal) return null;
+      if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+      return workerTerminalView(worker.terminal as StoredWorkerTerminal);
+    },
+    /**
      * The role-agent behind the casting — behind Query.agent's OWN read gate
      * (PUBLIC, else owner / org READER), masked to null on deny. The Worker
      * read gate is WIDER than the Agent's (App participants, App keys), and a
@@ -3125,16 +3262,20 @@ export const workerFieldResolvers = {
      * installed-agent read grant cannot stand in for that gate either: Worker
      * rows survive uninstall, so "a Worker exists" does not imply the grant
      * still does (PR #978 review — codex P1 + Copilot).
+     *
+     * #1149: this IS the DETAILS tier (cor:dmo:050:11): whoever the Agent's own
+     * visibility admits, judged per read and never cached, whatever path reached
+     * the Worker. `requireReadableAgent` is that predicate, reused rather than
+     * spelled out; only its not-found answer collapses to null, so a database
+     * failure inside the membership lookup propagates.
      */
     agent: async (worker: { agentId: string }, _: unknown, ctx: Context) => {
       const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId } });
-      if (!agent || agent.deletedAt) return null;
-      if (agent.visibility !== 'PUBLIC') {
-        try {
-          await requireAgentAccess(ctx, agent, 'READER');
-        } catch {
-          return null;
-        }
+      try {
+        await requireReadableAgent(ctx, agent, worker.agentId);
+      } catch (e) {
+        if (e instanceof AgentNotFoundError) return null;
+        throw e;
       }
       return agent;
     },
@@ -3143,6 +3284,10 @@ export const workerFieldResolvers = {
      * gate (owner / org READER), masked to null on deny: an AppMember who is
      * not an org member can read the Worker but must not reach App.keys /
      * App.members through it (the same #552 class as `agent` above).
+     * #1149: the Profile tier never widens this. Reached by naming one worker,
+     * Worker.app still answers only whoever Query.app admits, and the paths
+     * that returned it before (a session-nested Worker) are unchanged
+     * (cor:dmo:050:11, Vera's reading in team chat #53179).
      */
     app: async (worker: { appId: string }, _: unknown, ctx: Context) => {
       const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });

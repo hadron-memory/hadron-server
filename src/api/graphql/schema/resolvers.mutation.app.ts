@@ -1,4 +1,5 @@
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { appendMemberRemovedEvent, appendMemberSetEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
@@ -1114,9 +1115,13 @@ export const appMutations = {
               throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
           },
-          (tx) => ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
-            actorId: ctx.userId ?? null,
-          }),
+          async (tx) => {
+            const { priorRole } = await ensureAppMember(tx, resolvedAppId, resolvedUserId, role, {
+              actorId: ctx.userId ?? null,
+            });
+            // #2766: the act is recorded in its own transaction, after every refusal above.
+            await appendMemberSetEvent(tx, { appId: resolvedAppId, actor: eventActor(ctx.userId), userId: resolvedUserId, priorRole, role });
+          },
           { afterLock: async (tx) => {
             await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
             await tx.$queryRaw`
@@ -1205,9 +1210,18 @@ export const appMutations = {
             throw forbidRemove();
           }
         },
-        (tx) => tx.appMember.deleteMany({
-          where: { appId: resolvedAppId, userId: resolvedUserId },
-        }).then(() => undefined),
+        async (tx) => {
+          // The row is held FOR UPDATE by afterLock, so the role read here is the one deleted.
+          const existing = await tx.appMember.findUnique({
+            where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
+            select: { role: true },
+          });
+          const { count } = await tx.appMember.deleteMany({ where: { appId: resolvedAppId, userId: resolvedUserId } });
+          // #2766: an idempotent no-op (no row) records nothing.
+          if (count > 0 && existing) {
+            await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: eventActor(ctx.userId), userId: resolvedUserId, role: existing.role });
+          }
+        },
         { lockMode: 'exclusive', afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
           await tx.$queryRaw`

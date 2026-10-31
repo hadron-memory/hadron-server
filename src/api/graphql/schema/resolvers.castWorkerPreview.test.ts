@@ -91,7 +91,7 @@ beforeEach(async () => {
     ctx(admin.id),
   );
   roleAgent = { id: role.id };
-  await serveAgentBootPrompt(db, role.id, 'You are {{name}}, a {{role}}.');
+  await serveAgentBootPrompt(db, role.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'CWP Team App', urn: `${org.urn}:team` },
@@ -200,17 +200,24 @@ describe('#964 — castWorkerPreview', () => {
   });
 
   it('binds a template without a name token as written; hasNamePlaceholder is retired and null (#2049)', async () => {
-    await serveAgentBootPrompt(db, roleAgent.id, 'You are a {{role}}.');
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are a {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
 
-  it('binds only the exact token: "{{ name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
-    await serveAgentBootPrompt(db, roleAgent.id, 'You are {{ name }}, a {{role}}.');
+  it('binds only the exact token: "{{ worker.name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are {{ worker.name }}, a {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBeNull();
-    expect(p.prompt).toBe('You are {{ name }}, a backend-engineer.');
+    expect(p.prompt).toBe('You are {{ worker.name }}, a backend-engineer.');
+  });
+
+  it('leaves legacy {{name}} / {{role}} literal in the preview while the closed set binds (#2902, #1772 step 3)', async () => {
+    // The preview is a live path: only a retained record replay still binds the legacy tokens (applyRecordedVariables).
+    await serveAgentBootPrompt(db, roleAgent.id, 'Hi {{name}}, a {{role}}: {{worker.name}} / {{worker.role}}.');
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
+    expect(p.prompt).toBe('Hi {{name}}, a {{role}}: Gwen / backend-engineer.');
   });
 
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {

@@ -9,7 +9,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
-import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
@@ -54,10 +54,9 @@ describe('one pass over the authored source (blind review P2-1, P3-1)', () => {
     'worker.url': '', 'session.llmModel': 'm-1',
   };
 
-  it('legacy and platform tokens bind together, so a legacy value holding a platform token stays literal', () => {
-    const legacy = { name: '{{agent.name}}', role: '{{session.llmModel}}' };
-    expect(applyPlatformVariables('{{name}}|{{worker.name}}|{{role}}', { ...values, 'worker.name': legacy.name }, legacy)).toBe(
-      '{{agent.name}}|{{agent.name}}|{{session.llmModel}}',
+  it('a platform value holding a legacy or platform token stays literal, and legacy tokens bind nothing (#1772 step 3)', () => {
+    expect(applyPlatformVariables('{{name}}|{{worker.name}}|{{role}}', { ...values, 'worker.name': '{{agent.name}}' })).toBe(
+      '{{name}}|{{agent.name}}|{{role}}',
     );
   });
 
@@ -72,9 +71,9 @@ describe('the chat binding — a chat binds no worker (cor:dmo:150:08)', () => {
 
   it('worker.name falls back to the Agent name, role to persona role, the rest empty, url to the Agent portal URL', () => {
     vi.stubEnv('FRONTEND_URL', 'https://portal.test');
-    // The served chat path's binding (serveChatPrompt): the Agent's own values, legacy tokens from them.
+    // The served chat path's binding (serveChatPrompt): the Agent's own values.
     const agentValues = agentPlatformValues({ name: 'Juno', urn: 'acme.com:juno', personaRole: 'mentor' });
-    const out = applyPlatformVariables(TEMPLATE, agentValues, legacyFromValues(agentValues));
+    const out = applyPlatformVariables(TEMPLATE, agentValues);
     expect(out).toBe('Juno|mentor|Juno||[]|[]|https://portal.test/app/u/acme.com:juno|');
   });
 });
@@ -137,7 +136,7 @@ describe('composeWorkerPrompt — filled at each bind', () => {
   it('a legacy role value holding a platform token is served literally (composition level)', async () => {
     const w = await cast('Fay', '{{session.llmModel}}');
     await serveAgentBootPrompt(db, agentId, '{{role}}|{{worker.role}}');
-    expect(await prompt(w.id, { llmModel: 'm-9' })).toBe('{{session.llmModel}}|{{session.llmModel}}');
+    expect(await prompt(w.id, { llmModel: 'm-9' })).toBe('{{role}}|{{session.llmModel}}');
   });
 
   it('a rename reaches the next bind with no recompile', async () => {

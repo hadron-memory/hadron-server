@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import * as ts from 'typescript';
 
 const DIRECT = [
+  ['resolvers.mutation.appMemory.ts', 'createAppMemory'], // #2661: new app-class authority writer.
   ['resolvers.mutation.org.ts', 'updateUserRoles'],
   ['resolvers.mutation.org.ts', 'createUserInvitation'],
   ['resolvers.mutation.org.ts', 'acceptInvitation'],
@@ -33,7 +34,7 @@ const DIRECT = [
   ['resolvers.mutation.app.ts', 'createApp'],
   ['resolvers.mutation.app.ts', 'joinApp'],
   ['resolvers.mutation.chat.ts', 'startChat'],
-  // #2458: changing a worker's agent provisions a missing same-org grant, inside withAuthorizedTx.
+  // #2458: changing a worker's agent provisions a missing same-org grant (via provisionCastGrants, #2917), inside withAuthorizedTx.
   ['resolvers.worker.ts', 'changeWorkerAgent'],
 ] as const;
 
@@ -125,13 +126,13 @@ describe('#1551 authority writer ratchet', () => {
       ['resolvers.mutation.app.ts', 3],
       ['resolvers.mutation.chat.ts', 1],
       ['resolvers.helpers.ts', 2],
-      ['resolvers.worker.ts', 1], // #2458 changeWorkerAgent (anchored; in DIRECT)
+      ['resolvers.worker.ts', 2], // #2906 castWorker + #2917 changeWorkerAgent, via provisionCastGrants (changeWorkerAgent is in DIRECT)
     ]);
     const files = execFileSync('git', ['ls-files', 'src/api/graphql/schema/resolvers*.ts'], { encoding: 'utf8' })
       .split('\n').filter((file) => file && !file.endsWith('.test.ts'));
     const actual = new Map<string, number>();
     for (const file of files) {
-      const count = [...readFileSync(file, 'utf8').matchAll(/\bensureAgent(?:OrgGrant|Subscription)\(/g)].length;
+      const count = [...readFileSync(file, 'utf8').matchAll(/\b(?:ensureAgent(?:OrgGrant|Subscription)|provisionCastGrants)\(/g)].length;
       if (count) actual.set(file.slice(file.lastIndexOf('/') + 1), count);
     }
     expect([...actual].sort()).toEqual([...expectedByFile].sort());

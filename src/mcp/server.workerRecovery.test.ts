@@ -41,7 +41,7 @@ let outsider: { id: string };
 let app: { id: string; urn: string };
 let agent: { id: string };
 
-const PERSONA_TEMPLATE = 'You are {{name}}, the {{role}} on this team.';
+const PERSONA_TEMPLATE = 'You are {{worker.name}}, the {{worker.role}} on this team.';
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -132,7 +132,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
         personaRole: 'archivist',
       },
     });
-    await serveAgentBootPrompt(db, nullStampAgent.id, 'You are {{name}}, the {{role}}.');
+    await serveAgentBootPrompt(db, nullStampAgent.id, 'You are {{worker.name}}, the {{worker.role}}.');
     await db.agent.update({ where: { id: nullStampAgent.id }, data: { updatedAt: null } });
     await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: nullStampAgent.id, name: 'Stale', slug: 'stale', role: 'archivist' },
@@ -209,7 +209,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
       'the backend-engineer on this team',
     );
 
-    await serveAgentBootPrompt(db, agent.id, 'You are {{name}}. The team ships on Fridays.');
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}. The team ships on Fridays.');
 
     const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
     expect(after).toContain('The team ships on Fridays.');

@@ -3,9 +3,11 @@
  *
  * `createMemory` (resolvers.mutation.memory.ts) deliberately creates only
  * FREE-STANDING memories (app_id / agent stay NULL) and rejects class='app'.
- * These two mutations are the explicit, caller-invokable way to add every
+ * The mutations below are the explicit, caller-invokable way to add every
  * App-associable memory class to a chosen App:
  *
+ *   - createAppMemory (#2661, #2843) — new tenant-managed app-class creation without
+ *     selecting an Agent; no existing memory attachment.
  *   - createMemoryInApp — create a new memory born App-scoped (app | knowledge |
  *     personal | private).
  *   - attachMemoryToApp — bind an existing free-standing personal/private memory
@@ -29,6 +31,8 @@
  * columns correctly per class.
  */
 import { GraphQLError } from 'graphql';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
@@ -37,12 +41,13 @@ import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
-import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
 import { createNode } from '../../../controller/operations/createNode.js';
+import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
 import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
-import { type Context, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
+import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -187,7 +192,82 @@ async function withAppMemoryAuthorityTx<T>(
   );
 }
 
+/** #2843 / cor:acl:010:01: a user tenant's ACTUAL owner, or the existing org ADMIN gate; no user-App platform bypass. */
+async function requireAppMemoryCreator(ctx: Context, app: { organizationId: string | null; ownerUserId: string | null }): Promise<void> {
+  if (app.organizationId) await requireOrgRole(ctx, app.organizationId, 'ADMIN');
+  else if (!ctx.userId || app.ownerUserId !== ctx.userId) throw authorizationDenied();
+}
+
 export const appMemoryMutations = {
+  /**
+   * #2661 / cor:acl:010:01: NEW free-standing app memory, not an Agent's
+   * install memory. #2843 admits the user-owned App's actual owner as ruled
+   * by D2; org Apps keep the shared ADMIN gate. Only a person acting as
+   * themselves creates. App/tenant anchors fence ownership, uninstall and revocation.
+   */
+  createAppMemory: async (
+    _: unknown,
+    { appRef, name, shortDescription, description, tags }: {
+      appRef: string; name: string; shortDescription?: string; description?: string; tags?: string[];
+    },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId || ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
+    let id: string;
+    try { ({ id } = await resolveAppRef(ctx.db, appRef)); }
+    catch (error) {
+      // #2843: a stranger and an unknown/deleted App have one public answer.
+      if (error instanceof AppNotFoundError) throw authorizationDenied();
+      throw error;
+    }
+    const observed = await ctx.db.app.findUniqueOrThrow({ where: { id } });
+    if (observed.deletedAt || observed.uninstalledAt) throw authorizationDenied();
+    await requireAppMemoryCreator(ctx, observed);
+    if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
+    // #2730: refuse an unprojectable root after authorization, before any write.
+    assertMemoryRootLoc(name);
+    return withFsProjectionRollback(() => withAuthorizedTx(ctx, [
+      ...(observed.organizationId ? [{ kind: 'org' as const, id: observed.organizationId }] : []),
+      ...(observed.ownerUserId ? [{ kind: 'user' as const, id: observed.ownerUserId }] : []),
+      { kind: 'app', id },
+    ], async txCtx => {
+      const current = await txCtx.db.app.findUniqueOrThrow({ where: { id } });
+      if (current.organizationId !== observed.organizationId || current.ownerUserId !== observed.ownerUserId) {
+        throw authorizationDenied();
+      }
+      await requireAppMemoryCreator(txCtx, current);
+      // Uninstall takes the App anchor exclusively. Its committed removal is
+      // observed here after any wait, and cannot pass this writer until commit.
+      const installed = await txCtx.db.appAgent.findFirst({
+        where: { appId: id, agent: { deletedAt: null } }, select: { agentId: true },
+      });
+      if (!installed) throw new GraphQLError('This App has no Agent installed.', {
+        extensions: { code: 'AGENT_NOT_INSTALLED' },
+      });
+    }, async tx => {
+      // Reload the canonical name after any anchor wait (e.g. an owner rename).
+      const locked = await tx.app.findUniqueOrThrow({ where: { id } });
+      // Same flat tenant root as createMemoryInApp; ownerUserId is tenancy, not a personal pivot.
+      const root = locked.organizationId
+        ? (await tx.organization.findUniqueOrThrow({ where: { id: locked.organizationId }, select: { urn: true } })).urn
+        : locked.urn.split(':')[0]!;
+      const urn = await mintMemoryUrnV2(tx, {
+        root, desiredSlug: deriveSlugFromName(name), authorRoot: locked.urn.split(':').pop()!,
+      });
+      const memory = await tx.memory.create({ data: {
+        id: generateId(), organizationId: observed.organizationId, ownerUserId: observed.ownerUserId, appId: id,
+        urn, name, shortDescription, description, tags: tags ?? [], class: 'app',
+        visibility: null, isInstallMemory: false, installOfAgentId: null,
+        createdBy: ctx.userId,
+      }, include: MEMORY_INCLUDE });
+      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
+        description: 'Root node for this memory.' }, tx);
+      return memory;
+    }));
+  },
+
   createMemoryInApp: async (
     _: unknown,
     {
@@ -240,6 +320,9 @@ export const appMemoryMutations = {
 
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
+    // #2730: the root node's loc is `name`; refuse an unprojectable one after the
+    // gates and before the tombstone reclaim or any create.
+    assertMemoryRootLoc(name);
     const agentSlug = agentSlugFromUrn(agent.urn);
     const slug = deriveSlugFromName(name);
 
@@ -288,7 +371,7 @@ export const appMemoryMutations = {
 
     let memory;
     try {
-      memory = await withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
+      memory = await withFsProjectionRollback(() => withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
       const created = await tx.memory.create({
         data: {
           id: generateId(),
@@ -336,8 +419,12 @@ export const appMemoryMutations = {
           },
         });
       }
+      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
+      // the Memory back and a retry cannot mint a second one.
+      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
+        description: 'Root node for this memory.' }, tx);
       return created;
-      });
+      }));
     } catch (err) {
       // Race backstop: a concurrent create claimed the just-minted urn between
       // the mint probe and this insert (mintMemoryUrnV2 aliases around known
@@ -349,10 +436,6 @@ export const appMemoryMutations = {
       }
       throw err;
     }
-
-    // Root node, as createMemory does.
-    const rootName = name.split(':').pop() ?? name;
-    await createNode({ memoryId: memory.id, loc: name, name: rootName });
 
     return memory;
   },

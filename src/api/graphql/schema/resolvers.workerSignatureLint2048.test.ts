@@ -1,5 +1,5 @@
-/** #2048 S11c: Worker.signatureLint warns, never blocks, when a signature or trailer lacks the worker link (cor:agt:040:04 S3, cor:agt:040:13 S5). */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+/** #2048 S11c (cor:agt:040:04 S3, cor:agt:040:13 S5): Worker.signatureLint warns, never blocks, when a signature or trailer lacks the worker link (cor:agt:040:04 S3, cor:agt:040:13 S5). */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -118,5 +118,27 @@ describe('#2048 S11c Worker.signatureLint', () => {
     await update({ signature: 'no link' });
     await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
     expect(fields(await lint())).toEqual(['WORKER_LINK_MISSING:signature']);
+  });
+
+  // #2757 (Ruth's #2680 P3 2): the "holds this worker's own portal URL literally" arm of lintWorkerFields. Every case
+  // above runs with FRONTEND_URL unset, so portalUrl is null and the arm never fires (cor:agt:040:04 S3, cor:agt:040:13 S5).
+  describe('a literal portal URL (FRONTEND_URL set)', () => {
+    const was = process.env.FRONTEND_URL;
+    beforeEach(() => { process.env.FRONTEND_URL = 'https://portal.example'; });
+    afterEach(() => { if (was === undefined) delete process.env.FRONTEND_URL; else process.env.FRONTEND_URL = was; });
+    const urlOf = async (w: any) => `https://portal.example/app/u/${await W.urn(w, {}, ctx())}`;
+
+    it("this worker's own portal URL counts as the link, with no variable", async () => {
+      const own = await urlOf(worker);
+      await update({ signature: `see ${own}`, trailer: `[Anne](${own})` });
+      expect(await lint()).toEqual({ items: [], total: 0, nextCursor: null });
+    });
+
+    it("another worker's portal URL does not count", async () => {
+      const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Bea' }, ctx());
+      const other = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
+      await update({ signature: `see ${await urlOf(other)}`, trailer: 'x' });
+      expect(fields(await lint())).toEqual(['WORKER_LINK_MISSING:signature', 'WORKER_LINK_MISSING:trailer']);
+    });
   });
 });

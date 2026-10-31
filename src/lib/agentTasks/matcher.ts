@@ -1,3 +1,4 @@
+import { lockTaskGraph } from './blockers.js';
 /**
  * #1707 — the matcher (cor:agt:060:05, :06; plan design:agent-tasks §5).
  *
@@ -371,6 +372,7 @@ async function tryAssign(
     // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
     // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
     await lockStopFence(tx, task.appId, 'shared');
+    await lockTaskGraph(tx, task.appId, 'shared');
     // The per-worker lock (src/lib/agentTasks/workerLock.ts).
     await lockWorkersForAssignment(tx, [workerId]);
     const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
@@ -384,7 +386,7 @@ async function tryAssign(
     if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
     await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
     const n = await tx.agentTask.updateMany({
-      where: { id: task.id, appId: task.appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+      where: { id: task.id, appId: task.appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
         requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
       data: {
         assigneeWorkerId: workerId,
@@ -417,22 +419,22 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
   let candidates: WorkerWorkState[] | null = null;
   let covering: Map<string, StopSignal[]> | null = null;
   const spent = new Set<string>();
-  let after: { createdAt: Date; id: string } | null = null;
+  let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
-    const page: (QueuedTask & { createdAt: Date })[] = await db.agentTask.findMany({
+    const page: (QueuedTask & { priority: number; createdAt: Date })[] = await db.agentTask.findMany({
       where: {
-        appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+        appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
         ...(after
-          ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] }
+          ? { OR: [{ priority: { gt: after.priority } }, { priority: after.priority, createdAt: { gt: after.createdAt } }, { priority: after.priority, createdAt: after.createdAt, id: { gt: after.id } }] }
           : {}),
       },
-      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, createdAt: true, createdByWorkerId: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, appId: true, requirements: true, closeSessionWhenDone: true, priority: true, createdAt: true, createdByWorkerId: true },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       take: QUEUE_PAGE,
     });
     if (page.length === 0) break;
     const last = page[page.length - 1];
-    after = { createdAt: last.createdAt, id: last.id };
+    after = { priority: last.priority, createdAt: last.createdAt, id: last.id };
     if (candidates === null) {
       // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
       covering = await coveringSignals(db, appId, null, now);
@@ -477,7 +479,7 @@ export async function matchQueuedTasks(
     ? [opts.appId]
     : (await db.agentTask.findMany({
         where: {
-          status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+          status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
           app: { deletedAt: null, uninstalledAt: null },
         },
         select: { appId: true },
@@ -513,15 +515,15 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
   const timeStopped = timeStoppedWorkers(covering);
   const free = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w));
   const decisive = new Set<string>();
-  let after: { createdAt: Date; id: string } | null = null;
+  let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
-    const page: { id: string; createdAt: Date; requirements: Prisma.JsonValue | null; createdByWorkerId: string | null }[] = await db.agentTask.findMany({
+    const page: { id: string; priority: number; createdAt: Date; requirements: Prisma.JsonValue | null; createdByWorkerId: string | null }[] = await db.agentTask.findMany({
       where: {
-        appId, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
-        ...(after ? { OR: [{ createdAt: { gt: after.createdAt } }, { createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
+        appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
+        ...(after ? { OR: [{ priority: { gt: after.priority } }, { priority: after.priority, createdAt: { gt: after.createdAt } }, { priority: after.priority, createdAt: after.createdAt, id: { gt: after.id } }] } : {}),
       },
-      select: { id: true, createdAt: true, requirements: true, createdByWorkerId: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, priority: true, createdAt: true, requirements: true, createdByWorkerId: true },
+      orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
       take: QUEUE_PAGE,
     });
     for (const t of page) {
@@ -532,7 +534,7 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
     }
     if (page.length < QUEUE_PAGE) break;
     const last = page[page.length - 1];
-    after = { createdAt: last.createdAt, id: last.id };
+    after = { priority: last.priority, createdAt: last.createdAt, id: last.id };
   }
   const nowNaive = toNaiveUtc(now);
   const open = await db.agentTaskStopHold.findMany({ where: { appId, endedAt: null }, select: { id: true, taskId: true } });

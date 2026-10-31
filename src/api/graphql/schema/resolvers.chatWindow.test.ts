@@ -382,7 +382,7 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
 
   it('binds the Agent identity in both chat prompt paths and preserves the stage prompt', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'researcher' } });
-    await serveAgentBootPrompt(db, agent.id, 'You are {{name}}, a {{role}}.');
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
     const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
     expect(start.systemMessage).toBe('You are research-agent, a researcher.\n\nScope the research.');

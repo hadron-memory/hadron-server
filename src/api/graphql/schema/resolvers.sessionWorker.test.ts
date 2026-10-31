@@ -207,7 +207,7 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
       where: { id: worker.id },
       data: { memoryId: null },
     });
-    await serveAgentBootPrompt(db, agent.id, 'You are {{name}}, a {{role}}.');
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
     const c = ctx(member.id); // org READER, no AppMember row
     const w = await workerViaSessions(c);
     expect(w?.name).toBe('Iris');
@@ -217,7 +217,7 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
   });
 
   it('an App participant still reads the working-state fields', async () => {
-    await serveAgentBootPrompt(db, agent.id, 'You are {{name}}, a {{role}}.');
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
     const c = ctx(member.id);
     const w = await workerViaSessions(c);
@@ -225,7 +225,7 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
   });
 
   it("the App's own key reads internals; a session readable past membership loss does not", async () => {
-    await serveAgentBootPrompt(db, agent.id, 'internal note for {{name}}');
+    await serveAgentBootPrompt(db, agent.id, 'internal note for {{worker.name}}');
     // Pure App-key principal of the same App: requireWorkerReadAccess admits.
     expect(await W.prompt(await workerViaSessions(ctx(undefined, app.id, [])), {}, ctx(undefined, app.id, []))).toBe('internal note for Iris');
     // A user whose only reach is their self-attributed session (no org, no

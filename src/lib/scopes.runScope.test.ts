@@ -33,6 +33,7 @@ let memA1: { id: string; urn: string };
 let memA2: { id: string; urn: string };
 let memB: { id: string; urn: string };
 let entry: string;
+let scheduleId: string;
 
 const ctx = (userId: string, roles: Context['roles'] = ['READER']): Context => ({ db, userId, roles }) as Context;
 
@@ -58,6 +59,11 @@ beforeEach(async () => {
   await db.agentMemoryItem.create({ data: { id: generateId(), agentId: ag.id, memoryId: memA1.id, role: 'read' } });
   const node = await db.node.create({ data: { id: generateId(), memoryId: memA1.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
   entry = `hrn:node:${memA1.urn}:${node.loc}`;
+  // #2479: scheduled mints read their budget from a durable trigger, never a missing-id fallback.
+  scheduleId = (await db.agentSchedule.create({ data: {
+    id: generateId(), organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
+    name: 'scope fixture', cron: '* * * * *', entryNodeUrn: entry,
+  } })).id;
 });
 
 describe('a trigger names a scope', () => {
@@ -82,7 +88,7 @@ describe('the snapshot on the run', () => {
     const s = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA2.urn, memA1.urn] } }, ctx(admin.id));
     const run = await mintAppRun(db, {
       organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
-      triggerKind: 'SCHEDULE', entryNodeUrn: entry, scopeId: s.id, publish: false,
+      triggerKind: 'SCHEDULE', triggerId: scheduleId, entryNodeUrn: entry, scopeId: s.id, publish: false,
     });
     expect(run.scopeSnapshot).toMatchObject({ scopeId: s.id, name: 'lens', ownerType: 'ORGANIZATION', memoryIds: [memA2.id, memA1.id] });
 
@@ -135,7 +141,7 @@ describe('hadron_spawn is scope-bearing (plan §3.3)', () => {
     const other = await M.createScope({}, { input: { name: 'other', organizationRef: orgA.urn, memoryRefs: [memA2.urn] } }, ctx(admin.id));
     const parent = await mintAppRun(db, {
       organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
-      triggerKind: 'SCHEDULE', entryNodeUrn: entry, scopeId: lens.id, publish: false,
+      triggerKind: 'SCHEDULE', triggerId: scheduleId, entryNodeUrn: entry, scopeId: lens.id, publish: false,
     });
     const toolCtx = (run: typeof parent) => ({ log: () => {}, db, run, principal: runContext(db, run) });
     await hadronSpawn.execute(toolCtx(parent), {
@@ -156,7 +162,7 @@ describe('hadron_spawn is scope-bearing (plan §3.3)', () => {
     // No override: the parent's own snapshot, on children and callbacks alike.
     const parent2 = await mintAppRun(db, {
       organizationId: orgA.id, appId: app.id, agentId: agent.id, userId: admin.id,
-      triggerKind: 'SCHEDULE', entryNodeUrn: entry, scopeId: lens.id, publish: false,
+      triggerKind: 'SCHEDULE', triggerId: scheduleId, entryNodeUrn: entry, scopeId: lens.id, publish: false,
     });
     await hadronSpawn.execute(toolCtx(parent2), { items: ['x'], process_item: entry, callback: entry });
     const [kid] = (await db.appRun.findMany({ where: { parentRunId: parent2.id } })).filter((r) => !(r.eventData as any)?.__spawnCallback);

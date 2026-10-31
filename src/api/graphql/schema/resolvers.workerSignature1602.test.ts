@@ -7,7 +7,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
-import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
@@ -102,7 +102,7 @@ describe('#1602 signature/trailer', () => {
   it('no-worker chat/headless keeps signature and trailer empty', () => {
     // The served chat path's binding (serveChatPrompt): the Agent's own values, no worker.
     const values = agentPlatformValues({ name: 'Agent', urn: 'sig.example:agent', personaRole: 'engineer' });
-    expect(applyPlatformVariables('[{{worker.signature}}][{{worker.trailer}}]', values, legacyFromValues(values))).toBe('[][]');
+    expect(applyPlatformVariables('[{{worker.signature}}][{{worker.trailer}}]', values)).toBe('[][]');
   });
   it('migration backfills each NULL independently, preserving configured and retired rows on rerun', async () => {
     const sql = readFileSync('prisma/migrations/20261019090000_worker_signature/migration.sql', 'utf8');

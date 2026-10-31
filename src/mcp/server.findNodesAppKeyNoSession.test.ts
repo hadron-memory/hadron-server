@@ -18,7 +18,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbNode } from '../test/helpers.js';
+import { cleanDb, createDbNode, createDbAppMember } from '../test/helpers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
@@ -32,6 +32,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 
 interface Fixture {
   appId: string;
+  userId: string;
   linkedMemory: { id: string; urn: string };
   foreignMemory: { id: string; urn: string };
 }
@@ -39,8 +40,13 @@ interface Fixture {
 let fx: Fixture;
 
 function appKeyAuth(): AuthContext {
-  // App-Key, NO session — no userId, no roles.
+  // App-Key, NO session — no userId, no roles. (#1376: a bare key no longer folds item-linked org knowledge.)
   return { appId: fx.appId, organizationId: undefined };
+}
+
+// A principal with a user behind it (an AppMember) keeps the item fold — the reach semantics under test.
+function memberAuth(): AuthContext {
+  return { appId: fx.appId, userId: fx.userId, organizationId: undefined };
 }
 
 beforeEach(async () => {
@@ -89,6 +95,9 @@ beforeEach(async () => {
     },
   });
 
+  const user = await db.user.create({ data: { id: generateId(), name: 'aknoses-member' } });
+  await createDbAppMember(db, app.id, user.id, 'member');
+
   await createDbNode(db, {
     memoryId: linkedMemory.id,
     loc: 'alpha-linked',
@@ -102,6 +111,7 @@ beforeEach(async () => {
 
   fx = {
     appId: app.id,
+    userId: user.id,
     linkedMemory: { id: linkedMemory.id, urn: linkedMemory.urn },
     foreignMemory: { id: foreignMemory.id, urn: foreignMemory.urn },
   };
@@ -109,7 +119,7 @@ beforeEach(async () => {
 
 describe('hadron_find_nodes — App-Key without a session sees its agent-linked memories', () => {
   it('keyword query scoped to the linked memory finds its nodes', async () => {
-    const srv = createTestableMcpServer(appKeyAuth());
+    const srv = createTestableMcpServer(memberAuth());
     const text = await srv.callToolText('hadron_find_nodes', {
       query: 'alpha',
       memoryUrn: fx.linkedMemory.urn,
@@ -119,7 +129,7 @@ describe('hadron_find_nodes — App-Key without a session sees its agent-linked 
   });
 
   it('survey mode ("*") scoped to the linked memory lists its nodes', async () => {
-    const srv = createTestableMcpServer(appKeyAuth());
+    const srv = createTestableMcpServer(memberAuth());
     const text = await srv.callToolText('hadron_find_nodes', {
       query: '*',
       memoryUrn: fx.linkedMemory.urn,
@@ -128,20 +138,30 @@ describe('hadron_find_nodes — App-Key without a session sees its agent-linked 
   });
 
   it('a broad (unscoped) keyword search surfaces linked nodes and never foreign ones', async () => {
-    const srv = createTestableMcpServer(appKeyAuth());
+    const srv = createTestableMcpServer(memberAuth());
     const text = await srv.callToolText('hadron_find_nodes', { query: 'alpha' });
     expect(text).toContain('alpha-linked');
     expect(text).not.toContain('alpha-foreign');
   });
 
   it('allMemories surfaces linked nodes and never foreign ones', async () => {
-    const srv = createTestableMcpServer(appKeyAuth());
+    const srv = createTestableMcpServer(memberAuth());
     const text = await srv.callToolText('hadron_find_nodes', {
       query: 'alpha',
       allMemories: true,
     });
     expect(text).toContain('alpha-linked');
     expect(text).not.toContain('alpha-foreign');
+  });
+
+  it('a bare App key (no user) is refused the item-linked ORGANIZATION memory (#1376)', async () => {
+    const srv = createTestableMcpServer(appKeyAuth());
+    const text = await srv.callToolText('hadron_find_nodes', {
+      query: 'alpha',
+      memoryUrn: fx.linkedMemory.urn,
+    });
+    expect(text).toContain('Memory not found or invalid');
+    expect(text).not.toContain('alpha-linked');
   });
 
   it('memoryUrn scoped to a foreign memory returns "Memory not found" (no oracle)', async () => {

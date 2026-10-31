@@ -1,0 +1,36 @@
+-- #2755 — the dark-worker alarm: its per-App window and its episode table.
+ALTER TABLE "apps" ADD COLUMN IF NOT EXISTS "delivery_dark_alarm_window_seconds" INTEGER NOT NULL DEFAULT 1800;
+
+-- #2755 — when an active pause or isolation was cleared on purpose (the end of an exemption a clear would erase).
+ALTER TABLE worker_wake_settings ADD COLUMN IF NOT EXISTS exempt_ended_at TIMESTAMP(3);
+
+-- #2755 — the dark-worker alarm's per-App window: 5 minutes to a day.
+ALTER TABLE apps DROP CONSTRAINT IF EXISTS chk_apps_delivery_dark_alarm_window;
+ALTER TABLE apps ADD CONSTRAINT chk_apps_delivery_dark_alarm_window CHECK (
+  delivery_dark_alarm_window_seconds BETWEEN 300 AND 86400
+);
+
+-- #2755 — dark-worker episodes: at most ONE open episode per worker, across both reasons; a reason is one of two.
+CREATE TABLE IF NOT EXISTS dark_worker_episodes (
+  id         TEXT PRIMARY KEY,
+  app_id     TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  worker_id  TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  event_id   TEXT NOT NULL UNIQUE REFERENCES agent_team_events(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  reason     TEXT NOT NULL,
+  opened_at  TIMESTAMP(3) NOT NULL,
+  ended_at   TIMESTAMP(3),
+  notice_posted_at TIMESTAMP(3)
+);
+CREATE INDEX IF NOT EXISTS dark_worker_episodes_app_id_ended_at_idx ON dark_worker_episodes (app_id, ended_at);
+ALTER TABLE dark_worker_episodes DROP CONSTRAINT IF EXISTS chk_dark_worker_episodes_shape;
+ALTER TABLE dark_worker_episodes ADD CONSTRAINT chk_dark_worker_episodes_shape CHECK (
+  reason IN ('overdue', 'wake-unacked') AND (ended_at IS NULL OR ended_at >= opened_at)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS dark_worker_episodes_one_open_uniq ON dark_worker_episodes (worker_id) WHERE ended_at IS NULL;
+
+-- #1162: the episode's worker column is a typed Worker reference, so it sits under the same writer fence as every
+-- other one. The #1162 invariants file is closed (a shipped migration), so the trigger is created here; the function
+-- is that file's.
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "dark_worker_episodes";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "dark_worker_episodes"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.worker_id');

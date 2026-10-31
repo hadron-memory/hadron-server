@@ -1,4 +1,5 @@
 import { mentionReach, mentionReachSql, reachEnvelopeOf } from '../mentionReach.js';
+import { enrichTickWakes } from './tickActions.js';
 // dueWakes — #1748, cor:agt:080:08–:15, :22, :23 (plan §4.2, §4.2a, §6.1).
 //
 // The loading around the pure rule in wakeRule.ts: who the caller may read, the
@@ -34,6 +35,7 @@ import { decryptNodeFields } from '../nodeCrypto.js';
 import { BROADCAST_MENTION_TOKENS, mentionTokenOf } from '../mentionToken.js';
 import { onStandbySql, standbyAdmitsSql } from './standby.js';
 import { s7Available } from './s7Availability.js';
+import { oldestUnackedTickAt, type TickerSchedule } from './ticks.js';
 import { isWorkerDormant, toNaiveUtc } from '../sessionActivity.js';
 import {
   relevantMentionCount,
@@ -72,8 +74,15 @@ export type DueWakeOut = {
   wake: WorkerWake;
   availability: { state: string; reason: string | null; until: Date | null; setAt: Date } | null;
   proof: string;
+  tickText: string | null;
   /** R63 (#2017): when the wake may be typed and the latest a busy worker may be made to wait, from the earliest waiting reason. */
   timing: { anchorAt: Date; deliverAfter: Date; busyDeadline: Date };
+  /**
+   * #2790 (cor:agt:080:23): per TICK reason, that ticker's OLDEST unacknowledged tick up to the reason's tick, worked out in
+   * this read from the subscription's acknowledged tick. It is the value `wakeRule` folds into `anchorAtMs`, so the
+   * wake's anchor is at or before each of these. Never stored: the signed wake and its reservation do not carry it.
+   */
+  tickDueAt: Map<string, Date>;
 };
 
 export type DueWakesResult = {
@@ -365,6 +374,8 @@ export async function computeDueWakes(args: {
   /** #2169: the reason kinds this call can deliver. A STOP notice is offered only to a call that lists STOP. */
   acceptsStop?: boolean;
   onWorkersSelected?: (workerIds: string[]) => void;
+  /** #2755: derive the due wakes and return them without reserving, charging the budget or writing anything. */
+  preview?: boolean;
 }): Promise<DueWakesResult> {
   const { ctx, app, reader, requester } = args;
   const now = args.now ?? new Date();
@@ -410,6 +421,7 @@ export async function computeDueWakes(args: {
   const standbyHeadOf = new Map(standbyRows.map((r) => [r.id, r.head]));
   const availabilityOf = new Map(availability.map((a) => [a.workerId, a]));
   const subsOf = new Map<string, typeof subs>();
+  const tickersForAnnotations = new Map(subs.map(s => [s.tickerId, s.ticker]));
   for (const s of subs) subsOf.set(s.workerId, [...(subsOf.get(s.workerId) ?? []), s]);
   const deliveredOf = new Map(deliveryChannels.map((d) => [`${d.workerId}:${d.channelId}`, d]));
   const tickAckOf = new Map(deliveryTicks.map((d) => [`${d.workerId}:${d.tickerId}`, d]));
@@ -432,13 +444,15 @@ export async function computeDueWakes(args: {
   const channelOf = new Map(channelRows.map((c) => [c.id, c]));
 
   // R1/B3: the caller's reading right, and each distinct holder's.
-  const callerIds = await getAccessibleMemoryIds(ctx);
+  // #2755: a PREVIEW is the platform's own read (the dark-worker alarm), which may read every channel and every task; the
+  // holder's right, below, still applies.
+  const callerIds = args.preview ? null : await getAccessibleMemoryIds(ctx);
   const callerCan = (memoryId: string) => callerIds === null || callerIds.includes(memoryId);
   const holderCache = new Map<string, Set<string> | 'all' | null>();
   const holderOf = new Map<string, Set<string> | 'all' | null>();
 
   // #1708: task reasons, only for a caller who may read the App's tasks (cor:agt:050:21). App-wide, so one check.
-  const taskReader = await mayReadAppTasks(ctx, app.id);
+  const taskReader = args.preview ? true : await mayReadAppTasks(ctx, app.id);
   const pendingTasks = taskReader ? await pendingTaskWakes(db, ids, now) : new Map<string, PendingTaskWake[]>();
   /** A held worker's task reasons need its holder to be a participant still (the channels' holder test). */
   const tasksFor = (workerId: string): PendingTaskWake[] => (holderOf.get(workerId) === null ? [] : pendingTasks.get(workerId) ?? []);
@@ -515,7 +529,7 @@ export async function computeDueWakes(args: {
       issuedAt: now.getTime(),
       wakeKey: wakeIdentity(identityOf(wake)),
     });
-  const issued: Array<Omit<DueWakeOut, 'timing'> & { exempt: boolean }> = [];
+  const issued: Array<Omit<DueWakeOut, 'timing' | 'tickText' | 'tickDueAt'> & { exempt: boolean }> = [];
   const dormant: Array<{ workerId: string; mentions: number }> = [];
 
   for (const w of workers) {
@@ -632,6 +646,16 @@ export async function computeDueWakes(args: {
   let withheld = 0;
   const wakes: DueWakeOut[] = [];
   const deliverySettings = await loadDeliverySettings(db, app.id);
+  // #2790 (Diego P2-1): a re-handed TICK reason can outlive its subscription (unsubscribed, disabled, deleted), so its
+  // schedule is read from the ticker row itself, read-only, for any reason the live-subscription map does not cover.
+  const tickerOf = new Map<string, TickerSchedule>();
+  for (const s of subs) tickerOf.set(s.ticker.id, s.ticker);
+  const loadTickers = async (reader: Pick<typeof db, 'ticker'>, wakeList: Array<{ reasons: WorkerWake['reasons'] }>) => {
+    const missing = [...new Set(wakeList.flatMap((w) => w.reasons.flatMap((r) => (r.kind === 'TICK' && !tickerOf.has(r.tickerId) ? [r.tickerId] : []))))];
+    if (missing.length === 0) return;
+    for (const t of await reader.ticker.findMany({ where: { id: { in: missing }, appId: app.id } })) tickerOf.set(t.id, t);
+  };
+  await loadTickers(db, issued.map((i) => i.wake));
   const passes = (i: (typeof issued)[number]) => {
     const { exempt: _e, ...out } = i;
     const anchorMs = i.wake.anchorAtMs ?? now.getTime();
@@ -639,8 +663,25 @@ export async function computeDueWakes(args: {
     const timing = hasStop(i.wake)
       ? { anchorAt: new Date(anchorMs), deliverAfter: now, busyDeadline: now }
       : { anchorAt: new Date(anchorMs), ...batchTiming(deliverySettings, { oldestPostedAt: new Date(anchorMs) }) };
-    wakes.push({ ...out, timing });
+    const tickDueAt = new Map<string, Date>();
+    for (const r of i.wake.reasons) {
+      if (r.kind !== 'TICK') continue;
+      const ticker = tickerOf.get(r.tickerId);
+      if (ticker) tickDueAt.set(r.tickerId, oldestUnackedTickAt(ticker, tickAckOf.get(`${i.workerId}:${r.tickerId}`)?.lastAckedTick ?? 0, r.k));
+    }
+    wakes.push({ ...out, timing, tickDueAt, tickText: null });
   };
+  // #2755: a PREVIEW is the pure derivation above and nothing else: no reservation, no budget slot, no proof
+  // acknowledgement state touched. The dark-worker alarm reads it as the platform, so it must not spend the budget.
+  if (args.preview) {
+    for (const i of issued) passes(i);
+    const annotations = await enrichTickWakes(ctx, app, wakes, new Set(wakes.map(w => w.workerId)), tickersForAnnotations);
+    for (const w of wakes) {
+      const a = annotations.get(w.workerId);
+      if (a) { w.wake = a.visible; w.tickText = a.tickText; }
+    }
+    return { status: 'OK', withheld: 0, wakes, dormant: [], nextAfter, budgetNotice: null };
+  }
   if (issued.length > 0) {
     await db.$transaction(async (tx) => {
       // #1708 (Riana P2-1 on #1859): task reasons are decided again HERE, under the authority anchors a revoker takes
@@ -692,8 +733,10 @@ export async function computeDueWakes(args: {
       const rows = await tx.$queryRaw<Array<{ worker_id: string; wake_key: string; wake: WorkerWake; absorbed_keys: string[] }>>(Prisma.sql`
         SELECT worker_id, wake_key, wake, absorbed_keys FROM app_wake_reservations WHERE app_id = ${app.id} AND reserved_at > ${cutoff}::timestamp`);
       const live = new Map(rows.map((r) => [r.worker_id, r]));
+      await loadTickers(tx, rows.map((r) => r.wake));
       let consumed = used + live.size;
       const reserve: Array<{ workerId: string; key: string; wake: WorkerWake; absorbed?: string[] }> = [];
+      const refreshTicks = new Set<string>();
       wakes.length = 0;
       withheld = 0;
       for (const i of issued) {
@@ -744,6 +787,16 @@ export async function computeDueWakes(args: {
           // the current wake: still ONE reservation and ONE slot for the worker, and the old proof still acknowledges
           // exactly what it names.
           if (absorbsNewReason(have.wake, i.wake)) {
+            const had = reasonKeys(have.wake);
+            if ([...reasonKeys(i.wake)].some(k => k.startsWith('T:') && !had.has(k))) refreshTicks.add(i.workerId);
+            else {
+              // A task/stop join does not re-resolve tick guidance already issued.
+              i.wake = { ...i.wake, reasons: i.wake.reasons.map(r => {
+                if (r.kind !== 'TICK') return r;
+                const old = have.wake.reasons.find(old => old.kind === 'TICK' && old.tickerId === r.tickerId);
+                return { ...r, action: old?.kind === 'TICK' ? old.action : undefined };
+              }) };
+            }
             // The descendant remembers every key it absorbed: that lineage, not "some reservation exists", is what lets an
             // earlier proof of the same wake be acknowledged without a second charge (acknowledge.ts).
             reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake, absorbed: [...new Set([...have.absorbed_keys, have.wake_key])] });
@@ -757,7 +810,15 @@ export async function computeDueWakes(args: {
             i.exempt = have.wake.exempt;
             i.proof = signFor(i.workerId, have.wake);
           }
-          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: have.wake, absorbed: have.absorbed_keys });
+          else {
+            // Guidance is issued once, while same-identity display metadata stays fresh.
+            i.wake = { ...i.wake, reasons: i.wake.reasons.map(r => {
+              if (r.kind !== 'TICK') return r;
+              const old = have.wake.reasons.find(old => old.kind === 'TICK' && old.tickerId === r.tickerId);
+              return { ...r, action: old?.kind === 'TICK' ? old.action : undefined };
+            }) };
+          }
+          reserve.push({ workerId: i.workerId, key: have.wake_key, wake: i.wake, absorbed: have.absorbed_keys });
           passes(i);
           continue;
         }
@@ -767,7 +828,17 @@ export async function computeDueWakes(args: {
           consumed++;
           reserve.push({ workerId: i.workerId, key: wakeIdentity(identityOf(i.wake)), wake: i.wake });
         }
+        refreshTicks.add(i.workerId);
         passes(i);
+      }
+      const annotations = await enrichTickWakes(ctx, app, wakes, refreshTicks, tickersForAnnotations);
+      for (const w of wakes) {
+        const a = annotations.get(w.workerId);
+        if (a) { w.wake = a.visible; w.tickText = a.tickText; }
+      }
+      for (const r of reserve) {
+        const a = annotations.get(r.workerId);
+        if (a) r.wake = a.stored;
       }
       const nowNaive = toNaiveUtc(now);
       for (const { workerId, key, wake, absorbed } of reserve) {
