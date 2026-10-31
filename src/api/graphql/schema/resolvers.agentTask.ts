@@ -719,11 +719,14 @@ function normalizeTags(tags: readonly string[] | null | undefined): string[] {
   return out;
 }
 
+const REQUIREMENT_KEYS = new Set(['role', 'familyIn', 'familyNotIn', 'excludeWorkers', 'minTier']);
+
 type RequirementsInput = {
   role?: string | null;
   familyIn?: string[] | null;
   familyNotIn?: string[] | null;
   excludeWorkers?: string[] | null;
+  minTier?: string | null;
 };
 
 /** The matcher's requirements (plan §3.1). Stored for T3; validated here. */
@@ -733,6 +736,10 @@ async function normalizeRequirements(
   input: RequirementsInput | null | undefined,
 ): Promise<Prisma.InputJsonObject | null> {
   if (!input) return null;
+  // #2252 D1: there is no `maxTier`, and no other key is read here, so an unknown one is refused rather than silently
+  // dropped (GraphQL validation already refuses it; this holds for any caller that reaches the resolver, MCP included).
+  const unknown = Object.keys(input).filter((k) => !REQUIREMENT_KEYS.has(k));
+  if (unknown.length) throw badInput(`requirements has no field ${unknown.map((k) => `"${k}"`).join(', ')}${unknown.includes('maxTier') ? ' (a task names a minimum tier, minTier, never a maximum)' : ''}.`);
   const role = optionalText(input.role, 128, 'requirements.role');
   const list = (xs: string[] | null | undefined, field: string): string[] | null => {
     if (!xs) return null;
@@ -764,11 +771,16 @@ async function normalizeRequirements(
       if (!excludeWorkerIds.includes(id)) excludeWorkerIds.push(id);
     }
   }
+  // #2252 D1: exactly low | mid | high (cor:agt:060:06); anything else is refused, never read as "no bound".
+  if (input.minTier != null && input.minTier !== 'low' && input.minTier !== 'mid' && input.minTier !== 'high') {
+    throw badInput('requirements.minTier must be low, mid or high.');
+  }
   const out: Prisma.InputJsonObject = {
     ...(role ? { role } : {}),
     ...(familyIn ? { familyIn } : {}),
     ...(familyNotIn ? { familyNotIn } : {}),
     ...(excludeWorkerIds ? { excludeWorkerIds } : {}),
+    ...(input.minTier ? { minTier: input.minTier } : {}),
   };
   return Object.keys(out).length ? out : null;
 }
@@ -2030,6 +2042,7 @@ export const agentTaskFieldResolvers = {
         familyIn: (r.familyIn as string[]) ?? null,
         familyNotIn: (r.familyNotIn as string[]) ?? null,
         excludeWorkerIds: (r.excludeWorkerIds as string[]) ?? null,
+        minTier: (r.minTier as string) ?? null,
       };
     },
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
