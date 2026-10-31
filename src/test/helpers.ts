@@ -103,6 +103,13 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // Admin impersonation audit rows cascade from both User and Organization;
   // cleared explicitly before their parents to keep cleanup order predictable.
   await db.impersonationSession.deleteMany();
+  // #2965: invitations reference sender and org with onDelete SetNull, so
+  // deleting those parents left every invitation row (soft-deleted ones too)
+  // behind with its unique slug taken, and a reused serial base failed on
+  // fixed fixture slugs. Activations (Cascade from invitation and user) first,
+  // then the invitations, before the users and orgs they point at.
+  await db.userInvitationActivation.deleteMany();
+  await db.userInvitation.deleteMany();
   await db.orgMember.deleteMany();
   // Assets mostly cascade from Memory below — but a STAGED asset has
   // `memoryId: null` (uploaded, not yet attached), so it has no parent to
