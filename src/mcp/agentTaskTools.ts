@@ -640,7 +640,7 @@ const PROPERTIES_ARG = z.unknown().optional().describe(
 const SHAPE_HADRON_TASK_UPDATE = { taskId, input: z.object({
       title: z.string().nullable().optional(), description: z.string().nullable().optional(),
       tags: z.array(z.string()).nullable().optional(),
-      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
+      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional(),minTier:z.enum(['low','mid','high']).nullable().optional()}).strict().nullable().optional(),
       startBy: z.string().nullable().optional(), closeSessionWhenDone: z.boolean().nullable().optional(),
       properties: PROPERTIES_ARG,
     }).strict().optional(), session: SESSION_WRITE };
@@ -661,7 +661,8 @@ const SHAPE_HADRON_TASK_CREATE = {
     familyIn: z.array(z.string()).optional(),
     familyNotIn: z.array(z.string()).optional(),
     excludeWorkers: z.array(z.string()).optional(),
-  }).optional().describe('For the platform\'s matcher.'),
+    minTier: z.enum(['low', 'mid', 'high']).optional().describe('#2252: the lowest model tier the assignee may run at (low < mid < high). A worker below it, or of unknown tier, is never matched; the lowest sufficient tier wins. There is no maximum.'),
+  }).strict().optional().describe('For the platform\'s matcher.'),
   startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
   tags: z.array(z.string()).optional(),
   properties: PROPERTIES_ARG,
