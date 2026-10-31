@@ -82,18 +82,38 @@ beforeEach(async () => {
 
 afterEach(() => sessionKeyCache.clear());
 
-async function denseFixture() {
+async function denseFixture(edgeInsertion: 'forward' | 'reverse' = 'forward') {
   const nodes: Array<{ id: string; loc: string }> = [];
   for (let i = 0; i < 12; i++) nodes.push(await db.node.create({ data: {
     id: `01a188c${i.toString(16).padStart(25, '0')}`,
     memoryId: fx.memory.id, loc: `dense:${i.toString().padStart(2, '0')}`,
     name: `Synthetic ${i}`, abstract: 'small abstract', content: 'X'.repeat(96 * 1024),
   } }));
-  await db.edge.createMany({ data: nodes.flatMap((a, i) => nodes.map((b, j) => ({
+  const edges = nodes.flatMap((a, i) => nodes.map((b, j) => ({
     id: generateId(), memoryId: fx.memory.id, sourceId: a.id, targetId: b.id,
     loc: `dense-edge:${i}:${j}`, name: 'synthetic-link',
-  }))) });
+  })));
+  // #2823: the MCP edge includes carry no orderBy, so edge lines follow physical row order.
+  // 'reverse' forces that order to differ; the oracle below must not depend on it.
+  await db.edge.createMany({ data: edgeInsertion === 'reverse' ? edges.reverse() : edges });
   return nodes;
+}
+
+/**
+ * #2823: edge lines ("  - hrn:node:…") have no product order (the MCP edge includes carry no
+ * orderBy), so sort each consecutive run of them. Nothing else is normalized; every other byte
+ * of the output still goes into the hash.
+ */
+function canonicalEdgeOrder(text: string): string {
+  const out: string[] = [];
+  let run: string[] = [];
+  const flush = () => { out.push(...run.sort()); run = []; };
+  for (const line of text.split('\n')) {
+    if (line.startsWith('  - hrn:node:')) run.push(line);
+    else { flush(); out.push(line); }
+  }
+  flush();
+  return out.join('\n');
 }
 
 async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk' | 'urn' | 'prefix', raw = true) {
@@ -131,12 +151,12 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
   }) as typeof db.$transaction);
   try {
     const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { ...(form === 'prefix' ? { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'dense:' } : { refs: form === 'urn' ? refs.map((_, i) => `hrn:node:batch-org:batchmem:dense:${i.toString().padStart(2, '0')}`) : refs }), contentScope: scope, raw });
-    return { text, hash: createHash('sha256').update(text).digest('hex'), loads, maxPendingBodies };
+    return { text, hash: createHash('sha256').update(canonicalEdgeOrder(text)).digest('hex'), loads, maxPendingBodies };
   } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
 
-it.each([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const)('#2774 bounds endpoint/root payloads with byte-identical %s/%s output', async (scope, form) => {
-  const nodes = await denseFixture();
+it.each((['forward', 'reverse'] as const).flatMap(order => ([['abstract', 'pk'], ['abstract', 'urn'], ['abstract', 'prefix'], ['all', 'pk'], ['all', 'urn'], ['all', 'prefix']] as const).map(([scope, form]) => [scope, form, order] as const)))('#2774 bounds endpoint/root payloads with byte-identical %s/%s output (edge insertion %s)', async (scope, form, order) => {
+  const nodes = await denseFixture(order);
   const result = await measuredRead(scope, nodes.map(n => n.id), form);
   expect(result.text).not.toMatch(/^Error/);
   expect(result.loads.some(l => l.phase === 'initial' && l.rows === 12)).toBe(true);
