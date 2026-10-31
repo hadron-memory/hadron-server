@@ -7891,7 +7891,7 @@ export const typeDefs = `#graphql
     ipGroupingVersion: String!
     enforcementMode: RateLimitEnforcementMode!
     version: Int!
-    updatedAt: String!
+    updatedAt: DateTime!
   }
   "Complete limit triple; mode omitted or null preserves (hrn:node:hadronmemory.com:specs:cor:api:210:01)."
   input SetRateLimitPolicyInput {
