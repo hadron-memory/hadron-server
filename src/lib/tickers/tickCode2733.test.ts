@@ -43,7 +43,8 @@ it('reserves tick. outside the warning code list and mirrors the CHECK in post-p
   expect(source).toContain(check);
   expect(migration).toContain(check);
   expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir ticker-tick-code-invariants.sql');
-  expect(readFileSync(new URL('../../test/globalSetup.ts', import.meta.url), 'utf8')).toContain('ticker-tick-code-invariants.sql');
+  // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+  expect(readFileSync(new URL('../../test/globalSetup.ts', import.meta.url), 'utf8')).not.toContain('ticker-tick-code-invariants.sql');
 });
 
 it('backfills existing push-managed databases idempotently without changing an already stored code', async () => {
