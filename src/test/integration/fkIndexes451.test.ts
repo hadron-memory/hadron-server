@@ -9,8 +9,12 @@
  *
  * Two checks per column: the catalog has a VALID, READY, non-partial index whose first column is it, and
  * the planner, with sequential and bitmap scans disabled, serves the FK action's own statement through
- * that index. EXPLAIN only: nothing is executed and no rows are seeded, so the plan check proves the
- * index can serve the predicate, not that the planner prefers it at production row counts.
+ * that index. The plan check seeds 8,000 synthetic rows with distinct column values and ANALYZEs, inside
+ * a transaction that is rolled back (FK and user triggers off via `session_replication_role`, as #423
+ * does): on a near-empty table the planner may cost a walk of some other index carrying the column
+ * below a seek on the new one (CI did, for `sessions_served_prompt_owner_uniq`), which proves nothing.
+ * The statements are only EXPLAINed, never run. It shows the index serves the predicate at a realistic
+ * selectivity, not what the planner picks at production row counts.
  */
 import { describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -18,25 +22,29 @@ import { db } from '../../integrations/db/client.js';
 const CASES = [
   {
     table: 'usage_events', column: 'node_id', index: 'usage_events_node_id_idx',
+    seed: `INSERT INTO usage_events (id, type, node_id) SELECT 'idx451-ue-' || g, 'idx451', 'idx451-v-' || g FROM generate_series(1, 8000) g`,
     // A node hard delete: ON DELETE SET NULL.
-    statements: ["UPDATE usage_events SET node_id = NULL WHERE node_id = 'idx451-node'"],
+    statements: ["UPDATE usage_events SET node_id = NULL WHERE node_id = 'idx451-v-4000'"],
   },
   {
     table: 'sessions', column: 'agent_id', index: 'sessions_agent_id_idx',
+    seed: `INSERT INTO sessions (id, agent_id) SELECT 'idx451-s-' || g, 'idx451-v-' || g FROM generate_series(1, 8000) g`,
     // An agent delete: ON DELETE SET NULL.
-    statements: ["UPDATE sessions SET agent_id = NULL WHERE agent_id = 'idx451-agent'"],
+    statements: ["UPDATE sessions SET agent_id = NULL WHERE agent_id = 'idx451-v-4000'"],
   },
   {
     table: 'sessions', column: 'memory_id', index: 'sessions_memory_id_idx',
+    seed: `INSERT INTO sessions (id, memory_id) SELECT 'idx451-s-' || g, 'idx451-v-' || g FROM generate_series(1, 8000) g`,
     // A memory hard delete: ON DELETE SET NULL.
-    statements: ["UPDATE sessions SET memory_id = NULL WHERE memory_id = 'idx451-memory'"],
+    statements: ["UPDATE sessions SET memory_id = NULL WHERE memory_id = 'idx451-v-4000'"],
   },
   {
     table: 'agents', column: 'organization_id', index: 'agents_organization_id_idx',
+    seed: `INSERT INTO agents (id, urn, name, organization_id) SELECT 'idx451-a-' || g, 'idx451:a-' || g, 'idx451', 'idx451-v-' || g FROM generate_series(1, 8000) g`,
     // An org's agent listing, and the org delete: ON DELETE CASCADE.
     statements: [
-      "SELECT id FROM agents WHERE organization_id = 'idx451-org'",
-      "DELETE FROM agents WHERE organization_id = 'idx451-org'",
+      "SELECT id FROM agents WHERE organization_id = 'idx451-v-4000'",
+      "DELETE FROM agents WHERE organization_id = 'idx451-v-4000'",
     ],
   },
 ] as const;
@@ -59,6 +67,10 @@ describe('#451 foreign-key columns on delete paths are indexed', () => {
       class Rollback extends Error {}
       try {
         await db.$transaction(async tx => {
+          // Synthetic index-only fixture: no user data or dependency graph is needed.
+          await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+          await tx.$executeRawUnsafe(c.seed);
+          await tx.$executeRawUnsafe(`ANALYZE ${c.table}`);
           await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off');
           await tx.$executeRawUnsafe('SET LOCAL enable_bitmapscan = off');
           for (const statement of c.statements) {
