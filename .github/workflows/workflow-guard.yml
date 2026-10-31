@@ -1,0 +1,46 @@
+name: Workflow Guard
+
+# #2657 (epic #2139 B4). This repository is public: `pull_request_target`,
+# `workflow_run` and the `self-hosted` runner label each let a fork's author run
+# code with our privileges. This gate fails a change that adds one to ANY file
+# under `.github/workflows/`. See scripts/check-workflow-triggers.mjs for what it
+# parses, what it refuses, and its stated limit.
+#
+# THE LIMIT: the checker is carried by the PR it checks. A PR that edits
+# scripts/check-workflow-triggers.mjs or this file runs its own edited copy, so
+# this check alone is not a tamper-proof rule. Making it a required status check
+# or putting these two files under CODEOWNERS is a repository setting, which this
+# change does not make.
+#
+# It must itself stay inside the rules it enforces: `pull_request` only, a
+# read-only token, no secrets, a GitHub-hosted runner, and it executes nothing
+# from the PR except the checker script. There is deliberately NO `paths:` filter:
+# a filter is exactly the bypass a whole-tree gate exists to close.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The checker's one dependency, pinned to the version package.json pins and
+      # installed OUTSIDE the checkout with lifecycle scripts off, so nothing the
+      # PR ships runs during the install (the repo's own install would).
+      - name: Install the YAML parser
+        run: |
+          npm install --prefix "$RUNNER_TEMP/wfg" --ignore-scripts --no-audit --no-fund --no-package-lock yaml@2.8.3
+          ln -s "$RUNNER_TEMP/wfg/node_modules" "$GITHUB_WORKSPACE/node_modules"
+      - name: Check workflow triggers and runners
+        run: node scripts/check-workflow-triggers.mjs
