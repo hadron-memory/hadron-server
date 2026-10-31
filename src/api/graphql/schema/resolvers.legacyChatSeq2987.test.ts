@@ -175,6 +175,33 @@ describe('no over-reach', () => {
   });
 });
 
+describe('LOCAL review P2s on 0f581af6 (Beckett)', () => {
+  it('MCP create under a Channel keeps LOC_PROTECTED, like GraphQL, even with a seq', async () => {
+    const channel = await M.createChannel(null, { input: { memoryRef: memory.urn, loc: 'chats:guarded', name: 'guarded' } }, as());
+    const loc = 'chats:guarded:messages:forged';
+    const gql = await errorOf(M.createNode(null, { input: { memoryId: memory.id, loc, name: 'x', nodeType: 'chat-message', seq: 9 } }, as()));
+    expect(gql.extensions.code).toBe('LOC_PROTECTED');
+    const text = await mcpFor(member.id).callToolText('hadron_create_node', { urn: urn(loc), name: 'x', nodeType: 'chat-message', seq: 9 });
+    expect(text).toMatch(/loc_protected/i);
+    expect(text).not.toMatch(/seq_protected/);
+    expect(channel.id).toBeTruthy();
+    expect(await db.node.count({ where: { memoryId: memory.id, loc } })).toBe(0);
+  });
+
+  it('recreating a soft-deleted message at its own seq is not a seq write, on both doors', async () => {
+    const mcp = mcpFor(member.id);
+    for (const [loc, seq] of [['chats:legacy:messages:001', 1], ['chats:legacy:messages:002', 2]] as const) {
+      await db.node.updateMany({ where: { loc, memoryId: memory.id }, data: { deletedAt: new Date() } });
+      const out = loc.endsWith('001')
+        ? await M.createNode(null, { input: { memoryId: memory.id, loc, name: 'back', nodeType: 'chat-message', seq } }, as()).then(() => 'ok')
+        : await mcp.callToolText('hadron_create_node', { urn: urn(loc), name: 'back', nodeType: 'chat-message', seq });
+      expect(out).not.toMatch(/seq_protected/);
+      const r = await db.node.findFirstOrThrow({ where: { loc, memoryId: memory.id } });
+      expect([r.deletedAt, r.seq]).toEqual([null, seq]);
+    }
+  });
+});
+
 describe('allocator paths still assign seq', () => {
   it('createChannelMessage, createTeamChatMessage-style appends and the chat-root allocator', async () => {
     const channel = await M.createChannel(null, { input: { memoryRef: memory.urn, loc: 'chats:alloc', name: 'alloc' } }, as());
