@@ -67,6 +67,16 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     expect(await db.nodeEmbedding.count({ where: { nodeId, kind: 'abstract' } })).toBe(1);
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
   });
+  it('the worker clears a previous declaration when adopting summary-only policy', async () => {
+    await truncated();
+    // Seed pending work across a policy transition independently of the API purge.
+    await db.memory.update({ where: { id: memoryId }, data: { embeddingSource: 'abstract' } });
+    await db.node.update({ where: { id: nodeId }, data: { abstract: 'summary' } });
+    await queue(300);
+    expect(await embedNode(db, nodeId, undefined, client)).toBe('embedded');
+    expect(await chunks()).toHaveLength(0);
+    expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
+  });
   it('system memory passage removal fences an in-flight worker while keeping pending summary work', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { class: 'system', embeddingSource: 'both' } });
     await queue(300);

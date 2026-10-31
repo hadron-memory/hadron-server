@@ -104,6 +104,7 @@ export async function embedNode(
       // #1608 — a comment's stub state (a deleted-with-replies stub is never indexed).
       commentMeta: { select: { retractedAt: true } },
       embeddingAttempts: true,
+      embeddingTruncatedChunks: true,
       memory: {
         select: {
           id: true,
@@ -166,7 +167,10 @@ export async function embedNode(
   let usedClient: EmbeddingClient | null = null;
 
   try {
-    if (!wantChunks && !(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
+    // Ordinary summary-only work has no capped passages to remove. Avoid an extra
+    // transaction on every summary embed; policy changes already purge their vectors.
+    if (!wantChunks && node.embeddingTruncatedChunks != null
+      && !(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
     if (wantAbstract) {
       const abstractText = isComment
         ? (plaintext?.content !== undefined ? plaintext.content : node.content)
