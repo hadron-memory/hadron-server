@@ -1868,6 +1868,9 @@ model Session {
   @@index([appId, userId])
   @@index([expiresAt])
   @@index([workerId])
+  /// #451: agent and memory deletes null these FKs (SET NULL); each needs its own leading index.
+  @@index([agentId])
+  @@index([memoryId])
   /// #1016 — the "what am I driving?" read (`hadron_whoami`), which filters
   /// `userId` alone and orders by `startedAt`. `[appId, userId]` cannot serve
   /// it: Postgres will not seek on a composite index's SECOND column, so the
@@ -1955,6 +1958,8 @@ model UsageEvent {
   @@index([createdAt])
   @@index([sessionId])
   @@index([appId])
+  /// #451: a node hard delete nulls this FK (SET NULL); without it each delete scans the firehose.
+  @@index([nodeId])
   /// #796 — the two `usageActivity` scopes. Both are composite on `createdAt`
   /// so the bucketed aggregation is an index range scan; the composite
   /// `(userId, createdAt)` also prefix-covers the plain `userId` lookups the
@@ -2158,6 +2163,8 @@ model Agent {
   @@index([extendsAgentId])
   @@index([legacyUrn])
   @@index([bootPromptNodeId])
+  /// #451: org agent listings and the org-delete cascade. The persona-name uniques are partial and cannot serve them.
+  @@index([organizationId])
   @@map("agents")
   /// #2024 (S8, cor:agt:080:33): the tickers this Agent declares; each cast of a worker from it instantiates them.
   tickerTemplates       AgentTickerTemplate[]

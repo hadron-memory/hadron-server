@@ -814,3 +814,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql
+
+-- #451: delete-path FK columns need a leading index (the same statements as the four 20261031110x migrations).
+CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");
+CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
+CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
+CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
