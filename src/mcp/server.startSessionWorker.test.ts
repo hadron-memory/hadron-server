@@ -14,6 +14,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt, serveEveryAgent } from '../test/servedBootPrompt.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -65,6 +66,7 @@ beforeEach(async () => {
   otherAppWorker = await db.worker.create({
     data: { ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: agent.id, name: 'Nadia', slug: 'nadia' },
   });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 /** Hybrid principal: user credential + the team App as active selection. */
@@ -202,11 +204,9 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
     expect(otherAppWorker.id).toBeTruthy();
   });
 
-  it('returns the RESOLVED briefing when the role agent carries a template', async () => {
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}, a {{role}}. Ship carefully.', personaRole: 'backend-engineer' },
-    });
+  it('returns the RESOLVED briefing when the role agent is served a boot prompt', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'backend-engineer' } });
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}. Ship carefully.');
     await db.worker.update({ where: { id: worker.id }, data: { role: 'backend-engineer' } });
     const srv = createTestableMcpServer(hybridAuth());
     const out = await srv.callToolText('hadron_start_session', {
@@ -218,41 +218,11 @@ describe('#990 — workerRef by name, and the briefing always comes back', () =>
     // time plus the role Agent's generic updatedAt from the same read.
     expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-    expect(out).toContain('no per-override mtime is tracked');
-    // Rendered live from the template, with {{name}}/{{role}} bound — this is
+    expect(out).toContain('(generic Agent row update)');
+    // Rendered live from the served prompt, with {{worker.name}}/{{worker.role}} bound — this is
     // what removes the need for published briefing NODES (hadron-cli#443).
     expect(out).toContain('You are Iris, a backend-engineer. Ship carefully.');
-    expect(out).not.toContain('{{name}}');
-  });
-
-  it('appends the per-worker override to the template', async () => {
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}.', personaRole: 'backend-engineer' },
-    });
-    await db.worker.update({
-      where: { id: worker.id },
-      data: { promptOverride: 'You own the billing surface.' },
-    });
-    const srv = createTestableMcpServer(hybridAuth());
-    const out = await srv.callToolText('hadron_start_session', {
-      description: 'brief me',
-      workerRef: 'Iris',
-    });
-    expect(out).toContain('You are Iris.');
-    expect(out).toContain('You own the billing surface.');
-  });
-
-  it('says so explicitly when there is no briefing to give', async () => {
-    // The seeded agent carries no systemPrompt and the worker no override —
-    // emit a plain statement rather than a bare, confusing heading.
-    const srv = createTestableMcpServer(hybridAuth());
-    const out = await srv.callToolText('hadron_start_session', {
-      description: 'no template',
-      workerRef: 'Iris',
-    });
-    expect(out).toContain('No boot briefing');
-    expect(out).not.toContain('Boot briefing —');
+    expect(out).not.toContain('{{worker.name}}');
   });
 
   it('says nothing about briefings when no worker is bound', async () => {

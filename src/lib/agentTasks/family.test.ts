@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { deriveFamily, normalizeFamily, tierOf } from './family.js';
@@ -89,6 +90,7 @@ describe('startSession family, and Worker.family following the binding', () => {
     app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `fam-${n}.example:team` }, select: { id: true } });
     await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });
     worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit' }, select: { id: true, appId: true } });
+    await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
   });
 
   const start = (input: Record<string, unknown>) =>

@@ -15,6 +15,7 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
+import { serveAgentBootPrompt } from '../servedBootPrompt.js';
 import { signJwt } from '../../auth/jwt.js';
 import { generateId } from '../../lib/id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -101,7 +102,7 @@ beforeAll(async () => {
       memoryId: teamAgent.systemMemoryId,
       loc: 'roles:backend-engineer',
       name: 'backend-engineer',
-      content: 'You are {{name}}, a {{role}}.',
+      content: 'You are {{worker.name}}, a {{worker.role}}.',
       data: { names: ['Iris'] },
     },
   });
@@ -109,6 +110,7 @@ beforeAll(async () => {
     data: { id: generateId(), organizationId: org.id, name: 'Wire Team App 947', urn: `${org.urn}:team` },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
+  await serveAgentBootPrompt(db, teamAgent.id, 'Test boot prompt.'); // #2712: the bind needs a served prompt
   // #974: bind the session to a Worker casting so the wire test exercises the
   // workerName + workerId selection fields for a worker-bound record.
   worker = await db.worker.create({

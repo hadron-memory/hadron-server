@@ -416,6 +416,33 @@ describe('S3 filter audience and transport boundaries', () => {
         const sealed = encryptNodeFieldsWithKey({content: row.content, data: row.data}, key);
         await db.node.update({where: {id: row.id}, data: {content: sealed.content, data: sealed.data as never}});
       }
+      return key;
+    }
+    // #2604: the stamp scan is the only id-ordered message read, so it is told apart by that shape alone. The bound,
+    // the scope and the cursor are asserted on what it sent (scanShape), never used to find it: filtering on take: 100
+    // or on the memory would make a mutant that drops either one look like a scan that never ran.
+    const isStampScan = (a: any) => a?.orderBy?.id === 'asc' && a?.where?.nodeType === 'chat-message';
+    async function stampScans(spy: { mock: { calls: unknown[][]; results: { value: unknown }[] } }) {
+      const out: { args: any; ids: string[] }[] = [];
+      for (let i = 0; i < spy.mock.calls.length; i++) {
+        const args = spy.mock.calls[i]![0] as any;
+        if (!isStampScan(args)) continue;
+        // A batch that threw (a corrupt row) still returned its rows from the database before projection.
+        const rows = await Promise.resolve(spy.mock.results[i]!.value).catch(() => []) as { id: string }[];
+        out.push({ args, ids: rows.map(r => r.id) });
+      }
+      return out;
+    }
+    function scanShape(scans: { args: any; ids: string[] }[]) {
+      scans.forEach(({ args }, i) => {
+        expect(args.take).toBeGreaterThan(0);
+        expect(args.take).toBeLessThanOrEqual(100);
+        expect(args.where.memoryId).toBe(memory.id);
+        expect(args.where.loc).toEqual({ startsWith: `${channel.loc}:messages:` });
+        expect(args.where.deletedAt).toBeNull();
+        if (i === 0) expect(args.where.id).toBeUndefined();
+        else expect(args.where.id).toEqual({ gt: scans[i - 1]!.ids.at(-1) });
+      });
     }
     it('H6: a retired ex-head reads its sealed stamp, but not an unstamped encrypted Channel (#2595)', async () => {
       const post = await stampThenDissolve();
@@ -467,7 +494,6 @@ describe('S3 filter audience and transport boundaries', () => {
       }))});
       await sealStampHistory();
       const spy = vi.spyOn(db.node, 'findMany');
-      const scans = () => spy.mock.calls.map(([args]) => args as any).filter(a => a?.where?.memoryId === memory.id && a.where.nodeType === 'chat-message' && !a.where.seq);
       try {
         for (const limit of [0, 1]) {
           spy.mockClear();
@@ -480,30 +506,147 @@ describe('S3 filter audience and transport boundaries', () => {
             expect(page.total).toBe(1);
             expect(page.items).toHaveLength(limit);
           }
-          const queries = scans();
-          expect(queries).toHaveLength(position === 'early' ? 1 : 3);
-          for (const q of queries) {
-            expect(q.take).toBe(100);
-            expect(q.orderBy).toEqual({id: 'asc'});
-            expect(q.where.deletedAt).toBeNull();
-          }
-          if (queries.length > 1) expect(queries[1].where.id.gt).toBeTruthy();
+          const queries = await stampScans(spy);
+          scanShape(queries);
+          // 205 fixtures plus the real stamp: early stops in the first batch, the others read 100, 100 and 6.
+          expect(queries.map(q => q.ids.length)).toEqual(position === 'early' ? [100] : [100, 100, 6]);
         }
       } finally { spy.mockRestore(); sessionKeyCache.evict('mr-2595'); }
     });
     it('a stamped former head reads from an encrypted Channel, where the stamp is sealed', async () => {
       await stampThenDissolve();
-      const key = generateDataKey();
-      sessionKeyCache.set('mr-2020', memory.id, key);
-      await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
-      for (const m of await db.node.findMany({ where: { memoryId: memory.id, nodeType: 'chat-message' } })) {
-        const enc = encryptNodeFieldsWithKey({ content: m.content ?? null, data: (m.data ?? null) as unknown }, key);
-        await db.node.update({ where: { id: m.id }, data: { content: enc.content ?? null, data: enc.data as never } });
-      }
+      await sealStampHistory();
       try {
+        const sealed = await db.node.findMany({where: {memoryId: memory.id, nodeType: 'chat-message'}, select: {data: true}});
+        for (const s of sealed) expect(s.data).toHaveProperty('__enc');
         expect(await readAs(rook.id)).toMatchObject({total: 1});
         expect(await refusalOf(() => readAs(liam.id))).toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_HEAD_INVALID'}});
-      } finally { sessionKeyCache.evict('mr-2020'); }
+      } finally { sessionKeyCache.evict('mr-2595'); }
+    });
+    describe('the encrypted stamp scan, characterized (#2604)', () => {
+      // A synthetic population in exact id order, and nothing else in the Channel: no real post, so rook is a head only
+      // if a scanned row says so. Ids bracket nothing real; the index fixes the order. seq is null on purpose: the page
+      // read takes only rows with a seq, so whatever these rows do happens in the stamp scan and nowhere else.
+      type Kind = 'plain' | 'stamp' | 'corrupt';
+      const fixtureId = (i: number) => `00000000000070008000${i.toString(16).padStart(12, '0')}`;
+      const fixtureRow = (i: number, kind: Exclude<Kind, 'corrupt'> | 'corrupt') => ({
+        id: fixtureId(i), memoryId: memory.id, messageChannelId: channel.id, loc: `${channel.loc}:messages:fx-${i}`,
+        name: `fx-${i}`, nodeType: 'chat-message', seq: null, content: `fixture ${i}`,
+        data: kind === 'stamp'
+          ? {authorUserId: manager.id, mentions: [], teamTagsVersion: 1, teamTags: [{headId: rook.id, label: '@team.rook'}], teamHeadIds: [rook.id]}
+          : {authorUserId: manager.id, mentions: [], teamTagsVersion: 1, teamTags: [], teamHeadIds: []},
+      });
+      /** Seal every row under the session key, then re-seal the corrupt ones under a key nobody holds. */
+      async function population(kinds: Kind[]) {
+        vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
+        await db.node.createMany({data: kinds.map((k, i) => fixtureRow(i * 2, k))});
+        const key = await sealStampHistory();
+        const stranger = generateDataKey();
+        for (const [i, k] of kinds.entries()) {
+          if (k !== 'corrupt') continue;
+          const sealed = encryptNodeFieldsWithKey({content: `fixture ${i * 2}`, data: fixtureRow(i * 2, 'plain').data}, stranger);
+          await db.node.update({where: {id: fixtureId(i * 2)}, data: {content: sealed.content, data: sealed.data as never}});
+        }
+        // The fixture is the whole candidate set: the scan has exactly these rows to read.
+        expect(await db.node.count({where: {memoryId: memory.id, nodeType: 'chat-message', deletedAt: null}})).toBe(kinds.length);
+        return key;
+      }
+      const run = (n: number, at: Partial<Record<number, Kind>> = {}) => Array.from({length: n}, (_, i) => at[i] ?? 'plain');
+      async function scanOutcome(ref = rook.id) {
+        const spy = vi.spyOn(db.node, 'findMany');
+        try {
+          const outcome = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: ref, limit: 0}, ctx(holderA.id))
+            .then((page: any) => ({admitted: true as const, total: page.total}), (e: any) => ({admitted: false as const, message: String(e.message), code: e.extensions?.code}));
+          const scans = await stampScans(spy);
+          scanShape(scans);
+          return {outcome, batches: scans.map(s => s.ids.length), visited: scans.flatMap(s => s.ids)};
+        } finally { spy.mockRestore(); }
+      }
+      afterEach(() => { sessionKeyCache.evict('mr-2595'); });
+
+      // The delivered direction (gate 6490936471): a corrupt row the scan reaches fails the read with the decryption
+      // error, untranslated, so it never reads as "no stamp" or as success; a corrupt row after a proven stamp is never
+      // decrypted, because .some stops there, and a later batch is never fetched. Changing either direction is a
+      // behavior change and needs its own gate.
+      const decryptFailure = {admitted: false, message: expect.stringMatching(/unable to authenticate data/), code: undefined};
+      it.each([
+        ['before the stamp, same batch', run(5, {0: 'corrupt', 4: 'stamp'}), decryptFailure, [5]],
+        ['before the stamp, earlier batch', run(110, {50: 'corrupt', 105: 'stamp'}), decryptFailure, [100]],
+        ['with no stamp at all, in a later batch', run(101, {100: 'corrupt'}), decryptFailure, [100, 1]],
+        ['after the stamp, same batch', run(4, {1: 'stamp', 2: 'corrupt'}), {admitted: true, total: 0}, [4]],
+        ['after the stamp, later batch', run(101, {0: 'stamp', 100: 'corrupt'}), {admitted: true, total: 0}, [100]],
+      ] as const)('a corrupt row %s', async (_label, kinds, outcome, batches) => {
+        await population([...kinds]);
+        const r = await scanOutcome();
+        expect(r.outcome).toEqual(outcome);
+        expect(r.batches).toEqual(batches);
+        expect(r.visited).toEqual(Array.from({length: batches.reduce((a, b) => a + b, 0)}, (_, i) => fixtureId(i * 2)));
+      });
+      it('a missing session key fails the scan with the typed SESSION_EXPIRED, not a refusal or a miss', async () => {
+        await population(run(3, {1: 'stamp'}));
+        sessionKeyCache.evict('mr-2595');
+        expect((await scanOutcome()).outcome).toEqual({admitted: false, message: expect.stringMatching(/^SESSION_EXPIRED/), code: 'SESSION_EXPIRED'});
+      });
+      it('an unknown ref, a foreign id and a readable head never scan', async () => {
+        await population(run(3, {1: 'stamp'}));
+        const invalid = {admitted: false, message: expect.any(String), code: 'TEAM_CHAT_TEAM_HEAD_INVALID'};
+        for (const ref of ['no-such-worker', generateId()]) {
+          const r = await scanOutcome(ref);
+          expect(r.outcome).toEqual(invalid);
+          expect(r.batches).toEqual([]);
+        }
+        const { writeReportsTo } = await import('../../../lib/workerReportsTo.js');
+        await db.$transaction(tx => writeReportsTo(tx, {appId: app.id, workerId: liam.id, to: rook.id, actor: {userId: manager.id, workerId: null, agentId: null}, setBy: 'app-manager'}));
+        const head = await scanOutcome();
+        expect(head.outcome).toEqual({admitted: true, total: 0});
+        expect(head.batches).toEqual([]);
+      });
+      it('reads its scope only: the same rows in another memory, or under another Channel, are never candidates', async () => {
+        await population(run(3));
+        const otherMemory = await db.memory.create({data: {id: generateId(), organizationId: org.id, appId: app.id, urn: `${org.urn}:other-2604`, name: 'other', class: 'app'}});
+        const other = await ensureChannelWithRoot(db, {memoryId: memory.id, loc: 'chats:other', name: 'other', createdBy: manager.id});
+        await db.node.createMany({data: [
+          {...fixtureRow(1, 'stamp'), id: generateId(), memoryId: otherMemory.id, messageChannelId: null},
+          {...fixtureRow(3, 'stamp'), id: generateId(), loc: `chats:other:messages:fx-3`, messageChannelId: other.channel.id},
+        ]});
+        const r = await scanOutcome();
+        expect(r.outcome).toMatchObject({admitted: false, code: 'TEAM_CHAT_TEAM_HEAD_INVALID'});
+        expect(r.visited).toEqual([fixtureId(0), fixtureId(2), fixtureId(4)]);
+      });
+
+      // Each batch is its own statement, so it sees what had committed when it ran: there is no snapshot across the
+      // scan, and the old single query's snapshot is not claimed for it. The insert lands deterministically between
+      // batch 1 and batch 2 (inside the spy, after batch 1 returned), on one side of the cursor or the other.
+      it.each([
+        ['below the cursor is not seen by this scan, only by the next read', 21, false],
+        ['above the cursor is seen by the batch that reaches it', 301, true],
+      ] as const)('a stamp committed mid-scan %s', async (_label, at, seen) => {
+        const key = await population(run(150));
+        const original = db.node.findMany.bind(db.node);
+        let inserted = false;
+        const spy = vi.spyOn(db.node, 'findMany').mockImplementation((async (args: any) => {
+          const rows = await original(args);
+          if (isStampScan(args) && !inserted) {
+            inserted = true;
+            const row = fixtureRow(at, 'stamp');
+            const sealed = encryptNodeFieldsWithKey({content: row.content, data: row.data}, key);
+            await db.node.create({data: {...row, content: sealed.content, data: sealed.data as never}});
+          }
+          return rows;
+        }) as never);
+        try {
+          const page = await Q.teamChatMessages({}, {appRef: app.id, teamHeadRef: rook.id, limit: 0}, ctx(holderA.id))
+            .then(() => 'admitted', (e: any) => e.extensions?.code);
+          const scans = await stampScans(spy);
+          scanShape(scans);
+          expect(inserted).toBe(true);
+          expect(scans.map(s => s.ids.length)).toEqual(seen ? [100, 51] : [100, 50]);
+          expect(scans[1]!.ids.includes(fixtureId(at))).toBe(seen);
+          expect(page).toBe(seen ? 'admitted' : 'TEAM_CHAT_TEAM_HEAD_INVALID');
+        } finally { spy.mockRestore(); }
+        // Committed either way: a read that starts after the insert finds it.
+        expect((await scanOutcome()).outcome).toEqual({admitted: true, total: 0});
+      });
     });
   });
   it('masks metadata and denies all tag/count probes on an authorized App-less Channel', async () => {

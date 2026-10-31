@@ -1,3 +1,4 @@
+import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
 import { captureSetupConsent } from '../../../lib/automation/pins.js';
 // Headless-run surfaces (spec 040 plan §9): schedule CRUD, the run audit
@@ -103,7 +104,7 @@ export function buildAppRunOrderBy(
   }
 }
 
-export interface CreateAgentScheduleInput {
+export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
   appRef: string;
   name: string;
@@ -145,6 +146,30 @@ async function requireScheduleAdmin(ctx: Context, appRef: string) {
     });
   }
   return { id: app.id, organizationId: app.organizationId };
+}
+
+/**
+ * #2642: the automation's name for a failed run's plain reason, only when the
+ * CALLER passes the same gate that lists schedules and webhooks
+ * (`requireScheduleAdmin`). Any miss or failure — denied, user-owned App,
+ * deleted or foreign trigger, other trigger kind — is null, so the caller sees
+ * the generic wording with the same shape; the lookup is pinned to the run's
+ * own App.
+ */
+export async function authorizedTriggerLabel(
+  ctx: Context,
+  run: { appId?: string | null; triggerKind?: string | null; triggerId?: string | null },
+): Promise<string | null> {
+  try {
+    if (!run.appId || !run.triggerId) return null;
+    const app = await requireScheduleAdmin(ctx, run.appId);
+    const where = { id: run.triggerId, appId: app.id, organizationId: app.organizationId, deletedAt: null };
+    if (run.triggerKind === 'SCHEDULE') return (await ctx.db.agentSchedule.findFirst({ where, select: { name: true } }))?.name ?? null;
+    if (run.triggerKind === 'WEBHOOK') return (await ctx.db.agentWebhook.findFirst({ where, select: { name: true } }))?.name ?? null;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Next occurrence for a cron+timezone pair, as a typed BAD_USER_INPUT on invalid input. */
@@ -308,8 +333,8 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
  */
 export async function assertManualRunAllowed(
   ctx: Context,
-  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null },
-): Promise<{ id: string; organizationId: string }> {
+  input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null; agentRef?: string | null },
+): Promise<{ id: string; organizationId: string; agentId: string | null }> {
   const app = await requireManualRunAccess(ctx, input.appRef);
   assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
   // runAsSelf REQUIRES an authenticated user — surface it here (pre-write) too.
@@ -343,7 +368,31 @@ export async function assertManualRunAllowed(
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
-  return app;
+  // #2735 / cor:agt:040:10: which Agent the run is served as. Resolved here so
+  // every refusal lands before a caller's write (importNode).
+  return { ...app, agentId: await resolveManualRunAgent(ctx, app.id, input.agentRef) };
+}
+
+/**
+ * The Agent a MANUAL run is served as (#2735, cor:agt:040:10; Holger's R1): the
+ * named Agent, which must be installed in the App; else the App's single
+ * installed Agent; else, with several and none named, `RUN_AGENT_REQUIRED`. An
+ * App with no installed Agent yields null and keeps today's refusal at mint.
+ */
+async function resolveManualRunAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string | null> {
+  const named = await resolveInstalledAgent(ctx, appId, agentRef);
+  if (named) return named;
+  const installed = await ctx.db.appAgent.findMany({ where: { appId }, select: { agentId: true }, take: 2 });
+  if (installed.length > 1) {
+    throw new GraphQLError('This App has several installed Agents: pass agentRef to name the one the run is served as.', {
+      extensions: { code: 'RUN_AGENT_REQUIRED' },
+    });
+  }
+  return installed[0]?.agentId ?? null;
 }
 
 /**
@@ -361,12 +410,14 @@ export async function assertManualRunAllowed(
  */
 export async function mintManualRun(
   ctx: Context,
-  app: { id: string; organizationId: string },
+  app: { id: string; organizationId: string; agentId?: string | null },
   input: {
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
   },
   options: { publish?: boolean } = {},
 ) {
@@ -376,9 +427,11 @@ export async function mintManualRun(
       publish: options.publish,
       organizationId: app.organizationId,
       appId: app.id,
+      agentId: app.agentId ?? null,
       userId: resolveRunAsSelf(ctx, input.runAsSelf),
       triggerKind: 'MANUAL',
       consentPrincipal: ctx,
+      ...triggerBudgetPatch(input),
       entryNodeUrn: input.entryNodeUrn,
       eventData: {
         ...(input.eventData ?? {}),
@@ -398,10 +451,13 @@ export async function triggerManualRun(
   ctx: Context,
   input: {
     appRef: string;
+    agentRef?: string | null;
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
     runAsSelf?: boolean | null;
     aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
   },
 ) {
   const app = await assertManualRunAllowed(ctx, input);
@@ -451,6 +507,7 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
@@ -497,6 +554,7 @@ export const appRunMutations = {
         entryNodeUrn: input.entryNodeUrn,
         entryNodeId,
         automationPin: automationPin as never,
+        ...budgets,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,
@@ -579,6 +637,7 @@ export const appRunMutations = {
         return tx.agentSchedule.update({
           where: { id },
           data: {
+            ...triggerBudgetPatch(input),
             ...(input.name != null ? { name: input.name } : {}),
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
@@ -632,10 +691,13 @@ export const appRunMutations = {
     }: {
       input: {
         appRef: string;
+        agentRef?: string | null;
         entryNodeUrn: string;
         eventData?: Record<string, unknown> | null;
         runAsSelf?: boolean | null;
         aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
       };
     },
     ctx: Context,
@@ -679,6 +741,8 @@ export const appRunMutations = {
         eventData?: Record<string, unknown> | null;
         policy?: unknown;
         aiConfigName?: string | null;
+    budgetTokens?: number | null;
+    budgetActions?: number | null;
         enabled?: boolean | null;
         scopeRef?: string | null;
       };
@@ -686,6 +750,7 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
@@ -731,6 +796,7 @@ export const appRunMutations = {
         entryNodeUrn: input.entryNodeUrn,
         entryNodeId: consent != null && typeof consent === 'object' && 'entryId' in consent
           ? (consent as { entryId: string }).entryId : null,
+        ...budgets,
         eventData: (input.eventData ?? undefined) as never,
         policy: (input.policy ?? undefined) as never,
         aiConfigName: input.aiConfigName ?? null,

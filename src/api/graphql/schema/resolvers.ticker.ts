@@ -8,7 +8,11 @@
 //
 // THE ACTOR is the agent-task actor (resolveTaskActor, #1705): a worker through
 // its session, with a person behind the request, or a person as themselves. A
-// bare App key is refused (it is concealed as "App not found"). EVERY WRITE
+// bare App key is refused (it is concealed as "App not found"), with ONE
+// exception, read-only (#2931, V6): the App's own live `host:operate` key reads
+// the tickers and subscriptions of the workers ITS HOST registers, through
+// `tickers`, `tickersPage`, `ticker` and `Ticker.subscribers` only, never over
+// MCP, each read recorded as a host-key use (cor:agt:070:07). EVERY WRITE
 // re-gates inside its transaction (`inTaskWriteTx`): the authority anchors
 // SHARED, the actor re-resolved on the transaction client, then the decision
 // below on rows locked in that transaction. `managesApp` counts a person acting
@@ -33,7 +37,10 @@
 // succession of cor:agt:080:18 (Proposed).
 
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
+import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
+import { boundedRead, emitTaskWarnings } from './resolvers.taskWarnings.js';
+import { tickCodeOfSlug } from '../../../lib/tickers/tickCode.js';
 import { loadDeliverySettings, parseDeliverySettingsPatch, validateDeliverySettings, type DeliverySettings } from '../../../lib/tickers/deliverySettings.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { type Context, getAccessibleMemoryIds, pageArgs, pageEnvelope } from './resolvers.helpers.js';
@@ -47,7 +54,13 @@ import {
   resolveParticipatedApp,
   resolveTaskActor,
   taskError,
+  inHostKeyTickerReadTx,
+  withHostKeyTickerApp,
 } from './resolvers.agentTask.js';
+import { recordingRefusal } from './resolvers.hostOperation.js';
+import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
+import { recordHostKeyUseApart } from '../../../lib/hostOperations/hostKey.js';
+import { hostWorkersWhere } from '../../../lib/tickers/wakeKeyScope.js';
 import { composeWorkerUrn, resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -76,6 +89,10 @@ import { isWorkerDormant } from '../../../lib/sessionActivity.js';
 import { loadWorkersActivity } from './resolvers.worker.js';
 import { nextFreeTickerSlug } from '../../../lib/tickers/tickerSlug.js';
 import { TickerNotFoundError, composeTickerUrn, resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
+import {
+  GeneratedAgentNotInstalledError, GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
+  applyAgentTickerTemplates,
+} from '../../../lib/tickers/agentTickerTemplates.js';
 
 // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -146,7 +163,7 @@ type TickerSettings = {
 };
 export const SETTINGS_SELECT = {
   tickerMinCadenceSeconds: true, tickerSelfSubscribeCadenceSeconds: true, tickerLiveCap: true, wakeDailyBudget: true,
-  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true,
+  deliveryBusyDelaySeconds: true, deliveryStuckWindowSeconds: true, deliveryStandbyEnabled: true, deliveryDarkAlarmWindowSeconds: true,
   deliveryCheckPeriodSeconds: true, deliveryFailedChecksToOverdue: true,
 } as const;
 
@@ -315,17 +332,71 @@ type TickerInput = {
 };
 type TickerPatch = Partial<TickerInput> & { clearQuietHours?: boolean | null; clearChannels?: boolean | null };
 
+// ── The host key's read (#2931) ───────────────────────────────────────────
+
+/**
+ * #2931 — the App key a ticker read is judged as a host key for, or null for everyone else. Never over MCP (R-e;
+ * Holger V2/V3: no agent-team MCP), so an MCP connection authenticated by the key takes today's participant path and
+ * gets today's refusal, whichever tool delegates here.
+ */
+function tickerReadKey(ctx: Context): { appKeyId: string; appId: string } | null {
+  return ctx.transport === 'mcp' ? null : appKeyCaller(ctx);
+}
+
+/** The live tickers of `appId` that a worker registered on `hostId` subscribes to (V6; the due-wake host set, 080:22). */
+function hostTickersWhere(appId: string, hostId: string): Prisma.TickerWhereInput {
+  return { appId, deletedAt: null, subscriptions: { some: { endedAt: null, worker: hostWorkersWhere(appId, hostId) } } };
+}
+
+const TICKER_ORDER: Prisma.TickerOrderByWithRelationInput[] = [{ createdAt: 'asc' }, { id: 'asc' }];
+
+/** A host key's read: refusals recorded with their code; an admitted read recorded with its count, apart from the read. */
+async function hostKeyRead<T>(ctx: Context, key: { appKeyId: string; appId: string }, read: () => Promise<{ out: T; count: number }>): Promise<T> {
+  const { out, count } = await recordingRefusal(ctx, 'read', null, read);
+  await recordHostKeyUseApart(ctx.db, key, 'read', { count });
+  return out;
+}
+
+/**
+ * A ticker read that is not judged as a host key's (an MCP connection, R-e) still refuses an App key as today; a key that
+ * is or was a host key has that refusal recorded with its code (cor:agt:070:07). Anyone else records nothing.
+ */
+function keyRefusalRecorded<T>(ctx: Context, read: () => Promise<T>): Promise<T> {
+  return appKeyCaller(ctx) ? recordingRefusal(ctx, 'read', null, read) : read();
+}
+
 export const tickerQueries = {
   tickers: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, appRef);
-    return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    const key = tickerReadKey(ctx);
+    if (key) {
+      return hostKeyRead(ctx, key, async () => {
+        const rows = await withHostKeyTickerApp(ctx, appRef, (c, app, hostId) =>
+          c.db.ticker.findMany({ where: hostTickersWhere(app.id, hostId), orderBy: TICKER_ORDER }));
+        return { out: rows, count: rows.length };
+      });
+    }
+    return keyRefusalRecorded(ctx, async () => {
+      const { app } = await resolveParticipatedApp(ctx, appRef);
+      return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: TICKER_ORDER });
+    });
   },
 
   /** #2213 — `tickers` as a page: the same gate, rows and order, counted and read in one snapshot. */
   tickersPage: async (_: unknown, args: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
-    const where = { appId: app.id, deletedAt: null };
     const { take, skip } = pageArgs(args);
+    const key = tickerReadKey(ctx);
+    if (key) {
+      // One statement is one snapshot: the anchored read is READ COMMITTED, so the host's (cap-bounded) rows are read
+      // once and counted, rather than counted and paged in two statements that could disagree.
+      return hostKeyRead(ctx, key, async () => {
+        const rows = await withHostKeyTickerApp(ctx, args.appRef, (c, app, hostId) =>
+          c.db.ticker.findMany({ where: hostTickersWhere(app.id, hostId), orderBy: TICKER_ORDER }));
+        const items = rows.slice(skip, skip + take);
+        return { out: pageEnvelope(items, rows.length, skip), count: items.length };
+      });
+    }
+    const { app } = await keyRefusalRecorded(ctx, () => resolveParticipatedApp(ctx, args.appRef));
+    const where = { appId: app.id, deletedAt: null };
     const [total, items] = await ctx.db.$transaction([
       ctx.db.ticker.count({ where }),
       ctx.db.ticker.findMany({ where, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take, skip }),
@@ -335,7 +406,9 @@ export const tickerQueries = {
 
   ticker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
     try {
-      return (await loadReachableTicker(ctx, ref)).ticker;
+      const key = tickerReadKey(ctx);
+      if (key) return await hostKeyRead(ctx, key, async () => ({ out: await hostKeyTicker(ctx, key, ref), count: 1 }));
+      return (await keyRefusalRecorded(ctx, () => loadReachableTicker(ctx, ref))).ticker;
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code === 'TICKER_NOT_FOUND') return null;
       throw e;
@@ -354,6 +427,27 @@ export const tickerQueries = {
   },
 };
 
+/**
+ * #2931 — one ticker for a host key: its own App's, live, and subscribed by a worker its host registers; anything
+ * else is TICKER_NOT_FOUND (answered as null). The App is judged before anything about the ticker is read under it.
+ */
+async function hostKeyTicker(ctx: Context, key: { appKeyId: string; appId: string }, ref: string): Promise<TickerRow> {
+  let id: string;
+  try {
+    ({ id } = await resolveTickerRef(ctx.db, ref));
+  } catch (e) {
+    if (e instanceof TickerNotFoundError) throw tickerNotFound(ref);
+    throw e;
+  }
+  const head = await ctx.db.ticker.findUnique({ where: { id }, select: { appId: true } });
+  if (!head || head.appId !== key.appId) throw tickerNotFound(ref);
+  return inHostKeyTickerReadTx(ctx, head.appId, () => { throw tickerNotFound(ref); }, async (c, app, hostId) => {
+    const ticker = await c.db.ticker.findFirst({ where: { id, ...hostTickersWhere(app.id, hostId) } });
+    if (!ticker) throw tickerNotFound(ref);
+    return ticker;
+  });
+}
+
 /** Resolve a worker the caller may see: any worker of an App the caller participates in. */
 async function workerForRead(ctx: Context, ref: string) {
   let id: string;
@@ -370,8 +464,21 @@ async function workerForRead(ctx: Context, ref: string) {
   return worker;
 }
 
+const tickerEntryReads = new WeakMap<Context, Map<string, Promise<RegisterEntry>>>();
+function readTickerEntry(ctx: Context, appId: string, code: string): Promise<RegisterEntry> {
+  let memo = tickerEntryReads.get(ctx);
+  if (!memo) { memo = new Map(); tickerEntryReads.set(ctx, memo); }
+  const key = appId + '\u0000' + code;
+  let result = memo.get(key);
+  if (!result) {
+    result = boundedRead(ctx, (tx, deadline) => new RegisterLookup(tx, { ...ctx, db: tx } as unknown as Context, appId, deadline).entry(code));
+    memo.set(key, result);
+  }
+  return result;
+}
+
 const crudMutations = {
-  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context) => {
+  createTicker: async (_: unknown, { appRef, input }: { appRef: string; input: TickerInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     const { app, actor } = await resolveParticipatedApp(ctx, appRef);
     // Shape that needs no row, checked before the transaction.
     const name = cleanName(input.name);
@@ -380,7 +487,7 @@ const crudMutations = {
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     const anchorAt = input.anchorAt == null ? new Date() : parseDate(input.anchorAt, 'anchorAt');
-    return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    const ticker = await writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
       await lockAppTickers(tx, fresh.id);
       const settings = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: SETTINGS_SELECT });
       const cadence = checkCadence(input.cadenceSeconds, settings);
@@ -396,7 +503,7 @@ const crudMutations = {
       const slug = await nextFreeTickerSlug(tx, fresh.id, name);
       return tx.ticker.create({
         data: {
-          appId: fresh.id, name, slug, cadenceSeconds: cadence, anchorAt,
+          appId: fresh.id, name, slug, tickCode: tickCodeOfSlug(slug), cadenceSeconds: cadence, anchorAt,
           quietHours: quiet ?? Prisma.DbNull, channelIds, relevance,
           reasons,
           enabled: input.enabled ?? true,
@@ -407,6 +514,11 @@ const crudMutations = {
         },
       });
     });
+    try {
+      const entry = await readTickerEntry(ctx, app.id, ticker.tickCode);
+      if (entry.state !== 'FOUND') await emitTaskWarnings(ctx, info, app.id, { codes: ['ticker.code.unmapped'] });
+    } catch { /* Advice never changes the committed ticker; failed reads do not produce a warning. */ }
+    return ticker;
   },
 
   updateTicker: async (_: unknown, { ref, input }: { ref: string; input: TickerPatch }, ctx: Context) => {
@@ -622,6 +734,7 @@ export async function writeAppSettings(
       standbyEffective: false,
       checkPeriodSeconds: patch.checkPeriodSeconds ?? cur.deliveryCheckPeriodSeconds,
       failedChecksToOverdue: patch.failedChecksToOverdue ?? cur.deliveryFailedChecksToOverdue,
+      darkAlarmWindowSeconds: patch.darkAlarmWindowSeconds ?? cur.deliveryDarkAlarmWindowSeconds,
     };
     validateDeliverySettings(delivery, patch);
     await tx.app.update({
@@ -634,6 +747,7 @@ export async function writeAppSettings(
         deliveryStandbyEnabled: delivery.standbyEnabled,
         deliveryCheckPeriodSeconds: delivery.checkPeriodSeconds,
         deliveryFailedChecksToOverdue: delivery.failedChecksToOverdue,
+        deliveryDarkAlarmWindowSeconds: delivery.darkAlarmWindowSeconds,
       },
     });
     return { ticker: await settingsOut(tx, fresh.id), delivery: await loadDeliverySettings(tx, fresh.id) };
@@ -734,10 +848,15 @@ async function writeWorkerIsolation(
     const now = new Date();
     const stamp = updatedStamp(txCtx);
     if (op.kind === 'clear') {
+      // #2755: an isolation still running ends now, and that moment is kept (see exemptEndedAt).
+      // An isolation that already expired keeps its own expiry as the end (the latest anchor wins).
+      const prior = await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { isolatedUntil: true, exemptEndedAt: true } });
+      const ended = prior?.isolatedUntil ? (prior.isolatedUntil.getTime() > now.getTime() ? now : prior.isolatedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
         create: { workerId: w.id },
-        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null },
+        update: { isolatedUntil: null, isolatedAt: null, isolatedByUserId: null, ...(kept ? { exemptEndedAt: kept } : {}) },
       });
     }
     const end = until ?? new Date(now.getTime() + ISOLATION_DEFAULT_MS);
@@ -884,7 +1003,78 @@ async function announceGrantUse(
   }
 }
 
+/** The typed refusals of #2096's apply; the messages say what was NOT done, never another worker's or App's detail. */
+function applyRefusal(e: unknown): GraphQLError | null {
+  if (e instanceof GeneratedTickerLimitError) {
+    return taskError(
+      'TICKER_LIMIT_REACHED',
+      `${e.message.replace('this cast', 'this call')} Delete a ticker, or ask whoever manages the App to raise the limit; nothing was created.`,
+      { liveCap: e.liveCap, live: e.live, adding: e.adding },
+    );
+  }
+  if (e instanceof GeneratedTickerNameTakenError) {
+    return taskError('TICKER_NAME_TAKEN', `${e.message} Rename or delete that ticker and run this again; nothing was created.`, { name: e.name });
+  }
+  if (e instanceof GeneratedAgentNotInstalledError) {
+    return taskError('WORKER_AGENT_NOT_INSTALLED', 'The Agent is no longer installed in this App, so nothing was created.', { appId: e.appId });
+  }
+  if (e instanceof GeneratedNameTooLongError) {
+    return taskError('BAD_USER_INPUT', `${e.message} Nothing was created.`, { workerName: e.workerName });
+  }
+  return null;
+}
+
 const subscriptionMutations = {
+  /**
+   * #2096 (R97 B, R92 A): apply the Agent's CURRENT ticker templates to ONE existing worker, creating only the
+   * template tickers it is missing (the repair for workers cast before the templates existed). Whoever manages the
+   * App, a person acting as themselves: not the worker, not its holder as such, not a reportsTo chain, never an
+   * impersonation or a bare App key (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :33).
+   *
+   * Lock order, the one retireWorker and every ticker write take: the shared transaction gate (authority anchors),
+   * the App ticker lock, the worker row FOR SHARE, then the Agent's template set (shared) and the installation
+   * re-check inside `applyAgentTickerTemplates`. No worker-name lock: no name is allocated here. The worker's
+   * liveness is re-read after its row lock (`lockWorker` filters nothing), and the manager decision is made in the
+   * same transaction, so a demotion or a retirement that commits first is seen and any refusal writes nothing.
+   */
+  applyAgentTickerTemplates: async (_: unknown, { workerRef }: { workerRef: string }, ctx: Context) => {
+    let id: string;
+    try {
+      ({ id } = await resolveWorkerRef(ctx.db, workerRef));
+    } catch (e) {
+      if (e instanceof WorkerNotFoundError) throw workerNotFound(workerRef);
+      throw e;
+    }
+    const seen = await ctx.db.worker.findUnique({ where: { id }, select: { appId: true } });
+    const app = seen ? await loadApp(ctx, seen.appId) : null;
+    const actor = app ? await resolveTaskActor(ctx, app) : null;
+    if (!seen || !app || !actor) throw workerNotFound(workerRef);
+    try {
+      return await writeInApp(ctx, app, actor, () => workerNotFound(workerRef), async (tx, txCtx, fresh) => {
+        await lockAppTickers(tx, fresh.id);
+        const w = await lockWorker(tx, id);
+        if (!w || w.appId !== fresh.id || w.retiredAt) throw workerNotFound(workerRef);
+        if (!(await actorManagesApp(txCtx, fresh, actor))) {
+          throw taskError('FORBIDDEN', 'Only whoever manages this App can apply an Agent\'s ticker templates to a worker.');
+        }
+        const r = await applyAgentTickerTemplates(tx, {
+          appId: fresh.id, agentId: w.agentId, worker: { id: w.id, name: w.name }, createdBy: txCtx.userId ?? null,
+        });
+        const made = await tx.ticker.findMany({ where: { id: { in: r.created.map((c) => c.tickerId) } } });
+        return {
+          created: r.created.map((c) => ({
+            ticker: made.find((t) => t.id === c.tickerId)!,
+            template: { id: c.plan.templateId, name: c.plan.templateName },
+            effectiveCadenceSeconds: c.plan.effectiveCadenceSeconds,
+          })),
+          alreadyPresent: r.alreadyPresent.map((t) => ({ id: t.id, name: t.name })),
+        };
+      });
+    } catch (e) {
+      throw applyRefusal(e) ?? e;
+    }
+  },
+
   subscribeWorker: (_: unknown, a: { tickerRef: string; workerRef: string }, ctx: Context) =>
     changeSubscription(ctx, a.tickerRef, a.workerRef, 'subscribe'),
   unsubscribeWorker: (_: unknown, a: { tickerRef: string; workerRef: string }, ctx: Context) =>
@@ -920,9 +1110,19 @@ const wakeAndGrantMutations = {
         );
       }
       const u = updatedStamp(txCtx);
+      // #2755: clearing a pause that is still running erases when the exemption ended; keep that moment (a clear
+      // of a pause that already ended, or of none, restarts nothing).
+      const clearedNow = new Date();
+      const prior = input.clearPause && pausedUntil === undefined
+        ? await tx.workerWakeSettings.findUnique({ where: { workerId: w.id }, select: { pausedUntil: true, exemptEndedAt: true } })
+        : null;
+      // A pause that already expired keeps its own expiry as the end (the latest anchor wins).
+      const ended = prior?.pausedUntil ? (prior.pausedUntil.getTime() > clearedNow.getTime() ? clearedNow : prior.pausedUntil) : null;
+      const kept = ended && (!prior?.exemptEndedAt || prior.exemptEndedAt.getTime() < ended.getTime()) ? ended : null;
       const change = {
         ...(input.mentions != null ? { mentions: input.mentions } : {}),
         ...(pausedUntil !== undefined ? { pausedUntil } : input.clearPause ? { pausedUntil: null } : {}),
+        ...(kept ? { exemptEndedAt: kept } : {}),
       };
       return tx.workerWakeSettings.upsert({
         where: { workerId: w.id },
@@ -1005,6 +1205,12 @@ async function actorRef(ctx: Context, workerId: string | null, userId: string | 
 
 export const tickerFieldResolvers = {
   Ticker: {
+    registerTaskLoc: async (t: TickerRow, _: unknown, ctx: Context) => {
+      try {
+        const entry = await readTickerEntry(ctx, t.appId, t.tickCode);
+        return entry.state === 'FOUND' ? entry.taskLoc : null;
+      } catch { return null; }
+    },
     urn: async (t: TickerRow, _: unknown, ctx: Context) => {
       const app = await ctx.db.app.findUnique({ where: { id: t.appId }, select: { urn: true } });
       if (!app) return null;
@@ -1032,14 +1238,34 @@ export const tickerFieldResolvers = {
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {
       const take = Math.min(Math.max(a.first ?? 20, 1), 200);
-      const rows = await ctx.db.tickerSubscription.findMany({
-        where: { tickerId: t.id, endedAt: null },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        take: take + 1,
-        ...(a.after ? { cursor: { id: a.after }, skip: 1 } : {}),
-      });
-      const page = rows.slice(0, take);
-      return { items: page, hasNextPage: rows.length > take, endCursor: page.length ? page[page.length - 1]!.id : null };
+      const read = async (c: Context, hostWorkers: Prisma.WorkerWhereInput | null) => {
+        const rows = await c.db.tickerSubscription.findMany({
+          where: { tickerId: t.id, endedAt: null, ...(hostWorkers ? { worker: hostWorkers } : {}) },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: take + 1,
+          ...(a.after ? { cursor: { id: a.after }, skip: 1 } : {}),
+        });
+        const page = rows.slice(0, take);
+        return { items: page, hasNextPage: rows.length > take, endCursor: page.length ? page[page.length - 1]!.id : null };
+      };
+      const key = appKeyCaller(ctx);
+      if (!key) return read(ctx, null);
+      // #2931 (V6): an App key sees only the subscriptions of the workers its host registers NOW. This runs after the
+      // parent read's transaction and on every path to a Ticker (a subscription's ticker included), so it is a host-key
+      // read of its own: judged and read in one transaction under the App's anchors, and recorded (cor:agt:070:07), a
+      // refusal with its code. A key with no live host:operate, another App's key, or an MCP connection sees none.
+      const none = { items: [], hasNextPage: false, endCursor: null };
+      try {
+        return await hostKeyRead(ctx, key, async () => {
+          if (ctx.transport === 'mcp' || key.appId !== t.appId) throw tickerNotFound(t.id);
+          const out = await inHostKeyTickerReadTx(ctx, t.appId, () => { throw tickerNotFound(t.id); },
+            (c, app, hostId) => read(c, hostWorkersWhere(app.id, hostId)));
+          return { out, count: out.items.length };
+        });
+      } catch (e) {
+        if (e instanceof GraphQLError && e.extensions?.code === 'TICKER_NOT_FOUND') return none;
+        throw e;
+      }
     },
   },
 

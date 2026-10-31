@@ -1,3 +1,4 @@
+import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
 import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../lib/automation/pins.js';
 /**
@@ -47,11 +48,10 @@ import {
 } from '../lib/llm/index.js';
 import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
-import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
 import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
-import { applyPlatformVariables, legacyFromValues } from '../lib/personaDescription.js';
+import { applyPlatformVariables, applyRecordedVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -59,8 +59,6 @@ export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
 export const RUN_QUEUE_GROUP = 'run-worker';
 
 // Tunables (env-overridable where operations will want dials).
-const DEFAULT_RUN_TOKEN_BUDGET = intEnv('RUN_DEFAULT_TOKEN_BUDGET', 100_000);
-const DEFAULT_RUN_ACTION_BUDGET = intEnv('RUN_DEFAULT_ACTION_BUDGET', 50);
 const DEFAULT_RUN_TIMEOUT_MS = intEnv('RUN_DEFAULT_TIMEOUT_MS', 120_000);
 // D-MN-3: bound for hops the token/action budgets can't see (a routing-only
 // cycle costs nothing) — budgetActions is the REAL ceiling for LLM hops.
@@ -380,7 +378,8 @@ export async function consumeActionTicket(
 
 // ── Mint (plan §4 steps 1–2: launch gate + activation) ──────────────────────
 
-export interface MintAppRunArgs {
+/** Budget fields apply only to MANUAL; SCHEDULE/WEBHOOK always read durable setup, ignoring caller amounts. */
+export interface MintAppRunArgs extends TriggerRunBudgets {
   /** Internal interactive caller; never accepted from trigger/event data. */
   consentPrincipal?: import('../middleware/auth.js').AuthContext;
   organizationId: string;
@@ -529,6 +528,18 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // The snapshot stores only PRESENT links — an absent layer contributes
   // nothing to the conjunction, then or later.
   const presentLinks = chainLinks.filter((l): l is NonNullable<typeof l> => l != null);
+  // Read trigger budgets from durable setup, never eventData or webhook arguments.
+  // MANUAL has no reusable trigger row: its validated input is persisted in the run's initial snapshot.
+  const requestedBudgets = args.triggerKind === 'SCHEDULE'
+    ? await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
+    : args.triggerKind === 'WEBHOOK'
+      ? await db.agentWebhook.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { budgetTokens: true, budgetActions: true } })
+      : args.triggerKind === 'MANUAL' ? triggerBudgetPatch(args) : null;
+  if ((args.triggerKind === 'SCHEDULE' || args.triggerKind === 'WEBHOOK') && !requestedBudgets) {
+    throw new RunLaunchDeniedError('Trigger not found or no longer active in this App.', 'TRIGGER_DISABLED');
+  }
+  const budgets = effectiveRunBudgets(requestedBudgets ?? {});
+
   // Quota tier 1: runs/day per App AND per org (both must pass — consume
   // app first, refund on org denial to keep the counters truthful).
   if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', QUOTA_RUNS_PER_DAY_APP))) {
@@ -592,8 +603,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
   // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
   // cor:agt:040:07 (R74): a headless run with NO Agent has no boot prompt to serve and is refused the same way.
-  if (bootPromptServingEnabled() && !args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
-  const runServing = bootPromptServingEnabled() && args.agentId
+  if (!args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  const runServing = args.agentId
     ? await (async () => {
         const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
         return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
@@ -633,12 +644,12 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       policy: (presentLinks.length > 0 ? { chain: presentLinks } : undefined) as never,
       scopeSnapshot: (scopeSnapshot ?? undefined) as never,
       registerSnapshot: (registerSnapshot ?? undefined) as never,
-      budgetTokens: DEFAULT_RUN_TOKEN_BUDGET,
-      budgetActions: DEFAULT_RUN_ACTION_BUDGET,
+      budgetTokens: budgets.budgetTokens,
+      budgetActions: budgets.budgetActions,
       // #832: snapshot the MINTED budget so a client can render "spent vs
       // budget" — the two columns above are live-decremented remainders.
-      budgetTokensInitial: DEFAULT_RUN_TOKEN_BUDGET,
-      budgetActionsInitial: DEFAULT_RUN_ACTION_BUDGET,
+      budgetTokensInitial: budgets.budgetTokens,
+      budgetActionsInitial: budgets.budgetActions,
       costMicroCents: 0n,
       timeoutMs: args.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
       createdBy: args.createdBy ?? null,
@@ -885,13 +896,13 @@ async function executeAppRunInner(
     // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
     // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
     let servedText: string | null = null;
-    if (bootPromptServingEnabled() && run.agentId) {
+    if (run.agentId) {
       const record = await db.servedPrompt.findFirst({ where: { runId } });
       if (record) {
         const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
         if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
         const values = record.variables as unknown as Parameters<typeof applyPlatformVariables>[1];
-        servedText = applyPlatformVariables(content, values, legacyFromValues(values));
+        servedText = applyRecordedVariables(content, values);
       }
     }
     const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);

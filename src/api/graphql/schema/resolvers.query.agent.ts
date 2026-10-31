@@ -87,7 +87,7 @@ export const agentQueries = {
     // nesting). Gate mirrors resolveUrn's agent branch: a PUBLIC agent
     // resolves for any caller (#551 — marketplace discovery / share links),
     // otherwise member of the Agent's org or platform ADMIN/OWNER. A PUBLIC
-    // agent publishes its OWN definition (systemPrompt / memoryItems /
+    // agent publishes its OWN definition (systemMemoryId / memoryItems /
     // imports); the fields that surface OTHER tenants (apps / appAgents /
     // appCount / orgGrants / importedBy) are scoped to the caller's own access
     // and come back empty for an outsider (#552, #757).
@@ -121,7 +121,7 @@ export const agentQueries = {
     // member-scoped agents() list so the cross-org widening is an explicit,
     // bounded surface — never a side effect of a filter value on the default
     // list (contrast memories(filter: { visibility: PUBLIC })). Field-level
-    // exposure is slim for non-members (Agent.systemPrompt / systemMemoryId /
+    // exposure is slim for non-members (Agent.systemMemoryId /
     // memoryItems / imports gates). filter.type narrows; filter.visibility is
     // ignored (the slice is PUBLIC by definition).
     publicAgents: async (
@@ -201,7 +201,7 @@ export const agentQueries = {
         // #876: user-owned agents are identity-scoped, so an impersonated
         // session sees none — matching callerReadableAgentFilter, which drops
         // its ownerUserId clause the same way. Without this the list returned
-        // the target's private agents (definitions AND systemPrompt) while
+        // the target's private agents (their definitions) while
         // Query.agent(ref:) correctly refused them via requireOwnerOrOrgRole.
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { ...filters, organizationId: null, ownerUserId: ctx.userId };

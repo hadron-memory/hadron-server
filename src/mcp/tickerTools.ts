@@ -24,6 +24,8 @@ import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { reasonEnum, tickerFieldResolvers } from '../api/graphql/schema/resolvers.ticker.js';
+import { agentTickerTemplateFieldResolvers } from '../api/graphql/schema/resolvers.agentTickerTemplate.js';
+import { renderTaskWarnings } from '../api/graphql/schema/resolvers.taskWarnings.js';
 import { type AuthContext, validateSessionBinding } from '../middleware/auth.js';
 import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
@@ -107,11 +109,12 @@ const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
 async function renderTicker(t: Row, ctx: Context): Promise<string> {
   // Only channels the reader can read: the list is not a grant (the GraphQL field filters the same way).
-  const [urn, owner, subs, readable] = await Promise.all([
+  const [urn, owner, subs, readable, registerLoc] = await Promise.all([
     FT.urn(t as never, {}, ctx),
     FT.owner(t as never, {}, ctx),
     FT.subscribers(t as never, { first: 200 }, ctx),
     FT.channels(t as never, {}, ctx),
+    FT.registerTaskLoc(t as never, {}, ctx),
   ]);
   const names: string[] = [];
   for (const s of subs.items) {
@@ -121,6 +124,7 @@ async function renderTicker(t: Row, ctx: Context): Promise<string> {
   const quiet = t.quietHours ? `quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : null;
   return [
     `- ${t.name} · ${urn ?? t.id} · every ${t.cadenceSeconds}s · ${t.enabled ? 'enabled' : 'disabled'} · relevance ${t.relevance}· reasons ${(t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+')}`,
+    `  code ${t.tickCode} · ${registerLoc ? 'register task loc ' + registerLoc : 'no register entry you can read'}`,
     `  anchor ${iso(t.anchorAt)}${quiet ? ` · ${quiet}` : ''}${readable.length ? ` · ${readable.length} channel(s)` : ''}`,
     `  owner ${owner ? owner.name : 'unknown'} · subscribers: ${names.length ? names.join(', ') : 'none'}${subs.hasNextPage ? ' (more)' : ''}`,
   ].join('\n');
@@ -243,7 +247,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   server.tool(
     'hadron_ticker_list',
     'List the live tickers of a team App, with their cadence, owner and subscribers (cor:agt:080). A ticker is a named, ' +
-      'cadenced wake schedule; workers subscribe to the ones they want. Readable by the App\'s participants.',
+      'cadenced wake schedule; workers subscribe to the ones they want. Shows the permanent tick code and the register entry loc you may read, without resolving a worker task. Readable by the App\'s participants.',
     SHAPE_HADRON_TICKER_LIST,
     async ({ appRef, session }) =>
       read(session, async (ctx) => {
@@ -258,12 +262,12 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     'hadron_ticker_create',
     'Create a ticker in a team App (cor:agt:080:18). Any App participant, or a session bound to a worker of the App, up to ' +
       'the App\'s live-ticker cap (20 by default). You become its owner. Its slug, and so its URN, is derived from the name ' +
-      'and permanent. The cadence is in seconds, from the App\'s floor (120 by default) to 86400.',
+      'and permanent. So is its tick code. A code without a readable register entry produces a warn-only ticker.code.unmapped after success. The cadence is in seconds, from the App\'s floor (120 by default) to 86400.',
     SHAPE_HADRON_TICKER_CREATE,
     async ({ session, appRef, ...input }) =>
       write('hadron_ticker_create', session, async (ctx) => {
         const t = await M.createTicker({}, { appRef, input }, ctx);
-        return `Created.\n\n${await renderTicker(t, ctx)}`;
+        return `Created.\n\n${await renderTicker(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`;
       }),
   );
 
@@ -383,20 +387,23 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
       'channel and a PROOF: deliver the nudge, then pass the proof to hadron_ack_wakes. Reading wakes never moves anyone\'s ' +
       'read position. Allowed for a worker\'s holder (their workers) and whoever manages the App (all). Never due: a retired, ' +
       'paused or dormant worker; an unavailable, unheld or session-less worker IS still due. `dormant` lists dormant workers ' +
-      'with mentions waiting. A channel you cannot read is left out entirely.',
+      'with mentions waiting. A channel you cannot read is left out entirely. The server tick line names each readable role task, otherwise the code and guidance to resolve it yourself.',
     SHAPE_HADRON_DUE_WAKES,
     async ({ session, appRef, ...rest }) =>
       readWakes(session, async (ctx) => {
         const page = await Q.dueWakes({}, { appRef, ...rest }, ctx);
         const lines: string[] = [];
         for (const w of page.wakes) {
-          const why = (w.reasons as Row[])
-            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))
+          const why = [w.tickText, ...(w.reasons as Row[])
+            .filter(r => r.kind !== 'TICK' || !w.tickText)
+            .map((r) => (r.kind === 'TICK' ? `tick ${r.ticker?.name ?? ''}${r.tickDueAt ? ` tickDueAt ${iso(r.tickDueAt)}` : ''}` : r.kind === 'STOP' ? stopLine(r.stop) : r.kind === 'TASK' ? `task ${r.task.handle} ${JSON.stringify(r.task.title)} (${r.task.ref})${r.task.standbyHeld ? ` — ${r.task.standbyHeld} message${r.task.standbyHeld === 1 ? ' was' : 's were'} held while you were on standby` : ''}` : 'mention'))].filter(Boolean)
             .join(' + ');
+          const tickTimes = w.tickText ? (w.reasons as Row[]).filter(r => r.kind === 'TICK' && r.tickDueAt)
+            .map(r => `tick ${r.ticker?.name ?? ''} tickDueAt ${iso(r.tickDueAt)}`).join(' · ') : '';
           const ch = (w.channels as Row[]).map((c) => `${c.channel.name} ${c.fromSeq}-${c.throughSeq}`).join(', ');
           lines.push(
             `- ${w.worker.name}: ${why} · ${w.unread} unread (${w.unreadMentions} mention${w.unreadMentions === 1 ? '' : 's'}) · ${ch}` +
-              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}\n  anchor ${iso(w.anchorAt)} · deliverAfter ${iso(w.deliverAfter)} · busyDeadline ${iso(w.busyDeadline)}\n  proof: ${w.proof}`,
+              `${w.availability ? ` · ${w.availability.state}${w.availability.reason ? ` (${w.availability.reason})` : ''}` : ''}${tickTimes ? '\n  ' + tickTimes : ''}\n  anchor ${iso(w.anchorAt)} · deliverAfter ${iso(w.deliverAfter)} · busyDeadline ${iso(w.busyDeadline)}\n  proof: ${w.proof}`,
           );
         }
         const dormant = (page.dormant as Row[]).map((d) => `${d.worker.name} (${d.mentions})`);
@@ -465,7 +472,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   const renderTemplate = (t: Row): string => {
     const quiet = t.quietHours ? ` · quiet hours ${t.quietHours.timezone} (${t.quietHours.windows.length} window${t.quietHours.windows.length === 1 ? '' : 's'})` : '';
     const reasons = (t.reasons as string[]).map((x) => x.toLowerCase().replace(/_/g, '-')).join('+');
-    return `- ${t.name} · id ${t.id} · revision ${t.revision} · every ${t.cadenceSeconds}s (raised to the App floor at cast) · relevance ${t.relevance} · reasons ${reasons}${quiet}`;
+    return `- ${t.name} · code ${agentTickerTemplateFieldResolvers.AgentTickerTemplate.tickCode(t as never)} · id ${t.id} · revision ${t.revision} · every ${t.cadenceSeconds}s (raised to the App floor at cast) · relevance ${t.relevance} · reasons ${reasons}${quiet}`;
   };
   async function plain(fn: (ctx: Context) => Promise<string>) {
     try {
@@ -477,7 +484,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
   server.tool(
     'hadron_agent_ticker_template_list',
     'List the ticker templates an Agent declares (#2024). Casting a worker from the Agent creates these tickers for the worker ' +
-      'and subscribes it; a template edit reaches only FUTURE casts. Readable by anyone who can read the Agent.',
+      'and subscribes it; a template edit reaches only FUTURE casts. Shows the code future copies receive from the current template name. Readable by anyone who can read the Agent.',
     SHAPE_HADRON_AGENT_TICKER_TEMPLATE_LIST,
     async ({ agentRef, session }) => read(session, async (ctx) => {
       const rows = await Q.agentTickerTemplates({}, { agentRef }, ctx);
@@ -547,6 +554,7 @@ const SHAPE_HADRON_DELIVERY_SETTINGS_SET = {
     standbyEnabled: z.boolean().nullable().optional().describe('False clears; true is refused until S7 behavior ships.'),
     checkPeriodSeconds: z.number().nullable().optional().describe('#2138: whole seconds 60..86400; a worker with a task is expected to check its team channel this often. Set together with the team ticker cadence.'),
     failedChecksToOverdue: z.number().nullable().optional().describe('#2138: whole number 1..100; OVERDUE after this many missed periods + 5 minutes.'),
+    darkAlarmWindowSeconds: z.number().nullable().optional().describe('#2755: whole seconds 300..86400, default 1800; a due wake unacknowledged this long raises the dark-worker alarm. Independent of stuckWindowSeconds.'),
   }).passthrough().describe('Atomic patch. Unknown fields are refused by the shared resolver, never silently removed.'),
   session: SESSION_WRITE,
 };

@@ -3,7 +3,7 @@
  * refusal, when its boot prompt cannot be served; an approved one is recorded with the run and prefixed to the run's system
  * prompt with the recorded variables; the run finishes under that revision; derived blocks go to the run's own log.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -27,7 +27,6 @@ vi.mock('../lib/aiConfig.js', async (orig) => {
 import { executeAppRun, mintAppRun, type RunExecutionDeps } from './appRuns.js';
 
 let orgId: string, appId: string, userId: string, agentId: string, memoryId: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 
 const deps = (llm = vi.fn(async (_c: unknown, _r: { system?: string; prompt: string }) => ({ text: 'out', tokensIn: 10, tokensOut: 5, provider: 'anthropic', model: 'test' }))) => ({
   llm,
@@ -62,19 +61,14 @@ beforeEach(async () => {
   vi.clearAllMocks();
   attention.text = '';
   aiConfigFault.error = null;
-  process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'run-org', urn: 'run-org' } })).id;
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'run-app', urn: 'run-org::run-app' } })).id;
   userId = (await db.user.create({ data: { githubId: 92047200, githubUsername: 'run-user', roles: ['READER'] } })).id;
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: 'run-org:sys', organizationId: orgId } })).id;
-  agentId = (await db.agent.create({ data: { id: generateId(), name: 'Runner', urn: 'run-org:runner', organizationId: orgId, systemMemoryId: memoryId, systemPrompt: 'LEGACY' } })).id;
+  agentId = (await db.agent.create({ data: { id: generateId(), name: 'Runner', urn: 'run-org:runner', organizationId: orgId, systemMemoryId: memoryId } })).id;
   await db.appAgent.create({ data: { appId, agentId } as never });
-});
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
 });
 
 describe('#2047 run', () => {
@@ -102,13 +96,6 @@ describe('#2047 run', () => {
     const runs = await db.appRun.count();
     expect(await code(mint({ userId, agentId }))).toBe('BOOT_PROMPT_NOT_SET');
     expect(await db.appRun.count()).toBe(runs);
-  });
-
-  it('serving OFF: a run with an Agent launches with no pointer and no record', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    const run = await mint({ userId, agentId });
-    expect(run.id).toBeTruthy();
-    expect(await db.servedPrompt.count()).toBe(0);
   });
 
   it('#2047 PR-C: the revision is selected inside the launch transaction, so one approved after the preflight is the one recorded', async () => {
@@ -142,7 +129,6 @@ describe('#2047 run', () => {
     expect(await executeAppRun(db, run.id, d)).toBe('completed');
     const system = llm.mock.calls[0]![1].system!;
     expect(system.startsWith('You are Runner.\n\n')).toBe(true);
-    expect(system).not.toContain('LEGACY');
   });
 
   it('a run whose recorded revision was deleted fails with the typed code, not newer text', async () => {
@@ -196,8 +182,9 @@ describe('#2047 run', () => {
   });
 });
 
-// #2702: a run replays its recorded variables, and the legacy tokens bind from them in the same pass.
-describe('#2702 served run binds the legacy {{name}} / {{role}} tokens', () => {
+// #1772 step 3 (review P2): a run replays its RECORDED revision and variables, so a legacy token in that revision still binds from
+// the recorded values: a retained record is reconstructed as it was served, whatever the live binding does today.
+describe('#1772 step 3: a recorded run still binds legacy {{name}} / {{role}} from its recorded values', () => {
   it('binds {{name}} and {{role}} from the values recorded with the run', async () => {
     await db.agent.update({ where: { id: agentId }, data: { personaRole: 'runner-role' } });
     await compiledPointer('You are {{name}}, the {{role}}.');

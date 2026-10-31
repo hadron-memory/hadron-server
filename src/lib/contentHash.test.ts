@@ -86,3 +86,12 @@ describe('isAbstractUnverified (#1128)', () => {
     expect(isAbstractUnverified(node({ content: '', abstractOriginHash: null }))).toBe(false);
   });
 });
+
+describe('presence-only abstract verification', () => {
+  it('uses presence only for an absent origin fingerprint, never instead of a real hash comparison', () => {
+    expect(isAbstractUnverified({ abstract: 'Summary', content: null, abstractOriginHash: null }, true)).toBe(true);
+    expect(isAbstractUnverified({ abstract: 'Summary', content: null, abstractOriginHash: null }, false)).toBe(false);
+    expect(isAbstractUnverified({ abstract: 'Summary', content: 'body', abstractOriginHash: computeContentHash('body') }, true)).toBe(false);
+    expect(isAbstractUnverified({ abstract: 'Summary', content: 'body', abstractOriginHash: computeContentHash('older') }, false)).toBe(true);
+  });
+});

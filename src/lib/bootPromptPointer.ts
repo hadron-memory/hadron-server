@@ -16,8 +16,7 @@
  *
  * Approval is NOT checked here: a valid unapproved pointer is accepted, and
  * whether it may be SERVED is S10's serve-time check (cor:agt:040:10). Nothing
- * in this module serves, and nothing here reads `Agent.systemPrompt` or
- * `Worker.promptOverride` (those retire at S10's activation).
+ * in this module serves.
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';

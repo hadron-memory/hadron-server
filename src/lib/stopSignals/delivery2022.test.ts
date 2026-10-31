@@ -47,7 +47,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
   liam = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Liam', slug: 'liam', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
-  ticker = await db.ticker.create({ data: { id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: 'eng', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), reasons: ['every-tick'] } as never, select: { id: true } });
+  ticker = await db.ticker.create({ data: { tickCode: 'tick.fixture', id: generateId(), appId: app.id, ownerUserId: manager.id, name: 'Eng', slug: 'eng', cadenceSeconds: 600, anchorAt: new Date(Date.now() - 3600_000), reasons: ['every-tick'] } as never, select: { id: true } });
   await db.tickerSubscription.create({ data: { id: generateId(), tickerId: ticker.id, workerId: liam.id, createdBy: manager.id } });
   post = vi.spyOn(teamChatMutations, 'createTeamChatMessage').mockResolvedValue({} as never);
 });

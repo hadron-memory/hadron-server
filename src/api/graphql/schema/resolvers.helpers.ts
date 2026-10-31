@@ -1,3 +1,4 @@
+import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -1809,6 +1810,37 @@ export async function resolveAppTeamSpaceMemoryIds(
   return rows.filter((r) => keep.has(r.id)).map((r) => r.id);
 }
 
+/**
+ * #2861 (cor:dmo:050:17) — the App's FREE-STANDING app memories: the
+ * `createAppMemory` rows (cor:acl:010:01), app-class and App-scoped but neither
+ * the team space nor linked by any live Agent item. Identity only, like
+ * {@link resolveAppTeamSpaceMemoryIds}: pair with {@link isAppParticipant}.
+ *
+ * Built on the same column filter, so a Worker's working memory and a session
+ * memory stay out, and `teamSpaceIds` (passed in, already resolved by the
+ * caller) is subtracted so a legacy unkeyed team space is not a second kind.
+ * A memory an Agent links is that Agent's source, not this one.
+ */
+export async function resolveAppFreeStandingMemoryIds(
+  db: Context['db'],
+  appId: string,
+  teamSpaceIds: readonly string[],
+): Promise<string[]> {
+  const rows = await db.memory.findMany({
+    where: {
+      ...appTeamSpaceColumnFilter(appId),
+      sharedMemoryOfAgentId: null,
+      isInstallMemory: false,
+      installOfAgentId: null,
+      agentItems: { none: { deletedAt: null } },
+      ...(teamSpaceIds.length > 0 ? { id: { notIn: [...teamSpaceIds] } } : {}),
+    },
+    select: { id: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  return rows.map((r) => r.id);
+}
+
 /** Row shape shared by the masked mappers below (no key material leaves). */
 export interface AiServiceConfigRow {
   id: string;
@@ -2863,8 +2895,10 @@ export const ORG_INCLUDE = {
 // straight N+1. Full row (not a select): the Worker type's scalar fields all
 // come from it, and its OWN field resolvers (app/agent — which self-guard,
 // #552) fetch on demand.
+// Session.events is resolved lazily with its own access gate and SQL limit.
+// A nested take across multiple sessions fetches all event rows in Prisma's
+// query strategy before trimming them, even when events were not selected.
 export const SESSION_INCLUDE = {
-  events: { orderBy: { createdAt: 'desc' as const }, take: 50 },
   worker: true,
 };
 
@@ -3177,7 +3211,7 @@ export async function installAgentIntoAppCore(
   // Agent, and installing is itself a read grant. An installed Agent's system
   // memory becomes READ_ONLY in every App-context access map
   // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
-  // object, whose own definition fields (systemPrompt / systemMemoryId /
+  // object, whose own definition fields (systemMemoryId /
   // memoryItems) are NOT field-gated — they rely on this object-level gate
   // (#551). An AppMember who is not an org member cannot read a non-PUBLIC org
   // Agent today (`Query.agent` requires org READER), so admitting them here
@@ -3196,7 +3230,7 @@ export async function installAgentIntoAppCore(
   // `organizationId` columns are null for a user-owned App + a user-owned
   // Agent, so a bare `agent.organizationId !== app.organizationId` reads
   // `null !== null` ⇒ false and waves through another USER's non-PUBLIC agent
-  // (leaking its systemPrompt via the returned AGENT_INCLUDE). Branch on the
+  // (leaking its definition via the returned AGENT_INCLUDE). Branch on the
   // App's ownership class instead, mirroring createApp's personal path.
   if (app.organizationId === null) {
     // spec 047 personal install: no org ⇒ no AgentOrgGrant. A user-owned App
@@ -3414,13 +3448,15 @@ export async function orgExchangeConnectionScope(ctx: Context, orgId: string) {
 }
 
 /**
- * `requireEmailConnection`'s answer for a missing or deleted connection. The
- * message is unchanged for the operation surfaces; a caller that must answer
- * absence like denial (hadron-internal#18) can tell it apart by type.
+ * `requireEmailConnection`'s answer for a missing, deleted or malformed connection id. On the wire it is byte-identical
+ * to the gate's denial (`authorizationDenied()`: `Forbidden`, typed `FORBIDDEN`), so absence and another user's
+ * connection answer alike and the gate is no existence oracle (#2782, ruling A in team chat #55219, as
+ * hadron-internal#18 ruled for `testExchangeConnection`). It used to be a plain `Error`, which the formatter redacts to
+ * INTERNAL_SERVER_ERROR (cor:api:260:01). A caller that must still tell absence from denial matches the class.
  */
-export class ConnectionNotFoundError extends Error {
+export class ConnectionNotFoundError extends GraphQLError {
   constructor() {
-    super('Connection not found');
+    super('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     this.name = 'ConnectionNotFoundError';
   }
 }
@@ -4124,14 +4160,15 @@ const ROOT_LOC_ATOM_MAX_BYTES = 255;
  * #2730: a memory's root node takes the caller's `name` as its loc, and the
  * projection throws a server fault for a loc it cannot write. Refuse exactly
  * those inputs as BAD_USER_INPUT before any write: an empty last atom, an atom
- * over the filesystem's component limit, or a NUL or slash. Everything the
- * projection accepts today (spaces, Unicode, internal empty atoms) stays legal,
+ * over the filesystem's component limit, a reserved path component, or a NUL
+ * or slash. Other inputs (spaces, Unicode, internal empty atoms) stay legal,
  * so this is not the shared loc grammar (`validateLoc`).
  */
 export function assertMemoryRootLoc(name: string): void {
   const atoms = name.split(':');
   let reason: string | null = null;
   if (atoms[atoms.length - 1] === '') reason = 'its last ":"-separated segment is empty';
+  else if (atoms.some(hasReservedProjectionComponent)) reason = 'it contains a reserved path segment';
   else if (/[\0/]/.test(name)) reason = 'it contains a NUL or "/" character';
   else if (atoms.some(a => Buffer.byteLength(a, 'utf8') > ROOT_LOC_ATOM_MAX_BYTES)) {
     reason = `a ":"-separated segment is longer than ${ROOT_LOC_ATOM_MAX_BYTES} bytes`;

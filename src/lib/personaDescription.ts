@@ -1,9 +1,10 @@
 /**
  * Prompt variable binding (cor:dmo:150:08): the ONE definition of how a boot
  * prompt's variables bind at read time. S12 (#2049) removed the old
- * name-only helpers and the name-placeholder probe; the legacy `{{name}}` /
- * `{{role}}` tokens still bind, in the same pass, through `applyPlatformVariables`
- * until the live-node token audit.
+ * name-only helpers and the name-placeholder probe; #1772 step 3 removed the
+ * legacy `{{name}}` / `{{role}}` binding once the token audit (#2704) found none
+ * left in served text. Those two tokens now render as written, like any text
+ * outside the closed set.
  */
 
 /**
@@ -18,7 +19,6 @@
  * stays as written (the set is closed, nothing else resolves here). Substitution
  * is a single pass over the template, so a value that itself contains a token
  * (a name like `{{agent.name}}`) is inserted literally, never re-expanded.
- * The old `{{name}}` / `{{role}}` placeholders stay until the live-node token audit (#1772).
  */
 export interface PlatformVariableValues {
   'worker.name': string;
@@ -41,31 +41,26 @@ export const PLATFORM_VARIABLE_KEYS = [
 const platformVariableKeysAreExhaustive: Exclude<keyof PlatformVariableValues, (typeof PLATFORM_VARIABLE_KEYS)[number]> extends never ? true : never = true;
 void platformVariableKeysAreExhaustive;
 
-/**
- * #2702: the legacy `{{name}}` / `{{role}}` values for SERVED text, taken from the variable values that text is bound with
- * (`worker.name` / `worker.role`), so a recorded replay binds the recorded identity, never today's. Converted prompts keep
- * these tokens until the live-node token audit (#1772); without this they reached the briefing literally. A record whose
- * stored values lack either key leaves the tokens as written rather than printing "undefined".
- */
-export function legacyFromValues(values: Partial<Pick<PlatformVariableValues, 'worker.name' | 'worker.role'>>): { name: string; role: string } | undefined {
-  const name = values['worker.name'];
-  const role = values['worker.role'];
-  return typeof name === 'string' && typeof role === 'string' ? { name, role } : undefined;
+export function applyPlatformVariables(template: string, values: PlatformVariableValues): string {
+  return template.replace(
+    /\{\{(worker\.name|worker\.role|agent\.name|worker\.reportsTo\.name|worker\.signature|worker\.trailer|worker\.url|session\.llmModel)\}\}/g,
+    (_match, key: string) => values[key as keyof PlatformVariableValues],
+  );
 }
 
-export function applyPlatformVariables(
-  template: string,
-  values: PlatformVariableValues,
-  /** The legacy `{{name}}` / `{{role}}` placeholders, bound in the SAME pass (blind review P2-1): a second pass over
-   * an already-substituted prompt would read an inserted value as template source. Omit for text that has none (a
-   * worker override keeps its legacy tokens as written). */
-  legacy?: { name: string; role: string },
-): string {
+/**
+ * #1772 step 3 review P2: a RECORD replay (a session's or a run's recorded revision, read again) is reconstructed as it was
+ * served, so a legacy `{{name}}` / `{{role}}` held by that old revision still binds, from the RECORDED `worker.name` /
+ * `worker.role`, in the same single pass as the closed set. Live reads never call this: only a retained record can hold a
+ * revision written before the token migration (#2704), and its audit sees current text, not history. A record whose
+ * values lack either key leaves the tokens as written rather than printing "undefined".
+ */
+export function applyRecordedVariables(template: string, values: PlatformVariableValues): string {
+  const name = values['worker.name'];
+  const role = values['worker.role'];
+  const legacy = typeof name === 'string' && typeof role === 'string' ? { name, role } : null;
   return template.replace(
     /\{\{(name|role|worker\.name|worker\.role|agent\.name|worker\.reportsTo\.name|worker\.signature|worker\.trailer|worker\.url|session\.llmModel)\}\}/g,
-    (match, key: string) => {
-      if (key === 'name' || key === 'role') return legacy ? legacy[key] : match;
-      return values[key as keyof PlatformVariableValues];
-    },
+    (match, key: string) => (key === 'name' || key === 'role' ? (legacy ? legacy[key] : match) : values[key as keyof PlatformVariableValues]),
   );
 }

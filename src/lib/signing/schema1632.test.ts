@@ -270,6 +270,7 @@ describe('one source of signing SQL', () => {
     const source = readFileSync('prisma/signing-invariants.sql', 'utf8');
     expect(readFileSync('prisma/migrations/20261013160000_signing_requests/migration.sql', 'utf8').endsWith(source)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir signing-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/signing-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('signing-invariants.sql');
   });
 });

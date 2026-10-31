@@ -193,8 +193,10 @@ function fake(): Fake {
 
 // Server-owned timing (R63): by default past the floor, busy deadline still ahead.
 const iso = (ms: number): string => new Date(ms).toISOString();
-const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }) => ({
+const wake = (id: string, name: string, reasons: any[], p = proof(['T:1']), channels: any[] = [], timing?: { anchorAt: string; deliverAfter: string; busyDeadline: string }, tickText?: string | null) => ({
   worker: { id, name }, reasons, channels, proof: p,
+  // #2754: absent (not null) when the caller passes nothing, like a reply recorded before the server wrote a tick line.
+  ...(tickText === undefined ? {} : { tickText }),
   ...(timing ?? { anchorAt: iso(Date.now() - 600_000), deliverAfter: iso(Date.now() - 300_000), busyDeadline: iso(Date.now() + 3_600_000) }),
 });
 const cfg = (): Config => ({
@@ -1078,6 +1080,11 @@ describe('GraphQL contract with the server SDL (#2102 / R63)', () => {
     expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
     for (const f of ['anchorAt', 'deliverAfter', 'busyDeadline']) expect(QUERY).toContain(f);
   });
+  it('#2754: the dueWakes query selects the server tick line and each reason\'s action state, and validates', async () => {
+    expect(validate(schema, parse(QUERY)).map((e) => e.message)).toEqual([]);
+    expect(QUERY).toContain('tickText');
+    expect(QUERY).toMatch(/action\s*\{\s*state\s*\}/);
+  });
   it('the acknowledgeWakes mutation validates', async () => {
     expect(validate(schema, parse(ACK)).map((e) => e.message)).toEqual([]);
   });
@@ -1138,6 +1145,21 @@ describe('diagnostics never carry a proof, typed text or a server message (P2-2)
     expect(everything).not.toContain(PROOF_SENTINEL);
     expect(everything).not.toContain(TEXT_SENTINEL);
   };
+
+  it('#2754: a tick line holding a sentinel reaches the typed text and never the log or the receipt', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], undefined, `tick coordinator-tick: run hrn:node:hadronmemory.com:x:${TEXT_SENTINEL}`)];
+    await go();
+    expect(f.sent[0]).toContain(TEXT_SENTINEL);
+    clean();
+  });
+
+  it('#2754: an untypeable tick line holding a sentinel is dropped, and the sentinel never reaches the log, the receipt or the terminal', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']), [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}\u0007`)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).not.toContain(TEXT_SENTINEL);
+    clean();
+  });
 
   it('a failed ack logs its server error CODE but not the server message', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
@@ -2816,5 +2838,173 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     f.onCount = () => { t += 100; };
     await pass(cfg(), f.run, { now: () => base + t, budgetMs: 2_000 }, (l) => lines.push(l));
     expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], [], LINE(2)));
+  });
+});
+
+describe('#2754 — the server tick line', () => {
+  const stored = () => JSON.parse(readFileSync(receiptsFile(), 'utf8'));
+  const OPEN = (n: number) => ` You have ${n} open task${n === 1 ? '' : 's'} (as read when this was sent); run \`hadron team task mine\`.`;
+  const FORMS = [
+    'tick team-tick: run hrn:node:hadronmemory.com:x-system:tasks:on-team-tick',
+    'tick eden-queue-tick: same task as above',
+    'tick team-tick: no task is mapped for tick.team',
+    'tick team-tick: no task found at x-system:tasks:on-team-tick for tick.team',
+    'tick team-tick: resolve your task for tick.team yourself',
+  ];
+  const TEAM = { kind: 'TICK', ticker: { id: 'V', name: 'team-tick' } };
+  const mapped = (t: any, state: string) => ({ ...t, action: { state } });
+
+  it('2. a due TICK wake sends the server line first, then one space, then today\'s nudge', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [])}`]);
+  });
+
+  for (const form of FORMS) {
+    it(`3. types the line byte for byte: ${form.slice(0, 40)}`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, form)];
+      await go();
+      expect(f.sent[0].startsWith(form + ' Hadron ticker wake (team-tick)')).toBe(true);
+      expect(f.sent[0]).not.toContain('\n');
+    });
+  }
+
+  it('3. does not trim, re-case or re-space the line (double spaces and edge spaces survive)', async () => {
+    const odd = ' tick team-tick:  run  hrn:node:hadronmemory.com:x:y ';
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, odd)];
+    await go();
+    expect(f.sent[0]).toBe(`${odd} ${nudgeText(['team-tick'], [])}`);
+  });
+
+  it('4. a null tick line, and a reply with no tickText field at all, send today\'s text', async () => {
+    for (const tickText of [null, undefined]) {
+      f.sent.length = 0; f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1'], String(tickText)), [], undefined, tickText)];
+      rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+      await go();
+      expect(f.sent).toEqual([nudgeText(['team-tick'], [])]);
+    }
+  });
+
+  it('5. a TICK + ASSIGNED wake starts with the line, then the assignment text; a TASK-only wake is unchanged', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM, task('t7')], proof(['V:1'], 'a', [taskEntry('t7')]), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], ['t7'])}`]);
+    f.sent.length = 0; rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+    f.wakes = [wake('w-ada', 'Ada', [task('t8')], proof([], 'b', [taskEntry('t8')]), [], undefined, null)];
+    await go();
+    expect(f.sent).toEqual([nudgeText([], ['t8'])]);
+  });
+
+  it('6. a displaced request is the line, then the fresh-request prefix, then the nudge', async () => {
+    const T0 = Date.UTC(2026, 9, 24, 0);
+    const prior = { state: 'ambiguous', coverage: ['V:1'], receiver: 'term_a#inc-1', at: T0, detail: 'failed with a request identity',
+      text: 'original', handle: 'term_a', requestId: 'failed-request', checkedBefore: null };
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': prior }));
+    const timing = { anchorAt: iso(T0 - 600_000), deliverAfter: iso(T0 - 300_000), busyDeadline: iso(T0 + 3_600_000) };
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:3'], T0 + 1_200_000), [], timing, FORMS[0])];
+    f.retryReply = () => JSON.stringify({ ok: false, error: { code: 'transport' }, requestId: 'failed-request' });
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY);
+    await go({ now: () => T0 + 1_200_000 });
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].startsWith(`${FORMS[0]} Fresh tick request at `)).toBe(true);
+  });
+
+  const BAD: Array<[string, string]> = [
+    ['a C0 control character', 'tick team-tick: run x\u0007y'],
+    ['a C1 control character', 'tick team-tick: run x\u0085y'],
+    ['a tab', 'tick team-tick:\trun x'],
+    ['a line break', 'tick team-tick: run x\ntick u: y'],
+    ['a carriage return', 'tick team-tick: run x\ry'],
+    ['U+2028', 'tick team-tick: run x\u2028y'],
+    ['U+2029', 'tick team-tick: run x\u2029y'],
+    ['an empty string', ''],
+    ['a non-string', 42 as any],
+    ['over the length cap', 'tick team-tick: ' + 'x'.repeat(5000)],
+  ];
+  for (const [why, bad] of BAD) {
+    it(`7. a tick line holding ${why} is dropped: today's text goes out, one closed-reason log line, no text in the log or receipt`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, bad)];
+      await go();
+      expect(f.sent).toEqual([nudgeText(['team-tick'], [])]);
+      if (bad === '' || typeof bad !== 'string') return;
+      expect(log().split('\n').filter((l) => l.includes('tick line not typeable'))).toHaveLength(1);
+      expect(log()).toMatch(/Ada: .*tick line not typeable/);
+      expect(log()).not.toContain('x\u0007y');
+      expect(log()).not.toContain('tick team-tick');
+      expect(readFileSync(receiptsFile(), 'utf8')).not.toContain('tick team-tick: ');
+    });
+  }
+
+  it('8. a coordinator-tick whose action is MAPPED no longer gets the hard-coded base-tick sentence, and still gets the tagged check', async () => {
+    const line = 'tick coordinator-tick: run hrn:node:hadronmemory.com:coordinator-system:tasks:on-base-tick';
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, line)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    const rest = f.sent[0].replace(line + ' ', '');
+    expect(rest).not.toContain('coordinator-system:tasks:on-base-tick');
+    expect(rest).not.toContain('run your base tick');
+    expect(rest).toBe(nudgeText(['coordinator-tick'], [], '', new Set(['coordinator-tick'])));
+    expect(rest).toContain('hadron team chat read --mentions-me --limit 1');
+  });
+
+  for (const action of [null, undefined, { state: 'UNMAPPED' }, { state: 'UNRESOLVED' }, { state: 'WITHHELD' }]) {
+    it(`9. a coordinator-tick with action ${JSON.stringify(action)} keeps today's base-tick sentence`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: resolve your task for tick.coordinator yourself')];
+      await go();
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
+  const BEL = String.fromCharCode(7); // a real control character, built explicitly so no diff view can show it as text
+  for (const [why, tickText] of [['null', null], ['absent', undefined], ['untypeable', `tick coordinator-tick: run x${BEL}y`]] as const) {
+    it(`8b. a MAPPED coordinator-tick whose tick line is ${why} keeps the base-tick sentence (the task is named nowhere else)`, async () => {
+      f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED')], proof(['T:1']), [], undefined, tickText)];
+      await go();
+      expect(f.sent).toHaveLength(1);
+      expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+    });
+  }
+
+  it('9. only the coordinator-tick\'s own state counts: WITHHELD coordinator-tick with a MAPPED team-tick keeps the base-tick sentence', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'WITHHELD'), mapped(TEAM, 'MAPPED')], proof(['T:1', 'V:1']), [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
+  });
+
+  it('10. coverage keys and the ack proof are identical with and without tickText and action', async () => {
+    const p = proof(['T:1', 'V:1'], 'same');
+    f.sendReply = () => JSON.stringify(ACCEPTED_ONLY); // accepted but unconfirmed: the receipt (and its coverage) stays on disk
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TEAM], p)];
+    await go();
+    const plain = { coverage: stored()['w-ada'].coverage, acked: [...f.acked] };
+    f.sent.length = 0; f.acked.length = 0; rmSync(join(dir, 'ticker-wake'), { recursive: true, force: true });
+    f.wakes = [wake('w-ada', 'Ada', [mapped(TICK, 'MAPPED'), mapped(TEAM, 'WITHHELD')], p, [], undefined, FORMS[0])];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect({ coverage: stored()['w-ada'].coverage, acked: [...f.acked] }).toEqual(plain);
+  });
+
+  it('11. a covered tick T and a new tick U: the header names only U, and the typed line is the server\'s whole line', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    writeFileSync(receiptsFile(), JSON.stringify({ 'w-ada': { state: 'sent', coverage: ['T:1'], receiver: 'term_a#inc-1', at: Date.now() - 60_000, text: 'earlier', handle: 'term_a' } }));
+    const whole = `${FORMS[0]} · ${FORMS[1]}`;
+    f.wakes = [wake('w-ada', 'Ada', [TICK, TICK2], proof(['T:1', 'U:1'], 'c'), [], undefined, whole)];
+    await go();
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0].startsWith(whole + ' Hadron ticker wake (eden-queue-tick)')).toBe(true);
+  });
+
+  it('puts the tick line before the open-task line\'s host text: line, nudge, then the open-task count', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    f.openTasks['w-ada'] = Array.from({ length: 2 }, (_, i) => ({ id: `o${i}`, status: 'STARTED', assignee: { kind: 'WORKER', id: 'w-ada' } }));
+    await go();
+    expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [], OPEN(2))}`]);
+  });
+
+  it('a dry pass never types the line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
+    await go({ dry: true });
+    expect(f.sent).toEqual([]);
   });
 });

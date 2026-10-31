@@ -60,9 +60,24 @@ async function summary(ctx: Context, node: Node) {
     loc: node.loc, name: node.name, nodeType: node.nodeType, deletedAt: node.deletedAt };
 }
 
+/** The largest recovery page, and the most edge ids one recoveryEdges call may name. */
+const RECOVERY_PAGE_MAX = 200;
+
 /** Null means omitted on both transports; a complete-set consumer can drain offset pages using total. */
 function page(args: { limit?: number | null; offset?: number | null }) {
-  return { take: Math.min(200, Math.max(1, args.limit ?? 20)), skip: Math.max(0, args.offset ?? 0) };
+  return { take: Math.min(RECOVERY_PAGE_MAX, Math.max(1, args.limit ?? 20)), skip: Math.max(0, args.offset ?? 0) };
+}
+
+/**
+ * #2818: an optional edge-id restriction, refused outside 1..RECOVERY_PAGE_MAX before any lookup.
+ * An id that is not a visible edge of the memory is simply absent, so naming it discloses nothing a full scan would not.
+ */
+function edgeRestriction(edgeIds: readonly string[] | null | undefined): Prisma.Sql {
+  if (edgeIds == null) return Prisma.empty;
+  if (edgeIds.length === 0 || edgeIds.length > RECOVERY_PAGE_MAX) {
+    throw new GraphQLError(`edgeIds must name 1 to ${RECOVERY_PAGE_MAX} edges.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return Prisma.sql` AND e.id = ANY(${[...new Set(edgeIds)]}::text[])`;
 }
 
 /** A recovery reference never falls back to an inherited node or successor at another address. */
@@ -76,11 +91,16 @@ async function recoveryTarget(ctx: Context, ref: string) {
 
 export const recoveryQueries = {
   /** Explicit graph inspection; endpoint authority and ancestor liveness precede SQL count and page. */
-  recoveryEdges: async (_: unknown, args: { memoryRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
+  recoveryEdges: async (_: unknown, args: { memoryRef: string; edgeIds?: string[] | null; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const only = edgeRestriction(args.edgeIds);
     const memoryId = await recoveryMemory(ctx, args.memoryRef);
-    const endpointMemories = await ctx.db.$queryRaw<Array<{ memory_id: string }>>`
-      SELECT DISTINCT n.memory_id FROM edges e JOIN nodes n ON n.id = e.source_id OR n.id = e.target_id
-      WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL`;
+    // #2810: a UNION of key lookups; an OR join condition cannot use the node primary key.
+    const endpointIds = Prisma.sql`SELECT e.source_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}
+      UNION SELECT e.target_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}`;
+    // #2818: a restricted call probes its few endpoints by primary key; IN would hash-join a scan of every node.
+    const endpointMemories = await ctx.db.$queryRaw<Array<{ memory_id: string }>>(args.edgeIds == null
+      ? Prisma.sql`SELECT DISTINCT n.memory_id FROM nodes n WHERE n.id IN (${endpointIds})`
+      : Prisma.sql`SELECT DISTINCT n.memory_id FROM nodes n WHERE n.id = ANY(ARRAY(${endpointIds}))`);
     const readable: string[] = [], recoverable: string[] = [];
     for (const { memory_id: id } of endpointMemories) {
       const memory = await ctx.db.memory.findUnique({ where: { id }, select: { deletedAt: true } });
@@ -88,16 +108,19 @@ export const recoveryQueries = {
       readable.push(id);
       if (await canRecoverMemory(ctx, id)) recoverable.push(id);
     }
-    // Every interpolated value is a bound SQL parameter. Ancestor comparison uses ':' boundaries, not LIKE patterns.
+    // Every interpolated value is a bound SQL parameter. The ancestors are the endpoint loc's ':'-boundary
+    // prefixes (ancestorLocs), probed by equality on (memory_id, loc). #2810: a prefix comparison against
+    // every tombstone cannot use an index and scanned the whole nodes table once per endpoint.
     const endpoint = (alias: 's' | 't') => {
       const n = Prisma.raw(alias);
       return Prisma.sql`(( ${n}.deleted_at IS NULL AND ${n}.memory_id = ANY(${readable}::text[])
         AND NOT EXISTS (SELECT 1 FROM nodes p WHERE p.memory_id = ${n}.memory_id AND p.deleted_at IS NOT NULL
-          AND left(${n}.loc, length(p.loc) + 1) = p.loc || ':'))
+          AND p.loc = ANY(ARRAY(SELECT array_to_string((string_to_array(${n}.loc, ':'))[1:g.i], ':')
+            FROM generate_series(1, cardinality(string_to_array(${n}.loc, ':')) - 1) g(i)))))
         OR (${n}.deleted_at IS NOT NULL AND ${n}.node_type <> ${COMMENT_NODE_TYPE}
           AND ${n}.memory_id = ANY(${recoverable}::text[])))`;
     };
-    const predicate = Prisma.sql`e.memory_id = ${memoryId} AND e.deleted_at IS NULL AND ${endpoint('s')} AND ${endpoint('t')}`;
+    const predicate = Prisma.sql`e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only} AND ${endpoint('s')} AND ${endpoint('t')}`;
     const { take, skip } = page(args);
     type GraphRow = { id: string; name: string; source_id: string; source_loc: string; source_name: string;
       source_deleted: Date | null; source_urn: string; target_id: string; target_loc: string; target_name: string;

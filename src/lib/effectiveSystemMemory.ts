@@ -415,6 +415,8 @@ export async function resolveInheritedEdges(
     canReadMemory: (memoryId: string) => Promise<boolean>;
     /** Batch reads bound retained authorized results and page raw edge metadata, not endpoint bodies. */
     maxResults?: number;
+    /** MCP projections render endpoint identity/name, never endpoint bodies. */
+    endpointMetadataOnly?: boolean;
     /** GraphQL batch edge objects hydrate a selected endpoint lazily, after the shared edge budget. */
     identityOnly?: boolean;
     onLimit?: () => never;
@@ -426,12 +428,13 @@ export async function resolveInheritedEdges(
   const bounded = args.maxResults !== undefined;
   const pageSize = 128;
   const endpointIdentity = { id: true, memoryId: true, loc: true, role: true, deletedAt: true } as const;
+  const endpointMetadata = { ...endpointIdentity, name: true } as const;
   let cursor: string | undefined;
   const readPage = () => db.edge.findMany({
     where: args.direction === 'out'
       ? { sourceId: args.nodeId, deletedAt: null, target: { deletedAt: null } }
       : { targetId: args.nodeId, deletedAt: null, source: { deletedAt: null } },
-    ...(!bounded ? { include: { [far]: true } as { target: true } | { source: true } } : {}),
+    ...(!bounded ? { include: { [far]: args.endpointMetadataOnly ? { select: endpointMetadata } : true } as unknown as { target: true } | { source: true } } : {}),
     orderBy: bounded ? [{ loc: 'asc' }, { id: 'asc' }] : { loc: 'asc' },
     ...(bounded ? { take: pageSize, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}) } : {}),
   });
@@ -440,7 +443,9 @@ export async function resolveInheritedEdges(
   type NodeRow = NonNullable<Awaited<ReturnType<typeof db.node.findUnique>>>;
   const readEndpoint = async (id: string): Promise<NodeRow | null> => args.identityOnly
     ? await db.node.findUnique({ where: { id }, select: endpointIdentity }) as NodeRow | null
-    : await db.node.findUnique({ where: { id } });
+    : args.endpointMetadataOnly
+      ? await db.node.findUnique({ where: { id }, select: endpointMetadata }) as NodeRow | null
+      : await db.node.findUnique({ where: { id } });
   const out: Array<ResolvedInheritedEdge<EdgeRow, NodeRow>> = [];
   const checkLimit = () => {
     if (args.maxResults === undefined || out.length <= args.maxResults) return;

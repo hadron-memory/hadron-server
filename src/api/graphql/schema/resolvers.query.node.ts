@@ -60,7 +60,7 @@ import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemorySc
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
-import { requireWorkerReadAccess } from './resolvers.worker.js';
+import { requireWorkerProfileAccess } from './resolvers.worker.js';
 import { resolveNodeRevRef } from '../../../lib/entityRef/nodeRevRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
@@ -767,13 +767,15 @@ export const nodeQueries = {
           if (!worker) return null;
           const app = await ctx.db.app.findUnique({ where: { id: worker.appId } });
           if (!app || app.deletedAt) return null;
-          // The SHARED worker read gate, not a hand-rolled copy — a bespoke
-          // admin-or-member check here would drift from the `workers` query's
-          // (CLAUDE.md authorization invariants). App participants at any role,
-          // the App's own key, or the owner of a user-owned App.
+          // #1149: a worker link opens the worker's PROFILE, so this is the
+          // SHARED profile gate `worker(ref)` uses, not a hand-rolled copy
+          // (CLAUDE.md authorization invariants): any signed-in user, the App's
+          // own key, impersonation bounded to the App's org. Narrow catch: only
+          // the gate's denial reads as unresolvable.
           try {
-            await requireWorkerReadAccess(ctx, app);
-          } catch {
+            await requireWorkerProfileAccess(ctx, app);
+          } catch (e) {
+            if (!(e instanceof GraphQLError && e.extensions?.code === 'FORBIDDEN')) throw e;
             return null;
           }
           // A RETIRED worker still resolves: retirement never frees the name or
@@ -1244,7 +1246,16 @@ export const nodeQueries = {
       // #463: push the org narrowing straight into the scope queries (rather
       // than selecting all ids then intersecting) so the admin/broad path never
       // materializes every memory id just to filter it down.
-      const orgWhere = orgScopeId ? { organizationId: orgScopeId } : {};
+      // #1987 (R208 A, cor:api:060:04): the organisation's TASK catalogue lists
+      // only the organisation's own memories, never an App's. A memory that
+      // belongs to an App carries app_id (required for class 'app', set for an
+      // App-scoped knowledge/group, #653), so the runnable listing narrows to
+      // app_id IS NULL, the same predicate as ORG_INCLUDE.memories. Narrowing
+      // only: it composes with the accessible set above and adds no audience.
+      // Org-scoped non-runnable search is deliberately unchanged (no ruling).
+      const orgWhere = orgScopeId
+        ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) }
+        : {};
 
       let scopeIds: string[];
       if (explicitIds) {
@@ -1935,9 +1946,12 @@ export const nodeQueries = {
           return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
         }
         innerFilter = { ...f, memoryIds: requested };
-      } else if (scopeRes.kind === 'global') {
-        innerOrgId = scopeRes.orgScopeId;
       }
+      // #1987: the global view's materialised memory list must still pass
+      // through the org narrowing in core (the App-memory exclusion of the
+      // runnable catalogue); the list is already within that org, so for every
+      // other query the extra organizationId clause changes nothing.
+      if (scopeRes.kind === 'global') innerOrgId = scopeRes.orgScopeId;
       const inner = await core({ ...coreArgs, filter: innerFilter, orgId: innerOrgId });
       return { ...inner, scope: info, degraded: mergeDegradedCodes(inner.degraded, narrowed) };
     },
@@ -2304,7 +2318,7 @@ export const nodeQueries = {
           nodeLoc: loc,
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
       });
     },

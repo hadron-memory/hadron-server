@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { stringify } from 'yaml';
 import { GRAPHS_PATH } from '../../config.js';
+import { pathUnderGraphsRoot, ProjectionPathError } from '../localFs/pathUnderGraphsRoot.js';
 import { db } from '../db/client.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
@@ -21,7 +22,7 @@ import { ENCRYPTED_GIT_SYNC_MESSAGE, ENCRYPTED_GIT_SYNC_UNAVAILABLE, logEncrypte
 
 function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
   const slug = memoryUrn.includes(':') ? memoryUrn.split(':').slice(1).join(':') : memoryUrn;
-  return join(GRAPHS_PATH, orgUrn, slug);
+  return pathUnderGraphsRoot(GRAPHS_PATH, orgUrn, slug);
 }
 
 export interface PushResult {
@@ -85,7 +86,13 @@ async function pushMemoryToGitUnderLock(
   // spec 047: git-mirror is org-scoped (it needs the org's GitHub App). A
   // user-owned memory has no org, so there's nothing to sync it to.
   if (!org) return { nodeCount: 0, error: 'Memory has no organization (user-owned memories are not git-synced)' };
-  const localPath = memoryLocalPath(org.urn, memory.urn);
+  let localPath: string;
+  try {
+    localPath = memoryLocalPath(org.urn, memory.urn);
+  } catch (error) {
+    if (error instanceof ProjectionPathError) return { nodeCount: 0, error: error.message };
+    throw error;
+  }
 
   // 2. Get installation token
   let token: string | null = null;

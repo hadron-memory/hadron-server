@@ -1,7 +1,7 @@
 /**
  * #2047 (S10, cor:agt:040:03/:10) — the CHAT surface: an unserveable boot prompt refuses startChat and sendChatMessage with
  * the bind's typed refusal and leaves no chat; an approved one is served with its variables bound to the Agent, never the
- * retired `Agent.systemPrompt`; the chat records at start and again only when its served revision changes.
+ * retired literal prompt (#2712 deleted it); the chat records at start and again only when its served revision changes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -18,7 +18,6 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 
 const M = resolvers.Mutation as any;
 let org: any, user: any, agent: any, app: any, systemMemoryId: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 const ctx = (): Context => ({ db, roles: ['READER'], userId: user.id });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 
@@ -46,12 +45,11 @@ async function recompileApproved(nodeId: string, content: string) {
 }
 
 beforeEach(async () => {
-  process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   org = await db.organization.create({ data: { id: generateId(), name: 'sc-org', urn: 'sc-org' } });
   user = await db.user.create({ data: { githubId: 92047100, githubUsername: 'sc-user', roles: ['ADMIN'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', systemPrompt: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
+  agent = await M.createAgent({}, { orgId: org.id, name: 'chat-agent', visibility: 'ORGANIZATION', description: 'LEGACY {{agent.name}}' }, { db, roles: ['ADMIN'], userId: user.id });
   systemMemoryId = agent.systemMemoryId;
   app = await db.app.create({ data: { id: generateId(), name: 'chat-app', urn: `${org.urn}:chat-app`, organizationId: org.id, appAgents: { create: { agentId: agent.id } } } });
   const nodes = [
@@ -64,22 +62,11 @@ beforeEach(async () => {
   ];
   for (const n of nodes) await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: n.loc, name: n.name, nodeType: n.nodeType, data: ((n as any).data ?? null) as any, content: ((n as any).content ?? null) as any } });
 });
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-});
 
 // loc-scope-ok: counts every chat in the fresh test database
 const chatNodes = () => db.node.count({ where: { loc: { startsWith: 'chats:' } } });
 
 describe('#2047 chat', () => {
-  it('serving OFF: the legacy Agent prompt is bound and nothing is recorded', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    const start = await M.startChat({}, { agentId: agent.id }, ctx());
-    expect(start.systemMessage).toContain('LEGACY chat-agent');
-    expect(await db.servedPrompt.count()).toBe(0);
-  });
-
   it('no pointer: startChat is refused with the typed refusal and creates no chat', async () => {
     const chats = await chatNodes();
     expect(await code(M.startChat({}, { agentId: agent.id }, ctx()))).toBe('BOOT_PROMPT_NOT_SET');
@@ -154,13 +141,12 @@ describe('#2047 chat', () => {
   });
 });
 
-// #2702: a chat binds no worker, so the legacy tokens bind to the Agent, exactly as the pre-serve chat path did.
-describe('#2702 served chat binds the legacy {{name}} / {{role}} tokens', () => {
-  it('binds {{name}} to the Agent name and {{role}} to its persona role', async () => {
+// #1772 step 3: a served chat no longer binds the legacy tokens to the Agent.
+describe('#1772 step 3: served chat leaves legacy {{name}} / {{role}} tokens as written', () => {
+  it('renders {{name}} and {{role}} literally', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: 'helper' } });
     await compiled('You are {{name}}, the {{role}}.');
     const start = await M.startChat({}, { agentId: agent.id }, ctx());
-    expect(start.systemMessage).toContain('You are chat-agent, the helper.');
-    expect(start.systemMessage).not.toMatch(/\{\{(name|role)\}\}/);
+    expect(start.systemMessage).toContain('You are {{name}}, the {{role}}.');
   });
 });

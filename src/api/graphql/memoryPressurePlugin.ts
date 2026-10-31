@@ -22,7 +22,7 @@ export function readMemoryPressureConfig(env = process.env): MemoryPressureConfi
 }
 
 type Deps = {
-  memory?: () => { heapUsed: number; rss: number };
+  memory?: () => Pick<NodeJS.MemoryUsage, 'heapUsed' | 'heapTotal' | 'external' | 'arrayBuffers' | 'rss'>;
   now?: () => number;
   log?: (line: string) => void;
 };
@@ -39,7 +39,7 @@ export function memoryPressurePlugin(config = readMemoryPressureConfig(), deps: 
   let timer: ReturnType<typeof setInterval> | undefined;
   const sample = () => {
     try {
-      const { heapUsed, rss } = memory();
+      const { heapUsed, heapTotal, external, arrayBuffers, rss } = memory();
       const at = now();
       if ((heapUsed < config.heapBytes && rss < config.rssBytes) || at - lastLogAt < 60_000) return;
       lastLogAt = at;
@@ -48,7 +48,7 @@ export function memoryPressurePlugin(config = readMemoryPressureConfig(), deps: 
         if (operations.length === MAX_REPORTED) break;
         operations.push({ operationName: entry.operationName, principal: entry.principal, elapsedMs: Math.max(0, at - entry.startedAt) });
       }
-      log(JSON.stringify({ event: 'graphql.memory_pressure', heapUsed, rss, inFlight: active.size + untracked,
+      log(JSON.stringify({ event: 'graphql.memory_pressure', heapUsed, heapTotal, external, arrayBuffers, rss, inFlight: active.size + untracked,
         operations, omitted: active.size + untracked - operations.length }));
     } catch {
       // Observability must not change an operation's result or throw from the sampler.

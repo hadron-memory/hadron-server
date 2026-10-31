@@ -38,6 +38,8 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
+import { raisePostLimitAlarm } from '../../../lib/agentTasks/postLimit.js';
+import { admissionTime, findBrokenPostLimit, findEarlierDuplicate, lockWorkerPostAdmission } from '../../../lib/teamChatAdmission.js';
 import { lockStampAuthority, wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { deriveEdgeLoc, sanitizeLocAtom } from '../../../lib/edgeLoc.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -64,6 +66,9 @@ import { reachesWorker } from '../../../lib/mentionReach.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { TEAM_CHAT_LOC, TEAM_CHAT_MESSAGES_LOC } from '../../../lib/teamChatLoc.js';
 import { recordCheckMiss } from '../../../lib/channelReadState.js';
+import {
+  TEAM_CHAT_SEARCH_SCAN_CAP, assertSearchQuery, decodeSearchCursor, encodeSearchCursor, searchBinding, searchCallerKey, searchPageSize,
+} from '../../../lib/teamChatSearch.js';
 import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -996,7 +1001,11 @@ async function postToChannelRoot(
   const messageId = generateId();
   const createdBy = opts.system ? null : (ctx.userId ?? null);
   let messageLoc: string | null = null;
-  const { seq, inserted: createdAt } = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
+  // #2015: the admission instant of a worker's post, stamped into its createdAt below; null for a human or system post.
+  let admittedAt: Date | null = null;
+  let appended: { seq: number; inserted: Date };
+  try {
+  appended = await appendChatMessage(ctx.db, root, memEncInfo, async ({ tx, seq, msgNum }) => {
     // The Channel is re-checked LIVE under the lock (Copilot on PR #1169):
     // deleteChannel takes this same key, so a delete that committed between
     // resolving the target and acquiring it is seen here — a message is
@@ -1043,6 +1052,31 @@ async function postToChannelRoot(
           { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } },
         );
       }
+    }
+    // #2015 — a worker's admission: serialize this worker across Channels, read the ONE admission instant (the database
+    // clock, after the Channel's lock and this one), and refuse an identical post it already made here inside ten minutes.
+    // Before any stamp authority, session resume, seal, node or edge, so a refusal writes nothing: the throw rolls the
+    // transaction back before the allocator's counter writes (they follow the closure). A genuine human post and the
+    // platform's own carry no worker and are not judged.
+    const postingWorkerId = !opts.system && typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null;
+    if (postingWorkerId) {
+      await lockWorkerPostAdmission(tx, postingWorkerId);
+      admittedAt = await admissionTime(tx);
+      // An encrypted body is ciphertext at rest: no equality read can match, so none is made (no key plumbing, R13/R43).
+      const earlierSeq = memEncInfo.isEncrypted
+        ? null
+        : await findEarlierDuplicate(tx, { memoryId: root.memoryId, channelId: incarnation.id, workerId: postingWorkerId, body, replyTargetId: replyTarget?.id ?? null, admittedAt });
+      if (earlierSeq != null) {
+        throw new GraphQLError(
+          `Identical to your message #${earlierSeq} in this Channel, which was posted: do not retry. Say something different, or reply to #${earlierSeq}.`,
+          { extensions: { code: 'TEAM_CHAT_DUPLICATE', earlierSeq, channelId: incarnation.id } },
+        );
+      }
+      // #2014 — the rolling limits, counted under the same lock and clock, AFTER the duplicate rule: an identical post is refused as a
+      // duplicate (do not retry) whatever the count, so it never raises the rate alarm. The refusal is thrown as a sentinel: it rolls this
+      // transaction back (nothing is stored), and the caller raises the alarm in its OWN committed transaction.
+      const broken = await findBrokenPostLimit(tx, postingWorkerId, admittedAt);
+      if (broken) throw new PostRateLimited(postingWorkerId, broken.name, broken.resetsAt);
     }
     // #1842 — the reply-target fold (Holger, #10394): when the target was
     // authored by a WORKER, that worker counts as mentioned, recorded at
@@ -1155,6 +1189,8 @@ async function postToChannelRoot(
         createdByAgentId: authorAgentId,
         // #914: the SENDER's user id — for worker posts, the human driver.
         createdBy,
+        // #2015: a worker's message is recorded at the instant it was admitted (see teamChatAdmission.ts).
+        ...(admittedAt ? { createdAt: admittedAt } : {}),
       },
     });
     if (replyTarget) {
@@ -1172,6 +1208,16 @@ async function postToChannelRoot(
     }
     return row.createdAt;
   }, { asChannel: true });
+    } catch (e) {
+      if (!(e instanceof PostRateLimited)) throw e;
+      // #2014: the post is refused and nothing was stored; the alarm (once an hour) commits on its own.
+      await raisePostLimitAlarm(ctx.db, e.workerId, e.limit);
+      throw new GraphQLError(
+        `Your message was NOT posted: you have reached the team-chat post limit (${e.limit}). Do not retry in a loop: wait until ${e.resetsAt.toISOString()}, then post once.`,
+        { extensions: { code: 'TEAM_CHAT_POST_RATE_LIMITED', limit: e.limit, resetsAt: e.resetsAt.toISOString() } },
+      );
+    }
+  const { seq, inserted: createdAt } = appended;
 
   // #1061 — a chat message IS a node, so posting one is a write on the team's
   // shared chat memory. This was one of the largest blind spots in the old
@@ -1214,6 +1260,11 @@ async function postToChannelRoot(
  * team chat to post into or is gone; it never creates one.
  */
 class NoticeNotClaimed extends Error {}
+
+/** #2014: a worker's post refused by the rate limit; carries what the typed error and the alarm need. */
+class PostRateLimited extends Error {
+  constructor(readonly workerId: string, readonly limit: string, readonly resetsAt: Date) { super(limit); }
+}
 
 /**
  * Could a notice be posted into this App's team chat right now? (Read-only; nothing is created or restored.) Needs a
@@ -1320,9 +1371,21 @@ async function readChannelRoot(
   // P1 on PR #941). Everything else this function does is memory-scoped.
   appId: string | null,
   root: ChatRootRow,
-  args: { sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
+  args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
-  const { sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  const { replyToSeq, sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
+  // The outer resolver has already established read access. Validate independently of
+  // cursor/mention filters: a missing target is a refusal, a valid empty thread is not.
+  if (replyToSeq != null) {
+    const target = await ctx.db.node.findFirst({
+      where: { memoryId: root.memoryId,
+        loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
+        nodeType: 'chat-message', deletedAt: null, seq: replyToSeq },
+      select: { id: true },
+    });
+    if (!target) throw new GraphQLError(`replyToSeq ${replyToSeq} does not name a message in this Channel.`,
+      { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq } });
+  }
   const metadataVisible = await canReadTeamMetadata(ctx, appId);
   const teamFiltered = teamHeadRef != null || untagged != null;
   if (teamFiltered && !metadataVisible) throw new GraphQLError('Team metadata is unavailable in this Channel.', { extensions: { code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN' } });
@@ -1349,6 +1412,7 @@ async function readChannelRoot(
     // prefix must not surface as fabricated transcript entries.
     nodeType: 'chat-message',
     deletedAt: null,
+    ...(replyToSeq != null ? { NOT: { seq: replyToSeq } } : {}),
     // #1116: the two cursors are opposite ends of one range and compose —
     // sinceSeq is exclusive-above, beforeSeq exclusive-below, and passing
     // both reads a bounded slice. A team message always carries a seq, so
@@ -1405,19 +1469,25 @@ async function readChannelRoot(
     );
   };
 
+  const envelopeFilters: Prisma.NodeWhereInput[] = [];
+  if (replyToSeq != null && !memEncInfo.isEncrypted) {
+    envelopeFilters.push({ data: { path: ['replyToSeq'], equals: replyToSeq } });
+  }
   if (teamFiltered && !memEncInfo.isEncrypted) {
     const predicate: Prisma.NodeWhereInput = selectedHead
       ? { data: { path: ['teamHeadIds'], array_contains: [selectedHead] } }
       : { OR: [{ data: { path: ['teamHeadIds'], equals: Prisma.DbNull } }, { data: { path: ['teamHeadIds'], equals: Prisma.AnyNull } }, { data: { path: ['teamHeadIds'], equals: [] } }] };
     const noHeads = predicate;
-    where.AND = untagged === false ? [{ NOT: noHeads }] : [predicate];
+    envelopeFilters.push(untagged === false ? { NOT: noHeads } : predicate);
   }
-  if (mentionsRef || (teamFiltered && memEncInfo.isEncrypted)) {
+  if (envelopeFilters.length > 0) where.AND = envelopeFilters;
+  if (mentionsRef || ((teamFiltered || replyToSeq != null) && memEncInfo.isEncrypted)) {
     const resolved = mentionsRef && appId !== null ? await resolveMentionTokens(ctx, appId, mentionsRef) : null;
     if (mentionsRef && !resolved) return { items: [], total: 0 };
     const { tokens, workerId } = resolved ?? { tokens: [], workerId: null };
     // #2020: a worker sees what reaches it (lib/mentionReach.ts); a user, its handle.
     const matches = (msg: TeamChatMessageOut): boolean =>
+      (replyToSeq == null || msg.replyToSeq === replyToSeq) &&
       (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
     // Always scanned ASCENDING regardless of paging direction: this branch
     // filters in memory, so the direction is applied to the RESULT below.
@@ -1458,6 +1528,72 @@ async function readChannelRoot(
   recordRead(rows);
   return { items, total };
 }
+
+/**
+ * #2299 — search ONE channel's history (cor:agt:020:04, "Searching a chat's history"). The caller has already passed the
+ * read gate; this is everything after it. It matches against {@link projectMessage}, the same projection a read returns,
+ * so nothing a read withholds can be matched, counted, shown or encoded in the cursor; and it returns references only
+ * (no body, no snippet, no count). It writes nothing: no read mark, no usage, no heartbeat.
+ *
+ * A host in an encrypted memory is refused outright: its stored text is ciphertext, and decrypting a history to scan it
+ * is not a read the caller asked for. An empty page therefore only ever means a completed search.
+ */
+async function searchChannelRoot(
+  ctx: Context,
+  root: ChatRootRow,
+  channel: { id: string; incarnation: number },
+  args: { query: string; limit: number; cursor: string | null },
+): Promise<TeamChatSearchPageOut> {
+  const memEncInfo = await getMemoryEncryptionInfo(ctx.db, root.memoryId);
+  if (memEncInfo.isEncrypted) {
+    throw new GraphQLError('This chat is hosted in an encrypted memory and cannot be searched.', { extensions: { code: 'TEAM_CHAT_SEARCH_ENCRYPTED' } });
+  }
+  const binding = searchBinding(args.query, channel.id, channel.incarnation, searchCallerKey(ctx));
+  const before = args.cursor == null ? null : decodeSearchCursor(args.cursor, binding);
+  const memBareUrn = await hostMemoryUrn(ctx, root.memoryId);
+  const rows = await ctx.db.node.findMany({
+    where: {
+      memoryId: root.memoryId,
+      loc: { startsWith: escapePrismaLikePattern(`${root.loc}:messages:`) },
+      nodeType: 'chat-message',
+      deletedAt: null,
+      seq: before != null ? { lt: before } : { not: null },
+    },
+    orderBy: [{ seq: 'desc' }, { createdAt: 'desc' }, { loc: 'desc' }],
+    select: { id: true, loc: true, seq: true, content: true, data: true, createdAt: true },
+    take: TEAM_CHAT_SEARCH_SCAN_CAP,
+  });
+  const needle = args.query.toLowerCase();
+  const items: TeamChatSearchPageOut['items'] = [];
+  let filledAt = -1;
+  for (let i = 0; i < rows.length; i++) {
+    const msg = projectMessage(rows[i]!, memEncInfo, memBareUrn);
+    if (!msg.body.toLowerCase().includes(needle)) continue;
+    items.push({ nodeId: msg.nodeId, urn: msg.urn, seq: msg.seq, channelId: channel.id, channelIncarnation: channel.incarnation });
+    if (items.length >= args.limit) { filledAt = i; break; }
+  }
+  // Fewer rows than the bound means the scan reached the start of the history; exactly the bound means it may not have.
+  const reachedStart = rows.length < TEAM_CHAT_SEARCH_SCAN_CAP;
+  const page = { items, channelId: channel.id, channelIncarnation: channel.incarnation };
+  if (filledAt >= 0) {
+    // A full page continues after the last match returned.
+    if (filledAt === rows.length - 1 && reachedStart) return { ...page, complete: true, cursor: null };
+    return { ...page, complete: false, cursor: encodeSearchCursor(binding, items[items.length - 1]!.seq) };
+  }
+  if (reachedStart) return { ...page, complete: true, cursor: null };
+  // The scan bound fired first: resume just below the LAST SCANNED seq, so nothing is scanned twice or skipped.
+  return { ...page, complete: false, cursor: encodeSearchCursor(binding, rows[rows.length - 1]!.seq ?? 0) };
+}
+
+type TeamChatSearchPageOut = {
+  items: { nodeId: string; urn: string | null; seq: number; channelId: string; channelIncarnation: number }[];
+  complete: boolean;
+  cursor: string | null;
+  channelId: string | null;
+  channelIncarnation: number | null;
+};
+
+const EMPTY_COMPLETE_SEARCH: TeamChatSearchPageOut = { items: [], complete: true, cursor: null, channelId: null, channelIncarnation: null };
 
 export const teamChatMutations = {
   /**
@@ -1605,6 +1741,7 @@ export const teamChatQueries = {
     }: {
       appRef: string;
       advanceReadState?: boolean | null;
+      replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;
@@ -1615,7 +1752,11 @@ export const teamChatQueries = {
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
     // #2520: the gate half is ONE function shared with the `team_chat_read` run tool.
     const target = await resolveTeamChatReadTarget(ctx, appRef);
-    if (!target) return { items: [], total: 0 };
+    if (!target) {
+      if (args.replyToSeq != null) throw new GraphQLError(`replyToSeq ${args.replyToSeq} does not name a message in this Channel.`,
+        { extensions: { code: 'TEAM_CHAT_REPLY_NOT_FOUND', replyToSeq: args.replyToSeq } });
+      return { items: [], total: 0 };
+    }
     const { appId, root } = target;
     // The attention capture changes ordinary-read semantics only for a
     // caller's exact Worker session. Outside that boundary this extra lookup
@@ -1656,6 +1797,37 @@ export const teamChatQueries = {
     return Object.assign(page, { channelId: readChannel?.id ?? null, channelIncarnation: readChannel?.incarnation ?? null });
   },
 
+  /**
+   * #2299 — search the team chat's history: the `appRef` convenience over the same search `channelMessageSearch` runs.
+   * The two bound checks come first (fixed numbers, so the refusal is the same for everyone), then the read gate
+   * `teamChatMessages` uses, then the search. No read-state side effect.
+   */
+  teamChatSearch: async (
+    _: unknown,
+    { appRef, query, limit, cursor }: { appRef: string; query: string; limit?: number | null; cursor?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatSearchPageOut> => {
+    assertSearchQuery(query);
+    const take = searchPageSize(limit);
+    const target = await resolveTeamChatReadTarget(ctx, appRef);
+    if (!target) return EMPTY_COMPLETE_SEARCH;
+    const channel = await ctx.db.channel.findFirst({ where: { chatRootNodeId: target.root.id, deletedAt: null }, select: { id: true, incarnation: true } });
+    if (!channel) return EMPTY_COMPLETE_SEARCH;
+    return searchChannelRoot(ctx, target.root, channel, { query, limit: take, cursor: cursor ?? null });
+  },
+
+  /** #2299 — search ANY Channel by ref, through the read gate `channelMessages` uses; unreadable is CHANNEL_NOT_FOUND. */
+  channelMessageSearch: async (
+    _: unknown,
+    { channelRef, query, limit, cursor }: { channelRef: string; query: string; limit?: number | null; cursor?: string | null },
+    ctx: Context,
+  ): Promise<TeamChatSearchPageOut> => {
+    assertSearchQuery(query);
+    const take = searchPageSize(limit);
+    const target = await resolveChannelTarget(ctx, channelRef, 'read');
+    return searchChannelRoot(ctx, target.root, { id: target.channelId, incarnation: target.incarnation.value }, { query, limit: take, cursor: cursor ?? null });
+  },
+
   /** Spec 049 Phase 8 — read ANY Channel by ref; a Channel the caller may not read is "no match". */
   channelMessages: async (
     _: unknown,
@@ -1667,6 +1839,7 @@ export const teamChatQueries = {
     }: {
       channelRef: string;
       advanceReadState?: boolean | null;
+      replyToSeq?: number | null;
       sinceSeq?: number | null;
       beforeSeq?: number | null;
       mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null;

@@ -19,7 +19,8 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
+import { getPrincipalAppMemoryAccess } from '../../mcp/access-control.js';
 import { generateId } from '../../lib/id.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 
@@ -68,7 +69,14 @@ async function agentWithApp(orgId: string, label: string) {
   });
   const { app, rawKey } = await createDbAppWithKey(db, `app-${label}`, orgId);
   await createDbAppAgent(db, app.id, agent.id);
-  return { agentId: agent.id, appKey: rawKey };
+  return { agentId: agent.id, appKey: rawKey, appId: app.id };
+}
+
+/** #1376: an App member (a user behind the App), the principal that still reaches memory through the agent's items. */
+async function appMemberOf(appId: string) {
+  const user = await db.user.create({ data: { id: generateId(), handle: `am-${generateId()}`, githubUsername: `am-${generateId()}` } });
+  await createDbAppMember(db, appId, user.id, 'member');
+  return { appId, userId: user.id };
 }
 
 async function readsContent(appKey: string, target: string) {
@@ -162,18 +170,22 @@ afterAll(async () => {
 
 describe('#1349 — legitimate attaches keep working', () => {
   it('an org admin attaches their own org memory read-only; the App key reads it', async () => {
-    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'own-read');
+    const { agentId, appKey, appId } = await agentWithApp(attackerOrgId, 'own-read');
     const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read' });
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
-    expect(await readsContent(appKey, 'ownKnowledge')).toBe('ownKnowledge SECRET');
+    // #1376: the bare App key no longer reads org knowledge through the item; an App member (user behind it) does.
+    expect(await readsContent(appKey, 'ownKnowledge')).toBeNull();
+    expect((await getPrincipalAppMemoryAccess(db, await appMemberOf(appId))).get(mem.ownKnowledge!.id)).toBe('READ_ONLY');
     expect(await writes(appKey, 'ownKnowledge')).toBe(false);
   });
 
   it('an org admin attaches their own org memory read-write; the App key writes it', async () => {
-    const { agentId, appKey } = await agentWithApp(attackerOrgId, 'own-rw');
+    const { agentId, appKey, appId } = await agentWithApp(attackerOrgId, 'own-rw');
     const r = await gql(key.attacker!, ATTACH, { g: agentId, m: mem.ownKnowledge!.urn, r: 'read-write' });
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
-    expect(await writes(appKey, 'ownKnowledge')).toBe(true);
+    // #1376: the item caps a write; it never lets a bare key write. An App member's access is the item's READ_WRITE.
+    expect(await writes(appKey, 'ownKnowledge')).toBe(false);
+    expect((await getPrincipalAppMemoryAccess(db, await appMemberOf(appId))).get(mem.ownKnowledge!.id)).toBe('READ_WRITE');
   });
 
   it('anyone may attach a PUBLIC memory read-only (no audience is widened)', async () => {
@@ -460,16 +472,19 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     const movingNode = await db.node.create({ data: { id: generateId(), memoryId: moving.id, loc: 'payroll', name: 'p', content: 'MOVING SECRET' } });
     mem.moving = { id: moving.id, urn: `hrn:mem:${srcOrg.urn}:moving`, nodeId: movingNode.id };
 
-    const { agentId, appKey } = await agentWithApp(srcOrg.id, 'transfer-src');
+    const { agentId, appKey, appId } = await agentWithApp(srcOrg.id, 'transfer-src');
     const attach = await gql(moverKey, ATTACH, { g: agentId, m: mem.moving.urn, r: 'read' });
     expect(attach.errors, JSON.stringify(attach.errors)).toBeUndefined();
-    expect(await readsContent(appKey, 'moving')).toBe('MOVING SECRET');
+    // #1376: reach is shown through an App member; the bare key no longer reads org knowledge via the item.
+    const member = await appMemberOf(appId);
+    expect((await getPrincipalAppMemoryAccess(db, member)).get(mem.moving.id)).toBe('READ_ONLY');
+    expect(await readsContent(appKey, 'moving')).toBeNull();
 
     // Transfer to the other org. Visibility is NOT supplied — the trigger the
     // first version of this sweep missed entirely.
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id } }`, { id: moving.id, o: dstOrg.id });
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
-    expect(await readsContent(appKey, 'moving')).toBe('MOVING SECRET');
+    expect((await getPrincipalAppMemoryAccess(db, member)).get(mem.moving.id)).toBe('READ_ONLY');
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId } })).deletedAt).toBeNull();
   });
 
@@ -495,12 +510,15 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     mem.pubmove = { id: pub.id, urn: `hrn:mem:${srcOrg.urn}:pubmove`, nodeId: node.id };
 
     // A writable link from the memory's own tenant — legitimate today.
-    const { agentId: writer, appKey: writerKey } = await agentWithApp(srcOrg.id, 'pub-writer');
+    const { agentId: writer, appKey: writerKey, appId: writerApp } = await agentWithApp(srcOrg.id, 'pub-writer');
     expect((await gql(moverKey, ATTACH, { g: writer, m: mem.pubmove.urn, r: 'read-write' })).errors).toBeUndefined();
     // And a foreign READ link, justified by PUBLIC.
     const { agentId: reader, appKey: readerKey } = await agentWithApp(dualOrgId, 'pub-reader');
     expect((await gql(key.dual!, ATTACH, { g: reader, m: mem.pubmove.urn, r: 'read' })).errors).toBeUndefined();
-    expect(await writes(writerKey, 'pubmove')).toBe(true);
+    // #1376: the same-tenant read-write item is a write for an App member only; a bare key never writes.
+    const writerMember = await appMemberOf(writerApp);
+    expect(await writes(writerKey, 'pubmove')).toBe(false);
+    expect((await getPrincipalAppMemoryAccess(db, writerMember)).get(mem.pubmove.id)).toBe('READ_WRITE');
 
     // Transfer. The memory stays PUBLIC; only its tenant changes.
     const moved = await gql(moverKey, `mutation($id: ID!, $o: ID!) { updateMemory(id: $id, organizationId: $o) { id visibility } }`, { id: pub.id, o: dstOrg.id });
@@ -508,7 +526,8 @@ describe('#1349 — the checks are serialized with the writes they depend on (@c
     expect((await db.memory.findUniqueOrThrow({ where: { id: pub.id } })).visibility).toBe('PUBLIC');
 
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: writer } })).deletedAt).toBeNull();
-    expect(await writes(writerKey, 'pubmove')).toBe(true);
+    expect(await writes(writerKey, 'pubmove')).toBe(false);
+    expect((await getPrincipalAppMemoryAccess(db, writerMember)).get(mem.pubmove.id)).toBe('READ_WRITE');
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: reader } })).deletedAt).toBeNull();
     // Non-null rather than the original bytes: the legitimate write above
     // changed them, and what matters here is that the read link survived.
@@ -1071,7 +1090,8 @@ describe("#1357 — the same-App attach (Holger's ruling, 2026-09-26)", () => {
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
     expect(await db.agentMemoryItem.findFirst({ where: { agentId: secondAgentId, memoryId: mem.appX!.id }, select: { role: true } }))
       .toEqual({ role: 'read' });
-    expect(await readsContent(appXKey, 'appX')).toBe('APP X KNOWLEDGE');
+    // #1376: the attach is no read grant to a bare key; the link row above is the proof.
+    expect(await readsContent(appXKey, 'appX')).toBeNull();
   });
 
   it('does not treat a creator-scoped legacy holding as App knowledge', async () => {
@@ -1887,7 +1907,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     const memoryUrn = created.data!.createMemoryInApp.urn as string;
     const node = await db.node.findFirstOrThrow({ where: { memoryId } });
     await db.node.update({ where: { id: node.id }, data: { content: 'CROSS ORG RUNBOOK' } });
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 
     const unrelated = await db.agent.create({
       data: { id: generateId(), organizationId: victimOrgId, name: 'uninstalled foreign', urn: `victim-${suffix}:uninstalled-foreign` } as never,
@@ -1897,7 +1917,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect(touch.errors, JSON.stringify(touch.errors)).toBeUndefined();
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).toBeNull();
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: unrelated.id, memoryId } })).deletedAt).not.toBeNull();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 
     // Both grants belong to the caller: App admin and foreign Agent admin.
     const both = await db.user.create({ data: { id: generateId(), handle: `both-${suffix}` } });
@@ -1911,7 +1931,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect((await gql(appKey, READ, { r: node.id })).data?.node).toBeNull();
     const restored = await gql(bothKey, ATTACH, { g: agent.id, m: memoryUrn, r: 'read' });
     expect(restored.errors, JSON.stringify(restored.errors)).toBeUndefined();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
 
     // The old owner-change route must refuse this App-scoped memory. The
     // dedicated transfer path reports the App scope as a dependent blocker.
@@ -1921,7 +1941,7 @@ describe('#1357 Claude review — licensed cross-org App knowledge survives a vi
     expect(code(moved)).toBe('USE_TRANSFER_MEMORY_OWNERSHIP');
     expect((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).organizationId).toBe(attackerOrgId);
     expect((await db.agentMemoryItem.findFirstOrThrow({ where: { agentId: agent.id, memoryId } })).deletedAt).toBeNull();
-    expect((await gql(appKey, READ, { r: node.id })).data?.node?.content).toBe('CROSS ORG RUNBOOK');
+    expect((await gql(appKey, READ, { r: node.id })).data?.node ?? null).toBeNull(); // #1376: an item is no grant to a bare key; the link rows above are the proof
   });
 
   it('keeps a user-owned App link only while its foreign Agent subscription is live', async () => {

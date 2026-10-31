@@ -18,7 +18,7 @@
   ],
   [
    "hadron_create_app_memory",
-   "f560a387af8f23f9eec06b73155c226ef32269b357f8e89f0e28ffe4ad1d63dd"
+   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
   ],
   [
    "hadron_server_info",
@@ -74,7 +74,7 @@
   ],
   [
    "hadron_task_create",
-   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+   "4daf99c4fd6bdfc5d58ea46953d7495eb0c0181f56cb224be661e3819a1aae41"
   ],
   [
    "hadron_task_blocker_add",
@@ -87,6 +87,10 @@
   [
    "hadron_task_priority_set",
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
+  ],
+  [
+   "hadron_task_update",
+   "3a5e77ce4ee13181f14d5860d564ab4364ca2c0b32f3b6c5e9e92aed4a941aa7"
   ],
   [
    "hadron_task_assign",
@@ -130,7 +134,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "ebea162e69a561df8ce7c69ed5460f2d9b58db9e388dc3e31654393d4093789b"
   ],
   [
    "hadron_alarm_ack",
@@ -170,15 +174,15 @@
   ],
   [
    "hadron_delivery_settings_set",
-   "0f996f952f0dceedf22465956b1694d0508628e465062560b31c40517a8a208d"
+   "fef3ba4abb596d2b44bb85fdae5f8b8e7de37c8c8c61e79c3277f5dac0fa21d7"
   ],
   [
    "hadron_ticker_list",
-   "0d055272320cd52c6765903c645fea985f88c878731e22814d0bac8badd8a6aa"
+   "0b82ea013a27684fc7a57c5976a3c2600835c9fe951af06e1be2bfe8391586b3"
   ],
   [
    "hadron_ticker_create",
-   "a30f509694c232bf4a07f8764837c7e39282d9a58b237fe3d38e788246ec457c"
+   "f67aab77455fcb9bf4f0da7d17f2a130ba5b84d80d37f6faa00dbc8e7578edb5"
   ],
   [
    "hadron_ticker_update",
@@ -210,7 +214,7 @@
   ],
   [
    "hadron_due_wakes",
-   "8101c5dbfa68c8a3144627f2d611ba6a4fdd6bdbf98f420059e0a58c32d272a0"
+   "d9dc68501c3b155ce9e2be6fec74af95f90ddbf1f14074108eaa2220c99c68a6"
   ],
   [
    "hadron_team_chat_inbox",
@@ -222,7 +226,7 @@
   ],
   [
    "hadron_agent_ticker_template_list",
-   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+   "5b5736b3ea4e9acd124931db678b35b3e348a038e1ebee7487ded0678424bda5"
   ],
   [
    "hadron_agent_ticker_template_create",
@@ -282,7 +286,7 @@
   ],
   [
    "hadron_list_recovery_edges",
-   "dad6911fc2c8386837a215cdf966f7ba06747f866073864d577ffb22758bde44"
+   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
   ],
   [
    "hadron_get_recovery_node",
@@ -450,7 +454,7 @@
   ],
   [
    "hadron_run_task",
-   "447bfde0f72b40b2d03d2dea1415942cbcc4cde2e6190de57922585f7e8b5b40"
+   "543d5143635ff91b4643913053174671c13f313927eef56dc1bc2a4aab0b80fb"
   ],
   [
    "hadron_start_session",
@@ -474,7 +478,7 @@
   ],
   [
    "hadron_cast_worker",
-   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
+   "780b2d60f9fa0c1306cd6a89d30be1584519345b45a052f5eaa10891c3be7f4e"
   ],
   [
    "hadron_channel_post",
@@ -482,7 +486,7 @@
   ],
   [
    "hadron_channel_read",
-   "b3aa148159805750efd2e2e790029f81a081cb6f699d030a9ac64bc9dd97e36b"
+   "2a978fc4d62abf3a15eb0ecc4830d1663b7ba74b47e8ba9a0308b424c110ae18"
   ],
   [
    "hadron_team_chat_post",
@@ -490,7 +494,11 @@
   ],
   [
    "hadron_team_chat_read",
-   "ca39bfe50191367e6c2f2535acee8db4133370f6e401e37b6361df06e570427f"
+   "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
+  ],
+  [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
   ],
   [
    "hadron_team_attention",
@@ -522,7 +530,7 @@
   ],
   [
    "hadron_update_worker",
-   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+   "26533b187f376320478d4335674aaa662a79c90693801b00283da0fdbaee615a"
   ],
   [
    "hadron_change_worker_agent",
@@ -568,7 +576,7 @@
   ],
   [
    "hadron_create_app_memory",
-   "f560a387af8f23f9eec06b73155c226ef32269b357f8e89f0e28ffe4ad1d63dd"
+   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
   ],
   [
    "hadron_server_info",
@@ -624,7 +632,7 @@
   ],
   [
    "hadron_task_create",
-   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+   "4daf99c4fd6bdfc5d58ea46953d7495eb0c0181f56cb224be661e3819a1aae41"
   ],
   [
    "hadron_task_blocker_add",
@@ -637,6 +645,10 @@
   [
    "hadron_task_priority_set",
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
+  ],
+  [
+   "hadron_task_update",
+   "3a5e77ce4ee13181f14d5860d564ab4364ca2c0b32f3b6c5e9e92aed4a941aa7"
   ],
   [
    "hadron_task_assign",
@@ -680,7 +692,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "ebea162e69a561df8ce7c69ed5460f2d9b58db9e388dc3e31654393d4093789b"
   ],
   [
    "hadron_alarm_ack",
@@ -720,15 +732,15 @@
   ],
   [
    "hadron_delivery_settings_set",
-   "0f996f952f0dceedf22465956b1694d0508628e465062560b31c40517a8a208d"
+   "fef3ba4abb596d2b44bb85fdae5f8b8e7de37c8c8c61e79c3277f5dac0fa21d7"
   ],
   [
    "hadron_ticker_list",
-   "0d055272320cd52c6765903c645fea985f88c878731e22814d0bac8badd8a6aa"
+   "0b82ea013a27684fc7a57c5976a3c2600835c9fe951af06e1be2bfe8391586b3"
   ],
   [
    "hadron_ticker_create",
-   "a30f509694c232bf4a07f8764837c7e39282d9a58b237fe3d38e788246ec457c"
+   "f67aab77455fcb9bf4f0da7d17f2a130ba5b84d80d37f6faa00dbc8e7578edb5"
   ],
   [
    "hadron_ticker_update",
@@ -760,7 +772,7 @@
   ],
   [
    "hadron_due_wakes",
-   "8101c5dbfa68c8a3144627f2d611ba6a4fdd6bdbf98f420059e0a58c32d272a0"
+   "d9dc68501c3b155ce9e2be6fec74af95f90ddbf1f14074108eaa2220c99c68a6"
   ],
   [
    "hadron_team_chat_inbox",
@@ -772,7 +784,7 @@
   ],
   [
    "hadron_agent_ticker_template_list",
-   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+   "5b5736b3ea4e9acd124931db678b35b3e348a038e1ebee7487ded0678424bda5"
   ],
   [
    "hadron_agent_ticker_template_create",
@@ -832,7 +844,7 @@
   ],
   [
    "hadron_list_recovery_edges",
-   "dad6911fc2c8386837a215cdf966f7ba06747f866073864d577ffb22758bde44"
+   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
   ],
   [
    "hadron_get_recovery_node",
@@ -1000,7 +1012,7 @@
   ],
   [
    "hadron_run_task",
-   "447bfde0f72b40b2d03d2dea1415942cbcc4cde2e6190de57922585f7e8b5b40"
+   "543d5143635ff91b4643913053174671c13f313927eef56dc1bc2a4aab0b80fb"
   ],
   [
    "hadron_start_session",
@@ -1024,7 +1036,7 @@
   ],
   [
    "hadron_cast_worker",
-   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
+   "780b2d60f9fa0c1306cd6a89d30be1584519345b45a052f5eaa10891c3be7f4e"
   ],
   [
    "hadron_channel_post",
@@ -1032,7 +1044,7 @@
   ],
   [
    "hadron_channel_read",
-   "b3aa148159805750efd2e2e790029f81a081cb6f699d030a9ac64bc9dd97e36b"
+   "2a978fc4d62abf3a15eb0ecc4830d1663b7ba74b47e8ba9a0308b424c110ae18"
   ],
   [
    "hadron_team_chat_post",
@@ -1040,7 +1052,11 @@
   ],
   [
    "hadron_team_chat_read",
-   "ca39bfe50191367e6c2f2535acee8db4133370f6e401e37b6361df06e570427f"
+   "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
+  ],
+  [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
   ],
   [
    "hadron_team_attention",
@@ -1072,7 +1088,7 @@
   ],
   [
    "hadron_update_worker",
-   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+   "26533b187f376320478d4335674aaa662a79c90693801b00283da0fdbaee615a"
   ],
   [
    "hadron_change_worker_agent",
@@ -1118,7 +1134,7 @@
   ],
   [
    "hadron_create_app_memory",
-   "f560a387af8f23f9eec06b73155c226ef32269b357f8e89f0e28ffe4ad1d63dd"
+   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
   ],
   [
    "hadron_server_info",
@@ -1174,7 +1190,7 @@
   ],
   [
    "hadron_task_create",
-   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+   "4daf99c4fd6bdfc5d58ea46953d7495eb0c0181f56cb224be661e3819a1aae41"
   ],
   [
    "hadron_task_blocker_add",
@@ -1187,6 +1203,10 @@
   [
    "hadron_task_priority_set",
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
+  ],
+  [
+   "hadron_task_update",
+   "3a5e77ce4ee13181f14d5860d564ab4364ca2c0b32f3b6c5e9e92aed4a941aa7"
   ],
   [
    "hadron_task_assign",
@@ -1230,7 +1250,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "ebea162e69a561df8ce7c69ed5460f2d9b58db9e388dc3e31654393d4093789b"
   ],
   [
    "hadron_alarm_ack",
@@ -1270,15 +1290,15 @@
   ],
   [
    "hadron_delivery_settings_set",
-   "0f996f952f0dceedf22465956b1694d0508628e465062560b31c40517a8a208d"
+   "fef3ba4abb596d2b44bb85fdae5f8b8e7de37c8c8c61e79c3277f5dac0fa21d7"
   ],
   [
    "hadron_ticker_list",
-   "0d055272320cd52c6765903c645fea985f88c878731e22814d0bac8badd8a6aa"
+   "0b82ea013a27684fc7a57c5976a3c2600835c9fe951af06e1be2bfe8391586b3"
   ],
   [
    "hadron_ticker_create",
-   "a30f509694c232bf4a07f8764837c7e39282d9a58b237fe3d38e788246ec457c"
+   "f67aab77455fcb9bf4f0da7d17f2a130ba5b84d80d37f6faa00dbc8e7578edb5"
   ],
   [
    "hadron_ticker_update",
@@ -1310,7 +1330,7 @@
   ],
   [
    "hadron_due_wakes",
-   "8101c5dbfa68c8a3144627f2d611ba6a4fdd6bdbf98f420059e0a58c32d272a0"
+   "d9dc68501c3b155ce9e2be6fec74af95f90ddbf1f14074108eaa2220c99c68a6"
   ],
   [
    "hadron_team_chat_inbox",
@@ -1322,7 +1342,7 @@
   ],
   [
    "hadron_agent_ticker_template_list",
-   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+   "5b5736b3ea4e9acd124931db678b35b3e348a038e1ebee7487ded0678424bda5"
   ],
   [
    "hadron_agent_ticker_template_create",
@@ -1382,7 +1402,7 @@
   ],
   [
    "hadron_list_recovery_edges",
-   "dad6911fc2c8386837a215cdf966f7ba06747f866073864d577ffb22758bde44"
+   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
   ],
   [
    "hadron_get_recovery_node",
@@ -1550,7 +1570,7 @@
   ],
   [
    "hadron_run_task",
-   "447bfde0f72b40b2d03d2dea1415942cbcc4cde2e6190de57922585f7e8b5b40"
+   "543d5143635ff91b4643913053174671c13f313927eef56dc1bc2a4aab0b80fb"
   ],
   [
    "hadron_start_session",
@@ -1574,7 +1594,7 @@
   ],
   [
    "hadron_cast_worker",
-   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
+   "780b2d60f9fa0c1306cd6a89d30be1584519345b45a052f5eaa10891c3be7f4e"
   ],
   [
    "hadron_channel_post",
@@ -1582,7 +1602,7 @@
   ],
   [
    "hadron_channel_read",
-   "b3aa148159805750efd2e2e790029f81a081cb6f699d030a9ac64bc9dd97e36b"
+   "2a978fc4d62abf3a15eb0ecc4830d1663b7ba74b47e8ba9a0308b424c110ae18"
   ],
   [
    "hadron_team_chat_post",
@@ -1590,7 +1610,11 @@
   ],
   [
    "hadron_team_chat_read",
-   "ca39bfe50191367e6c2f2535acee8db4133370f6e401e37b6361df06e570427f"
+   "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
+  ],
+  [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
   ],
   [
    "hadron_list_workers",
@@ -1606,7 +1630,7 @@
   ],
   [
    "hadron_update_worker",
-   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+   "26533b187f376320478d4335674aaa662a79c90693801b00283da0fdbaee615a"
   ],
   [
    "hadron_change_worker_agent",
@@ -1652,7 +1676,7 @@
   ],
   [
    "hadron_create_app_memory",
-   "f560a387af8f23f9eec06b73155c226ef32269b357f8e89f0e28ffe4ad1d63dd"
+   "58a107410592b0f41aedc4d9a81c40c17c42f3cd39e481262cb7f0ea08b6922c"
   ],
   [
    "hadron_server_info",
@@ -1708,7 +1732,7 @@
   ],
   [
    "hadron_task_create",
-   "5a6362bfde8ffcdc49536b6e8b9bb407cd172d0220340c285ee3a13eddda26bf"
+   "4daf99c4fd6bdfc5d58ea46953d7495eb0c0181f56cb224be661e3819a1aae41"
   ],
   [
    "hadron_task_blocker_add",
@@ -1721,6 +1745,10 @@
   [
    "hadron_task_priority_set",
    "dbe9212560894a3f2402023b69c264ee669afd61f4a093b23271068a2b134f1a"
+  ],
+  [
+   "hadron_task_update",
+   "3a5e77ce4ee13181f14d5860d564ab4364ca2c0b32f3b6c5e9e92aed4a941aa7"
   ],
   [
    "hadron_task_assign",
@@ -1764,7 +1792,7 @@
   ],
   [
    "hadron_team_events",
-   "a0eeade95e3b3392c8d10a239f7bd6d9c15e95f14dcf9c53f61a2007e14623db"
+   "ebea162e69a561df8ce7c69ed5460f2d9b58db9e388dc3e31654393d4093789b"
   ],
   [
    "hadron_alarm_ack",
@@ -1804,15 +1832,15 @@
   ],
   [
    "hadron_delivery_settings_set",
-   "0f996f952f0dceedf22465956b1694d0508628e465062560b31c40517a8a208d"
+   "fef3ba4abb596d2b44bb85fdae5f8b8e7de37c8c8c61e79c3277f5dac0fa21d7"
   ],
   [
    "hadron_ticker_list",
-   "0d055272320cd52c6765903c645fea985f88c878731e22814d0bac8badd8a6aa"
+   "0b82ea013a27684fc7a57c5976a3c2600835c9fe951af06e1be2bfe8391586b3"
   ],
   [
    "hadron_ticker_create",
-   "a30f509694c232bf4a07f8764837c7e39282d9a58b237fe3d38e788246ec457c"
+   "f67aab77455fcb9bf4f0da7d17f2a130ba5b84d80d37f6faa00dbc8e7578edb5"
   ],
   [
    "hadron_ticker_update",
@@ -1844,7 +1872,7 @@
   ],
   [
    "hadron_due_wakes",
-   "8101c5dbfa68c8a3144627f2d611ba6a4fdd6bdbf98f420059e0a58c32d272a0"
+   "d9dc68501c3b155ce9e2be6fec74af95f90ddbf1f14074108eaa2220c99c68a6"
   ],
   [
    "hadron_team_chat_inbox",
@@ -1856,7 +1884,7 @@
   ],
   [
    "hadron_agent_ticker_template_list",
-   "1895f5f52b96cd911fd26f03bd7b546d8573db03a5776a330dbacff46bf9b5fe"
+   "5b5736b3ea4e9acd124931db678b35b3e348a038e1ebee7487ded0678424bda5"
   ],
   [
    "hadron_agent_ticker_template_create",
@@ -1916,7 +1944,7 @@
   ],
   [
    "hadron_list_recovery_edges",
-   "dad6911fc2c8386837a215cdf966f7ba06747f866073864d577ffb22758bde44"
+   "af4b37458d32923fe5cc496423afcd25b0025042cada4771bd29c16909118e45"
   ],
   [
    "hadron_get_recovery_node",
@@ -2084,7 +2112,7 @@
   ],
   [
    "hadron_run_task",
-   "447bfde0f72b40b2d03d2dea1415942cbcc4cde2e6190de57922585f7e8b5b40"
+   "543d5143635ff91b4643913053174671c13f313927eef56dc1bc2a4aab0b80fb"
   ],
   [
    "hadron_start_session",
@@ -2108,7 +2136,7 @@
   ],
   [
    "hadron_cast_worker",
-   "6d5aef2318311103af426c057995688460de04205876dc77ef7149e3aca9f9d8"
+   "780b2d60f9fa0c1306cd6a89d30be1584519345b45a052f5eaa10891c3be7f4e"
   ],
   [
    "hadron_channel_post",
@@ -2116,7 +2144,7 @@
   ],
   [
    "hadron_channel_read",
-   "b3aa148159805750efd2e2e790029f81a081cb6f699d030a9ac64bc9dd97e36b"
+   "2a978fc4d62abf3a15eb0ecc4830d1663b7ba74b47e8ba9a0308b424c110ae18"
   ],
   [
    "hadron_team_chat_post",
@@ -2124,7 +2152,11 @@
   ],
   [
    "hadron_team_chat_read",
-   "ca39bfe50191367e6c2f2535acee8db4133370f6e401e37b6361df06e570427f"
+   "5b9b63e46edc523cc82100c66c93826a72699da140f18d45226a5f8c8fe07041"
+  ],
+  [
+   "hadron_team_chat_search",
+   "7df9d963df0136d94c12cf8a72b48ac2255cdc49fbd1d39af539c1f9729153c1"
   ],
   [
    "hadron_list_workers",
@@ -2140,7 +2172,7 @@
   ],
   [
    "hadron_update_worker",
-   "cea7f9a378eb30bdbe8981dafa47c76af989302f0830ca5fa90973965489dc3a"
+   "26533b187f376320478d4335674aaa662a79c90693801b00283da0fdbaee615a"
   ],
   [
    "hadron_change_worker_agent",

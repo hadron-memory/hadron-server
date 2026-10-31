@@ -8,6 +8,7 @@ import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { hasFsProjectionScope, projectionCleanupFor, registerFsProjectionCleanup, runCleanups, snapshotProjection } from '../../lib/fsProjectionRollback.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
 import {
   ensureCurrentNodeRevisionInTransaction,
@@ -36,13 +37,26 @@ const createNodeAsSystem = async (
   const loc = node.loc;
   const name = node.name;
 
-  // Save to filesystem
-  const fsResult = await saveNodeToFs(node, GRAPHS_PATH);
+  // Save to filesystem. #2731: a projection this call creates is undone when
+  // the database write does not commit.
+  // A caller-supplied transaction outlives this call and its rollback is invisible here, so
+  // its creator must hold a rollback scope; refuse before writing anything rather than orphan a file.
+  if (transaction && !hasFsProjectionScope()) {
+    throw new Error('createNode: a caller-supplied transaction requires withFsProjectionRollback (#2731).');
+  }
+  const fsPrior = snapshotProjection(loc, GRAPHS_PATH);
+  // #2731: the id is minted before the write so the projection's bytes are unique to this call (the
+  // cleanup's ownership proof): two creates at one loc, even with identical fields, never write equal bytes.
+  const id = node.id ?? generateId();
+  const fsResult = await saveNodeToFs({ ...node, id }, GRAPHS_PATH);
+  // Ownership is by the bytes this call wrote (a failed write may have written none).
+  const undoProjection = fsResult.written ? projectionCleanupFor(loc, GRAPHS_PATH, fsPrior, fsResult.written) : null;
   if (fsResult.error) {
+    // A partial write (directory made, file refused) is ours to undo too.
+    undoProjection?.();
     throw new Error(`Failed to save node to filesystem: ${fsResult.error}`);
   }
 
-  const id = node.id ?? generateId();
   const serializedTags = serializeTags(node.tags ?? []) as string[];
   const content = node.content ?? null;
   const fields = {
@@ -135,8 +149,20 @@ const createNodeAsSystem = async (
   };
   // New-memory callers can include scaffolding in their authority transaction:
   // a root failure then rolls back the memory row as well. Existing callers
-  // retain their own transaction. Filesystem projection still precedes the DB write.
-  const saved = transaction ? await write(transaction) : await db.$transaction(write);
+  // retain their own transaction. Filesystem projection still precedes the DB write (#2731 undoes it on failure).
+  let saved;
+  if (transaction) {
+    // The caller's transaction outlives this call: its resolver runs the cleanup on failure.
+    if (undoProjection) registerFsProjectionCleanup(undoProjection);
+    saved = await write(transaction);
+  } else {
+    try {
+      saved = await db.$transaction(write);
+    } catch (err) {
+      if (undoProjection) runCleanups([undoProjection]);
+      throw err;
+    }
+  }
 
   return saved as unknown as Node;
 };

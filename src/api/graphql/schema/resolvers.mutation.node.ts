@@ -118,7 +118,7 @@ import {
   toUsageNodeRef,
   toUsageNodeRefs,
 } from '../../../lib/usageRecorder.js';
-import { nextSiblingSeq } from '../../../lib/nodeSeq.js';
+import { assertRootAllocationAllowed, lockRootSiblings, markNodeWrittenInTx, nextSiblingSeq } from '../../../lib/nodeSeq.js';
 import { authoredContentChanged, carryNodeAuthorship, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../../lib/nodeAuthorship.js';
 import { mergePropertiesPatch } from '../../../lib/skilldoc/exportsMerge.js';
 import {
@@ -934,12 +934,8 @@ async function writeNodeCoreRaw(
       // list: with no explicit seq it inherits max(sibling seq)+1 and lands at
       // the end. Create-only; an explicit input.seq always wins; an unordered /
       // empty sibling list leaves seq null (nextSiblingSeq returns null).
-      // #443: roots retain the old behavior; nested allocation waits for the
-      // existing parent lock inside the writing transaction below.
-      const seqForCreate =
-        existing == null && input.seq == null && !input.loc.includes(':')
-          ? await nextSiblingSeq(ctx.db, input.memoryId, input.loc)
-          : undefined;
+      // #443: BOTH root and nested allocation read in the writing transaction below,
+      // root under the per-memory key K, nested after the existing parent lock.
 
       // Update mode writes via `update`, not `upsert`: existence was verified
       // by the mode gate above, and with `name` now optional-on-update (D4)
@@ -1417,6 +1413,7 @@ async function writeNodeCoreRaw(
                   deletedAt: null,
                 };
             const updated = await tx.node.update({ where, data, include });
+            if (opts?.transaction) await markNodeWrittenInTx(tx);   // #443: a shared transaction's later root allocation is refused
             return { conflict: false, node: await finalizeNodeWrite(tx, updated, currentForDiff.content ?? null) };
           });
           if (result.conflict) {
@@ -1467,7 +1464,6 @@ async function writeNodeCoreRaw(
               createdBy,
               ...hashPayload,
               revisionContentHash: revisionStateHashRefreshMarker(),
-              ...(seqForCreate != null ? { seq: seqForCreate } : {}),
             } as Prisma.NodeUncheckedCreateInput,
             update: updatePayload,
             include,
@@ -1477,6 +1473,8 @@ async function writeNodeCoreRaw(
           // under the transaction — a root-level Channel address was
           // otherwise overwritable here (Copilot on PR #1165, round 2).
           node = await inWriteTransaction(async (tx) => {
+            // #443: a second root allocation in one transaction is refused before ANY lock of its own is taken.
+            if (input.seq == null && !input.loc.includes(':')) await assertRootAllocationAllowed(tx, input.memoryId);
             await lockInlineEdgeMemories(tx);
             await lockAncestorsForCreate(tx, input.memoryId, input.loc, {
               owns: opts?.owns,
@@ -1671,9 +1669,13 @@ async function writeNodeCoreRaw(
               await assertNoMintedSpecUnmark(tx, input.memoryId, [markerChange(authoritative.id)], 'overwrite');
             }
             // #443: the existing ancestor set includes the immediate parent.
-            // READ COMMITTED now sees the prior parent's holder commit.
-            const nestedSeq = existing == null && input.seq == null && input.loc.includes(':')
-              ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
+            // READ COMMITTED now sees the prior parent's holder commit. A ROOT has
+            // no parent lock: it takes K instead (held to commit), then reads.
+            // Keyed on the AUTHORITATIVE read under the locks, not the stale probe (see the MCP twin).
+            const autoSeq = authoritative == null && input.seq == null;
+            const isRoot = !input.loc.includes(':');
+            if (autoSeq && isRoot) await lockRootSiblings(tx, input.memoryId);
+            const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -1711,6 +1713,7 @@ async function writeNodeCoreRaw(
             // #1606 — restoring a target restores the threads its soft delete
             // took (cause TARGET), never ones an admin deleted.
             if (reviving) await restoreThreadsOfTargets(tx, [upserted.id]);
+            if (opts?.transaction) await markNodeWrittenInTx(tx);   // #443: see the update arm
             return finalizeNodeWrite(tx, upserted, storedForIncludes);
           });
         }
@@ -3516,29 +3519,42 @@ export const nodeMutations = {
         }
         // Writer level of the source node, on the locked source.
         await assertEdgeSourceWritersById(tx, ctx, locked.source.id);
-        return tx.edge.create({
-          data: {
-            id: generateId(),
-            memoryId: locked.source.memoryId,
-            sourceId: locked.source.id,
-            targetId: locked.target.id,
-            loc: edgeLoc,
-            name: name ?? null,
-            description: description ?? null,
-            isRunnable: isRunnable ?? null,
-            condition: (condition ?? null) as InputJsonValue,
-            // != null: the GraphQL arg is nullable, and non-JS clients (the
-            // Go CLI) send explicit nulls for unset args. priority is a
-            // non-nullable Int @default(0) — passing null to Prisma fails
-            // validation with a misleading "Argument source is missing"
-            // (the invalid field disqualifies the scalar-FK input variant).
-            // Issue #263.
-            ...(priority != null ? { priority } : {}),
-            data: (data ?? null) as InputJsonValue,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-          include: { source: true, target: true },
-        });
+        // #2803 — the `(loc, memory_id)` unique is the only constraint a fresh
+        // id can violate, and it is judged here, after every read/write gate
+        // above, so the answer discloses nothing a refused caller could see.
+        // Same typed refusal the inline-edge path throws (#1469/#1471).
+        try {
+          return await tx.edge.create({
+            data: {
+              id: generateId(),
+              memoryId: locked.source.memoryId,
+              sourceId: locked.source.id,
+              targetId: locked.target.id,
+              loc: edgeLoc,
+              name: name ?? null,
+              description: description ?? null,
+              isRunnable: isRunnable ?? null,
+              condition: (condition ?? null) as InputJsonValue,
+              // != null: the GraphQL arg is nullable, and non-JS clients (the
+              // Go CLI) send explicit nulls for unset args. priority is a
+              // non-nullable Int @default(0) — passing null to Prisma fails
+              // validation with a misleading "Argument source is missing"
+              // (the invalid field disqualifies the scalar-FK input variant).
+              // Issue #263.
+              ...(priority != null ? { priority } : {}),
+              data: (data ?? null) as InputJsonValue,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+            include: { source: true, target: true },
+          });
+        } catch (e) {
+          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+            throw new GraphQLError(`Edge loc "${edgeLoc}" is already occupied; choose a unique loc.`, {
+              extensions: { code: 'EDGE_LOC_CONFLICT' },
+            });
+          }
+          throw e;
+        }
       });
       // #1061 — an edge write is a graph write, attributed to the SOURCE node:
       // the edge lives in the source's memory (spec 037) and `UsageEvent` has
@@ -4776,9 +4792,11 @@ export const nodeMutations = {
         restored.embeddingWorkToken = await stampEmbeddingObligation(tx, restored.id, restored.memoryId);
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted, previousContent: logicalCurrent.content as string | null };
       });
-      // 033 — re-embed the restored content (revision snapshots are plaintext on
-      // non-encrypted memories; ciphertext snapshots are handled by embedNode's
-      // #206 permanent-fail path).
+      // 033 — re-embed the restored content. The embedder is handed the restored
+      // PLAINTEXT (`restoredPlaintext`, decrypted inside the transaction), never
+      // the stored row: on an encrypted memory the row holds ciphertext, and a
+      // keyless restore into one was already refused above (#1272, pinned in
+      // resolvers.restoreEmbed1272.test.ts).
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: restored.id,
         workToken: restored.embeddingWorkToken,

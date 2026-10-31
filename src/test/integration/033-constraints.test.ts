@@ -5,7 +5,7 @@
  * constraints (not just app logic), and the "one abstract vector per node"
  * rule by a partial unique index that the Prisma `@@unique` can't express.
  * These tests pin that the structural backstops are actually present on the
- * test DB (built via `db push` + post-push.sql + globalSetup).
+ * test DB (built via pre-push.sql + `db push` + post-push.sql; #434 removed globalSetup's copy).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';

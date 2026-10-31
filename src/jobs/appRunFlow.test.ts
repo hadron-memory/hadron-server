@@ -17,9 +17,10 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null),
@@ -49,6 +50,7 @@ const DEFER = `${ORG_URN}::flowmem::flow:defer`;
 let orgId: string;
 let appId: string;
 let memoryId: string;
+let agentId: string;
 
 async function makeNode(loc: string, extra: Record<string, unknown> = {}): Promise<string> {
   const node = await db.node.create({
@@ -89,6 +91,8 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'flow-agent', urn: `${ORG_URN}:flow-agent` },
   });
   await db.appAgent.create({ data: { appId, agentId: agent.id } });
+  agentId = agent.id;
+  await serveAgentBootPrompt(db, agentId, 'Test boot prompt.'); // #2712: a run is served its Agent's prompt
   await db.agentMemoryItem.create({
     data: { agentId: agent.id, memoryId, role: 'read-write' },
   });
@@ -166,9 +170,11 @@ async function mintFlow() {
   return mintAppRun(db, {
     organizationId: orgId,
     appId,
+    agentId,
     triggerKind: 'MANUAL',
     entryNodeUrn: ENTRY,
     eventData: { topic: 'ticks' },
+    consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
 }
 
