@@ -59,7 +59,7 @@ import {
 } from './resolvers.agentTask.js';
 import { recordingRefusal } from './resolvers.hostOperation.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
-import { keyHostId, recordHostKeyUseApart } from '../../../lib/hostOperations/hostKey.js';
+import { recordHostKeyUseApart } from '../../../lib/hostOperations/hostKey.js';
 import { hostWorkersWhere } from '../../../lib/tickers/wakeKeyScope.js';
 import { composeWorkerUrn, resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -357,6 +357,14 @@ async function hostKeyRead<T>(ctx: Context, key: { appKeyId: string; appId: stri
   return out;
 }
 
+/**
+ * A ticker read that is not judged as a host key's (an MCP connection, R-e) still refuses an App key as today; a key that
+ * is or was a host key has that refusal recorded with its code (cor:agt:070:07). Anyone else records nothing.
+ */
+function keyRefusalRecorded<T>(ctx: Context, read: () => Promise<T>): Promise<T> {
+  return appKeyCaller(ctx) ? recordingRefusal(ctx, 'read', null, read) : read();
+}
+
 export const tickerQueries = {
   tickers: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
     const key = tickerReadKey(ctx);
@@ -367,8 +375,10 @@ export const tickerQueries = {
         return { out: rows, count: rows.length };
       });
     }
-    const { app } = await resolveParticipatedApp(ctx, appRef);
-    return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: TICKER_ORDER });
+    return keyRefusalRecorded(ctx, async () => {
+      const { app } = await resolveParticipatedApp(ctx, appRef);
+      return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: TICKER_ORDER });
+    });
   },
 
   /** #2213 — `tickers` as a page: the same gate, rows and order, counted and read in one snapshot. */
@@ -385,7 +395,7 @@ export const tickerQueries = {
         return { out: pageEnvelope(items, rows.length, skip), count: items.length };
       });
     }
-    const { app } = await resolveParticipatedApp(ctx, args.appRef);
+    const { app } = await keyRefusalRecorded(ctx, () => resolveParticipatedApp(ctx, args.appRef));
     const where = { appId: app.id, deletedAt: null };
     const [total, items] = await ctx.db.$transaction([
       ctx.db.ticker.count({ where }),
@@ -398,7 +408,7 @@ export const tickerQueries = {
     try {
       const key = tickerReadKey(ctx);
       if (key) return await hostKeyRead(ctx, key, async () => ({ out: await hostKeyTicker(ctx, key, ref), count: 1 }));
-      return (await loadReachableTicker(ctx, ref)).ticker;
+      return (await keyRefusalRecorded(ctx, () => loadReachableTicker(ctx, ref))).ticker;
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code === 'TICKER_NOT_FOUND') return null;
       throw e;
@@ -1228,24 +1238,34 @@ export const tickerFieldResolvers = {
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {
       const take = Math.min(Math.max(a.first ?? 20, 1), 200);
-      // #2931 (V6): an App key sees only the subscriptions of the workers its host registers NOW, re-read here because
-      // this runs after the read's transaction and on every path to a Ticker (a subscription's ticker included). A
-      // key with no live host:operate, another App's key, or an MCP connection sees none.
-      let hostWorkers: Prisma.WorkerWhereInput | null = null;
+      const read = async (c: Context, hostWorkers: Prisma.WorkerWhereInput | null) => {
+        const rows = await c.db.tickerSubscription.findMany({
+          where: { tickerId: t.id, endedAt: null, ...(hostWorkers ? { worker: hostWorkers } : {}) },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: take + 1,
+          ...(a.after ? { cursor: { id: a.after }, skip: 1 } : {}),
+        });
+        const page = rows.slice(0, take);
+        return { items: page, hasNextPage: rows.length > take, endCursor: page.length ? page[page.length - 1]!.id : null };
+      };
       const key = appKeyCaller(ctx);
-      if (key) {
-        const hostId = ctx.transport === 'mcp' || key.appId !== t.appId ? null : await keyHostId(ctx.db, key);
-        if (!hostId) return { items: [], hasNextPage: false, endCursor: null };
-        hostWorkers = hostWorkersWhere(t.appId, hostId);
+      if (!key) return read(ctx, null);
+      // #2931 (V6): an App key sees only the subscriptions of the workers its host registers NOW. This runs after the
+      // parent read's transaction and on every path to a Ticker (a subscription's ticker included), so it is a host-key
+      // read of its own: judged and read in one transaction under the App's anchors, and recorded (cor:agt:070:07), a
+      // refusal with its code. A key with no live host:operate, another App's key, or an MCP connection sees none.
+      const none = { items: [], hasNextPage: false, endCursor: null };
+      if (ctx.transport === 'mcp' || key.appId !== t.appId) return none;
+      try {
+        return await hostKeyRead(ctx, key, async () => {
+          const out = await inHostKeyTickerReadTx(ctx, t.appId, () => { throw tickerNotFound(t.id); },
+            (c, app, hostId) => read(c, hostWorkersWhere(app.id, hostId)));
+          return { out, count: out.items.length };
+        });
+      } catch (e) {
+        if (e instanceof GraphQLError && e.extensions?.code === 'TICKER_NOT_FOUND') return none;
+        throw e;
       }
-      const rows = await ctx.db.tickerSubscription.findMany({
-        where: { tickerId: t.id, endedAt: null, ...(hostWorkers ? { worker: hostWorkers } : {}) },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        take: take + 1,
-        ...(a.after ? { cursor: { id: a.after }, skip: 1 } : {}),
-      });
-      const page = rows.slice(0, take);
-      return { items: page, hasNextPage: rows.length > take, endCursor: page.length ? page[page.length - 1]!.id : null };
     },
   },
 
