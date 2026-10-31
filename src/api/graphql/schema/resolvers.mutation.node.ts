@@ -1573,6 +1573,10 @@ async function writeNodeCoreRaw(
                   extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
                 });
               }
+              // #2987 — the AUTHORITATIVE row, locked: a message tombstone that appeared after the unlocked probe is
+              // still history, so no exemption applies (the clone exemption is for a loc with no row at all) and the
+              // refusal comes before any snapshot or revival write (Beckett LOCAL delta 2, Rico P3).
+              assertNoGenericMessageSeqWrite(authoritative, input.nodeType, input.seq, 'create');
             }
             await enforceNodeSchemaOnWrite(
               tx, input.memoryId,
