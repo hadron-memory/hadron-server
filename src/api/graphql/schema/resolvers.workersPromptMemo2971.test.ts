@@ -148,6 +148,19 @@ describe('#2971 parity: every item of the page equals its single read', () => {
   });
 });
 
+describe('#2971 the register is evaluated for each worker\'s own holder', () => {
+  it('(f) workers held by two people whose standing differs read different registers, equal to their single reads', async () => {
+    const ada = await cast('Ada');
+    const bea = await cast('Bea');
+    const reader = await db.user.create({ data: { githubId: 98_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `rd-${generateId().toLowerCase()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: reader.id, role: 'READER' } });
+    await db.worker.update({ where: { id: ada.id }, data: { heldByUserId: admin.id } });
+    await db.worker.update({ where: { id: bea.id }, data: { heldByUserId: reader.id } });
+    const got = await expectParity(adminCtx());
+    expect(got.Ada?.text).not.toEqual(got.Bea?.text?.replace('Bea', 'Ada'));
+  });
+});
+
 describe('#2971 the memo is one page long and holds only what the workers of a page share', () => {
   it('a mutation that changes the persona, then a second page read in the same request context, serves the new text', async () => {
     await cast('Ada');
@@ -181,8 +194,9 @@ describe('#2971 the memo is one page long and holds only what the workers of a p
     expect(calls.appAgent, JSON.stringify(calls)).toBeLessThanOrEqual(1);
     expect(calls.compiled, JSON.stringify(calls)).toBeLessThanOrEqual(1);
     expect(calls.approved, JSON.stringify(calls)).toBeLessThanOrEqual(2);
-    // The viewer's and the one holder's accessible-memory sets: computed once each for the page.
-    expect(calls.memories, JSON.stringify(calls)).toBeLessThanOrEqual(10);
-    expect(calls.members, JSON.stringify(calls)).toBeLessThanOrEqual(10);
+    // The viewer's and the one holder's accessible-memory sets and the holder's participation and write answers: a
+    // constant for the page (21 and 15 measured; 805 and 603 on main, one round per worker). Under N=50 any per-worker read exceeds 40.
+    expect(calls.memories, JSON.stringify(calls)).toBeLessThanOrEqual(40);
+    expect(calls.members, JSON.stringify(calls)).toBeLessThanOrEqual(40);
   });
 });
