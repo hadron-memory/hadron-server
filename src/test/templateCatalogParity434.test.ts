@@ -126,7 +126,9 @@ describe('#434 the template catalog comparator (fresh template, rolled-back cont
     await client?.end().catch(() => {});
     await admin?.query(`DROP DATABASE IF EXISTS ${quoteDbIdent(scratch)} WITH (FORCE)`).catch(() => {});
     await admin?.end().catch(() => {});
-  });
+    // DROP DATABASE of a full schema can take well past the 10s default hook
+    // timeout when the whole suite is loading the server (seen at 8c8b3149).
+  }, 120_000);
 
   it('snapshots a non-trivial catalog', () => {
     for (const kind of ['col:', 'con:', 'idx:', 'fn:', 'tg:']) {
