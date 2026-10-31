@@ -88,13 +88,13 @@ describe('#455 createMany through the extension', () => {
   it('keeps caller-supplied ids and honours skipDuplicates', async () => {
     const mine = generateId();
     await db.edge.createMany({ data: [edgeRow('a:cites:mine', mine)] });
-    expect((await db.edge.findFirstOrThrow({ where: { loc: 'a:cites:mine' } })).id).toBe(mine);
+    expect((await db.edge.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'a:cites:mine' } })).id).toBe(mine);
     // The duplicate is skipped on its key; the new row gets an injected id.
     const result = await db.edge.createMany({
       data: [edgeRow('a:cites:mine', mine), edgeRow('a:cites:fresh')], skipDuplicates: true,
     });
     expect(result.count).toBe(1);
-    expect((await db.edge.findFirstOrThrow({ where: { loc: 'a:cites:fresh' } })).id).toMatch(UUIDV7_HEX);
+    expect((await db.edge.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'a:cites:fresh' } })).id).toMatch(UUIDV7_HEX);
   });
 
   it('still stamps node.createMany / createManyAndReturn, and gives them generateId() ids', async () => {
