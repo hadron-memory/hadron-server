@@ -54,13 +54,14 @@ async function servingAppRequiresSignature(_db: Db, _appId: string): Promise<boo
   return false;
 }
 
-/** The pointer that decides, highest level first, or null when none is set anywhere. */
+/** The pointer that decides, highest level first, or null when none is set anywhere. `skipWorker`: the worker level was already judged. */
 async function decidingPointer(
   db: Db,
   t: ServeTarget,
+  skipWorker = false,
 ): Promise<{ level: ServedPointerLevel; stored: StoredBootPromptPointer } | null> {
   const select = { bootPromptNodeId: true, bootPromptUrn: true } as const;
-  if (t.workerId) {
+  if (t.workerId && !skipWorker) {
     const w = await db.worker.findUnique({ where: { id: t.workerId }, select });
     if (w?.bootPromptNodeId) return { level: 'WORKER', stored: w };
   }
@@ -71,10 +72,53 @@ async function decidingPointer(
   return null;
 }
 
-/** Resolve what to serve, or throw the typed refusal. Reads only; the caller records what it served. */
-export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<ServedBootPrompt> {
+/**
+ * #2971 — what the workers of ONE `workers` page share: the serve below the worker level (install, then Agent) is the
+ * same for every uncustomised worker of one (App, Agent), so one page resolves it once. The map holds the PROMISE of the
+ * outcome, a typed refusal included (R27: a deleted install target is a refusal for every worker below it, never a
+ * fall-through). It belongs to one page resolution and is dropped with its rows: a briefing is never cached
+ * (cor:agt:020:01), so nothing here may be attached to a request context or outlive the page.
+ */
+export type PageServedMemo = Map<string, Promise<ServedBootPrompt>>;
+
+/**
+ * Resolve what to serve, or throw the typed refusal. Reads only; the caller records what it served.
+ *
+ * With `page`, a worker's OWN pointer is still read and judged first, per worker (cor:agt:040:07: a customised worker
+ * is never answered with the install's or the Agent's text, and its own deleted target never falls through); only a worker
+ * with no pointer of its own shares the lower levels' outcome with the rest of the page. `workerPointer` is that worker's
+ * pointer columns when the caller already holds the row (a page does), else they are read.
+ */
+export async function resolveServedBootPrompt(
+  db: Db,
+  t: ServeTarget,
+  page?: { memo: PageServedMemo; workerPointer?: { bootPromptNodeId: string | null; bootPromptUrn: string | null } | null },
+): Promise<ServedBootPrompt> {
+  if (page && t.workerId) {
+    const own = page.workerPointer !== undefined
+      ? page.workerPointer
+      : await db.worker.findUnique({ where: { id: t.workerId }, select: { bootPromptNodeId: true, bootPromptUrn: true } });
+    if (!own?.bootPromptNodeId) {
+      const key = `${t.appId ?? ''}:${t.agent.id}`;
+      let outcome = page.memo.get(key);
+      if (!outcome) {
+        outcome = resolveFrom(db, t, true);
+        page.memo.set(key, outcome);
+        // A refusal is the answer and stays; anything else (a dropped connection) must not be served to the rest of the page.
+        outcome.catch((err) => {
+          const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+          if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) page.memo.delete(key);
+        });
+      }
+      return outcome;
+    }
+  }
+  return resolveFrom(db, t, false);
+}
+
+async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise<ServedBootPrompt> {
   const where = { surface: t.surface, agentName: t.agent.name };
-  const pointer = await decidingPointer(db, t);
+  const pointer = await decidingPointer(db, t, skipWorker);
   if (!pointer) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', where);
   const resolved = await resolveBootPromptPointer(db, pointer.stored);
   if (!resolved || resolved.deleted) throw bootPromptRefusal('BOOT_PROMPT_TARGET_DELETED', where);
