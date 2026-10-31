@@ -143,7 +143,8 @@ describe('guard', () => {
     const guard = readFileSync('prisma/passkey-registration-invariants.sql', 'utf8');
     expect(readFileSync('prisma/migrations/20261022030000_passkey_revoke/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir passkey-registration-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/passkey-registration-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('passkey-registration-invariants.sql');
   });
   it('a token is never deleted, spent once, and its identity is immutable', async () => {
     const { id } = await db.passkeyCancelToken.findUniqueOrThrow({ where: { passkeyId: first } });

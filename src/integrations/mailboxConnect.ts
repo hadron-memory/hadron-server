@@ -12,10 +12,13 @@
  * provider tool holds the client secret and does the code exchange.
  */
 import crypto from 'crypto';
-import type { Express } from 'express';
+import express, { type Express, type Response } from 'express';
 import {
   EXCHANGE_START_TTL_MS,
+  connectInterstitialToken,
+  connectInterstitialTokenValid,
   issueExchangeStartNonce,
+  peekExchangeStartNonce,
   redeemExchangeStartNonce,
   type ExchangeStartOrigin,
 } from '../auth/authHandoff.js';
@@ -24,6 +27,7 @@ import { requireOrgRole } from '../api/graphql/schema/resolvers.helpers.js';
 import { createToolConnection, deleteToolConnection, subscribeToolFolder } from '../lib/emailClient.js';
 import { db } from './db/client.js';
 import { respondInternalFault } from '../lib/internalFault.js';
+import { isPortalPath, portalPathOrRoot } from './portalRedirect.js';
 
 export interface MailboxConnectConfig {
   /** emailClient PROVIDER_TOOLS key; stored on ExchangeConnection.provider. */
@@ -136,7 +140,7 @@ const escapeHtml = (s: string): string =>
  * thrown message or a token. The CLI confirms by listing connections, so this page is informational.
  */
 function sendConnectDonePage(
-  res: import('express').Response,
+  res: Response,
   page: { provider: string; ok: true; orgName: string | null } | { provider: string; ok: false; code: string },
 ): void {
   const label = escapeHtml(PROVIDER_LABELS[page.provider] ?? page.provider);
@@ -154,6 +158,48 @@ function sendConnectDonePage(
     })
     .send(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${label}</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}code{background:#eee;padding:0 .25rem}</style></head><body>${body}</body></html>`,
+    );
+}
+
+const BINDING_COOKIE = 'hadron_connect_bind';
+const BINDING_PATTERN = /^[0-9a-f]{32}$/;
+
+/** The browser-binding value a request carries, or null (absent or malformed). Cookies are parsed by hand: no parser is mounted. */
+function readBindingCookie(header: string | undefined): string | null {
+  for (const part of (header ?? '').split(';')) {
+    const [name, ...rest] = part.trim().split('=');
+    if (name === BINDING_COOKIE) {
+      const value = rest.join('=');
+      return BINDING_PATTERN.test(value) ? value : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The connect confirmation page (#2908): server-hosted HTML naming the provider, the organization and who asked, with
+ * one Continue button that POSTs the nonce and a per-page token back. Every interpolated value is escaped. No
+ * `form-action` directive: Chromium enforces it on the whole redirect chain after the POST, which ends at the provider.
+ */
+function sendConnectConfirmPage(
+  res: Response,
+  page: { provider: string; action: string; nonce: string; token: string; binding: string; orgName: string; initiator: string },
+): void {
+  const label = escapeHtml(PROVIDER_LABELS[page.provider] ?? page.provider);
+  res
+    .status(200)
+    .set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+      'X-Frame-Options': 'DENY',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      // Strict: the confirming POST is same-site from this very page, and a cross-site form post must not carry it.
+      'Set-Cookie': `${BINDING_COOKIE}=${page.binding}; Path=${page.action}; Max-Age=${Math.ceil(EXCHANGE_START_TTL_MS / 1000)}; HttpOnly; SameSite=Strict${(process.env.BASE_URL ?? '').startsWith('https://') ? '; Secure' : ''}`,
+    })
+    .send(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect ${label}</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}button{font:inherit;padding:.5rem 1rem}</style></head><body><h1>Connect ${label}</h1><p><strong>${escapeHtml(page.initiator)}</strong> asked to connect ${label} to <strong>${escapeHtml(page.orgName)}</strong>.</p><p>Continue only if you expect this. You will be sent to ${label} to sign in and approve.</p><form method="post" action="${escapeHtml(page.action)}"><input type="hidden" name="nonce" value="${escapeHtml(page.nonce)}"><input type="hidden" name="token" value="${escapeHtml(page.token)}"><button type="submit">Continue</button></form></body></html>`,
     );
 }
 
@@ -200,11 +246,18 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
 
     const body = (req.body ?? {}) as { orgId?: unknown; redirect?: unknown };
     const orgId = typeof body.orgId === 'string' ? body.orgId : '';
-    const redirect = typeof body.redirect === 'string' && body.redirect ? body.redirect : '/';
     if (!orgId) {
       res.status(400).json({ error: 'orgId is required' });
       return;
     }
+    // #2909: the value lands in the callback's browser redirect, so it must be a path inside the portal. Refused
+    // before the org gate and before any nonce exists. Omitted or empty keeps meaning the portal root.
+    const provided = body.redirect === undefined || body.redirect === null || body.redirect === '' ? '/' : body.redirect;
+    if (!isPortalPath(provided, process.env.FRONTEND_URL || 'http://localhost:5173')) {
+      res.status(400).json({ error: 'redirect must be a path inside the portal, such as /app/dashboard' });
+      return;
+    }
+    const redirect = provided;
 
     // #506: the Bearer JWT authenticates the caller but says nothing about
     // which org they may act on. Without this gate any authenticated user
@@ -233,11 +286,45 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     }
   });
 
+  // One refusal for every shape (unknown, expired, redeemed, wrong provider, deleted org or user, ex-admin): same
+  // status, body and headers, so the response says nothing about which one it was.
+  const refuseNonce = (res: Response): void => {
+    res.status(400).json({ error: 'Invalid or expired nonce' });
+  };
+
+  /**
+   * Whether the nonce's initiator may still connect into its org, judged BEFORE anything is consumed or shown (#506
+   * again: authority can narrow between start and the browser arriving). Returns what the page names, or null.
+   */
+  const judgeNonce = async (
+    started: { userId: string; orgId: string },
+  ): Promise<{ orgName: string; initiator: string } | null> => {
+    const [initiator, org] = await Promise.all([
+      db.user.findFirst({
+        where: { id: started.userId, deletedAt: null },
+        select: { roles: true, name: true, handle: true },
+      }),
+      db.organization.findFirst({ where: { id: started.orgId, deletedAt: null }, select: { name: true } }),
+    ]);
+    if (!initiator || !org) return null;
+    try {
+      await requireOrgRole(
+        { db, userId: started.userId, roles: initiator.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[] },
+        started.orgId,
+        'ADMIN',
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Forbidden') return null;
+      throw err;
+    }
+    return { orgName: org.name, initiator: initiator.name?.trim() || `@${initiator.handle}` };
+  };
+
+  // #2908: opening the link is a read. The browser arrives with a single-use nonce (minted by POST
+  // /auth/<provider>/start or GraphQL `startConnection`); this page names the organization and who asked, and the
+  // person confirms with a button. A link preview or a prefetch that only GETs consumes nothing and starts nothing.
   app.get(`/auth/${cfg.routeName}`, async (req, res) => {
-    // #477 Sink 2: the browser arrives with a single-use nonce (minted by
-    // POST /auth/<provider>/start), not the session JWT. Look it up, discard
-    // it, and proceed with the provider OAuth round-trip.
-    const nonce = req.query.nonce as string | undefined;
+    const nonce = typeof req.query.nonce === 'string' ? req.query.nonce : undefined;
     if (!nonce) {
       res.status(400).json({ error: 'Missing nonce' });
       return;
@@ -246,9 +333,61 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       res.status(503).json({ error: `${cfg.routeName} connections are not configured on this server` });
       return;
     }
-    const started = await redeemExchangeStartNonce(nonce, cfg.provider);
+    try {
+      const started = await peekExchangeStartNonce(nonce, cfg.provider);
+      const who = started ? await judgeNonce(started) : null;
+      if (!who) {
+        refuseNonce(res);
+        return;
+      }
+      // A second tab in the same browser reuses the binding, so the first page's token keeps working.
+      const binding = readBindingCookie(req.headers.cookie) ?? crypto.randomBytes(16).toString('hex');
+      sendConnectConfirmPage(res, {
+        provider: cfg.provider,
+        action: `/auth/${cfg.routeName}`,
+        nonce,
+        token: connectInterstitialToken(cfg.provider, nonce, binding),
+        binding,
+        orgName: who.orgName,
+        initiator: who.initiator,
+      });
+    } catch (err) {
+      respondInternalFault(res, `${cfg.routeName}/confirm`, err);
+    }
+  });
+
+  app.post(`/auth/${cfg.routeName}`, express.urlencoded({ extended: false }), async (req, res) => {
+    const body = (req.body ?? {}) as { nonce?: unknown; token?: unknown };
+    const nonce = typeof body.nonce === 'string' ? body.nonce : undefined;
+    if (!nonce) {
+      res.status(400).json({ error: 'Missing nonce' });
+      return;
+    }
+    if (!cfg.isConfigured()) {
+      res.status(503).json({ error: `${cfg.routeName} connections are not configured on this server` });
+      return;
+    }
+    let started: Awaited<ReturnType<typeof redeemExchangeStartNonce>>;
+    try {
+      // A wrong or missing token or browser binding, or an initiator who may no longer connect, is refused before the claim, so it
+      // does not burn a nonce the right page could still use.
+      const binding = readBindingCookie(req.headers.cookie);
+      if (!binding || !connectInterstitialTokenValid(cfg.provider, nonce, binding, body.token)) {
+        refuseNonce(res);
+        return;
+      }
+      const peeked = await peekExchangeStartNonce(nonce, cfg.provider);
+      if (!peeked || !(await judgeNonce(peeked))) {
+        refuseNonce(res);
+        return;
+      }
+      started = await redeemExchangeStartNonce(nonce, cfg.provider);
+    } catch (err) {
+      respondInternalFault(res, `${cfg.routeName}/confirm`, err);
+      return;
+    }
     if (!started) {
-      res.status(400).json({ error: 'Invalid or expired nonce' });
+      refuseNonce(res);
       return;
     }
 
@@ -456,7 +595,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         sendConnectDonePage(res, { provider: cfg.provider, ok: true, orgName: org?.name ?? null });
         return;
       }
-      const successUrl = new URL(pending.redirect, frontendUrl);
+      const successUrl = new URL(portalPathOrRoot(pending.redirect, frontendUrl), frontendUrl);
       successUrl.searchParams.set('exchangeConnected', '1');
       successUrl.searchParams.set('provider', cfg.provider);
       res.redirect(successUrl.toString());
@@ -472,7 +611,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: 'connection_failed' });
         return;
       }
-      const errorUrl = new URL(pending.redirect, frontendUrl);
+      const errorUrl = new URL(portalPathOrRoot(pending.redirect, frontendUrl), frontendUrl);
       errorUrl.searchParams.set(
         'exchangeError',
         err instanceof Error ? err.message : 'Mailbox authentication failed',

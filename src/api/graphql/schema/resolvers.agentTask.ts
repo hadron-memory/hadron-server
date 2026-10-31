@@ -94,6 +94,7 @@ import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
+import { keyHostId } from '../../../lib/hostOperations/hostKey.js';
 import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
 import { requestSessionEnd } from '../../../lib/hostOperations/sessionEnd.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
@@ -298,6 +299,16 @@ async function inKeyReadTx<T>(
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
 ): Promise<T> {
+  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => ((await keyMayReadApp(txCtx, app)) ? body(txCtx, app) : onGone()));
+}
+
+/** One transaction holding the App's authority anchors SHARED, with the App re-read after the lock (see `inKeyReadTx`). */
+async function inAnchoredAppTx<T>(
+  ctx: Context,
+  appId: string,
+  onGone: () => T,
+  body: (txCtx: Context, app: TaskApp) => Promise<T>,
+): Promise<T> {
   const head = await loadApp(ctx, appId);
   if (!head) return onGone();
   return ctx.db.$transaction(async (tx) => {
@@ -310,9 +321,68 @@ async function inKeyReadTx<T>(
     const app = await loadApp(txCtx, appId);
     // Ownership moved while we waited for the anchors: the locks we hold are the wrong ones, so answer as missing.
     if (!app || app.organizationId !== head.organizationId || app.ownerUserId !== head.ownerUserId) return onGone();
-    if (!(await keyMayReadApp(txCtx, app))) return onGone();
     return body(txCtx, app);
   });
+}
+
+/**
+ * #2931 (V6, Holger 2026-10-31; cor:agt:070:04, cor:agt:080:18, :22) — the host this caller reads an App's tickers
+ * as: the App's OWN key holding a live `host:operate` scope, or null. Judged on `ctx.db`, which is the read's own
+ * transaction under the App's shared anchors, so a scope or key revoked while the read waited is seen.
+ *
+ * ORDER, so that every caller this does not admit gets exactly today's answer (APP_NOT_FOUND / null):
+ * own App, App and org live, then the scope (`keyHostId`: a live scope on an unrevoked key of an installed App),
+ * and ONLY THEN the session refusal. A session-bound key without the scope still reads "not found"; a host key
+ * learns only that it carries a session. Unlike `keyMayReadApp`, an unscoped own-App key is NOT admitted, and no
+ * worker set is derived for a key without a host: such a key is refused, never given an "unregistered" set.
+ * READ-ONLY by construction: it yields no `TaskActor`, so every write still refuses the key.
+ */
+async function hostKeyTickerReader(ctx: Context, app: TaskApp): Promise<string | null> {
+  const key = appKeyCaller(ctx);
+  if (!key || app.deletedAt || app.id !== key.appId) return null;
+  if (app.organizationId) {
+    const org = await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+    if (!org) return null;
+  }
+  const hostId = await keyHostId(ctx.db, key);
+  if (!hostId) return null;
+  refuseSessionBound(ctx);
+  if (currentActor().workerId) throw taskError('APP_KEY_SESSION_BOUND', 'A host key does not act as a worker. Send no session.');
+  return hostId;
+}
+
+/**
+ * #2931 — a host key's ticker read of App `appId`, in one transaction under the App's shared anchors: `body` runs
+ * with the host the key operates as, re-judged after the lock; `onGone` answers (or throws) for anyone else.
+ */
+export async function inHostKeyTickerReadTx<T>(
+  ctx: Context,
+  appId: string,
+  onGone: () => T,
+  body: (txCtx: Context, app: TaskApp, hostId: string) => Promise<T>,
+): Promise<T> {
+  return inAnchoredAppTx(ctx, appId, onGone, async (txCtx, app) => {
+    const hostId = await hostKeyTickerReader(txCtx, app);
+    return hostId ? body(txCtx, app, hostId) : onGone();
+  });
+}
+
+/** #2931 — `inHostKeyTickerReadTx` by App ref: another App's ref, or one that resolves to nothing, is APP_NOT_FOUND as today. */
+export async function withHostKeyTickerApp<T>(
+  ctx: Context,
+  appRef: string,
+  body: (txCtx: Context, app: TaskApp, hostId: string) => Promise<T>,
+): Promise<T> {
+  const key = appKeyCaller(ctx);
+  let appId: string;
+  try {
+    ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+  } catch (e) {
+    if (e instanceof AppNotFoundError) throw appNotFound(appRef);
+    throw e;
+  }
+  if (!key || appId !== key.appId) throw appNotFound(appRef);
+  return inHostKeyTickerReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
 }
 
 /** Run a read over an App the caller may READ tasks and events of: a participant, or the App's own key. */

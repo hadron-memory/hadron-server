@@ -7,6 +7,7 @@ import { mintUserApiKey } from '../../../middleware/auth.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 
@@ -32,6 +33,7 @@ beforeEach(async () => {
   agentId = (await db.agent.create({ data: { name: 'Agent', urn: `transport-${userId}:agent`, ownerUserId: userId, usesTasks: false } })).id;
   workerId = (await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, name: 'Worker', slug: 'worker', appId, agentId, heldByUserId: userId } })).id;
   key = (await mintUserApiKey(db, { userId, label: null, createdBy: userId, issuedVia: 'test' })).rawKey;
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 afterAll(() => { delete process.env.DISABLE_TASK_MATCHER; });
 async function post(query: string, variables: Record<string, unknown>) {

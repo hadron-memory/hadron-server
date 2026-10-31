@@ -392,7 +392,7 @@ describe('#1944 group A: the remaining surfaces gated on the Agent answer an unr
  */
 describe('#1944 Query.agent serves only the row it authorized (Atilla\'s P2 on #1950)', () => {
   it('a PUBLIC→ORGANIZATION flip with a new private prompt right after the first read never leaks the private version', async () => {
-    await db.agent.update({ where: { id: pub.id }, data: { systemPrompt: 'PUBLIC prompt' } });
+    await db.agent.update({ where: { id: pub.id }, data: { description: 'PUBLIC prompt' } });
     let flipped = false;
     const racy = new Proxy(db, {
       get(target, prop, receiver) {
@@ -406,7 +406,7 @@ describe('#1944 Query.agent serves only the row it authorized (Atilla\'s P2 on #
               const out = await fn.call(t, args);
               if (!flipped) {
                 flipped = true;
-                await db.agent.update({ where: { id: pub.id }, data: { visibility: 'ORGANIZATION', systemPrompt: 'PRIVATE marker' } });
+                await db.agent.update({ where: { id: pub.id }, data: { visibility: 'ORGANIZATION', description: 'PRIVATE marker' } });
               }
               return out;
             };
@@ -415,7 +415,7 @@ describe('#1944 Query.agent serves only the row it authorized (Atilla\'s P2 on #
       },
     }) as Context['db'];
     const a = await ask({ db: racy, userId: foreignAdmin, roles: ['READER'] } as Context,
-      'query($ref: ID!) { agent(ref: $ref) { id visibility systemPrompt } }', urnOf(pub));
+      'query($ref: ID!) { agent(ref: $ref) { id visibility description } }', urnOf(pub));
     expect(flipped).toBe(true);
     expect(JSON.stringify(a)).not.toContain('PRIVATE marker');
     if (a.data !== null) expect((a.data as { visibility: string }).visibility).toBe('PUBLIC');

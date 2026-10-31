@@ -7,7 +7,9 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
-import { bindAgentPrompt } from './resolvers.mutation.chat.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
+import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any, W = resolvers.Worker as any;
@@ -27,7 +29,8 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: staff.id, role: 'CONTRIBUTOR' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Engineer', personaRole: 'engineer', systemPrompt: '{{worker.signature}}\n{{worker.trailer}}' }, ctx());
+  agent = await M.createAgent({}, { orgId: org.id, name: 'Engineer', personaRole: 'engineer' }, ctx());
+  await serveAgentBootPrompt(db, agent.id, '{{worker.signature}}\n{{worker.trailer}}');
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Anne' }, ctx());
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
@@ -55,7 +58,7 @@ describe('#1602 signature/trailer', () => {
   });
   it.each(['signature', 'trailer'])('%s omission preserves; whitespace empties; nonblank stays raw', async field => {
     const before = await row();
-    await update({ promptOverride: 'prose' });
+    await update({ [field === 'signature' ? 'trailer' : 'signature']: 'the other field' });
     expect((await row())[field]).toBe(before[field]);
     await update({ [field]: ' \t\n' }); expect((await row())[field]).toBe('');
     await update({ [field]: '  raw {{worker.name}}  ' }); expect((await row())[field]).toBe('  raw {{worker.name}}  ');
@@ -63,7 +66,7 @@ describe('#1602 signature/trailer', () => {
   it.each(['signature', 'trailer'])('%s invalid values roll back a mixed prompt edit', async field => {
     for (const value of [null, 'x'.repeat(2001), 'no\0value']) {
       const before = await row();
-      await expect(update({ [field]: value, promptOverride: 'must not commit' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+      await expect(update({ [field]: value })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
       expect(await row()).toEqual(before);
     }
     await expect(update({ [field]: 'x'.repeat(2000) })).resolves.toBeTruthy();
@@ -74,7 +77,7 @@ describe('#1602 signature/trailer', () => {
       : kind === 'key' ? { db, appId: app.id, roles: [] } as Context
       : kind === 'impersonation' ? ctx(admin, { roles: [], impersonation: { sessionId: generateId(), actorUserId: outsider.id, orgId: org.id, expiresAt: new Date(Date.now() + 60000) } })
       : ctx();
-    const call = () => update({ signature: 'denied', trailer: 'denied', promptOverride: 'denied' }, c);
+    const call = () => update({ signature: 'denied', trailer: 'denied' }, c);
     const result = kind === 'session' ? runAsActor({ workerId: worker.id, agentId: agent.id }, call) : kind === 'run' ? runAsActor({ workerId: null, agentId: agent.id }, call) : call();
     await expect(result).rejects.toBeTruthy();
     expect(await row()).toEqual(before);
@@ -96,8 +99,14 @@ describe('#1602 signature/trailer', () => {
     await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
     await expect(update({ signature: 'retired' })).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
   });
+  it('a fieldless call on a retired worker refuses too (#2725 blind P3, main parity)', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
+    await expect(update({})).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED', workerId: worker.id } });
+  });
   it('no-worker chat/headless keeps signature and trailer empty', () => {
-    expect(bindAgentPrompt({ name: 'Agent', urn: 'sig.example:agent', personaRole: 'engineer', systemPrompt: '[{{worker.signature}}][{{worker.trailer}}]' })).toBe('[][]');
+    // The served chat path's binding (serveChatPrompt): the Agent's own values, no worker.
+    const values = agentPlatformValues({ name: 'Agent', urn: 'sig.example:agent', personaRole: 'engineer' });
+    expect(applyPlatformVariables('[{{worker.signature}}][{{worker.trailer}}]', values)).toBe('[][]');
   });
   it('migration backfills each NULL independently, preserving configured and retired rows on rerun', async () => {
     const sql = readFileSync('prisma/migrations/20261019090000_worker_signature/migration.sql', 'utf8');
@@ -141,8 +150,8 @@ it('rechecks retirement at the transactional write and rolls back the mixed edit
       } });
     } })), opts);
   } });
-  await expect(update({ signature: 'late', promptOverride: 'late' }, ctx(admin, { db: wrapped }))).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
-  expect(await row()).toMatchObject({ signature: SIG, trailer: TRL, promptOverride: null });
+  await expect(update({ signature: 'late', trailer: 'late' }, ctx(admin, { db: wrapped }))).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
+  expect(await row()).toMatchObject({ signature: SIG, trailer: TRL });
 });
 
 it('GraphQL exposes both fields, preserves omissions, and atomically refuses null', async () => {
@@ -174,12 +183,12 @@ it('actual MCP SDK updates, preserves omitted fields, reads raw templates and re
     const good: any = await call({ signature: 'mcp {{worker.name}}', trailer: '' });
     expect(good.content[0].text).toContain('Updated **Anne**');
     expect(await row()).toMatchObject({ signature: 'mcp {{worker.name}}', trailer: '' });
-    await call({ promptOverride: 'independent' });
+    await call({});
     expect((await row()).signature).toBe('mcp {{worker.name}}');
     const read: any = await client.callTool({ name: 'hadron_get_worker', arguments: { workerRef: worker.id } });
     expect(read.content[0].text).toContain('Signature template:\nmcp {{worker.name}}');
     const before = await row();
-    await call({ signature: null, promptOverride: 'no commit' }); expect(await row()).toEqual(before);
+    await call({ signature: null }); expect(await row()).toEqual(before);
     await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: admin.id, heldAt: new Date() } });
     const session = await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, workerId: worker.id, agentId: agent.id } });
     await call({ signature: 'bound', session: session.id });
@@ -200,21 +209,14 @@ async function withSignatureSdk(fn: (call: (args: Record<string, unknown>) => Pr
   finally { await client.close(); await server.close(); }
 }
 
-it.each([
-  ['signature', null], ['trailer', null], ['signature', 'kept override'], ['trailer', 'kept override'],
-] as const)('MCP %s-only edit truthfully preserves override %s and echoes the stored template', async (field, override) => {
-  await db.worker.update({ where: { id: worker.id }, data: { promptOverride: override } });
+it.each(['signature', 'trailer'] as const)('MCP %s-only edit echoes the stored template', async (field) => {
   await withSignatureSdk(async call => {
     const reply = await call({ [field]: '  custom {{worker.name}}  ' });
     const text = reply.content[0].text;
     expect(text).toContain('Updated **Anne**');
-    expect(text).not.toContain('Prompt override cleared.');
-    expect(text).not.toContain('Prompt override now:');
+    expect(text).not.toContain('Prompt override');
     expect(text).toContain(`${field === 'signature' ? 'Signature' : 'Trailer'} template now:\n\n  custom {{worker.name}}  `);
-    expect(await row()).toMatchObject({ promptOverride: override, [field]: '  custom {{worker.name}}  ' });
-    const clear = await call({ promptOverride: '' });
-    expect(clear.content[0].text).toContain('Prompt override cleared.');
-    expect((await row()).promptOverride).toBeNull();
+    expect(await row()).toMatchObject({ [field]: '  custom {{worker.name}}  ' });
   });
 });
 
@@ -226,7 +228,7 @@ it.each(['ended', 'absent', 'foreign', 'expired'] as const)('MCP refuses an inva
   } });
   const before = await row();
   await withSignatureSdk(async call => {
-    const reply = await call({ signature: 'do not store', promptOverride: 'do not store', session: session?.id ?? 'not-a-session' });
+    const reply = await call({ signature: 'do not store', session: session?.id ?? 'not-a-session' });
     expect(reply.isError).toBe(true);
     expect(reply.content[0].text).toContain('[session_not_bound]');
     expect(await row()).toEqual(before);
@@ -240,7 +242,7 @@ it.each(['ended', 'absent', 'foreign', 'expired'] as const)('MCP refuses an inva
 it.each(['worker-only', 'context-bound', 'binding-refused'] as const)('H26 independently refuses %s without relying on agent actor', async kind => {
   const session = kind === 'context-bound' ? await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, workerId: worker.id, agentId: agent.id } }) : null;
   const before = await row();
-  const call = () => update({ signature: 'no', trailer: 'no', promptOverride: 'no' }, ctx(admin, {
+  const call = () => update({ signature: 'no', trailer: 'no' }, ctx(admin, {
     ...(session ? { sessionId: session.id } : {}), ...(kind === 'binding-refused' ? { sessionBindingRefused: true } : {}),
   }));
   await expect(kind === 'worker-only' ? runAsActor({ workerId: worker.id, agentId: null }, call) : call()).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });

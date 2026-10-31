@@ -3519,29 +3519,42 @@ export const nodeMutations = {
         }
         // Writer level of the source node, on the locked source.
         await assertEdgeSourceWritersById(tx, ctx, locked.source.id);
-        return tx.edge.create({
-          data: {
-            id: generateId(),
-            memoryId: locked.source.memoryId,
-            sourceId: locked.source.id,
-            targetId: locked.target.id,
-            loc: edgeLoc,
-            name: name ?? null,
-            description: description ?? null,
-            isRunnable: isRunnable ?? null,
-            condition: (condition ?? null) as InputJsonValue,
-            // != null: the GraphQL arg is nullable, and non-JS clients (the
-            // Go CLI) send explicit nulls for unset args. priority is a
-            // non-nullable Int @default(0) — passing null to Prisma fails
-            // validation with a misleading "Argument source is missing"
-            // (the invalid field disqualifies the scalar-FK input variant).
-            // Issue #263.
-            ...(priority != null ? { priority } : {}),
-            data: (data ?? null) as InputJsonValue,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-          include: { source: true, target: true },
-        });
+        // #2803 — the `(loc, memory_id)` unique is the only constraint a fresh
+        // id can violate, and it is judged here, after every read/write gate
+        // above, so the answer discloses nothing a refused caller could see.
+        // Same typed refusal the inline-edge path throws (#1469/#1471).
+        try {
+          return await tx.edge.create({
+            data: {
+              id: generateId(),
+              memoryId: locked.source.memoryId,
+              sourceId: locked.source.id,
+              targetId: locked.target.id,
+              loc: edgeLoc,
+              name: name ?? null,
+              description: description ?? null,
+              isRunnable: isRunnable ?? null,
+              condition: (condition ?? null) as InputJsonValue,
+              // != null: the GraphQL arg is nullable, and non-JS clients (the
+              // Go CLI) send explicit nulls for unset args. priority is a
+              // non-nullable Int @default(0) — passing null to Prisma fails
+              // validation with a misleading "Argument source is missing"
+              // (the invalid field disqualifies the scalar-FK input variant).
+              // Issue #263.
+              ...(priority != null ? { priority } : {}),
+              data: (data ?? null) as InputJsonValue,
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+            include: { source: true, target: true },
+          });
+        } catch (e) {
+          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+            throw new GraphQLError(`Edge loc "${edgeLoc}" is already occupied; choose a unique loc.`, {
+              extensions: { code: 'EDGE_LOC_CONFLICT' },
+            });
+          }
+          throw e;
+        }
       });
       // #1061 — an edge write is a graph write, attributed to the SOURCE node:
       // the edge lives in the source's memory (spec 037) and `UsageEvent` has
@@ -4779,9 +4792,11 @@ export const nodeMutations = {
         restored.embeddingWorkToken = await stampEmbeddingObligation(tx, restored.id, restored.memoryId);
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted, previousContent: logicalCurrent.content as string | null };
       });
-      // 033 — re-embed the restored content (revision snapshots are plaintext on
-      // non-encrypted memories; ciphertext snapshots are handled by embedNode's
-      // #206 permanent-fail path).
+      // 033 — re-embed the restored content. The embedder is handed the restored
+      // PLAINTEXT (`restoredPlaintext`, decrypted inside the transaction), never
+      // the stored row: on an encrypted memory the row holds ciphertext, and a
+      // keyless restore into one was already refused above (#1272, pinned in
+      // resolvers.restoreEmbed1272.test.ts).
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: restored.id,
         workToken: restored.embeddingWorkToken,

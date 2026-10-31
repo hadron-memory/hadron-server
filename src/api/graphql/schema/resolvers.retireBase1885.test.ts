@@ -19,7 +19,7 @@ let userId: string;
 let org: { id: string };
 const ctx = (): Context => ({ db, userId, roles: [] });
 const makeAgent = (name: string) => M.createAgent(null, {
-  orgId: org.id, name, visibility: 'PUBLIC', systemPrompt: 'synthetic prompt',
+  orgId: org.id, name, visibility: 'PUBLIC',
 }, ctx());
 const setBase = (childId: string, baseId: string | null, c: Context = ctx()) =>
   M.setAgentBase(null, { ref: childId, baseRef: baseId }, c);

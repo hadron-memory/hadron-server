@@ -22,6 +22,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -199,49 +200,34 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
   // wants an App participant (AppMember / org CONTRIBUTOR+ / owner / own
   // App-key). The gap principal — an org READER who is not an AppMember —
   // must get the attribution scalars (name, and the app for the compound)
-  // WITHOUT the working-state fields: prompt, promptOverride, memoryId.
+  // WITHOUT the working-state fields: prompt, memoryId.
 
   it('org READER (not an App participant): attribution renders, internals mask to null', async () => {
     await db.worker.update({
       where: { id: worker.id },
-      data: { promptOverride: 'be extra careful', memoryId: null },
+      data: { memoryId: null },
     });
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{worker.name}}, a {{worker.role}}.' },
-    });
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
     const c = ctx(member.id); // org READER, no AppMember row
     const w = await workerViaSessions(c);
     expect(w?.name).toBe('Iris');
     expect(await W.app(w, {}, c)).not.toBeNull(); // the compound still renders
-    expect(await W.promptOverride(w, {}, c)).toBeNull();
     expect(await W.memoryId(w, {}, c)).toBeNull();
     expect(await W.prompt(w, {}, c)).toBeNull();
   });
 
   it('an App participant still reads the working-state fields', async () => {
-    await db.worker.update({
-      where: { id: worker.id },
-      data: { promptOverride: 'be extra careful' },
-    });
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{worker.name}}, a {{worker.role}}.' },
-    });
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, a {{worker.role}}.');
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
     const c = ctx(member.id);
     const w = await workerViaSessions(c);
-    expect(await W.promptOverride(w, {}, c)).toBe('be extra careful');
     expect(await W.prompt(w, {}, c)).toContain('You are Iris');
   });
 
   it("the App's own key reads internals; a session readable past membership loss does not", async () => {
-    await db.worker.update({
-      where: { id: worker.id },
-      data: { promptOverride: 'internal note' },
-    });
+    await serveAgentBootPrompt(db, agent.id, 'internal note for {{worker.name}}');
     // Pure App-key principal of the same App: requireWorkerReadAccess admits.
-    expect(await W.promptOverride(await workerViaSessions(ctx(undefined, app.id, [])), {}, ctx(undefined, app.id, []))).toBe('internal note');
+    expect(await W.prompt(await workerViaSessions(ctx(undefined, app.id, [])), {}, ctx(undefined, app.id, []))).toBe('internal note for Iris');
     // A user whose only reach is their self-attributed session (no org, no
     // AppMember) keeps the session readable — but not the worker internals.
     const stranger = await db.user.create({
@@ -256,7 +242,6 @@ describe('#980 — the #552 nested-gate audit, per principal shape', () => {
     expect(row).toBeDefined();
     const w = await S.worker(row, {}, c);
     expect(w?.name).toBe('Iris'); // attribution survives
-    expect(await W.promptOverride(w, {}, c)).toBeNull();
     expect(await W.prompt(w, {}, c)).toBeNull();
   });
 });

@@ -1868,6 +1868,9 @@ model Session {
   @@index([appId, userId])
   @@index([expiresAt])
   @@index([workerId])
+  /// #451: agent and memory deletes null these FKs (SET NULL); each needs its own leading index.
+  @@index([agentId])
+  @@index([memoryId])
   /// #1016 — the "what am I driving?" read (`hadron_whoami`), which filters
   /// `userId` alone and orders by `startedAt`. `[appId, userId]` cannot serve
   /// it: Postgres will not seek on a composite index's SECOND column, so the
@@ -1955,6 +1958,8 @@ model UsageEvent {
   @@index([createdAt])
   @@index([sessionId])
   @@index([appId])
+  /// #451: a node hard delete nulls this FK (SET NULL); without it each delete scans the firehose.
+  @@index([nodeId])
   /// #796 — the two `usageActivity` scopes. Both are composite on `createdAt`
   /// so the bucketed aggregation is an index range scan; the composite
   /// `(userId, createdAt)` also prefix-covers the plain `userId` lookups the
@@ -2006,9 +2011,6 @@ model Agent {
   /// Display name of this agent.
   name                  String
   description           String?
-  /// Agent prompt template. {{name}}/{{role}} bind to the Worker's identity
-  /// for a worker briefing, or to this Agent's name/role for a chat.
-  systemPrompt          String?         @map("system_prompt")
   /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
   /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
@@ -2161,6 +2163,8 @@ model Agent {
   @@index([extendsAgentId])
   @@index([legacyUrn])
   @@index([bootPromptNodeId])
+  /// #451: org agent listings and the org-delete cascade. The persona-name uniques are partial and cannot serve them.
+  @@index([organizationId])
   @@map("agents")
   /// #2024 (S8, cor:agt:080:33): the tickers this Agent declares; each cast of a worker from it instantiates them.
   tickerTemplates       AgentTickerTemplate[]
@@ -3316,10 +3320,6 @@ model App {
   /// `installation_policy.memberRoles` doesn't apply.
   role                              AppMembershipRole    @default(READER)
   description                       String?
-  /// **Deprecated** — superseded by `Agent.systemMemoryId` +
-  /// `Agent.systemPrompt`. Scheduled for removal in a follow-up
-  /// cleanup spec (per 008 R-4).
-  systemPrompt                      String?              @map("system_prompt")
   /// Tools this App's agent can access; default `[]`.
   agentTools                        String[]             @default([]) @map("agent_tools")
   // 036-ai-service-config: the legacy ai_provider/ai_model/
@@ -3793,7 +3793,7 @@ model AppAgent {
 
 /// #974 — a **Worker**: the named casting of an installed Agent into an App
 /// (cor:dmo:050:11, cor:agt:020:01). The Agent carries the reusable persona
-/// dressing (`personaRole` + the `systemPrompt` template); the Worker is the
+/// dressing (`personaRole` and its compiled boot prompt); the Worker is the
 /// local named identity ("Iris") that does attributable work. Casting is
 /// opt-in (an installed agent with no Worker row is just an agent) and
 /// requires the agent installed in the App at cast time; multiple Workers may
@@ -3838,10 +3838,6 @@ model Worker {
   /// Free string with conventions; defaults to the agent's `personaRole`
   /// at cast time when the caller names none.
   role              String?
-  /// Per-worker individuality layered over the agent's template prompt
-  /// (cor:agt:020:01) — nullable; two castings of one agent share the
-  /// template and nothing else.
-  promptOverride    String?   @map("prompt_override")
   /// Per-worker signature template, delivered through S4 (cor:agt:040:04).
   signature         String
   /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).
@@ -6299,7 +6295,8 @@ model HostKeyUse {
   appId       String   @map("app_id")
   hostId      String   @map("host_id")
   /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
-  /// App's host registrations or host-operations listing, read with the key) |
+  /// App's host registrations or host-operations listing, read with the key;
+  /// #2931: its host's tickers, `count` the rows returned) |
   /// `session` (#1969: a refused session write; always carries a refusedCode).
   action      String
   operationId String?  @map("operation_id")

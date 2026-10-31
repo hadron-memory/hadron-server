@@ -21,6 +21,7 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
@@ -96,6 +97,7 @@ beforeEach(async () => {
   ada = await worker(app, 'Ada');
   ret = await worker(app, 'Ret', { retiredAt: new Date() });
   uma = await worker(ownedApp, 'Uma');
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 /** The outsider shapes: who asks, and with what App context. */

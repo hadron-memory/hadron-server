@@ -23,7 +23,7 @@
 // across multi-worker deploys and restarts, like the pending login states
 // (src/auth/pendingLoginState.ts) that feed it.
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { db } from '../integrations/db/client.js';
 import type { HadronJwtPayload } from './jwt.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
@@ -241,4 +241,54 @@ export async function redeemExchangeStartNonce(
     redirect: row.redirect ?? '/',
     origin: row.kind === kinds[1] ? 'graphql' : 'portal',
   };
+}
+
+/**
+ * Read an `exchange_start` nonce WITHOUT consuming it (#2908): the connect interstitial shows who is asking to connect
+ * what before the single-use claim. Same predicate as {@link redeemExchangeStartNonce} (provider-bound kind, unredeemed,
+ * unexpired), so a peek that succeeds is a nonce a redeem could still claim. Null for every refusal shape.
+ */
+export async function peekExchangeStartNonce(
+  code: string,
+  provider: string,
+): Promise<RedeemedExchangeStart | null> {
+  const kinds = [exchangeStartKind(provider, 'portal'), exchangeStartKind(provider, 'graphql')];
+  const row = await db.authHandoffCode.findFirst({
+    where: { codeHash: sha256(code), kind: { in: kinds }, redeemedAt: null, expiresAt: { gt: new Date() } },
+  });
+  if (!row || !row.orgId) return null;
+  return {
+    userId: row.userId,
+    orgId: row.orgId,
+    redirect: row.redirect ?? '/',
+    origin: row.kind === kinds[1] ? 'graphql' : 'portal',
+  };
+}
+
+/** Domain label of the interstitial token key: derived from JWT_SECRET, never the secret itself, never shared with another HMAC. */
+const CONNECT_INTERSTITIAL_KEY_LABEL = 'hadron:connect-interstitial:v1';
+
+/**
+ * The per-page token of the connect interstitial (#2908): HMAC over the provider and the SHA-256 of the nonce, keyed
+ * and a random per-browser value, keyed by HMAC(JWT_SECRET, {@link CONNECT_INTERSTITIAL_KEY_LABEL}). It binds the POST
+ * to a page this server rendered for this nonce at this provider, FOR THE BROWSER THAT RECEIVED IT: the browser value
+ * rides in an HttpOnly cookie set with the page, so a token fetched in one browser and auto-submitted from another
+ * (a cross-site form post into the victim's browser, which carries no such cookie) fails.
+ */
+export function connectInterstitialToken(provider: string, nonce: string, browserBinding: string): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is required for the connect interstitial');
+  const key = createHmac('sha256', secret).update(CONNECT_INTERSTITIAL_KEY_LABEL).digest();
+  return createHmac('sha256', key).update(JSON.stringify([provider, sha256(nonce), browserBinding])).digest('hex');
+}
+
+/** Constant-time check of a presented interstitial token; false for anything that is not the exact token. */
+export function connectInterstitialTokenValid(
+  provider: string,
+  nonce: string,
+  browserBinding: string,
+  presented: unknown,
+): boolean {
+  if (typeof presented !== 'string') return false;
+  return hashesEqual(connectInterstitialToken(provider, nonce, browserBinding), presented);
 }

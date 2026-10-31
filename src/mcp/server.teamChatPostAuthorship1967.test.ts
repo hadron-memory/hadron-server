@@ -18,6 +18,7 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { ensureChannelWithRoot } from '../lib/channels.js';
@@ -77,6 +78,7 @@ beforeEach(async () => {
   });
   ({ rawKey: token } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' }));
   ({ rawKey: strangerToken } = await mintUserApiKey(db, { userId: stranger.id, label: null, createdBy: stranger.id, issuedVia: 'test' }));
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 /** One MCP connection; `header` sends X-Hadron-Session on every request. */

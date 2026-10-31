@@ -97,6 +97,7 @@ import {
 } from './resolvers.helpers.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
+import { recordSessionOutcome as recordOutcome } from '../../../lib/sessionOutcome.js';
 import { consumeGrant, failOperation, loadLiveGrant, sameHold, type LoadedGrant } from '../../../lib/hostOperations/launch.js';
 import {
   consumeResumeClaim,
@@ -1592,6 +1593,34 @@ export const sessionMutations = {
         },
         include: SESSION_INCLUDE,
       });
+    },
+
+    // #2896: report a session's outcome. The ONE implementation `POST /sessions/:id/outcome` also calls
+    // (`recordSessionOutcome`, src/lib/sessionOutcome.ts); each refusal maps onto the error shape the other session
+    // mutations use. An outcome report is a session WRITE (cor:dmo:070:05, strict owner cor:acl:010:02), not driving it.
+    recordSessionOutcome: async (
+      _: unknown,
+      { sessionId, outcome, outcomeRef, outcomeMeta }: { sessionId: string; outcome: number; outcomeRef?: string | null; outcomeMeta?: unknown },
+      ctx: Context,
+    ) => {
+      const result = await recordOutcome(ctx.db, async () => ctx, { sessionId, outcome, outcomeRef, outcomeMeta });
+      switch (result.kind) {
+        case 'out_of_range':
+          throw new GraphQLError('outcome must be a number between 0 and 1', { extensions: { code: 'BAD_USER_INPUT' } });
+        case 'oauth_surface':
+          throw new GraphQLError(
+            oauthSurfaceRefusalMessage(result.refusal, 'This OAuth credential is limited to the MCP surface.'),
+            { extensions: { code: 'FORBIDDEN', ...result.refusal } },
+          );
+        case 'no_credential':
+          throw new GraphQLError('A credential is required', { extensions: { code: 'UNAUTHENTICATED' } });
+        case 'not_found':
+          throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        case 'forbidden':
+          throw authorizationDenied();
+        case 'ok':
+          return ctx.db.session.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE });
+      }
     },
 
     endSession: async (

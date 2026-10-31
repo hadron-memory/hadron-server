@@ -147,18 +147,3 @@ export function workerTerminalView(t: StoredWorkerTerminal | null | undefined) {
     reportedAt: new Date(t.reportedAt),
   };
 }
-
-type TerminalLike = { host: { id: string; label: string }; status: string; reason: string | null; checkedAt: Date | string };
-
-/** "5m", "2h", "3d": how long before `now`, for a reader judging a report's age. */
-function ago(at: Date, now: Date): string {
-  const min = Math.max(0, Math.floor((now.getTime() - at.getTime()) / 60_000));
-  if (min < 60) return `${min}m`;
-  return min < 1440 ? `${Math.floor(min / 60)}h` : `${Math.floor(min / 1440)}d`;
-}
-
-/** The short MCP line, read only, e.g. `terminal dark (no_turn_for_due_ticker) on orca1, checked 4m ago`. */
-export function renderTerminal(t: TerminalLike, now: Date): string {
-  const reason = t.reason ? ` (${t.reason})` : '';
-  return `terminal ${t.status}${reason} on ${t.host.label}, checked ${ago(new Date(t.checkedAt), now)} ago`;
-}

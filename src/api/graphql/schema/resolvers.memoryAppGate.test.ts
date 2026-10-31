@@ -8,7 +8,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
-type NestedApp = { id: string; keys: Array<{ keyPreview: string }>; members: Array<{ userId: string }>; systemPrompt?: string | null };
+type NestedApp = { id: string; keys: Array<{ keyPreview: string }>; members: Array<{ userId: string }>; description?: string | null };
 type TestData = {
   app?: NestedApp | null;
   worker?: { id: string; app: NestedApp | null } | null;
@@ -41,7 +41,7 @@ beforeEach(async () => {
   owner = await db.user.create({ data: { githubId: 910001, githubUsername: 'synthetic-owner', roles: ['READER'] } });
   holder = await db.user.create({ data: { githubId: 910002, githubUsername: 'synthetic-holder', roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'OWNER' } });
-  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Private App', urn: 'synthetic-org:private-app', systemPrompt: 'SYNTHETIC-CONFIDENTIAL-APP-PROMPT' } });
+  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Private App', urn: 'synthetic-org:private-app', description: 'SYNTHETIC-CONFIDENTIAL-APP-PROMPT' } });
   await db.appMember.create({ data: { appId: app.id, userId: owner.id, role: 'owner' } });
   await db.appMember.create({ data: { appId: app.id, userId: holder.id, role: 'member' } });
   await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `hash-${generateId()}`, keyPreview: 'SYNTHETIC-KEY-PREVIEW' } });
@@ -51,7 +51,7 @@ beforeEach(async () => {
   publicMemory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, urn: 'synthetic-org:public-knowledge', name: 'Public Knowledge', class: 'knowledge', visibility: 'PUBLIC' } });
 });
 
-const nested = `query($ref: ID!) { memory(ref: $ref) { id app { id systemPrompt keys { keyPreview } members { userId } } } }`;
+const nested = `query($ref: ID!) { memory(ref: $ref) { id app { id description keys { keyPreview } members { userId } } } }`;
 const direct = `query($ref: ID!) { app(ref: $ref) { id keys { keyPreview } members { userId } } }`;
 
 describe('nested App read gates', () => {
@@ -70,7 +70,7 @@ describe('nested App read gates', () => {
     const directOrg = await gql(holder.id, `query($ref: ID!) { organization(ref: $ref) { id policy } }`, orgId);
     expect(directOrg.data?.organization).toBeNull();
     expect(directOrg.errors?.length).toBeGreaterThan(0);
-    const throughOrg = await gql(holder.id, `query($ref: ID!) { memory(ref: $ref) { organization { policy apps { id systemPrompt keys { keyPreview } } } } }`, workerMemory.id);
+    const throughOrg = await gql(holder.id, `query($ref: ID!) { memory(ref: $ref) { organization { policy apps { id description keys { keyPreview } } } } }`, workerMemory.id);
     expect(throughOrg.errors).toBeUndefined();
     expect(throughOrg.data?.memory?.organization).toBeNull();
 
@@ -131,7 +131,7 @@ describe('nested App read gates', () => {
     const memory = await gql(owner.id, nested, workerMemory.id);
     expect(memory.errors).toBeUndefined();
     expect(memory.data?.memory?.app?.keys).toEqual([{ keyPreview: 'SYNTHETIC-KEY-PREVIEW' }]);
-    expect(memory.data?.memory?.app?.systemPrompt).toBe('SYNTHETIC-CONFIDENTIAL-APP-PROMPT');
+    expect(memory.data?.memory?.app?.description).toBe('SYNTHETIC-CONFIDENTIAL-APP-PROMPT');
     expect(memory.data?.memory?.app?.members.map((m: { userId: string }) => m.userId)).toContain(owner.id);
 
     const membership = await gql(owner.id, `query { me { appMemberships { app { keys { keyPreview } } } } }`, app.id);
@@ -153,7 +153,7 @@ describe('nested App read gates', () => {
     } });
     const privateApp = await db.app.create({ data: {
       id: generateId(), ownerUserId: owner.id, urn: '@synthetic-owner:private-app',
-      name: 'Personal App', systemPrompt: 'PERSONAL-APP-PROMPT',
+      name: 'Personal App', description: 'PERSONAL-APP-PROMPT',
       appAgents: { create: { agentId: publicAgent.id } },
     } });
     await db.appMember.create({ data: { appId: privateApp.id, userId: owner.id, role: 'owner' } });
@@ -164,7 +164,7 @@ describe('nested App read gates', () => {
 
     const directResult = await gql(holder.id, direct, privateApp.id, ['ADMIN']);
     expect(directResult.data?.app).toBeNull();
-    const nestedResult = await gql(holder.id, `query($ref: ID!) { agent(ref: $ref) { apps { id systemPrompt keys { keyPreview } } appAgents { app { id systemPrompt keys { keyPreview } } } } }`, publicAgent.id, ['ADMIN']);
+    const nestedResult = await gql(holder.id, `query($ref: ID!) { agent(ref: $ref) { apps { id description keys { keyPreview } } appAgents { app { id description keys { keyPreview } } } } }`, publicAgent.id, ['ADMIN']);
     expect(nestedResult.errors).toBeUndefined();
     expect(nestedResult.data?.agent?.apps).toEqual([]);
     expect(nestedResult.data?.agent?.appAgents).toEqual([]);

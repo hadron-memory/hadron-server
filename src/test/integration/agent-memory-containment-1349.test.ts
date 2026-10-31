@@ -23,6 +23,7 @@ import { sharedChatKnowledgeMemoryIds } from '../../api/graphql/schema/chat-scop
 import { sessionScopedMemoryIds } from '../../lib/auth/sessionScopedMemoryIds.js';
 import { resolveAssetTargetMemoryId } from '../../api/graphql/schema/resolvers.helpers.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt } from '../servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -277,6 +278,8 @@ async function giveConversation(agentId: string) {
   ] as const) {
     await db.node.create({ data: { id: generateId(), memoryId: sys.id, loc, name: loc.split(':').pop()!, nodeType: 'system', data: data as never, content } });
   }
+  // #2712: serving is always on, so a chat needs an approved boot prompt.
+  await serveAgentBootPrompt(db, agentId, 'Hi.');
 }
 
 describe('#1349 Slice 1 — the folds that read links directly use the same cap', () => {

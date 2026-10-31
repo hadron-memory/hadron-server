@@ -8,12 +8,20 @@ type Db = Parameters<typeof keyHostId>[0];
 type Key = { appKeyId: string; appId: string };
 const scopeRequired = () => new GraphQLError('This key no longer holds its host delivery scope.', { extensions: { code: 'APP_KEY_SCOPE_REQUIRED' } });
 
+/**
+ * The workers a host registers right now: listed on its live (not lost) registration in the App. ONE definition for
+ * every host-scoped reader, due wakes here and the host key's ticker read (#2931, V6), so the two cannot drift.
+ */
+export function hostWorkersWhere(appId: string, hostId: string): Prisma.WorkerWhereInput {
+  return { launchableVia: { some: { registration: { appId, hostId, lostAt: null } } } };
+}
+
 export async function legacyWakeKeyScope(db: Db, key: Key) {
   await requireKeyScope(db, key, 'attention:deliver');
   const hostId = await keyHostId(db, key);
   if (!hostId && await keyEverHeldHostOperate(db, key.appKeyId)) throw scopeRequired();
   const where: Prisma.WorkerWhereInput = hostId
-    ? { launchableVia: { some: { registration: { appId: key.appId, hostId, lostAt: null } } } }
+    ? hostWorkersWhere(key.appId, hostId)
     // A retained lost-host registration still lists the worker: losing a host
     // must not transfer its workers to an App-wide non-host reader.
     : { launchableVia: { none: {} } };

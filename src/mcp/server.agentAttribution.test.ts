@@ -10,6 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -55,6 +56,7 @@ beforeEach(async () => {
     data: { id: sessionId, appId: app.id, userId: user.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER', startedAt: new Date() },
   });
   ({ rawKey: token } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' }));
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 const headers = (withSession: boolean, extra: Record<string, string> = {}) => ({

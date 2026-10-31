@@ -13,7 +13,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { renderTerminal, TERMINAL_REASONS } from '../../../lib/workerTerminal.js';
+import { TERMINAL_REASONS } from '../../../lib/workerTerminal.js';
 import { resolvers, type Context } from './resolvers.js';
 import * as workerGate from './resolvers.worker.js';
 import { typeDefs } from './typeDefs.js';
@@ -302,39 +302,39 @@ describe('registerHost locks the listed workers in id order, as the batch does (
   });
 });
 
-describe('the alarm verdict is computed, returned, never stored (cor:agt:100:02)', () => {
-  const lockedCoord = (extra: Record<string, unknown> = {}) => send(orca1, [rep(coord.id, { status: 'locked', reason: 'rate_limited', ...extra })]);
+describe('#2924 reports set status without an alarm or team-shape verdict', () => {
+  const resultOnly = (r: Record<string, unknown>) => expect(Object.keys(r).sort()).toEqual(['refused', 'stored']);
 
-  it('lists a locked or dark coordinator this host registers, as references only', async () => {
-    const r = await lockedCoord();
-    expect(r.alarm).toEqual([{ worker: { id: coord.id, urn: expect.stringContaining('mara') }, status: 'locked', reason: 'rate_limited' }]);
-    expect(r.noCoordinator).toBe(false);
-    expect(Object.keys(r.alarm[0].worker).sort()).toEqual(['id', 'urn']);
-    expect((await send(orca1, [rep(coord.id, { status: 'dark', reason: 'no_terminal', checkedAt: NOW() })])).alarm[0].status).toBe('dark');
+  it.each(['locked', 'dark'])('stores a %s coordinator without returning a verdict', async status => {
+    const r = await send(orca1, [rep(coord.id, { status, reason: status === 'locked' ? 'rate_limited' : 'no_terminal' })]);
+    resultOnly(r);
+    expect(r.stored).toEqual([{ id: coord.id, urn: expect.stringContaining('mara') }]);
+    expect(r.refused).toEqual([]);
+    expect((await stored(coord.id)).status).toBe(status);
   });
 
-  it('omits an idle coordinator, a dark non-coordinator, and a coordinator registered only on another host', async () => {
-    expect((await send(orca1, [rep(coord.id), rep(kit.id, { status: 'dark', reason: 'bare_shell' })])).alarm).toEqual([]);
+  it('does not judge an idle coordinator, dark non-coordinator or coordinator on another host', async () => {
+    resultOnly(await send(orca1, [rep(coord.id), rep(kit.id, { status: 'dark', reason: 'bare_shell' })]));
     await db.hostRegistrationWorker.deleteMany({ where: { workerId: coord.id } });
     await M.registerHost({}, { input: { appRef: app.id, label: 'Orca Two', pollIntervalSeconds: 60, workers: [{ worker: coord.id, family: 'claude' }] } }, keyCtx(orca2));
-    await send(orca2, [rep(coord.id, { status: 'locked', reason: 'bare_shell' })]);
-    expect((await send(orca1, [rep(kit.id)])).alarm).toEqual([]);
+    resultOnly(await send(orca2, [rep(coord.id, { status: 'locked', reason: 'bare_shell' })]));
+    resultOnly(await send(orca1, [rep(kit.id)]));
   });
 
-  it('omits a paused coordinator, a stopped team and a paused team', async () => {
+  it('records status without judging a paused worker or paused team', async () => {
     await db.workerWakeSettings.create({ data: { workerId: coord.id, pausedUntil: new Date(Date.now() + 30 * 60_000) } });
-    expect((await lockedCoord()).alarm).toEqual([]);
-    await db.workerWakeSettings.update({ where: { workerId: coord.id }, data: { pausedUntil: null } });
-    expect((await lockedCoord({ checkedAt: NOW() })).alarm).toHaveLength(1);
+    resultOnly(await send(orca1, [rep(coord.id, { status: 'locked', reason: 'rate_limited' })]));
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
-    expect((await lockedCoord({ checkedAt: NOW() })).alarm).toEqual([]);
+    resultOnly(await send(orca1, [rep(coord.id, { status: 'dark', reason: 'bare_shell', checkedAt: NOW() })]));
+    expect((await stored(coord.id)).status).toBe('dark');
   });
 
-  it('sets noCoordinator when the App has no live coordinator, and stores no verdict', async () => {
+  it('accepts a no-coordinator App with no special result field or stored verdict', async () => {
     await db.worker.update({ where: { id: coord.id }, data: { retiredAt: new Date() } });
     const r = await send(orca1, [rep(kit.id)]);
-    expect(r.noCoordinator).toBe(true);
-    expect(r.alarm).toEqual([]);
+    resultOnly(r);
+    expect(r.stored).toEqual([{ id: kit.id, urn: expect.stringContaining('kit') }]);
+    expect(r.refused).toEqual([]);
     expect(Object.keys(await stored(kit.id)).sort()).toEqual(['checkedAt', 'host', 'lastTurnAt', 'prompt', 'reason', 'reportedAt', 'status']);
   });
 });
@@ -396,15 +396,33 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
     } finally { spy.mockRestore(); }
   });
 
-  it('hadron_get_worker prints the terminal line only through the gated Worker.terminal field (#2791 §10 P3-2)', async () => {
-    await send(orca1, [rep(kit.id, { status: 'dark', reason: 'bare_shell' })]);
-    const mcp = () => createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` })
-      .callToolText('hadron_get_worker', { workerRef: kit.id });
-    expect(await mcp()).toContain('terminal dark (bare_shell) on Orca One');
-    const spy = vi.spyOn(F.Worker, 'terminal').mockResolvedValue(null);
+  it.each([
+    ['idle', null], ['busy', null], ['locked', 'rate_limited'], ['dark', 'bare_shell'],
+  ])('#2924 MCP worker and roster omit terminal for %s while GraphQL keeps it', async (status, reason) => {
+    await send(orca1, [rep(kit.id, { status, reason })]);
+    const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
+    for (const text of [
+      await mcp.callToolText('hadron_get_worker', { workerRef: kit.id }),
+      await mcp.callToolText('hadron_team_roster', { appRef: app.id }),
+    ]) {
+      expect(text).toContain('Kit');
+      expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
+      expect(text).not.toContain('Orca One');
+    }
+    expect(await F.Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id: kit.id } }), {}, ctx(manager.id))).toMatchObject({ status, reason });
+    const r = await Q.teamRoster({}, { appRef: app.id }, ctx(manager.id));
+    expect(F.TeamRosterEntry.terminal(r.workers.find((w: any) => w.workerId === kit.id))).toMatchObject({ status, reason });
+  });
+
+  it('#2924 MCP omits terminal before a report and does not resolve the worker terminal', async () => {
+    const spy = vi.spyOn(F.Worker, 'terminal');
     try {
-      expect(await mcp()).not.toContain('terminal dark');
-      expect(spy).toHaveBeenCalled();
+      const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
+      const text = await mcp.callToolText('hadron_get_worker', { workerRef: kit.id });
+      expect(text).toContain('Kit');
+      expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
+      expect(spy).not.toHaveBeenCalled();
+      expect(await mcp.callToolText('hadron_team_roster', { appRef: app.id })).not.toMatch(/terminal (idle|busy|locked|dark)/);
     } finally { spy.mockRestore(); }
   });
 
@@ -423,10 +441,7 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
     expect(await count()).toBe(none);
   });
 
-  it('renders the MCP line read only', () => {
-    expect(renderTerminal({ host: { id: 'orca1', label: 'orca1' }, status: 'dark', reason: 'no_turn_for_due_ticker', checkedAt: new Date(Date.now() - 4 * 60_000) }, new Date()))
-      .toBe('terminal dark (no_turn_for_due_ticker) on orca1, checked 4m ago');
-  });
+
 });
 
 describe('the SDL: results are references, not Worker objects (G1)', () => {
@@ -435,11 +450,12 @@ describe('the SDL: results are references, not Worker objects (G1)', () => {
     const type = schema.getType(t);
     return isObjectType(type) ? Object.keys(type.getFields()).sort() : [];
   };
-  it('stored and alarm entries are WorkerTerminalRef, not Worker', () => {
+  it('#2924 only stored and refused remain, without an alarm type', () => {
     const result = (schema.getType('SetHostWorkerTerminalsResult') as any).getFields();
     expect(String(result.stored.type)).toBe('[WorkerTerminalRef!]!');
     expect(String(result.refused.type)).toBe('[WorkerTerminalRefusal!]!');
-    expect(String((schema.getType('WorkerTerminalAlarm') as any).getFields().worker.type)).toBe('WorkerTerminalRef!');
+    expect(fields('SetHostWorkerTerminalsResult')).toEqual(['refused', 'stored']);
+    expect(schema.getType('WorkerTerminalAlarm')).toBeUndefined();
     expect(fields('WorkerTerminalRef')).toEqual(['id', 'urn']);
   });
   it('the report input has no free-text field', () => {

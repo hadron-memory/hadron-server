@@ -3211,7 +3211,7 @@ export async function installAgentIntoAppCore(
   // Agent, and installing is itself a read grant. An installed Agent's system
   // memory becomes READ_ONLY in every App-context access map
   // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
-  // object, whose own definition fields (systemPrompt / systemMemoryId /
+  // object, whose own definition fields (systemMemoryId /
   // memoryItems) are NOT field-gated — they rely on this object-level gate
   // (#551). An AppMember who is not an org member cannot read a non-PUBLIC org
   // Agent today (`Query.agent` requires org READER), so admitting them here
@@ -3230,7 +3230,7 @@ export async function installAgentIntoAppCore(
   // `organizationId` columns are null for a user-owned App + a user-owned
   // Agent, so a bare `agent.organizationId !== app.organizationId` reads
   // `null !== null` ⇒ false and waves through another USER's non-PUBLIC agent
-  // (leaking its systemPrompt via the returned AGENT_INCLUDE). Branch on the
+  // (leaking its definition via the returned AGENT_INCLUDE). Branch on the
   // App's ownership class instead, mirroring createApp's personal path.
   if (app.organizationId === null) {
     // spec 047 personal install: no org ⇒ no AgentOrgGrant. A user-owned App
@@ -3448,13 +3448,15 @@ export async function orgExchangeConnectionScope(ctx: Context, orgId: string) {
 }
 
 /**
- * `requireEmailConnection`'s answer for a missing or deleted connection. The
- * message is unchanged for the operation surfaces; a caller that must answer
- * absence like denial (hadron-internal#18) can tell it apart by type.
+ * `requireEmailConnection`'s answer for a missing, deleted or malformed connection id. On the wire it is byte-identical
+ * to the gate's denial (`authorizationDenied()`: `Forbidden`, typed `FORBIDDEN`), so absence and another user's
+ * connection answer alike and the gate is no existence oracle (#2782, ruling A in team chat #55219, as
+ * hadron-internal#18 ruled for `testExchangeConnection`). It used to be a plain `Error`, which the formatter redacts to
+ * INTERNAL_SERVER_ERROR (cor:api:260:01). A caller that must still tell absence from denial matches the class.
  */
-export class ConnectionNotFoundError extends Error {
+export class ConnectionNotFoundError extends GraphQLError {
   constructor() {
-    super('Connection not found');
+    super('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     this.name = 'ConnectionNotFoundError';
   }
 }

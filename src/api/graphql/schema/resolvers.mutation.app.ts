@@ -273,7 +273,6 @@ export const appMutations = {
         appType,
         role,
         description,
-        systemPrompt,
         agentTools,
         aiProvider,
         aiModel,
@@ -295,7 +294,6 @@ export const appMutations = {
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
-        systemPrompt?: string;
         agentTools?: string[];
         aiProvider?: string;
         aiModel?: string;
@@ -488,7 +486,12 @@ export const appMutations = {
             await tx.app.delete({ where: { id: existing.id } });
           });
         } else {
-          throw new Error(`An app with URN "${appUrn}" already exists`);
+          // #2785: typed, like the memory collision (#2819); a plain Error is
+          // masked as INTERNAL_SERVER_ERROR (cor:api:260:01). Names only the
+          // URN the caller sent, never a holder field.
+          throw new GraphQLError(`An app with URN "${appUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
       // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
@@ -549,7 +552,6 @@ export const appMutations = {
             appType: appType ?? 'WORKSTATION',
             role: role ?? 'READER',
             description: description ?? null,
-            systemPrompt: systemPrompt ?? null,
             agentTools: agentTools ?? [],
             expiresAt: expiresAt ? new Date(expiresAt) : undefined,
             createUserPermission: createUserPermission ?? 'EXPLICIT',
@@ -744,7 +746,6 @@ export const appMutations = {
         appType,
         role,
         description,
-        systemPrompt,
         agentTools,
         aiProvider,
         aiModel,
@@ -765,7 +766,6 @@ export const appMutations = {
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
-        systemPrompt?: string;
         agentTools?: string[];
         // GraphQL nullable args: explicit null is meaningful here
         // (aiProvider: null clears the App's 'default' AI config).
@@ -953,7 +953,6 @@ export const appMutations = {
           ...(appType !== undefined ? { appType } : {}),
           ...(role !== undefined ? { role } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
           ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),
