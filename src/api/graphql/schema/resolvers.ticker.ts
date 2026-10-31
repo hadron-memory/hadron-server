@@ -1255,9 +1255,9 @@ export const tickerFieldResolvers = {
       // read of its own: judged and read in one transaction under the App's anchors, and recorded (cor:agt:070:07), a
       // refusal with its code. A key with no live host:operate, another App's key, or an MCP connection sees none.
       const none = { items: [], hasNextPage: false, endCursor: null };
-      if (ctx.transport === 'mcp' || key.appId !== t.appId) return none;
       try {
         return await hostKeyRead(ctx, key, async () => {
+          if (ctx.transport === 'mcp' || key.appId !== t.appId) throw tickerNotFound(t.id);
           const out = await inHostKeyTickerReadTx(ctx, t.appId, () => { throw tickerNotFound(t.id); },
             (c, app, hostId) => read(c, hostWorkersWhere(app.id, hostId)));
           return { out, count: out.items.length };
