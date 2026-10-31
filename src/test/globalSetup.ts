@@ -125,7 +125,7 @@ async function provision(admin: Client) {
 }
 
 /** The CHECK constraints `prisma db push` cannot express. Source of truth: prisma/post-push.sql. */
-async function applyTemplateConstraints(client: Client) {
+export async function applyTemplateConstraints(client: Client) {
   await client.query(readFileSync(new URL('../../prisma/passkey-invariants.sql', import.meta.url), 'utf8'));
   // #1897 — sign-in lineage guards (sign_ins depends on passkey_credentials).
   await client.query(readFileSync(new URL('../../prisma/signin-invariants.sql', import.meta.url), 'utf8'));
