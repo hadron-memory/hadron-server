@@ -1,4 +1,5 @@
 // memoryQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { graphViewDisabled } from '../../../lib/graphView.js';
 import { GraphQLError } from 'graphql';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
@@ -689,6 +690,9 @@ export const memoryQueries = {
       { memoryRef, limit, offset }: { memoryRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
+      // #2990: graph view off (default). Before ANY read, so the cost is gone and readable, unreadable and missing
+      // memories answer the same page: the flag creates no existence oracle.
+      if (graphViewDisabled()) return { nodes: [], total: 0 };
       const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
       if (!resolvedId) return { nodes: [], total: 0 };
 
@@ -759,6 +763,8 @@ export const memoryQueries = {
       { memoryRef, limit, offset }: { memoryRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
+      // #2990: graph view off (default); see memoryNodes.
+      if (graphViewDisabled()) return { edges: [], total: 0 };
       const resolvedId = await resolveReadableMemoryId(ctx, memoryRef);
       if (!resolvedId) return { edges: [], total: 0 };
 

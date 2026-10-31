@@ -9094,6 +9094,9 @@ export const typeDefs = `#graphql
     limit: 0 returns an empty page with just the total — the cheap "how big is
     this memory" node count. Deterministic loc-ascending order so offset paging
     never drops/duplicates.
+
+    Temporarily OFF by default (#2990, server env GRAPH_VIEW_DISABLED): every memory,
+    readable or not, answers the empty page (nodes [], total 0) without a read.
     """
     memoryNodes(memoryRef: ID!, limit: Int, offset: Int): GraphNodesPage!
 
@@ -9104,7 +9107,8 @@ export const typeDefs = `#graphql
     itself. Scoped by the edge's denormalized memoryId (edges whose SOURCE is in
     the memory); a cross-memory edge may reference a target outside this memory,
     which the client drops as a dangling endpoint. Same access gate, paging, and
-    deterministic loc-ascending order as memoryNodes.
+    deterministic loc-ascending order as memoryNodes. Temporarily OFF by default like
+    memoryNodes (#2990): the empty page (edges [], total 0) for every memory.
     """
     memoryEdges(memoryRef: ID!, limit: Int, offset: Int): GraphEdgesPage!
 
