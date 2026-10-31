@@ -164,7 +164,10 @@ export function workerWake(args: {
   }
 
   // cor:agt:080:10 — each live subscription whose current tick is newer than the last acknowledged.
-  for (const sub of subscriptions) {
+  // #2949: in ticker-id order, never the order the rows were read in (that read has no ORDER BY, and the plan may walk
+  // the heap), so an unchanged outstanding wake is re-handed with the same reasons in the same order: the same proof
+  // bytes and the same stored wake. A worker holds one live subscription per ticker, so the order is total.
+  for (const sub of [...subscriptions].sort((x, y) => (x.ticker.id < y.ticker.id ? -1 : x.ticker.id > y.ticker.id ? 1 : 0))) {
     const k = currentTick(sub.ticker, now);
     if (k === null || k <= sub.lastAckedTick) continue;
     const scope = sub.ticker.channelIds.length > 0 ? new Set(sub.ticker.channelIds) : null;
