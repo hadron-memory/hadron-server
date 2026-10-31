@@ -93,6 +93,29 @@ describe('GraphQL doors refuse a generic seq write on a legacy message (V13)', (
   });
 });
 
+describe('changing the type away from a message does not escape the gate (Bruno BLIND P2)', () => {
+  it('updateNode and hadron_update_node refuse seq + nodeType: info on a legacy message, changing neither field nor history', async () => {
+    const row = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:002', memoryId: memory.id } });
+    expect((await errorOf(M.updateNode(null, { input: { id: row.id, nodeType: 'info', seq: 99 } }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    expect(await mcpFor(member.id).callToolText('hadron_update_node', { urn: urn(row.loc), nodeType: 'info', seq: 99 })).toMatch(/^\[seq_protected\]/);
+    const after = await db.node.findUniqueOrThrow({ where: { id: row.id } });
+    expect([after.nodeType, after.seq, after.revSeq]).toEqual([row.nodeType, row.seq, row.revSeq]);
+    expect(await revisions(row.id)).toBe(0);
+  });
+
+  it('a create over a soft-deleted message loc cannot swap the type and set a seq (GraphQL and MCP)', async () => {
+    for (const loc of ['chats:legacy:messages:001', 'chats:legacy:messages:002']) {
+      await db.node.updateMany({ where: { loc, memoryId: memory.id }, data: { deletedAt: new Date() } });
+    }
+    expect((await errorOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'chats:legacy:messages:001', name: 'x', nodeType: 'info', seq: 55 } }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    expect(await mcpFor(member.id).callToolText('hadron_create_node', { urn: urn('chats:legacy:messages:002'), name: 'x', nodeType: 'info', seq: 56 })).toMatch(/^\[seq_protected\]/);
+    for (const loc of ['chats:legacy:messages:001', 'chats:legacy:messages:002']) {
+      const r = await db.node.findFirstOrThrow({ where: { loc, memoryId: memory.id } });
+      expect([r.nodeType, r.deletedAt !== null]).toEqual(['chat-message', true]);
+    }
+  });
+});
+
 describe('MCP doors refuse the same, with the same message (V13)', () => {
   it('hadron_update_node and hadron_create_node carry the GraphQL refusal verbatim', async () => {
     const mcp = mcpFor(member.id);
