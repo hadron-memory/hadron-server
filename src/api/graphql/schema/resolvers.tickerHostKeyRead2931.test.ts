@@ -427,4 +427,79 @@ describe('#2931 no MCP (R-e): an MCP connection authenticated by the host key is
     expect(host.text).toMatch(/app_not_found/i);
     expect(host).toEqual(await call(plainKey));
   });
+
+  it('G7: that refusal is a recorded use of the host key, with its code; an unscoped key records nothing', async () => {
+    const recorded = (k: { id: string }) => db.hostKeyUse.findMany({ where: { appKeyId: k.id, id: { notIn: setupUses } }, select: { action: true, hostId: true, count: true, refusedCode: true } });
+    const server = (k: { id: string }) => createMcpServerInstance({ appId: appX.id, appKeyId: k.id, roles: [] } as unknown as AuthContext, () => undefined, { kind: 'multi-app' } as never);
+    for (const k of [hostKey, plainKey]) {
+      const s = server(k);
+      const client = new Client({ name: 'hk2931', version: '1' });
+      const [local, remote] = InMemoryTransport.createLinkedPair();
+      await s.connect(remote); await client.connect(local);
+      try {
+        expect((await client.callTool({ name: 'hadron_ticker_list', arguments: { appRef: appX.id } })).isError).toBe(true);
+      } finally { await client.close(); await s.close(); }
+    }
+    expect(await recorded(hostKey)).toEqual([{ action: 'read', hostId: 'orca1', count: null, refusedCode: 'APP_NOT_FOUND' }]);
+    expect(await recorded(plainKey)).toEqual([]);
+  });
+});
+
+describe('#2931 Ticker.subscribers is a host-key read of its own: anchored, re-judged and recorded', () => {
+  const uses = (k: { id: string }) =>
+    db.hostKeyUse.findMany({ where: { appKeyId: k.id, id: { notIn: setupUses } }, orderBy: [{ usedAt: 'asc' }, { id: 'asc' }], select: { action: true, hostId: true, count: true, refusedCode: true } });
+
+  it('an admitted nested read records one read use with its count; a participant records nothing', async () => {
+    const t = await ticker(keyCtx(hostKey), shared.id);
+    const before = (await uses(hostKey)).length;
+    expect((await subscribers(keyCtx(hostKey), t)).items.map((s: { workerId: string }) => s.workerId)).toEqual([ada.id]);
+    expect((await uses(hostKey)).slice(before)).toEqual([{ action: 'read', hostId: 'orca1', count: 1, refusedCode: null }]);
+    const all = await db.hostKeyUse.count({ where: { id: { notIn: setupUses } } });
+    await subscribers(ctx(member.id), t);
+    expect(await db.hostKeyUse.count({ where: { id: { notIn: setupUses } } })).toBe(all);
+  });
+
+  it('repeated selections are one recorded use each', async () => {
+    const api = new ApolloServer<Context>({ typeDefs, resolvers });
+    await api.start();
+    try {
+      const r = await api.executeOperation(
+        { query: 'query($r:String!){ ticker(ref:$r){ a: subscribers { items { worker { id } } } b: subscribers(first: 1) { items { worker { id } } } } }', variables: { r: shared.id } },
+        { contextValue: keyCtx(hostKey) });
+      if (r.body.kind !== 'single') throw new Error('unexpected body');
+      expect(r.body.singleResult.errors).toBeUndefined();
+    } finally { await api.stop(); }
+    expect(await uses(hostKey)).toEqual([
+      { action: 'read', hostId: 'orca1', count: 1, refusedCode: null },
+      { action: 'read', hostId: 'orca1', count: 1, refusedCode: null },
+      { action: 'read', hostId: 'orca1', count: 1, refusedCode: null },
+    ]);
+  });
+
+  it('a scope revoked after the parent read refuses the nested read: empty, recorded with its code', async () => {
+    const t = await ticker(keyCtx(hostKey), shared.id);
+    await db.appKeyScope.updateMany({ where: { appKeyId: hostKey.id, scope: 'host:operate', revokedAt: null }, data: { revokedAt: new Date(), revokedByUserId: admin.id } });
+    expect((await subscribers(keyCtx(hostKey), t)).items).toEqual([]);
+    expect((await uses(hostKey)).at(-1)).toEqual({ action: 'read', hostId: 'orca1', count: null, refusedCode: 'TICKER_NOT_FOUND' });
+  });
+
+  it('a revocation committed under the App\'s exclusive anchor is seen by the nested read that waited for it', async () => {
+    const t = await ticker(keyCtx(hostKey), shared.id);
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const revoker = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: appX.id }, { kind: 'org', id: org.id }], 'exclusive');
+      await tx.appKeyScope.updateMany({ where: { appKeyId: hostKey.id, scope: 'host:operate', revokedAt: null }, data: { revokedAt: new Date(), revokedByUserId: admin.id } });
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await isLocked;
+    const read = subscribers(keyCtx(hostKey), t);
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await revoker;
+    expect((await read).items).toEqual([]);
+  });
 });
