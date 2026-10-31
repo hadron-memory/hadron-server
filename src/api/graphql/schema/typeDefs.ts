@@ -10080,7 +10080,7 @@ export const typeDefs = `#graphql
     from the key and its registration, the time from the server, and no screen text of any kind is accepted. A
     malformed input refuses the whole call and stores nothing (BAD_USER_INPUT); a worker this host does not register is
     refused for that item only (WORKER_NOT_FOUND, as setHostWorkerAvailability); an older report than the stored one
-    is skipped (TERMINAL_REPORT_STALE). The result carries the alarm verdict, computed and returned, never stored.
+    is skipped (TERMINAL_REPORT_STALE). The result lists the stored items and the refused items, each refusal with a reason.
     The report decides nothing: it feeds no check status, availability, matcher, stall rule or alarm.
     """
     setHostWorkerTerminals(input: SetHostWorkerTerminalsInput!): SetHostWorkerTerminalsResult!
