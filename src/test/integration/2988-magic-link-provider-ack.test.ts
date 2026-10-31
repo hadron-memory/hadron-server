@@ -128,6 +128,26 @@ describe('#2988 the per-send log line', () => {
     }
   });
 
+  it('emits exactly the allowed field set, so a field cannot be added to the line unnoticed', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      sendMock.mockResolvedValue({ data: { id: 'em_keys' }, error: null });
+      await sendMagicLink(uniqueEmail(), db);
+      const raw = sendLines(spy)[0]!;
+      const payload = JSON.parse(raw.slice(raw.indexOf('{'))) as Record<string, unknown>;
+      expect(Object.keys(payload).sort()).toEqual(['durationMs', 'event', 'outcome', 'providerId']);
+
+      spy.mockClear();
+      sendMock.mockResolvedValue({ data: null, error: { message: 'm', name: 'validation_error' } });
+      await expect(sendMagicLink(uniqueEmail(), db)).rejects.toThrow();
+      const raw2 = sendLines(spy)[0]!;
+      const refused = JSON.parse(raw2.slice(raw2.indexOf('{'))) as Record<string, unknown>;
+      expect(Object.keys(refused).sort()).toEqual(['durationMs', 'event', 'outcome', 'providerError']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('logs a refused send with the provider error name and no address', async () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
