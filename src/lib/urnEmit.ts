@@ -22,7 +22,7 @@
  * migrated + org-owned) round-trip cleanly.
  */
 
-import { composeUrnV2, normalizeUrnForLookup } from './urn.js';
+import { composeActionUrnV2, composeUrnV2, normalizeUrnForLookup } from './urn.js';
 
 /** v1/`CanonicalUrnType` type word → its v2 spelling (only `memory` renames). */
 const V2_TYPE_WORD: Record<string, string> = {
@@ -99,6 +99,28 @@ export function emitNodeUrnV2(memBareUrn: string, loc: string): string {
 export function emitEdgeUrnV2(memBareUrn: string, loc: string): string {
   const [root, ...mem] = bareAtoms(memBareUrn);
   return composeUrnV2('edge', root, ...mem, ...loc.split(':'));
+}
+
+/**
+ * Emit `hrn:action:<root>:<agent-slug>:<code>` — the #2610 action-register
+ * address (cor:urn:010:01, Proposed) — from the HOLDING Agent's bare urn + a
+ * register-entry code. The root and slug are the Agent's own (`hrn:agent:
+ * <root>:<slug>`), so a child Agent's override entry addresses under its own
+ * slug; the leaf is the code, a permanent authored atom that must satisfy the
+ * slug charset and the 64-character bound (`task.finish.open-children` is
+ * valid). Composition REFUSES an invalid code by throwing: the caller is about
+ * to write or serve an address, and an atom the grammar rejects can never
+ * resolve back. Read paths that must not throw catch and null (never a
+ * best-effort string — a wrong action URN is worse than none).
+ */
+export function emitActionUrnV2(agentBareUrn: string, code: string): string {
+  const [root, ...segments] = bareAtoms(agentBareUrn);
+  // The container is ONE slug — the grammar has no ownership chain, and an
+  // agent urn that isn't `<root>:<slug>` cannot key an action address.
+  if (segments.length !== 1) {
+    throw new Error(`urnEmit: agent urn "${agentBareUrn}" is not a single-slug root form`);
+  }
+  return composeActionUrnV2(root, segments[0]!, code);
 }
 
 /**

@@ -60,6 +60,8 @@ import {
   validateUrnType,
   normalizeUrnForLookup,
   hasSchemePrefix,
+  parseUrnV2,
+  composeUrnV2,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
@@ -67,6 +69,7 @@ import { currentActorAmbiguity, publishActor, publishAmbiguousActor, publishUser
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
+  emitActionUrnV2,
   nodeUrnRoundTrips,
   safeNodeUrnV2,
   safeNodeUrnV2Result,
@@ -217,6 +220,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import {
   AgentNotFoundError,
@@ -246,7 +250,7 @@ import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptL
 const REPLACE_LINT_MAX_NODES = 100;
 import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -1812,6 +1816,65 @@ async function concealUnreadableEdgeEnds<N extends {
   };
 }
 
+/**
+ * #2610 — the register entry's action address (`hrn:action:<root>:<agent-slug>:<code>`)
+ * for the read projection's `Action URN:` line. Non-null only for a `register:<code>`
+ * node in a LIVE Agent's system memory — the MCP spelling of Node.actionUrn
+ * (resolvers.types.ts), computed the same way so the two surfaces cannot drift:
+ * null, never a throw, on an unemittable stored code atom; a `register:` loc in a
+ * memory no live Agent holds names no entry.
+ */
+async function actionUrnForRegisterLoc(loc: string, memoryId: string): Promise<string | null> {
+  if (!loc.startsWith('register:')) return null;
+  const code = loc.slice('register:'.length);
+  if (!code) return null;
+  const agent = await db.agent.findFirst({
+    where: { systemMemoryId: memoryId, deletedAt: null },
+    select: { urn: true },
+  });
+  if (!agent) return null;
+  try {
+    return emitActionUrnV2(agent.urn, code);
+  } catch (err) {
+    console.warn(
+      `[Action URN:] register code ${JSON.stringify(code)} in memory ${memoryId} is not ` +
+        'emittable as an action URN; omitting the line. The STORED loc needs repair — this is ' +
+        'not a malformed caller request:',
+      err,
+    );
+    return null;
+  }
+}
+
+/**
+ * The batch's action addresses in ONE grouped agent lookup (the per-node
+ * `Action URN:` line needs the holding Agent's urn, and cor:api:040:01 makes the
+ * batch projection the same thing as the single read's). Absent from the map —
+ * like a null from the single-node path — means no line.
+ */
+async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const entries = nodes.filter((n) => n.loc.startsWith('register:'));
+  if (!entries.length) return out;
+  const agents = await db.agent.findMany({
+    where: { systemMemoryId: { in: [...new Set(entries.map((n) => n.memoryId))] }, deletedAt: null },
+    select: { systemMemoryId: true, urn: true },
+  });
+  const urnByMemory = new Map(agents.map((a) => [a.systemMemoryId as string, a.urn]));
+  for (const n of entries) {
+    const agentUrn = urnByMemory.get(n.memoryId);
+    if (!agentUrn) continue; // no live Agent holds this memory — no line
+    const code = n.loc.slice('register:'.length);
+    if (!code) continue;
+    try {
+      out.set(n.id, emitActionUrnV2(agentUrn, code));
+    } catch {
+      out.set(n.id, null); // unemittable stored code — same posture as the single read
+    }
+  }
+  return out;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1827,6 +1890,8 @@ async function renderNodeReadProjection(
       feedback: ReadonlyMap<string, CommentCounts>;
       /** #1632 — signature status per node, one batched load. */
       signatures?: ReadonlyMap<string, NodeSignatureStatusView>;
+      /** #2610 — action addresses per node, one batched agent lookup; absent = no line. */
+      actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
@@ -1904,6 +1969,15 @@ async function renderNodeReadProjection(
   // structure (`/`, `?`, `#`) into the href. Same rule as a malformed base
   // URL: a link that points somewhere other than the node is worse than none.
   const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
+
+  // #2610 — the entry's action address (`hrn:action:<root>:<agent-slug>:<code>`),
+  // when this row IS one: a `register:<code>` node in a live Agent's system
+  // memory. Address-class like the URL line (#1885 pin: content, served on an
+  // inherited read too, keyed on the row's own — the holding base Agent's —
+  // memory). Batched callers hand it in one grouped lookup (cor:api:040:01).
+  const actionUrn = opts.batch
+    ? (opts.batch.actionUrns?.get(node.id) ?? null)
+    : await actionUrnForRegisterLoc(node.loc, node.memoryId);
 
   // #1326: a source node may be readable while its author/validator task
   // lives in another tenant's memory. Resolve task addresses only after that
@@ -2033,6 +2107,7 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    actionUrn ? `Action URN: ${actionUrn}` : '',
     inheritedFrom
       ? `Inherited from: ${emitEntityUrnV2('agent', inheritedFrom.agentUrn)} (a base of the Agent read; its edges and records are not shown)`
       : '',
@@ -4814,11 +4889,209 @@ export function createMcpServerInstance(
 
   // ── hadron_get_node ──────────────────────────────────────────────────────────
 
+  /** An action URN — a register entry's second address (#2610, cor:urn:010:01). */
+  const ACTION_REF_RE = /^(?:hrn|urn):action:/;
+
+  /**
+   * #2610 — resolve `hrn:action:<root>:<agent-slug>:<code>` to its register
+   * entry: the SAME steps as resolveUrn's action arm (resolvers.query.node.ts),
+   * with this surface's gate spellings. The root + slug name the ONE Agent whose
+   * system memory holds the entry at `register:<code>` — no nearest-first chain
+   * fallthrough (a child's override entry addresses under its own slug). The
+   * `agent` arm's gate verbatim (PUBLIC resolves for anyone, #551; otherwise
+   * owner-or-org-member), then the system memory's read gate, then the entry
+   * through resolveNodeRefForAuth so the live lookup, the rename alias heal
+   * (cor:urn:030:01) and ambiguity concealment are the SAME implementation the
+   * node form below uses. Returns null for EVERY refusal — other tenant,
+   * unreadable memory, unknown agent, missing or malformed code — the arm's
+   * uniform-refusal rule, worn here as the same single not-found message the
+   * node form serves. A globally-ambiguous historical entry address stays a
+   * LOUD refusal (AmbiguousLegacyUrnError escapes), exactly as in the arm.
+   */
+  const resolveActionEntryRef = async (
+    rawUrn: string,
+  ): Promise<{ id: string; memoryId: string; loc: string } | null> => {
+    let agentId: string;
+    let code: string;
+    try {
+      const parsed = parseUrnV2(rawUrn); // fixed 'action' arity: [agent-slug, code]
+      [code] = parsed.segments.slice(1);
+      ({ id: agentId } = await resolveAgentRef(
+        db,
+        composeUrnV2('agent', parsed.root, parsed.segments[0]!),
+      ));
+    } catch {
+      // Malformed leaf (charset/length/arity) or an unknown/renamed-away agent
+      // — both name nothing (the arm's uniform refusal).
+      return null;
+    }
+    const agent = await db.agent.findUnique({
+      where: { id: agentId },
+      select: { organizationId: true, visibility: true, ownerUserId: true, systemMemoryId: true },
+    });
+    if (!agent?.systemMemoryId) return null;
+    // D-1 (Rico §10 delta): carry impersonation into the gate — scopeCtx()
+    // alone omits it, so an impersonated session's org-membership check would
+    // admit what the GraphQL arm (ctx.impersonation-aware) refuses.
+    // recoveryCtx() is the established shape for this.
+    if (
+      agent.visibility !== 'PUBLIC' &&
+      !(await isOwnerOrOrgMember({ ...scopeCtx(), impersonation: auth.impersonation ?? undefined }, agent))
+    ) {
+      return null;
+    }
+    if (!(await canReadMemory(db, auth, agent.systemMemoryId, EXPLICIT_REF))) return null;
+    let entryId: string;
+    try {
+      ({ id: entryId } = await resolveNodeRefForAuth(
+        emitNodeUrnV2(await loadMemoryUrn(agent.systemMemoryId), `register:${code}`),
+        auth,
+      ));
+    } catch (error) {
+      if (error instanceof AmbiguousLegacyUrnError) throw error;
+      return null;
+    }
+    const entry = await db.node.findFirst({
+      where: { id: entryId, deletedAt: null },
+      select: { id: true, memoryId: true, loc: true },
+    });
+    if (!entry) return null;
+    // The content gate on the memory the entry ACTUALLY lives in — an alias
+    // heal can cross memories (PR #2711 §10, P3-2): the caller reads where it
+    // lives, not the system memory the ref started from.
+    if (!(await canReadMemory(db, auth, entry.memoryId, EXPLICIT_REF))) return null;
+    return entry;
+  };
+
+  /**
+   * The read tail shared by hadron_get_node's two address forms — the node URN
+   * path and the #2610 action-URN path — so one projection, one reconcile, one
+   * usage event and one lint pass serve both of a node's addresses and cannot
+   * drift (the same rule cor:api:040:01 holds the batch to).
+   */
+  const serveNodeReadProjection = async (
+    node: { id: string; memoryId: string; loc: string },
+    o: {
+      rawUrn: string;
+      contentScope?: 'content' | 'abstract' | 'all';
+      raw?: boolean;
+      inheritedFrom?: InheritedFrom | null;
+      fragment?: string;
+      matchedLiteral?: boolean;
+    },
+  ) => {
+      // Spec 031 — contentScope-driven response shape. Default 'content'
+      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
+      // validates the same set at the MCP transport boundary, but direct-
+      // handler callers (createTestableMcpServer's _registeredTools shortcut)
+      // bypass that parsing, so re-validate here. InvalidContentScopeError is
+      // the single source of truth for the message (and any future GraphQL
+      // `extensions.code` mapping). MCP convention: return error text, not throw.
+      if (
+        o.contentScope !== undefined &&
+        o.contentScope !== 'content' &&
+        o.contentScope !== 'abstract' &&
+        o.contentScope !== 'all'
+      ) {
+        const err = new InvalidContentScopeError(String(o.contentScope));
+        return refusalResult(err.message);
+      }
+      const scope = o.contentScope ?? 'content';
+      // Reconcile + fetch under one row lock. The first lookup selects the
+      // address and authorizes its memory; it must not supply the body after a
+      // reconciliation advanced the counter.
+      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, o.inheritedFrom?.via ?? node.memoryId);
+      if (
+        !current ||
+        current.memoryId !== node.memoryId ||
+        current.loc !== node.loc ||
+        // An inherited node was admitted through the child's memory above.
+        (!o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
+      ) {
+        return refusalResult(`Node "${o.rawUrn}" not found.`);
+      }
+      // The version actually served must still be the child's to show
+      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
+      if (o.inheritedFrom && !(await stillInherited(db, o.inheritedFrom, current))) {
+        return refusalResult(`Node "${o.rawUrn}" not found.`);
+      }
+      if (o.inheritedFrom) markInherited([current], new Map([[current.memoryId, o.inheritedFrom]]));
+      // Spec 041: decrypt when this session holds the key; mark locked
+      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
+      const lockState = mcpDecryptOrMark(current);
+      // Shared with hadron_get_nodes (batch) so the per-node projection can never
+      // drift between the single-read and batch-read surfaces (cor:api:040:01).
+      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
+      const served = lockState === 'locked' || o.raw
+        ? current
+        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw: o.raw }) };
+      const projection = await renderNodeReadProjection(served, scope, {
+        locked: lockState === 'locked',
+        encryptedMemory: lockState !== 'plaintext',
+        auth,
+      });
+
+      // Record usage event (fire-and-forget), AFTER the projection is in hand:
+      // the defensive contentScope check above returns an error for a direct
+      // handler call with a bad scope, and recording first would count a read
+      // for content never returned (PR #1062 review — Copilot).
+      //
+      // #796: `memoryId` is attributed directly so the event stays counted for
+      // this memory after the node is deleted (nodeId is SetNull).
+      //
+      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
+      // bound session. `auth.sessionId` is a validated Session.id — an App-key
+      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
+      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
+      // MCP transport session id. It was hardcoded null in all five MCP usage
+      // writers, which meant MCP work produced no session heartbeat at all: the
+      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
+      // The residual this comment used to describe — "user-credential MCP
+      // callers cannot bind a session today" — was CLOSED by #934 four days
+      // after it was written: `bindSession` takes both principal shapes, and a
+      // user principal binds a session attributed to them. The real gap was
+      // narrower and outlived it: a desktop caller's session is created
+      // mid-conversation by `hadron_start_session`, so it can never reach an
+      // `X-Hadron-Session` header on a connection that already exists, leaving
+      // `auth.sessionId` null and every event here unattributed. #1081 gives
+      // that caller an explicit heartbeat instead (`heartbeatSession`).
+      //
+      // A LOCKED node still records: the projection is what crossed the
+      // boundary, and the caller did read this node's addressable state.
+      // An alias read names the node at its CURRENT address; never pair the
+      // historical input loc with the target memory in the usage event.
+      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
+
+      // #696: `#data` addresses the node's DATA, not the node — and before the
+      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
+      // read simply missed. Now it decomposes, and returning the parent's
+      // projection with no word said would answer a question the caller did not
+      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
+      // a read surface. This tool has no data view, so it serves the node and
+      // SAYS which resource that is; `resolveUrn` tags its result the same way.
+      // No notice when the LITERAL row matched: nothing was resolved away, the
+      // caller got exactly the loc they named.
+      // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
+      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
+      return textResult(noteFragment(projection, o.matchedLiteral ? undefined : o.fragment) + lint);
+  };
+
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted — the register entry's SECOND address, resolved to that entry and served as the same projection. Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give. A node that is an action's register entry also carries an `Action URN:` line — its action address; cite THAT (not the node URN) when naming the action.",
     SHAPE_HADRON_GET_NODE,
     async ({ urn: rawUrn, contentScope, raw }) => {
+      // #2610 — an action URN is a register entry's SECOND address, not a node
+      // URN: the node-qualification gate below would refuse it as a wrong-kind
+      // prefix. Resolve it through the action arm's steps and serve the ENTRY's
+      // projection — one projection for both of a node's addresses, so the
+      // surfaces cannot drift.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const entry = await resolveActionEntryRef(rawUrn);
+        if (!entry) return refusalResult(`Node "${rawUrn}" not found.`);
+        return serveNodeReadProjection(entry, { rawUrn, contentScope, raw });
+      }
+
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4923,100 +5196,7 @@ export function createMcpServerInstance(
       }
       if (!node) return missing();
 
-      // Spec 031 — contentScope-driven response shape. Default 'content'
-      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
-      // validates the same set at the MCP transport boundary, but direct-
-      // handler callers (createTestableMcpServer's _registeredTools shortcut)
-      // bypass that parsing, so re-validate here. InvalidContentScopeError is
-      // the single source of truth for the message (and any future GraphQL
-      // `extensions.code` mapping). MCP convention: return error text, not throw.
-      if (
-        contentScope !== undefined &&
-        contentScope !== 'content' &&
-        contentScope !== 'abstract' &&
-        contentScope !== 'all'
-      ) {
-        const err = new InvalidContentScopeError(String(contentScope));
-        return refusalResult(err.message);
-      }
-      const scope = contentScope ?? 'content';
-      // Reconcile + fetch under one row lock. The first lookup selects the
-      // address and authorizes its memory; it must not supply the body after a
-      // reconciliation advanced the counter.
-      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, inheritedFrom?.via ?? node.memoryId);
-      if (
-        !current ||
-        current.memoryId !== node.memoryId ||
-        current.loc !== node.loc ||
-        // An inherited node was admitted through the child's memory above.
-        (!inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
-      ) {
-        return refusalResult(`Node "${rawUrn}" not found.`);
-      }
-      // The version actually served must still be the child's to show
-      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
-      if (inheritedFrom && !(await stillInherited(db, inheritedFrom, current))) {
-        return refusalResult(`Node "${rawUrn}" not found.`);
-      }
-      if (inheritedFrom) markInherited([current], new Map([[current.memoryId, inheritedFrom]]));
-      // Spec 041: decrypt when this session holds the key; mark locked
-      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
-      const lockState = mcpDecryptOrMark(current);
-      // Shared with hadron_get_nodes (batch) so the per-node projection can never
-      // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
-      const served = lockState === 'locked' || raw
-        ? current
-        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw }) };
-      const projection = await renderNodeReadProjection(served, scope, {
-        locked: lockState === 'locked',
-        encryptedMemory: lockState !== 'plaintext',
-        auth,
-      });
-
-      // Record usage event (fire-and-forget), AFTER the projection is in hand:
-      // the defensive contentScope check above returns an error for a direct
-      // handler call with a bad scope, and recording first would count a read
-      // for content never returned (PR #1062 review — Copilot).
-      //
-      // #796: `memoryId` is attributed directly so the event stays counted for
-      // this memory after the node is deleted (nodeId is SetNull).
-      //
-      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
-      // bound session. `auth.sessionId` is a validated Session.id — an App-key
-      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
-      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
-      // MCP transport session id. It was hardcoded null in all five MCP usage
-      // writers, which meant MCP work produced no session heartbeat at all: the
-      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
-      // The residual this comment used to describe — "user-credential MCP
-      // callers cannot bind a session today" — was CLOSED by #934 four days
-      // after it was written: `bindSession` takes both principal shapes, and a
-      // user principal binds a session attributed to them. The real gap was
-      // narrower and outlived it: a desktop caller's session is created
-      // mid-conversation by `hadron_start_session`, so it can never reach an
-      // `X-Hadron-Session` header on a connection that already exists, leaving
-      // `auth.sessionId` null and every event here unattributed. #1081 gives
-      // that caller an explicit heartbeat instead (`heartbeatSession`).
-      //
-      // A LOCKED node still records: the projection is what crossed the
-      // boundary, and the caller did read this node's addressable state.
-      // An alias read names the node at its CURRENT address; never pair the
-      // historical input loc with the target memory in the usage event.
-      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
-
-      // #696: `#data` addresses the node's DATA, not the node — and before the
-      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
-      // read simply missed. Now it decomposes, and returning the parent's
-      // projection with no word said would answer a question the caller did not
-      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
-      // a read surface. This tool has no data view, so it serves the node and
-      // SAYS which resource that is; `resolveUrn` tags its result the same way.
-      // No notice when the LITERAL row matched: nothing was resolved away, the
-      // caller got exactly the loc they named.
-      // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
-      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
-      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment) + lint);
+      return serveNodeReadProjection(node, { rawUrn, contentScope, raw, inheritedFrom, fragment, matchedLiteral });
     },
   );
 
@@ -5406,12 +5586,13 @@ export function createMcpServerInstance(
           .map((n) => n.id))
         : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
-      const [taskRefs, humanNames, feedback] = await Promise.all([
+      const [taskRefs, humanNames, feedback, actionUrns] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
         batchHumanNames(visible, signerIds),
         openThreadCounts(db, visible.map((n) => n.id)),
+        batchActionUrns(visible),
       ]);
-      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
+      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
       for (const metadata of visible) {
         if (truncated) {
@@ -12613,7 +12794,7 @@ const SHAPE_HADRON_FIND_NODES = {
 };
 
 const SHAPE_HADRON_GET_NODE = {
-  urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted)'),
+  urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted), or an action URN "hrn:action:<root>:<agent-slug>:<code>" — the register entry\'s second address'),
   contentScope: z
     .enum(['content', 'abstract', 'all'])
     .optional()
