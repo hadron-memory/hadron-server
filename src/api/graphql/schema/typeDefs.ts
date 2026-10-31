@@ -6462,11 +6462,13 @@ export const typeDefs = `#graphql
     memoryId: ID!
     "Live (non-deleted) nodes scanned - soft-deleted tombstones are excluded, since their findings would be unactionable (#884). The whole memory in one pass - the checks are cross-referential, so a partial scan would produce false positives rather than fewer findings."
     nodesChecked: Int!
-    "Findings, capped by the limit argument."
+    "Findings, capped by the limit argument, with problems before informational declarations."
     findings: [MemoryValidationFinding!]!
-    "The TRUE finding count, before any truncation, including informational INDEX_TRUNCATED. Gate health on ok, not findings.length."
+    "The TRUE problem count, before any truncation. Excludes informational INDEX_TRUNCATED; gate CI on this, not findings.length."
     totalFindings: Int!
-    "True when findings was capped and totalFindings is larger."
+    "The TRUE informational declaration count, before any truncation. Does not affect health."
+    totalInformational: Int!
+    "True when findings was capped and totalFindings + totalInformational is larger."
     truncated: Boolean!
     skippedChecks: [MemoryValidationSkippedCheck!]!
     """

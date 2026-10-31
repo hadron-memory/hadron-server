@@ -19,7 +19,7 @@ import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAg
 import { normalizeObjectType } from './enforceNodeSchema.js';
 import type { MemorySchema } from './memorySchema.js';
 
-/** The six checks. Mirrors the GraphQL MemoryValidationCheck enum. */
+/** The validation checks. Mirrors the GraphQL MemoryValidationCheck enum. */
 export type ValidationKind =
   | 'BROKEN_REF'
   | 'SPARSE'
@@ -45,10 +45,12 @@ export interface ValidationReport {
   nodesChecked: number;
   /** Findings, capped at `maxFindings`. */
   findings: ValidationFinding[];
-  /** The TRUE count, even when `findings` was capped. */
+  /** The TRUE problem count, even when `findings` was capped. */
   totalFindings: number;
   /** Non-informational findings, counted even beyond the retained page. */
   totalProblems: number;
+  /** Informational declarations; never included in the problem count. */
+  totalInformational: number;
   /**
    * A check that could NOT run. Reported explicitly rather than silently
    * omitted: a clean bill of health that quietly skipped a check is worse than
@@ -115,13 +117,18 @@ export async function validateMemoryNodes(
     // no longer exists.
     include: { outgoingEdges: { where: { deletedAt: null } } },
   });
-  const findings: ValidationFinding[] = [];
+  const problems: ValidationFinding[] = [];
+  const informational: ValidationFinding[] = [];
   let totalFindings = 0;
-  let totalProblems = 0;
+  let totalInformational = 0;
   const record = (f: ValidationFinding) => {
-    totalFindings += 1;
-    if (f.kind !== 'INDEX_TRUNCATED') totalProblems += 1;
-    if (findings.length < maxFindings) findings.push(f);
+    if (f.kind === 'INDEX_TRUNCATED') {
+      totalInformational += 1;
+      if (informational.length < maxFindings) informational.push(f);
+    } else {
+      totalFindings += 1;
+      if (problems.length < maxFindings) problems.push(f);
+    }
   };
 
   // BROKEN_REF, corrected in #819. The pre-#819 check compared every edge
@@ -258,7 +265,10 @@ export async function validateMemoryNodes(
     }
   }
 
-  return { nodesChecked: nodes.length, findings, totalFindings, totalProblems, skippedChecks };
+  // Keep each bucket bounded during the scan, and give actionable problems
+  // precedence regardless of where informational declarations were encountered.
+  const findings = problems.concat(informational.slice(0, Math.max(0, maxFindings - problems.length)));
+  return { nodesChecked: nodes.length, findings, totalFindings, totalProblems: totalFindings, totalInformational, skippedChecks };
 }
 
 /** The MCP prose line for one finding — the pre-#819 wording, preserved. */

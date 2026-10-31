@@ -92,6 +92,7 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
     expect((await row()).embeddingWorkToken).not.toBeNull();
     setEmbeddingClientForTests(client);
+    vi.stubEnv('EMBEDDING_API_URL', 'http://unused.invalid');
     try {
       // Recover through the real durable selector/dispatcher, not a direct embed call.
       expect(await drainEmbeddingQueue(db, { client })).toMatchObject({ embedded: 1, failed: 0 });
@@ -99,6 +100,7 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     } finally {
       await stopEmbeddingWorker(db);
       resetEmbeddingClientForTests();
+      vi.unstubAllEnvs();
     }
   });
   it('re-embedding is stable; editing down and empty content clear it', async () => {

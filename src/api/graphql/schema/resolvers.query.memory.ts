@@ -209,7 +209,8 @@ export const memoryQueries = {
         nodesChecked: report.nodesChecked,
         findings,
         totalFindings: report.totalFindings,
-        truncated: report.totalFindings > findings.length,
+        totalInformational: report.totalInformational,
+        truncated: report.totalFindings + report.totalInformational > findings.length,
         skippedChecks: report.skippedChecks,
         // A skipped check makes `ok` false even with zero findings — you
         // cannot claim health for a check you did not run.

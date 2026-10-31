@@ -11584,21 +11584,26 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // findings typed.
       const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
+      const informational: string[] = [];
       const memoryUrnOf = memoizedMemoryUrnLookup();
       for (const f of report.findings) {
-        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
+        const lines = f.kind === 'INDEX_TRUNCATED' ? informational : issues;
+        lines.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
+      const informationalNote = report.totalInformational
+        ? `\n\nInformational findings (${report.totalInformational}):\n${informational.join('\n')}`
+        : '';
       // A skipped check is stated rather than silently omitted — a clean bill
       // of health that quietly skipped a check is worse than no report.
       const skippedNote = report.skippedChecks.length
         ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
         : '';
 
-      if (issues.length === 0) {
-        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${skippedNote}`);
+      if (report.totalFindings === 0) {
+        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${informationalNote}${skippedNote}`);
       }
       return textResult(
-        `Found ${issues.length} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${skippedNote}`,
+        `Found ${report.totalFindings} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${informationalNote}${skippedNote}`,
       );
     },
   );

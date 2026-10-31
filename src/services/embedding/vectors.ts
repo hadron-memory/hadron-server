@@ -278,7 +278,7 @@ export async function upsertChunkVectors(
 /** Delete every vector for a memory (revoke / disable). */
 export async function deleteMemoryVectors(db: PrismaClient, memoryId: string): Promise<void> {
   await db.$transaction(async tx => {
-    await tx.node.updateMany({ where: { memoryId }, data: { embeddingPendingAt: null, embeddingWorkToken: null, embeddingTruncatedChunks: null } });
+    await tx.node.updateMany({ where: { memoryId, OR: [{ embeddingPendingAt: { not: null } }, { embeddingWorkToken: { not: null } }, { embeddingTruncatedChunks: { not: null } }] }, data: { embeddingPendingAt: null, embeddingWorkToken: null, embeddingTruncatedChunks: null } });
     await tx.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId}`;
   });
 }
@@ -291,7 +291,8 @@ export async function deleteMemoryChunkVectors(db: PrismaClient, memoryId: strin
   await db.$transaction(async tx => {
     await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = NULL,
       embedding_work_token = CASE WHEN embedding_pending_at IS NOT NULL THEN gen_random_uuid() ELSE NULL END
-      WHERE memory_id = ${memoryId}`;
+      WHERE memory_id = ${memoryId}
+        AND (embedding_truncated_chunks IS NOT NULL OR embedding_pending_at IS NOT NULL OR embedding_work_token IS NOT NULL)`;
     await tx.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId} AND kind = 'chunk'`;
   });
 }
