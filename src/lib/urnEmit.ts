@@ -124,6 +124,24 @@ export function emitActionUrnV2(agentBareUrn: string, code: string): string {
 }
 
 /**
+ * #2972 — the single-atom action-register code a `register:` loc carries, or
+ * null when the loc is not an action-register entry. A NESTED `register:` loc
+ * (`register:a:b`) is a legitimately writable namespace loc, not a broken
+ * entry: it returns null QUIETLY (nothing needs repair — cor:urn:010:01,
+ * reading (i), Xan's gate issue comment 6547618747). The code is returned
+ * WITHOUT charset/length validation: emission (`emitActionUrnV2` → urn-lib
+ * `composeActionUrnV2`) stays the one validator — no second copy — and the
+ * callers' null-and-log branch remains as drift defence for a stored
+ * single-atom code the emitter refuses.
+ */
+export function registerEntryCode(loc: string): string | null {
+  if (!loc.startsWith('register:')) return null;
+  const code = loc.slice('register:'.length);
+  if (!code || code.includes(':')) return null;
+  return code;
+}
+
+/**
  * Emit `hrn:asset:<root>:<mem>:assets:<asset-id>` from a memory's bare urn + an
  * asset id (the v2 `asset` shape, `cor:urn:010:01`).
  */
