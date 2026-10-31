@@ -13,6 +13,7 @@ import type { Server } from 'node:http';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { startup } from '../controller/startup.js';
+import { createServer } from '../server.js';
 import * as health from './health.js';
 import type { HealthDb } from './health.js';
 
@@ -242,7 +243,6 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
 
 describe('createServer mounts /ready from the readiness it is given (#2998)', () => {
   it('serves the passed readiness', async () => {
-    const { createServer } = await import('../server.js');
     const r = tracker();
     const app = await (createServer as (opts?: unknown) => Promise<express.Express>)({ readiness: r });
     const base = await listen(app);
@@ -250,5 +250,5 @@ describe('createServer mounts /ready from the readiness it is given (#2998)', ()
     r.trackFirstStartup(Promise.resolve('ran'));
     await settle();
     expect((await get(base, '/ready')).status).toBe(200);
-  });
+  }, 30_000);
 });

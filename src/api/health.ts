@@ -39,13 +39,89 @@ export const HEALTH_DB_TIMEOUT_MS = 2_000;
 export type HealthDb = Pick<PrismaClient, '$queryRaw'>;
 
 /**
- * Mount GET /health: 200 `{ ok: true }` when `SELECT 1` completes through
+ * What the first startup attempt has come to (#2998, cor:api:270:01):
+ * `starting` until it settles, then `settled` or `startup_failed`, for good.
+ */
+export type StartupState = 'starting' | 'startup_failed' | 'settled';
+
+/** The two readiness inputs `/ready` reads; `/health` reads neither. */
+export interface ReadinessSource {
+  startup(): StartupState;
+  stopping(): boolean;
+}
+
+/** A {@link ReadinessSource} plus the two writes the process entry point makes. */
+export interface Readiness extends ReadinessSource {
+  /**
+   * Record the FIRST startup attempt. Only the first call counts: a later
+   * attempt (a reload) neither makes the server not ready again nor rescues a
+   * failed first one. `onError` receives the rejection for the log; it never
+   * reaches the response.
+   */
+  trackFirstStartup(attempt: Promise<unknown>, onError?: (err: unknown) => void): void;
+  /** Graceful shutdown has begun: `/ready` answers `stopping` from now on. */
+  markStopping(): void;
+}
+
+/**
+ * #2998: the readiness state for one server process. The entry point
+ * (`src/index.ts`) creates it, hands it to `createServer`, tracks the first
+ * `controller.startup()` and marks the shutdown signal. A closure rather than
+ * module state, so each server (and each test) owns its own.
+ */
+export function createReadiness(): Readiness {
+  let state: StartupState = 'starting';
+  let tracked = false;
+  let stopping = false;
+  return {
+    startup: () => state,
+    stopping: () => stopping,
+    trackFirstStartup(attempt, onError) {
+      if (tracked) {
+        // Not the first attempt: its outcome is the caller's to handle.
+        attempt.catch((err) => onError?.(err));
+        return;
+      }
+      tracked = true;
+      attempt.then(
+        () => {
+          state = 'settled';
+        },
+        (err) => {
+          state = 'startup_failed';
+          onError?.(err);
+        },
+      );
+    },
+    markStopping() {
+      stopping = true;
+    },
+  };
+}
+
+/**
+ * Mount GET /health and GET /ready.
+ *
+ * `/health` (#1906): 200 `{ ok: true }` when `SELECT 1` completes through
  * `db` within `timeoutMs`, otherwise 503 `{ ok: false, error: 'database_unavailable' }`.
+ * It never reads `readiness`.
+ *
+ * `/ready` (#2998, hrn:node:hadronmemory.com:specs:cor:api:270:01): exactly
+ * one of five fixed bodies, checked in this order: 503 `stopping` once
+ * shutdown has begun; 503 `starting` while the first startup attempt is
+ * pending; 503 `startup_failed` if it rejected; then the same database check
+ * as `/health` (the same in-flight query, the same bound): 503
+ * `database_unavailable` or 200 `{ ok: true }`. Unauthenticated, no side
+ * effects, `Cache-Control: no-store`. Without `readiness` (tests that mount
+ * only `/health`), `/ready` reads a source that never saw a startup: `starting`.
  */
 export function mountHealthRoutes(
   app: Express,
   db: HealthDb,
-  { timeoutMs = HEALTH_DB_TIMEOUT_MS }: { timeoutMs?: number } = {},
+  {
+    timeoutMs = HEALTH_DB_TIMEOUT_MS,
+    readiness = createReadiness(),
+  }: { timeoutMs?: number; readiness?: ReadinessSource } = {},
 ): void {
   let inFlight: Promise<void> | null = null;
 
@@ -61,20 +137,50 @@ export function mountHealthRoutes(
     return inFlight;
   };
 
-  app.get('/health', async (_req, res) => {
-    res.set('Cache-Control', 'no-store');
+  /**
+   * True when the shared probe completes within `timeoutMs`. Both routes call
+   * this, so `/ready` can never answer the database differently from `/health`.
+   */
+  const databaseAnswers = async (route: string): Promise<boolean> => {
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('health check timed out')), timeoutMs);
+      timer = setTimeout(() => reject(new Error(`${route} check timed out`)), timeoutMs);
     });
     try {
       await Promise.race([probe(), timedOut]);
-      res.json({ ok: true });
+      return true;
     } catch (err) {
-      console.warn('[health] database check failed:', err instanceof Error ? err.message : err);
-      res.status(503).json({ ok: false, error: 'database_unavailable' });
+      console.warn(`[${route}] database check failed:`, err instanceof Error ? err.message : err);
+      return false;
     } finally {
       clearTimeout(timer);
+    }
+  };
+
+  app.get('/health', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (await databaseAnswers('health')) {
+      res.json({ ok: true });
+    } else {
+      res.status(503).json({ ok: false, error: 'database_unavailable' });
+    }
+  });
+
+  app.get('/ready', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (readiness.stopping()) {
+      res.status(503).json({ ok: false, error: 'stopping' });
+      return;
+    }
+    const startup = readiness.startup();
+    if (startup !== 'settled') {
+      res.status(503).json({ ok: false, error: startup === 'starting' ? 'starting' : 'startup_failed' });
+      return;
+    }
+    if (await databaseAnswers('ready')) {
+      res.json({ ok: true });
+    } else {
+      res.status(503).json({ ok: false, error: 'database_unavailable' });
     }
   });
 }
