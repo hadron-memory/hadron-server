@@ -21,7 +21,6 @@
     "schema:export": "tsx scripts/export-graphql-sdl.mjs",
     "check:loc-scope": "node scripts/check-loc-scope.mjs",
     "admin:mint-token": "tsx scripts/admin-mint-token.ts",
-    "admin:migrate-boot-prompt-variables": "tsx scripts/admin-migrate-boot-prompt-variables.ts",
     "admin:backfill-urn-v2": "tsx scripts/backfill-urn-v2.ts",
     "admin:backfill-shared-memory-agent": "tsx scripts/backfill-shared-memory-agent.ts",
     "admin:backfill-system-embeddings": "tsx src/jobs/backfillSystemMemoryEmbeddings.ts",
