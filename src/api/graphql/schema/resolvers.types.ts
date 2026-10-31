@@ -30,6 +30,7 @@ import {
   emitNodeUrnV2,
   emitEdgeUrnV2,
   emitAssetUrnV2,
+  emitActionUrnV2,
   emitInstalledAgentUrnV2,
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
@@ -186,6 +187,42 @@ export async function resolveNodeUrnField(
     // on the same malformed value, defeating the serve-and-log posture of
     // this non-null field.
     return bestEffortFlatNodeUrn('node', memUrn, n.loc);
+  }
+}
+
+/**
+ * #2610 — `Node.actionUrn`: the register entry's action address
+ * (`hrn:action:<root>:<agent-slug>:<code>`), computed on read. Non-null only
+ * for a `register:<code>` node in a LIVE Agent's system memory — the memory the
+ * action URN keys on is the holding Agent's own (`Node.memoryId` here), so a
+ * `register:` loc anywhere else names no entry. Null, never a throw, on an
+ * unemittable stored code atom (charset/length): one bad row must not fail the
+ * query, and a wrong action URN is worse than none.
+ */
+export async function resolveNodeActionUrnField(
+  n: { loc: string; memoryId: string },
+  ctx: Context,
+): Promise<string | null> {
+  if (!n.loc.startsWith('register:')) return null;
+  const code = n.loc.slice('register:'.length);
+  if (!code) return null;
+  const agent = await ctx.db.agent.findFirst({
+    where: { systemMemoryId: n.memoryId, deletedAt: null },
+    select: { urn: true },
+  });
+  // No live Agent keys this memory (a plain memory, or a deleted Agent whose
+  // URN can no longer resolve): no action address exists for this node.
+  if (!agent) return null;
+  try {
+    return emitActionUrnV2(agent.urn, code);
+  } catch (err) {
+    console.warn(
+      `[Node.actionUrn] register code ${JSON.stringify(code)} in memory ${n.memoryId} is not ` +
+        'emittable as an action URN; serving null. The STORED loc needs repair — this is not a ' +
+        'malformed caller request:',
+      err,
+    );
+    return null;
   }
 }
 
@@ -1135,6 +1172,11 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    // #2610 — the action-register address for a register:<code> entry in an
+    // Agent system memory; null for every other node. A second address beside
+    // `urn` (which keeps resolving), computed from the holding Agent's own urn.
+    actionUrn: (n: { loc: string; memoryId: string }, _: unknown, ctx: Context) =>
+      resolveNodeActionUrnField(n, ctx),
     // #1885 — stamped by the effective-system-memory reads (markInherited);
     // absent everywhere else, which reads as not inherited.
     inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>

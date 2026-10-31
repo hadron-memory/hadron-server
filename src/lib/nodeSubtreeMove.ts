@@ -598,11 +598,33 @@ export async function moveNodeSubtree(
   // make two specs moved through the same number resolve as ambiguous, and
   // keep draft-era numbers resolving after the mint. A minted node's address
   // was published, so it leaves an alias behind wherever it moves.
+  //
+  // #2610: a register:<code> entry in a live Agent's system memory ALSO leaves
+  // its old address behind, minted or not. #1448's premise ("nothing outside
+  // can cite an unminted node") is about spec draft numbers and fails for
+  // entries the moment action URNs exist: the address is emitted on every read
+  // (`Node.actionUrn`) as soon as the entry does, and cor:urn:010:01 (Proposed,
+  // #2610) rules the old code never stops resolving. Scoped so #1448's spec
+  // behavior is untouched: only `register:` locs in the SOURCE memory when that
+  // memory is some live Agent's system memory — exactly the nodes an action URN
+  // can key on.
   const sourceMemoryUrn = memoryUrns.get(srcMemoryId)!;
   const targetMemoryUrn = memoryUrns.get(destMemoryId)!;
   const aliasKey = (memoryUrn: string, loc: string) =>
     safeNodeUrnV2(memoryUrn, loc).slice('hrn:node:'.length);
-  for (const n of subtree.filter(isMintedRow)) {
+  const leavesAlias = new Set(subtree.filter(isMintedRow));
+  if (leavesAlias.size < subtree.length) {
+    const srcIsAgentSystemMemory = await tx.agent.findFirst({
+      where: { systemMemoryId: srcMemoryId, deletedAt: null },
+      select: { id: true },
+    });
+    if (srcIsAgentSystemMemory) {
+      for (const n of subtree) {
+        if (n.loc.startsWith('register:')) leavesAlias.add(n);
+      }
+    }
+  }
+  for (const n of leavesAlias) {
     await recordUrnRename(tx, {
       entityType: 'NODE',
       entityId: n.id,
