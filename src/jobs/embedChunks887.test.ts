@@ -1,16 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { createTestableMcpServer } from '../mcp/server.js';
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { emptyActor, publishUser, requestActorStorage } from '../lib/requestActor.js';
-import { deleteNodeVectors } from '../services/embedding/vectors.js';
+import { deleteNodeVectors, deleteMemoryChunkVectors } from '../services/embedding/vectors.js';
 import { upsertChunkVectors } from '../services/embedding/vectors.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { chunkNode } from '../lib/chunking.js';
-import { embedNode } from './embedNodes.js';
+import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../lib/embedding/index.js';
+import { embedNode, drainEmbeddingQueue, stopEmbeddingWorker } from './embedNodes.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { validateMemoryNodes } from '../lib/memoryValidation.js';
 
@@ -79,6 +81,7 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
   });
   it('system memory passage removal fences an in-flight worker while keeping pending summary work', async () => {
     await db.memory.update({ where: { id: memoryId }, data: { class: 'system', embeddingSource: 'both' } });
+    await db.node.update({ where: { id: nodeId }, data: { abstract: 'summary' } });
     await queue(300);
     const paused = { ...client, embed: async (texts: string[]) => {
       await (resolvers.Mutation as any).updateMemory(null, { id: memoryId, vectorIndexEnabled: false }, ctx());
@@ -88,7 +91,15 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     expect(await chunks()).toHaveLength(0);
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
     expect((await row()).embeddingWorkToken).not.toBeNull();
-    expect(await embedNode(db, nodeId, undefined, client)).toBe('embedded');
+    setEmbeddingClientForTests(client);
+    try {
+      // Recover through the real durable selector/dispatcher, not a direct embed call.
+      expect(await drainEmbeddingQueue(db, { client })).toMatchObject({ embedded: 1, failed: 0 });
+      expect((await row()).embeddingPendingAt).toBeNull();
+    } finally {
+      await stopEmbeddingWorker(db);
+      resetEmbeddingClientForTests();
+    }
   });
   it('re-embedding is stable; editing down and empty content clear it', async () => {
     await truncated(); await truncated();
@@ -134,7 +145,30 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     expect(report.findings).toContainEqual(expect.objectContaining({ kind: 'INDEX_TRUNCATED', nodeId, detail: expect.stringContaining('44') }));
     expect(report.findings.some(f => f.kind === 'EMBED_FAILED')).toBe(false);
     const result = await (resolvers.Query as any).validateMemory(null, { memoryRef: memoryId, limit: 0 }, ctx());
-    expect(result).toMatchObject({ ok: true, totalFindings: 1, truncated: true, findings: [] });
+    expect(result).toMatchObject({ ok: true, totalFindings: 0, totalInformational: 1, truncated: true, findings: [] });
+  });
+  it('MCP reports truncation as informational rather than an issue', async () => {
+    await truncated();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const text = await createTestableMcpServer({ userId, roles: ['ADMIN'], clientId: `user:${userId}` }).callToolText('hadron_validate', { memoryUrn: `hrn:mem:${memory.urn}` });
+    expect(text).toContain('No issues found.');
+    expect(text).toContain('Informational findings (1)');
+    expect(text).toContain('[index-truncated]');
+    expect(text).not.toContain('Found 1 issue');
+  });
+  it('retains real problems ahead of informational declarations within the page cap', async () => {
+    await truncated();
+    await db.node.update({ where: { id: nodeId }, data: { embeddingFailedAt: new Date(), embeddingError: 'synthetic failure' } });
+    const report = await validateMemoryNodes(db, memoryId, 1);
+    expect(report).toMatchObject({ totalFindings: 1, totalInformational: 1 });
+    expect(report.findings).toEqual([expect.objectContaining({ kind: 'EMBED_FAILED' })]);
+  });
+  it('passage removal does not rewrite a clean node with no marker or pending work', async () => {
+    await db.node.update({ where: { id: nodeId }, data: { embeddingPendingAt: null, embeddingWorkToken: null, embeddingTruncatedChunks: null } });
+    const version = async () => (await db.$queryRaw<{version: string}[]>`SELECT xmin::text AS version FROM nodes WHERE id = ${nodeId}`)[0].version;
+    const before = await version();
+    await deleteMemoryChunkVectors(db, memoryId);
+    expect(await version()).toBe(before);
   });
   it('a superseded in-flight embed cannot overwrite the new marker/vectors', async () => {
     await truncated(); await queue(300);
