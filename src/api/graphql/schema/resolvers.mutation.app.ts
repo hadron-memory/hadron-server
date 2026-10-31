@@ -488,7 +488,12 @@ export const appMutations = {
             await tx.app.delete({ where: { id: existing.id } });
           });
         } else {
-          throw new Error(`An app with URN "${appUrn}" already exists`);
+          // #2785: typed, like the memory collision (#2819); a plain Error is
+          // masked as INTERNAL_SERVER_ERROR (cor:api:260:01). Names only the
+          // URN the caller sent, never a holder field.
+          throw new GraphQLError(`An app with URN "${appUrn}" already exists`, {
+            extensions: { code: 'CONFLICT' },
+          });
         }
       }
       // 023-app-shape Phase 2b: App↔Agent moved from `App.agentId` to the
