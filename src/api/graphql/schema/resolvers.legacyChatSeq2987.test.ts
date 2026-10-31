@@ -252,6 +252,17 @@ describe('SECURITY §10 P2s on 7b2276e1 (Rico)', () => {
   });
 });
 
+describe('LOCAL delta P2 on a59c00ed (Beckett): clone over a tombstone', () => {
+  it('cloneNode onto a soft-deleted message loc cannot revive it at a different seq', async () => {
+    const src = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:003', memoryId: memory.id } });
+    const target = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:001', memoryId: memory.id } });
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    expect((await errorOf(M.cloneNode(null, { sourceRef: src.id, targetUrn: urn(target.loc) }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    const after = await db.node.findUniqueOrThrow({ where: { id: target.id } });
+    expect([after.deletedAt !== null, after.seq, after.revSeq]).toEqual([true, 1, target.revSeq]);
+  });
+});
+
 describe('allocator paths still assign seq', () => {
   it('createChannelMessage, createTeamChatMessage-style appends and the chat-root allocator', async () => {
     const channel = await M.createChannel(null, { input: { memoryRef: memory.urn, loc: 'chats:alloc', name: 'alloc' } }, as());
