@@ -145,7 +145,8 @@ describe('the guard has one source', () => {
     const guard = readFileSync('prisma/login-nonce-invariants.sql', 'utf8');
     expect(readFileSync('prisma/migrations/20261023120000_pending_login_provider_nonce/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir login-nonce-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/login-nonce-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('login-nonce-invariants.sql');
     expect(guard).toContain('NOT VALID');
   });
 });

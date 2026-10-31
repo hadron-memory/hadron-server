@@ -198,7 +198,8 @@ describe('database invariants', () => {
     const dir = readdirSync('prisma/migrations').find((d) => d.endsWith('_sign_in_lineage'))!;
     expect(readFileSync(`prisma/migrations/${dir}/migration.sql`, 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir signin-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/signin-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('signin-invariants.sql');
   });
 });
 

@@ -1,16 +1,18 @@
 /**
- * #434 Slice A: does globalSetup's `applyTemplateConstraints` change a freshly built test template?
+ * #434 Slice A: the test template needs no DDL beyond post-push.sql.
  *
  * Since #1922 every test template is built from EMPTY by `buildTestSchema` (pre-push.sql, `prisma db
- * push`, post-push.sql through psql). globalSetup then re-issued its own partial copy of post-push.sql
- * on each run's template, so any definition in that copy that differs from post-push.sql silently
- * overrode the truth on every test run. This file builds a fresh template on a scratch database, takes
- * a catalog snapshot (columns, constraints, indexes, sequences, views, public functions, triggers),
- * applies the copy and compares.
+ * push`, post-push.sql through psql). globalSetup used to re-issue its own partial copy of post-push.sql
+ * on each run's template, so any definition in that copy that differed from post-push.sql silently
+ * overrode the truth on every test run. Before deleting it, this file measured it (commit 0a1c95d6): on
+ * a freshly built template the copy changed no column, constraint, index, sequence, view, function or
+ * trigger, except that its `hadron_nodes_tsv` body was post-push.sql's text indented six spaces
+ * (reported on the issue). The copy is gone; what stays is the catalog comparator with its controls,
+ * and a guard that the global setup carries no DDL again.
  *
- * The comparator has two controls on the same scratch database, each in a rolled-back transaction:
- * re-issuing a post-push CHECK with its own definition changes nothing, and re-issuing it with an
- * altered definition is reported, by name.
+ * The comparator's controls run on a fresh scratch template, each in a rolled-back transaction:
+ * re-issuing a post-push CHECK with its own definition changes nothing, re-issuing it with an altered
+ * definition is reported by name, and a re-indented function body is reported as reformatted.
  */
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -18,7 +20,6 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { baseTestDbUrl, maintenanceUrl, quoteDbIdent, withDbName } from './dbWorkers.js';
 import { buildTestSchema } from './schemaTemplate.js';
-import { applyTemplateConstraints } from './globalSetup.js';
 
 /** Every definition a re-applied DDL copy could change, keyed by object identity. */
 const SNAPSHOT = `
@@ -109,7 +110,7 @@ let admin: Client;
 let client: Client;
 let fresh: Snapshot;
 
-describe('#434 the test template needs no DDL beyond post-push.sql', () => {
+describe('#434 the template catalog comparator (fresh template, rolled-back controls)', () => {
   beforeAll(async () => {
     admin = new Client({ connectionString: maintenanceUrl() });
     await admin.connect();
@@ -160,16 +161,6 @@ describe('#434 the test template needs no DDL beyond post-push.sql', () => {
     });
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatch(/^reformatted fn:hadron_nodes_tsv\(/);
-  });
-
-  it('applyTemplateConstraints changes nothing on a freshly built template but one re-indented function body', async () => {
-    const changes = await diffInRolledBackTx(client, fresh, () => applyTemplateConstraints(client));
-    const semantic = changes.filter((c) => !c.startsWith('reformatted '));
-    expect(semantic, semantic.join('\n')).toEqual([]);
-    // Measured on main (#434): the copy's hadron_nodes_tsv is post-push.sql's text indented six spaces.
-    expect(changes.map((c) => c.split('\n')[0])).toEqual([
-      'reformatted fn:hadron_nodes_tsv(p_name text, p_alias text, p_loc text, p_tags text[], p_description text, p_abstract text, p_content text, p_properties text, p_data text)',
-    ]);
   });
 });
 

@@ -150,7 +150,8 @@ describe('guard', () => {
     const guard = readFileSync('prisma/fresh-sign-in-invariants.sql', 'utf8');
     expect(readFileSync('prisma/migrations/20261021080000_fresh_sign_ins/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir fresh-sign-in-invariants.sql');
-    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).toContain('../../prisma/fresh-sign-in-invariants.sql');
+    // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
+    expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('fresh-sign-in-invariants.sql');
   });
 
   it('writes times from the database clock, whatever the statement said', async () => {
