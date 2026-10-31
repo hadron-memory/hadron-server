@@ -9,6 +9,7 @@
  * carve-outs (Query.memory blocker #676, Query.agents, effectiveAccess).
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { Prisma } from '../../../generated/prisma/index.js';
@@ -444,11 +445,14 @@ describe('#1787 — a platform admin manages a user-owned Agent (cor:dmo:050:13,
 
 // DAR / #1687: this caller has NO organization or OrgMember rows. Exercise
 // Apollo field rendering, not just createAgent's already-atomic core.
+// #1694 / Rook #1692 P3-2: pin the portal's full AgentFields selection on
+// BOTH create and read. Keep orgGrants as additional pre-existing coverage.
+const portalAgentFields1694 = readFileSync(new URL('./__fixtures__/agentFields1694.graphql', import.meta.url), 'utf8');
 const personalAgentApi = new ApolloServer<Context>({ typeDefs, resolvers });
 afterAll(async () => { await personalAgentApi.stop(); });
 it('lets an org-less user create, view and use a personal agent through GraphQL', async () => {
   const contextValue = ctx({ userId: ownerId, roles: ['READER'] });
-  expect(await db.orgMember.count({ where: { userId: ownerId } })).toBe(0);
+  expect(await db.orgMember.count()).toBe(0);
   const execute = async (query: string, variables: Record<string, unknown> = {}) => {
     const response = await personalAgentApi.executeOperation({ query, variables }, { contextValue });
     expect(response.body.kind).toBe('single');
@@ -457,13 +461,18 @@ it('lets an org-less user create, view and use a personal agent through GraphQL'
     return response.body.singleResult.data as Record<string, any>;
   };
   const created = (await execute(`mutation {
-    createAgent(name: "Orgless helper") { id urn organizationId systemMemoryId appCount orgGrants { organization { id } } }
-  }`)).createAgent;
-  expect(created).toMatchObject({ organizationId: null, appCount: 0, orgGrants: [] });
+    createAgent(name: "Orgless helper") { ...AgentFields orgGrants { organization { id } } }
+  }
+  ${portalAgentFields1694}`)).createAgent;
+  expect(created).toMatchObject({ organizationId: null, hasAiApiKey: false, memoryItems: [],
+    memoryProvisioning: { appMemory: 'shared' }, installationPolicy: { maxMembers: 'unlimited', memberRoles: ['owner'] },
+    imports: [], appCount: 0, orgGrants: [] });
   const viewed = (await execute(`query($ref: ID!) {
-    agent(ref: $ref) { id appCount orgGrants { organization { id } } systemMemoryId }
-  }`, { ref: created.id })).agent;
-  expect(viewed).toMatchObject({ id: created.id, appCount: 0, orgGrants: [], systemMemoryId: created.systemMemoryId });
+    agent(ref: $ref) { ...AgentFields orgGrants { organization { id } } }
+  }
+  ${portalAgentFields1694}`, { ref: created.id })).agent;
+  expect(viewed).toEqual(created);
+  expect(await db.orgMember.count()).toBe(0);
   const task = await db.node.create({ data: {
     id: generateId(), memoryId: created.systemMemoryId, loc: 'tasks:hello', name: 'Hello', nodeType: 'task',
     content: 'Help {{person}} with this personal task.', data: {}, createdBy: ownerId,
