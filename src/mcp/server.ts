@@ -6290,8 +6290,9 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
-        // #2987 (V13) — a message outside a Channel keeps its seq; the GraphQL core runs the same function.
-        assertNoGenericMessageSeqWrite(governedProbe, nodeType, seq, 'create');
+        // #2987 (V13): the seq gate for a create runs UNDER the lock, on the full locked row. It cannot run here:
+        // this probe selects no seq (a same-seq tombstone recreation would read as a change), and it would answer
+        // before the Channel gate, which lives in the lock helper (Beckett LOCAL review).
         assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,

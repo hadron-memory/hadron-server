@@ -181,9 +181,12 @@ describe('LOCAL review P2s on 0f581af6 (Beckett)', () => {
     const loc = 'chats:guarded:messages:forged';
     const gql = await errorOf(M.createNode(null, { input: { memoryId: memory.id, loc, name: 'x', nodeType: 'chat-message', seq: 9 } }, as()));
     expect(gql.extensions.code).toBe('LOC_PROTECTED');
-    const text = await mcpFor(member.id).callToolText('hadron_create_node', { urn: urn(loc), name: 'x', nodeType: 'chat-message', seq: 9 });
-    expect(text).toMatch(/loc_protected/i);
-    expect(text).not.toMatch(/seq_protected/);
+    // The create door's tx catch has no LocProtectedError mapping (unchanged by #2987), so the Channel refusal
+    // surfaces as the thrown LocProtectedError; what is pinned is WHICH refusal wins, not its envelope.
+    const text = await mcpFor(member.id).callToolText('hadron_create_node', { urn: urn(loc), name: 'x', nodeType: 'chat-message', seq: 9 })
+      .catch((e: Error) => `${e.name}: ${e.message}`);
+    expect(text).toMatch(/LocProtectedError|loc_protected/i);
+    expect(text).not.toMatch(/seq_protected/i);
     expect(channel.id).toBeTruthy();
     expect(await db.node.count({ where: { memoryId: memory.id, loc } })).toBe(0);
   });
