@@ -101,6 +101,7 @@ import {
 import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } from '../../../lib/nodeApproval.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
+import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
 
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
@@ -389,6 +390,9 @@ export const nodeQueries = {
           outgoingEdges: {
             where: { deletedAt: null, target: { deletedAt: null } },
             include: { target: true },
+            // #2967 — run resolution order (cor:dmo:060:03): priority, loc, id; the same
+            // order as the MCP run feeder, so a preview predicts the run.
+            orderBy: edgeRunOrder(),
           },
         },
       });
@@ -834,8 +838,8 @@ export const nodeQueries = {
     ) => {
       const access = await memoryAccessFilter(ctx);
       const include = {
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
+        outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+        incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
       const allowed = (memoryId: string): boolean => {
@@ -1042,7 +1046,7 @@ export const nodeQueries = {
       const access = await memoryAccessFilter(ctx);
       const node = await ctx.db.node.findUnique({
         where: { id },
-        include: { outgoingEdges: { include: { target: true } } },
+        include: { outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() } },
       });
       // #391: don't export a soft-deleted node (denied ≡ not-found).
       if (!node || node.deletedAt) throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
@@ -1346,8 +1350,8 @@ export const nodeQueries = {
       };
       const nodeInclude = {
         memory: true,
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
+        outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+        incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       } as const;
 
       const hasQuery = typeof query === 'string' && query.trim() !== '';
@@ -2522,8 +2526,8 @@ export const nodeQueries = {
         orderBy: { loc: 'asc' },
         take: limit ?? 20,
         include: {
-          outgoingEdges: { include: { target: true } },
-          incomingEdges: { include: { source: true } },
+          outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+          incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
           memory: { select: { id: true, urn: true, name: true, organizationId: true } },
         },
       });

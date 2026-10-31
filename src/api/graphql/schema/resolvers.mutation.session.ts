@@ -1,4 +1,5 @@
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
@@ -3078,7 +3079,7 @@ export const sessionMutations = {
 
         const node = await ctx.db.node.findUnique({
           where: { loc_memoryId: { loc, memoryId: memory.id } },
-          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true } } },
+          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true }, orderBy: edgeRunOrder() } },
         });
         if (!node) {
           throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
