@@ -16,6 +16,7 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
+import { validateSessionBinding } from '../../../middleware/auth.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -89,6 +90,25 @@ describe('#2971 parity: every item of the page equals its single read', () => {
     // Another reader with no session sees the recompile for Ada too: the record is the caller's own session's.
     const other = await expectParity(adminCtx());
     expect(other.Ada?.text).toContain('RECOMPILED Ada');
+  });
+
+  it('(a2) the recorded text needs an ACCEPTED session binding: a refused or ended binding is silently unbound and reads the live text, page equal to single', async () => {
+    const ada = await cast('Ada');
+    const open = await M.startSession({}, { input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: ada.id, force: true } }, adminCtx());
+    await serveAgentBootPrompt(db, agent.id, 'RECOMPILED {{worker.name}}');
+    // Accepted: the header's session is the caller's own open session -> ctx.sessionId is set -> the recorded revision.
+    const accepted = await validateSessionBinding(db, { userId: admin.id } as never, open.id);
+    expect(accepted?.sessionId).toBe(open.id);
+    expect((await expectParity(adminCtx({ sessionId: accepted!.sessionId })))['Ada']?.text).toContain('SHARED Ada');
+    // Refused: another user's header is dropped without an error (ctx.sessionBindingRefused), so the request is unbound.
+    const admin2 = await db.user.create({ data: { githubId: 94_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `b2-${generateId().toLowerCase()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin2.id, role: 'ADMIN' } });
+    expect(await validateSessionBinding(db, { userId: admin2.id } as never, open.id)).toBeNull();
+    expect((await expectParity(ctxOf(admin2.id)))['Ada']?.text).toContain('RECOMPILED Ada');
+    // Ended: the owner's own header no longer binds either; the unbound read is the live text.
+    await db.session.update({ where: { id: open.id }, data: { endedAt: new Date() } });
+    expect(await validateSessionBinding(db, { userId: admin.id } as never, open.id)).toBeNull();
+    expect((await expectParity(adminCtx()))['Ada']?.text).toContain('RECOMPILED Ada');
   });
 
   it('(b) a worker whose Agent is USER-owned reads null for a non-owner member, the text for its holder', async () => {
