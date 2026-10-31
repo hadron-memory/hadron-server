@@ -213,7 +213,7 @@ export const memoryQueries = {
         skippedChecks: report.skippedChecks,
         // A skipped check makes `ok` false even with zero findings — you
         // cannot claim health for a check you did not run.
-        ok: report.totalFindings === 0 && report.skippedChecks.length === 0,
+        ok: report.totalProblems === 0 && report.skippedChecks.length === 0,
       };
     },
 

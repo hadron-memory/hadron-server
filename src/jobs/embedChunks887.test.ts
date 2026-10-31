@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { upsertChunkVectors } from '../services/embedding/vectors.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
@@ -7,9 +11,7 @@ import { chunkNode } from '../lib/chunking.js';
 import { embedNode } from './embedNodes.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
 import { validateMemoryNodes } from '../lib/memoryValidation.js';
-import { recordLlmUsage } from '../lib/metering/index.js';
 
-vi.mock('../lib/metering/index.js', () => ({ recordLlmUsage: vi.fn(async () => {}) }));
 let memoryId: string;
 let nodeId: string;
 let userId: string;
@@ -47,7 +49,34 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     expect(stored.map(c => c.chunkIndex)).toEqual(Array.from({ length: Math.min(n,256) }, (_, i) => i));
     expect(client.embed.mock.calls.flatMap(([texts]) => texts)).toHaveLength(Math.min(n,256));
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: n > 256 ? n-256 : null, embeddingError: null, embeddingFailedAt: null, embeddingPendingAt: null });
-    expect(recordLlmUsage).toHaveBeenCalledWith(db, expect.objectContaining({ tokensIn: Math.min(n,256) }));
+    const usage = await db.usageEvent.findMany({ where: { nodeId, type: 'embedding' } });
+    expect(usage).toHaveLength(1);
+    expect(usage[0].tokensIn).toBe(Math.min(n,256));
+  });
+  it('leaves the summary vector unaffected, and summary-only never sets a marker', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { embeddingSource: 'both' } });
+    await db.node.update({ where: { id: nodeId }, data: { abstract: 'summary' } });
+    await truncated();
+    expect(await db.nodeEmbedding.count({ where: { nodeId, kind: 'abstract' } })).toBe(1);
+    expect(await row()).toMatchObject({ embeddingTruncatedChunks: 44 });
+    await (resolvers.Mutation as any).updateMemory(null, { id: memoryId, embeddingSource: 'abstract' }, ctx());
+    await embedNode(db, nodeId, undefined, client);
+    expect(await chunks()).toHaveLength(0);
+    expect(await db.nodeEmbedding.count({ where: { nodeId, kind: 'abstract' } })).toBe(1);
+    expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
+  });
+  it('system memory passage removal fences an in-flight worker while keeping pending summary work', async () => {
+    await db.memory.update({ where: { id: memoryId }, data: { class: 'system', embeddingSource: 'both' } });
+    await queue(300);
+    const paused = { ...client, embed: async (texts: string[]) => {
+      await (resolvers.Mutation as any).updateMemory(null, { id: memoryId, vectorIndexEnabled: false }, ctx());
+      return texts.map(() => vector);
+    } };
+    expect(await embedNode(db, nodeId, undefined, paused)).toBe('skipped');
+    expect(await chunks()).toHaveLength(0);
+    expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
+    expect((await row()).embeddingWorkToken).not.toBeNull();
+    expect(await embedNode(db, nodeId, undefined, client)).toBe('embedded');
   });
   it('re-embedding is stable; editing down and empty content clear it', async () => {
     await truncated(); await truncated();
@@ -79,6 +108,16 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     await truncated();
     const node = await row();
     expect(await (resolvers.Node as any).indexTruncated(node, {}, ctx())).toEqual({ omittedChunks: 44 });
+    // Exercise the actual public SDL and normal parent read, not just the field helper.
+    const server = new ApolloServer({ typeDefs, resolvers });
+    try {
+      const response = await server.executeOperation({ query: 'query($id: ID!) { node(ref: $id) { indexTruncated { omittedChunks } } }', variables: { id: nodeId } }, { contextValue: ctx() });
+      expect(response.body.kind).toBe('single');
+      if (response.body.kind === 'single') {
+        expect(response.body.singleResult.errors).toBeUndefined();
+        expect(response.body.singleResult.data).toMatchObject({ node: { indexTruncated: { omittedChunks: 44 } } });
+      }
+    } finally { await server.stop(); }
     const report = await validateMemoryNodes(db, memoryId);
     expect(report.findings).toContainEqual(expect.objectContaining({ kind: 'INDEX_TRUNCATED', nodeId, detail: expect.stringContaining('44') }));
     expect(report.findings.some(f => f.kind === 'EMBED_FAILED')).toBe(false);
@@ -94,6 +133,24 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
     expect(await embedNode(db, nodeId, undefined, staleClient)).toBe('skipped');
     expect(await chunks()).toHaveLength(1);
     expect(await row()).toMatchObject({ embeddingTruncatedChunks: null });
+  });
+  it('the atomic vector writer rejects a stale token without changing a successful marker', async () => {
+    await truncated();
+    const stale = randomUUID();
+    const chunk = chunkNode(content(1), { chunkTokens: 1, chunkOverlap: 0, forceFixedSize: true })[0];
+    expect(await upsertChunkVectors(db, nodeId, [{ nodeId, memoryId, provider: 'fake', model: 'cap887', dim: 768,
+      chunkIndex: 0, charStart: chunk.charStart, charEnd: chunk.charEnd, chunkText: chunk.text, embedding: vector }], stale, null)).toBe(false);
+    expect(await chunks()).toHaveLength(256);
+    expect(await row()).toMatchObject({ embeddingTruncatedChunks: 44 });
+  });
+  it('additive migration leaves pre-existing nodes NULL without a backfill', async () => {
+    const sql = readFileSync(new URL('../../prisma/migrations/20261031220000_embedding_truncated_chunks/migration.sql', import.meta.url), 'utf8');
+    await db.$transaction(async tx => {
+      await tx.$executeRawUnsafe('CREATE TEMP TABLE nodes (id text) ON COMMIT DROP');
+      await tx.$executeRawUnsafe("INSERT INTO nodes VALUES ('legacy')");
+      await tx.$executeRawUnsafe(sql);
+      expect(await tx.$queryRawUnsafe('SELECT embedding_truncated_chunks FROM nodes')).toEqual([{ embedding_truncated_chunks: null }]);
+    });
   });
   it('soft deletion clears the marker', async () => {
     await truncated();

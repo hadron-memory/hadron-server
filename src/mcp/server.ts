@@ -6680,6 +6680,7 @@ export function createMcpServerInstance(
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
             await tx.nodeEmbedding.deleteMany({ where: { nodeId: pre.id } });
+            await tx.node.updateMany({ where: { id: pre.id }, data: { embeddingTruncatedChunks: null } });
           }
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.

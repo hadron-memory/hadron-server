@@ -1648,6 +1648,8 @@ export const typeDefs = `#graphql
     backoff ceiling and likely needs operator attention). System-managed.
     """
     embeddingAttempts: Int!
+    "Passages omitted by the per-node indexing cap; null when not truncated (hrn:node:hadronmemory.com:specs:cor:rag:010:01)."
+    indexTruncated: IndexTruncated
     """
     The node's text. Include tags and data variables resolve for the reader
     (hrn:node:hadronmemory.com:specs:cor:dmo:150:03); pass raw: true for the stored text with its tags as
@@ -6413,6 +6415,12 @@ export const typeDefs = `#graphql
     servedPrompt: ServedPrompt
   }
 
+  "Declared successful partial passage indexing (hrn:node:hadronmemory.com:specs:cor:rag:010:01)."
+  type IndexTruncated {
+    "Number of passage chunks not embedded."
+    omittedChunks: Int!
+  }
+
   "One health check the validator runs (#819)."
   enum MemoryValidationCheck {
     "An edge whose target node is missing OR soft-deleted. A hard-deleted target cannot occur - Edge.target is FK-enforced with onDelete: Cascade - so in practice this means a dangling edge to a tombstone."
@@ -6423,6 +6431,8 @@ export const typeDefs = `#graphql
     STALE_ABSTRACT
     "embedding_failed_at is set - a retryable failure awaiting its backoff, or the permanent class (deterministic 4xx, dimension mismatch, #206 encrypted-no-plaintext) recoverable via retryFailedEmbeddings (spec 033 / #882). Such a node is absent from vector search, which from outside looks identical to no hits matching."
     EMBED_FAILED
+    "Informational: passage indexing succeeded with later chunks omitted by the cap; does not make ok false."
+    INDEX_TRUNCATED
     "A Git-mirror attempt for this node did not land (#430): a fixed failure class and an attempt count, never exception text. The repository may be stale until the next successful mirror, and a repo-wins sync can revert the lost write. Recorded for failures the process survives; a crash before the record, or a lost event, leaves no row."
     GIT_MIRROR_FAILED
     "objectType/properties violate the memory declared schema (#725)."
@@ -6454,13 +6464,14 @@ export const typeDefs = `#graphql
     nodesChecked: Int!
     "Findings, capped by the limit argument."
     findings: [MemoryValidationFinding!]!
-    "The TRUE finding count, before any truncation - gate CI on this, not on findings.length."
+    "The TRUE finding count, before any truncation, including informational INDEX_TRUNCATED. Gate health on ok, not findings.length."
     totalFindings: Int!
     "True when findings was capped and totalFindings is larger."
     truncated: Boolean!
     skippedChecks: [MemoryValidationSkippedCheck!]!
     """
-    True only when EVERY check ran and none found anything. A skipped check
+    True only when EVERY check ran and none found a problem. INDEX_TRUNCATED
+    is informational and does not make this false. A skipped check
     makes this false even with zero findings - you cannot claim health for a
     check you did not run.
     """

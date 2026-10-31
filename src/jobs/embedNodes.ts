@@ -65,6 +65,9 @@ export interface EmbedRetryOpts {
   retryMaxMs?: number;
 }
 
+// cor:rag:010:01 — tunable passage count, independent of per-memory chunk size.
+export const MAX_NODE_PASSAGE_CHUNKS = 256;
+
 const DEFAULT_RETRY_BASE_MS = 60_000;
 const DEFAULT_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 
@@ -163,6 +166,7 @@ export async function embedNode(
   let usedClient: EmbeddingClient | null = null;
 
   try {
+    if (!wantChunks && !(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
     if (wantAbstract) {
       const abstractText = isComment
         ? (plaintext?.content !== undefined ? plaintext.content : node.content)
@@ -241,11 +245,13 @@ export async function embedNode(
       if (contentText == null || contentText.trim() === '') {
         if (!(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
       } else {
-        const chunks = chunkNode(contentText, {
+        const allChunks = chunkNode(contentText, {
           chunkTokens: memory.chunkTokens ?? undefined,
           chunkOverlap: memory.chunkOverlap ?? undefined,
           forceFixedSize: memory.forceFixedSize,
         });
+        const chunks = allChunks.slice(0, MAX_NODE_PASSAGE_CHUNKS);
+        const omittedChunks = allChunks.length - chunks.length;
         if (chunks.length === 0) {
           if (!(await deleteNodeChunkVectors(db, nodeId, capturedWorkToken))) return 'skipped';
         } else {
@@ -285,6 +291,7 @@ export async function embedNode(
               embedding: vectors[i],
             })),
             capturedWorkToken,
+            omittedChunks || null,
           );
           if (!wroteChunks) return 'skipped';
         }

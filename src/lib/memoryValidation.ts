@@ -25,6 +25,7 @@ export type ValidationKind =
   | 'SPARSE'
   | 'STALE_ABSTRACT'
   | 'EMBED_FAILED'
+  | 'INDEX_TRUNCATED'
   | 'GIT_MIRROR_FAILED'
   | 'SCHEMA';
 
@@ -46,6 +47,8 @@ export interface ValidationReport {
   findings: ValidationFinding[];
   /** The TRUE count, even when `findings` was capped. */
   totalFindings: number;
+  /** Non-informational findings, counted even beyond the retained page. */
+  totalProblems: number;
   /**
    * A check that could NOT run. Reported explicitly rather than silently
    * omitted: a clean bill of health that quietly skipped a check is worse than
@@ -114,8 +117,10 @@ export async function validateMemoryNodes(
   });
   const findings: ValidationFinding[] = [];
   let totalFindings = 0;
+  let totalProblems = 0;
   const record = (f: ValidationFinding) => {
     totalFindings += 1;
+    if (f.kind !== 'INDEX_TRUNCATED') totalProblems += 1;
     if (findings.length < maxFindings) findings.push(f);
   };
 
@@ -198,6 +203,10 @@ export async function validateMemoryNodes(
     // permanent encrypted-no-plaintext class. All are operator-useful, because
     // from outside this audit an empty vector index is indistinguishable from
     // "no hits matched".
+    if (node.embeddingTruncatedChunks != null && node.embeddingTruncatedChunks > 0) {
+      record({ kind: 'INDEX_TRUNCATED', nodeId: node.id, nodeLoc: node.loc,
+        detail: `${node.embeddingTruncatedChunks} passage chunks omitted by the per-node indexing cap (informational)` });
+    }
     if (node.embeddingFailedAt) {
       record({
         kind: 'EMBED_FAILED',
@@ -249,7 +258,7 @@ export async function validateMemoryNodes(
     }
   }
 
-  return { nodesChecked: nodes.length, findings, totalFindings, skippedChecks };
+  return { nodesChecked: nodes.length, findings, totalFindings, totalProblems, skippedChecks };
 }
 
 /** The MCP prose line for one finding — the pre-#819 wording, preserved. */
@@ -259,6 +268,7 @@ export function formatFindingLine(f: ValidationFinding, nodeUrn: string): string
     SPARSE: 'sparse',
     STALE_ABSTRACT: 'stale-abstract',
     EMBED_FAILED: 'embed-failed',
+    INDEX_TRUNCATED: 'index-truncated',
     GIT_MIRROR_FAILED: 'git-mirror-failed',
     SCHEMA: 'schema',
   }[f.kind];
