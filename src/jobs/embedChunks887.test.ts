@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
+import { emptyActor, publishUser, requestActorStorage } from '../lib/requestActor.js';
+import { deleteNodeVectors } from '../services/embedding/vectors.js';
 import { upsertChunkVectors } from '../services/embedding/vectors.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -151,6 +153,20 @@ describe('#887 partial indexing (fake client, real disposable DB)', () => {
       await tx.$executeRawUnsafe(sql);
       expect(await tx.$queryRawUnsafe('SELECT embedding_truncated_chunks FROM nodes')).toEqual([{ embedding_truncated_chunks: null }]);
     });
+  });
+  it('operational vector replacement and purge preserve the last authored editor', async () => {
+    await queue(300);
+    await requestActorStorage.run(emptyActor(), async () => {
+      publishUser(userId);
+      await db.node.update({ where: { id: nodeId }, data: { name: 'authored name' } });
+    });
+    expect((await row()).updatedByUserId).toBe(userId);
+    await requestActorStorage.run(emptyActor(), async () => {
+      expect(await embedNode(db, nodeId, undefined, client)).toBe('embedded');
+      expect((await row()).updatedByUserId).toBe(userId);
+      await deleteNodeVectors(db, nodeId);
+    });
+    expect(await row()).toMatchObject({ updatedByUserId: userId, name: 'authored name', content: content(300), embeddingTruncatedChunks: null });
   });
   it('soft deletion clears the marker', async () => {
     await truncated();
