@@ -10816,6 +10816,11 @@ export const typeDefs = `#graphql
     # node URN. Resolved via resolveNodeRef. edgeRef (update/delete) likewise
     # accepts an edge PK or a fully-qualified edge URN, resolved via
     # resolveEdgeRef (#542 Tier 2).
+    #
+    # #2803: a createEdge onto an edge loc the memory already holds is refused
+    # with the typed EDGE_LOC_CONFLICT (message names the loc), the same code
+    # inline edges on a node write answer; it is judged after the memory
+    # read/write gates, so a caller who cannot read the memory sees none of it.
     createEdge(sourceRef: ID!, targetRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     updateEdge(edgeRef: ID!, name: String, loc: String, description: String, isRunnable: Boolean, condition: JSON, priority: Int, data: JSON): Edge!
     deleteEdge(edgeRef: ID!): Boolean!
