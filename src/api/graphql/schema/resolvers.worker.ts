@@ -17,7 +17,7 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
-import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
+import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -58,7 +58,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { applyPlatformVariables, applyRecordedVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
-import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
+import { renderDerivedBlocks, resolveRegister, type RegisterPageShare } from '../../../lib/resolveRegister.js';
 import {
   newestHandoff,
   handoffSessionId,
@@ -2024,7 +2024,10 @@ export const workerQueries = {
       }),
       ctx.db.worker.count({ where }),
     ]);
-    return { items, total };
+    // #2971: one memo per page resolution, carried on the rows it serves (never on ctx), so `prompt` on N items reads
+    // what the page shares once. Only `prompt` reads it.
+    const pageMemo = newWorkerPromptPageMemo(ctx);
+    return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
   },
 
   /**
@@ -2458,6 +2461,66 @@ export async function loadAppWorkerCheckStatuses(
  * Memoized per request+App: one gate check covers a whole session page.
  */
 /**
+ * #2971 — what the workers of ONE `workers` page share while their `prompt` is composed. It is created by the page
+ * resolution, carried on that page's rows under a symbol, and unreachable from ctx, so it dies with the page: a mutation
+ * that edits a persona and then reads a page in the same request builds a new memo and reads the new Agent row, and no
+ * briefing is cached (cor:agt:020:01).
+ *
+ * SHARED (the same input for every worker of the page, read only AFTER that worker passed the worker read gate, which
+ * `composeWorkerPrompt` judges before it touches the memo): the Agent row by its placed id, the install- and Agent-level
+ * served prompt per (App, Agent) with a typed refusal kept as a refusal, and the viewer's and each holder's
+ * accessible-memory sets inside the register evaluation.
+ *
+ * PER WORKER, never memoized: the worker read gate, the open-session placement, the USER-owned Agent template gate
+ * (#1764), the worker's own boot-prompt pointer, the recorded revision and SESSION_UNRECORDED, the platform variables
+ * and the register itself (evaluated for the worker's own holder).
+ */
+export interface WorkerPromptPageMemo {
+  agent(ctx: Context, agentId: string): Promise<PromptAgentRow | null>;
+  served: PageServedMemo;
+  registerShare: RegisterPageShare;
+}
+export type PromptAgentRow = { personaRole: string | null; updatedAt: Date | null; ownerUserId: string | null; name: string; urn: string };
+
+/** The page memo's property on a served row (the `__heldWorkerActivity` precedent): a plain key, never ctx. */
+const PAGE_MEMO = '__workerPromptPageMemo' as const;
+
+function readPromptAgent(ctx: Context, agentId: string): Promise<PromptAgentRow | null> {
+  return ctx.db.agent.findUnique({
+    where: { id: agentId },
+    select: { personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
+  });
+}
+
+function newWorkerPromptPageMemo(viewer: Context): WorkerPromptPageMemo {
+  const agents = new Map<string, Promise<PromptAgentRow | null>>();
+  return {
+    agent(ctx, agentId) {
+      let held = agents.get(agentId);
+      if (!held) {
+        held = readPromptAgent(ctx, agentId);
+        agents.set(agentId, held);
+        held.catch(() => agents.delete(agentId));
+      }
+      return held;
+    },
+    served: new Map(),
+    registerShare: { viewer, sets: new Map(), participant: new Map() },
+  };
+}
+
+/** The memo a page row carries, honoured only for the caller the page was built for: another ctx composes alone. */
+function pageMemoOf(ctx: Context, worker: object): WorkerPromptPageMemo | null {
+  const memo = (worker as { [PAGE_MEMO]?: WorkerPromptPageMemo })[PAGE_MEMO];
+  return memo && memo.registerShare.viewer === ctx ? memo : null;
+}
+
+/** The worker's own pointer columns when the row carries them (a page's row does), else undefined: the serve reads them. */
+function pointerColumnsOf(worker: { bootPromptNodeId?: string | null; bootPromptUrn?: string | null }) {
+  return worker.bootPromptNodeId === undefined ? undefined : { bootPromptNodeId: worker.bootPromptNodeId ?? null, bootPromptUrn: worker.bootPromptUrn ?? null };
+}
+
+/**
  * #1090 — one composition of a worker's boot prompt, with the freshness facts
  * a holder needs to tell whether the text is current. `renderedAt` is stamped
  * once the text exists (an up-front clock could predate a concurrent template
@@ -2471,9 +2534,11 @@ export async function loadAppWorkerCheckStatuses(
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
+  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null; bootPromptNodeId?: string | null; bootPromptUrn?: string | null },
   opts?: { llmModel?: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null; refusal?: string | null }> {
+  // #2971: a row served by a `workers` page carries that page's memo; any other row composes alone, exactly as before.
+  const memo = pageMemoOf(ctx, worker);
   // Working-state path: the composed boot prompt embeds the agent's persona
   // template, which this loads WITHOUT the Agent read gate — so every caller
   // must sit behind the worker read gate itself (#983 review; see
@@ -2486,10 +2551,7 @@ export async function composeWorkerPrompt(
   const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
   // The spread is shallow on purpose: everything agent-derived below is re-read from `worker.agentId`/`role`.
   if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
-  const agent = await ctx.db.agent.findUnique({
-    where: { id: worker.agentId },
-    select: { personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
-  });
+  const agent = memo ? await memo.agent(ctx, worker.agentId) : await readPromptAgent(ctx, worker.agentId);
   // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
   // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
   // driving the name), never by a member through this nested field. The gate above is App participation; this is the
@@ -2504,11 +2566,11 @@ export async function composeWorkerPrompt(
   // one composition point (`renderDerivedBlocks`), never authored prompt text
   // — evaluated for the Worker's durable holder, so an admin reading another
   // Worker's briefing sees that Worker's standing, not the admin's.
-  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE' }));
+  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE', shared: memo?.registerShare }));
   // #2047 (S10): the prompt is the pointed-to compiled node's approved revision, as-is (#2712 retired the serving switch
   // and the literal prompts). A refusal reads as no briefing with its code, so a read never throws where a bind would
   // have refused.
-  const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform);
+  const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform, memo ? { memo: memo.served, workerPointer: pointerColumnsOf(worker) } : undefined);
   const text = served.text === null ? null : !derived ? served.text : `${served.text}\n\n${derived}`;
   // #1090 review (Andi, P2): stamp the render time AFTER the text exists, so renderedAt is a lower bound the printed
   // text and its Agent stamp both satisfy.
@@ -2527,6 +2589,7 @@ async function readServedWorkerText(
   worker: { id: string; appId: string; agentId: string },
   agentName: string,
   platform: PlatformVariableValues,
+  page?: Parameters<typeof resolveServedBootPrompt>[2],
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
   try {
@@ -2547,7 +2610,7 @@ async function readServedWorkerText(
       const own = await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: worker.id, endedAt: null }, select: { id: true } });
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
-    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
+    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id }, page);
     return { text: applyPlatformVariables(served.content, platform), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
