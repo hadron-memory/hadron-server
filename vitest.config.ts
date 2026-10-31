@@ -52,6 +52,9 @@ export default defineConfig({
       // portal URL), so a dev machine's .env would make projections differ from
       // CI's. Pinned off; tests that assert the link set it explicitly.
       FRONTEND_URL: '',
+      // #2990 — the graph-view queries are OFF by default in production; the suite runs them ON (flag lifted) so the
+      // existing graph tests keep reading rows. The #2990 pins set the variable explicitly, so the default is still pinned.
+      GRAPH_VIEW_DISABLED: 'false',
       EMBEDDING_API_URL: '',
       EMBEDDING_SAGEMAKER_ENDPOINT_NAME: '',
       NATS_URL: '',
