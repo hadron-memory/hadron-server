@@ -168,6 +168,14 @@ describe('#2931 admit — a live host key reads its own host workers\' tickers (
     expect(await ticker(keyCtx(hostKey), 'no-such-ticker')).toBeNull();
   });
 
+  it('P2: a host marked lost registers nobody right now: no tickers, no ticker, no subscribers', async () => {
+    const t = await ticker(keyCtx(hostKey), shared.id);
+    expect(await db.hostRegistration.updateMany({ where: { appId: appX.id, hostId: 'orca1' }, data: { lostAt: new Date() } })).toEqual({ count: 1 });
+    expect(await tickers(keyCtx(hostKey))).toEqual([]);
+    expect(await ticker(keyCtx(hostKey), shared.id)).toBeNull();
+    expect((await subscribers(keyCtx(hostKey), t)).items).toEqual([]);
+  });
+
   it('P2: subscribers lists only the host\'s own workers\' subscriptions', async () => {
     const t = await ticker(keyCtx(hostKey), shared.id);
     const page = await subscribers(keyCtx(hostKey), t);
@@ -481,6 +489,16 @@ describe('#2931 Ticker.subscribers is a host-key read of its own: anchored, re-j
     await db.appKeyScope.updateMany({ where: { appKeyId: hostKey.id, scope: 'host:operate', revokedAt: null }, data: { revokedAt: new Date(), revokedByUserId: admin.id } });
     expect((await subscribers(keyCtx(hostKey), t)).items).toEqual([]);
     expect((await uses(hostKey)).at(-1)).toEqual({ action: 'read', hostId: 'orca1', count: null, refusedCode: 'TICKER_NOT_FOUND' });
+  });
+
+  it('over MCP, and on another App\'s ticker, the nested read is refused: empty, recorded with its code', async () => {
+    const refused = { action: 'read', hostId: 'orca1', count: null, refusedCode: 'TICKER_NOT_FOUND' };
+    expect((await subscribers(keyCtx(hostKey, { transport: 'mcp' } as Partial<Context>), { id: shared.id, appId: appX.id } as never)).items).toEqual([]);
+    expect(await uses(hostKey)).toEqual([refused]);
+    expect((await subscribers(keyCtx(hostKey), { id: onY.id, appId: appY.id } as never)).items).toEqual([]);
+    expect(await uses(hostKey)).toEqual([refused, refused]);
+    await subscribers(keyCtx(plainKey, { transport: 'mcp' } as Partial<Context>), { id: shared.id, appId: appX.id } as never);
+    expect(await uses(plainKey)).toEqual([]);
   });
 
   it('a revocation committed under the App\'s exclusive anchor is seen by the nested read that waited for it', async () => {
