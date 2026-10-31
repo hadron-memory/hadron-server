@@ -201,6 +201,9 @@ describe('#2642 plain wording', () => {
     expect(emoji).toBe('x'.repeat(78) + '😀…');
     expect(emoji).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
     expect(plainAutomationLabel('   ')).toBeNull();
+    // Replacement-pattern characters in a name stay literal.
+    const dollar = plainRunFailure({ status: 'FAILED', failure: { code: 'AUTOMATION_CHANGED' } }, { automationLabel: "Finance $& $' $1 $$" })!;
+    expect(dollar.summary).toContain("“Finance $& $' $1 $$”");
     expect(plainAutomationLabel(undefined)).toBeNull();
     const t = plainRunFailure({ status: 'FAILED', failure: { code: 'AUTOMATION_CHANGED' } }, { automationLabel: 'A\n<script>' })!;
     expect(t.summary).not.toMatch(/[<>\n]/);

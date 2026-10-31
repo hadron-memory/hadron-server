@@ -97,7 +97,7 @@ export function plainRunFailure(run: RunLike, context?: { automationLabel?: stri
   const reason = REASONS[kind];
   if (kind === 'CHANGED') {
     const label = plainAutomationLabel(context?.automationLabel);
-    return { kind, ...reason, summary: reason.summary.replace('the automation was', label ? `the automation “${label}” was` : 'this automation was') };
+    return { kind, ...reason, summary: reason.summary.replace('the automation was', () => (label ? `the automation “${label}” was` : 'this automation was')) };
   }
   return { kind, ...reason };
 }
