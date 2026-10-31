@@ -65,7 +65,7 @@ describe('GraphQL doors refuse a generic seq write on a legacy message (V13)', (
     expect(err.extensions.code).toBe('SEQ_PROTECTED');
     const after = await db.node.findUniqueOrThrow({ where: { id: row.id } });
     expect(after.seq).toBe(row.seq);
-    expect(after.revision).toBe(row.revision);
+    expect(after.revSeq).toBe(row.revSeq);
     expect(await revisions(row.id)).toBe(before);
   });
 
