@@ -13629,6 +13629,8 @@ export const typeDefs = `#graphql
     familyIn: [String!]
     familyNotIn: [String!]
     excludeWorkerIds: [ID!]
+    "The lowest model tier the assignee may run at: low, mid or high (hrn:node:hadronmemory.com:specs:cor:agt:060:06). Null when the task names none."
+    minTier: String
   }
 
   input AgentTaskRequirementsInput {
@@ -13638,6 +13640,8 @@ export const typeDefs = `#graphql
     familyNotIn: [String!]
     "Workers of this App (id, URN or name) the matcher must not pick."
     excludeWorkers: [String!]
+    "The lowest model tier the assignee may run at: low, mid or high, in that order (hrn:node:hadronmemory.com:specs:cor:agt:060:06). A worker below it, or whose tier is unknown, is never matched; the lowest sufficient tier wins. There is no maximum."
+    minTier: String
   }
 
   "A finished task's result (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
