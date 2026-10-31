@@ -3,7 +3,10 @@
  * and where. Derived at read time from the stored failure plus the run's own
  * columns, so it never changes what a run recorded. The text is static and
  * names no memory, id, hash or tool: it discloses nothing the caller does not
- * already read (the bound #2434 applies to memory-naming).
+ * already read (the bound #2434 applies to memory-naming). The one exception
+ * (#2642): a CHANGED reason may name the automation, but only through a label
+ * the caller's own authorization already produced (`automationLabel`); the
+ * mapper never decides who may see it.
  */
 export type PlainRunFailureKind =
   | 'NOT_ADOPTED' | 'MEMORY_UNREADABLE' | 'CHANGED' | 'OVER_BUDGET'
@@ -28,7 +31,7 @@ const REASONS: Record<PlainRunFailureKind, Omit<PlainRunFailure, 'kind'>> = {
     nextStep: 'Give the run-as user read access to the memory, or move the automation to one they can read. Then adopt it again. Before running it again, check what this run already did in its details.',
   },
   CHANGED: {
-    summary: 'The run stopped because the automation was edited after it was approved. Anything it did before it stopped is kept.',
+    summary: 'The run stopped because the automation was edited or moved after it was approved. Anything it did before it stopped is kept.',
     whoCanFix: 'The run-as user of the trigger.',
     nextStep: 'Preview the changed automation and adopt it again. Before running it again, check what this run already did in its details, so nothing is done twice.',
   },
@@ -64,7 +67,17 @@ const REASONS: Record<PlainRunFailureKind, Omit<PlainRunFailure, 'kind'>> = {
   },
 };
 
-export function plainRunFailure(run: RunLike): PlainRunFailure | null {
+const LABEL_MAX = 80;
+
+/** Display text for an authorized trigger name: no control or markup characters, one line, bounded. */
+export function plainAutomationLabel(name: unknown): string | null {
+  if (typeof name !== 'string') return null;
+  const t = name.replace(/[\p{C}\p{Zl}\p{Zp}<>"“”`]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  return t.length > LABEL_MAX ? `${t.slice(0, LABEL_MAX - 1).trimEnd()}…` : t;
+}
+
+export function plainRunFailure(run: RunLike, context?: { automationLabel?: string | null }): PlainRunFailure | null {
   const f = run.failure as { code?: unknown; reason?: unknown } | null;
   if (!f || typeof f !== 'object') return null;
   const code = typeof f.code === 'string' ? f.code : '';
@@ -80,5 +93,10 @@ export function plainRunFailure(run: RunLike): PlainRunFailure | null {
   else if (code === 'TIMEOUT' || run.status === 'TIMED_OUT') kind = 'TIMED_OUT';
   else if (code === 'CANCELLED' || run.status === 'CANCELLED') kind = 'CANCELLED';
   else kind = 'OTHER';
-  return { kind, ...REASONS[kind] };
+  const reason = REASONS[kind];
+  if (kind === 'CHANGED') {
+    const label = plainAutomationLabel(context?.automationLabel);
+    return { kind, ...reason, summary: reason.summary.replace('the automation was', label ? `the automation “${label}” was` : 'this automation was') };
+  }
+  return { kind, ...reason };
 }
