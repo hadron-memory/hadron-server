@@ -33,7 +33,8 @@ import { requireWorkerReadAccess } from './resolvers.worker.js';
 //   sessionId      — the driving session (sessionRef path; D16 attribution)
 //   mentions       — lowercased mention tokens extracted server-side at write
 //   replyToSeq     — the seq this message replies to (also a `replies-to` edge)
-import { GraphQLError } from 'graphql';
+import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
+import { selectsField } from '../selectsField.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { generateId } from '../../../lib/id.js';
@@ -1322,6 +1323,28 @@ export async function postSystemNotice(
 }
 
 /**
+ * #2980 — batch size of the in-memory filter branch's bounded scan (`readChannelRoot` with `countAll: false`).
+ * Mutable only so a test can exercise batch boundaries with a small Channel.
+ */
+export const CHAT_FILTER_SCAN = { batch: 200 };
+
+/**
+ * #2980 — the rows strictly past `after` in the read order (seq, createdAt, loc; descending when `backward`). A
+ * keyset, not a Prisma cursor: it needs no row to still exist, and the three keys order every message totally
+ * (loc is unique in a memory), so no row is read twice or skipped between batches.
+ */
+function keysetPast(after: { seq: number | null; createdAt: Date; loc: string }, backward: boolean): Prisma.NodeWhereInput {
+  const op = backward ? 'lt' : 'gt';
+  return {
+    OR: [
+      { seq: { [op]: after.seq } },
+      { seq: after.seq, createdAt: { [op]: after.createdAt } },
+      { seq: after.seq, createdAt: after.createdAt, loc: { [op]: after.loc } },
+    ],
+  };
+}
+
+/**
  * Read a Channel's root — the one read path (#939, #1116): seq-ordered
  * ascending as a uniform `{ items, total }` page. Without a cursor or offset,
  * select the newest page; `sinceSeq` is a forward watermark (strictly greater),
@@ -1372,6 +1395,15 @@ async function readChannelRoot(
   appId: string | null,
   root: ChatRootRow,
   args: { replyToSeq?: number | null; sinceSeq?: number | null; beforeSeq?: number | null; mentionsRef?: string | null; teamHeadRef?: string | null; untagged?: boolean | null; limit?: number | null; offset?: number | null },
+  /**
+   * #2980 — `countAll: false` says the caller will not show `total` (a GraphQL selection without it, `selectsField`).
+   * Only the in-memory filter branch uses it: it then scans in batches in the paging direction and stops once the
+   * page is known, and the returned `total` is exact only when that scan reached the end of the range. Otherwise it
+   * is a lower bound strictly greater than `items.length`, which is all the own-read advance reads from it
+   * (`total <= items.length` means exhausted). Every other caller keeps the default, an exact count
+   * (cor:api:120:02, cor:agt:020:04).
+   */
+  opts: { countAll?: boolean } = {},
 ): Promise<{ items: TeamChatMessageOut[]; total: number }> {
   const { replyToSeq, sinceSeq, beforeSeq, mentionsRef, teamHeadRef, untagged, limit, offset } = args;
   // The outer resolver has already established read access. Validate independently of
@@ -1489,20 +1521,51 @@ async function readChannelRoot(
     const matches = (msg: TeamChatMessageOut): boolean =>
       (replyToSeq == null || msg.replyToSeq === replyToSeq) &&
       (!mentionsRef || (workerId !== null ? reachesWorker(msg, [workerId], tokens) : msg.mentions.some((t) => tokens.includes(t)))) && (!teamFiltered || !memEncInfo.isEncrypted || (selectedHead ? !!msg.teamTags?.some(t => t.headId === selectedHead) : untagged === false ? !!msg.teamTags?.length : !msg.teamTags?.length));
-    // Always scanned ASCENDING regardless of paging direction: this branch
-    // filters in memory, so the direction is applied to the RESULT below.
-    const rows = await ctx.db.node.findMany({ where, orderBy, select });
-    const matching = rows
-      .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn, metadataVisible) }))
-      .filter((m) => matches(m.msg));
-    const page =
-      take === 0
-        ? []
-        : backward
-          ? matching.slice(Math.max(0, matching.length - take))
-          : matching.slice(skip, skip + take);
+    type Hit = { row: MessageRow; msg: TeamChatMessageOut };
+    let page: Hit[];
+    let total: number;
+    if (opts.countAll !== false || take === 0) {
+      // An exact `total` needs every match in the range (and `limit: 0` is a pure count), so this path scans the
+      // whole range. Scanned ASCENDING regardless of paging direction; the direction is applied to the RESULT below.
+      const rows = await ctx.db.node.findMany({ where, orderBy, select });
+      const matching = rows
+        .map((r) => ({ row: r, msg: projectMessage(r, memEncInfo, memBareUrn, metadataVisible) }))
+        .filter((m) => matches(m.msg));
+      page =
+        take === 0
+          ? []
+          : backward
+            ? matching.slice(Math.max(0, matching.length - take))
+            : matching.slice(skip, skip + take);
+      total = matching.length;
+    } else {
+      // #2980: nobody will see `total`, so read only as far as the page needs: batches in the paging direction,
+      // stopping at one match past the page, so a full page still says whether more exist. Same rows, same order
+      // and the same filter as the full scan above, so `items` are identical (offset is ignored backward, as there).
+      const want = (backward ? 0 : skip) + take + 1;
+      const found: Hit[] = [];
+      let after: { seq: number | null; createdAt: Date; loc: string } | null = null;
+      for (;;) {
+        const rows: MessageRow[] = await ctx.db.node.findMany({
+          where: after ? { AND: [where, keysetPast(after, backward)] } : where,
+          orderBy: readOrder,
+          select,
+          take: CHAT_FILTER_SCAN.batch,
+        });
+        for (const r of rows) {
+          const msg = projectMessage(r, memEncInfo, memBareUrn, metadataVisible);
+          if (matches(msg)) found.push({ row: r, msg });
+          if (found.length >= want) break;
+        }
+        if (found.length >= want || rows.length < CHAT_FILTER_SCAN.batch) break;
+        const last = rows[rows.length - 1]!;
+        after = { seq: last.seq, createdAt: last.createdAt, loc: last.loc };
+      }
+      page = backward ? found.slice(0, take).reverse() : found.slice(skip, skip + take);
+      total = found.length;
+    }
     recordRead(page.map((m) => m.row));
-    const out = { items: page.map((m) => m.msg), total: matching.length };
+    const out = { items: page.map((m) => m.msg), total };
     // #2018: the own-read advance moves marks only for the worker this page was filtered by.
     if (workerId !== null) recordMentionsWorker(out, workerId);
     return out;
@@ -1749,6 +1812,7 @@ export const teamChatQueries = {
       offset?: number | null;
     },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId?: string | null; channelIncarnation?: number | null }> => {
     // #2520: the gate half is ONE function shared with the `team_chat_read` run tool.
     const target = await resolveTeamChatReadTarget(ctx, appRef);
@@ -1772,7 +1836,8 @@ export const teamChatQueries = {
       select: { id: true, lastSeq: true, incarnation: true },
     });
     const pilotChannel = ctx.sessionId || ctx.sessionBindingRefused ? readChannel : null;
-    const page = await readChannelRoot(ctx, appId, root, args);
+    // #2980: a selection without `total` lets a filtered read stop once its page is full (no info: count exactly).
+    const page = await readChannelRoot(ctx, appId, root, args, { countAll: selectsField(info, 'total') });
     // #2138 follow-up: a request that NAMED a session the server refused is served as a session-less read, so it can never
     // count as a check. Say so in the App log (reason code only); behaviour is unchanged.
     if (pilotChannel && !ctx.sessionId && ctx.sessionBindingRefused) {
@@ -1848,6 +1913,7 @@ export const teamChatQueries = {
       expectedIncarnation?: number | null;
     },
     ctx: Context,
+    info?: GraphQLResolveInfo,
   ): Promise<{ items: TeamChatMessageOut[]; total: number; channelId: string; channelIncarnation: number }> => {
     const target = await resolveChannelTarget(ctx, channelRef, 'read');
     const pinned = expectedIncarnation != null;
@@ -1855,7 +1921,7 @@ export const teamChatQueries = {
     if (pinned && expectedIncarnation !== target.incarnation.value) {
       throw channelIncarnationChanged(target.channelId, target.incarnation.value);
     }
-    const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args);
+    const page = await readChannelRoot(ctx, target.app?.id ?? null, target.root, args, { countAll: selectsField(info, 'total') });
     // (c): incarnation only rises, so equality before and after proves no recreation happened while the page was read;
     // otherwise old contents would be emitted under new metadata.
     if (pinned) {
