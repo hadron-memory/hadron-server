@@ -42,9 +42,7 @@ const cast = () => M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'M
 const remove = (workerRef: string) => M.deleteWorker({}, { workerRef, confirmNoExternalAttribution: true }, ctx);
 
 describe('#1162 never-referenced repair', () => {
-  // #2712: every bind now writes an immutable served_prompts record (serving is always on, as in production), which the
-  // reference check counts as use, so this repair refuses WORKER_IN_USE. Restore once that is ruled (raised on PR #2725).
-  it.skip('normally ends an empty bound stint, then removes it without dangling sessions', async () => {
+  it('normally ends an empty bound stint, then removes it without dangling sessions', async () => {
     const worker = await cast();
     const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
     await M.endSession({}, { id: session.id }, ctx);
@@ -55,9 +53,7 @@ describe('#1162 never-referenced repair', () => {
     expect(await db.memory.findUnique({ where: { id: worker.memoryId } })).toBeNull();
   });
 
-  // #2712: every bind now writes an immutable served_prompts record (serving is always on, as in production), which the
-  // reference check counts as use, so this repair refuses WORKER_IN_USE. Restore once that is ruled (raised on PR #2725).
-  it.skip('MCP exposes the same empty-stint repair gate', async () => {
+  it('MCP exposes the same empty-stint repair gate', async () => {
     const worker = await cast();
     const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
     await M.endSession({}, { id: session.id }, ctx);

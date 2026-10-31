@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -32,6 +33,15 @@ let taskUrn: string;
 let taskEntryUrnV2: string;
 let targetMemoryId: string;
 let targetMemoryUrn: string;
+
+/** #2712: serving is always on, and a manual run is served as the App's single installed Agent (#2735), which needs an
+ * approved prompt. Installs one (or serves `agentId` when the test installed its own). */
+async function installServedAgent(agentId?: string): Promise<string> {
+  const id = agentId ?? (await db.agent.create({ data: { id: generateId(), organizationId: orgId, urn: 'tr-org::runner', name: 'runner' } })).id;
+  if (!agentId) await db.appAgent.create({ data: { appId: app.id, agentId: id } });
+  await serveAgentBootPrompt(db, id, 'You run tasks.');
+  return id;
+}
 
 function adminCtx(overrides: Partial<Context> = {}): Context {
   return { db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}`, ...overrides };
@@ -116,9 +126,8 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     expect(await db.appRun.count()).toBe(0);
   });
 
-  // #2712: a manual run names no Agent, so it is refused BOOT_PROMPT_NOT_SET (R74, production already does). Restore when a
-  // manual run can name its Agent (the agentless manual-run defect raised on PR #2725).
-  it.skip('#530: a non-admin AppMember can trigger an interactive run', async () => {
+  it('#530: a non-admin AppMember can trigger an interactive run', async () => {
+    await installServedAgent();
     const member = await db.user.create({ data: { githubId: 9703, githubUsername: 'tr-member' } });
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
     const runId = await resolvers.Mutation.runTask(
@@ -131,14 +140,13 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     expect(run.triggerKind).toBe('MANUAL');
   });
 
-  // #2712: a manual run names no Agent, so it is refused BOOT_PROMPT_NOT_SET (R74, production already does). Restore when a
-  // manual run can name its Agent (the agentless manual-run defect raised on PR #2725).
-  it.skip('#530: a non-admin with an active AgentSubscription to an App agent can trigger', async () => {
+  it('#530: a non-admin with an active AgentSubscription to an App agent can trigger', async () => {
     // Install an agent in the App, then subscribe a plain user to it.
     const agent = await db.agent.create({
       data: { id: generateId(), organizationId: orgId, urn: 'tr-org::sub-agent', name: 'sub-agent' },
     });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await installServedAgent(agent.id);
     const subscriber = await db.user.create({ data: { githubId: 9704, githubUsername: 'tr-sub' } });
     await db.agentSubscription.create({
       data: { agentId: agent.id, userId: subscriber.id, activatedAt: new Date() },
@@ -185,9 +193,8 @@ describe('#529 — runTask(appRef:) mints a MANUAL app run', () => {
     expect(await db.appRun.count()).toBe(0);
   });
 
-  // #2712: a manual run names no Agent, so it is refused BOOT_PROMPT_NOT_SET (R74, production already does). Restore when a
-  // manual run can name its Agent (the agentless manual-run defect raised on PR #2725).
-  it.skip('passes structured args through to eventData (not stringified) — #531 review', async () => {
+  it('passes structured args through to eventData (not stringified) — #531 review', async () => {
+    await installServedAgent();
     const runId = await resolvers.Mutation.runTask(
       {},
       { nodeRef: taskUrn, appRef: app.id, args: { count: 3, tag: 'x' } },
@@ -223,9 +230,8 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
     expect(await db.appRun.count()).toBe(0);
   });
 
-  // #2712: a manual run names no Agent, so it is refused BOOT_PROMPT_NOT_SET (R74, production already does). Restore when a
-  // manual run can name its Agent (the agentless manual-run defect raised on PR #2725).
-  it.skip('taskArgs are merged into the run eventData', async () => {
+  it('taskArgs are merged into the run eventData', async () => {
+    await installServedAgent();
     const res = await resolvers.Mutation.importNode(
       {},
       {
@@ -326,9 +332,8 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
     expect(await db.appRun.count()).toBe(0);
   });
 
-  // #2712: a manual run names no Agent, so it is refused BOOT_PROMPT_NOT_SET (R74, production already does). Restore when a
-  // manual run can name its Agent (the agentless manual-run defect raised on PR #2725).
-  it.skip('runAsSelf on a personal-memory import; app-only on a knowledge import', async () => {
+  it('runAsSelf on a personal-memory import; app-only on a knowledge import', async () => {
+    await installServedAgent();
     // Knowledge target (the default fixture memory) → app-only, no user.
     const know = await resolvers.Mutation.importNode(
       {},
