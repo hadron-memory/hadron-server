@@ -148,6 +148,17 @@ describe('the red pin: a no-cursor limit-1 mentions read over a long history', (
     expect(rows()).toBeLessThanOrEqual(400);
   });
 
+  it('a sparse filter stays bounded: the next older match at the far end is never read for a backward page', async () => {
+    await humanSays(manager.id, 'long ago @liam');
+    await filler(3000);
+    const last = await humanSays(manager.id, 'now @liam');
+    await filler(5);
+    const { ctx: counted, rows } = countingCtx(ctx(liam.holder));
+    const page = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: liam.id, limit: 1 }, counted, ITEMS_ONLY);
+    expect(page.items.map((m: any) => m.seq)).toEqual([last.seq]);
+    expect(rows()).toBeLessThanOrEqual(400);
+  });
+
   it('with total selected the count stays exact (the full scan is kept for it)', async () => {
     await humanSays(manager.id, 'early @liam');
     await filler(300);
