@@ -551,7 +551,12 @@ export const agentMutations = {
       if (systemMemoryId !== undefined) {
         const incoming = systemMemoryId === '' ? null : systemMemoryId;
         if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
-          throw new Error('Cannot unset or change an agent\'s system memory. Delete the agent to replace it.');
+          // Typed, like the in-transaction twin below (#2856, cor:api:260:01): a plain
+          // Error reads as a fault, but this is a refusal of the caller's own input.
+          throw new GraphQLError(
+            "Cannot unset or change an agent's system memory. Delete the agent to replace it.",
+            { extensions: { code: 'BAD_USER_INPUT' } },
+          );
         }
         if (!agent.systemMemoryId && incoming) {
           // #1818 review (Emerson P2-C): on a USER-owned agent, first-attach is
