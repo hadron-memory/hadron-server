@@ -414,6 +414,18 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
     expect(F.TeamRosterEntry.terminal(r.workers.find((w: any) => w.workerId === kit.id))).toMatchObject({ status, reason });
   });
 
+  it('#2924 MCP omits terminal before a report and does not resolve the worker terminal', async () => {
+    const spy = vi.spyOn(F.Worker, 'terminal');
+    try {
+      const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
+      const text = await mcp.callToolText('hadron_get_worker', { workerRef: kit.id });
+      expect(text).toContain('Kit');
+      expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
+      expect(spy).not.toHaveBeenCalled();
+      expect(await mcp.callToolText('hadron_team_roster', { appRef: app.id })).not.toMatch(/terminal (idle|busy|locked|dark)/);
+    } finally { spy.mockRestore(); }
+  });
+
   it('the roster query count does not grow with the reports it carries', async () => {
     const count = async () => {
       const traced: string[] = [];
