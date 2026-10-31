@@ -1232,9 +1232,10 @@ export const nodeQueries = {
       const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, scopeIds) : [];
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
-        // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
-        // to the memory-class exclusion above).
-        ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+        // Explicit nodeType wins; otherwise exclude system-type and chat-message
+        // nodes (orthogonal to the memory-class exclusion above); `record` stays
+        // searchable (cor:api:090:02, #2836).
+        ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { notIn: ['system', 'chat-message'] } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
         ...(f.role != null
