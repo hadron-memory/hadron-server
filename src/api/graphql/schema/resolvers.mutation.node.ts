@@ -4792,9 +4792,11 @@ export const nodeMutations = {
         restored.embeddingWorkToken = await stampEmbeddingObligation(tx, restored.id, restored.memoryId);
         return { restored, restoredPlaintext: plaintextFields, destinationEncrypted: selectedDestination.isEncrypted, previousContent: logicalCurrent.content as string | null };
       });
-      // 033 — re-embed the restored content (revision snapshots are plaintext on
-      // non-encrypted memories; ciphertext snapshots are handled by embedNode's
-      // #206 permanent-fail path).
+      // 033 — re-embed the restored content. The embedder is handed the restored
+      // PLAINTEXT (`restoredPlaintext`, decrypted inside the transaction), never
+      // the stored row: on an encrypted memory the row holds ciphertext, and a
+      // keyless restore into one was already refused above (#1272, pinned in
+      // resolvers.restoreEmbed1272.test.ts).
       void enqueueNodeEmbedding(ctx.db, {
         nodeId: restored.id,
         workToken: restored.embeddingWorkToken,
