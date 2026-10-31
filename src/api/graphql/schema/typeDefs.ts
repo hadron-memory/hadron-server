@@ -9631,6 +9631,21 @@ export const typeDefs = `#graphql
     agentTickerTemplates(agentRef: String!): [AgentTickerTemplate!]!
 
     """
+    #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - the model groups an Agent declares, by name. Whoever manages
+    the Agent only (an org OWNER or ADMIN, the owner of a user-owned Agent, a platform admin as for the Agent's other
+    management reads). An Agent the caller cannot read answers as absent (AGENT_NOT_FOUND); a reader who does not manage it
+    gets FORBIDDEN.
+    """
+    agentModelGroups(agentRef: ID!): [ModelGroup!]!
+
+    """
+    #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - the model groups in force in an App, resolved live: the Team Agent's groups with the App's
+    overrides applied by name, plus the App's own groups, by name, each with its origin. A participant of the App reads
+    them. An App with no Team Agent has only its own. Refusals: APP_NOT_FOUND, TEAM_AGENT_AMBIGUOUS, SESSION_NOT_BOUND.
+    """
+    effectiveModelGroups(appRef: ID!): [EffectiveModelGroup!]!
+
+    """
     Dry-run castWorker (#964): run the cast's exact resolution — same
     arguments, same typed refusals (WORKER_AGENT_NOT_FOUND / _AMBIGUOUS /
     _NOT_INSTALLED, WORKER_NAME_REQUIRED, WORKER_NAME_TAKEN,
@@ -10253,6 +10268,35 @@ export const typeDefs = `#graphql
     APP_UNINSTALLED.
     """
     setAgentTaskStallSchedule(appRef: ID!, input: AgentTaskStallScheduleInput!): AgentTaskStallSchedule!
+
+    """
+    #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an Agent's model group: the name is created or its whole pattern list replaced (no
+    merge). Patterns are lowercase globs matched against a session's self-reported model (* any run, ? one character); an
+    empty list is allowed. Whoever manages the Agent only. A group only steers matching, never authorization. Refusals:
+    AGENT_NOT_FOUND, FORBIDDEN, BAD_USER_INPUT, MODEL_GROUP_LIMIT_REACHED.
+    """
+    setAgentModelGroup(agentRef: ID!, name: String!, patterns: [String!]!): ModelGroup!
+
+    """
+    #2831 S1 - remove an Agent's model group. Installs that override it keep their own list. Whoever manages the Agent only.
+    Refusals: AGENT_NOT_FOUND, FORBIDDEN, BAD_USER_INPUT, MODEL_GROUP_NOT_FOUND.
+    """
+    deleteAgentModelGroup(agentRef: ID!, name: String!): Boolean!
+
+    """
+    #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an App's model group of this name: it overrides the Team Agent's group of that name
+    (replacing its whole list, no merge) or, when the Agent has none, is the App's own. An empty list matches no one.
+    Whoever manages the App only. Refusals: APP_NOT_FOUND, APP_MANAGER_REQUIRED, BAD_USER_INPUT, MODEL_GROUP_LIMIT_REACHED,
+    SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    setAppModelGroup(appRef: ID!, name: String!, patterns: [String!]!): ModelGroup!
+
+    """
+    #2831 S1 - remove the App's model group of this name: an override reverts to the Team Agent's group, an App-only group is
+    gone. The Agent's group itself is never deleted from here. Whoever manages the App only. Refusals: APP_NOT_FOUND,
+    APP_MANAGER_REQUIRED, BAD_USER_INPUT, MODEL_GROUP_NOT_FOUND, SESSION_NOT_BOUND, APP_UNINSTALLED.
+    """
+    deleteAppModelGroup(appRef: ID!, name: String!): Boolean!
     """
     Start impersonating another member of orgRef (admin support/diagnostics).
     Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
@@ -14825,6 +14869,30 @@ export const typeDefs = `#graphql
     type: String!
     "The type's arguments, without workerId (taken from worker)."
     args: JSON
+  }
+
+  """#2831 - one model group: a lowercase name over a list of lowercase model patterns."""
+  type ModelGroup {
+    name: String!
+    patterns: [String!]!
+    updatedAt: DateTime!
+  }
+
+  """Where an effective model group comes from."""
+  enum ModelGroupOrigin {
+    "Declared by the App's Team Agent, with no App override."
+    AGENT
+    "The App replaced the Agent's group of this name."
+    APP_OVERRIDE
+    "The App's own group; the Agent declares none of this name."
+    APP
+  }
+
+  """#2831 - a model group as it applies in one App (hrn:node:hadronmemory.com:specs:cor:agt:060:12)."""
+  type EffectiveModelGroup {
+    name: String!
+    patterns: [String!]!
+    origin: ModelGroupOrigin!
   }
 
   "#1706 — one model family's availability for work in one App (hrn:node:hadronmemory.com:specs:cor:agt:060:03). A family with no record is available."

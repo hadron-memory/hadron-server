@@ -2146,6 +2146,7 @@ model Agent {
   importedBy         AgentImport[]       @relation("ImportedAgent")
   orgGrants          AgentOrgGrant[]
   aiServiceConfigs   AiServiceConfig[]
+  modelGroups        ModelGroup[]
   scopes             Scope[]
   registerAttendeeOf RegisterEntry[]     @relation("RegisterAttendeeAgent")
   readStates         ChannelReadState[]  @relation("ReadStateAgent")
@@ -3435,6 +3436,7 @@ model App {
   usageEvents             UsageEvent[]
   pendingSetups           PendingSetup[]
   aiServiceConfigs        AiServiceConfig[]
+  modelGroups             ModelGroup[]
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
   slackConnections        SlackConnection[]
@@ -5992,6 +5994,32 @@ model WorkerAvailability {
 /// #1706 — one model family's availability for work in one App
 /// (cor:agt:060:03): at most one row per App and family; with none, the family
 /// is available. Set only by whoever manages the App (cor:agt:060:09).
+/// #2831 S1 (cor:agt:060:12) — a model group: an opaque name over a list of model
+/// patterns (globs), declared by the team Agent (`agentId`) or by an App (`appId`,
+/// an override of the Agent's group of that name, or an App-only group). Exactly
+/// one owner (chk_model_group_owner). Resolved LIVE at match time, App's row else
+/// the Agent's (src/lib/agentTasks/modelGroups.ts); never copied at install. The
+/// platform gives name and patterns no meaning, and a group is never an
+/// authorization input. `name` and every pattern are stored lowercase.
+model ModelGroup {
+  id        String    @id @default(cuid())
+  name      String
+  agentId   String?   @map("agent_id")
+  appId     String?   @map("app_id")
+  patterns  String[]
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @updatedAt @map("updated_at")
+  updatedBy String?   @map("updated_by")
+
+  agent Agent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  app   App?   @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, name])
+  @@unique([appId, name])
+  @@map("model_groups")
+}
+
 model ModelFamilyAvailability {
   appId         String    @map("app_id")
   /// The model family, e.g. `claude`, `codex`, `glm` (cor:agt:060:04).
