@@ -2462,7 +2462,7 @@ export async function loadAppWorkerCheckStatuses(
  */
 /**
  * #2971 — what the workers of ONE `workers` page share while their `prompt` is composed. It is created by the page
- * resolution, carried on that page's rows under a symbol, and unreachable from ctx, so it dies with the page: a mutation
+ * resolution, carried on that page's rows under a reserved string key (`PAGE_MEMO`), and unreachable from ctx, so it dies with the page: a mutation
  * that edits a persona and then reads a page in the same request builds a new memo and reads the new Agent row, and no
  * briefing is cached (cor:agt:020:01).
  *

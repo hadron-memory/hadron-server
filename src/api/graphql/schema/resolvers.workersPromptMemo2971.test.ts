@@ -110,9 +110,11 @@ describe('#2971 parity: every item of the page equals its single read', () => {
   it('(c) a caller who fails the worker read gate reads null on a page another caller built, and on every single read', async () => {
     await cast('Ada');
     await cast('Bea');
-    const { items } = await page(adminCtx());
-    // The page was composed for the admin first, so a shared entry exists; the outsider must still read null.
-    for (const item of items) expect((await viaPage(adminCtx(), item)).text).toContain('SHARED');
+    // ONE admin ctx builds the page and composes the first reads, so the page memo is warm (the memo is honoured only for
+    // the ctx that built the page); the outsider must still read null from the same rows.
+    const admin = adminCtx();
+    const { items } = await page(admin);
+    for (const item of items) expect((await viaPage(admin, item)).text).toContain('SHARED');
     for (const item of items) {
       expect(await viaPage(ctxOf(outsider.id), item)).toEqual({ text: null, refusal: null, prompt: null });
       expect((await single(ctxOf(outsider.id), item.id)).text).toBeNull();
@@ -161,6 +163,39 @@ describe('#2971 the register is evaluated for each worker\'s own holder', () => 
   });
 });
 
+describe('#2971 the accessible-memory sets are keyed by principal (cross-principal invariant)', () => {
+  const withPrivateChannel = async () => {
+    const admin2 = await db.user.create({ data: { githubId: 97_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `a2-${generateId().toLowerCase()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin2.id, role: 'ADMIN' } });
+    const priv = await db.memory.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:admins-private`, name: 'admins-private', class: 'private', userId: admin.id } });
+    const c = await ensureChannelWithRoot(db, { memoryId: priv.id, loc: 'chats:secret', name: 'secret', createdBy: admin.id });
+    await db.registerEntry.create({ data: { id: generateId(), appId: app.id, channelId: c.channel.id, role: 'BOTH' } });
+    return { admin2, priv };
+  };
+
+  it('a viewer narrower than the holder: parity, and the holder-only host memory URN never reaches the viewer', async () => {
+    const { admin2, priv } = await withPrivateChannel();
+    const ada = await cast('Ada');
+    const bea = await cast('Bea');
+    await db.worker.updateMany({ where: { id: { in: [ada.id, bea.id] } }, data: { heldByUserId: admin.id } });
+    const got = await expectParity(ctxOf(admin2.id));
+    for (const k of ['Ada', 'Bea']) {
+      expect(got[k]?.text ?? '').toContain('secret');
+      expect(got[k]?.text ?? '').not.toContain(priv.urn);
+    }
+  });
+
+  it('two participant holders, only one of whom reads the host memory: parity, and the texts differ', async () => {
+    const { admin2 } = await withPrivateChannel();
+    const ada = await cast('Ada');
+    const bea = await cast('Bea');
+    await db.worker.update({ where: { id: ada.id }, data: { heldByUserId: admin.id } });
+    await db.worker.update({ where: { id: bea.id }, data: { heldByUserId: admin2.id } });
+    const got = await expectParity(adminCtx());
+    expect(got.Ada?.text).not.toEqual(got.Bea?.text?.replace(/Bea/g, 'Ada'));
+  });
+});
+
 describe('#2971 the memo is one page long and holds only what the workers of a page share', () => {
   it('a mutation that changes the persona, then a second page read in the same request context, serves the new text', async () => {
     await cast('Ada');
@@ -187,7 +222,8 @@ describe('#2971 the memo is one page long and holds only what the workers of a p
       memories: vi.spyOn(db.memory, 'findMany'),
       members: vi.spyOn(db.orgMember, 'findMany'),
     };
-    for (const item of items) expect(await W.prompt(item, {}, ctx)).toContain('SHARED');
+    // Siblings resolve concurrently, as GraphQL resolves list fields: the shared promises are joined, not re-issued.
+    for (const out of await Promise.all(items.map((item: any) => W.prompt(item, {}, ctx)))) expect(out).toContain('SHARED');
     const calls = Object.fromEntries(Object.entries(spies).map(([k, s]) => [k, s.mock.calls.length]));
     // Shared reads: a constant number per page (a worker-level pointer read and the shared level read together stay far below N).
     expect(calls.agent, JSON.stringify(calls)).toBeLessThanOrEqual(2);
