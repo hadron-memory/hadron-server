@@ -263,6 +263,29 @@ describe('LOCAL delta P2 on a59c00ed (Beckett): clone over a tombstone', () => {
   });
 });
 
+describe('LOCAL delta 2 P2 on d1168457 (Beckett): the stale absent-target probe', () => {
+  it('a clone whose unlocked probe saw NO row still cannot revive a message tombstone at a different seq', async () => {
+    const src = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:003', memoryId: memory.id } });
+    const target = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:001', memoryId: memory.id } });
+    await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
+    // The probe is the real interleaving's initial answer: the tombstone appeared AFTER it. Only the first
+    // lookup of the target loc is stale; every later read (the authoritative one under the lock) is real.
+    const real = db.node.findUnique.bind(db.node);
+    let stale = true;
+    const spy = vi.spyOn(db.node, 'findUnique').mockImplementation(((args: any) => {
+      const key = args?.where?.loc_memoryId;
+      if (stale && key?.loc === target.loc && key?.memoryId === memory.id) { stale = false; return Promise.resolve(null) as any; }
+      return real(args);
+    }) as any);
+    try {
+      expect((await errorOf(M.cloneNode(null, { sourceRef: src.id, targetUrn: urn(target.loc) }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+      expect(stale).toBe(false);
+    } finally { spy.mockRestore(); }
+    const after = await db.node.findUniqueOrThrow({ where: { id: target.id } });
+    expect([after.deletedAt !== null, after.seq, after.revSeq]).toEqual([true, 1, target.revSeq]);
+  });
+});
+
 describe('allocator paths still assign seq', () => {
   it('createChannelMessage, createTeamChatMessage-style appends and the chat-root allocator', async () => {
     const channel = await M.createChannel(null, { input: { memoryRef: memory.urn, loc: 'chats:alloc', name: 'alloc' } }, as());
