@@ -273,7 +273,6 @@ export const appMutations = {
         appType,
         role,
         description,
-        systemPrompt,
         agentTools,
         aiProvider,
         aiModel,
@@ -295,7 +294,6 @@ export const appMutations = {
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
-        systemPrompt?: string;
         agentTools?: string[];
         aiProvider?: string;
         aiModel?: string;
@@ -554,7 +552,6 @@ export const appMutations = {
             appType: appType ?? 'WORKSTATION',
             role: role ?? 'READER',
             description: description ?? null,
-            systemPrompt: systemPrompt ?? null,
             agentTools: agentTools ?? [],
             expiresAt: expiresAt ? new Date(expiresAt) : undefined,
             createUserPermission: createUserPermission ?? 'EXPLICIT',
@@ -749,7 +746,6 @@ export const appMutations = {
         appType,
         role,
         description,
-        systemPrompt,
         agentTools,
         aiProvider,
         aiModel,
@@ -770,7 +766,6 @@ export const appMutations = {
         appType?: AppType;
         role?: AppMembershipRole;
         description?: string;
-        systemPrompt?: string;
         agentTools?: string[];
         // GraphQL nullable args: explicit null is meaningful here
         // (aiProvider: null clears the App's 'default' AI config).
@@ -958,7 +953,6 @@ export const appMutations = {
           ...(appType !== undefined ? { appType } : {}),
           ...(role !== undefined ? { role } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(agentTools !== undefined ? { agentTools } : {}),
           ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
           ...(surfaces !== undefined ? { surfaces } : {}),

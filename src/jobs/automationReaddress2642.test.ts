@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { automationPinQueries, automationPinMutations } from '../api/graphql/schema/resolvers.automationPin.js';
 import { appRunMutations } from '../api/graphql/schema/resolvers.appRun.js';
 import { nodeMutations } from '../api/graphql/schema/resolvers.mutation.node.js';
@@ -37,6 +38,10 @@ async function fixture(kind: Kind, name = nameOf(kind)) {
   await db.orgMember.create({ data: { userId: writer.id, organizationId: org.id, role: 'CONTRIBUTOR' } });
   const app = await db.app.create({ data: { name: 'Rd', urn: 'rd.test:app', organizationId: org.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
+  // #2712: serving is mandatory, so a trigger names an installed Agent with an approved boot prompt.
+  const agent = await db.agent.create({ data: { name: 'Rd agent', urn: 'rd.test:agent', organizationId: org.id } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   const memory = await db.memory.create({ data: { name: 'Flow', urn: 'rd.test:flow', class: 'knowledge', organizationId: org.id } });
   const elsewhere = await db.memory.create({ data: { name: 'Else', urn: 'rd.test:else', class: 'knowledge', organizationId: org.id } });
   await db.node.create({ data: { memoryId: memory.id, loc: 'grp', name: 'Group', content: 'g' } });
@@ -45,8 +50,8 @@ async function fixture(kind: Kind, name = nameOf(kind)) {
   const writerCtx = { db, userId: writer.id, roles: [] as never[] };
   const entryNodeUrn = 'hrn:node:rd.test:flow:grp:entry';
   const trigger: { id: string } = kind === 'SCHEDULE'
-    ? await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name, cron: '* * * * *', entryNodeUrn, runAsSelf: true } }, ctx as never)
-    : (await appRunMutations.createAgentWebhook({}, { input: { appRef: app.id, name, entryNodeUrn, runAsSelf: true } }, ctx as never)).webhook;
+    ? await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, agentRef: agent.id, name, cron: '* * * * *', entryNodeUrn, runAsSelf: true } }, ctx as never)
+    : (await appRunMutations.createAgentWebhook({}, { input: { appRef: app.id, agentRef: agent.id, name, entryNodeUrn, runAsSelf: true } }, ctx as never)).webhook;
   const input = { triggerKind: kind, triggerRef: trigger.id };
   const pin = await automationPinQueries.previewAutomation({}, input, ctx as never);
   await automationPinMutations.reAdoptAutomation({}, { ...input, expectedHash: pin.hash }, ctx as never);

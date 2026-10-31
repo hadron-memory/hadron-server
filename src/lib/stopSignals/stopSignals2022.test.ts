@@ -26,6 +26,7 @@ import { __matcherTesting } from '../agentTasks/matcher.js';
 import { loadPendingReasons } from '../tickers/checkPending.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
+import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -75,6 +76,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: max.id, role: 'ADMIN' } });
   const agent = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(max.id));
   agentId = agent.id;
+  await serveEveryAgent(db); // #2712: binds are served
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
   otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
   await db.appMember.create({ data: { appId: app.id, userId: mia.id, role: 'member' } });

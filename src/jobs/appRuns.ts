@@ -48,7 +48,6 @@ import {
 } from '../lib/llm/index.js';
 import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
-import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
 import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
@@ -604,8 +603,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
   // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
   // cor:agt:040:07 (R74): a headless run with NO Agent has no boot prompt to serve and is refused the same way.
-  if (bootPromptServingEnabled() && !args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
-  const runServing = bootPromptServingEnabled() && args.agentId
+  if (!args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  const runServing = args.agentId
     ? await (async () => {
         const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
         return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
@@ -897,7 +896,7 @@ async function executeAppRunInner(
     // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
     // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
     let servedText: string | null = null;
-    if (bootPromptServingEnabled() && run.agentId) {
+    if (run.agentId) {
       const record = await db.servedPrompt.findFirst({ where: { runId } });
       if (record) {
         const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);

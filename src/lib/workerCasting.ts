@@ -22,7 +22,7 @@ import { parseCompiledProvenance } from './bootCompile/provenance.js';
 type Db = Pick<PrismaClient, 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
 
 export type CastingApp = { id: string; organizationId: string | null; ownerUserId: string | null; uninstalledAt: Date | null };
-export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null; systemPrompt: string | null };
+export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null };
 
 const refusal = (code: string, message: string, extensions: Record<string, unknown> = {}) =>
   new GraphQLError(message, { extensions: { code, ...extensions } });
@@ -116,7 +116,7 @@ export async function assertCastable(
   }
   const row = await db.appAgent.findUnique({
     where: { appId_agentId: { appId: app.id, agentId } },
-    select: { agent: { select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true } } },
+    select: { agent: { select: { id: true, name: true, urn: true, personaRole: true, deletedAt: true } } },
   });
   if (!row || row.agent.deletedAt) throw workerAgentNotInstalled(app.id);
   const provisionGrantsFor: string[] = [];

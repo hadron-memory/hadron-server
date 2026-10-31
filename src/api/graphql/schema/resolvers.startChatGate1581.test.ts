@@ -18,6 +18,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { canChatWithAgent } from './agentChatAccess.js';
 import { readFileSync } from 'node:fs';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
@@ -77,7 +78,6 @@ beforeEach(async () => {
 
   const created = await M.createAgent({}, { orgId: orgA.id, name: 'secret-agent', visibility: 'ORGANIZATION' },
     { db, roles: ['ADMIN'], userId: admin.id } as Context);
-  await db.agent.update({ where: { id: created.id }, data: { systemPrompt: 'VENDOR-SECRET-PROMPT' } });
   agent = await db.agent.findUniqueOrThrow({
     where: { id: created.id },
     select: { id: true, organizationId: true, ownerUserId: true, visibility: true, deletedAt: true },
@@ -93,6 +93,8 @@ beforeEach(async () => {
   } });
   // An App end user: a member of the App, NOT of the org.
   await db.appMember.create({ data: { appId: app.id, userId: endUser.id, role: 'member' } });
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 describe('#1581: startChat gates the Agent before reading or licensing anything', () => {

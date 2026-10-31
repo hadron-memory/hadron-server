@@ -363,42 +363,36 @@ describe('#2048 S11b transport and ambiguity controls', () => {
     expect(await lintWarningPageForNodeId(ctx(), ambiguous.id)).toMatchObject({ total: 1, items: [{ kind: 'BROKEN_INCLUDE' }] });
   });
   it('mounted node and worker reads render compiled/recorded lint, not live root tags', async () => {
-    const previous = process.env.BOOT_PROMPT_SERVE_ENABLED;
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
-    try {
-      const root = await source('no tags');
-      const agent = await db.agent.findFirstOrThrow({ where: { systemMemoryId: memoryId } });
-      const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-      const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', role: 'boot-prompt', nodeType: 'compiled-boot-prompt', content: 'expanded' } }));
-      await db.compiledPromptRevision.create({ data: { compiledNodeId: compiled.id, compiledRevNo: 1, targetKind: 'AGENT', targetAgentId: agent.id,
-        contentHash: sha256Hex('expanded'), occurrenceCount: 1, provenance: { version: 1, occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: 1,
-          hash: sha256Hex('no tags'), selection: { rev: null, approved: false, signed: false } }] } } });
-      await db.node.update({ where: { id: root.id }, data: { content: 'new root', revSeq: 2 } });
-      const app = await db.app.create({ data: { name: 'lint team', urn: 'lint-team', organizationId: memory.organizationId } });
-      await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-      const worker = await db.worker.create({ data: { name: 'Lint', slug: 'lint', agentId: agent.id, appId: app.id, signature: '{{worker.url}}', trailer: '{{worker.url}}' } });
-      const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER' } });
-      await db.servedPrompt.create({ data: { id: generateId(), kind: 'BIND', sessionId: session.id, appId: app.id, workerId: worker.id, agentId: agent.id, pointerLevel: 'AGENT', compiledNodeId: compiled.id,
-        servedRevSeq: 1, provenanceRevSeq: 1, compiledContentHash: sha256Hex('expanded'), provenance: [], variables: {} } });
-      const text = await callMountedTool('hadron_get_node', { urn: `hrn:node:${memoryUrn}:boot:compiled` });
-      expect(text).toContain('[RECOMPILE_AVAILABLE]');
-      // No current pointer is needed to lint an immutable record of the open session.
-      const got = await (resolvers as any).Worker.promptLintWarnings(worker, {}, { db, userId, roles: [] });
-      expect(got).toMatchObject({ items: [{ kind: 'RECOMPILE_AVAILABLE' }] });
-      const workerText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
-      expect(workerText).toContain('Served prompt lint (compile revision 1)');
-      expect(workerText).toContain('[RECOMPILE_AVAILABLE]');
-      expect(workerText).toContain("The worker's open session was served revision 1");
-      await db.node.update({ where: { id: root.id }, data: { content: 'no tags', revSeq: 1 } });
-      const cleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
-      expect(cleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
-      await (resolvers.Mutation as any).approveNode(null, { nodeRef: compiled.id }, { db, userId, roles: [] });
-      await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: compiled.id, bootPromptUrn: `hrn:node:${memoryUrn}:boot:compiled` } });
-      const bothCleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
-      expect(bothCleanText).toContain('Current prompt lint (compile revision 1):\nNo lint warnings.');
-      expect(bothCleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
-    } finally {
-      if (previous === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED; else process.env.BOOT_PROMPT_SERVE_ENABLED = previous;
-    }
+    const root = await source('no tags');
+    const agent = await db.agent.findFirstOrThrow({ where: { systemMemoryId: memoryId } });
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', role: 'boot-prompt', nodeType: 'compiled-boot-prompt', content: 'expanded' } }));
+    await db.compiledPromptRevision.create({ data: { compiledNodeId: compiled.id, compiledRevNo: 1, targetKind: 'AGENT', targetAgentId: agent.id,
+      contentHash: sha256Hex('expanded'), occurrenceCount: 1, provenance: { version: 1, occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: 1,
+        hash: sha256Hex('no tags'), selection: { rev: null, approved: false, signed: false } }] } } });
+    await db.node.update({ where: { id: root.id }, data: { content: 'new root', revSeq: 2 } });
+    const app = await db.app.create({ data: { name: 'lint team', urn: 'lint-team', organizationId: memory.organizationId } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await db.worker.create({ data: { name: 'Lint', slug: 'lint', agentId: agent.id, appId: app.id, signature: '{{worker.url}}', trailer: '{{worker.url}}' } });
+    const session = await db.session.create({ data: { id: generateId(), appId: app.id, workerId: worker.id, agentId: agent.id, type: 'DEVELOPER' } });
+    await db.servedPrompt.create({ data: { id: generateId(), kind: 'BIND', sessionId: session.id, appId: app.id, workerId: worker.id, agentId: agent.id, pointerLevel: 'AGENT', compiledNodeId: compiled.id,
+      servedRevSeq: 1, provenanceRevSeq: 1, compiledContentHash: sha256Hex('expanded'), provenance: [], variables: {} } });
+    const text = await callMountedTool('hadron_get_node', { urn: `hrn:node:${memoryUrn}:boot:compiled` });
+    expect(text).toContain('[RECOMPILE_AVAILABLE]');
+    // No current pointer is needed to lint an immutable record of the open session.
+    const got = await (resolvers as any).Worker.promptLintWarnings(worker, {}, { db, userId, roles: [] });
+    expect(got).toMatchObject({ items: [{ kind: 'RECOMPILE_AVAILABLE' }] });
+    const workerText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+    expect(workerText).toContain('Served prompt lint (compile revision 1)');
+    expect(workerText).toContain('[RECOMPILE_AVAILABLE]');
+    expect(workerText).toContain("The worker's open session was served revision 1");
+    await db.node.update({ where: { id: root.id }, data: { content: 'no tags', revSeq: 1 } });
+    const cleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+    expect(cleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
+    await (resolvers.Mutation as any).approveNode(null, { nodeRef: compiled.id }, { db, userId, roles: [] });
+    await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: compiled.id, bootPromptUrn: `hrn:node:${memoryUrn}:boot:compiled` } });
+    const bothCleanText = await callMountedTool('hadron_get_worker', { workerRef: worker.id });
+    expect(bothCleanText).toContain('Current prompt lint (compile revision 1):\nNo lint warnings.');
+    expect(bothCleanText).toContain('Served prompt lint (compile revision 1):\nNo lint warnings.');
   });
 });

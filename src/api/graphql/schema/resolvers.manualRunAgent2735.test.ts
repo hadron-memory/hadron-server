@@ -6,7 +6,7 @@
  * several installed and none named is RUN_AGENT_REQUIRED, identical on GraphQL
  * and MCP and raised before any write; none installed is unchanged.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -14,6 +14,7 @@ import { composeNodeUrn } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -28,7 +29,6 @@ let targetMemoryId: string;
 let agentA: string;
 let agentB: string;
 let foreignAgent: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
@@ -39,12 +39,14 @@ const importInput = (extra: Record<string, unknown> = {}) => ({
 });
 async function agent(name: string, org = orgId) {
   const mem = await db.memory.create({ data: { id: generateId(), class: 'system', name: `${name}-sys`, urn: `${name}:sys`, organizationId: org } });
-  return (await db.agent.create({ data: { id: generateId(), name, urn: `${name}:agent`, organizationId: org, systemMemoryId: mem.id } })).id;
+  const id = (await db.agent.create({ data: { id: generateId(), name, urn: `${name}:agent`, organizationId: org, systemMemoryId: mem.id } })).id;
+  // #2712: serving is always on, so a run is served only as an Agent with an approved prompt.
+  await serveAgentBootPrompt(db, id, `You are ${name}.`);
+  return id;
 }
 const install = (agentId: string) => db.appAgent.create({ data: { appId, agentId } as never });
 
 beforeEach(async () => {
-  delete process.env.BOOT_PROMPT_SERVE_ENABLED;
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'mra-org', urn: 'mra-org' } });
   orgId = org.id;
@@ -60,10 +62,6 @@ beforeEach(async () => {
   agentB = await agent('bravo');
   const other = await db.organization.create({ data: { id: generateId(), name: 'mra-other', urn: 'mra-other' } });
   foreignAgent = await agent('foreign', other.id);
-});
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
 });
 
 const runs = () => db.appRun.findMany();
@@ -188,13 +186,10 @@ describe('#2735 several installed Agents', () => {
 });
 
 describe('#2735 no installed Agent', () => {
-  it('is unchanged: the run is minted agent-less while serving is off, BOOT_PROMPT_NOT_SET once on, and an import then leaves no node', async () => {
-    expect(await code(M.runTask({}, { nodeRef: taskUrn, appRef: appId }, ctx()))).toBe('RESOLVED');
-    expect((await runs())[0]!.agentId).toBeNull();
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+  it('is BOOT_PROMPT_NOT_SET (#2712: serving is always on), and an import then leaves no node', async () => {
     expect(await code(M.runTask({}, { nodeRef: taskUrn, appRef: appId }, ctx()))).toBe('BOOT_PROMPT_NOT_SET');
     expect(await code(M.importNode({}, { input: importInput() }, ctx()))).toBe('BOOT_PROMPT_NOT_SET');
     expect(await importedNodes()).toBe(0);
-    expect(await runs()).toHaveLength(1);
+    expect(await runs()).toHaveLength(0);
   });
 });

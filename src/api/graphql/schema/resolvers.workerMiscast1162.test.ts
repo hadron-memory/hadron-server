@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { generateDataKey } from '../../../lib/crypto.js';
 import { encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
@@ -30,6 +31,7 @@ beforeEach(async () => {
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Repair team', urn: `${org.urn}:team` } });
   appId = app.id;
   await db.appAgent.create({ data: { appId, agentId } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 
 afterEach(() => sessionKeyCache.clear());

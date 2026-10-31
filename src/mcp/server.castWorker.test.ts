@@ -16,6 +16,7 @@ import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -60,18 +61,18 @@ beforeEach(async () => {
     },
   });
 
-  // The role-agent carries the persona dressing the boot briefing binds.
+  // The role-agent's served boot prompt is the persona dressing the boot briefing binds (#2712).
   const role = await M.createAgent(
     {},
     {
       orgId: org.id,
       name: 'MCP Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{worker.name}}, a {{worker.role}}.',
     },
     ctx,
   );
   roleAgent = { id: role.id, urn: role.urn };
+  await serveAgentBootPrompt(db, role.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'MCP Team App', urn: `${org.urn}:team` },
@@ -101,7 +102,7 @@ describe('hadron_cast_worker (#974)', () => {
       name: 'Zoe',
     });
     expect(out).toContain('Worker cast: **Zoe** (backend-engineer)');
-    // The boot briefing is the agent's template with {{worker.name}}/{{worker.role}} bound.
+    // The boot briefing is the agent's served prompt with {{worker.name}}/{{worker.role}} bound.
     expect(out).toContain('Boot briefing:');
     expect(out).toContain('You are Zoe, a backend-engineer.');
     // The full operation ran: a real Worker row, id echoed for session binding.

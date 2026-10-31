@@ -93,7 +93,7 @@ const SURFACES: Array<[string, (c: Context, ref: string) => Promise<unknown>]> =
   ['retireWorker', (c, ref) => M.retireWorker({}, { workerRef: ref }, c)],
   ['setWorkerReportsTo', (c, ref) => M.setWorkerReportsTo({}, { workerRef: ref, reportsTo: null }, c)],
   ['releaseWorker', (c, ref) => M.releaseWorker({}, { workerRef: ref }, c)],
-  ['updateWorker', (c, ref) => M.updateWorker({}, { workerRef: ref, promptOverride: 'x' }, c)],
+  ['updateWorker', (c, ref) => M.updateWorker({}, { workerRef: ref }, c)],
   ['deleteWorker', (c, ref) => M.deleteWorker({}, { workerRef: ref }, c)],
   ['Query.worker', (c, ref) => Q.worker({}, { ref }, c)],
 ];
@@ -163,7 +163,6 @@ describe('#1742 the oracle is closed: an unreadable App answers like an absent w
     for (const [, call] of SURFACES) await envelopeOf(call(ctx(outsider.id), danUrn()));
     const row = await db.worker.findUniqueOrThrow({ where: { id: dan.id } });
     expect(row.retiredAt).toBeNull();
-    expect(row.promptOverride).toBeNull();
   });
 });
 
@@ -171,7 +170,7 @@ describe('#1742 controls: readers keep their answers', () => {
   it('a reader of the App is still refused a staff change with FORBIDDEN, which tells them nothing new', async () => {
     for (const call of [
       (c: Context) => M.retireWorker({}, { workerRef: danUrn() }, c),
-      (c: Context) => M.updateWorker({}, { workerRef: danUrn(), promptOverride: 'x' }, c),
+      (c: Context) => M.updateWorker({}, { workerRef: danUrn() }, c),
       (c: Context) => M.deleteWorker({}, { workerRef: danUrn() }, c),
     ]) {
       const env = await envelopeOf(call(ctx(reader.id)));
@@ -215,7 +214,7 @@ describe('#1742 MCP delegates, so its worker tools are closed as well', () => {
   const auth = (userId: string) => ({ userId, roles: ['READER' as const] });
   const tools: Array<[string, (ref: string) => Record<string, unknown>]> = [
     ['hadron_get_worker', (ref) => ({ workerRef: ref })],
-    ['hadron_update_worker', (ref) => ({ workerRef: ref, promptOverride: 'x' })],
+    ['hadron_update_worker', (ref) => ({ workerRef: ref })],
     ['hadron_set_worker_reports_to', (ref) => ({ workerRef: ref, reportsTo: null })],
   ];
   // #1149: hadron_get_worker reads the PROFILE for any signed-in user

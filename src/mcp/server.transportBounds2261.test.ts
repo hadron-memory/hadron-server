@@ -11,6 +11,7 @@ import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import {
@@ -361,6 +362,7 @@ describe('#2261 eviction touches connection-local state only', () => {
     const org = await db.organization.create({ data: { id: generateId(), name: 'Team', urn: `team-2261-${generateId().slice(-6)}.com` } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId, role: 'CONTRIBUTOR' } });
     const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:backend`, name: 'Backend', visibility: 'ORGANIZATION' } });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.'); // #2712: the bind is served
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });

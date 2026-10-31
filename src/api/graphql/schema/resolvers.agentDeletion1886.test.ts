@@ -14,7 +14,7 @@ let alpha: { id: string };
 let beta: { id: string };
 const ctx = (): Context => ({ db, userId, roles: [] });
 const makeAgent = (name: string, org = beta) => M.createAgent(null, {
-  orgId: org.id, name, visibility: 'PUBLIC', systemPrompt: 'synthetic prompt',
+  orgId: org.id, name, visibility: 'PUBLIC',
 }, ctx());
 
 beforeEach(async () => {

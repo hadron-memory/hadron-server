@@ -22,8 +22,6 @@
     "check:loc-scope": "node scripts/check-loc-scope.mjs",
     "check:workflow-triggers": "node scripts/check-workflow-triggers.mjs",
     "admin:mint-token": "tsx scripts/admin-mint-token.ts",
-    "admin:convert-boot-prompts": "tsx scripts/admin-convert-boot-prompts.ts",
-    "admin:migrate-boot-prompt-variables": "tsx scripts/admin-migrate-boot-prompt-variables.ts",
     "admin:backfill-urn-v2": "tsx scripts/backfill-urn-v2.ts",
     "admin:backfill-shared-memory-agent": "tsx scripts/backfill-shared-memory-agent.ts",
     "admin:backfill-system-embeddings": "tsx src/jobs/backfillSystemMemoryEmbeddings.ts",

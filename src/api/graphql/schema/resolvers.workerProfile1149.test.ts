@@ -24,6 +24,7 @@ import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -61,7 +62,7 @@ async function worker(appId: string, agentId: string, name: string, extra: Recor
   return db.worker.create({
     data: {
       ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId, name, slug: name.toLowerCase(),
-      role: 'server-engineer', promptOverride: 'secret override', createdBy: contributor.id, ...extra,
+      role: 'server-engineer', signature: 'secret signature', createdBy: contributor.id, ...extra,
     },
     select: { id: true },
   });
@@ -80,7 +81,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgA.id, userId: contributor.id, role: 'CONTRIBUTOR' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgA.id, userId: orgReader.id, role: 'READER' } });
   orgAgent = await db.agent.create({
-    data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:engineer`, name: 'Engineer', visibility: 'ORGANIZATION', systemPrompt: 'You are {{name}}.' },
+    data: { id: generateId(), organizationId: orgA.id, urn: `${orgA.urn}:engineer`, name: 'Engineer', visibility: 'ORGANIZATION' },
     select: { id: true },
   });
   publicAgent = await db.agent.create({
@@ -100,7 +101,7 @@ beforeEach(async () => {
 });
 
 const PROFILE = 'id appId agentId name slug urn role appUrn appName ownerName createdAt retiredAt';
-const WORKING = 'prompt promptOverride signature trailer memoryId repos heldByUserId heldAt reportsToWorkerId reportsToRetired hasLiveSession family lastActiveAt continuity { __typename } createdBy retiredBy app { id } bootPromptRef';
+const WORKING = 'prompt signature trailer memoryId repos heldByUserId heldAt reportsToWorkerId reportsToRetired hasLiveSession family lastActiveAt continuity { __typename } createdBy retiredBy app { id } bootPromptRef';
 
 async function run(query: string, variables: Record<string, unknown>, c: Context) {
   const r = await api.executeOperation({ query, variables }, { contextValue: c });
@@ -137,11 +138,22 @@ describe('#1149 Profile tier: a signed-in stranger who names a worker reads its 
     const r = await readWorker(teamDan.id, ctx(stranger.id));
     expect(r.errors).toBeUndefined();
     expect(r.data?.worker).toMatchObject({
-      prompt: null, promptOverride: null, signature: null, trailer: null, memoryId: null, repos: [],
+      prompt: null, signature: null, trailer: null, memoryId: null, repos: [],
       heldByUserId: null, heldAt: null, reportsToWorkerId: null, reportsToRetired: false,
       hasLiveSession: null, family: null, lastActiveAt: null, continuity: null,
       createdBy: null, retiredBy: null, app: null, bootPromptRef: null,
     });
+  });
+
+  it('prompt masks even when the worker serves one; an internals reader sees it (#2725 local review P3)', async () => {
+    // Without a servable prompt the field is null for everyone, so the mask above could not tell a working gate from none.
+    await serveAgentBootPrompt(db, orgAgent.id, 'Served profile prompt for {{worker.name}}.');
+    const masked = await readWorker(teamDan.id, ctx(stranger.id), 'prompt');
+    expect(masked.errors).toBeUndefined();
+    expect(masked.data?.worker).toEqual({ prompt: null });
+    const seen = await readWorker(teamDan.id, ctx(contributor.id), 'prompt');
+    expect(seen.errors).toBeUndefined();
+    expect((seen.data?.worker as { prompt: string | null }).prompt).toContain('Served profile prompt for Dan.');
   });
 
   it('ownerName is the org atom for an org App', async () => {
@@ -190,8 +202,8 @@ describe('#1149 Details tier: `agent` follows the cast Agent\'s own visibility',
   });
 
   it("the org READER still gets no working state", async () => {
-    const r = await readWorker(teamDan.id, ctx(orgReader.id), 'promptOverride heldByUserId createdBy');
-    expect(r.data?.worker).toEqual({ promptOverride: null, heldByUserId: null, createdBy: null });
+    const r = await readWorker(teamDan.id, ctx(orgReader.id), 'signature heldByUserId createdBy');
+    expect(r.data?.worker).toEqual({ signature: null, heldByUserId: null, createdBy: null });
   });
 
   it('`app` keeps Query.app\'s own audience: the profile never widens it', async () => {
@@ -208,18 +220,18 @@ describe('#1149 Details tier: `agent` follows the cast Agent\'s own visibility',
 
 describe('#1149 Working state: participants read exactly what they read before', () => {
   it('a participant reads the profile and the working state', async () => {
-    const r = await readWorker(teamDan.id, ctx(contributor.id), 'appName ownerName promptOverride heldByUserId createdBy app { id }');
+    const r = await readWorker(teamDan.id, ctx(contributor.id), 'appName ownerName signature heldByUserId createdBy app { id }');
     expect(r.errors).toBeUndefined();
     expect(r.data?.worker).toEqual({
-      appName: 'Team', ownerName: orgA.urn, promptOverride: 'secret override',
+      appName: 'Team', ownerName: orgA.urn, signature: 'secret signature',
       heldByUserId: contributor.id, createdBy: contributor.id, app: { id: appA.id },
     });
   });
 
   it("an App's own key reads its own staff", async () => {
-    const r = await readWorker(teamDan.id, { db, roles: [], appId: appA.id } as Context, 'name appName promptOverride');
+    const r = await readWorker(teamDan.id, { db, roles: [], appId: appA.id } as Context, 'name appName signature');
     expect(r.errors).toBeUndefined();
-    expect(r.data?.worker).toEqual({ name: 'Dan', appName: 'Team', promptOverride: 'secret override' });
+    expect(r.data?.worker).toEqual({ name: 'Dan', appName: 'Team', signature: 'secret signature' });
   });
 });
 
@@ -255,9 +267,9 @@ describe('#1149 the profile entry gate refuses like an unknown worker', () => {
 
   it('impersonation is bounded to the App\'s own org: admitted there, refused for a user-owned App', async () => {
     const imp = ctx(stranger.id, { impersonation: { sessionId: generateId(), actorUserId: generateId(), orgId: orgA.id } as never });
-    const inOrg = await readWorker(teamDan.id, imp, 'name appName promptOverride');
+    const inOrg = await readWorker(teamDan.id, imp, 'name appName signature');
     expect(inOrg.errors).toBeUndefined();
-    expect(inOrg.data?.worker).toEqual({ name: 'Dan', appName: 'Team', promptOverride: null });
+    expect(inOrg.data?.worker).toEqual({ name: 'Dan', appName: 'Team', signature: null });
     expect((await refusalOf(umaScout.id, imp)).errors?.[0]).toMatchObject({ code: 'WORKER_NOT_FOUND' });
   });
 
@@ -292,8 +304,7 @@ describe('#1149 hadron_get_worker delegates to the profile read and keeps workin
 
   it('does not claim the worker has no template or override when the reader cannot see them (#2918)', async () => {
     const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(text).not.toContain('carries no systemPrompt template');
-    expect(text).not.toContain('No boot briefing');
+        expect(text).not.toContain('No boot briefing');
   });
 
   it('a departed participant gets no recovery line for its own still-open session', async () => {

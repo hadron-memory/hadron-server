@@ -2006,11 +2006,6 @@ model Agent {
   /// Display name of this agent.
   name                  String
   description           String?
-  /// Legacy prompt template, served only while BOOT_PROMPT_SERVE_ENABLED is off;
-  /// with serving on, the compiled boot prompt named by bootPromptRef replaces
-  /// it. Only the closed platform variables ({{worker.name}}, {{worker.role}},
-  /// ...) bind in it (cor:dmo:150:08); bare {{name}}/{{role}} stay as written.
-  systemPrompt          String?         @map("system_prompt")
   /// #2045 (S8, cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
   /// compiled boot-prompt node (`nodeType = 'compiled-boot-prompt'`), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
@@ -3318,10 +3313,6 @@ model App {
   /// `installation_policy.memberRoles` doesn't apply.
   role                              AppMembershipRole    @default(READER)
   description                       String?
-  /// **Deprecated** — superseded by `Agent.systemMemoryId` +
-  /// `Agent.systemPrompt`. Scheduled for removal in a follow-up
-  /// cleanup spec (per 008 R-4).
-  systemPrompt                      String?              @map("system_prompt")
   /// Tools this App's agent can access; default `[]`.
   agentTools                        String[]             @default([]) @map("agent_tools")
   // 036-ai-service-config: the legacy ai_provider/ai_model/
@@ -3795,7 +3786,7 @@ model AppAgent {
 
 /// #974 — a **Worker**: the named casting of an installed Agent into an App
 /// (cor:dmo:050:11, cor:agt:020:01). The Agent carries the reusable persona
-/// dressing (`personaRole` + the `systemPrompt` template); the Worker is the
+/// dressing (`personaRole` and its compiled boot prompt); the Worker is the
 /// local named identity ("Iris") that does attributable work. Casting is
 /// opt-in (an installed agent with no Worker row is just an agent) and
 /// requires the agent installed in the App at cast time; multiple Workers may
@@ -3840,10 +3831,6 @@ model Worker {
   /// Free string with conventions; defaults to the agent's `personaRole`
   /// at cast time when the caller names none.
   role              String?
-  /// Per-worker individuality layered over the agent's template prompt
-  /// (cor:agt:020:01) — nullable; two castings of one agent share the
-  /// template and nothing else.
-  promptOverride    String?   @map("prompt_override")
   /// Per-worker signature template, delivered through S4 (cor:agt:040:04).
   signature         String
   /// Per-worker commit trailer template, delivered through S4 (cor:agt:040:04).

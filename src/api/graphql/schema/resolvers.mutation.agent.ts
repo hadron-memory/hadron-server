@@ -119,7 +119,6 @@ export interface CreateAgentCoreInput {
   namespace: string;
   name: string;
   description?: string;
-  systemPrompt?: string;
   systemMemoryId?: string;
   visibility?: string;
   type?: 'ASSISTANT' | 'CHATBOT';
@@ -149,7 +148,6 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     namespace,
     name,
     description,
-    systemPrompt,
     systemMemoryId,
     visibility,
     type,
@@ -290,7 +288,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
         // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
         // The column default stays owner-only so no existing row changes meaning.
         installationPolicy: { maxMembers: 'unlimited', memberRoles: memberRolesNorm } as Prisma.InputJsonValue,
-        organizationId: resolvedOrgId, ownerUserId, urn: agentUrn, name, description, systemPrompt, systemMemoryId: resolvedSystemMemoryId,
+        organizationId: resolvedOrgId, ownerUserId, urn: agentUrn, name, description, systemMemoryId: resolvedSystemMemoryId,
         visibility: agentVisibility,
         type: inferredType,
         surfaces: surfaces ?? defaultSurfaces,
@@ -425,7 +423,7 @@ async function requireKnownImportedAgent(
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgId, name, description, systemPrompt, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
+      { orgId, name, description, systemMemoryId, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, memberRoles }: { orgId?: string | null; name: string; description?: string; systemMemoryId?: string; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgId`
@@ -477,7 +475,6 @@ export const agentMutations = {
         namespace,
         name,
         description,
-        systemPrompt,
         systemMemoryId,
         visibility,
         type,
@@ -491,7 +488,7 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemPrompt, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemPrompt?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryId, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryId?: string; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -855,7 +852,6 @@ export const agentMutations = {
           ...(name !== undefined ? { name } : {}),
           ...(newUrn !== undefined ? { urn: newUrn } : {}),
           ...(description !== undefined ? { description } : {}),
-          ...(systemPrompt !== undefined ? { systemPrompt } : {}),
           ...(systemMemoryId !== undefined ? { systemMemoryId } : {}),
           ...(visibility !== undefined ? { visibility: visibility as AgentVisibility } : {}),
           // cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement,

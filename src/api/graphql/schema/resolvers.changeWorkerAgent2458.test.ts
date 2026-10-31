@@ -13,6 +13,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any, W = resolvers.Worker as any;
@@ -65,10 +66,12 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: staff.id, role: 'CONTRIBUTOR' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
-  oldAgent = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer', systemPrompt: 'OLD {{worker.name}} {{worker.role}}' }, ctx());
-  newAgent = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer', systemPrompt: 'NEW {{worker.name}} {{worker.role}}' }, ctx());
+  oldAgent = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
+  newAgent = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: oldAgent.id } });
   await db.appAgent.create({ data: { appId: app.id, agentId: newAgent.id } });
+  await serveAgentBootPrompt(db, oldAgent.id, 'OLD {{worker.name}} {{worker.role}}');
+  await serveAgentBootPrompt(db, newAgent.id, 'NEW {{worker.name}} {{worker.role}}');
   for (const a of [oldAgent, newAgent]) {
     await M.createAgentTickerTemplate({}, { agentRef: a.id, input: { name: `${a.name} tick`, cadenceSeconds: 600 } }, ctx());
   }

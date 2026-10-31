@@ -4,7 +4,7 @@
  * never a refusal). It is the same implementation as `Chat.servedPrompts`, so the two are held to one answer by a
  * differential over every caller shape.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -24,7 +24,6 @@ describe('#2862 — Query.chatServedPrompts', () => {
   let compiledNodeId: string;
   let agentId: string;
   const u: Record<string, string> = {};
-  const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 
   const user = async (tag: string, roles: string[] = ['READER']) =>
     (await db.user.create({ data: { id: generateId(), githubId: Math.floor(Math.random() * 1e9), githubUsername: `c2862-${tag}-${generateId().slice(0, 6)}`, roles: roles as never } })).id;
@@ -40,7 +39,6 @@ describe('#2862 — Query.chatServedPrompts', () => {
     });
 
   beforeEach(async () => {
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
     await cleanDb(db);
     const { org, graph } = await createDbOrgAndGraph(db, { orgName: `c2862-${generateId().slice(0, 8)}` });
     orgId = org.id;
@@ -59,11 +57,6 @@ describe('#2862 — Query.chatServedPrompts', () => {
     for (const ordinal of [1, 2, 3]) await record({ chatId, ordinal, appId });
     await record({ chatId, ordinal: 4, appId: otherAppId });
     await record({ chatId: noAppChatId, ordinal: 1, appId: null });
-  });
-
-  afterEach(() => {
-    if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
   });
 
   it('is a top-level query taking chatId, with the field\'s paging, returning the records page', async () => {
@@ -112,10 +105,8 @@ describe('#2862 — Query.chatServedPrompts', () => {
     for (const who of ['manager', 'enduser', 'otherManager', 'stranger']) expect(await query(who, noAppChatId)).toEqual(EMPTY);
   });
 
-  it('an unknown chat id and serving switched off are empty pages, never errors', async () => {
+  it('an unknown chat id is an empty page, never an error', async () => {
     expect(await query('manager', generateId())).toEqual(EMPTY);
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    expect(await query('manager')).toEqual(EMPTY);
   });
 
   it('a deleted App\'s chat records read as empty even to its manager', async () => {

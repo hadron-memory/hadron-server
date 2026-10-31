@@ -17,6 +17,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { workerSlugBase } from '../../../lib/workerSlug.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -86,11 +87,11 @@ beforeEach(async () => {
       orgId: org.id,
       name: 'CWP Backend Engineer',
       personaRole: 'backend-engineer',
-      systemPrompt: 'You are {{worker.name}}, a {{worker.role}}.',
     },
     ctx(admin.id),
   );
   roleAgent = { id: role.id };
+  await serveAgentBootPrompt(db, role.id, 'You are {{worker.name}}, a {{worker.role}}.');
 
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'CWP Team App', urn: `${org.urn}:team` },
@@ -149,14 +150,13 @@ describe('#964 — castWorkerPreview', () => {
     );
   });
 
-  it('explicit name: free previews with the override appended; taken refuses WORKER_NAME_TAKEN (retired included)', async () => {
+  it('explicit name: free previews the served prompt with the name bound; taken refuses WORKER_NAME_TAKEN (retired included)', async () => {
     const p = await preview(ctx(admin.id), {
       agentRef: roleAgent.id,
       name: 'Zoe',
-      promptOverride: 'Be terse.',
     });
     expect(p.name).toBe('Zoe');
-    expect(p.prompt).toBe('You are Zoe, a backend-engineer.\n\nBe terse.');
+    expect(p.prompt).toBe('You are Zoe, a backend-engineer.');
     await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: roleAgent.id, name: 'zoe', slug: 'zoe', retiredAt: new Date() },
     });
@@ -167,7 +167,7 @@ describe('#964 — castWorkerPreview', () => {
   });
 
   it('binds {{worker.name}} in the preview prompt with the new variable set (#2049)', async () => {
-    await db.agent.update({ where: { id: roleAgent.id }, data: { systemPrompt: 'You are {{worker.name}}, the {{worker.role}}.' } });
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are {{worker.name}}, the {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.prompt).toBe('You are Gwen, the backend-engineer.');
     expect(p.hasNamePlaceholder).toBeNull();
@@ -200,33 +200,24 @@ describe('#964 — castWorkerPreview', () => {
   });
 
   it('binds a template without a name token as written; hasNamePlaceholder is retired and null (#2049)', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are a {{worker.role}}.' },
-    });
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are a {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are a backend-engineer.');
   });
 
   it('binds only the exact token: "{{ worker.name }}" stays literal, and the retired field stays null (#985 review, #2049)', async () => {
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'You are {{ worker.name }}, a {{worker.role}}.' },
-    });
+    await serveAgentBootPrompt(db, roleAgent.id, 'You are {{ worker.name }}, a {{worker.role}}.');
     const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
     expect(p.hasNamePlaceholder).toBeNull();
     expect(p.prompt).toBe('You are {{ worker.name }}, a backend-engineer.');
   });
 
-  it('leaves legacy {{name}} / {{role}} literal in the preview, template and override, while the closed set binds (#2902, #1772 step 3)', async () => {
+  it('leaves legacy {{name}} / {{role}} literal in the preview while the closed set binds (#2902, #1772 step 3)', async () => {
     // The preview is a live path: only a retained record replay still binds the legacy tokens (applyRecordedVariables).
-    await db.agent.update({
-      where: { id: roleAgent.id },
-      data: { systemPrompt: 'Hi {{name}}, a {{role}}: {{worker.name}} / {{worker.role}}.' },
-    });
-    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen', promptOverride: 'Also {{name}} / {{role}} / {{worker.name}}.' });
-    expect(p.prompt).toBe('Hi {{name}}, a {{role}}: Gwen / backend-engineer.\n\nAlso {{name}} / {{role}} / Gwen.');
+    await serveAgentBootPrompt(db, roleAgent.id, 'Hi {{name}}, a {{role}}: {{worker.name}} / {{worker.role}}.');
+    const p = await preview(ctx(admin.id), { role: 'backend-engineer', name: 'Gwen' });
+    expect(p.prompt).toBe('Hi {{name}}, a {{role}}: Gwen / backend-engineer.');
   });
 
   it('takes the MINT gate, not a read gate: outsiders and pure App-key principals are refused', async () => {

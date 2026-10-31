@@ -85,7 +85,7 @@ async function call(transport: string, name: string, args: Record<string, unknow
   return { status: response.status, result: body.result, text: body.result?.content?.[0]?.text ?? '' };
 }
 const edit = (transport: string, signature: string, session?: string, namedSession?: string) =>
-  call(transport, 'hadron_update_worker', { workerRef: workerId, signature, promptOverride: signature, ...(namedSession ? { session: namedSession } : {}) }, session);
+  call(transport, 'hadron_update_worker', { workerRef: workerId, signature, ...(namedSession ? { session: namedSession } : {}) }, session);
 
 
 describe('#2123 request-local session refusal', () => {
@@ -93,10 +93,10 @@ describe('#2123 request-local session refusal', () => {
     const transport = await open();
     const allowed = await edit(transport, 'human manager control');
     expect(allowed.result?.isError).not.toBe(true);
-    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control', promptOverride: 'human manager control' });
+    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control' });
     const denied = await edit(transport, 'must not commit', generateId());
     expect(denied.status).toBe(200);
-    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control', promptOverride: 'human manager control' });
+    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control' });
     expect(denied.text).toBe('Error: You are not authorized to manage workers in this App.');
   });
 
@@ -113,7 +113,7 @@ describe('#2123 request-local session refusal', () => {
       expect(denied.status).toBe(200);
       expect(denied.text).toBe('Error: You are not authorized to manage workers in this App.');
       expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({
-        signature: before.signature, promptOverride: before.promptOverride, trailer: before.trailer,
+        signature: before.signature, trailer: before.trailer,
       });
     },
   );
@@ -165,7 +165,7 @@ describe('#2123 request-local session refusal', () => {
     expect(await db.agentTask.count()).toBe(0);
     expect(await db.ticker.count()).toBe(0);
     expect((await db.teamStopSignal.findUniqueOrThrow({ where: { id: signal.id } })).endedAt).toBeNull();
-    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).promptOverride).toBeNull();
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).signature).not.toBe('denied');
   });
 
   it('App-key N5 stays request-local after an initially refused header across task and ticker reads', async () => {
@@ -295,7 +295,7 @@ describe('#2123 request-local session refusal', () => {
       expect((await first).text).toMatch(/^Updated/);
       expect((await second).text).toBe('Error: You are not authorized to manage workers in this App.');
       expect((await foreign).status).toBe(404);
-      expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'first own request', promptOverride: 'first own request' });
+      expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'first own request' });
       // A late invalid request is not an INITIAL refusal and cannot poison
       // the following clean request on this same authenticated transport.
       expect((await edit(transport, 'clean next request')).text).toMatch(/^Updated/);
