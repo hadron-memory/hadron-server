@@ -99,6 +99,23 @@ async function denseFixture(edgeInsertion: 'forward' | 'reverse' = 'forward') {
   return nodes;
 }
 
+/**
+ * #2823: edge lines ("  - hrn:node:…") have no product order (the MCP edge includes carry no
+ * orderBy), so sort each consecutive run of them. Nothing else is normalized; every other byte
+ * of the output still goes into the hash.
+ */
+function canonicalEdgeOrder(text: string): string {
+  const out: string[] = [];
+  let run: string[] = [];
+  const flush = () => { out.push(...run.sort()); run = []; };
+  for (const line of text.split('\n')) {
+    if (line.startsWith('  - hrn:node:')) run.push(line);
+    else { flush(); out.push(line); }
+  }
+  flush();
+  return out.join('\n');
+}
+
 async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk' | 'urn' | 'prefix', raw = true) {
   const loads: Array<{phase: string; rows: number; bytes: number; rootBodyBytes: number; endpointBodyBytes: number}> = [];
   let pendingBodies = 0, maxPendingBodies = 0;
@@ -134,7 +151,7 @@ async function measuredRead(scope: 'abstract' | 'all', refs: string[], form: 'pk
   }) as typeof db.$transaction);
   try {
     const text = await createTestableMcpServer(adminAuth()).callToolText('hadron_get_nodes', { ...(form === 'prefix' ? { memoryUrn: 'hrn:mem:batch-org:batchmem', locPrefix: 'dense:' } : { refs: form === 'urn' ? refs.map((_, i) => `hrn:node:batch-org:batchmem:dense:${i.toString().padStart(2, '0')}`) : refs }), contentScope: scope, raw });
-    return { text, hash: createHash('sha256').update(text).digest('hex'), loads, maxPendingBodies };
+    return { text, hash: createHash('sha256').update(canonicalEdgeOrder(text)).digest('hex'), loads, maxPendingBodies };
   } finally { many.mockRestore(); txSpy.mockRestore(); renderSpy.mockRestore(); }
 }
 
