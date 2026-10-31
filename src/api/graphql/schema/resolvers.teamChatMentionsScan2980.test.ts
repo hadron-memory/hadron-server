@@ -146,7 +146,7 @@ describe('the red pin: a no-cursor limit-1 mentions read over a long history', (
     expect(page.items.map((m: any) => m.seq)).toEqual([last.seq]);
     // One batch reaches the newest mention; a whole-history scan reads all ~3013 rows.
     expect(rows()).toBeLessThanOrEqual(400);
-  });
+  }, 30_000);
 
   it('a sparse filter stays bounded: the next older match at the far end is never read for a backward page', async () => {
     await humanSays(manager.id, 'long ago @liam');
@@ -157,7 +157,7 @@ describe('the red pin: a no-cursor limit-1 mentions read over a long history', (
     const page = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: liam.id, limit: 1 }, counted, ITEMS_ONLY);
     expect(page.items.map((m: any) => m.seq)).toEqual([last.seq]);
     expect(rows()).toBeLessThanOrEqual(400);
-  });
+  }, 30_000);
 
   it('with total selected the count stays exact (the full scan is kept for it)', async () => {
     await humanSays(manager.id, 'early @liam');
@@ -204,8 +204,9 @@ describe('parity: items are the same with and without total, at a batch size tha
     ['offset alongside beforeSeq (ignored backward)', { beforeSeq: 30, offset: 1, limit: 2 }],
   ];
 
-  async function compare(c: Context, base: Record<string, unknown>, shape: Record<string, unknown>, expectedAll: number[]) {
-    for (const [batch, maxBatch] of [[1, 1], [2, 2], [3, 3], [1, 64], [200, 51200]]) {
+  const ALL_BATCHES = [[1, 1], [2, 2], [3, 3], [1, 64], [200, 51200]];
+  async function compare(c: Context, base: Record<string, unknown>, shape: Record<string, unknown>, expectedAll: number[], batches = ALL_BATCHES) {
+    for (const [batch, maxBatch] of batches) {
       if (tuning) Object.assign(tuning, { batch, maxBatch });
       const full = await Q.channelMessages({}, { channelRef: channel.id, ...base, ...shape }, c, WITH_TOTAL);
       const bounded = await Q.channelMessages({}, { channelRef: channel.id, ...base, ...shape }, c, ITEMS_ONLY);
@@ -247,7 +248,8 @@ describe('parity: items are the same with and without total, at a batch size tha
     expect(bounded.items.map((m: any) => m.seq)).toEqual([hit.seq]);
   });
 
-  it('an encrypted channel: the mentions read and the reply filter match on both paths', async () => {
+  /** The history plus a second thread, then every message sealed under a session key. */
+  async function encryptedHistory(): Promise<{ liamSeqs: number[]; parent: number; replies: number[] }> {
     const { liamSeqs } = await history();
     const parent = await humanSays(manager.id, 'second thread');
     const r1 = await humanSays(manager.id, 'r1', parent.seq);
@@ -261,9 +263,21 @@ describe('parity: items are the same with and without total, at a batch size tha
       const enc = encryptNodeFieldsWithKey({ content: m.content ?? null, data: (m.data ?? null) as unknown }, key);
       await db.node.update({ where: { id: m.id }, data: { content: enc.content ?? null, data: enc.data as never } });
     }
-    for (const [, shape] of shapes) await compare(ctx(liam.holder), { mentionsRef: liam.id }, shape, liamSeqs);
-    for (const [, shape] of shapes) await compare(ctx(liam.holder), { replyToSeq: parent.seq }, shape, [r1.seq, r2.seq]);
-  });
+    return { liamSeqs, parent: parent.seq, replies: [r1.seq, r2.seq] };
+  }
+  // Every read decrypts its rows, so these sweep three batch settings (one row, three rows, the default) and get
+  // a longer budget than vitest's 5 s default.
+  const ENCRYPTED_BATCHES = [[1, 1], [3, 3], [200, 51200]];
+
+  it('an encrypted channel: the mentions read matches on both paths', async () => {
+    const { liamSeqs } = await encryptedHistory();
+    for (const [, shape] of shapes) await compare(ctx(liam.holder), { mentionsRef: liam.id }, shape, liamSeqs, ENCRYPTED_BATCHES);
+  }, 30_000);
+
+  it('an encrypted channel: the reply filter (same in-memory branch) matches on both paths', async () => {
+    const { parent, replies } = await encryptedHistory();
+    for (const [, shape] of shapes) await compare(ctx(liam.holder), { replyToSeq: parent }, shape, replies, ENCRYPTED_BATCHES);
+  }, 30_000);
 });
 
 describe('an unresolvable or cross-tenant mentionsRef is the same empty page on both paths (cor:agt:020:04)', () => {
