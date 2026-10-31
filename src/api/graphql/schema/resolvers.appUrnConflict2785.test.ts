@@ -15,12 +15,13 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
 }));
 
 const M = resolvers.Mutation as any;
+const Q = resolvers.Query as any;
 const orgUrn = 'conflict-2785';
 let orgId: string;
 let agentId: string;
 let userId: string;
 
-const ctx = (): Context => ({ db, userId, roles: ['ADMIN'] });
+const ctx = (): Context => ({ db, userId, roles: ['READER'] });
 const create = (name: string) => M.createApp({}, { orgRef: orgId, agentRef: agentId, name }, ctx());
 
 const refusal = async (p: Promise<unknown>) => {
@@ -35,7 +36,7 @@ const refusal = async (p: Promise<unknown>) => {
 beforeEach(async () => {
   await cleanDb(db);
   orgId = (await db.organization.create({ data: { id: generateId(), name: orgUrn, urn: orgUrn } })).id;
-  userId = (await db.user.create({ data: { id: generateId(), githubId: 27851, githubUsername: 'a-admin', handle: 'aadmin', roles: ['ADMIN'] } })).id;
+  userId = (await db.user.create({ data: { id: generateId(), githubId: 27851, githubUsername: 'a-admin', handle: 'aadmin', roles: ['READER'] } })).id;
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId, role: 'ADMIN' } });
   agentId = (await db.agent.create({
     data: { id: generateId(), organizationId: orgId, urn: `${orgUrn}:helper`, name: 'Helper', visibility: 'ORGANIZATION' },
@@ -54,17 +55,26 @@ describe('already-existing App URN is CONFLICT (#2785)', () => {
     expect(await db.app.findUniqueOrThrow({ where: { id: first.id } })).toEqual(row);
   });
 
-  it('b. oracle: identical answer whether or not the caller can see the holder, no holder fields', async () => {
+  it('b. oracle: identical answer for a holder the caller can read and one they provably cannot, no holder fields', async () => {
     const visible = await create('Visible');
-    // The hidden holder has no members at all; the visible one was created by the caller.
+    // The unreadable holder belongs to ANOTHER org but squats a URN this
+    // caller's createApp derives, so the caller is not an admin or member of it.
+    const otherOrg = await db.organization.create({ data: { id: generateId(), name: 'other-2785', urn: 'other-2785' } });
     const hidden = await db.app.create({
-      data: { id: generateId(), name: 'Hidden', urn: `${orgUrn}:hidden`, organization: { connect: { id: orgId } } },
+      data: { id: generateId(), name: 'Hidden', urn: `${orgUrn}:hidden`, organization: { connect: { id: otherOrg.id } } },
     });
+    // Premises: the caller reads the visible holder and is refused the hidden one.
+    expect((await Q.app({}, { ref: visible.id }, ctx()))?.id).toBe(visible.id);
+    const read = await Q.app({}, { ref: hidden.id }, ctx()).then((r: any) => r, (e: any) => e);
+    expect(read?.id).toBeUndefined();
     const v = await refusal(create('Visible'));
     const h = await refusal(create('Hidden'));
+    expect(v.extensions?.code).toBe('CONFLICT');
     expect(h.extensions).toEqual(v.extensions);
     expect(Object.keys(h.extensions ?? {}).sort()).toEqual(['code']);
     expect(h.message.replace(hidden.urn, 'X')).toBe(v.message.replace(visible.urn, 'X'));
+    // The hidden holder is untouched.
+    expect((await db.app.findUniqueOrThrow({ where: { id: hidden.id } })).organizationId).toBe(otherOrg.id);
   });
 
   it('c. control: a soft-deleted App at the URN is still reclaimed', async () => {
