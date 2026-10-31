@@ -6464,7 +6464,7 @@ export const typeDefs = `#graphql
     nodesChecked: Int!
     "Findings, capped by the limit argument, with problems before informational declarations."
     findings: [MemoryValidationFinding!]!
-    "The TRUE problem count, before any truncation. Excludes informational INDEX_TRUNCATED; gate CI on this, not findings.length."
+    "The TRUE problem count, before any truncation. Excludes informational INDEX_TRUNCATED. Gate health and CI on ok, which also accounts for skipped checks."
     totalFindings: Int!
     "The TRUE informational declaration count, before any truncation. Does not affect health."
     totalInformational: Int!
@@ -9803,10 +9803,11 @@ export const typeDefs = `#graphql
     on Node at all), and property-schema conformance. So unlike other gaps
     there is no slow client-side fallback.
 
-    Returns TYPED findings so a caller can branch and CI can gate on
-    totalFindings. findings is capped by limit (default 200, max 1000) while
-    totalFindings reports the true count - so a gate is never fooled by
-    truncation. Read gate as the rest of the memory reads.
+    Returns TYPED findings so a caller can branch. Gate health and CI on ok,
+    which accounts for both problems and skipped checks. findings is capped
+    by limit (default 200, max 1000); totalFindings reports the full problem
+    count before truncation, excluding informational declarations. Read gate
+    as the rest of the memory reads.
     """
     validateMemory(memoryRef: ID!, limit: Int): MemoryValidationResult!
 
