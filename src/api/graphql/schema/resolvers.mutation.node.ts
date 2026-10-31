@@ -362,7 +362,8 @@ async function writeNodeCoreRaw(
     platformWrite?: boolean;
     /**
      * #2987 — set only by `cloneNode`, which copies the source's `seq` onto a NEW row: a copy of existing
-     * order, not a reorder, so it is exempt from the legacy-message seq gate. No other caller passes it.
+     * order, not a reorder, so it is exempt from the legacy-message seq gate — but ONLY onto a loc with no row: a clone
+     * over a tombstone revives existing history and takes the normal gate (Beckett LOCAL delta of #2989). No other caller passes it.
      */
     copiesSeq?: boolean;
   },
@@ -623,7 +624,7 @@ async function writeNodeCoreRaw(
       assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
       // #2987 (V13) — a message outside a Channel (assertLocWritable above already refused one under a
       // Channel) keeps its seq: no generic write sets or changes it. A clone copies the source's seq to a new row.
-      if (!opts?.copiesSeq) assertNoGenericMessageSeqWrite(existing, input.nodeType, input.seq, mode === 'update' ? 'update' : 'create');
+      if (!opts?.copiesSeq || existing) assertNoGenericMessageSeqWrite(existing, input.nodeType, input.seq, mode === 'update' ? 'update' : 'create');
       // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
       assertBootPromptWriteAllowed(existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its decision codes: only the decision
