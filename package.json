@@ -75,7 +75,7 @@
     "resend": "^6.9.3",
     "undici": "^6.27.0",
     "yaml": "2.8.3",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/bcrypt": "^5.0.2",
