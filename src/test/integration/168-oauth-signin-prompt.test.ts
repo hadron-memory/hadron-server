@@ -235,7 +235,7 @@ describe('#2625 local synthetic provider callback returns to consent', () => {
       expect(await db.pendingLoginState.findUnique({where: {state}})).toBeNull();
     });
 
-    it('GITHUB_ORG set and membership confirmed still round-trips into consent', async () => {
+    it('GITHUB_ORG set and membership confirmed: the callback still sets a session and redirects to the authorize URL', async () => {
       vi.stubEnv('GITHUB_ORG', 'acme-required');
       const q = query();
       const {expectedReturn, state} = await startPromptLogin(q);
@@ -250,9 +250,10 @@ describe('#2625 local synthetic provider callback returns to consent', () => {
 
 describe('fixture HTML helpers fail with their own message', () => {
   it('accept any attribute order and decode the production escapes once', () => {
-    const html = `<a href="/auth/github?a=1&amp;b=&amp;amp;" class="button">x</a><input value="v&quot;1" name="n" type="hidden">`;
+    const html = `<a href="/auth/github?a=1&amp;b=&amp;amp;" class="button">x</a><input value="v&quot;1&amp;quot;" name="n" type="hidden">`;
     expect(signInHref(html)).toBe('/auth/github?a=1&b=&amp;');
-    expect(hiddenInputs(html)).toEqual({n: 'v"1'});
+    // &amp;quot; is an escaped ampersand followed by 'quot;': decoding &amp; first would turn it into a quote.
+    expect(hiddenInputs(html)).toEqual({n: 'v"1&quot;'});
   });
   it('a missing element is a fixture error, not a callback failure', () => {
     expect(() => signInHref('<p>no link</p>')).toThrow(/fixture: expected <a class="button"> sign-in link with an href/);
