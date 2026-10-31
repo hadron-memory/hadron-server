@@ -8,6 +8,7 @@ import { mintAppRun } from './appRuns.js';
 import { schedulerTick } from './scheduler.js';
 import express from 'express';
 import { mountWebhookRoutes } from '../api/webhooks.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => {
@@ -23,11 +24,15 @@ async function fixture() {
   await db.orgMember.create({ data: { userId: user.id, organizationId: org.id, role: 'ADMIN' } });
   const app = await db.app.create({ data: { name: 'Budget', urn: 'budget.test:app', organizationId: org.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
+  // #2712: serving is always on, so the run is served as an installed Agent with an approved prompt.
+  const agent = await db.agent.create({ data: { name: 'Budgeted', urn: 'budget.test:agent', organizationId: org.id } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } as never });
+  await serveAgentBootPrompt(db, agent.id, 'You run budgeted flows.');
   const memory = await db.memory.create({ data: { name: 'Flow', urn: 'budget.test:flow', class: 'knowledge', organizationId: org.id } });
   await db.node.create({ data: { memoryId: memory.id, loc: 'entry', name: 'Budgeted flow', isRunnable: true, content: 'approved' } });
   const ctx = { db, userId: user.id, roles: [] };
-  const input = { appRef: app.id, name: 'budget-trigger', cron: '* * * * *', entryNodeUrn: 'hrn:node:budget.test:flow:entry', runAsSelf: true };
-  return { user, org, app, ctx, input };
+  const input = { appRef: app.id, name: 'budget-trigger', cron: '* * * * *', entryNodeUrn: 'hrn:node:budget.test:flow:entry', runAsSelf: true, agentRef: agent.id };
+  return { user, org, app, agent, ctx, input };
 }
 const requested = { budgetTokens: 500, budgetActions: 3 };
 const amounts = (r: any, tokens = 500, actions = 3) => expect(r).toMatchObject({ budgetTokens: tokens, budgetActions: actions, budgetTokensInitial: tokens, budgetActionsInitial: actions });
@@ -41,7 +46,7 @@ it.each(['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const)('persists and seeds narrowed
       ? await M.createAgentSchedule({}, { input: { ...f.input, ...requested } }, f.ctx)
       : (await M.createAgentWebhook({}, { input: { ...f.input, ...requested } }, f.ctx)).webhook;
     expect(made).toMatchObject(requested);
-    run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn });
+    run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn });
   }
   amounts(run);
   amounts(await db.appRun.findUniqueOrThrow({ where: { id: run.id } }));
@@ -151,7 +156,7 @@ it.each(['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const)('accepts the exact platform-
       ? await M.createAgentSchedule({}, { input: { ...f.input, ...ceiling } }, f.ctx)
       : (await M.createAgentWebhook({}, { input: { ...f.input, ...ceiling } }, f.ctx)).webhook;
     expect(made).toMatchObject(ceiling);
-    amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn }), 100000, 50);
+    amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: made.id, entryNodeUrn: f.input.entryNodeUrn }), 100000, 50);
   }
 });
 
@@ -179,7 +184,7 @@ it('keeps omitted historical limits but refuses supplied above-current-default v
   await expect(M.updateAgentSchedule({}, { id: s.id, input: { budgetTokens: 500, budgetActions: 3 } }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   const same = await M.updateAgentSchedule({}, { id: s.id, input: { name: 'renamed' } }, f.ctx);
   expect(same).toMatchObject(requested);
-  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
+  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
 });
 
 it.each(['SCHEDULE', 'WEBHOOK'] as const)('updates the %s budget projection without changing the consent hash or adopted state', async kind => {
@@ -195,7 +200,7 @@ it.each(['SCHEDULE', 'WEBHOOK'] as const)('updates the %s budget projection with
   const after = await Q.automationApproval({}, ref, f.ctx);
   expect(after.hash).toBe(before.hash); expect(after.state).toBe('ADOPTED');
   expect(after.summary.limits).not.toEqual(before.summary.limits);
-  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, userId: f.user.id, triggerKind: kind, triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
+  amounts(await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: s.id, entryNodeUrn: f.input.entryNodeUrn }), 200, 2);
 });
 
 

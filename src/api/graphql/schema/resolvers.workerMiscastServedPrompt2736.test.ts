@@ -8,6 +8,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { resolvers, type Context } from './resolvers.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn() }));
@@ -23,6 +24,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   ctx = { db, userId: user.id, roles: ['READER'] };
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Repair role' }, ctx)).id;
+  await serveAgentBootPrompt(db, agentId, 'You repair.');
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Repair team', urn: `${org.urn}:team` } });
   appId = app.id;
   await db.appAgent.create({ data: { appId, agentId } });
@@ -31,18 +33,14 @@ afterEach(() => sessionKeyCache.clear());
 
 const remove = (workerRef: string) => M.deleteWorker({}, { workerRef, confirmNoExternalAttribution: true }, ctx);
 
-/** A cast, bound, ended and released worker whose bind was recorded, as a serving deployment writes it. */
+/** A cast, bound, ended and released worker whose bind was recorded. */
 async function boundWorker() {
   const worker = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Miscast' }, ctx);
   const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
   await M.endSession({}, { id: session.id }, ctx);
   await M.releaseWorker({}, { workerRef: worker.id }, ctx);
-  const record = await db.servedPrompt.create({
-    data: {
-      kind: 'BIND', sessionId: session.id, workerId: worker.id, appId, agentId, pointerLevel: 'AGENT',
-      compiledNodeId: generateId(), servedRevSeq: 3, provenanceRevSeq: 2, compiledContentHash: 'h',
-    } as never,
-  });
+  // #2712: serving is always on, so the bind wrote its own record.
+  const record = await db.servedPrompt.findFirstOrThrow({ where: { kind: 'BIND', sessionId: session.id, workerId: worker.id } });
   return { worker, session, record };
 }
 const recordsNaming = (workerId: string, sessionId: string) => db.servedPrompt.count({ where: { OR: [{ workerId }, { sessionId }] } });
@@ -83,12 +81,7 @@ describe('#2736 empty-stint repair and the served-prompt record', () => {
     const mine = await boundWorker();
     const other = await M.castWorker({}, { appRef: appId, agentRef: agentId, name: 'Other' }, ctx);
     const otherSession = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: other.id, tool: 'test' } }, ctx);
-    await db.servedPrompt.create({
-      data: {
-        kind: 'BIND', sessionId: otherSession.id, workerId: other.id, appId, agentId, pointerLevel: 'AGENT',
-        compiledNodeId: generateId(), servedRevSeq: 3, provenanceRevSeq: 2, compiledContentHash: 'h',
-      } as never,
-    });
+    // The other bind recorded its own served prompt.
     expect(await remove(mine.worker.id)).toBe(true);
     expect(await recordsNaming(other.id, otherSession.id)).toBe(1);
   });

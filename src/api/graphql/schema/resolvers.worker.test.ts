@@ -859,7 +859,7 @@ describe('worker / workers queries', () => {
     // signed-in user; the working state stays behind the participant gate.
     const w = await Q.worker({}, { ref: iris.id }, ctx(outsider.id));
     expect(w.name).toBe('Iris');
-    expect(await W.promptOverride(w, {}, ctx(outsider.id))).toBeNull();
+    expect(await W.prompt(w, {}, ctx(outsider.id))).toBeNull();
     // An anonymous caller is still refused like an absent worker (#1742).
     await expectCode(Q.worker({}, { ref: iris.id }, { db, roles: [] } as Context), 'WORKER_NOT_FOUND');
   });

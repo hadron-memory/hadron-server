@@ -21,6 +21,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromG
 
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 const ORG_URN = 'sysgrant2716-org';
 const FLOW_URN = `${ORG_URN}:flow`;
@@ -30,14 +31,14 @@ const ENTRY = `${ORG_URN}::flow::flow:report`;
 const PREFIX = 'boot';
 const LOC = `${PREFIX}:source`;
 
-let orgId: string, appId: string, flowId: string, systemId: string, sharedId: string, graniterId: string;
+let orgId: string, appId: string, flowId: string, systemId: string, sharedId: string, graniterId: string, agentId: string;
 
 async function run(writeTo: string, mode: 'replace' | 'append' = 'replace') {
   await db.node.update({
     where: { loc_memoryId: { loc: 'flow:report', memoryId: flowId } },
     data: { data: { output: { writeTo, mode } } as never },
   });
-  const minted = await mintAppRun(db, { organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData: {}, consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId) });
+  const minted = await mintAppRun(db, { organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData: {}, consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId) });
   const deps: RunExecutionDeps = {
     ...makeProdRunDeps(db),
     resolveConfig: vi.fn(async () => ({ config: { provider: 'anthropic', model: 'test' } }) as never),
@@ -68,6 +69,8 @@ beforeEach(async () => {
   sharedId = (await db.memory.create({ data: { id: generateId(), organizationId: orgId, name: 'shared', urn: SHARED_URN, class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
   const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'iris', urn: `${ORG_URN}:iris`, systemMemoryId: systemId } as never });
   await db.appAgent.create({ data: { appId, agentId: agent.id } });
+  agentId = agent.id;
+  await serveAgentBootPrompt(db, agent.id, 'You are iris.');
   // Read access to the flow memory only: no agent memory item touches either destination.
   await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: flowId, role: 'read' } });
   await db.node.create({ data: { id: generateId(), memoryId: flowId, loc: 'flow:report', name: 'report', tags: [], content: 'Produce the report.' } as never });
@@ -85,7 +88,8 @@ describe('#2716 N2: the run-upsert door and a write grant on a class=system memo
     expect(failure?.message).toContain(SYSTEM_URN);
     expect(failure?.message).toMatch(/not granted/i);
     expect(await footprint(systemId)).toEqual(before);
-    expect(await db.node.count({ where: { memoryId: systemId } })).toBe(0);
+    // Only the served boot prompt's own nodes (#2712) are in the system memory; the run wrote nothing.
+    expect(await db.node.count({ where: { memoryId: systemId, NOT: { loc: { startsWith: 'boot:' } } } })).toBe(0);
   });
 
   it('existing target: the same run cannot replace or append to a node already in the system memory', async () => {
