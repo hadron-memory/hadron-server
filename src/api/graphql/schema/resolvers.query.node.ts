@@ -2240,7 +2240,7 @@ export const nodeQueries = {
           nodeLoc: loc,
           ...(accessibleMemoryIds !== null ? { memoryId: { in: accessibleMemoryIds } } : {}),
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit ?? 20,
       });
     },
