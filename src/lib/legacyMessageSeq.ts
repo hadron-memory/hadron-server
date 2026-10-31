@@ -49,7 +49,7 @@ export function isLegacyMessageSeqError(error: unknown): error is LegacyMessageS
  * Refuse a generic write that sets or changes `seq` on a message node.
  *
  * @param prior   the row at the target loc (tombstone included), if any
- * @param nextType the `nodeType` the write names, if any (omitted keeps the prior one)
+ * @param nextType the `nodeType` the write names, if any (omitted keeps the prior one); a prior OR resulting message type is protected
  * @param seq     the `seq` the write names: `undefined` = not named
  */
 export function assertNoGenericMessageSeqWrite(
@@ -59,8 +59,12 @@ export function assertNoGenericMessageSeqWrite(
   op: 'create' | 'update',
 ): void {
   if (seq === undefined) return;
+  // Protected when EITHER side is a message: judging only the resulting type let a message shed its type and
+  // take a new seq in one write (BLIND review of #2989, P2). A prior tombstone counts, as in the comment gate.
   const resulting = nextType ?? prior?.nodeType ?? null;
-  if (resulting === null || !MESSAGE_SEQ_NODE_TYPES.has(resulting)) return;
+  const priorProtected = prior?.nodeType != null && MESSAGE_SEQ_NODE_TYPES.has(prior.nodeType);
+  const resultingProtected = resulting !== null && MESSAGE_SEQ_NODE_TYPES.has(resulting);
+  if (!priorProtected && !resultingProtected) return;
   if (seq === (prior?.seq ?? null)) return;
   throw new LegacyMessageSeqError(op);
 }
