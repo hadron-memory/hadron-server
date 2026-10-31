@@ -171,3 +171,20 @@ it.each(['retired','tombstone','dry-run'] as const)('rechecks %s authority despi
   :M.searchReplaceInNodes({}, {input:{nodeIds:[f.node.id],oldText:'before',newText:'after',fields:['content'],dryRun:true}},c);
  await expect(call).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});expect(crossed).toBe(true);expect(await snapshot(f)).toEqual(before);
 });
+
+it.each(['updateEdge','deleteEdge'] as const)('%s refuses when a real move puts the source in another memory after preflight', async door => {
+ const f=await fixture();await createDbAppMember(db,f.app.id,f.outsider.id,'owner');
+ const privateMemory=await db.memory.create({data:{name:'Private destination',urn:`${f.org.urn}:private-destination`,class:'private',ownerUserId:f.outsider.id,userId:f.outsider.id}});
+ let moved=false;
+ const wrapped=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return async(work:any,options:any)=>{
+   await M.moveNode({}, {sourceRef:f.node.id,targetMemoryRef:privateMemory.id},context(f.outsider.id));
+   expect((await db.edge.findUniqueOrThrow({where:{id:f.edge.id}})).memoryId).toBe(privateMemory.id);moved=true;
+   return target.$transaction(work,options);
+  };
+  const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+ }});
+ const args=door==='updateEdge'?{edgeRef:f.edge.id,name:'unauthorized'}:{edgeRef:f.edge.id};
+ await expect(M[door]({},args,{...context(f.admin.id),db:wrapped})).rejects.toMatchObject({extensions:{code:'NODE_WRITE_CONFLICT'}});
+ expect(moved).toBe(true);expect((await db.edge.findUniqueOrThrow({where:{id:f.edge.id}})).name).toBe('link');
+});
