@@ -195,6 +195,11 @@ describe('#2642 plain wording', () => {
   it('a name is one bounded line of plain text', () => {
     expect(plainAutomationLabel('a\n<b>x</b>\u0000 "q"')).toBe('a b x /b q');
     expect(plainAutomationLabel('x'.repeat(200))!.length).toBe(80);
+    // Truncation counts code points, so an emoji at the boundary is never split into a lone surrogate.
+    const emoji = plainAutomationLabel('x'.repeat(78) + '😀😀😀')!;
+    expect(Array.from(emoji).length).toBe(80);
+    expect(emoji).toBe('x'.repeat(78) + '😀…');
+    expect(emoji).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
     expect(plainAutomationLabel('   ')).toBeNull();
     expect(plainAutomationLabel(undefined)).toBeNull();
     const t = plainRunFailure({ status: 'FAILED', failure: { code: 'AUTOMATION_CHANGED' } }, { automationLabel: 'A\n<script>' })!;

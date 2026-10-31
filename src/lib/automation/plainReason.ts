@@ -74,7 +74,8 @@ export function plainAutomationLabel(name: unknown): string | null {
   if (typeof name !== 'string') return null;
   const t = name.replace(/[\p{C}\p{Zl}\p{Zp}<>"“”`]/gu, ' ').replace(/\s+/g, ' ').trim();
   if (!t) return null;
-  return t.length > LABEL_MAX ? `${t.slice(0, LABEL_MAX - 1).trimEnd()}…` : t;
+  const points = Array.from(t);
+  return points.length > LABEL_MAX ? `${points.slice(0, LABEL_MAX - 1).join('').trimEnd()}…` : t;
 }
 
 export function plainRunFailure(run: RunLike, context?: { automationLabel?: string | null }): PlainRunFailure | null {
