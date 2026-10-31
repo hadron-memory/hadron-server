@@ -249,7 +249,6 @@ import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } 
 import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
-import { renderTerminal } from '../lib/workerTerminal.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
 import { safeEqual } from '../lib/constantTime.js';
 
@@ -10840,7 +10839,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus, terminal] = await Promise.all([
+        const [briefing, workerUrn, agent, override, continuity, signature, trailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10861,8 +10860,6 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.trailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
-          // #2771 — the same gate; the host's latest terminal report, null on deny or before a host reports.
-          resolvers.Worker.terminal(worker, {}, ctx),
         ]);
         // #2045: the boot-prompt pointer, through the SAME gated field resolvers
         // GraphQL serves (null on deny, and null when unset). A read only: R24
@@ -10977,7 +10974,6 @@ function ageOf(at: Date, now: Date = new Date()): string {
             (reportingHeadId ? `Reports to worker: ${reportingHeadId}\n` : '') +
             (agentName ? `Role agent: ${agentName}\n` : '') +
             (checkStatus ? `${renderCheckStatusLong(checkStatus)}\n` : '') +
-            (terminal ? `${renderTerminal(terminal, new Date())}\n` : '') +
             // Only the caller's OWN driving session is named. Whose session it
             // is otherwise stays behind the takeover refusal, which is a
             // deliberate act rather than a listing (hadron_list_workers' rule).

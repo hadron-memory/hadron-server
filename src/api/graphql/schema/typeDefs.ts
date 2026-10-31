@@ -14795,23 +14795,10 @@ export const typeDefs = `#graphql
     code: String!
   }
 
-  "#2771 — a coordinator this host registers whose stored status is locked or dark."
-  type WorkerTerminalAlarm {
-    worker: WorkerTerminalRef!
-    status: WorkerTerminalState!
-    reason: WorkerTerminalReason
-  }
-
+  "#2924 — status reporting only: no alarm verdict or coordinator requirement."
   type SetHostWorkerTerminalsResult {
     stored: [WorkerTerminalRef!]!
     refused: [WorkerTerminalRefusal!]!
-    """
-    The alarm verdict, computed after the write and returned, never stored: coordinators of the App this host registers
-    whose stored status is locked or dark, leaving out a paused or stopped worker and a paused or halted team.
-    """
-    alarm: [WorkerTerminalAlarm!]!
-    "True when the App has no coordinator (a worker with the coordinator role that is not retired)."
-    noCoordinator: Boolean!
   }
 
   input IssueHostOperationInput {
