@@ -4,10 +4,12 @@ import { randomUUID } from 'node:crypto';
  *
  * Hybrid and vector pages promise no snapshot across calls while embeddings
  * are still landing (Holger's ruling (a) on #2991); callers who need complete,
- * duplicate-free paging use mode: keyword, whose order is `score DESC, loc ASC`
- * with a unique loc. This pins that guarantee: an embedding landing between
- * two keyword reads (the drain also touches the row) moves no hit across a
- * page boundary.
+ * duplicate-free paging use mode: keyword on one memory, whose order is
+ * `score DESC, loc ASC` with loc unique within a memory (it is unique per
+ * (memoryId, loc) only, so across memories equal score and loc have no defined
+ * order). This pins that guarantee: an embedding landing between two keyword
+ * reads (the drain also touches the row) moves no hit across a page boundary,
+ * and the pages come back in loc order.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -57,13 +59,16 @@ describe('findNodes keyword offset paging while the vector index fills (#2991)',
     const mem = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
     expect(mem.vectorIndexEnabled).toBe(true); // the index is live, so embeddings land
     // Identical text, so every hit ties on score and loc alone orders them.
+    // ids[i] has loc doc:i. Rows are inserted in REVERSE loc order, so an
+    // order with no loc tiebreak (physical or insertion order) disagrees with
+    // the asserted one.
     const ids = Array.from({ length: 5 }, () => generateId());
     await db.node.createMany({
       data: ids.map((id, i) => ({
         id, memoryId: memory.id, loc: `doc:${i}`,
         name: 'Paging doc', abstract: 'paging policy', content: 'paging policy text',
         embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date(),
-      })),
+      })).reverse(),
     });
     const page = (offset: number) => findNodes({ query: 'paging', mode: 'keyword', filter: { memoryIds: [memory.id] }, limit: 2, offset });
 
@@ -77,7 +82,7 @@ describe('findNodes keyword offset paging while the vector index fills (#2991)',
     seen.push(...(await page(2)).hits.map((h: any) => h.node.id));
     seen.push(...(await page(4)).hits.map((h: any) => h.node.id));
 
-    expect(seen).toHaveLength(ids.length);
-    expect([...seen].sort()).toEqual([...ids].sort());
+    // Every match exactly once, in the documented score DESC, loc ASC order.
+    expect(seen).toEqual(ids);
   });
 });
