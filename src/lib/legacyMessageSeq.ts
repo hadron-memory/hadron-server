@@ -21,7 +21,18 @@
  *
  * "A seq write" means the call names a `seq` that differs from the stored one
  * (`null` included): a client that round-trips a node with its seq unchanged
- * reorders nothing and is not refused.
+ * reorders nothing and is not refused. Three more shapes count, each found in
+ * review of #2989:
+ *   - the PRIOR type being a message, not only the resulting one (a message
+ *     cannot shed its type and take a new seq in one write);
+ *   - BECOMING a message while carrying a seq, named or stored (retype away, set
+ *     a seq, retype back; or convert an ordered node into a message): only an
+ *     allocator gives a message its seq;
+ *   - `restoreNodeRevision`, which restores a revision's seq verbatim.
+ * Not decided here: whether a message may leave the conversation by retyping to
+ * another type with no seq named (the ruling names seq only); and `cloneNode`
+ * copies a source seq onto a new row (`copiesSeq`), which can land over a
+ * tombstone: an insertion at an existing position, not a reorder.
  */
 
 import { GraphQLError } from 'graphql';
@@ -56,15 +67,24 @@ export function assertNoGenericMessageSeqWrite(
   prior: { nodeType?: string | null; seq?: number | null } | null | undefined,
   nextType: string | null | undefined,
   seq: number | null | undefined,
-  op: 'create' | 'update',
+  op: 'create' | 'update' | 'restore',
 ): void {
-  if (seq === undefined) return;
   // Protected when EITHER side is a message: judging only the resulting type let a message shed its type and
   // take a new seq in one write (BLIND review of #2989, P2). A prior tombstone counts, as in the comment gate.
   const resulting = nextType ?? prior?.nodeType ?? null;
   const priorProtected = prior?.nodeType != null && MESSAGE_SEQ_NODE_TYPES.has(prior.nodeType);
   const resultingProtected = resulting !== null && MESSAGE_SEQ_NODE_TYPES.has(resulting);
   if (!priorProtected && !resultingProtected) return;
+  // BECOMING a message (a create, or a conversion from another type) while carrying a seq, named or stored,
+  // is an insertion into the conversation: only an allocator gives a message its seq. Judging only a NAMED seq
+  // let a message be moved in three single-purpose writes (retype away, set the seq, retype back) and let an
+  // ordinary node with a seq be converted into a message at any position (security review of #2989, P2-1).
+  if (!priorProtected) {
+    const carried = seq !== undefined ? seq : (prior?.seq ?? null);
+    if (carried !== null) throw new LegacyMessageSeqError(op);
+    return;
+  }
+  if (seq === undefined) return;
   if (seq === (prior?.seq ?? null)) return;
   throw new LegacyMessageSeqError(op);
 }

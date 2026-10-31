@@ -4580,6 +4580,8 @@ export const nodeMutations = {
       // #1606 — a comment's history is not restorable through the generic
       // surface, and no revision may turn a node into one (cor:dmo:110:04).
       assertNotCommentWrite(node.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+      // #2987 — a revision restores a message's old seq verbatim: that is a reorder (security P2-2).
+      assertNoGenericMessageSeqWrite(node, (restoreFields as { nodeType?: string | null }).nodeType, (restoreFields as { seq?: number | null }).seq, 'restore');
       assertBootPromptWriteAllowed(node, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
       assertGovernedWrite(
         node,
@@ -4685,6 +4687,7 @@ export const nodeMutations = {
         // The preflight checks above are useful fast refusals, but they cannot
         // protect a restore that waited behind a concurrent writer.
         assertNotCommentWrite(current.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+        assertNoGenericMessageSeqWrite(current, (restoreFields as { nodeType?: string | null }).nodeType, (restoreFields as { seq?: number | null }).seq, 'restore');
         assertBootPromptWriteAllowed(current, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
         assertGovernedWrite(
           current,
