@@ -16,6 +16,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { appendChatMessage } from '../../../lib/chatRoot.js';
 import { getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
+import { buildNodeRevisionSnapshot, createNodeRevision, editorFromAuth } from '../../../lib/nodeRevisionSnapshot.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -202,6 +203,52 @@ describe('LOCAL review P2s on 0f581af6 (Beckett)', () => {
       const r = await db.node.findFirstOrThrow({ where: { loc, memoryId: memory.id } });
       expect([r.deletedAt, r.seq]).toEqual([null, seq]);
     }
+  });
+});
+
+describe('SECURITY §10 P2s on 7b2276e1 (Rico)', () => {
+  it('P2-1: retype away, set a seq, retype back never ends with a moved message, on both doors', async () => {
+    const mcp = mcpFor(member.id);
+    const g = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:001', memoryId: memory.id } });
+    // The three single-purpose writes, each judged on its own: the LAST one (becoming a message while carrying a seq) is refused.
+    await M.updateNode(null, { input: { id: g.id, nodeType: 'info' } }, as());
+    await M.updateNode(null, { input: { id: g.id, seq: 99 } }, as());
+    expect((await errorOf(M.updateNode(null, { input: { id: g.id, nodeType: 'chat-message' } }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    expect((await db.node.findUniqueOrThrow({ where: { id: g.id } })).nodeType).toBe('info');
+
+    const m = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:002', memoryId: memory.id } });
+    await mcp.callToolText('hadron_update_node', { urn: urn(m.loc), nodeType: 'info' });
+    await mcp.callToolText('hadron_update_node', { urn: urn(m.loc), seq: 77 });
+    expect(await mcp.callToolText('hadron_update_node', { urn: urn(m.loc), nodeType: 'chat-message' })).toMatch(/^\[seq_protected\]/);
+    expect((await db.node.findUniqueOrThrow({ where: { id: m.id } })).nodeType).toBe('info');
+  });
+
+  it('P2-1 variant: an info node carrying a seq cannot become a message (insert at a position), on both doors', async () => {
+    const a = await mk('chats:legacy:messages:ins-a', 'info', 1);
+    const b = await mk('chats:legacy:messages:ins-b', 'info', 2);
+    expect((await errorOf(M.updateNode(null, { input: { id: a.id, nodeType: 'chat-message' } }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    expect(await mcpFor(member.id).callToolText('hadron_update_node', { urn: urn(b.loc), nodeType: 'record' })).toMatch(/^\[seq_protected\]/);
+    expect(await db.node.count({ where: { id: { in: [a.id, b.id] }, nodeType: 'info' } })).toBe(2);
+    // a seq-less node may become a message: only an allocator-less message is unordered
+    const c = await mk('chats:legacy:messages:ins-c', 'info', null);
+    await M.updateNode(null, { input: { id: c.id, nodeType: 'chat-message' } }, as());
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).nodeType).toBe('chat-message');
+  });
+
+  it('P2-2: restoreNodeRevision cannot rewrite a message seq from a revision', async () => {
+    const row = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:003', memoryId: memory.id } });
+    await db.node.update({ where: { id: row.id }, data: { seq: 3 } });
+    await createNodeRevision(db, buildNodeRevisionSnapshot(await db.node.findUniqueOrThrow({ where: { id: row.id } }), editorFromAuth({ userId: member.id }), { revLabel: 'edit', changes: ['content'] }));
+    await db.node.update({ where: { id: row.id }, data: { seq: 40 } });
+    const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: row.id } });
+    expect((await errorOf(M.restoreNodeRevision(null, { revisionId: rev.id }, as()))).extensions.code).toBe('SEQ_PROTECTED');
+    expect((await db.node.findUniqueOrThrow({ where: { id: row.id } })).seq).toBe(40);
+  });
+
+  it('P3-1: cloneNode of a message with a seq still works (the copiesSeq exemption)', async () => {
+    const src = await db.node.findFirstOrThrow({ where: { loc: 'chats:legacy:messages:001', memoryId: memory.id } });
+    const copy = await M.cloneNode(null, { sourceRef: src.id, targetUrn: urn('chats:legacy:messages:copy-of-001') }, as());
+    expect([copy.nodeType, copy.seq]).toEqual(['chat-message', 1]);
   });
 });
 
