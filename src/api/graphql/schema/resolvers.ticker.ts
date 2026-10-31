@@ -8,7 +8,11 @@
 //
 // THE ACTOR is the agent-task actor (resolveTaskActor, #1705): a worker through
 // its session, with a person behind the request, or a person as themselves. A
-// bare App key is refused (it is concealed as "App not found"). EVERY WRITE
+// bare App key is refused (it is concealed as "App not found"), with ONE
+// exception, read-only (#2931, V6): the App's own live `host:operate` key reads
+// the tickers and subscriptions of the workers ITS HOST registers, through
+// `tickers`, `tickersPage`, `ticker` and `Ticker.subscribers` only, never over
+// MCP, each read recorded as a host-key use (cor:agt:070:07). EVERY WRITE
 // re-gates inside its transaction (`inTaskWriteTx`): the authority anchors
 // SHARED, the actor re-resolved on the transaction client, then the decision
 // below on rows locked in that transaction. `managesApp` counts a person acting
@@ -50,7 +54,13 @@ import {
   resolveParticipatedApp,
   resolveTaskActor,
   taskError,
+  inHostKeyTickerReadTx,
+  withHostKeyTickerApp,
 } from './resolvers.agentTask.js';
+import { recordingRefusal } from './resolvers.hostOperation.js';
+import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
+import { keyHostId, recordHostKeyUseApart } from '../../../lib/hostOperations/hostKey.js';
+import { hostWorkersWhere } from '../../../lib/tickers/wakeKeyScope.js';
 import { composeWorkerUrn, resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { WorkerNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
@@ -322,17 +332,61 @@ type TickerInput = {
 };
 type TickerPatch = Partial<TickerInput> & { clearQuietHours?: boolean | null; clearChannels?: boolean | null };
 
+// ── The host key's read (#2931) ───────────────────────────────────────────
+
+/**
+ * #2931 — the App key a ticker read is judged as a host key for, or null for everyone else. Never over MCP (R-e;
+ * Holger V2/V3: no agent-team MCP), so an MCP connection authenticated by the key takes today's participant path and
+ * gets today's refusal, whichever tool delegates here.
+ */
+function tickerReadKey(ctx: Context): { appKeyId: string; appId: string } | null {
+  return ctx.transport === 'mcp' ? null : appKeyCaller(ctx);
+}
+
+/** The live tickers of `appId` that a worker registered on `hostId` subscribes to (V6; the due-wake host set, 080:22). */
+function hostTickersWhere(appId: string, hostId: string): Prisma.TickerWhereInput {
+  return { appId, deletedAt: null, subscriptions: { some: { endedAt: null, worker: hostWorkersWhere(appId, hostId) } } };
+}
+
+const TICKER_ORDER: Prisma.TickerOrderByWithRelationInput[] = [{ createdAt: 'asc' }, { id: 'asc' }];
+
+/** A host key's read: refusals recorded with their code; an admitted read recorded with its count, apart from the read. */
+async function hostKeyRead<T>(ctx: Context, key: { appKeyId: string; appId: string }, read: () => Promise<{ out: T; count: number }>): Promise<T> {
+  const { out, count } = await recordingRefusal(ctx, 'read', null, read);
+  await recordHostKeyUseApart(ctx.db, key, 'read', { count });
+  return out;
+}
+
 export const tickerQueries = {
   tickers: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
+    const key = tickerReadKey(ctx);
+    if (key) {
+      return hostKeyRead(ctx, key, async () => {
+        const rows = await withHostKeyTickerApp(ctx, appRef, (c, app, hostId) =>
+          c.db.ticker.findMany({ where: hostTickersWhere(app.id, hostId), orderBy: TICKER_ORDER }));
+        return { out: rows, count: rows.length };
+      });
+    }
     const { app } = await resolveParticipatedApp(ctx, appRef);
-    return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    return ctx.db.ticker.findMany({ where: { appId: app.id, deletedAt: null }, orderBy: TICKER_ORDER });
   },
 
   /** #2213 — `tickers` as a page: the same gate, rows and order, counted and read in one snapshot. */
   tickersPage: async (_: unknown, args: { appRef: string; limit?: number | null; offset?: number | null }, ctx: Context) => {
+    const { take, skip } = pageArgs(args);
+    const key = tickerReadKey(ctx);
+    if (key) {
+      // One statement is one snapshot: the anchored read is READ COMMITTED, so the host's (cap-bounded) rows are read
+      // once and counted, rather than counted and paged in two statements that could disagree.
+      return hostKeyRead(ctx, key, async () => {
+        const rows = await withHostKeyTickerApp(ctx, args.appRef, (c, app, hostId) =>
+          c.db.ticker.findMany({ where: hostTickersWhere(app.id, hostId), orderBy: TICKER_ORDER }));
+        const items = rows.slice(skip, skip + take);
+        return { out: pageEnvelope(items, rows.length, skip), count: items.length };
+      });
+    }
     const { app } = await resolveParticipatedApp(ctx, args.appRef);
     const where = { appId: app.id, deletedAt: null };
-    const { take, skip } = pageArgs(args);
     const [total, items] = await ctx.db.$transaction([
       ctx.db.ticker.count({ where }),
       ctx.db.ticker.findMany({ where, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take, skip }),
@@ -342,6 +396,8 @@ export const tickerQueries = {
 
   ticker: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
     try {
+      const key = tickerReadKey(ctx);
+      if (key) return await hostKeyRead(ctx, key, async () => ({ out: await hostKeyTicker(ctx, key, ref), count: 1 }));
       return (await loadReachableTicker(ctx, ref)).ticker;
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code === 'TICKER_NOT_FOUND') return null;
@@ -360,6 +416,27 @@ export const tickerQueries = {
     return wakeSettingsOut(worker.id, row);
   },
 };
+
+/**
+ * #2931 — one ticker for a host key: its own App's, live, and subscribed by a worker its host registers; anything
+ * else is TICKER_NOT_FOUND (answered as null). The App is judged before anything about the ticker is read under it.
+ */
+async function hostKeyTicker(ctx: Context, key: { appKeyId: string; appId: string }, ref: string): Promise<TickerRow> {
+  let id: string;
+  try {
+    ({ id } = await resolveTickerRef(ctx.db, ref));
+  } catch (e) {
+    if (e instanceof TickerNotFoundError) throw tickerNotFound(ref);
+    throw e;
+  }
+  const head = await ctx.db.ticker.findUnique({ where: { id }, select: { appId: true } });
+  if (!head || head.appId !== key.appId) throw tickerNotFound(ref);
+  return inHostKeyTickerReadTx(ctx, head.appId, () => { throw tickerNotFound(ref); }, async (c, app, hostId) => {
+    const ticker = await c.db.ticker.findFirst({ where: { id, ...hostTickersWhere(app.id, hostId) } });
+    if (!ticker) throw tickerNotFound(ref);
+    return ticker;
+  });
+}
 
 /** Resolve a worker the caller may see: any worker of an App the caller participates in. */
 async function workerForRead(ctx: Context, ref: string) {
@@ -1151,8 +1228,18 @@ export const tickerFieldResolvers = {
     owner: (t: TickerRow, _: unknown, ctx: Context) => actorRef(ctx, t.ownerWorkerId, t.ownerUserId),
     subscribers: async (t: TickerRow, a: { first?: number | null; after?: string | null }, ctx: Context) => {
       const take = Math.min(Math.max(a.first ?? 20, 1), 200);
+      // #2931 (V6): an App key sees only the subscriptions of the workers its host registers NOW, re-read here because
+      // this runs after the read's transaction and on every path to a Ticker (a subscription's ticker included). A
+      // key with no live host:operate, another App's key, or an MCP connection sees none.
+      let hostWorkers: Prisma.WorkerWhereInput | null = null;
+      const key = appKeyCaller(ctx);
+      if (key) {
+        const hostId = ctx.transport === 'mcp' || key.appId !== t.appId ? null : await keyHostId(ctx.db, key);
+        if (!hostId) return { items: [], hasNextPage: false, endCursor: null };
+        hostWorkers = hostWorkersWhere(t.appId, hostId);
+      }
       const rows = await ctx.db.tickerSubscription.findMany({
-        where: { tickerId: t.id, endedAt: null },
+        where: { tickerId: t.id, endedAt: null, ...(hostWorkers ? { worker: hostWorkers } : {}) },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         take: take + 1,
         ...(a.after ? { cursor: { id: a.after }, skip: 1 } : {}),

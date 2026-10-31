@@ -21,6 +21,7 @@ import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { createMcpServerInstance } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
+import { inHostKeyTickerReadTx } from './resolvers.agentTask.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
 import { typeDefs } from './typeDefs.js';
 
@@ -316,9 +317,42 @@ describe('#2931 the anchor re-check: a scope revoked while the read waits refuse
   });
 });
 
+describe('#2931 another App is judged before anything is locked or read under it', () => {
+  it('a foreign App ref or ticker is refused without waiting on that App\'s authority anchor', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: appY.id }, { kind: 'org', id: org.id }], 'exclusive');
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await isLocked;
+    const late = (p: Promise<unknown>) => Promise.race([
+      p.then(() => 'answered', () => 'answered'),
+      new Promise((r) => setTimeout(() => r('waited'), 1_500)),
+    ]);
+    try {
+      expect(await late(tickers(keyCtx(hostKey), appY.id))).toBe('answered');
+      expect(await late(ticker(keyCtx(hostKey), onY.id))).toBe('answered');
+    } finally {
+      release();
+      await holder;
+    }
+  });
+
+  it('the in-transaction reader itself refuses another App, even when handed it directly', async () => {
+    const gone = Symbol('gone');
+    expect(await inHostKeyTickerReadTx<string | symbol>(keyCtx(hostKey), appY.id, () => gone, async () => 'read')).toBe(gone);
+    expect(await inHostKeyTickerReadTx<string | symbol>(keyCtx(hostKey), appX.id, () => gone, async (_c, _a, hostId) => hostId)).toBe('orca1');
+  });
+});
+
 /** Every field of a type an unprivileged selection can name at depth one: leaves by name, objects by __typename. */
-function selectionOf(type: GraphQLObjectType): string {
+function selectionOf(type: GraphQLObjectType, skip: string[] = []): string {
   return Object.values(type.getFields())
+    .filter((f) => !skip.includes(f.name))
     .filter((f) => !f.args.some((a) => a.type.toString().endsWith('!') && a.defaultValue === undefined))
     .map((f) => (isLeafType(getNamedType(f.type)) ? f.name : `${f.name} { __typename }`))
     .join(' ');
@@ -340,10 +374,12 @@ describe('#2931 the nested surface is no wider than today (executable schema)', 
   afterEach(async () => { await api.stop(); });
 
   it('P-N1/P-N2: Ticker.app gives the host key what myApp gives it, field by field, errors included', async () => {
-    const sel = selectionOf(appType);
+    // `keys` is non-null and refused to a key, so it would null the whole App on both paths; P-N2 pins it alone.
+    const sel = selectionOf(appType, ['keys']);
     const viaTicker = await run(api, `query($r:String!){ ticker(ref:$r){ app { ${sel} } } }`, keyCtx(hostKey), { r: shared.id });
     const viaMyApp = await run(api, `query{ myApp { ${sel} } }`, keyCtx(hostKey));
-    expect((viaTicker.data as any)?.ticker?.app).not.toBeNull();
+    expect((viaTicker.data as any)?.ticker?.app).toBeTruthy();
+    expect((viaMyApp.data as any)?.myApp).toBeTruthy();
     expect((viaTicker.data as any).ticker.app).toEqual((viaMyApp.data as any).myApp);
     expect(viaTicker.errors).toEqual(viaMyApp.errors);
     const explicit = await run(api, `query($r:String!){ ticker(ref:$r){ app { viewerManages memberCount members { __typename } } } }`, keyCtx(hostKey), { r: shared.id });
@@ -360,6 +396,7 @@ describe('#2931 the nested surface is no wider than today (executable schema)', 
     const direct = await run(api, `query($w:ID!){ worker(ref:$w){ ${sel} } }`, keyCtx(hostKey), { w: ada.id });
     const items = (viaTicker.data as any).ticker.subscribers.items;
     expect(items).toHaveLength(1);
+    expect((direct.data as any).worker?.id).toBe(ada.id);
     expect(items[0].worker).toEqual((direct.data as any).worker);
     const asMember = await run(api, `query($r:String!){ ticker(ref:$r){ owner { id name urn } subscribers { items { createdBy { id name urn } } } } }`, ctx(member.id), { r: shared.id });
     expect((viaTicker.data as any).ticker.owner).toEqual((asMember.data as any).ticker.owner);

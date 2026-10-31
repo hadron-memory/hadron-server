@@ -7897,17 +7897,20 @@ export const typeDefs = `#graphql
     """
     agentTask(id: ID!): AgentTask
 
-    "#1747 — the live tickers of an App the caller participates in. An App the caller cannot reach reads as APP_NOT_FOUND (hrn:node:hadronmemory.com:specs:cor:agt:080:18)."
+    """
+    #1747 — the live tickers of an App the caller participates in. An App the caller cannot reach reads as APP_NOT_FOUND (hrn:node:hadronmemory.com:specs:cor:agt:080:18).
+    #2931 — the App's own live host:operate key reads too, read only and never over MCP: only the tickers a worker its host registers subscribes to, each read recorded as a host-key use (hrn:node:hadronmemory.com:specs:cor:agt:070:04, hrn:node:hadronmemory.com:specs:cor:agt:070:07).
+    """
     tickers(appRef: String!): [Ticker!]!
 
     """
-    #2213 — \`tickers\` as a page: the same App gate, rows and order, with the real total.
+    #2213 — \`tickers\` as a page: the same App gate, rows and order, with the real total (for a host key, #2931, its host's tickers).
     \`limit\` defaults to 20, 0 returns the count only, a negative limit is 0 and a limit
     over 200 is served as 200 (never refused). \`offset\` below 0 is 0.
     """
     tickersPage(appRef: String!, limit: Int, offset: Int): TickerPage!
 
-    "#1747 — one ticker by id or hrn:ticker: URN; null when it does not exist or the caller may not reach it."
+    "#1747 — one ticker by id or hrn:ticker: URN; null when it does not exist or the caller may not reach it. #2931: a host key reaches only its host's tickers (hrn:node:hadronmemory.com:specs:cor:agt:070:04)."
     ticker(ref: String!): Ticker
 
     "#1747 — an App's ticker settings: the cadence floor, the default self-subscription cadence, the live-ticker cap and the daily wake budget (hrn:node:hadronmemory.com:specs:cor:agt:080:05)."
@@ -14085,7 +14088,7 @@ export const typeDefs = `#graphql
     nextTickAt: DateTime
     "The moment of the current tick; null when none has fired or it cannot tick."
     lastTickAt: DateTime
-    "Live subscriptions."
+    "Live subscriptions. #2931: an App key sees only those of the workers its host registers (hrn:node:hadronmemory.com:specs:cor:agt:080:22)."
     subscribers(first: Int, after: String): TickerSubscriptionPage!
     createdAt: DateTime!
     updatedAt: DateTime
