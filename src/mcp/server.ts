@@ -70,6 +70,7 @@ import {
   emitEntityUrnV2,
   emitNodeUrnV2,
   emitActionUrnV2,
+  registerEntryCode,
   nodeUrnRoundTrips,
   safeNodeUrnV2,
   safeNodeUrnV2Result,
@@ -1822,11 +1823,15 @@ async function concealUnreadableEdgeEnds<N extends {
  * (resolvers.types.ts), computed the same way so the two surfaces cannot drift:
  * null, never a throw, on an unemittable stored code atom; a `register:` loc in a
  * memory no live Agent holds names no entry.
+ *
+ * #2972 — entry-hood is `registerEntryCode`'s call: a NESTED `register:a:b` loc
+ * is a writable namespace loc, not an entry, and nulls QUIETLY (no repair warn);
+ * the null-and-log below is reachable only for a single-atom code the emitter
+ * refuses.
  */
 async function actionUrnForRegisterLoc(loc: string, memoryId: string): Promise<string | null> {
-  if (!loc.startsWith('register:')) return null;
-  const code = loc.slice('register:'.length);
-  if (!code) return null;
+  const code = registerEntryCode(loc);
+  if (code === null) return null;
   const agent = await db.agent.findFirst({
     where: { systemMemoryId: memoryId, deletedAt: null },
     select: { urn: true },
@@ -1849,11 +1854,14 @@ async function actionUrnForRegisterLoc(loc: string, memoryId: string): Promise<s
  * The batch's action addresses in ONE grouped agent lookup (the per-node
  * `Action URN:` line needs the holding Agent's urn, and cor:api:040:01 makes the
  * batch projection the same thing as the single read's). Absent from the map —
- * like a null from the single-node path — means no line.
+ * like a null from the single-node path — means no line. #2972: only
+ * single-atom `register:` locs are entries (`registerEntryCode`); a nested
+ * `register:a:b` loc never reaches the emitter, so it can neither warn nor
+ * render a line.
  */
 async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
-  const entries = nodes.filter((n) => n.loc.startsWith('register:'));
+  const entries = nodes.filter((n) => registerEntryCode(n.loc) !== null);
   if (!entries.length) return out;
   const agents = await db.agent.findMany({
     where: { systemMemoryId: { in: [...new Set(entries.map((n) => n.memoryId))] }, deletedAt: null },
@@ -1863,8 +1871,7 @@ async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string,
   for (const n of entries) {
     const agentUrn = urnByMemory.get(n.memoryId);
     if (!agentUrn) continue; // no live Agent holds this memory — no line
-    const code = n.loc.slice('register:'.length);
-    if (!code) continue;
+    const code = registerEntryCode(n.loc) as string; // non-null: the filter kept only entries
     try {
       out.set(n.id, emitActionUrnV2(agentUrn, code));
     } catch {

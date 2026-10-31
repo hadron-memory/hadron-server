@@ -31,6 +31,7 @@ import {
   emitEdgeUrnV2,
   emitAssetUrnV2,
   emitActionUrnV2,
+  registerEntryCode,
   emitInstalledAgentUrnV2,
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
@@ -198,14 +199,18 @@ export async function resolveNodeUrnField(
  * `register:` loc anywhere else names no entry. Null, never a throw, on an
  * unemittable stored code atom (charset/length): one bad row must not fail the
  * query, and a wrong action URN is worse than none.
+ *
+ * #2972 — entry-hood is `registerEntryCode`'s call: a NESTED `register:a:b`
+ * loc is a writable namespace loc, not an entry, and nulls QUIETLY (no repair
+ * warn); the null-and-log below is reachable only for a single-atom code the
+ * emitter refuses — a real entry that needs repair.
  */
 export async function resolveNodeActionUrnField(
   n: { loc: string; memoryId: string },
   ctx: Context,
 ): Promise<string | null> {
-  if (!n.loc.startsWith('register:')) return null;
-  const code = n.loc.slice('register:'.length);
-  if (!code) return null;
+  const code = registerEntryCode(n.loc);
+  if (code === null) return null;
   const agent = await ctx.db.agent.findFirst({
     where: { systemMemoryId: n.memoryId, deletedAt: null },
     select: { urn: true },
