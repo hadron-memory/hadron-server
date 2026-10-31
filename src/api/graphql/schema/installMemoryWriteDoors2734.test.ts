@@ -188,3 +188,42 @@ it.each(['updateEdge','deleteEdge'] as const)('%s refuses when a real move puts 
  await expect(M[door]({},args,{...context(f.admin.id),db:wrapped})).rejects.toMatchObject({extensions:{code:'NODE_WRITE_CONFLICT'}});
  expect(moved).toBe(true);expect((await db.edge.findUniqueOrThrow({where:{id:f.edge.id}})).name).toBe('link');
 });
+
+it.each(['deleteNodeRevision','updateNodeRevision','clearNodeHistory'] as const)('%s refuses history carried into another memory by a real move', async door => {
+ const f=await fixture();await createDbAppMember(db,f.app.id,f.outsider.id,'owner');
+ const destination=await db.memory.create({data:{name:'Private history',urn:`${f.org.urn}:private-history`,class:'private',ownerUserId:f.outsider.id,userId:f.outsider.id}});
+ let moved=false;let before:any;
+ const wrapped=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return async(work:any,options:any)=>{
+   await M.moveNode({}, {sourceRef:f.node.id,targetMemoryRef:destination.id},context(f.outsider.id));
+   expect((await db.node.findUniqueOrThrow({where:{id:f.node.id}})).memoryId).toBe(destination.id);
+   before=await db.nodeRevision.findMany({where:{nodeId:f.node.id},orderBy:{id:'asc'}});moved=true;
+   return target.$transaction(work,options);
+  };
+  const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+ }});
+ const args=door==='clearNodeHistory'?{nodeRef:f.node.id}:{revisionId:f.revision.id,revLabel:'unauthorized'};
+ await expect(M[door]({},args,{...context(f.admin.id),db:wrapped})).rejects.toMatchObject({extensions:{code:'NODE_NOT_FOUND'}});
+ expect(moved).toBe(true);expect(await db.nodeRevision.findMany({where:{nodeId:f.node.id},orderBy:{id:'asc'}})).toEqual(before);
+});
+
+it.each(['mergeNodes','deleteNode'] as const)('%s refuses a newly attached foreign edge rather than acquiring its authority late', async door => {
+ const f=await fixture();await createDbAppMember(db,f.app.id,f.outsider.id,'owner');
+ const {app:foreignApp}=await createDbAppWithKey(db,'foreign-app',f.org.id);
+ await createDbAppAgent(db,foreignApp.id,f.agent.id);
+ await createDbAppMember(db,foreignApp.id,f.outsider.id,'owner');
+ await createDbAppMember(db,foreignApp.id,f.admin.id,'member');
+ const holder=await M.createNode({}, {input:{install:{appRef:foreignApp.id,agentRef:f.agent.id},loc:'holder',name:'Holder'}},context(f.outsider.id));
+ let incoming:any;
+ const wrapped=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return async(work:any,options:any)=>{
+   incoming=await M.createEdge({}, {sourceRef:holder.id,targetRef:f.node.id,name:'incoming',loc:'incoming'},context(f.outsider.id));
+   return target.$transaction(work,options);
+  };
+  const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+ }});
+ const args=door==='mergeNodes'?{input:{source:f.node.id,target:f.target.id,include:['EDGES']}}:{nodeRef:f.node.id,hard:true,cascadeCrossMemoryEdges:true};
+ await expect(M[door]({},args,{...context(f.admin.id),db:wrapped})).rejects.toMatchObject({extensions:{code:'NODE_WRITE_CONFLICT'}});
+ expect(incoming).toBeTruthy();expect((await db.edge.findUniqueOrThrow({where:{id:incoming.id}})).targetId).toBe(f.node.id);
+ expect(await db.node.findUnique({where:{id:f.node.id}})).not.toBeNull();
+});
