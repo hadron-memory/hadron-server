@@ -100,3 +100,49 @@ describe('#2988 POST /auth/email', () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 });
+
+describe('#2988 the per-send log line', () => {
+  function sendLines(spy: ReturnType<typeof vi.spyOn>): string[] {
+    return spy.mock.calls
+      .map((c: unknown[]) => c.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '))
+      .filter((l: string) => l.includes('auth.magic_link.send'));
+  }
+
+  it('logs the provider message id, duration and outcome for an acknowledged send, with no address or token', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      sendMock.mockResolvedValue({ data: { id: 'em_abc123' }, error: null });
+      const email = uniqueEmail();
+      await sendMagicLink(email, db);
+      const lines = sendLines(spy);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('em_abc123');
+      expect(lines[0]).toMatch(/"outcome":"acked"/);
+      expect(lines[0]).toMatch(/"durationMs":\d+/);
+      const token = (await db.emailVerificationToken.findFirstOrThrow({ where: { email } })).token;
+      expect(lines[0]).not.toContain(email);
+      expect(lines[0]).not.toContain(email.split('@')[1]!);
+      expect(lines[0]).not.toContain(token);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('logs a refused send with the provider error name and no address', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      sendMock.mockResolvedValue({ data: null, error: { message: 'x@example.test is suppressed', name: 'validation_error' } });
+      const email = uniqueEmail();
+      await expect(sendMagicLink(email, db)).rejects.toThrow();
+      const lines = sendLines(spy);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/"outcome":"refused"/);
+      expect(lines[0]).toContain('validation_error');
+      // the provider's free-text message can echo the address, so it is never logged
+      expect(lines[0]).not.toContain('suppressed');
+      expect(lines[0]).not.toContain(email);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
