@@ -186,6 +186,7 @@ describe('parity: items are the same with and without total, at a batch size tha
     ['forward from 0, limit 2', { sinceSeq: 0, limit: 2 }],
     ['forward from the middle, limit 3', { sinceSeq: 6, limit: 3 }],
     ['offset 1, limit 2 (oldest-first)', { offset: 1, limit: 2 }],
+    ['offset 3, limit 2 (the page sits past the first matches)', { offset: 3, limit: 2 }],
     ['offset past the end', { offset: 40, limit: 2 }],
     ['backward window (beforeSeq)', { beforeSeq: 14, limit: 2 }],
     ['bounded slice (sinceSeq + beforeSeq)', { sinceSeq: 1, beforeSeq: 20, limit: 2 }],
