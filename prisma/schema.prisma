@@ -6288,7 +6288,8 @@ model HostKeyUse {
   appId       String   @map("app_id")
   hostId      String   @map("host_id")
   /// `register` | `collect` | `report` | `availability` | `read` (#1881: the
-  /// App's host registrations or host-operations listing, read with the key) |
+  /// App's host registrations or host-operations listing, read with the key;
+  /// #2931: its host's tickers, `count` the rows returned) |
   /// `session` (#1969: a refused session write; always carries a refusedCode).
   action      String
   operationId String?  @map("operation_id")
