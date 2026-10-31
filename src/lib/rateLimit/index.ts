@@ -23,8 +23,8 @@ function storeUnavailable(error: unknown): boolean {
 function unknownMode(fieldClass: FieldClass): RateDecision {
   observe(fieldClass,'store','UNKNOWN');
   if (fieldClass === 'CREDENTIALS' || fieldClass === 'OUTBOUND') {
-    // Pending explicit gate disposition of unknown-mode LOG_ONLY policy-read failure; no cached mode is used.
-    throw new Error('Rate policy is temporarily unavailable.');
+    // Holger #1793: unreadable policy refuses fail-closed classes even during LOG_ONLY; never use a cached mode.
+    throw new RateLimited(fieldClass, DEFAULTS[fieldClass].windowSeconds);
   }
   return { admitted: true, retryAfterSeconds: 0, fieldClass };
 }
@@ -59,6 +59,7 @@ export async function seedRateConfig(tx: RateTx) {
   await configFence(tx, true);
   const ring = readRateKeys();
   const manifest = await tx.rateLimitManifest.findUnique({ where: { id: 'global' } });
+  if (!manifest && (await tx.rateLimitPolicy.count() || await tx.rateLimitBucket.count() || await tx.rateLimitPolicyAudit.count())) throw new RateConfigurationError();
   if (!manifest) await tx.rateLimitManifest.create({ data: { id: 'global', keyIds: [ring.current], fingerprints: { [ring.current]: keyFingerprint(ring.keys.get(ring.current)!) } } });
   for (const fieldClass of RATE_CLASSES) {
     const exists = await tx.rateLimitPolicy.findUnique({ where: { fieldClass } });
@@ -73,6 +74,23 @@ export async function assertRateReadiness(db: PrismaClient) {
   readRateKeys();
   await db.$transaction(seedRateConfig);
 }
+/** Read-only health/readiness validation, including a manifest changed by a live overlap transition. */
+export async function checkRateConfiguration(db: PrismaClient): Promise<void> {
+  readRateKeys();
+  try {
+    await db.$transaction(async tx => {
+      await configFence(tx);
+      validateManifest(await tx.rateLimitManifest.findUnique({ where: { id: 'global' } }));
+      const policies=await tx.rateLimitPolicy.findMany();
+      if (policies.length !== RATE_CLASSES.length) throw new RateConfigurationError();
+      for (const p of policies) validatePolicy(p);
+    });
+  } catch(error) {
+    // A transient policy-store read error does not take fail-open callers out of service (R209).
+    // The health route independently checks the ordinary application DB pool.
+    if (!storeUnavailable(error)) throw error;
+  }
+}
 export class RateLimited extends GraphQLError {
   constructor(fieldClass: FieldClass, retryAfterSeconds: number) {
     super('Too many requests.', { extensions: { code: 'RATE_LIMITED', fieldClass, retryAfterSeconds } });
@@ -82,18 +100,37 @@ export class RateLimited extends GraphQLError {
 function observe(fieldClass: FieldClass, dimension: 'principal'|'key'|'ip'|'store', mode: string) {
   console.info('rate-limit-observation', { fieldClass, dimension, mode });
 }
+/** Policy read failures are separate from malformed configuration; rollback restores a usable caller transaction. */
+async function policySnapshot(tx: RateTx, fieldClass: FieldClass) {
+  await tx.$executeRawUnsafe('SAVEPOINT rate_limit_policy');
+  try {
+    if (!await tx.rateLimitManifest.findUnique({ where: { id: 'global' } })) await seedRateConfig(tx);
+    await configFence(tx);
+    const p=await tx.rateLimitPolicy.findUnique({ where: { fieldClass } });
+    if (!p) throw new RateConfigurationError();
+    validatePolicy(p);
+    const {manifest,keys}=validateManifest(await tx.rateLimitManifest.findUnique({ where: { id: 'global' } }));
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT rate_limit_policy');
+    return {p,manifest,keys};
+  } catch(error) {
+    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT rate_limit_policy');
+    await tx.$executeRawUnsafe('RELEASE SAVEPOINT rate_limit_policy');
+    if (storeUnavailable(error)) return null;
+    throw error;
+  }
+}
+function validateIdentity(identity: RateIdentity) {
+  if (!identity.principal && !identity.ip) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+  if (identity.internal && (!identity.principal?.startsWith('APP:') || identity.key || identity.ip)) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+}
 export interface RateDecision { admitted: boolean; retryAfterSeconds: number; fieldClass: FieldClass }
 /** Caller supplies the transaction: consent proof and counters share commit/rollback. */
 export async function admitRateInTx(tx: RateTx, fieldClass: FieldClass, identity: RateIdentity): Promise<RateDecision> {
   readRateKeys(); // Configuration/readiness failures are never a store-outage fail-open path.
-  if (!identity.principal && !identity.ip) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
-  if (identity.internal && (!identity.principal?.startsWith('APP:') || identity.key || identity.ip)) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
-  if (!await tx.rateLimitManifest.findUnique({ where: { id: 'global' } })) await seedRateConfig(tx);
-  await configFence(tx);
-  const p = await tx.rateLimitPolicy.findUnique({ where: { fieldClass } });
-  if (!p) throw new RateConfigurationError();
-  validatePolicy(p);
-  const { manifest, keys } = validateManifest(await tx.rateLimitManifest.findUnique({ where: { id: 'global' } }));
+  validateIdentity(identity);
+  const snapshot=await policySnapshot(tx,fieldClass);
+  if (!snapshot) return unknownMode(fieldClass);
+  const {p,manifest,keys}=snapshot;
   const closed = fieldClass === 'CREDENTIALS' || fieldClass === 'OUTBOUND';
   if (!identity.ip && !identity.internal) {
     observe(fieldClass, 'ip', p.enforcementMode);
@@ -103,7 +140,7 @@ export async function admitRateInTx(tx: RateTx, fieldClass: FieldClass, identity
   if (identity.principal) dimensions.push({ dim: 'principal', subject: identity.principal, limit: p.principalLimit });
   if (identity.key) dimensions.push({ dim: 'key', subject: identity.key, limit: p.keyLimit });
   if (identity.ip) dimensions.push({ dim: 'ip', subject: identity.ip, limit: p.ipLimit });
-  const aliases = dimensions.map(d => ({ ...d, aliases: manifest.keyIds.map(id => `${id}:${createHmac('sha256', keys.get(id)!).update(JSON.stringify(['v1',d.dim,d.subject])).digest('hex')}`) }));
+  const aliases = dimensions.map(d => ({ ...d, aliases: manifest.keyIds.map(id => `${id}:${createHmac('sha256', keys.get(id)!).update(JSON.stringify(['v1',fieldClass,d.dim,d.subject])).digest('hex')}`) }));
   // A savepoint contains an aborted SQL statement before a fail-open decision; no partial counter writes survive.
   await tx.$executeRawUnsafe('SAVEPOINT rate_limit_admission');
   try {
@@ -138,6 +175,8 @@ export async function admitRateInTx(tx: RateTx, fieldClass: FieldClass, identity
 }
 export async function admitRate(db: PrismaClient, fieldClass: FieldClass, identity: RateIdentity) {
   readRateKeys();
+  validateIdentity(identity);
+  if (!RATE_CLASSES.includes(fieldClass)) throw new RateConfigurationError();
   try { return await db.$transaction(tx => admitRateInTx(tx, fieldClass, identity)); }
   catch (error) {
     if (!storeUnavailable(error)) throw error;

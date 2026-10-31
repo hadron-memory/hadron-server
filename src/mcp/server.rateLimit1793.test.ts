@@ -30,3 +30,21 @@ it('#1793 actual SDK and GraphQL share one search allowance and structured refus
   expect(((await r.json()) as { errors: Array<{extensions:Record<string,unknown>}> }).errors[0].extensions).toMatchObject({code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'});
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
 });
+
+it('#1793 live manifest/key disagreement makes existing health readiness fail without exposing secrets',async()=>{
+  const {beginRateKeyOverlap}=await import('../lib/rateLimit/lifecycle.js');
+  const initial=process.env.RATE_LIMIT_KEYRING!;
+  try {
+    server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+    const url=`http://127.0.0.1:${(server.address() as AddressInfo).port}/health`;
+    expect((await fetch(url)).status).toBe(200);
+    const ring=JSON.parse(initial);const oldId=ring.current;
+    process.env.RATE_LIMIT_KEYRING=JSON.stringify({...ring,keys:{...ring.keys,next:'2'.repeat(64)}});
+    await beginRateKeyOverlap(db,'next');
+    process.env.RATE_LIMIT_KEYRING=initial; // a non-prepared process must not remain ready after overlap begins
+    const r=await fetch(url);expect(r.status).toBe(503);
+    expect(await r.json()).toEqual({ok:false,error:'database_unavailable'});
+    expect(await db.rateLimitManifest.count()).toBe(1);
+    expect(oldId).toBeTruthy();
+  } finally {process.env.RATE_LIMIT_KEYRING=initial;}
+});

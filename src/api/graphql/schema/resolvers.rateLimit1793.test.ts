@@ -91,3 +91,12 @@ it('#1793 refuses invalid limits, immutable settings and arbitrary classes witho
   expect((await gql(READ)).data).toEqual(first.data);
   expect(await db.rateLimitPolicyAudit.count()).toBe(0);
 });
+
+it.each([{sessionBindingRefused:true},{impersonation:{actorUserId:'actor',orgId:'org',sessionId:'imp',expiresAt:new Date()}}])('#1793 does not downgrade refused binding/impersonation into human admin: %j',async extra=>{
+  expect((await gql(READ,undefined,extra)).errors?.[0].extensions?.code).toBe('FORBIDDEN');
+});
+it('#1793 live OWNER and live user-key may read without an org-admin substitute',async()=>{
+  await db.user.update({where:{id:userId},data:{roles:['OWNER']}});
+  const key=await db.userApiKey.create({data:{id:generateId(),userId,keyHash:'rate-live-key',keyPreview:'live',oauthScopes:[]}});
+  expect((await gql(READ,undefined,{apiKeyId:key.id,roles:['OWNER']})).errors).toBeUndefined();
+});

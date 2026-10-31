@@ -45,7 +45,7 @@ export type HealthDb = Pick<PrismaClient, '$queryRaw'>;
 export function mountHealthRoutes(
   app: Express,
   db: HealthDb,
-  { timeoutMs = HEALTH_DB_TIMEOUT_MS }: { timeoutMs?: number } = {},
+  { timeoutMs = HEALTH_DB_TIMEOUT_MS, checkConfiguration }: { timeoutMs?: number; checkConfiguration?: () => Promise<void> } = {},
 ): void {
   let inFlight: Promise<void> | null = null;
 
@@ -53,7 +53,7 @@ export function mountHealthRoutes(
   const probe = (): Promise<void> => {
     if (!inFlight) {
       inFlight = Promise.resolve(db.$queryRaw`SELECT 1`)
-        .then(() => undefined)
+        .then(async () => { await checkConfiguration?.(); })
         .finally(() => {
           inFlight = null;
         });

@@ -223,3 +223,50 @@ it('#1793 fail-open rolls back an actually written partial dimension before cont
   });
   expect(await used()).toEqual([]);
 });
+
+it('#1793 a partially missing policy set is readiness failure, not env re-seeding',async()=>{
+  await db.rateLimitPolicy.delete({where:{fieldClass:'FAN_OUT_READS'}});
+  await expect(assertRateReadiness(db)).rejects.toThrow('readiness');
+  expect(await db.rateLimitPolicy.count()).toBe(4);
+});
+
+it('#1793 store outage cannot turn an empty or forged internal identity into an exemption',async()=>{
+  const fake={$transaction:vi.fn().mockRejectedValue(Object.assign(new Error('down'),{errorCode:'P1001'}))} as any;
+  await expect(admitRate(fake,'FAN_OUT_READS',{internal:false})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+  await expect(admitRate(fake,'FAN_OUT_READS',{principal:'USER:a',internal:true})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+  expect(fake.$transaction).not.toHaveBeenCalled();
+});
+
+it('#1793 unreadable policy row is not a malformed row and leaves a usable fail-open transaction',async()=>{
+  await db.$transaction(async tx=>{
+    const proxy=new Proxy(tx,{get(target,key){
+      if(key==='rateLimitPolicy')return {findUnique:async()=>{throw Object.assign(new Error('unreadable'),{code:'P1001'});}};
+      return Reflect.get(target,key);
+    }});
+    await expect(admitRateInTx(proxy,'FAN_OUT_READS',id)).resolves.toMatchObject({admitted:true});
+    expect(await tx.rateLimitBucket.count()).toBe(0);
+  });
+});
+
+it('#1793 a missing manifest cannot re-seed a fresh secret over retained allowance state',async()=>{
+  await policy();await admitRate(db,'FAN_OUT_READS',id);
+  const before=await used();await db.rateLimitManifest.delete({where:{id:'global'}});
+  vi.stubEnv('RATE_LIMIT_KEYRING',JSON.stringify({current:'different',keys:{different:'4'.repeat(64)}}));
+  await expect(assertRateReadiness(db)).rejects.toThrow('readiness');
+  expect(await db.rateLimitManifest.count()).toBe(0);
+  expect(await used()).toEqual(before);
+});
+
+it.each(['CREDENTIALS','OUTBOUND'] as const)('#1793 ruled unknown-mode %s policy outage refuses even during LOG_ONLY, no cache',async fieldClass=>{
+  for(const enforcementMode of ['LOG_ONLY','ENFORCING']){
+    await policy(fieldClass,{enforcementMode});
+    await db.$transaction(async tx=>{
+      const proxy=new Proxy(tx,{get(target,key){
+        if(key==='rateLimitPolicy')return {findUnique:async()=>{throw Object.assign(new Error('policy unavailable'),{code:'P1001'});}};
+        return Reflect.get(target,key);
+      }});
+      await expect(admitRateInTx(proxy,fieldClass,id)).rejects.toMatchObject({extensions:{code:'RATE_LIMITED',fieldClass,retryAfterSeconds:fieldClass==='CREDENTIALS'?900:3600}});
+      expect(await tx.rateLimitBucket.count()).toBe(0);
+    });
+  }
+});

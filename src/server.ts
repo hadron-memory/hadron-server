@@ -1,4 +1,4 @@
-import { assertRateReadiness, cleanupRateBuckets } from './lib/rateLimit/index.js';
+import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
@@ -1845,7 +1845,7 @@ export async function createServer(): Promise<Express> {
 
   // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
   // unhealthy. See src/api/health.ts.
-  mountHealthRoutes(app, db);
+  mountHealthRoutes(app, db, { checkConfiguration: () => checkRateConfiguration(db) });
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.
