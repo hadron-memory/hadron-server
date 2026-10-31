@@ -348,17 +348,26 @@ export async function sendMagicLink(
 
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
 
-  await getResend().emails.send({
-    from: fromAddress,
-    to: email,
-    subject: 'Sign in to Hadron',
-    html: `
+  // #2988: the SDK resolves a refused send as `{ data: null, error }`; an unchecked await reported it as sent.
+  // Throwing lets both callers answer a fault, and the token that can no longer be delivered is removed.
+  try {
+    assertProviderAck(
+      await getResend().emails.send({
+        from: fromAddress,
+        to: email,
+        subject: 'Sign in to Hadron',
+        html: `
       <p>Click the link below to sign in to Hadron:</p>
       <p><a href="${verifyUrl}">Sign in to Hadron</a></p>
       <p>This link expires in ${TOKEN_EXPIRY_MINUTES} minutes.</p>
       <p>If you didn't request this, you can safely ignore this email.</p>
     `,
-  });
+      }),
+    );
+  } catch (err) {
+    await db.emailVerificationToken.deleteMany({ where: { token } });
+    throw err;
+  }
 }
 
 /**
