@@ -1,5 +1,6 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
+import { authorizedTriggerLabel } from './resolvers.appRun.js';
 import { plainRunFailure } from '../../../lib/automation/plainReason.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
@@ -1263,7 +1264,16 @@ export const typeResolvers = {
     servedPrompt: servedPromptOwnerFields.runServedPrompt,
     // #2439: BigInt over the wire as a string, like UsageEvent.costMicroCents; NULL = unknown.
     costMicroCents: (r: { costMicroCents?: bigint | null }) => r.costMicroCents != null ? r.costMicroCents.toString() : null,
-    failureReason: (r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null }) => plainRunFailure(r),
+    failureReason: async (
+      r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null; appId?: string | null; triggerKind?: string | null; triggerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const f = r.failure as { code?: unknown; reason?: unknown } | null;
+      // Only a CHANGED reason can carry a name; look it up only then (#2642).
+      const changed = !!f && typeof f === 'object' && f.code === 'AUTOMATION_CHANGED' && f.reason !== 'MEMORY_UNREADABLE';
+      return plainRunFailure(r, changed ? { automationLabel: await authorizedTriggerLabel(ctx, r) } : undefined);
+    },
     /**
      * Spec 049 Phase 3b — the run's scope as the CALLER may read it: the mint
      * snapshot ∩ the caller's current access (a lens never grants), or null
