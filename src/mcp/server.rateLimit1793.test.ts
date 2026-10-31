@@ -11,7 +11,7 @@ import { signJwt } from '../auth/jwt.js';
 vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithub:vi.fn().mockResolvedValue({error:null})}));
 let server:Server|undefined,client:Client|undefined;
-beforeEach(async()=>{await cleanDb(db);});
+beforeEach(async()=>{client=undefined;server=undefined;await cleanDb(db);});
 afterEach(async()=>{await client?.close();server?.closeAllConnections();if(server)await new Promise<void>(r=>server!.close(()=>r()));});
 it('#1793 actual SDK and GraphQL share one search allowance and structured refusal',async()=>{
   const u=await db.user.create({data:{githubId:179399,githubUsername:'rate-wire',roles:['ADMIN']}});
@@ -29,6 +29,52 @@ it('#1793 actual SDK and GraphQL share one search allowance and structured refus
   const r=await fetch(base+'/graphql',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({query:'query { findNodes(limit:0) { total } }'})});
   expect(((await r.json()) as { errors: Array<{extensions:Record<string,unknown>}> }).errors[0].extensions).toMatchObject({code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'});
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
+});
+
+it('#1793 GraphQL threads the trusted transport IP into search and consent admission',async()=>{
+  const u=await db.user.create({data:{githubId:179398,githubUsername:'rate-http-ip',roles:['ADMIN']}});
+  const target=await db.user.create({data:{githubId:179397,githubUsername:'rate-http-target'}});
+  const app=await createServer();
+  // The loopback peer is NOT a trusted production ingress. Forged forwarding
+  // headers must not replace the socket address under this CIDR predicate.
+  app.set('trust proxy',['203.0.113.0/24']);
+  server=httpServer(app);await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['ADMIN']});
+  await db.rateLimitPolicy.update({where:{fieldClass:'CREDENTIALS'},data:{enforcementMode:'ENFORCING'}});
+  const post=async(query:string,ip:string)=>{
+    const r=await fetch(base+'/graphql',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`,'X-Forwarded-For':ip},body:JSON.stringify({query})});
+    const body=await r.json() as {errors?:unknown};expect(body.errors).toBeUndefined();return body;
+  };
+  await post('query { findNodes(limit:0) { total } }','198.51.100.1');
+  await post('query { findNodes(limit:0) { total } }','198.51.100.2');
+  const buckets=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS',dimension:'ip'}});
+  expect(buckets).toHaveLength(1);expect(buckets[0].used).toBe(2n);
+  await post(`mutation { beginMergeUsersConsent(source:"${u.id}",target:"${target.id}") { proof expiresAt } }`,'198.51.100.3');
+  expect(await db.rateLimitBucket.count({where:{fieldClass:'CREDENTIALS',dimension:'ip'}})).toBe(1);
+  expect(await db.userMergeConsent.count()).toBe(1);
+});
+
+it('#1793 each MCP tool call uses its current request IP, not the initialize address',async()=>{
+  const u=await db.user.create({data:{githubId:179396,githubUsername:'rate-mcp-ip',roles:['ADMIN']}});
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['ADMIN']});
+  let ip='198.51.100.10';
+  client=new Client({name:'rate1793-ip',version:'1'});
+  // Test-mode proxy trust permits this controlled synthetic ingress identity.
+  // This does not assert that production trusts client-supplied forwarding.
+  await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{
+    requestInit:{headers:{Authorization:`Bearer ${token}`}},
+    fetch:(url,init)=>{const headers=new Headers(init?.headers);headers.set('X-Forwarded-For',ip);return fetch(url,{...init,headers});},
+  }));
+  const read=()=>client!.callTool({name:'hadron_find_nodes',arguments:{query:'*',allMemories:true,limit:1}});
+  expect((await read()).isError).not.toBe(true);
+  ip='198.51.100.11';
+  expect((await read()).isError).not.toBe(true);
+  const buckets=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS',dimension:'ip'}});
+  expect(buckets).toHaveLength(2);expect(buckets.map(r=>r.used)).toEqual([1n,1n]);
+  expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([2n]);
 });
 
 it('#1793 live manifest/key disagreement makes existing health readiness fail without exposing secrets',async()=>{
