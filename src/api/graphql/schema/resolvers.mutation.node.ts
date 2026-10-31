@@ -1,6 +1,7 @@
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { currentActor } from '../../../lib/requestActor.js';
+import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
@@ -951,8 +952,8 @@ async function writeNodeCoreRaw(
       // moves (D3), and on the update-by-PK path writing the caller-supplied
       // loc back could undo a concurrent move.
       const include = {
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
+        outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+        incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       const inWriteTransaction = <T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> =>
         opts?.transaction
@@ -2204,8 +2205,8 @@ export const nodeMoveOps = {
       const isSameSlot = !crossMemory && destLoc === source.loc;
 
       const withEdges = {
-        outgoingEdges: { include: { target: true } },
-        incomingEdges: { include: { source: true } },
+        outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+        incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       } as const;
 
       try {
@@ -4420,8 +4421,8 @@ export const nodeMutations = {
       const finalNode = (await ctx.db.node.findUnique({
         where: { id: target.id },
         include: {
-          outgoingEdges: { include: { target: true } },
-          incomingEdges: { include: { source: true } },
+          outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+          incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
         },
       }))!;
       if (tgtEnc.isEncrypted && sessionKeyCache.getByMemoryId(tgtEnc.id)) {
@@ -4778,7 +4779,7 @@ export const nodeMutations = {
         const restored = await tx.node.update({
           where: { id: current.id },
           data: writeData,
-          include: { outgoingEdges: { include: { target: true } }, incomingEdges: { include: { source: true } } },
+          include: { outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() }, incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() } },
         });
         // #2040 — the restored text is re-checked: an old revision can hold a tag
         // that would now make a cycle. A refusal rolls the restore back.

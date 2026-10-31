@@ -79,7 +79,7 @@ it.each(['sorted', 'reversed'] as const)('node and nodeBatch list edges by loc t
 
 it.each(['sorted', 'reversed'] as const)('over the edge budget both physical orders fail loudly with no partial list (inserted %s)', async (order) => {
   await seedEdges(order);
-  vi.spyOn(batchRead, 'BATCH_READ_MAX_EDGES', 'get').mockReturnValue(7);
+  vi.spyOn(batchRead, 'BATCH_READ_MAX_EDGES', 'get').mockReturnValue(7 as never);
   const response = await run(`query($refs:[ID!]){ nodeBatch(refs:$refs){ nodes{ ${EDGES} } } }`, { refs: [ids.s] });
   expect(response.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   expect(JSON.stringify(response.errors)).toContain('edges');

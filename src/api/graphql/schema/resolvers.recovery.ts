@@ -2,6 +2,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type Node } from '../../../generated/prisma/index.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
+import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { NodeNotFoundError, MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { decryptNodeFields } from '../../../lib/nodeCrypto.js';
@@ -229,7 +230,7 @@ export const recoveryMutations = {
         ORDER BY node_id FOR UPDATE`;
       const lockedNodeIds = new Set(locked.map((node) => node.id));
       if (lockedMeta.some((member) => !lockedNodeIds.has(member.node_id))) throw changed();
-      const current = await tx.node.findUnique({ where: { id: candidate.id }, include: { outgoingEdges: { include: { target: true } } } });
+      const current = await tx.node.findUnique({ where: { id: candidate.id }, include: { outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() } } });
       if (!current) throw nodeNotFoundError(args.nodeRef);
       if (current.memoryId !== memory.id || current.loc !== candidate.loc) throw changed();
       // The mutation returns content. Validate key custody before any visible state change, not after commit.
@@ -254,7 +255,7 @@ export const recoveryMutations = {
       // Only threads deleted by this target's deletion return; independently
       // deleted ADMIN/AUTHOR/MANAGER threads retain their own deletion cause.
       await restoreThreadsOfTargets(tx, [current.id]);
-      const node = await tx.node.findUniqueOrThrow({ where: { id: current.id }, include: { outgoingEdges: { include: { target: true } } } });
+      const node = await tx.node.findUniqueOrThrow({ where: { id: current.id }, include: { outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() } } });
       return { node, changed: true };
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch((error: unknown) => {
       if (isDeadlockVictim(error)) throw changed();

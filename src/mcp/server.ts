@@ -311,6 +311,7 @@ import {
   teamAttentionAvailable,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
+import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
@@ -1551,8 +1552,8 @@ type ReadProjectionNode = {
 };
 
 const readProjectionInclude = {
-  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } } },
-  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } } },
+  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } }, orderBy: edgeDisplayOrder() },
+  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } }, orderBy: edgeDisplayOrder() },
   memory: { select: { isEncrypted: true } },
 } as const;
 
@@ -5569,10 +5570,12 @@ export function createMcpServerInstance(
           outgoingEdges: {
             include: { target: true },
             where: { target: { deletedAt: null } },
+            orderBy: edgeDisplayOrder(),
           },
           incomingEdges: {
             include: { source: true },
             where: { source: { deletedAt: null } },
+            orderBy: edgeDisplayOrder(),
           },
         },
       });
@@ -8328,6 +8331,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         outgoingEdges: {
           where: { deletedAt: null, target: { deletedAt: null } },
           include: { target: true },
+          // #2967 — run resolution order (cor:dmo:060:03): priority, loc, id.
+          orderBy: edgeRunOrder(),
         },
       },
     });
