@@ -14,8 +14,8 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { startup } from '../controller/startup.js';
 import { createServer } from '../server.js';
-import * as health from './health.js';
-import type { HealthDb } from './health.js';
+import { createReadiness, mountHealthRoutes } from './health.js';
+import type { HealthDb, ReadinessSource, StartupState } from './health.js';
 
 // S2: a memory whose sync fails. The real startup() runs; only the per-memory
 // sync is replaced, and it reports a failure the way a bad clone does.
@@ -23,8 +23,6 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
   syncGraphFromGithub: vi.fn(async () => ({ error: 'clone failed: secret-host' })),
 }));
 
-/** The readiness inputs as the route reads them, for pins that set a state directly. */
-type Source = { startup(): 'starting' | 'startup_failed' | 'settled'; stopping(): boolean };
 
 const servers: Server[] = [];
 
@@ -38,28 +36,19 @@ async function listen(app: express.Express): Promise<string> {
   return `http://127.0.0.1:${address.port}`;
 }
 
-async function serve(healthDb: HealthDb, readiness: Source, timeoutMs?: number): Promise<string> {
+async function serve(healthDb: HealthDb, readiness: ReadinessSource, timeoutMs?: number): Promise<string> {
   const app = express();
-  health.mountHealthRoutes(app, healthDb, { readiness, ...(timeoutMs === undefined ? {} : { timeoutMs }) } as never);
+  mountHealthRoutes(app, healthDb, { readiness, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
   return listen(app);
 }
 
-const source = (state: ReturnType<Source['startup']>, stopping = false): Source => ({
+const source = (state: StartupState, stopping = false): ReadinessSource => ({
   startup: () => state,
   stopping: () => stopping,
 });
 
 /** The readiness tracker the entry point creates (src/index.ts). */
-function tracker() {
-  const create = (health as Record<string, unknown>).createReadiness as undefined | (() => {
-    startup(): 'starting' | 'startup_failed' | 'settled';
-    stopping(): boolean;
-    trackFirstStartup(attempt: Promise<unknown>, onError?: (err: unknown) => void): void;
-    markStopping(): void;
-  });
-  if (typeof create !== 'function') throw new Error('health.ts exports no createReadiness (#2998 not built)');
-  return create();
-}
+const tracker = createReadiness;
 
 async function get(base: string, path: string) {
   const res = await fetch(`${base}${path}`);
@@ -167,7 +156,7 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
       $queryRaw: (() => {
         calls += 1;
         return new Promise<void>((_r, rej) => (rejectQuery = rej));
-      }) as never,
+      }) as HealthDb['$queryRaw'],
     };
     const base = await serve(failing, source('settled'), 5_000);
     const probes = [fetch(`${base}/ready`), fetch(`${base}/health`), fetch(`${base}/ready`)];
@@ -184,7 +173,7 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
   });
 
   it('S5: a database that hangs past the bound reads database_unavailable', async () => {
-    const hung: HealthDb = { $queryRaw: (() => new Promise<void>(() => {})) as never };
+    const hung: HealthDb = { $queryRaw: (() => new Promise<void>(() => {})) as HealthDb['$queryRaw'] };
     const base = await serve(hung, source('settled'), 200);
     const ready = await get(base, '/ready');
     expect(ready.status).toBe(503);
@@ -204,6 +193,29 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
     expect(ready.cache).toBe('no-store');
     // /health keeps answering liveness while the server drains.
     expect((await get(base, '/health')).status).toBe(200);
+  });
+
+  it('a /ready probe in flight when shutdown begins answers stopping, whatever the database says', async () => {
+    for (const outcome of ['passes', 'fails'] as const) {
+      let settleQuery!: () => void;
+      const deferred: HealthDb = {
+        $queryRaw: (() =>
+          new Promise<void>((resolve, reject) => {
+            settleQuery = outcome === 'passes' ? () => resolve() : () => reject(new Error('P1001'));
+          })) as HealthDb['$queryRaw'],
+      };
+      const r = tracker();
+      r.trackFirstStartup(Promise.resolve('ran'));
+      await settle();
+      const base = await serve(deferred, r, 5_000);
+      const pending = get(base, '/ready');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      r.markStopping();
+      settleQuery();
+      const ready = await pending;
+      expect(ready.status).toBe(503);
+      expect(ready.body).toBe(JSON.stringify({ ok: false, error: 'stopping' }));
+    }
   });
 
   it('stopping wins over every other state', async () => {
@@ -244,7 +256,7 @@ describe('GET /ready (#2998, cor:api:270:01)', () => {
 describe('createServer mounts /ready from the readiness it is given (#2998)', () => {
   it('serves the passed readiness', async () => {
     const r = tracker();
-    const app = await (createServer as (opts?: unknown) => Promise<express.Express>)({ readiness: r });
+    const app = await createServer({ readiness: r });
     const base = await listen(app);
     expect(JSON.parse((await get(base, '/ready')).body)).toEqual({ ok: false, error: 'starting' });
     r.trackFirstStartup(Promise.resolve('ran'));

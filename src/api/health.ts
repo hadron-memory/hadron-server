@@ -111,7 +111,8 @@ export function createReadiness(): Readiness {
  * shutdown has begun; 503 `starting` while the first startup attempt is
  * pending; 503 `startup_failed` if it rejected; then the same database check
  * as `/health` (the same in-flight query, the same bound): 503
- * `database_unavailable` or 200 `{ ok: true }`. Unauthenticated, no side
+ * `database_unavailable` or 200 `{ ok: true }`, unless shutdown began while
+ * that probe was in flight, which still answers `stopping`. Unauthenticated, no side
  * effects, `Cache-Control: no-store`. Without `readiness` (tests that mount
  * only `/health`), `/ready` reads a source that never saw a startup: `starting`.
  */
@@ -177,7 +178,12 @@ export function mountHealthRoutes(
       res.status(503).json({ ok: false, error: startup === 'starting' ? 'starting' : 'startup_failed' });
       return;
     }
-    if (await databaseAnswers('ready')) {
+    const databaseOk = await databaseAnswers('ready');
+    // Shutdown may have begun while the probe was in flight: stopping still
+    // wins, whatever the database answered.
+    if (readiness.stopping()) {
+      res.status(503).json({ ok: false, error: 'stopping' });
+    } else if (databaseOk) {
       res.json({ ok: true });
     } else {
       res.status(503).json({ ok: false, error: 'database_unavailable' });
