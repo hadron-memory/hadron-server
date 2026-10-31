@@ -17,6 +17,7 @@ import * as batchRead from '../../../lib/batchRead.js';
 let memoryId: string;
 let userId: string;
 let orgSlug: string;
+let orgId: string;
 let ids: { s: string; targets: Record<string, string>; sources: Record<string, string> };
 
 const LETTERS = ['a', 'b', 'c', 'd', 'e'] as const;
@@ -28,6 +29,7 @@ beforeEach(async () => {
   const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'edge2967.example', graphName: 'edgemem' });
   memoryId = graph.id;
   orgSlug = org.urn ?? 'edge2967.example';
+  orgId = org.id;
   userId = (await db.user.create({ data: { handle: 'edge-probe' } })).id;
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
   const mk = (loc: string, extra: Record<string, unknown> = {}) =>
@@ -83,6 +85,11 @@ it.each(['sorted', 'reversed'] as const)('over the edge budget both physical ord
   const response = await run(`query($refs:[ID!]){ nodeBatch(refs:$refs){ nodes{ ${EDGES} } } }`, { refs: [ids.s] });
   expect(response.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   expect(JSON.stringify(response.errors)).toContain('edges');
+  // cor:api:040:02 (the Proposed edge-row bound, server#2770): a refused read carries no cut edge
+  // list. `nodeBatch` is non-null, so the whole field nulls into `data`; no node, no edges.
+  expect(response.data ?? null).toBeNull();
+  expect(JSON.stringify(response)).not.toContain('ord:s:out:');
+  expect(JSON.stringify(response)).not.toContain('ord:s:in:');
 });
 
 it.each(['sorted', 'reversed'] as const)('renderRunNode resolves referenced nodes by priority, loc, id (inserted %s)', async (order) => {
@@ -91,4 +98,34 @@ it.each(['sorted', 'reversed'] as const)('renderRunNode resolves referenced node
   expect(response.errors).toBeUndefined();
   const text = (response.data as any).renderRunNode as string;
   expect([...text.matchAll(/CONTENT-ord:t:(\w)/g)].map((m) => m[1])).toEqual(PRIORITY_ORDER);
+});
+
+it.each(['sorted', 'reversed'] as const)('runTask (render-only) bundles referenced nodes by priority, loc, id (inserted %s)', async (order) => {
+  await seedEdges(order);
+  // Priority disagrees with loc (loc order is a..e, priority order is e,b,d,c,a); b and d tie on priority.
+  const response = await run(`mutation($ref:String!){ runTask(nodeRef:$ref) }`, { ref: `hrn:node:${orgSlug}:edgemem:ord:s` });
+  expect(response.errors).toBeUndefined();
+  const text = (response.data as any).runTask as string;
+  expect([...text.matchAll(/CONTENT-ord:t:(\w)/g)].map((m) => m[1])).toEqual(PRIORITY_ORDER);
+});
+
+it.each(['low-first', 'high-first'] as const)('equal-loc incoming edges from two memories order by id (inserted %s)', async (insert) => {
+  // Edge is unique on (loc, memoryId) with memoryId the SOURCE memory's, so an equal loc is only
+  // reachable across source memories, i.e. for incoming edges. Same loc, same priority: only id decides.
+  const other = await db.memory.create({
+    data: { id: generateId(), organizationId: orgId, urn: 'edge2967.example:othermem', name: 'othermem', class: 'knowledge' },
+  });
+  const foreign = await db.node.create({ data: { id: generateId(), memoryId: other.id, loc: 'ord:foreign', name: 'foreign', content: 'x' } });
+  const [lo, hi] = [generateId(), generateId()].sort();
+  const mine = { id: hi, memoryId, sourceId: ids.sources.a, targetId: ids.s, loc: 'ord:tie', name: 'ref', priority: 0 };
+  const theirs = { id: lo, memoryId: other.id, sourceId: foreign.id, targetId: ids.s, loc: 'ord:tie', name: 'ref', priority: 0 };
+  await db.edge.deleteMany({ where: { memoryId: { in: [memoryId, other.id] } } });
+  // Physical insert order opposes the expected order in the 'high-first' case, matches it otherwise.
+  for (const e of insert === 'high-first' ? [mine, theirs] : [theirs, mine]) await db.edge.create({ data: e });
+  const single = await run(`query($ref:ID!){ node(ref:$ref){ incomingEdges { id loc } } }`, { ref: ids.s });
+  expect(single.errors).toBeUndefined();
+  expect((single.data as any).node.incomingEdges.map((e: { id: string }) => e.id)).toEqual([lo, hi]);
+  const batch = await run(`query($refs:[ID!]){ nodeBatch(refs:$refs){ nodes{ incomingEdges { id loc } } } }`, { refs: [ids.s] });
+  expect(batch.errors).toBeUndefined();
+  expect((batch.data as any).nodeBatch.nodes[0].incomingEdges.map((e: { id: string }) => e.id)).toEqual([lo, hi]);
 });
