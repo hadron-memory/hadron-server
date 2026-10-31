@@ -1758,6 +1758,11 @@ export const workerMutations = {
       });
     }
     await requireWorkerStaffAccess(ctx, app);
+    // A call naming neither field changes nothing, but a retired worker still refuses, as the SDL and
+    // MCP descriptions say (the behavior before #2712; #2725 blind P3).
+    if (worker.retiredAt) {
+      throw new GraphQLError('This worker is retired.', { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } });
+    }
     return ctx.db.worker.findUniqueOrThrow({ where: { id: worker.id } });
   },
 

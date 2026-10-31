@@ -99,6 +99,10 @@ describe('#1602 signature/trailer', () => {
     await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
     await expect(update({ signature: 'retired' })).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
   });
+  it('a fieldless call on a retired worker refuses too (#2725 blind P3, main parity)', async () => {
+    await db.worker.update({ where: { id: worker.id }, data: { retiredAt: new Date() } });
+    await expect(update({})).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED', workerId: worker.id } });
+  });
   it('no-worker chat/headless keeps signature and trailer empty', () => {
     // The served chat path's binding (serveChatPrompt): the Agent's own values, no worker.
     const values = agentPlatformValues({ name: 'Agent', urn: 'sig.example:agent', personaRole: 'engineer' });
