@@ -36,6 +36,7 @@ import { chatQueries } from './resolvers.query.chat.js';
 import { sessionQueries } from './resolvers.query.session.js';
 import { slackQueries } from './resolvers.query.slack.js';
 import { mcpQueries } from './resolvers.query.mcp.js';
+import { webPollMutations, webPollQueries } from './resolvers.webPoll.js';
 import { homeAssistantQueries } from './resolvers.query.homeAssistant.js';
 import { resendSenderQueries } from './resolvers.query.resendSender.js';
 import { secretMutations, secretQueries } from './resolvers.secret.js';
@@ -212,6 +213,7 @@ export const resolvers = {
     ...sessionQueries,
     ...slackQueries,
     ...mcpQueries,
+    ...webPollQueries,
     ...homeAssistantQueries,
     ...resendSenderQueries,
     ...secretQueries,
@@ -279,6 +281,7 @@ export const resolvers = {
     ...sessionMutations,
     ...slackMutations,
     ...mcpMutations,
+    ...webPollMutations,
     ...homeAssistantMutations,
     ...resendSenderMutations,
     ...secretMutations,

@@ -13,6 +13,7 @@ import {
 import { loadWebFetchAuthSecret } from '../secrets.js';
 import { isSecretOwnerType, SECRET_OWNER_TYPES, SECRET_SCOPE_ORDER, type SecretOwnerType } from '../../secrets.js';
 import { redactUrl } from '../../webUrl.js';
+import { cancelOrgWebPoll } from '../../webPolls.js';
 import type { RunToolDef } from './types.js';
 import { coerceHeaders } from './webTools.js';
 
@@ -203,14 +204,9 @@ export const webPollCancel: RunToolDef = {
   execute: async (ctx, args) => {
     const jobId = typeof args.jobId === 'string' ? args.jobId : '';
     if (!jobId) throw new Error('web_poll_cancel: "jobId" is required.');
-    const binding = await ctx.db.webFetchPollBinding.findFirst({
-      where: { jobId, organizationId: ctx.run.organizationId },
-      select: { cancelledAt: true },
-    });
-    if (!binding) throw new Error('web_poll_cancel: job not found in this organization.');
-    if (binding.cancelledAt) return { jobId, cancelled: true, alreadyCancelled: true };
-    await cancelPoll(jobId);
-    await ctx.db.webFetchPollBinding.update({ where: { jobId }, data: { cancelledAt: new Date() } });
+    const result = await cancelOrgWebPoll(ctx.db, ctx.run.organizationId, jobId);
+    if (!result) throw new Error('web_poll_cancel: job not found in this organization.');
+    if (result.alreadyCancelled) return { jobId, cancelled: true, alreadyCancelled: true };
     ctx.log(`web_poll_cancel ${JSON.stringify({ jobId })}`);
     return { jobId, cancelled: true };
   },
