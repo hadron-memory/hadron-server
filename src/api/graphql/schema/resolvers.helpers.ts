@@ -107,9 +107,9 @@ export interface Context {
   db: PrismaClient;
   /**
    * #2044: set ONLY by a door that re-runs its write gate on a transaction client holding the
-   * install memory's authority fence (writeNodeCore). On the pooled client an install memory's
+   * install memory's authority fence (writeNodeCore and the #2734 node-write doors). On the pooled client an install memory's
    * write gate otherwise answers NO: a writer that never rechecks in its own transaction
-   * (restoreNodeRevision, moveNode, deleteNode, ...) cannot hold the fence, so it fails closed.
+   * cannot hold the fence, so it fails closed.
    */
   installWritePreflight?: boolean;
   /**

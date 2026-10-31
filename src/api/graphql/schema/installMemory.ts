@@ -302,6 +302,19 @@ export async function memoryAuthorityAnchors(
 }
 
 /**
+ * #2734: acquire the COMPLETE multi-memory authority set before taking any of
+ * its rows. Calling the one-memory helper in source/destination order could
+ * invert App/Agent anchors across two install memories. Existing row helpers
+ * then re-enter the already-owned anchors before locking audience rows.
+ */
+export async function lockInstallAuthoritiesFirst(tx: Prisma.TransactionClient, ctx: Context, memoryIds: readonly string[]): Promise<void> {
+  const ids = [...new Set(memoryIds)].sort();
+  const anchors = (await Promise.all(ids.map(id => memoryAuthorityAnchors(tx as never, ctx, id)))).flat();
+  await lockAuthorityAnchors(tx, anchors, 'shared');
+  for (const id of ids) await lockInstallAuthorityFirst(tx, ctx, id);
+}
+
+/**
  * The first statement of any transaction that will write or delete `memoryId`: if it is an install memory, or (#2206)
  * a live Agent's own system memory, take its authority before any memory, node or loc lock. A plain read of the
  * identity (no lock), so an ordinary memory costs one or two indexed selects.
