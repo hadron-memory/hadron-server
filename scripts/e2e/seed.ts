@@ -5,6 +5,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { PrismaClient } from '../../src/generated/prisma/index.js';
 import { computeApprovalHash } from '../../src/lib/approvalHash.js';
 import { ensureCurrentNodeRevisionInTransaction } from '../../src/lib/nodeRevisionSnapshot.js';
+import { resolveServedBootPrompt } from '../../src/lib/bootPrompt/serve.js';
+import { seedE2eBootPrompt, E2E_BOOT_PROMPT } from '../../src/test/e2eBootPrompt.js';
 
 // Separate from the narrative dev seed: every principal has global READER
 // except the org-less platform-admin fixture, so org-role journeys exercise
@@ -90,6 +92,9 @@ async function seed() {
         urn: `${org}:${role}`, name: role, personaRole: role,
         systemMemoryId: memoryIds.system, visibility: 'ORGANIZATION' } });
       await db.appAgent.create({ data: { appId, agentId } });
+      // #2712: no literal prompt and no serving switch any more, so a stock Agent binds only with an approved compiled prompt.
+      await seedE2eBootPrompt(db, { agentId, memoryId: memoryIds.system, slot: role, approvedAt: date,
+        idFor: part => id(`${org}:${role}:boot-${part}`) });
       await db.agentMemoryItem.create({ data: { id: id(`${org}:${role}:item`),
         agentId, memoryId: memoryIds.app, role: 'read' } });
       const workerMemoryId = id(`${org}:${role}:worker-memory`);
@@ -167,6 +172,12 @@ async function check() {
       assert(await db.node.count({ where: { memoryId: memory.id } }) > 0);
     }
     assert.equal(await db.worker.count({ where: { appId: id(`${org}:team`) } }), 2);
+    // Every seeded worker's bind is serveable: the same resolution startSession runs (#2725 local review P2).
+    for (const w of await db.worker.findMany({ where: { appId: id(`${org}:team`) }, include: { agent: true } })) {
+      const served = await resolveServedBootPrompt(db, { surface: 'bind', appId: w.appId, agent: w.agent, workerId: w.id });
+      assert.equal(served.content, E2E_BOOT_PROMPT);
+      assert.equal(served.pointerLevel, 'AGENT');
+    }
     assert.equal(await db.appKey.count({ where: { appId: id(`${org}:team`) } }), 1);
     const specs = await db.node.findMany({ where: { memoryId: id(`${org}:specs`) } });
     assert.equal(specs.length, 2);

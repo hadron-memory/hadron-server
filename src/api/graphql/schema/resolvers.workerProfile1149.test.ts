@@ -24,6 +24,7 @@ import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -142,6 +143,17 @@ describe('#1149 Profile tier: a signed-in stranger who names a worker reads its 
       hasLiveSession: null, family: null, lastActiveAt: null, continuity: null,
       createdBy: null, retiredBy: null, app: null, bootPromptRef: null,
     });
+  });
+
+  it('prompt masks even when the worker serves one; an internals reader sees it (#2725 local review P3)', async () => {
+    // Without a servable prompt the field is null for everyone, so the mask above could not tell a working gate from none.
+    await serveAgentBootPrompt(db, orgAgent.id, 'Served profile prompt for {{worker.name}}.');
+    const masked = await readWorker(teamDan.id, ctx(stranger.id), 'prompt');
+    expect(masked.errors).toBeUndefined();
+    expect(masked.data?.worker).toEqual({ prompt: null });
+    const seen = await readWorker(teamDan.id, ctx(contributor.id), 'prompt');
+    expect(seen.errors).toBeUndefined();
+    expect((seen.data?.worker as { prompt: string | null }).prompt).toContain('Served profile prompt for Dan.');
   });
 
   it('ownerName is the org atom for an org App', async () => {
