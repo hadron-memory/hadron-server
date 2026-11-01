@@ -78,7 +78,13 @@ export async function effectiveModelGroups(
   return [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-/** Full-string model glob matching; only `*` and `?` are special. No regex backtracking. */
+/**
+ * Full-string model glob matching; only `*` and `?` are special. No regex backtracking: an iterative two-pointer match
+ * that remembers only the LAST star (O(pattern x model)), and judges a pattern star BEFORE literal equality so a model
+ * that itself contains `*` or `?` is matched as literal text. ONE primitive for both the S3 readers
+ * (`matchingModelGroupNames`) and the S2 matcher filters (`modelMatchesPattern`), so the groups a worker shows are the
+ * groups the matcher judges it by.
+ */
 function matchesModel(pattern: string, model: string): boolean {
   let p = 0, m = 0, star = -1, retry = 0;
   while (m < model.length) {
@@ -89,6 +95,29 @@ function matchesModel(pattern: string, model: string): boolean {
   }
   while (pattern[p] === '*') p++;
   return p === pattern.length;
+}
+
+/** The glob primitive of the S2 filters: trimmed and case-insensitive, exactly as `matchingModelGroupNames` reads it. */
+export function modelMatchesPattern(pattern: string, model: string): boolean {
+  return matchesModel(pattern.trim().toLowerCase(), model.trim().toLowerCase());
+}
+
+/** Is `model` in the named group? No model (or a blank one), or a name no group carries, is in nothing. */
+export function modelInGroup(groups: EffectiveModelGroup[], name: string, model: string | null): boolean {
+  if (!model?.trim()) return false;
+  const g = groups.find((x) => x.name === name);
+  return !!g && g.patterns.some((p) => modelMatchesPattern(p, model));
+}
+
+/** The group requirements of a task, judged on one worker's model: In admits on any one, NotIn refuses on any one. */
+export function modelGroupsAllowed(
+  req: { modelGroupIn?: string[]; modelGroupNotIn?: string[] },
+  model: string | null,
+  groups: EffectiveModelGroup[],
+): boolean {
+  if (req.modelGroupIn && !req.modelGroupIn.some((n) => modelInGroup(groups, n, model))) return false;
+  if (req.modelGroupNotIn && req.modelGroupNotIn.some((n) => modelInGroup(groups, n, model))) return false;
+  return true;
 }
 
 /** Current membership (hrn:node:hadronmemory.com:specs:cor:agt:060:12), never authorization or family/tier inference. */

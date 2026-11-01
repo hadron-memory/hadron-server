@@ -72,6 +72,8 @@ import { loadLaunchableFamilies } from './hosts.js';
 import { launchForAssignment } from '../hostOperations/launch.js';
 import { PENDING_SESSION_END_SQL } from '../hostOperations/sessionEnd.js';
 import { normalizeFamily, tierOf, type ModelTier } from './family.js';
+import { effectiveModelGroups, modelGroupsAllowed, normalizeModelGroupName, type EffectiveModelGroup } from './modelGroups.js';
+import { locateTeamAgent } from '../../api/graphql/schema/resolvers.worker.js';
 
 /** On since T6 (#1709): a host can start an unbound worker, so the matcher assigns to one (see the file header). */
 export const MATCH_UNBOUND_LAUNCHABLE = true;
@@ -96,6 +98,9 @@ export type Requirements = {
    * (a stored `maxTier` key makes the requirements `invalid`).
    */
   minTier?: ModelTier;
+  /** #2831 S2 (cor:agt:060:12): group names (lowercase) the assignee's model must be in at least one of / in none of. */
+  modelGroupIn?: string[];
+  modelGroupNotIn?: string[];
 };
 
 const TIER_RANK: Readonly<Record<ModelTier, number>> = { low: 0, mid: 1, high: 2 };
@@ -117,6 +122,17 @@ export function parseRequirements(json: Prisma.JsonValue | null): Requirements {
   const familyIn = list(r.familyIn, true);
   const familyNotIn = list(r.familyNotIn, true);
   const excludeWorkerIds = list(r.excludeWorkerIds);
+  const groupList = (v: unknown): string[] | undefined => {
+    if (v == null) return undefined;
+    const names = Array.isArray(v) ? v.map(normalizeModelGroupName) : null;
+    if (!names || names.some((n) => n === null)) {
+      invalid = true;
+      return undefined;
+    }
+    return names as string[];
+  };
+  const modelGroupIn = groupList(r.modelGroupIn);
+  const modelGroupNotIn = groupList(r.modelGroupNotIn);
   if (r.role != null && (typeof r.role !== 'string' || !r.role.trim())) invalid = true;
   if (familyIn && familyNotIn) invalid = true;
   // #2252 D1: a tier names a hard minimum or the requirements are unusable; never "no bound". `maxTier` is not a field,
@@ -128,7 +144,25 @@ export function parseRequirements(json: Prisma.JsonValue | null): Requirements {
     role: typeof r.role === 'string' ? r.role.trim() : undefined,
     familyIn, familyNotIn, excludeWorkerIds,
     ...(isTier(r.minTier) ? { minTier: r.minTier } : {}),
+    ...(modelGroupIn ? { modelGroupIn } : {}),
+    ...(modelGroupNotIn ? { modelGroupNotIn } : {}),
   };
+}
+
+/**
+ * The App's effective model groups, live (cor:agt:060:12). `strict` refuses two Team Agents (the writers' typed
+ * refusal); the matcher is not strict: with two candidates it reads the App's own groups only, so the pass still runs.
+ */
+export async function loadAppModelGroups(db: Db, appId: string, opts: { strict?: boolean } = {}): Promise<EffectiveModelGroup[]> {
+  let teamAgentId: string | null = null;
+  try {
+    teamAgentId = (await locateTeamAgent({ db } as unknown as Context, appId, undefined)).id;
+  } catch (e) {
+    const code = (e as { extensions?: { code?: string } }).extensions?.code;
+    if (code === 'TEAM_AGENT_NOT_FOUND' || (code === 'TEAM_AGENT_AMBIGUOUS' && !opts.strict)) teamAgentId = null;
+    else throw e;
+  }
+  return effectiveModelGroups(db as Pick<Prisma.TransactionClient, 'modelGroup'>, appId, teamAgentId);
 }
 
 /**
@@ -155,7 +189,13 @@ export function tierPreference(tier: ModelTier | null): number {
  * The family a free worker would take this task as, or null: `eligibleFamily` (role, family, exclusion, name) AND the
  * tier rule. A tier never admits a worker the other rules keep out.
  */
-export function eligibleFor(req: Requirements, w: { id: string; role: string | null; freeFamilies: string[]; bound: boolean; bindingModel: string | null }): string | null {
+export function eligibleFor(
+  req: Requirements,
+  w: { id: string; role: string | null; freeFamilies: string[]; bound: boolean; bindingModel: string | null },
+  groups: EffectiveModelGroup[] = [],
+): string | null {
+  // #2831 S2: an unbound worker has no model, so it is in no group (fails every In, passes every NotIn).
+  if (!modelGroupsAllowed(req, w.bound ? w.bindingModel : null, groups)) return null;
   return tierAllowed(req, workerTier(w)) ? eligibleFamily(req, w) : null;
 }
 
@@ -388,6 +428,8 @@ async function stillFreeAs(tx: Prisma.TransactionClient, appId: string, workerId
   // #2252 D1: the hard bound, judged on the model read AFTER the session-row locks above, so a refresh that held a
   // session row while this waited is seen (an unbound worker is unknown). The preference order is the pass's snapshot.
   if (!tierAllowed(req, workerTier({ bound, bindingModel: activity?.bindingModel ?? null }))) return false;
+  // #2831 S2: groups are live, so they are read here, after the same locks, never from the pass's snapshot.
+  if ((req.modelGroupIn || req.modelGroupNotIn) && !modelGroupsAllowed(req, bound ? activity?.bindingModel ?? null : null, await loadAppModelGroups(tx, appId))) return false;
   const launchable = bound ? [] : (await loadLaunchableFamilies(tx, { workerIds: [workerId] }, decidedAt)).get(workerId) ?? [];
   const families = familiesOf({ bound, bindingFamily: activity?.bindingFamily ?? null, launchableFamilies: launchable });
   if (!families.includes(family)) return false;
@@ -468,6 +510,7 @@ export type MatchResult = { taskId: string; workerId: string; family: string };
 async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: MatcherHooks, anchor: number): Promise<MatchResult[]> {
   const out: MatchResult[] = [];
   let candidates: WorkerWorkState[] | null = null;
+  let groups: EffectiveModelGroup[] = [];
   let covering: Map<string, StopSignal[]> | null = null;
   const spent = new Set<string>();
   let after: { priority: number; createdAt: Date; id: string } | null = null;
@@ -489,6 +532,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
     if (candidates === null) {
       // #2022 (cor:agt:090:03): a worker a live stop signal covers is skipped, at every level; tryAssign re-checks.
       covering = await coveringSignals(db, appId, null, now);
+      groups = await loadAppModelGroups(db, appId);
       // #2252 D1: cheapest known tier first, unknown last, then least recently assigned (a snapshot, see `stillFreeAs`).
       candidates = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w) && !covering!.has(w.id))
         .sort((a, b) => tierPreference(workerTier(a)) - tierPreference(workerTier(b)) || compareRank(a, b));
@@ -500,7 +544,7 @@ async function matchApp(db: PrismaClient, appId: string, now: Date, hooks: Match
       const req = parseRequirements(task.requirements);
       for (const w of candidates) {
         if (spent.has(w.id)) continue;
-        const family = eligibleFor(req, w);
+        const family = eligibleFor(req, w, groups);
         if (!family) continue;
         const outcome = await tryAssign(db, task, w.id, family, now, hooks, anchor);
         // Assigned, or no longer free: either way this worker is spent for this run.
@@ -567,6 +611,7 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
   const covering = await coveringSignals(db, appId, null, now);
   const timeStopped = timeStoppedWorkers(covering);
   const free = (await loadWorkerWorkStates(db, appId, now, { bySession: true })).filter((w) => w.free && matchable(w));
+  const groups = await loadAppModelGroups(db, appId);
   const decisive = new Set<string>();
   let after: { priority: number; createdAt: Date; id: string } | null = null;
   for (;;) {
@@ -582,7 +627,7 @@ export async function recordStopHolds(db: PrismaClient, appId: string, now: Date
     for (const t of page) {
       if (t.createdByWorkerId && timeStopped.has(t.createdByWorkerId)) { decisive.add(t.id); continue; }
       const req = parseRequirements(t.requirements);
-      const eligible = free.filter((w) => eligibleFor(req, w) !== null);
+      const eligible = free.filter((w) => eligibleFor(req, w, groups) !== null);
       if (eligible.length > 0 && eligible.every((w) => covering.has(w.id))) decisive.add(t.id);
     }
     if (page.length < QUEUE_PAGE) break;

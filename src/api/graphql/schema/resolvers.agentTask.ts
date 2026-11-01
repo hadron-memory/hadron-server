@@ -109,7 +109,8 @@ import {
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
-import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
@@ -719,7 +720,7 @@ function normalizeTags(tags: readonly string[] | null | undefined): string[] {
   return out;
 }
 
-const REQUIREMENT_KEYS = new Set(['role', 'familyIn', 'familyNotIn', 'excludeWorkers', 'minTier']);
+const REQUIREMENT_KEYS = new Set(['role', 'familyIn', 'familyNotIn', 'excludeWorkers', 'minTier', 'modelGroupIn', 'modelGroupNotIn']);
 
 type RequirementsInput = {
   role?: string | null;
@@ -727,6 +728,8 @@ type RequirementsInput = {
   familyNotIn?: string[] | null;
   excludeWorkers?: string[] | null;
   minTier?: string | null;
+  modelGroupIn?: string[] | null;
+  modelGroupNotIn?: string[] | null;
 };
 
 /** The matcher's requirements (plan §3.1). Stored for T3; validated here. */
@@ -775,12 +778,34 @@ async function normalizeRequirements(
   if (input.minTier != null && input.minTier !== 'low' && input.minTier !== 'mid' && input.minTier !== 'high') {
     throw badInput('requirements.minTier must be low, mid or high.');
   }
+  // #2831 S2 (cor:agt:060:12): group names, lowercase; a name no effective group of this App carries is refused,
+  // naming it, so a typo never becomes a filter that silently matches no one (In) or everyone (NotIn).
+  const groupNames = (xs: string[] | null | undefined, field: string): string[] | null => {
+    const values = list(xs, field);
+    if (!values) return null;
+    const names = values.map((v) => {
+      const n = normalizeModelGroupName(v);
+      if (!n) throw badInput(`${field} entries are model group names: letters, digits, ".", "_" or "-", up to 64 characters.`);
+      return n;
+    });
+    return [...new Set(names)];
+  };
+  const modelGroupIn = groupNames(input.modelGroupIn, 'requirements.modelGroupIn');
+  const modelGroupNotIn = groupNames(input.modelGroupNotIn, 'requirements.modelGroupNotIn');
+  if (modelGroupIn || modelGroupNotIn) {
+    const known = new Set((await loadAppModelGroups(ctx.db, app.id, { strict: true })).map((g) => g.name));
+    for (const name of [...(modelGroupIn ?? []), ...(modelGroupNotIn ?? [])]) {
+      if (!known.has(name)) throw taskError('MODEL_GROUP_NOT_FOUND', `No model group named "${name}" is declared for this App.`, { name });
+    }
+  }
   const out: Prisma.InputJsonObject = {
     ...(role ? { role } : {}),
     ...(familyIn ? { familyIn } : {}),
     ...(familyNotIn ? { familyNotIn } : {}),
     ...(excludeWorkerIds ? { excludeWorkerIds } : {}),
     ...(input.minTier ? { minTier: input.minTier } : {}),
+    ...(modelGroupIn ? { modelGroupIn } : {}),
+    ...(modelGroupNotIn ? { modelGroupNotIn } : {}),
   };
   return Object.keys(out).length ? out : null;
 }
@@ -2186,6 +2211,8 @@ export const agentTaskFieldResolvers = {
         familyNotIn: (r.familyNotIn as string[]) ?? null,
         excludeWorkerIds: (r.excludeWorkerIds as string[]) ?? null,
         minTier: (r.minTier as string) ?? null,
+        modelGroupIn: (r.modelGroupIn as string[]) ?? null,
+        modelGroupNotIn: (r.modelGroupNotIn as string[]) ?? null,
       };
     },
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */

@@ -13741,6 +13741,10 @@ export const typeDefs = `#graphql
     excludeWorkerIds: [ID!]
     "The lowest model tier the assignee may run at: low, mid or high (hrn:node:hadronmemory.com:specs:cor:agt:060:06). Null when the task names none."
     minTier: String
+    "Model groups the assignee's model must be in at least one of (hrn:node:hadronmemory.com:specs:cor:agt:060:12). Null when the task names none."
+    modelGroupIn: [String!]
+    "Model groups the assignee's model must be in none of (hrn:node:hadronmemory.com:specs:cor:agt:060:12). Null when the task names none."
+    modelGroupNotIn: [String!]
   }
 
   input AgentTaskRequirementsInput {
@@ -13752,6 +13756,10 @@ export const typeDefs = `#graphql
     excludeWorkers: [String!]
     "The lowest model tier the assignee may run at: low, mid or high, in that order (hrn:node:hadronmemory.com:specs:cor:agt:060:06). A worker below it, or whose tier is unknown, is never matched; the lowest sufficient tier wins. There is no maximum."
     minTier: String
+    "Model groups of the App (hrn:node:hadronmemory.com:specs:cor:agt:060:12) the assignee's model must be in at least one of. A name no group of the App carries is refused. A worker with no model is in no group, so it never matches."
+    modelGroupIn: [String!]
+    "Model groups of the App (hrn:node:hadronmemory.com:specs:cor:agt:060:12) the assignee's model must be in none of. A name no group of the App carries is refused. A worker with no model is in no group, so it passes."
+    modelGroupNotIn: [String!]
   }
 
   "A finished task's result (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
