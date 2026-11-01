@@ -152,7 +152,7 @@ it('a recorded signature suppresses advice, while a covered non-carrier still wa
     const req = await resolvers.Mutation.requestNodeSignature(null, { nodeRef: n.id }, ctx());
     const key = softPasskey();
     await insertSoftPasskey(db, userId, key, { label: 'Synthetic test key', rpId: 'sign2063.example' });
-    const payload = signaturePayloadBytes('hadron-signature-v1', req);
+    const payload = signaturePayloadBytes('hadron-signature-v3', { nodeId: req.nodeId, approvalHash: req.approvalHash, requestId: req.id });
     await db.$transaction(tx => completeSigningRequestInTransaction(tx, req.id, {
       memoryId, signerId: userId, credentialId: key.credentialId,
       assertion: key.assert({ payload, origin: 'https://sign2063.example', rpId: 'sign2063.example' }),
