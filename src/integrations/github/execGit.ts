@@ -83,6 +83,7 @@
  * `GIT_CONFIG_PARAMETERS`, so a helper git spawns inherits them.
  */
 
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
 
@@ -115,9 +116,12 @@ export interface ExecGitOptions {
 export class GitCommandError extends Error {
   readonly code = 'GIT_COMMAND_FAILED';
 
-  constructor() {
+  readonly exitCode?: number;
+
+  constructor(error?: unknown) {
     super('Git command failed. Check the repository and branch, then retry.');
     this.name = 'GitCommandError';
+    this.exitCode = mirrorFailureMetadata(error, 'git', 'GIT_COMMAND_FAILED').exitCode;
   }
 }
 
@@ -135,7 +139,7 @@ export async function execGit(
 ): Promise<{ stdout: string; stderr: string }> {
   try {
     return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], options);
-  } catch {
-    throw new GitCommandError();
+  } catch (error) {
+    throw new GitCommandError(error);
   }
 }
