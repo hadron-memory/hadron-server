@@ -1,11 +1,26 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readdirSync } from 'node:fs';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
 import { resolvers, type Context } from './resolvers.js';
+
+// #2796: this file's projections go to its OWN graph root. The run's root
+// (process.env.GRAPHS_PATH) is shared by every worker, so a whole-root count
+// there also counted other files' legitimate writes. The private root lives
+// under the run root, so the run's teardown removes it even after a crash.
+let graphsPath: string;
+vi.mock('../../../config.js', async (original) => ({
+  ...await original<typeof import('../../../config.js')>(),
+  get GRAPHS_PATH() { return graphsPath; },
+}));
+beforeAll(() => { graphsPath = mkdtempSync(join(process.env.GRAPHS_PATH!, 'rootloc2730-')); });
+// Empty it per test, so one case's residue cannot mask the same residue in a later case.
+beforeEach(() => { rmSync(graphsPath, { recursive: true, force: true }); mkdirSync(graphsPath); });
+afterAll(() => rmSync(graphsPath, { recursive: true, force: true }));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -15,7 +30,18 @@ afterEach(() => vi.restoreAllMocks());
 const M = resolvers.Mutation as any;
 let org: any, app: any, agent: any, admin: any, outsider: any;
 const ctx = (userId: string): Context => ({ db, userId, roles: [] });
-const graphEntries = () => readdirSync(process.env.GRAPHS_PATH!).length;
+/** Every entry, at any depth, under this file's private graph root. */
+const graphEntries = () => readdirSync(graphsPath, { recursive: true }).length;
+
+/** Assert a refused create leaves no graph residue, with `interleave` run between the snapshots. */
+async function refusedWithoutResidue(create: () => Promise<unknown>, interleave: () => void = () => {}) {
+  const entries = graphEntries();
+  interleave();
+  await expect(create()).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  expect(await db.memory.count()).toBe(0);
+  expect(await db.node.count()).toBe(0);
+  expect(graphEntries()).toBe(entries);
+}
 
 type Door = { label: string; create: (name: string, who?: string) => Promise<any> };
 const doors = (): Door[] => [
@@ -60,19 +86,29 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
     const d = () => doors().find(x => x.label === door)!;
     for (const [label, name] of unprojectable) {
       it(`refuses ${label} as BAD_USER_INPUT and leaves no residue`, async () => {
-        const entries = graphEntries();
-        await expect(d().create(name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-        expect(await db.memory.count()).toBe(0);
-        expect(await db.node.count()).toBe(0);
-        expect(graphEntries()).toBe(entries);
+        await refusedWithoutResidue(() => d().create(name));
       });
     }
+    it('#2796 projects into this file\'s private graph root', async () => {
+      const entries = graphEntries();
+      await d().create(`Private root ${door}`);
+      expect(graphEntries()).toBeGreaterThan(entries);
+    });
     for (const [label, name] of admitted) {
       it(`still creates a memory and root for ${label}`, async () => {
         const memory = await d().create(name);
         expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
       });
     }
+    it('#2796 an entry another worker adds to the shared run root between the snapshots is not residue', async () => {
+      // The run's graph root is shared by every worker (#1951); simulate a concurrent file writing a node.
+      const other = join(process.env.GRAPHS_PATH!, `other-worker-2796-${generateId()}`);
+      try {
+        await refusedWithoutResidue(() => d().create('abc:'), () => mkdirSync(other));
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
     it('keeps the authorization refusal ahead of the name refusal', async () => {
       const code = await d().create('abc:', outsider.id).catch(e => e.extensions?.code);
       expect(code).not.toBe('BAD_USER_INPUT');
