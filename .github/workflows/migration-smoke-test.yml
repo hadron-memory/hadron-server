@@ -147,8 +147,10 @@ jobs:
 
   # #2413 S3 (plan section 3.6): the same production path (`migrate deploy`), but the database is owned by a
   # NON-SUPERUSER migrator and served by a NON-OWNER role, so a migration that adds a table or object the serve
-  # role cannot use fails here, before production. The grants file refuses a superuser runner, so `postgres` is
-  # used only to create roles and databases; everything else runs as the migrator.
+  # role cannot use fails here, before production. The grants file refuses a serve role that is the role running
+  # it, is a superuser, or is a member of the owner (or the reverse). It must be run as the owner, never as
+  # `postgres` (its default privileges attach to the runner), so `postgres` is used only to create roles and
+  # databases; everything else runs as the migrator.
   serve-role-smoke:
     runs-on: ubuntu-latest
     env:
