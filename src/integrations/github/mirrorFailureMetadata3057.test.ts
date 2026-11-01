@@ -57,6 +57,13 @@ const run = () => withMirrorCheckout({ db: client, memoryId: memory.id, commitSu
   obligations: [{ nodeId: 'node-3057', kind: 'WRITE' }] }, async () => { if (fault.site === 'tree') throw fault.value; });
 
 describe('mirror failure metadata at each real call site', () => {
+  it.each(['sequence', 'settle'])('%s keeps a closed code-less Prisma type without hostile text', async site => {
+    fault.site = site; fault.value = Object.assign(hostile(), { code: undefined, name: 'PrismaClientInitializationError' });
+    if (site === 'sequence') await tryTakeAttemptSeq(client);
+    else await settleMirrorObligations(client, memory.id, [{ nodeId: 'node', kind: 'WRITE' }], { result: 'failed', errorClass: 'TREE_WRITE' }, 1n);
+    assertSafe(); expect(output.join('\n')).toContain("errorType: 'PrismaClientInitializationError'");
+  });
+
   it.each(['sequence', 'settle'])('%s retains the diagnostic code of a pool timeout (#3057 BLIND P2)', async site => {
     fault.site = site; fault.value = Object.assign(hostile(), { code: 'P2024' });
     if (site === 'sequence') await tryTakeAttemptSeq(client);

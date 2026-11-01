@@ -268,7 +268,6 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     expect(await run(['a.txt', 'one'])).toBe('failed');
     expect((await rows())[0]).toMatchObject({ errorClass: 'BRANCH_SETUP', attempts: 2 });
     env.failOn = null;
-  env.failure = null;
 
     const thrown = await withMirrorCheckout(
       { memoryId, commitSubject: 'm', logPrefix: '[t]', obligations: [WRITE] }, () => { throw new Error(`disk ${TOKEN}`); });
