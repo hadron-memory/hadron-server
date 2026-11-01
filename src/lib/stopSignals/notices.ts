@@ -85,6 +85,8 @@ export async function appendStopNotice(
     level: StopLevel;
     notice: StopNoticeKind;
     at: Date;
+    /** A coordinator resume names the stop notice it ends, so who is still told never rests on event order. */
+    endsNoticeEventId?: string;
   },
 ): Promise<void> {
   const interrupt = args.notice === 'stop' && args.level === 'halt';
@@ -99,6 +101,7 @@ export async function appendStopNotice(
       payload: {
         signalId: args.signalId, level: args.level, notice: args.notice, interrupt,
         ...('userId' in args.recipient ? { recipientUserId: args.recipient.userId } : {}),
+        ...(args.endsNoticeEventId ? { endsNoticeEventId: args.endsNoticeEventId } : {}),
       },
       createdAt: args.at,
     },

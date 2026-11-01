@@ -219,4 +219,31 @@ describe('#3045 cor:agt:090:04 V20 — the coordinator set of a live pause-dispa
     const stops = await db.agentTeamEvent.findMany({ where: { appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice' } });
     expect(stops.filter((e) => (e.payload as any).signalId === a.id && (e.payload as any).notice === 'stop')).toHaveLength(3);
   });
+  it.each([
+    ['stop id sorts after its resume', '7fffbfffffffffffffff', '70008000000000000000'],
+    ['stop id sorts before its resume', '70008000000000000000', '7fffbfffffffffffffff'],
+  ])('a same-ms stop and the resume that ends it: %s: a rejoin is told again (Andi #3142 P2, delta)', async (_n, stopSuffix, resumeSuffix) => {
+    const a = await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Dan' });
+    await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Liam' });
+    await reportsTo(dan, liam);
+    await new Promise((r) => setTimeout(r, 5));
+    const at = new Date();
+    const prefix = at.getTime().toString(16).padStart(12, '0');
+    const stopId = prefix + stopSuffix;
+    const ev = (id: string, notice: string, extra: Record<string, unknown> = {}) =>
+      db.agentTeamEvent.create({ data: { id, appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice', createdAt: at, payload: { signalId: a.id, level: 'pause-dispatch', notice, interrupt: false, ...extra } } });
+    await ev(stopId, 'stop');
+    await ev(prefix + resumeSuffix, 'resume', { endsNoticeEventId: stopId });
+    await reportsTo(dan, ada);
+    const stops = await db.agentTeamEvent.findMany({ where: { appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice' } });
+    expect(stops.filter((e) => (e.payload as any).signalId === a.id && (e.payload as any).notice === 'stop')).toHaveLength(3);
+  });
+  it('the resume a leaving coordinator gets names the stop it ends', async () => {
+    const a = await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Dan' });
+    await reportsTo(dan, liam);
+    const rows = await db.agentTeamEvent.findMany({ where: { appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice' } });
+    const stop = rows.find((r) => (r.payload as any).notice === 'stop' && (r.payload as any).signalId === a.id)!;
+    const resume = rows.find((r) => (r.payload as any).notice === 'resume')!;
+    expect((resume.payload as any).endsNoticeEventId).toBe(stop.id);
+  });
 });
