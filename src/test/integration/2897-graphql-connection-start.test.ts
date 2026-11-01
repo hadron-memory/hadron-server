@@ -27,6 +27,8 @@ vi.mock('../../lib/emailClient.js', async (importOriginal) => ({
 }));
 
 import { createServer } from '../../server.js';
+import { assertRateReadiness, checkRateConfiguration, RateConfigurationError } from '../../lib/rateLimit/index.js';
+import { readRateKeys, keyFingerprint } from '../../lib/rateLimit/config.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { confirmConnect } from '../connectInterstitial.js';
@@ -55,6 +57,23 @@ let orgId: string;
 
 beforeAll(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+  // #3063: reproduce an earlier file's retained manifest, not just an empty DB.
+  // The fork's private DB is reused across files, while env is restored between them.
+  const savedRing = process.env.RATE_LIMIT_KEYRING;
+  try {
+    await cleanDb(db);
+    process.env.RATE_LIMIT_KEYRING = JSON.stringify({ current: 'previous-file', keys: { 'previous-file': '2'.repeat(64) } });
+    await assertRateReadiness(db);
+  } finally {
+    if (savedRing === undefined) delete process.env.RATE_LIMIT_KEYRING;
+    else process.env.RATE_LIMIT_KEYRING = savedRing;
+  }
+  const retained = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+  expect(retained.keyIds.every((id) => !readRateKeys().keys.has(id))).toBe(true);
+  // The unchanged product guard must still reject this configuration, without re-seeding it.
+  await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
+  expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual(['previous-file']);
+
   const app = await createServer();
   server = createHttpServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -399,4 +418,23 @@ describe('startConnection: credentials that may never start a connection (resolv
     expect(r.errors?.[0]?.extensions).toMatchObject({ code: 'FORBIDDEN', reason: 'OAUTH_SCOPE_INSUFFICIENT' });
     expect(await rows()).toHaveLength(0);
   });
+});
+
+// #3063: a present key ID with a different fingerprint is invalid too. Fixture
+// isolation must never become a product fallback that overwrites retained config.
+it('invalid retained fingerprints still refuse real startup and readiness without rewriting state (#3063)', async () => {
+  await assertRateReadiness(db);
+  const id = readRateKeys().current;
+  await db.rateLimitManifest.update({
+    where: { id: 'global' },
+    data: { fingerprints: { [id]: keyFingerprint(Buffer.alloc(32, 7)) } },
+  });
+  const before = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+  expect(readRateKeys().keys.has(id)).toBe(true);
+  expect((before.fingerprints as Record<string, string>)[id] === keyFingerprint(readRateKeys().keys.get(id)!)).toBe(false);
+  await expect(checkRateConfiguration(db)).rejects.toBeInstanceOf(RateConfigurationError);
+  await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
+  // Compare without printing even synthetic fingerprints in failure diagnostics.
+  const after = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+  expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
 });
