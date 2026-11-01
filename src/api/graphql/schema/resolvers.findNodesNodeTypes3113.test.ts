@@ -105,6 +105,15 @@ describe('filter-only list: union, exact total, paging', () => {
     expect(res.total).toBe(2);
   });
 
+  it('keyword and regex keep total null even with includeTotal (as on main); the union still filters them', async () => {
+    const kw = await findNodes({ includeTotal: true, query: 'marker', mode: 'keyword', filter: { memoryIds: [memoryId], nodeTypes: ['task', 'record'] } });
+    expect(locs(kw)).toEqual(['n.record', 'n.task']);
+    expect(kw.total).toBeNull();
+    const rx = await findNodes({ includeTotal: true, query: 'marker', mode: 'regex', filter: { memoryIds: [memoryId], nodeTypes: ['task', 'record'] } });
+    expect(locs(rx)).toEqual(['n.record', 'n.task']);
+    expect(rx.total).toBeNull();
+  });
+
   it('an explicit list replaces the system-type default; it is not defaults plus the list', async () => {
     const withSystem = await findNodes({ filter: { memoryIds: [memoryId], nodeTypes: ['system', 'task'] } });
     expect(locs(withSystem)).toEqual(['n.system', 'n.task']);
