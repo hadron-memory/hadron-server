@@ -45,9 +45,11 @@ jobs:
     runs-on: ubuntu-latest
     # GH default job timeout is 6 hours — a hung vitest worker or
     # deadlocked postgres connection would consume it before failing.
-    # A shard runs a quarter of the suite; 20 minutes is generous cover
-    # for CI cold starts (install + prisma generate + db setup).
-    timeout-minutes: 20
+    # A shard runs a quarter of the suite. #2776: 20 minutes cancelled slow
+    # but healthy runs (15-23 min per shard on the private mirror's hosted
+    # runners), so the cap is 40: room for a slow run, still a hard stop
+    # for a real hang long before the 6-hour default.
+    timeout-minutes: 40
     strategy:
       # Don't cancel the other shards when one fails — surface every shard's
       # results so a failure isn't masked by a sibling shard's early exit.
