@@ -13813,7 +13813,7 @@ export const typeDefs = `#graphql
     linkedPullRequestMerged: Boolean!
   }
 
-  "#3125 S3: one page of untrackedTaskItems. total counts the whole filtered list."
+  "#3125 S3: one page of untrackedTaskItems. total counts the whole filtered list as read: when complete is false, only what the read reached."
   type UntrackedTaskItemPage {
     items: [UntrackedTaskItem!]!
     total: Int!
