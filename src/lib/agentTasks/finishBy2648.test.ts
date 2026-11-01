@@ -94,6 +94,13 @@ describe('#2648 — the finish-by alarm (cor:agt:050:14)', () => {
     expect(await alarms()).toEqual([]);
   });
 
+  it('a backlog task raises no finish-by alarm', async () => {
+    await task({ ownerWorkerId: ada.id, status: 'backlog', createdAt: at('10:00'), finishBy: at('12:00') });
+    await tick('12:00');
+    await tick('14:00');
+    expect(await alarms()).toEqual([]);
+  });
+
   it('a task with no finish-by time keeps the ordinary windows and never raises a finish-by alarm', async () => {
     await assignedToAnne('10:00');
     await tick('10:15');
