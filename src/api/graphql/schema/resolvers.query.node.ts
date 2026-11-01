@@ -29,6 +29,7 @@ import {
 import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import {
   compileNodeWhere,
@@ -1322,9 +1323,10 @@ export const nodeQueries = {
       const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, scopeIds) : [];
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
-        // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
-        // to the memory-class exclusion above).
-        ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+        // Explicit nodeType wins; otherwise exclude the unqualified-search
+        // defaults, system and chat-message (#2836; the system one is
+        // orthogonal to the memory-class exclusion above).
+        ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { notIn: [...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES] } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
         ...(f.role != null
