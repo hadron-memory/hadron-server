@@ -165,6 +165,18 @@ describe('the failure diagnostic (#2630)', () => {
     expect(seen).toEqual([]);
   });
 
+  it('neither unbound case invokes the runner or the diagnostic: an empty App, and a named App with no worker (#2641)', () => {
+    for (const [app, w] of [['', 'w1'], ['app1', '']] as const) {
+      const runs: string[][] = [];
+      const diag: string[] = [];
+      const run = (argv: string[]) => { runs.push(argv); return { code: 0, stdout: JSON.stringify({ data: { agentTasks: rows(2) } }) }; };
+      expect(countOpenTasks(run, 'hadron', app, w, undefined, undefined, undefined, (r) => diag.push(r))).toBeNull();
+      expect(openTaskLine(run, 'hadron', app, w, undefined, undefined, undefined, (r) => diag.push(r))).toBe('');
+      expect(runs).toEqual([]);
+      expect(diag).toEqual([]);
+    }
+  });
+
   it('the reason is the only thing handed over: no stdout, stderr, argv, id or message reaches it', () => {
     const calls: unknown[][] = [];
     const run = () => ({ code: 1, stdout: JSON.stringify({ errors: [{ message: SECRET }] }), stderr: SECRET });

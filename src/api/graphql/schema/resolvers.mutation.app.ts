@@ -73,6 +73,8 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { isRefusedPrincipal } from './resolvers.appViewerManages.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
@@ -125,41 +127,23 @@ async function assertNoInstallMemories(
 }
 
 /**
- * Can the caller manage this App's members by ROLE alone — independent of any
- * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
- * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
- * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
- * org-owned App (a user-owned App is strictly owner-only). Shared by
- * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
- * target user is resolved — a non-authorized caller can't turn user-ref
- * resolution into an existence oracle (#816 review).
+ * Can the caller manage this App's members? The role logic is `managesApp`'s
+ * (user-owner, org ADMIN/OWNER, platform ADMIN/OWNER for an ORG-owned App only,
+ * an owner-role AppMember; spec 047 blocker 3), so it has one source. On top of
+ * it, a principal that is not the direct user is refused whatever its role: an
+ * impersonation, a run principal, an ambiguous actor, a refused session binding
+ * (#2448). A worker session is deliberately NOT decided here: it keeps its
+ * holder's answer until #2483 S2b. Shared by ensureAppMember + removeAppMember
+ * and evaluated BEFORE the target user is resolved, so a non-authorized caller
+ * can't turn user-ref resolution into an existence oracle (#816 review).
  */
 export async function callerManagesAppMembers(
   ctx: Context,
   app: { ownerUserId: string | null; organizationId: string | null },
   resolvedAppId: string,
 ): Promise<boolean> {
-  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-  if (isPlatformAdmin && app.ownerUserId === null) return true;
-  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-  if (isAppOwnerUser) return true;
-  if (app.organizationId) {
-    const orgMember = await ctx.db.orgMember.findFirst({
-      where: {
-        organizationId: app.organizationId,
-        userId: ctx.userId ?? '',
-        ...LIVE_ORG_MEMBERSHIP,
-        role: { in: ['ADMIN', 'OWNER'] },
-      },
-    });
-    if (orgMember) return true;
-  }
-  const ownerMember = ctx.userId
-    ? await ctx.db.appMember.findUnique({
-        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-      })
-    : null;
-  return ownerMember?.role === 'owner';
+  if (isRefusedPrincipal(ctx)) return false;
+  return managesApp(ctx, { id: resolvedAppId, organizationId: app.organizationId, ownerUserId: app.ownerUserId });
 }
 
 /**
@@ -1185,6 +1169,9 @@ export const appMutations = {
       const forbidRemove = () =>
         forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
 
+      // #2448: a principal that is not the direct user is refused outright, the
+      // self-leave arm included, and before the target is resolved.
+      if (isRefusedPrincipal(ctx)) throw forbidRemove();
       const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
       let resolvedUserId: string;
       if (authorizedByRole) {
@@ -1211,6 +1198,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry member management');
           }
+          if (isRefusedPrincipal(txCtx)) throw forbidRemove();
           if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
             throw forbidRemove();
           }
