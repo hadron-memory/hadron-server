@@ -104,7 +104,8 @@ async function prove(id: string, who: { key: SoftPasskey }, over: { uv?: boolean
     origin: over.origin ?? ORIGIN, rpId: RP, counter: over.counter ?? 1, uv: over.uv,
   });
   const r = await post(id, 'proof', assertionBody(ceremonyId, who.key, a), cookie);
-  const json = await r.json().catch(() => null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const json = (await r.json().catch(() => null)) as any;
   // After a proof that opened a signing ceremony, `/challenge` hands over its bound challenge (it mints nothing).
   if (json?.outcome === 'open') {
     const s = await post(id, 'challenge', {}, cookie);
@@ -189,7 +190,7 @@ describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
     const b = await post('B'.repeat(22), 'proof/challenge', {});
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    expect(Object.keys(await a.json()).sort()).toEqual(Object.keys(await b.json()).sort());
+    expect(Object.keys((await a.json()) as object).sort()).toEqual(Object.keys((await b.json()) as object).sort());
     for (const origin of ['https://evil.example', null]) {
       const r = await post(req.id, 'proof/challenge', {}, undefined, origin);
       expect(r.status).toBe(403);
@@ -243,7 +244,7 @@ describe('passkey-proven read access and the named-signer match come BEFORE any 
     expect(p.json.view.node.title).toBe(TITLE);
     expect(p.json.canSign).toBe(false);
     expect(p.json.signing).toBeNull();
-    const r = await post(req.id, 'complete', { ceremonyId: p.ceremonyId, ...signingBody({ ...p, json: { signing: { ceremonyId: p.ceremonyId, challenge: signatureChallenge(signaturePayloadBytes('hadron-signature-v3', { nodeId, approvalHash: req.approvalHash, requestId: req.id })).toString('base64url') } } }, reader.key) }, p.cookie);
+    const r = await post(req.id, 'complete', { ...signingBody({ ...p, json: { signing: { ceremonyId: p.ceremonyId, challenge: signatureChallenge(signaturePayloadBytes('hadron-signature-v3', { nodeId, approvalHash: req.approvalHash, requestId: req.id })).toString('base64url') } } }, reader.key) }, p.cookie);
     expect(r.status).toBe(403);
     expect(await db.nodeSignature.count()).toBe(0);
   });
