@@ -276,6 +276,20 @@ describe('acceptance 4: the reason discloses nothing new', () => {
     }
   });
 
+  // Riana §10 P3-1: hadron_get_worker serves the profile tier to any signed-in
+  // user who names the worker, so its check status must come through the
+  // masked resolver. A stranger (no membership, no App binding) sees the
+  // worker but no check status and no reason.
+  it('hadron_get_worker to a stranger shows the worker but no check status or reason', async () => {
+    const strangerAuth = { userId: outsider.id, roles: ['READER'], clientId: `user:${outsider.id}` } as AuthContext;
+    for (const name of ['Idle', 'Ended', 'Never']) {
+      const server = createTestableMcpServer(strangerAuth, { sessionId: `nsr-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
+      const out = await server.callToolText('hadron_get_worker', { workerRef: w[name].id });
+      expect(out, `${name}: the stranger must still get the profile, or this pin proves nothing`).toContain(w[name].id);
+      expect(out, name).not.toMatch(/Check status|NO_SESSION|never bound|never checked/);
+    }
+  });
+
   it('the SDL adds only the closed reason enum: no session id or timestamp', () => {
     const block = /type WorkerCheckStatus \{([\s\S]*?)\n  \}/.exec(typeDefs)?.[1] ?? '';
     const fields = [...block.matchAll(/^\s+(\w+):/gm)].map((m) => m[1]);
