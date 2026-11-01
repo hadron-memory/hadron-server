@@ -5747,6 +5747,11 @@ model AgentTask {
   resultOutcome        String?   @map("result_outcome")
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
+  /// #2651 (cor:agt:050:29, :01): the latest hand-back — its code (closed set, chk_agent_tasks_hand_back), optional
+  /// text (<= 2,000 characters; never put into an event) and time. A later hand-back replaces all three.
+  handBackReasonCode   String?   @map("hand_back_reason_code")
+  handBackReasonText   String?   @map("hand_back_reason_text")
+  handedBackAt         DateTime? @map("handed_back_at")
   tags                 String[]  @default([])
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.

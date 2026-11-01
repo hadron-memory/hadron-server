@@ -104,7 +104,7 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
   it('no assignee, pending, queued, the worker excluded, one event with the code only, no result written', async () => {
     const t = await anneTask();
     const before = (await events(t.id)).length;
-    const out = await asWorker(anne, () => handBack(t.id, { code: 'missing_input', text: 'The fixture repo is not reachable from my host.' }));
+    const out = await asWorker(anne, () => handBack(t.id, { code: 'MISSING_INPUT', text: 'The fixture repo is not reachable from my host.' }));
     expect(out).toMatchObject({ id: t.id, status: 'pending', assigneeWorkerId: null, assigneeUserId: null, startedAt: null });
     const after = await row(t.id);
     expect(after).toMatchObject({ resultOutcome: null, resultSummary: null, resultEvidence: null });
@@ -126,7 +126,7 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
   it('keeps existing requirements and adds the worker once', async () => {
     const t = await anneTask();
     await db.agentTask.update({ where: { id: t.id }, data: { requirements: { role: 'engineer', excludeWorkerIds: [rook.id] } } });
-    await asWorker(anne, () => handBack(t.id, { code: 'cannot_do' }));
+    await asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
     expect((await row(t.id)).requirements).toEqual({ role: 'engineer', excludeWorkerIds: [rook.id, anne.id] });
     expect(F.AgentTask.handBack(await row(t.id))).toMatchObject({ code: 'CANNOT_DO', text: null });
   });
@@ -134,7 +134,7 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
   it('a person who hands a task back is not excluded (the platform assigns only workers)', async () => {
     const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Read the contract', assignee: { user: mia.id } } }, ctx(mia.id));
     await M.startAgentTask({}, { taskId: t.id }, ctx(mia.id));
-    const out = await handBack(t.id, { code: 'out_of_scope' });
+    const out = await handBack(t.id, { code: 'OUT_OF_SCOPE' });
     expect(out).toMatchObject({ status: 'pending', assigneeUserId: null });
     expect(out.requirements ?? null).toBeNull();
     expect((await events(t.id)).filter((e) => e.type === 'task.handed-back').map((e) => e.payload)).toEqual([{ code: 'out_of_scope' }]);
@@ -142,10 +142,10 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
 
   it('a later hand-back replaces the code and text; the earlier code stays in the events', async () => {
     const t = await anneTask();
-    await asWorker(anne, () => handBack(t.id, { code: 'missing_input', text: 'first' }));
+    await asWorker(anne, () => handBack(t.id, { code: 'MISSING_INPUT', text: 'first' }));
     await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, ctx(mia.id));
     await asWorker(liam, () => M.startAgentTask({}, { taskId: t.id }, ctx(mia.id)));
-    await asWorker(liam, () => handBack(t.id, { code: 'duplicate' }));
+    await asWorker(liam, () => handBack(t.id, { code: 'DUPLICATE' }));
     const after = await row(t.id);
     expect(F.AgentTask.handBack(after)).toMatchObject({ code: 'DUPLICATE', text: null });
     expect((after.requirements as { excludeWorkerIds: string[] }).excludeWorkerIds).toEqual([anne.id, liam.id]);
@@ -167,14 +167,14 @@ describe('acceptance 2: the matcher never gives it back to the returning worker 
     await db.agentTeamEvent.create({
       data: { appId: app.id, type: 'task.assigned', subjectWorkerId: liam.id, createdAt: new Date(Date.now() + MIN), payload: { assignee: { workerId: liam.id } } },
     });
-    await asWorker(anne, () => handBack(t.id, { code: 'cannot_do' }));
+    await asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
     expect((await row(t.id)).assigneeWorkerId).toBe(liam.id);
   });
 
   it('with no other match it stays queued, and the couldn\'t-be-assigned alarm is raised once the window passes', async () => {
     await bind(anne);
     const t = await anneTask();
-    await asWorker(anne, () => handBack(t.id, { code: 'refused' }));
+    await asWorker(anne, () => handBack(t.id, { code: 'REFUSED' }));
     expect((await row(t.id)).assigneeWorkerId).toBeNull();
     const queuedAt = (await events(t.id)).filter((e) => e.type === 'assignment.queued').at(-1)!.createdAt;
     await taskStallTick(db, new Date(queuedAt.getTime() + 29 * MIN));
@@ -188,21 +188,21 @@ describe('acceptance 3: refused, nothing changed', () => {
   it('a worker that is not the assignee', async () => {
     const t = await anneTask();
     const before = await snapshot(t.id);
-    await expectCode(asWorker(rook, () => handBack(t.id, { code: 'cannot_do' })), 'TASK_NOT_ASSIGNEE');
+    await expectCode(asWorker(rook, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_NOT_ASSIGNEE');
     expect(await snapshot(t.id)).toEqual(before);
   });
 
   it('the owner, a person who is not the assignee', async () => {
     const t = await anneTask();
     const before = await snapshot(t.id);
-    await expectCode(handBack(t.id, { code: 'cannot_do' }), 'TASK_NOT_ASSIGNEE');
+    await expectCode(handBack(t.id, { code: 'CANNOT_DO' }), 'TASK_NOT_ASSIGNEE');
     expect(await snapshot(t.id)).toEqual(before);
   });
 
   it('a pending task, though its assignee asks', async () => {
     const t = await anneTask({ start: false });
     const before = await snapshot(t.id);
-    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'cannot_do' })), 'TASK_INVALID_TRANSITION');
+    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_INVALID_TRANSITION');
     expect(await snapshot(t.id)).toEqual(before);
   });
 
@@ -210,7 +210,7 @@ describe('acceptance 3: refused, nothing changed', () => {
     const t = await anneTask();
     await asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(mia.id)));
     const before = await snapshot(t.id);
-    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'cannot_do' })), 'TASK_ENDED');
+    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_ENDED');
     expect(await snapshot(t.id)).toEqual(before);
   });
 
@@ -218,18 +218,18 @@ describe('acceptance 3: refused, nothing changed', () => {
     const t = await anneTask();
     await M.cancelAgentTask({}, { taskId: t.id }, ctx(mia.id));
     const before = await snapshot(t.id);
-    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'cannot_do' })), 'TASK_ENDED');
+    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_ENDED');
     expect(await snapshot(t.id)).toEqual(before);
   });
 
   it('a backlog task (no assignee)', async () => {
     const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Later', status: 'BACKLOG' } }, ctx(mia.id));
     const before = await snapshot(t.id);
-    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'cannot_do' })), 'TASK_NOT_ASSIGNEE');
+    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' })), 'TASK_NOT_ASSIGNEE');
     expect(await snapshot(t.id)).toEqual(before);
   });
 
-  it.each(['bored', 'MISSING_INPUT', '', 'missing input'])('a code outside the set (%j), and the task stays started (S4)', async (code) => {
+  it.each(['bored', 'missing_input', '', 'MISSING INPUT'])('a code outside the set (%j), and the task stays started (S4)', async (code) => {
     const t = await anneTask();
     const before = await snapshot(t.id);
     await expectCode(asWorker(anne, () => handBack(t.id, { code })), 'BAD_USER_INPUT');
@@ -239,9 +239,9 @@ describe('acceptance 3: refused, nothing changed', () => {
   it('reason text over 2,000 characters; exactly 2,000 is accepted', async () => {
     const t = await anneTask();
     const before = await snapshot(t.id);
-    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'cannot_do', text: 'x'.repeat(2001) })), 'BAD_USER_INPUT');
+    await expectCode(asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO', text: 'x'.repeat(2001) })), 'BAD_USER_INPUT');
     expect(await snapshot(t.id)).toEqual(before);
-    await asWorker(anne, () => handBack(t.id, { code: 'cannot_do', text: 'y'.repeat(2000) }));
+    await asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO', text: 'y'.repeat(2000) }));
     expect((await row(t.id)).status).toBe('pending');
   });
 });
@@ -255,7 +255,7 @@ describe('acceptance 4: a raised stall alarm does not survive the hand-back (cor
     const key = alarmEpisodeKey(t.id, alarm.type, alarm.episodeStart!);
     const probe = [{ taskId: t.id, type: alarm.type, episodeStart: alarm.episodeStart }];
     expect(await currentAlarmEpisodes(db, probe, new Date(startedAt.getTime() + 62 * MIN))).toContain(key);
-    await asWorker(anne, () => handBack(t.id, { code: 'missing_input' }));
+    await asWorker(anne, () => handBack(t.id, { code: 'MISSING_INPUT' }));
     expect(await currentAlarmEpisodes(db, probe, new Date(startedAt.getTime() + 62 * MIN))).not.toContain(key);
   });
 });
@@ -263,10 +263,10 @@ describe('acceptance 4: a raised stall alarm does not survive the hand-back (cor
 describe('children are untouched (cor:agt:050:29 details)', () => {
   it('a task with an open child may be handed back; the child keeps its status and its owner', async () => {
     const t = await anneTask();
-    const child = await asWorker(anne, () =>
+    const child: { id: string } = await asWorker(anne, () =>
       M.createAgentTask({}, { input: { appRef: app.id, parentTaskId: t.id, title: 'Sub-step', assignee: { worker: rook.id } } }, ctx(mia.id)));
     const before = await row(child.id);
-    await asWorker(anne, () => handBack(t.id, { code: 'cannot_do' }));
+    await asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
     const after = await row(child.id);
     expect(after).toMatchObject({ status: before.status, ownerWorkerId: anne.id, assigneeWorkerId: rook.id, requirements: before.requirements });
   });
@@ -286,7 +286,7 @@ describe('acceptance 5: a concurrent hand-back and finish, exactly one wins', ()
       await held;
     }, { timeout: 30_000 });
     await isLocked;
-    const hb = () => asWorker(anne, () => handBack(t.id, { code: 'cannot_do' }));
+    const hb = () => asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
     const fin = () => asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(mia.id)));
     const first = order === 'hand-back first' ? hb() : fin();
     await waitForRowLockWaiters(1);

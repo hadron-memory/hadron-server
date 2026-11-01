@@ -689,6 +689,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
 
+-- #2651: a task's latest hand-back (code, optional text, time). One source, shared verbatim with migration
+-- 20261101090000_agent_task_hand_back (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-hand-back-invariants.sql
+
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
 -- 20261024100200_context_reset_availability (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
