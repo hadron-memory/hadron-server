@@ -59,47 +59,47 @@ Rows below describe test edits, not a claim that a sibling suite has identical w
 | `src/lib/teamAttention.test.ts` | Kept library/resolver coverage; retired MCP-only wrapper assertions. |
 | `src/mcp/apiKeyPropagation1868.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.agentAttribution.test.ts` | Retained core tool behavior; worker fixtures start through GraphQL. Obsolete implicit MCP-worker-binding assertions retired; explicit named/header attribution remains. |
-| `src/mcp/server.agentTaskAlarmTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.agentTaskAppKey1755.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.agentTaskTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.agentTaskAlarmTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.agentTaskAppKey1755.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.agentTaskTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.ambientAppPrecedence.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
-| `src/mcp/server.appKeyScope1749.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.appScopePinning.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.appKeyScope1749.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.appScopePinning.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.bindReceipt1599.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.callerSessionGate1701.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
-| `src/mcp/server.castWorker.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.changeWorkerAgent2458.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.channelChat.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.channelPostAuthorship1697.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.castWorker.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.changeWorkerAgent2458.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.channelChat.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.channelPostAuthorship1697.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.chatReplies2841.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.clientKeyHeader.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.commentTools.test.ts` | Retained core tool behavior; worker fixtures start through GraphQL. Obsolete implicit MCP-worker-binding assertions retired; explicit named/header attribution remains. |
 | `src/mcp/server.crossAppWorker1597.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.governedDoorShared1769.test.ts` | Retained core tool behavior; worker fixtures start through GraphQL. Obsolete implicit MCP-worker-binding assertions retired; explicit named/header attribution remains. |
-| `src/mcp/server.listWorkers.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.listWorkers.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.mcpTeamCut3082.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
-| `src/mcp/server.oneMark2018.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.oneMark2018.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.reconnectLegibility.test.ts` | Retained core tool behavior; worker fixtures start through GraphQL. Obsolete implicit MCP-worker-binding assertions retired; explicit named/header attribution remains. |
-| `src/mcp/server.register.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.register.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.requestSession2123.test.ts` | Retired team-wrapper-only #2123 cases; preserved main's independent #3107 retained-rate-manifest startup regression on merge. Core HTTP attribution/header controls remain in the new cut suite. |
 | `src/mcp/server.sessionHeartbeat.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.sessionVocabulary.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.sharedToolShapes2260.test.ts` | Intentional golden cut; invert team presence and retain all remaining shared-schema/heap checks. |
-| `src/mcp/server.stallScheduleTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.stallScheduleTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.startSessionWorker.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
-| `src/mcp/server.stopSignalTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.taskWarnings2198.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.taskWarnings2607.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.teamChat.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.teamChatDuplicate2015.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.teamChatPostAuthorship1967.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.teamChatSearch2299.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.teamWork.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.tickCode2733.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.tickerTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.stopSignalTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.taskWarnings2198.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.taskWarnings2607.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.teamChat.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.teamChatDuplicate2015.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.teamChatPostAuthorship1967.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.teamChatSearch2299.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.teamWork.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.tickCode2733.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
+| `src/mcp/server.tickerTools.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.transportBounds2261.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.unhosted2136.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
-| `src/mcp/server.workerActivity2103.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.workerActivity2103.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see the Preserved contracts section above. |
 | `src/mcp/server.workerPortalUrl.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.workerRecovery.test.ts` | Retained core tool behavior; worker fixtures start through GraphQL. Obsolete implicit MCP-worker-binding assertions retired; explicit named/header attribution remains. |
 | `src/test/integration/2087-error-diagnostics.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
@@ -121,3 +121,11 @@ The completed native full run at 02d9c1341 reported 20,652 passed, 1 expected fa
 Additional per-file dispositions: `resolvers.workerSignature1602.test.ts` keeps GraphQL wire and H26 guard pins; `lib/tickers/tickDueAt2790.test.ts` keeps all GraphQL/lib timing assertions; `lib/stopSignals/stopSignals2022.test.ts` changes expected remedy only; `lib/teamAttention.test.ts` retains the admitted/uninstalled/nonparticipant capability cases with absent capability; `mcp-existence-oracle-1316.test.ts` retains all core-memory doors and controls.
 
 CLI syntax audit: `hadron team stop lift --help` specifies a positional signal id. The remedy pin was red (1 failure/45 controls) with the obsolete `id=` spelling, then corrected to `hadron team stop lift <id>`.
+
+## Review coverage limits and retained helper paths
+
+The family smoke uses non-empty, identified worker/register/chat/attention/task/roster/stop/ticker rows. It is not a one-for-one port of every deleted formatter assertion. Cast omission is exercised through the actual GraphQL mutation (not only preview), and the live-key comment control checks the persisted comment.
+
+The kept end_session still calls adoptAppFromSession: ownership, current participation, deleted/uninstalled App rejection and a positive recovery are pinned directly. Generic settleCallerSession remains reachable by core writes: a direct shared actor fixture tests ambiguous refusal and simultaneous named-worker isolation without registering a retired wrapper. New connection ambiguity creation through MCP worker binding is unreachable after this cut; header and named-session attribution remain supported. The disabled chat monitor/heartbeat handler paths are not re-enabled.
+
+The pending-delivery footer and its mutation coverage live in src/api/graphql/deliveryPending2026.test.ts, separately from the literal tool-surface tests. No claim is made that the latter alone protects every shared helper.

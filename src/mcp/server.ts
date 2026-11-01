@@ -2343,36 +2343,35 @@ export function createMcpServerInstance(
   // one that writes nothing on the caller's behalf. A new tool therefore gets
   // the gate without anyone remembering to add it; forgetting the other way
   // only costs an ambiguous caller one `session` argument.
+  // Only retained tools belong in the caller-session gate policy.
   const ACTOR_NEUTRAL_TOOLS = new Set([
-    // Reads and searches.
-    'hadron_search', 'hadron_list_memories', 'hadron_server_info', 'hadron_list_apps', 'hadron_list_scopes',
-    'hadron_scope_explain', 'hadron_list_channels', 'hadron_register_list', 'hadron_find_nodes', 'hadron_get_node',
-    'hadron_get_nodes', 'hadron_get_next_node', 'hadron_list_nodes', 'hadron_get_object', 'hadron_find_objects',
-    'hadron_get_run', 'hadron_whoami', 'hadron_channel_read', 'hadron_team_chat_read', 'hadron_team_chat_search', 'hadron_team_attention',
-    'hadron_team_attention_page', 'hadron_list_workers', 'hadron_get_worker', 'hadron_team_work_items',
-    'hadron_list_comments', 'hadron_get_comment', 'hadron_team_chat_mark_read',
-    'hadron_list_recovery_nodes', 'hadron_list_recovery_edges', 'hadron_get_recovery_node',
-    // #1705 — agent-task reads (each takes its own optional session).
-    'hadron_task_get', 'hadron_task_list', 'hadron_team_events',
-    // #1706 — availability read (its own optional session).
-    'hadron_team_availability',
-    // #1707 — the team roster read (its own optional session).
-    'hadron_team_roster',
-    // #1926 — the stall schedule read (its own optional session).
-    'hadron_stall_schedule_get',
-    // #1747 — ticker reads (each takes its own optional session; wake settings enforces the write rule itself).
-    'hadron_ticker_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get',
-    // #2024 — the Agent ticker-template list (a read through the Agent's own gate).
-    'hadron_agent_ticker_template_list',
-    // #2022 — the stop-signal list (its own optional session).
-    'hadron_stop_signal_list',
-    // Per-connection selections and key handling: nothing authored.
-    'hadron_set_active_memory', 'hadron_set_active_app', 'hadron_set_active_org', 'hadron_set_active_scope',
-    'hadron_unlock_memory', 'hadron_lock_memory',
-    // Binding itself: it is how a caller SAYS who it is.
+    'hadron_search',
+    'hadron_list_memories',
+    'hadron_server_info',
+    'hadron_list_apps',
+    'hadron_list_scopes',
+    'hadron_scope_explain',
+    'hadron_find_nodes',
+    'hadron_get_node',
+    'hadron_get_nodes',
+    'hadron_get_next_node',
+    'hadron_list_nodes',
+    'hadron_get_object',
+    'hadron_find_objects',
+    'hadron_get_run',
+    'hadron_whoami',
+    'hadron_list_comments',
+    'hadron_get_comment',
+    'hadron_list_recovery_nodes',
+    'hadron_list_recovery_edges',
+    'hadron_get_recovery_node',
+    'hadron_set_active_memory',
+    'hadron_set_active_app',
+    'hadron_set_active_org',
+    'hadron_set_active_scope',
+    'hadron_unlock_memory',
+    'hadron_lock_memory',
     'hadron_start_session',
-    // #1956 — recovering a binding is binding: it is how a fresh context says who it is.
-    'hadron_resume_session',
   ]);
   /** Tools whose own required argument names the caller's session under another name. */
   const SESSION_ARGUMENT: Record<string, string> = { hadron_end_session: 'id' };
@@ -9788,8 +9787,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult(
           activeMemoryLine +
           (includeEnded
-            ? 'You have no sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>") to work as a teammate.'
-            : 'You have no open sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>"); pass includeEnded to see recent ended ones.'),
+            ? 'You have no sessions. Start an ordinary session with hadron_start_session(description: "<task>"). To work as a teammate, use the CLI: hadron team session start --as <worker-URN>.'
+            : 'You have no open sessions. Start an ordinary session with hadron_start_session(description: "<task>"). To work as a teammate, use the CLI: hadron team session start --as <worker-URN>; pass includeEnded to see recent ended ones.'),
         );
       }
 
