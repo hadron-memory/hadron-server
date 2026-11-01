@@ -132,6 +132,9 @@ beforeAll(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 afterAll(async () => {
+  // #3169: a beforeAll that throws before `server` is assigned must report only
+  // its own failure, not a second TypeError from closing an unset server.
+  if (!server) return;
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });
 
