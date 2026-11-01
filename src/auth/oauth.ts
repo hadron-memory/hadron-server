@@ -58,6 +58,8 @@ import {
 import { requireSignupBotCheck } from './turnstile.js';
 import { isServerLocalPath } from './server-local-path.js';
 import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
+import { isGoogleConfigured } from './google.js';
+import { isAppleConfigured } from './apple.js';
 import { redirectAnchor } from './redirectAnchor.js';
 import { isLiveOAuthClient, oauthClientExpiresAt } from '../lib/oauthClientLifetime.js';
 import {
@@ -1000,11 +1002,23 @@ function buildHandleAuthorizeGet(
       if (q.login_provider === undefined && typeof q.resource === 'string') {
         const origin = getServerOrigin(req);
         if (origin !== null && q.resource === `${origin}/mcp`) {
+          const returnTo = encodeURIComponent(req.originalUrl);
+          // #2844: the other first-party providers, offered only when the
+          // deployment can actually serve them (`/auth/google` and `/auth/apple`
+          // answer 503 otherwise). Same `return_to` as the GitHub link; the href
+          // is a fixed local path plus the encoded original URL, escaped here
+          // because `providerLinks` is the one pre-rendered fragment.
+          const providerLinks = [
+            ...(isGoogleConfigured() ? [['google', 'Google']] : []),
+            ...(isAppleConfigured() ? [['apple', 'Apple']] : []),
+          ]
+            .map(([id, label]) => `<a class="button" href="${escapeHtml(`/auth/${id}?return_to=${returnTo}`)}">Continue with ${label}</a>`)
+            .join('\n    ');
           res.type('html').send(
-            renderTemplate(SIGNIN_PROMPT_TEMPLATE, {
+            renderTemplate(SIGNIN_PROMPT_TEMPLATE.replace('{{providerLinks}}', providerLinks), {
               clientName,
               redirectAnchor: redirectAnchor(redirectUri),
-              signInUrl: `/auth/${loginProvider}?return_to=${encodeURIComponent(req.originalUrl)}`,
+              signInUrl: `/auth/${loginProvider}?return_to=${returnTo}`,
               // Fixed local path + the original query: never derived from the
               // request target's origin (an absolute-form request line).
               emailUrl: `/oauth/authorize${req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '?'}&login_provider=email`,
