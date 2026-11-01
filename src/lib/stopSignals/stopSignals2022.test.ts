@@ -250,7 +250,7 @@ describe('cor:agt:090:03 — every level stops assignment', () => {
     const e = await refusal(M.reassignAgentTask({}, { taskId: assigned.id, assignee: { worker: 'Liam' } }, ctx(max.id)));
     const handle = (await db.user.findUniqueOrThrow({ where: { id: max.id }, select: { handle: true } })).handle;
     const setter = handle ? `@${handle}` : `user ${max.id}`;
-    expect(e.message).toBe(`Can't assign to Liam: a PAUSE_DISPATCH stop signal (TEAM, set by ${setter}, until ${until.toISOString()}) covers them. Assign someone else, or whoever manages the App lifts it (hadron team stop lift id=${s.id}).`);
+    expect(e.message).toBe(`Can't assign to Liam: a PAUSE_DISPATCH stop signal (TEAM, set by ${setter}, until ${until.toISOString()}) covers them. Assign someone else, or whoever manages the App lifts it (hadron team stop lift ${s.id}).`);
     expect(e.extensions).toMatchObject({
       code: 'TASK_STOPPED', workerId: liam.id, workerUrn: expect.stringMatching(/^hrn:worker:.*:liam$/), moreBlockers: false,
       blockers: [{ id: s.id, level: 'PAUSE_DISPATCH', scope: 'TEAM', setByUserId: max.id, setByHandle: handle, setByHostKey: false, until: until.toISOString() }],
