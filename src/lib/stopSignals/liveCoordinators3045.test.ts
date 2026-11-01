@@ -17,6 +17,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
 import { pendingStopNotices } from './delivery.js';
+import { appendStopNotice, appendStopNoticeWithdrawn } from './notices.js';
 import { serveEveryAgent } from '../../test/servedBootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -187,5 +188,16 @@ describe('#3045 cor:agt:090:04 V20 — the coordinator set of a live pause-dispa
     await reportsTo(dan, liam);
     const rows = await db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'stop.notice', subjectWorkerId: dan.id } });
     expect(rows.map((r) => (r.payload as { level: string }).level)).toEqual(['pause']);
+  });
+  it('a withdrawal drops only the notice it names: a rejoin stop recorded in the same millisecond is still offered (Diego #3142 P2)', async () => {
+    const at = new Date();
+    const stopA = () => db.$transaction((tx) => appendStopNotice(tx, { appId: app.id, recipient: { workerId: ada.id }, signalId: 'sig-x', level: 'pause-dispatch', notice: 'stop', at }));
+    await stopA();
+    const first = await db.agentTeamEvent.findFirstOrThrow({ where: { appId: app.id, type: 'stop.notice', subjectWorkerId: ada.id }, select: { id: true } });
+    await db.$transaction((tx) => appendStopNoticeWithdrawn(tx, { appId: app.id, workerId: ada.id, signalId: 'sig-x', noticeEventId: first.id, at }));
+    await stopA(); // the coordinator rejoined within the same millisecond
+    const second = await db.agentTeamEvent.findMany({ where: { appId: app.id, type: 'stop.notice', subjectWorkerId: ada.id }, select: { id: true } });
+    const offered = (await pendingStopNotices(db, app.id, [ada.id])).get(ada.id);
+    expect(offered?.eventId).toBe(second.map((e) => e.id).find((id) => id !== first.id));
   });
 });

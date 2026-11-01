@@ -203,12 +203,10 @@ async function reconcileCoordinators(tx: Tx, appId: string, now: Date, covering:
     want.set(s.id, new Set(ids));
   }
   // Who each live signal last named, and whether the latest stop to them was delivered.
-  const last = await tx.$queryRaw<Array<{ signalId: string; workerId: string; named: boolean; delivered: boolean }>>(Prisma.sql`
+  const last = await tx.$queryRaw<Array<{ signalId: string; workerId: string; eventId: string; named: boolean }>>(Prisma.sql`
     SELECT DISTINCT ON (e.payload ->> 'signalId', e.subject_worker_id)
-           e.payload ->> 'signalId' AS "signalId", e.subject_worker_id AS "workerId",
-           (e.type = ${STOP_NOTICE_EVENT} AND e.payload ->> 'notice' = 'stop') AS named,
-           EXISTS (SELECT 1 FROM worker_delivery_task_events d WHERE d.event_id = e.id AND d.worker_id = e.subject_worker_id
-                   AND d.chain_index = 0 AND d.delivered_at IS NOT NULL) AS delivered
+           e.payload ->> 'signalId' AS "signalId", e.subject_worker_id AS "workerId", e.id AS "eventId",
+           (e.type = ${STOP_NOTICE_EVENT} AND e.payload ->> 'notice' = 'stop') AS named
     FROM agent_team_events e
     WHERE e.app_id = ${appId} AND e.type IN (${STOP_NOTICE_EVENT}, ${STOP_NOTICE_WITHDRAWN_EVENT}) AND e.subject_worker_id IS NOT NULL
       AND e.payload ->> 'signalId' IN (${Prisma.join(live.map((s) => s.id))})
@@ -217,16 +215,16 @@ async function reconcileCoordinators(tx: Tx, appId: string, now: Date, covering:
   let sent = 0;
   for (const s of live) {
     const now_ = want.get(s.id)!;
-    const named = new Set(last.filter((l) => l.signalId === s.id && l.named).map((l) => l.workerId));
+    const named = new Map(last.filter((l) => l.signalId === s.id && l.named).map((l) => [l.workerId, l.eventId] as const));
     for (const w of [...now_].sort()) {
       if (named.has(w)) continue;
       await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: s.id, level: s.level, notice: 'stop', at: now });
       sent++;
     }
-    for (const w of [...named].sort()) {
+    for (const [w, noticeEventId] of [...named].sort(([a], [b]) => a.localeCompare(b))) {
       if (now_.has(w)) continue;
       if (live.some((o) => o.id !== s.id && want.get(o.id)!.has(w))) {
-        await appendStopNoticeWithdrawn(tx, { appId, workerId: w, signalId: s.id, at: now });
+        await appendStopNoticeWithdrawn(tx, { appId, workerId: w, signalId: s.id, noticeEventId, at: now });
       } else if (!retired.has(w)) {
         await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: s.id, level: s.level, notice: 'resume', at: now });
         sent++;

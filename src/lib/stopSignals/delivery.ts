@@ -65,7 +65,7 @@ export async function pendingStopNotices(db: Db, appId: string, workerIds: strin
         -- #3045 (V20): a coordinator notice the worker left behind (another live pause-dispatch still named it) no longer applies.
         AND NOT EXISTS (SELECT 1 FROM agent_team_events w
                         WHERE w.app_id = e.app_id AND w.type = ${STOP_NOTICE_WITHDRAWN_EVENT} AND w.subject_worker_id = e.subject_worker_id
-                          AND w.payload ->> 'signalId' = e.payload ->> 'signalId' AND w.created_at >= e.created_at)
+                          AND w.payload ->> 'noticeEventId' = e.id)
     ), newest AS (
       SELECT DISTINCT ON ("workerId", coordinator, CASE WHEN coordinator THEN "signalId" ELSE '' END) *
       FROM ev
