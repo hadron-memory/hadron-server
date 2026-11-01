@@ -172,3 +172,27 @@ it.each(['member', 'outside'] as const)('a task read for a holder who may read i
   expect(JSON.stringify(stored.filter(r => JSON.stringify(r).includes(byOutside.id)))).not.toContain(urn);
   expect(task.id).toBeTruthy();
 });
+
+// ---- the inherited-link filter, now applied to the shared row -------------------
+
+// A comment can't be a fixture here (the COMMENT_INVARIANT trigger: only the comment path creates one), so the
+// comment half of the filter keeps the pre-#2950 SQL's behaviour without a pin of its own.
+it.each([
+  ['a boot prompt', { role: 'boot-prompt' }],
+  ['a boot-prompt variant', { role: 'boot-prompt.lane' }],
+] as const)('an inherited link never supplies %s as the register entry, while the Team Agent\'s own one counts', async (_label, shape) => {
+  await f.node(f.roleA.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  const w = await f.worker('Alpha');
+  const t = await f.ticker('Shared');
+  await db.tickerSubscription.create({ data: { tickerId: t.id, workerId: w.id } });
+  const entry = (memoryId: string) => f.node(memoryId, 'register:tick.shared', { ...shape, data: { registerEntry: { code: 'tick.shared', taskLoc: tickTaskLoc2733 } } });
+  // Inherited: the Team Agent extends Base, and only Base carries the entry.
+  await db.agent.update({ where: { id: f.team.id }, data: { extendsAgentId: f.base.id } });
+  const inherited = await entry(f.base.systemMemoryId);
+  expect(tick(await due(), w.id).action).toEqual({ code: 'tick.shared', state: 'UNMAPPED' });
+  // Own: the same row in the Team Agent's own memory is its entry.
+  await db.node.delete({ where: { id: inherited.id } });
+  await db.appWakeReservation.deleteMany({ where: { appId: f.app.id } });
+  await entry(f.team.systemMemoryId);
+  expect(tick(await due(), w.id).action).toMatchObject({ code: 'tick.shared', state: 'MAPPED', taskLoc: tickTaskLoc2733 });
+});
