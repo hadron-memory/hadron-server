@@ -79,41 +79,32 @@ export async function effectiveModelGroups(
 }
 
 /**
- * The pure glob primitive (#2831 S2): full-string, case-insensitive, `*` (any run) and `?` (one char) only. Iterative
- * two-pointer match that remembers only the LAST star, so it is O(pattern x model) in the worst case and never
- * backtracks exponentially: a manager-written pattern of separated stars cannot slow a matching pass (BLIND and LOCAL
- * review of the first head, where a regex expansion took over a second on a 41-character legal pattern).
+ * Full-string model glob matching; only `*` and `?` are special. No regex backtracking: an iterative two-pointer match
+ * that remembers only the LAST star (O(pattern x model)), and judges a pattern star BEFORE literal equality so a model
+ * that itself contains `*` or `?` is matched as literal text. ONE primitive for both the S3 readers
+ * (`matchingModelGroupNames`) and the S2 matcher filters (`modelMatchesPattern`), so the groups a worker shows are the
+ * groups the matcher judges it by.
  */
-export function modelMatchesPattern(pattern: string, model: string): boolean {
-  const p = pattern.toLowerCase();
-  const s = model.toLowerCase();
-  let i = 0;
-  let j = 0;
-  let star = -1;
-  let mark = 0;
-  while (j < s.length) {
-    // The star is judged FIRST: a model may itself contain a literal `*` (or `?`), and a pattern's `*` is always a
-    // wildcard, never a literal to be equality-matched against that character.
-    if (i < p.length && p[i] === '*') {
-      star = i++;
-      mark = j;
-    } else if (i < p.length && (p[i] === '?' || p[i] === s[j])) {
-      i++;
-      j++;
-    } else if (star !== -1) {
-      i = star + 1;
-      j = ++mark;
-    } else {
-      return false;
-    }
+function matchesModel(pattern: string, model: string): boolean {
+  let p = 0, m = 0, star = -1, retry = 0;
+  while (m < model.length) {
+    if (pattern[p] === '*') { star = p++; retry = m; }
+    else if (pattern[p] === '?' || pattern[p] === model[m]) { p++; m++; }
+    else if (star >= 0) { p = star + 1; m = ++retry; }
+    else return false;
   }
-  while (i < p.length && p[i] === '*') i++;
-  return i === p.length;
+  while (pattern[p] === '*') p++;
+  return p === pattern.length;
 }
 
-/** Is `model` in the named group? No model, or a name no group carries, is in nothing. */
+/** The glob primitive of the S2 filters: trimmed and case-insensitive, exactly as `matchingModelGroupNames` reads it. */
+export function modelMatchesPattern(pattern: string, model: string): boolean {
+  return matchesModel(pattern.trim().toLowerCase(), model.trim().toLowerCase());
+}
+
+/** Is `model` in the named group? No model (or a blank one), or a name no group carries, is in nothing. */
 export function modelInGroup(groups: EffectiveModelGroup[], name: string, model: string | null): boolean {
-  if (!model) return false;
+  if (!model?.trim()) return false;
   const g = groups.find((x) => x.name === name);
   return !!g && g.patterns.some((p) => modelMatchesPattern(p, model));
 }
@@ -127,4 +118,11 @@ export function modelGroupsAllowed(
   if (req.modelGroupIn && !req.modelGroupIn.some((n) => modelInGroup(groups, n, model))) return false;
   if (req.modelGroupNotIn && req.modelGroupNotIn.some((n) => modelInGroup(groups, n, model))) return false;
   return true;
+}
+
+/** Current membership (hrn:node:hadronmemory.com:specs:cor:agt:060:12), never authorization or family/tier inference. */
+export function matchingModelGroupNames(groups: EffectiveModelGroup[], model: string | null | undefined): string[] {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized) return [];
+  return groups.filter(g => g.patterns.some(p => matchesModel(p.trim().toLowerCase(), normalized))).map(g => g.name).sort();
 }
