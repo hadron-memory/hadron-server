@@ -29,13 +29,22 @@ export class TaskReferenceError extends Error {}
 /** The kind as stored: accepts the GraphQL enum value or the stored word; anything else is refused. */
 export function referenceKind(raw: unknown): TaskReferenceKind {
   if (typeof raw === 'string') {
-    const kind = REFERENCE_KIND_FROM_GQL[raw] ?? (TASK_REFERENCE_KINDS as readonly string[]).find(k => k === raw);
+    // Own properties only: an inherited name (constructor, __proto__, toString) is not a kind.
+    const kind = (Object.hasOwn(REFERENCE_KIND_FROM_GQL, raw) ? REFERENCE_KIND_FROM_GQL[raw] : undefined)
+      ?? (TASK_REFERENCE_KINDS as readonly string[]).find(k => k === raw);
     if (kind) return kind as TaskReferenceKind;
   }
   throw new TaskReferenceError(`A reference kind is one of ${TASK_REFERENCE_KINDS.join(', ')}.`);
 }
 
+/**
+ * The scheme, then `//`, then a non-empty authority, as written. The URL parser repairs `https:host`,
+ * `https:///host` and backslashes into a valid URL; a target is stored as given, so those are refused here.
+ */
+const WRITTEN_AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#\\]/i;
+
 function absoluteUrl(target: string, protocols: readonly string[]): boolean {
+  if (target.includes('\\') || !WRITTEN_AUTHORITY.test(target)) return false;
   let url: URL;
   try {
     url = new URL(target);
@@ -85,7 +94,8 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     if (typeof target !== 'string' || target.length === 0) throw new TaskReferenceError(`${at} needs a target.`);
     if (target.length > TASK_REFERENCE_TARGET_MAX) throw new TaskReferenceError(`${at}: a target is at most ${TASK_REFERENCE_TARGET_MAX} characters.`);
     // Stored as given, so a target the URL parser would silently trim or re-spell is refused, not rewritten.
-    if (/\s/.test(target) || !targetHasKindForm(kind, target)) {
+    // Whitespace and control characters (C0 and DEL) are refused for every kind: the parser trims or encodes them.
+    if (/[\s\x00-\x1f\x7f]/.test(target) || !targetHasKindForm(kind, target)) {
       throw new TaskReferenceError(`${at}: the target is not ${KIND_FORM[kind]}.`);
     }
     if (label != null && typeof label !== 'string') throw new TaskReferenceError(`${at}: a label is text.`);

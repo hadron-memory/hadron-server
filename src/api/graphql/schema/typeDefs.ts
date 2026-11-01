@@ -14587,8 +14587,9 @@ export const typeDefs = `#graphql
 
   """
   #2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): one reference to set. target must have its kind's form and be
-  at most 512 characters, with no whitespace; label at most 120 (empty means none). A list of more than 20, or any
-  item that fails, is refused BAD_USER_INPUT and nothing is written.
+  at most 512 characters, with no whitespace or control characters (a URL is written scheme://host, with no
+  backslash); label at most 120 (empty means none). A list of more than 20, or any item that fails, is refused
+  BAD_USER_INPUT and nothing is written.
   """
   input AgentTaskReferenceInput {
     kind: AgentTaskReferenceKind!
