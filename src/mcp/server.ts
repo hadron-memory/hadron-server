@@ -8474,7 +8474,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same read gate, so both spellings give the same outcome for every caller.',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
       // #2718 — an action URN is a register entry's SECOND address. Resolve it
@@ -8487,9 +8487,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
         const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
         if (!entry) return unreadable();
+        // The DB read stays OUTSIDE the catch: an operational fault is not an
+        // absence and must surface as one (cor:api:140:03), not as not-found.
+        const entryMemoryUrn = await loadMemoryUrn(entry.memoryId);
         let entryUrn: string;
         try {
-          entryUrn = emitNodeUrnV2(await loadMemoryUrn(entry.memoryId), entry.loc);
+          entryUrn = emitNodeUrnV2(entryMemoryUrn, entry.loc);
         } catch {
           return unreadable(); // an unemittable stored loc names no runnable address
         }

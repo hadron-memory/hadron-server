@@ -174,6 +174,28 @@ describe('#2718 — hadron_run_action by action URN', () => {
     expect(await run(outsider.id, actionUrn(agent.urn, CODE))).toBe(notFound(actionUrn(agent.urn, CODE)));
   });
 
+  it('lets a database fault after resolution surface, never as not-found (cor:api:140:03)', async () => {
+    await registerEntry(memoryId, CODE);
+    const urn = actionUrn(agent.urn, CODE);
+    // Count the URN-only Memory reads one successful action run makes, then fail the LAST one (the run branch's own lookup).
+    const real = db.memory.findUnique.bind(db.memory) as (a: any) => Promise<unknown>;
+    let calls = 0;
+    let failAt = Infinity;
+    const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation(((a: any) => {
+      if (a?.select?.urn === true && ++calls === failAt) return Promise.reject(new Error('db down'));
+      return real(a);
+    }) as any);
+    try {
+      expect(await run(admin.id, urn, { who: 'F' })).toContain('RUN-BODY-2718 F');
+      failAt = calls; calls = 0;
+      const outcome = await run(admin.id, urn).then((t) => t, (e) => String(e));
+      expect(outcome).not.toContain('RUN-BODY-2718');
+      expect(outcome).not.toBe(notFound(urn));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('still refuses a non-action, non-node URN with the qualification message', async () => {
     const text = await run(admin.id, 'not-a-urn');
     expect(text).not.toContain('RUN-BODY-2718');
