@@ -1,3 +1,5 @@
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
@@ -1148,6 +1150,12 @@ export const nodeQueries = {
       },
       ctx: Context,
     ) => {
+      // #1793: one outer search attempt, shared by MCP delegation and all core/fallback paths.
+      // Shape validation is side-effect-free and precedes admission; retrieval never begins on refusal.
+      if (args.expand != null && (!Number.isInteger(args.expand) || args.expand < 0 || args.expand > 3)) {
+        throw new GraphQLError('findNodes `expand` must be an integer in [0, 3].', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
       const { scope, appRef, ...coreArgs } = args;
 
       // The pre-spec-049 resolver, unchanged, as a local so the scope wrapper

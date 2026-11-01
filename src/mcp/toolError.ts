@@ -1,3 +1,4 @@
+import { RateLimited } from '../lib/rateLimit/index.js';
 import { isPrismaClientError } from '../lib/prismaErrors.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
 import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFault } from '../lib/internalFault.js';
@@ -53,6 +54,14 @@ export function toolFaultResult(error: unknown, site: string) {
   };
 }
 
+/** #1793: same structured error carrier as faults, with only caller-safe rate metadata. */
+function rateLimitedResult(error: RateLimited) {
+  return { isError: true as const, ...textResult(error.message), structuredContent: { error: {
+    code: 'RATE_LIMITED' as const, message: error.message, retryAfterSeconds: error.extensions.retryAfterSeconds,
+    fieldClass: error.extensions.fieldClass,
+  } } };
+}
+
 /**
  * The MCP fallback boundary (#1695, #1789). Classify before reading a message/code: a Prisma error may contain
  * arguments, paths and internal ids. A typed domain refusal keeps its wording (and is flagged isError); everything else,
@@ -62,7 +71,8 @@ export function toolErrorResult(
   error: unknown,
   domainText: () => string,
   site = 'mcp_tool',
-): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> {
+): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult> {
+  if (error instanceof RateLimited) return rateLimitedResult(error);
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
   return refusalResult(domainText());
 }
@@ -76,6 +86,7 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
+      if (error instanceof RateLimited) return rateLimitedResult(error);
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.
       if (!containsDatabaseDiagnostic(error) && isTrustedRefusal(error)) throw error;
       return toolFaultResult(error, `${name}:handler`);

@@ -7,7 +7,8 @@
  * and q.resource === `${origin}/mcp` with a trusted, non-null origin.
  * An omitted provider defaults to `github`. The page explains why a sign-in
  * is needed and offers a link that starts that GitHub flow and returns to the
- * same authorize URL, plus a secondary link to the same authorize URL with
+ * same authorize URL, then (#2844) one equal link per OTHER provider the deployment
+ * has fully configured (Google, Apple; `{{providerLinks}}` is empty when neither is), plus a secondary link to the same authorize URL with
  * `login_provider=email` (the existing email-entry page). A plain link, not a form: the target is a GET that
  * changes no state, so there is nothing for CSRF to protect.
  *
@@ -35,6 +36,7 @@ ${SHARED_STYLE}
     <p class="muted">Returns to: <code>{{redirectAnchor}}</code></p>
     <p>You need to sign in to Hadron first. After you sign in, you&#39;ll come back to review and approve the connection.</p>
     <a class="button" href="{{signInUrl}}">Continue with GitHub</a>
+    {{providerLinks}}
     <p class="muted">No GitHub account? <a href="{{emailUrl}}">Use email instead</a></p>
     <p class="muted">If you didn&#39;t expect this, close this tab.</p>
   </main>
