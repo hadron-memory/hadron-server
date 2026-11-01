@@ -315,18 +315,26 @@ describe('#2924 reports set status without an alarm or team-shape verdict', () =
 
   it('does not judge an idle coordinator, dark non-coordinator or coordinator on another host', async () => {
     resultOnly(await send(orca1, [rep(coord.id), rep(kit.id, { status: 'dark', reason: 'bare_shell' })]));
+    expect(await stored(coord.id)).toMatchObject({ host: { id: 'orca1' }, status: 'idle', reason: null });
+    expect(await stored(kit.id)).toMatchObject({ host: { id: 'orca1' }, status: 'dark', reason: 'bare_shell' });
     await db.hostRegistrationWorker.deleteMany({ where: { workerId: coord.id } });
     await M.registerHost({}, { input: { appRef: app.id, label: 'Orca Two', pollIntervalSeconds: 60, workers: [{ worker: coord.id, family: 'claude' }] } }, keyCtx(orca2));
     resultOnly(await send(orca2, [rep(coord.id, { status: 'locked', reason: 'bare_shell' })]));
+    expect(await stored(coord.id)).toMatchObject({ host: { id: 'orca2', label: 'Orca Two' }, status: 'locked', reason: 'bare_shell' });
     resultOnly(await send(orca1, [rep(kit.id)]));
+    expect(await stored(kit.id)).toMatchObject({ host: { id: 'orca1' }, status: 'idle', reason: null });
+    expect(await stored(coord.id)).toMatchObject({ host: { id: 'orca2' }, status: 'locked', reason: 'bare_shell' });
   });
 
   it('records status without judging a paused worker or paused team', async () => {
     await db.workerWakeSettings.create({ data: { workerId: coord.id, pausedUntil: new Date(Date.now() + 30 * 60_000) } });
     resultOnly(await send(orca1, [rep(coord.id, { status: 'locked', reason: 'rate_limited' })]));
+    expect(await stored(coord.id)).toMatchObject({ host: { id: 'orca1' }, status: 'locked', reason: 'rate_limited' });
+    // Isolate the team pause from the worker pause: either must still store the report.
+    await db.workerWakeSettings.update({ where: { workerId: coord.id }, data: { pausedUntil: null } });
     await db.app.update({ where: { id: app.id }, data: { teamPausedAt: new Date() } });
     resultOnly(await send(orca1, [rep(coord.id, { status: 'dark', reason: 'bare_shell', checkedAt: NOW() })]));
-    expect((await stored(coord.id)).status).toBe('dark');
+    expect(await stored(coord.id)).toMatchObject({ host: { id: 'orca1' }, status: 'dark', reason: 'bare_shell' });
   });
 
   it('accepts a no-coordinator App with no special result field or stored verdict', async () => {
@@ -399,7 +407,8 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
   it.each([
     ['idle', null], ['busy', null], ['locked', 'rate_limited'], ['dark', 'bare_shell'],
   ])('#2924 MCP worker and roster omit terminal for %s while GraphQL keeps it', async (status, reason) => {
-    await send(orca1, [rep(kit.id, { status, reason })]);
+    const report = rep(kit.id, { status, reason, prompt: 'menu', checkedAt: new Date('2026-01-02T03:04:05Z'), lastTurnAt: new Date('2026-01-02T03:00:00Z') });
+    await send(orca1, [report]);
     const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
     for (const text of [
       await mcp.callToolText('hadron_get_worker', { workerRef: kit.id }),
@@ -407,7 +416,11 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
     ]) {
       expect(text).toContain('Kit');
       expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
-      expect(text).not.toContain('Orca One');
+      // Pin the report's semantic contents, not just the old `terminal <status>` wording.
+      for (const value of ['Orca One', 'orca1', report.checkedAt.toISOString(), report.lastTurnAt.toISOString(), ...(reason ? [reason] : [])]) {
+        expect(text).not.toContain(value);
+      }
+      expect(text).not.toMatch(/\b(?:checkedAt|lastTurnAt|reportedAt)\b/);
     }
     expect(await F.Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id: kit.id } }), {}, ctx(manager.id))).toMatchObject({ status, reason });
     const r = await Q.teamRoster({}, { appRef: app.id }, ctx(manager.id));
@@ -421,6 +434,7 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
       const text = await mcp.callToolText('hadron_get_worker', { workerRef: kit.id });
       expect(text).toContain('Kit');
       expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
+      // This spy covers hadron_get_worker only. The roster still reads its GraphQL terminal field.
       expect(spy).not.toHaveBeenCalled();
       expect(await mcp.callToolText('hadron_team_roster', { appRef: app.id })).not.toMatch(/terminal (idle|busy|locked|dark)/);
     } finally { spy.mockRestore(); }
@@ -440,8 +454,6 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
     await send(orca1, [rep(kit.id), rep(ada.id), rep(coord.id)]);
     expect(await count()).toBe(none);
   });
-
-
 });
 
 describe('the SDL: results are references, not Worker objects (G1)', () => {
