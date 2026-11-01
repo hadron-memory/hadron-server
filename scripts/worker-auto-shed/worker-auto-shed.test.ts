@@ -1,3 +1,4 @@
+import { readFileSync as readCutSource3082 } from 'node:fs';
 /**
  * #1958 residual: the recovery prompt the PreCompact hook `worker-auto-shed` writes.
  *
@@ -319,4 +320,8 @@ describe('#2163 part 1: a stopped agent cannot compact on the way out', () => {
       expect(fire(PRE2163_HOOK, s, wt, agent.pid).status).toBe(0);
     });
   });
+});
+
+it('#3082 recovery prompt never instructs MCP worker binding', () => {
+  expect(readCutSource3082(new URL('./worker-auto-shed', import.meta.url), 'utf8')).not.toContain('hadron_resume_session');
 });

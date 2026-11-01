@@ -1,3 +1,4 @@
+import { readFileSync as readCutSource3082 } from 'node:fs';
 /**
  * The Orca attention router. No network, no Orca: a fake runner plays both
  * `hadron team attention` and `orca terminal list|wait|send`.
@@ -2839,3 +2840,7 @@ describe('#2613 — the open-task line on every router wake', () => {
   });
 });
 
+
+it('#3082 source never instructs the retired MCP team surface', () => {
+  expect(readCutSource3082(new URL('./router.ts', import.meta.url), 'utf8')).not.toMatch(/hadron_team_chat_(?:read|mark_read)/);
+});
