@@ -2007,17 +2007,160 @@ export async function partyView(ctx: Context, workerId: string | null, userId: s
   return null;
 }
 
-/** #2644: bounded same-App dependency reads use the task's normal participant/key gate. */
-async function taskRelations(ctx: Context, id: string, direction: 'blockedBy' | 'blocks', args: { limit?: number | null; offset?: number | null }) {
+type RelationDirection = 'blockedBy' | 'blocks';
+type RelationPage = { items: TaskRow[]; total: number; hasMore: boolean };
+type RelationRequest = {
+  id: string;
+  direction: RelationDirection;
+  take: number;
+  skip: number;
+  settle: (page: RelationPage) => void;
+  fail: (error: unknown) => void;
+};
+
+/**
+ * #2764: the relation requests one request's field resolvers raised in the current tick. Keyed by the Context OBJECT
+ * (a WeakMap, not a field): a copy made for another caller or transaction (`{ ...ctx, userId }`) never inherits the
+ * original's queue, so a batch holds one caller's requests only. Nothing here outlives its flush: the queue is
+ * removed before the flush starts and no result is kept, so a later read always reaches the database.
+ */
+const relationQueues = new WeakMap<Context, RelationRequest[]>();
+
+/**
+ * #2644 / #2764: bounded same-App dependency reads, batched per request. GraphQL starts every list item's field
+ * resolver in one synchronous pass, so the requests raised in that pass are served together by
+ * {@link flushTaskRelations}: a 200-row list costs a fixed number of queries, not two per row.
+ */
+function taskRelations(ctx: Context, id: string, direction: RelationDirection, args: { limit?: number | null; offset?: number | null }): Promise<RelationPage> {
   const { take, skip } = pageArgs(args);
-  return (await withReadableTask(ctx, id, async (c, r) => {
-    const where: Prisma.AgentTaskWhereInput = { appId: r.task.appId,
-      ...(direction === 'blockedBy' ? { dependentLinks: { some: { taskId: r.task.id } } } : { blockerLinks: { some: { blockerTaskId: r.task.id } } }) };
-    const [items, total] = await Promise.all([
-      c.db.agentTask.findMany({ where, orderBy: { id: 'asc' }, take, skip }), c.db.agentTask.count({ where }),
-    ]);
-    return pageEnvelope(items, total, skip);
-  })) ?? pageEnvelope([], 0, skip);
+  return new Promise((settle, fail) => {
+    let queue = relationQueues.get(ctx);
+    if (!queue) {
+      const fresh: RelationRequest[] = (queue = []);
+      relationQueues.set(ctx, fresh);
+      queueMicrotask(() => {
+        relationQueues.delete(ctx);
+        void flushTaskRelations(ctx, fresh);
+      });
+    }
+    queue.push({ id, direction, take, skip, settle, fail });
+  });
+}
+
+/** A caller with no readable parent gets exactly the page a missing task gets. */
+const emptyRelationPage = (skip: number): RelationPage => pageEnvelope([] as TaskRow[], 0, skip);
+
+async function flushTaskRelations(ctx: Context, requests: RelationRequest[]): Promise<void> {
+  try {
+    const taskIds = [...new Set(requests.map((r) => r.id))];
+    const parents = await readableRelationParents(ctx, taskIds, requests);
+    for (const r of requests) r.settle(parents.get(r) ?? emptyRelationPage(r.skip));
+  } catch (e) {
+    for (const r of requests) r.fail(e);
+  }
+}
+
+/**
+ * The relation page of every REQUESTED parent the caller may read, by the SAME gate the per-task read used: a
+ * participant of the parent's App (decided once per distinct App, since the actor depends on the App alone), or the
+ * App's own key inside ONE transaction holding the App's shared anchors. A parent that is missing or unreadable is
+ * absent from the map, and the caller answers it with the empty page.
+ */
+async function readableRelationParents(ctx: Context, taskIds: string[], requests: RelationRequest[]): Promise<Map<RelationRequest, RelationPage>> {
+  const key = appKeyCaller(ctx);
+  const heads = await ctx.db.agentTask.findMany({ where: { id: { in: taskIds } }, select: { id: true, appId: true } });
+  if (!key) {
+    const readableApps = new Set<string>();
+    await Promise.all(
+      [...new Set(heads.map((h) => h.appId))].map(async (appId) => {
+        const app = await loadApp(ctx, appId);
+        if (app && (await resolveTaskActor(ctx, app))) readableApps.add(appId);
+      }),
+    );
+    return relationPages(ctx.db, heads.filter((h) => readableApps.has(h.appId)), requests);
+  }
+  const own = heads.filter((h) => h.appId === key.appId);
+  if (!own.length) return new Map();
+  const pages = await inKeyReadTx<Map<RelationRequest, RelationPage> | null>(ctx, key.appId, () => null, async (txCtx, app) => {
+    const rows = await txCtx.db.agentTask.findMany({ where: { id: { in: own.map((h) => h.id) }, appId: app.id }, select: { id: true, appId: true } });
+    return relationPages(txCtx.db, rows, requests);
+  });
+  return pages ?? new Map();
+}
+
+/**
+ * Count and page every (parent, direction, take, skip) in a fixed number of statements. The related task is the
+ * parent's blocker (`blockedBy`) or dependent (`blocks`), in the parent's own App, ordered by id; the window numbers
+ * each parent's rows so a page is exactly `offset .. offset+limit` of ITS OWN list.
+ */
+async function relationPages(
+  db: Context['db'],
+  parents: Array<{ id: string; appId: string }>,
+  requests: RelationRequest[],
+): Promise<Map<RelationRequest, RelationPage>> {
+  const known = new Set(parents.map((p) => p.id));
+  const mine = requests.filter((r) => known.has(r.id));
+  const out = new Map<RelationRequest, RelationPage>();
+  if (!mine.length) return out;
+  const totals = new Map<string, number>(); // `${direction}:${parent}` -> total
+  const related = new Map<string, TaskRow>();
+  const relatedIds = new Map<string, string[]>(); // `${direction}:${take}:${skip}:${parent}` -> related ids, in order
+  for (const direction of ['blockedBy', 'blocks'] as const) {
+    const ofDirection = mine.filter((r) => r.direction === direction);
+    if (!ofDirection.length) continue;
+    const parentIds = [...new Set(ofDirection.map((r) => r.id))];
+    const counts = direction === 'blockedBy'
+      ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT l.task_id AS parent, count(*)::int AS n FROM agent_task_blockers l
+          JOIN agent_tasks p ON p.id = l.task_id JOIN agent_tasks r ON r.id = l.blocker_task_id AND r.app_id = p.app_id
+          WHERE l.task_id IN (${Prisma.join(parentIds)}) GROUP BY l.task_id`
+      : await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT l.blocker_task_id AS parent, count(*)::int AS n FROM agent_task_blockers l
+          JOIN agent_tasks p ON p.id = l.blocker_task_id JOIN agent_tasks r ON r.id = l.task_id AND r.app_id = p.app_id
+          WHERE l.blocker_task_id IN (${Prisma.join(parentIds)}) GROUP BY l.blocker_task_id`;
+    for (const c of counts) totals.set(`${direction}:${c.parent}`, c.n);
+    // One windowed read per distinct page shape (limit, offset); every parent that asked for it shares the statement.
+    const shapes = new Map<string, { take: number; skip: number; parentIds: string[] }>();
+    for (const r of ofDirection) {
+      if (r.take === 0 || !totals.get(`${direction}:${r.id}`)) continue;
+      const s = shapes.get(`${r.take}:${r.skip}`) ?? { take: r.take, skip: r.skip, parentIds: [] };
+      if (!s.parentIds.includes(r.id)) s.parentIds.push(r.id);
+      shapes.set(`${r.take}:${r.skip}`, s);
+    }
+    for (const s of shapes.values()) {
+      const upper = s.skip + s.take;
+      const rows = direction === 'blockedBy'
+        ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT l.task_id AS parent, l.blocker_task_id AS related,
+                     row_number() OVER (PARTITION BY l.task_id ORDER BY l.blocker_task_id) AS rn
+              FROM agent_task_blockers l
+              JOIN agent_tasks p ON p.id = l.task_id JOIN agent_tasks r ON r.id = l.blocker_task_id AND r.app_id = p.app_id
+              WHERE l.task_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`
+        : await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT l.blocker_task_id AS parent, l.task_id AS related,
+                     row_number() OVER (PARTITION BY l.blocker_task_id ORDER BY l.task_id) AS rn
+              FROM agent_task_blockers l
+              JOIN agent_tasks p ON p.id = l.blocker_task_id JOIN agent_tasks r ON r.id = l.task_id AND r.app_id = p.app_id
+              WHERE l.blocker_task_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`;
+      for (const row of rows) {
+        const k = `${direction}:${s.take}:${s.skip}:${row.parent}`;
+        const list = relatedIds.get(k) ?? [];
+        list.push(row.related);
+        relatedIds.set(k, list);
+      }
+    }
+  }
+  const wanted = [...new Set([...relatedIds.values()].flat())];
+  if (wanted.length) for (const t of await db.agentTask.findMany({ where: { id: { in: wanted } } })) related.set(t.id, t);
+  for (const r of mine) {
+    const items = (relatedIds.get(`${r.direction}:${r.take}:${r.skip}:${r.id}`) ?? []).map((id) => related.get(id)).filter((t): t is TaskRow => !!t);
+    out.set(r, pageEnvelope(items, totals.get(`${r.direction}:${r.id}`) ?? 0, r.skip));
+  }
+  return out;
 }
 
 export const agentTaskFieldResolvers = {

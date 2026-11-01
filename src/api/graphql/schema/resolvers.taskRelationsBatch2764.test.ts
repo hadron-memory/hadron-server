@@ -147,3 +147,19 @@ describe('#2764 no cache across callers or requests', () => {
     expect((await blockedBy(t, c)).total).toBe(2);
   });
 });
+
+describe('#2764 App key reads', () => {
+  it('serves a key its own App in one transaction and conceals another App, in one batch', async () => {
+    const [t] = await fan(2);
+    const key = await db.appKey.create({ data: { id: generateId(), appId, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    const foreignApp = await db.app.create({ data: { ownerUserId: outsiderId, name: 'Foreign', urn: 'syntheticoutsider:app' } });
+    const foreign = await db.agentTask.create({ data: { appId: foreignApp.id, title: 'Foreign', ownerUserId: outsiderId } });
+    const foreignBlocker = await db.agentTask.create({ data: { appId: foreignApp.id, title: 'FB', ownerUserId: outsiderId } });
+    await link(foreign.id, foreignBlocker.id);
+    const ctx: Context = { db, appId, appKeyId: key.id, roles: [] };
+    const [mine, theirs, mineDown] = await Promise.all([blockedBy(t, ctx), blockedBy(foreign, ctx), blocks(t, ctx)]);
+    expect(mine.total).toBe(1);
+    expect(mineDown.total).toBe(1);
+    expect(theirs).toEqual({ items: [], total: 0, hasMore: false });
+  });
+});
