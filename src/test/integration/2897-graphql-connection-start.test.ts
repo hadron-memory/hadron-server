@@ -55,28 +55,14 @@ let adminId: string;
 let memberId: string;
 let orgId: string;
 
+/** #3063: both suite boot and the named retained-state regression use this exact fixture path. */
+async function startConnectionFixture() {
+  return createServer();
+}
+
 beforeAll(async () => {
   for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
-  // #3063: reproduce an earlier file's retained manifest, not just an empty DB.
-  // The fork's private DB is reused across files, while env is restored between them.
-  const savedRing = process.env.RATE_LIMIT_KEYRING;
-  try {
-    await cleanDb(db);
-    process.env.RATE_LIMIT_KEYRING = JSON.stringify({ current: 'previous-file', keys: { 'previous-file': '2'.repeat(64) } });
-    await assertRateReadiness(db);
-  } finally {
-    if (savedRing === undefined) delete process.env.RATE_LIMIT_KEYRING;
-    else process.env.RATE_LIMIT_KEYRING = savedRing;
-  }
-  const retained = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
-  expect(retained.keyIds.every((id) => !readRateKeys().keys.has(id))).toBe(true);
-  // The unchanged product guard must still reject this configuration, without re-seeding it.
-  await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
-  expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual(['previous-file']);
-
-  // Own this private worker DB before boot, not only before the first test.
-  await cleanDb(db);
-  const app = await createServer();
+  const app = await startConnectionFixture();
   const listening = createHttpServer(app);
   server = listening;
   await new Promise<void>((resolve) => listening.listen(0, '127.0.0.1', resolve));
@@ -429,21 +415,58 @@ describe('startConnection: credentials that may never start a connection (resolv
   });
 });
 
-// #3063: a present key ID with a different fingerprint is invalid too. Fixture
-// isolation must never become a product fallback that overwrites retained config.
-it('invalid retained fingerprints still refuse real startup and readiness without rewriting state (#3063)', async () => {
-  await assertRateReadiness(db);
-  const id = readRateKeys().current;
-  await db.rateLimitManifest.update({
-    where: { id: 'global' },
-    data: { fingerprints: { [id]: keyFingerprint(Buffer.alloc(32, 7)) } },
+describe('startup fixture ownership (#3063)', () => {
+  it('cleans a previous file manifest before boot while raw startup still refuses it', async () => {
+    const savedRing = process.env.RATE_LIMIT_KEYRING;
+    const restoreRing = () => {
+      if (savedRing === undefined) delete process.env.RATE_LIMIT_KEYRING;
+      else process.env.RATE_LIMIT_KEYRING = savedRing;
+    };
+    try {
+      // Reproduce the actual predecessor: DB persists, but the environment is restored.
+      try {
+        process.env.RATE_LIMIT_KEYRING = JSON.stringify({ current: 'previous-file', keys: { 'previous-file': '2'.repeat(64) } });
+        await assertRateReadiness(db);
+      } finally {
+        restoreRing();
+      }
+      const before = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(before.keyIds).toEqual(['previous-file']);
+      expect(before.keyIds.filter((id) => readRateKeys().keys.has(id))).toEqual([]);
+      // Raw product startup/seed must refuse, not overwrite retained configuration.
+      await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
+      await expect(assertRateReadiness(db)).rejects.toBeInstanceOf(RateConfigurationError);
+      const after = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+
+      // The same test-only fixture path used by beforeAll must own its DB before boot.
+      await expect(startConnectionFixture()).resolves.toBeDefined();
+      expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual([readRateKeys().current]);
+    } finally {
+      restoreRing();
+      await cleanDb(db);
+    }
   });
-  const before = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
-  expect(readRateKeys().keys.has(id)).toBe(true);
-  expect((before.fingerprints as Record<string, string>)[id] === keyFingerprint(readRateKeys().keys.get(id)!)).toBe(false);
-  await expect(checkRateConfiguration(db)).rejects.toBeInstanceOf(RateConfigurationError);
-  await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
-  // Compare without printing even synthetic fingerprints in failure diagnostics.
-  const after = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
-  expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+
+  it('invalid retained fingerprints still refuse real startup and readiness without rewriting state', async () => {
+    try {
+      await assertRateReadiness(db);
+      const id = readRateKeys().current;
+      await db.rateLimitManifest.update({
+        where: { id: 'global' },
+        data: { fingerprints: { [id]: keyFingerprint(Buffer.alloc(32, 7)) } },
+      });
+      const before = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(readRateKeys().keys.has(id)).toBe(true);
+      expect((before.fingerprints as Record<string, string>)[id] === keyFingerprint(readRateKeys().keys.get(id)!)).toBe(false);
+      await expect(checkRateConfiguration(db)).rejects.toBeInstanceOf(RateConfigurationError);
+      await expect(assertRateReadiness(db)).rejects.toBeInstanceOf(RateConfigurationError);
+      await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
+      // Compare without printing even synthetic fingerprints in failure diagnostics.
+      const after = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+    } finally {
+      await cleanDb(db);
+    }
+  });
 });
