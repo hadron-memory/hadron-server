@@ -10,6 +10,8 @@ import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from
 import { generateId } from '../../../lib/id.js';
 import { resolvers } from './resolvers.js';
 import type { Context } from './resolvers.helpers.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -58,8 +60,15 @@ describe.each(DOORS)('#2701 %s on an install memory', (_name, call, field) => {
 
   it('answers an outsider as a missing node, byte-identical to a node that does not exist', async () => {
     const f = await fixture();
-    await expect(call(f, f.stranger.id)).rejects.toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    const denied = await call(f, f.stranger.id).catch(error => error);
+    expect(denied).toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
     expect(field(await f.row())).not.toHaveProperty(_name === 'updateNodeData' ? 'b' : 'q');
+    // Keep the exact same reference: only whether it exists changes between
+    // the refused call and the real missing-node control.
+    await db.node.delete({ where: { id: f.node.id } });
+    const missing = await call(f, f.stranger.id).catch(error => error);
+    expect(missing).toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    expect(denied.message).toBe(missing.message);
   });
 
   it('refuses the manager of a DETACHED install memory (Agent erased)', async () => {
@@ -74,5 +83,66 @@ describe.each(DOORS)('#2701 %s on an install memory', (_name, call, field) => {
     await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
     await expect(call(f, f.admin.id)).rejects.toThrow();
     expect(field(await f.row())).not.toHaveProperty(_name === 'updateNodeData' ? 'b' : 'q');
+  });
+});
+
+describe('#2769 updateNodeProperties decides platform authority after the App-anchor wait', () => {
+  it.each([true, false])('revoked=%s: observes the wait, then judges live authority without a partial merge', async revoke => {
+    const f = await fixture();
+    // The platform role is the ONLY manager grant. App membership preserves
+    // content read reach after revocation, so the deciding WRITE gate must
+    // refuse, rather than an unrelated content-read precheck masking it.
+    await db.orgMember.delete({ where: { organizationId_userId: { organizationId: orgId, userId: f.admin.id } } });
+    await createDbAppMember(db, f.app.id, f.admin.id, 'member');
+    await db.user.update({ where: { id: f.admin.id }, data: { roles: ['ADMIN'] } });
+    const caller: Context = { ...ctxOf(f.admin.id), roles: ['ADMIN'] };
+    const before = {
+      node: await f.row(),
+      revisions: await db.nodeRevision.findMany({ where: { nodeId: f.node.id }, orderBy: { id: 'asc' } }),
+    };
+
+    let release!: () => void;
+    const commit = new Promise<void>(resolve => { release = resolve; });
+    let held!: () => void;
+    let failed!: (error: unknown) => void;
+    const isHeld = new Promise<void>((resolve, reject) => { held = resolve; failed = reject; });
+    const holder = db.$transaction(async tx => {
+      await lockAuthorityAnchors(tx, [{ kind: 'app', id: f.app.id }], 'exclusive');
+      held();
+      await commit;
+      if (revoke) await tx.user.update({ where: { id: f.admin.id }, data: { roles: [] } });
+    }, { timeout: 20_000 });
+    // Attach rejection handlers immediately; always release and drain both
+    // connections even when a barrier/assertion fails.
+    const holderOutcome = holder.then(() => null, error => { failed(error); return error; });
+    await isHeld;
+    const write = M.updateNodeProperties({}, { nodeRef: f.node.id, properties: { q: 2 } }, caller)
+      .then((node: unknown) => ({ ok: true as const, node }), (error: unknown) => ({ ok: false as const, error }));
+    let outcome: Awaited<typeof write>;
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1);
+      const [wait] = await db.$queryRaw<Array<{ waiting: number }>>`
+        SELECT count(*)::int AS waiting FROM pg_locks
+        WHERE locktype = 'advisory' AND NOT granted
+          AND classid = hashtext('authorization:app')::oid
+          AND objid = hashtext(${f.app.id})::oid
+          AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
+      expect(wait.waiting).toBe(1);
+      expect(await f.row()).toEqual(before.node);
+    } finally {
+      release();
+      const holderError = await holderOutcome;
+      outcome = await write;
+      if (holderError) throw holderError;
+    }
+
+    if (revoke) {
+      expect(outcome).toMatchObject({ ok: false, error: { message: expect.stringMatching(/^Forbidden/), extensions: { code: 'FORBIDDEN' } } });
+      expect(await f.row()).toEqual(before.node);
+      expect(await db.nodeRevision.findMany({ where: { nodeId: f.node.id }, orderBy: { id: 'asc' } })).toEqual(before.revisions);
+    } else {
+      expect(outcome.ok).toBe(true);
+      expect((await f.row()).properties).toEqual({ p: 1, q: 2 });
+    }
   });
 });
