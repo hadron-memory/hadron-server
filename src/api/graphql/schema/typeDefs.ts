@@ -3027,7 +3027,9 @@ export const typeDefs = `#graphql
     not-URN-legal (neither has a URN).
     """
     urn: String
+    "Numeric GitHub account id (#2574, hrn:node:hadronmemory.com:specs:cor:acl:070:01). Personal tier, like name and email: null for a viewer who is not the user, a platform admin, or a co-member of one of their orgs."
     githubId: Int
+    "GitHub username (#2574, hrn:node:hadronmemory.com:specs:cor:acl:070:01). Identity tier: visible to any signed-in viewer, and a public search key (hrn:node:hadronmemory.com:specs:cor:acl:070:02)."
     githubUsername: String
     """
     Google account subject id (#837). Opaque provider identifier, never an
@@ -3050,6 +3052,7 @@ export const typeDefs = `#graphql
     linkedAt: DateTime
     name: String
     email: String
+    "Avatar image URL (#2574, hrn:node:hadronmemory.com:specs:cor:acl:070:01). Identity tier: visible to any signed-in viewer."
     avatarUrl: String
     "Platform roles; an empty list is returned to viewers without personal-field access."
     roles: [Role!]!
