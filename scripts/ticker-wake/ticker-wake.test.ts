@@ -2784,6 +2784,17 @@ describe('#2613 — the open-task line on every ticker-wake form', () => {
     expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
   });
 
+  it('an empty result (the read answered, zero rows): no diagnostic, no open-task clause, the plain wake still delivers (#2641)', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
+    f.openTasks['w-ada'] = [];
+    await go();
+    expect(f.openTaskReads).toEqual([['hrn:app:test:team', 'w-ada', '0']]); // the read ran and answered empty
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toBe(nudgeText(['coordinator-tick'], []));
+    expect(f.sent[0]).not.toMatch(/open task|You have \d/);
+    expect(lines.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
   it('a row that is not open or not this worker makes the count unknown; the wake is plain', async () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'a'))];
     f.openTasks['w-ada'] = [...open('w-ada', 2), { id: 'x', status: 'CANCELLED', assignee: { kind: 'WORKER', id: 'w-ada' } }];
