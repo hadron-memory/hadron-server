@@ -52,6 +52,7 @@ describe('repeat acknowledgement across issue/ack clock skew', () => {
       expect(await ack(p, AT.getTime())).toEqual({ acknowledged: 1, unchanged: 0 });
       const first = await receipt();
       expect(first.ackedAt).toEqual(AT); // the floor uses actual acknowledgement time, not future issue time
+      expect(first.issuedAt).toEqual(new Date(AT.getTime() + skew));
       expect(await ack(p, AT.getTime())).toEqual({ acknowledged: 0, unchanged: 1 });
       expect(await ack(p, AT.getTime() + 500)).toEqual({ acknowledged: 0, unchanged: 1 });
       expect(await ack(p, AT.getTime() + skew + 1000)).toEqual({ acknowledged: 0, unchanged: 1 });
@@ -84,19 +85,38 @@ describe('repeat acknowledgement across issue/ack clock skew', () => {
     expect(await receipt()).toEqual(second);
   });
 
-  it('an absorbed ancestor with a future issue is not charged after its descendant is acknowledged', async () => {
-    const ancestor = proof(AT.getTime() + 1000, 'ancestor');
-    const descendant = proof(AT.getTime() + 30_000);
-    await db.appWakeReservation.create({ data: {
-      workerId, appId, wakeKey: 'clock-wake', reservedAt: AT, wake: {}, absorbedKeys: ['ancestor'],
-    } });
-    expect(await ack(descendant, AT.getTime())).toEqual({ acknowledged: 1, unchanged: 0 });
-    expect(await db.appWakeReservation.count({ where: { workerId } })).toBe(0);
-    const rows = await db.workerWakeAck.findMany({ where: { workerId }, orderBy: { wakeKey: 'asc' } });
-    expect(await ack(ancestor, AT.getTime() + 500)).toEqual({ acknowledged: 0, unchanged: 1 });
+  it('a NULL watermark from an old writer falls back to its receipt and permits a later real issue', async () => {
+    // Old code on the expanded schema still inserts these columns only.
+    await db.$executeRaw`
+      INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at)
+      VALUES (${workerId}, 'clock-wake', ${AT.toISOString()}::timestamp)`;
+    const old = await receipt();
+    expect(old.issuedAt).toBeNull();
+    expect(await ack(proof(AT.getTime() - 1000), AT.getTime() + 500)).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await receipt()).toEqual(old);
+    expect(await charged()).toBe(0);
+    const later = AT.getTime() + 5 * 60_000;
+    expect(await ack(proof(later), later)).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect((await receipt()).issuedAt).toEqual(new Date(later));
     expect(await charged()).toBe(1);
-    expect(await db.workerWakeAck.findMany({ where: { workerId }, orderBy: { wakeKey: 'asc' } })).toEqual(rows);
   });
+
+  for (const existing of [false, true]) {
+    it(`an absorbed ancestor with a future issue is not charged after its descendant (existing receipt: ${existing})`, async () => {
+      const ancestor = proof(AT.getTime() + 1000, 'ancestor');
+      const descendant = proof(AT.getTime() + 30_000);
+      if (existing) await db.workerWakeAck.create({ data: { workerId, wakeKey: 'ancestor', ackedAt: AT } });
+      await db.appWakeReservation.create({ data: {
+        workerId, appId, wakeKey: 'clock-wake', reservedAt: AT, wake: {}, absorbedKeys: ['ancestor'],
+      } });
+      expect(await ack(descendant, AT.getTime())).toEqual({ acknowledged: 1, unchanged: 0 });
+      expect(await db.appWakeReservation.count({ where: { workerId } })).toBe(0);
+      const rows = await db.workerWakeAck.findMany({ where: { workerId }, orderBy: { wakeKey: 'asc' } });
+      expect(await ack(ancestor, AT.getTime() + 500)).toEqual({ acknowledged: 0, unchanged: 1 });
+      expect(await charged()).toBe(1);
+      expect(await db.workerWakeAck.findMany({ where: { workerId }, orderBy: { wakeKey: 'asc' } })).toEqual(rows);
+    });
+  }
 
   it('serializes concurrent acknowledgements of the same future-issued proof into one charge', async () => {
     const p = proof(AT.getTime() + 30_000);
