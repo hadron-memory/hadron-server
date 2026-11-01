@@ -439,23 +439,38 @@ export async function vectorSearchNodes(
     exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
     if (takeExactFallback({ exhausted, eligibleRows, bound })) {
       // Every eligible row is ranked, so the ANN horizon cannot hide one. The
-      // MATERIALIZED CTE has no ORDER BY / LIMIT, so the HNSW index cannot
-      // serve it on any plan (no planner switch, nothing to leak to the pool).
-      const exact = await db.$queryRaw<NodeRow[]>`
+      // MATERIALIZED CTE has no ORDER BY, so the HNSW index cannot serve it on
+      // any plan (no planner switch, nothing to leak to the pool). The count
+      // above is a separate statement, so the eligible set may have grown
+      // since (#3062 blind P2): the CTE reads at most bound + 1 rows, and an
+      // overflow keeps the ANN result. `total` always yields one row, so the
+      // overflow is visible even when no hit survives the deleted-node join.
+      const exact = await db.$queryRaw<{ node_id: string | null; distance: number | null; total: number }[]>`
         WITH ann AS MATERIALIZED (
           SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
           ${eligibleFrom}
-        )
-        SELECT a.node_id, MIN(a.distance) AS distance, (SELECT count(*) FROM ann)::int AS ann_rows
-        FROM ann a
-        JOIN nodes n ON n.id = a.node_id AND n.deleted_at IS NULL
-        GROUP BY a.node_id
-        ORDER BY distance ASC
-        LIMIT ${k}
+          LIMIT ${bound + 1}
+        ), total AS (SELECT count(*)::int AS n FROM ann)
+        SELECT h.node_id, h.distance, t.n AS total
+        FROM total t
+        LEFT JOIN LATERAL (
+          SELECT a.node_id, MIN(a.distance) AS distance
+          FROM ann a
+          JOIN nodes n ON n.id = a.node_id AND n.deleted_at IS NULL
+          GROUP BY a.node_id
+          ORDER BY distance ASC
+          LIMIT ${k}
+        ) h ON TRUE
+        ORDER BY h.distance ASC NULLS LAST
       `;
-      // Short of k after ranking every eligible row = every hit is here.
-      opts.onWindow?.({ exhausted: exact.length < k });
-      return exact.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
+      if (Number(exact[0]?.total ?? 0) <= bound) {
+        const hits = exact.filter((r) => r.node_id != null);
+        // Short of k after ranking every eligible row = every hit is here.
+        opts.onWindow?.({ exhausted: hits.length < k });
+        return hits.map((r) => ({ nodeId: r.node_id!, score: 1 - Number(r.distance) }));
+      }
+      // Overflow: the set grew past the bound; today's ANN result and flag stand.
+      exhausted = false;
     }
   }
   opts.onWindow?.({ exhausted });
@@ -572,17 +587,27 @@ export async function vectorSearchChunks(
     exhausted = vectorWindowExhausted({ windowRows: rows.length, eligibleRows, truncated });
     if (takeExactFallback({ exhausted, eligibleRows, bound })) {
       // See vectorSearchNodes: every eligible chunk ranked; the MATERIALIZED
-      // CTE leaves the HNSW index nothing to serve. k + 1 tells whether the
-      // slice below truncates.
-      rows = await db.$queryRaw<ChunkRow[]>`
+      // CTE leaves the HNSW index nothing to serve and reads at most bound + 1
+      // rows (an overflow keeps the ANN result). k + 1 tells whether the slice
+      // below truncates.
+      const exact = await db.$queryRaw<(Omit<ChunkRow, 'node_id'> & { node_id: string | null; total: number })[]>`
         WITH exact AS MATERIALIZED (
           SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
                  ne.embedding <=> ${qvec}::vector AS distance
           ${eligibleFrom}
-        )
-        SELECT * FROM exact ORDER BY distance ASC LIMIT ${k + 1}
+          LIMIT ${bound + 1}
+        ), total AS (SELECT count(*)::int AS n FROM exact)
+        SELECT e.*, t.n AS total
+        FROM total t
+        LEFT JOIN LATERAL (SELECT * FROM exact ORDER BY distance ASC LIMIT ${k + 1}) e ON TRUE
+        ORDER BY e.distance ASC NULLS LAST
       `;
-      exhausted = rows.length <= k;
+      if (Number(exact[0]?.total ?? 0) <= bound) {
+        rows = exact.filter((r): r is typeof r & { node_id: string } => r.node_id != null);
+        exhausted = rows.length <= k;
+      } else {
+        exhausted = false;
+      }
     }
   }
   opts.onWindow?.({ exhausted });

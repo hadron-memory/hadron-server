@@ -75,14 +75,14 @@ let smallSpecIds: string[];
  * and SMALL 0.1 (about 0.2), so every BIG vector is nearer the query than every SMALL one; the fixture test checks.
  * `r.rn > 0` correlates the subquery with the row, so random() is drawn per row, not once.
  */
-async function embed(memoryId: string, noise: number) {
+async function embed(memoryId: string, noise: number, onlyIds?: string[]) {
   await db.$executeRawUnsafe(`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
     SELECT md5(r.id), r.id, r.memory_id, 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'body',
       (SELECT array_agg(CASE WHEN g = 2 THEN 1 ELSE (random() - 0.5) * ${2 * noise} END ORDER BY g)
          FROM generate_series(1, ${DIM}) g WHERE r.rn > 0)::real[]::vector,
       now()
-    FROM (SELECT id, memory_id, row_number() OVER (ORDER BY id) AS rn FROM nodes WHERE memory_id = '${memoryId}') r`);
+    FROM (SELECT id, memory_id, row_number() OVER (ORDER BY id) AS rn FROM nodes WHERE memory_id = '${memoryId}'${onlyIds ? ` AND id IN (${onlyIds.map((i) => `'${i}'`).join(',')})` : ''}) r`);
 }
 
 beforeAll(async () => {
@@ -232,9 +232,9 @@ async function withBound<T>(value: string | undefined, run: () => Promise<T>): P
 }
 
 describe('#3054 the bounded exact fallback', () => {
-  it('the bound: unset, empty or invalid is the default 2000; 0 disables; a non-negative integer is taken as is', async () => {
+  it('the bound: unset, empty, invalid, unsafe or over 2^31-1 is the default 2000; 0 disables; a non-negative integer (surrounding whitespace trimmed) is taken as is', async () => {
     expect(VECTOR_EXACT_FALLBACK_DEFAULT_MAX_ROWS).toBe(2000);
-    for (const [raw, want] of [[undefined, 2000], ['', 2000], ['  ', 2000], ['abc', 2000], ['-1', 2000], ['1.5', 2000], ['1e99', 2000], ['0', 0], ['4', 4], ['10000', 10000]] as const) {
+    for (const [raw, want] of [[undefined, 2000], ['', 2000], ['  ', 2000], ['abc', 2000], ['-1', 2000], ['1.5', 2000], ['1e99', 2000], ['9007199254740993', 2000], ['2147483648', 2000], ['0', 0], ['4', 4], [' 4 ', 4], ['10000', 10000], ['2147483647', 2147483647]] as const) {
       expect(await withBound(raw, async () => vectorExactFallbackMaxRows()), String(raw)).toBe(want);
     }
   });
@@ -291,6 +291,54 @@ describe('#3054 the bounded exact fallback', () => {
       const got = await withBound('1000000', () => kind === 'node' ? provider.vectorSearch(opts) : provider.vectorSearchChunks(opts));
       expect(got.length, kind).toBe(5);
       expect(exactCalls(), `${kind} truncated`).toBe(0);
+    }
+  });
+
+  it('#3062 P2: eligible rows added between the count and the exact query never push the exact work past the bound', async () => {
+    // SMALL has 5 eligible rows and the bound is 5, so the count admits the fallback. Right after the count returns,
+    // 3 more eligible SMALL rows land. The exact query must read at most bound + 1 rows, see the overflow and keep
+    // today's ANN result (and its not-exhausted flag), never rank the enlarged set.
+    const provider = getRetrievalProvider();
+    for (const kind of ['node', 'chunk'] as const) {
+      const today = await withBound('0', () => {
+        const o = { db: hnsw(), queryEmbedding: qvec(), memoryIds: [small], limit: 50 };
+        return kind === 'node' ? provider.vectorSearch(o) : provider.vectorSearchChunks(o);
+      });
+      const extra = Array.from({ length: 3 }, (_, i) => ({ id: generateId(), memoryId: small, loc: `race-${kind}-${i}`, name: `race${i}`, content: 'body', role: 'review' }));
+      let injected = false;
+      let exactTotal: number | null = null;
+      const handle = new Proxy(hnsw(), {
+        get(target, prop) {
+          const v = Reflect.get(target, prop);
+          if (prop === '$queryRaw') {
+            return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
+              const sql = Array.isArray(strings) ? strings.join('') : '';
+              const out = await (v as any).call(target, strings, ...vals);
+              if (!injected && sql.includes('count(*)::int AS n') && !sql.includes('MATERIALIZED')) {
+                injected = true;
+                await db.node.createMany({ data: extra });
+                await embed(small, 0.1, extra.map((e) => e.id));
+              }
+              if (sql.includes('MATERIALIZED')) exactTotal = Number((out as any[])[0]?.total);
+              return out;
+            };
+          }
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
+      try {
+        let flag: boolean | null = null;
+        const o = { db: handle, queryEmbedding: qvec(), memoryIds: [small], limit: 50, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
+        const got = await withBound('5', () => kind === 'node' ? provider.vectorSearch(o) : provider.vectorSearchChunks(o));
+        expect(injected, kind).toBe(true);
+        expect(got.map((h) => h.nodeId), kind).toEqual(today.map((h) => h.nodeId));
+        expect(got.some((h) => extra.some((e) => e.id === h.nodeId)), kind).toBe(false);
+        expect(flag, kind).toBe(false);
+        expect(exactTotal, `${kind}: the exact CTE stops at bound + 1`).toBe(6);
+      } finally {
+        await db.$executeRawUnsafe(`DELETE FROM node_embeddings WHERE node_id IN (${extra.map((e) => `'${e.id}'`).join(',')})`);
+        await db.node.deleteMany({ where: { id: { in: extra.map((e) => e.id) } } });
+      }
     }
   });
 });
