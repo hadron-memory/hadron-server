@@ -58,6 +58,9 @@ async function mkUser(n: number) {
 }
 
 type Shape = {
+  type?: 'DEVELOPER' | 'CHATBOT' | 'AUTOMATION' | 'EDGE';
+  /** A usage event on the session; `counts: false` is attribution, not activity (#1653). */
+  event?: { at: Date; counts: boolean };
   startedAt: Date;
   updatedAt?: Date | null;
   endedAt?: Date | null;
@@ -121,6 +124,14 @@ const SCENARIOS: Record<string, { sessions: Shape[]; reason: 'IDLE' | 'ENDED' | 
     ],
     reason: null,
   },
+  // Joost P3: liveness through a usage event. Stale row, recent counting event: live, no reason.
+  LiveByEvent: { sessions: [{ startedAt: ago(30 * HOUR), updatedAt: ago(26 * HOUR), event: { at: ago(1 * MIN), counts: true } }], reason: null },
+  // Same, but the event is attribution only (#1653): not live, so IDLE.
+  IdleDespiteAttribution: { sessions: [{ startedAt: ago(30 * HOUR), updatedAt: ago(26 * HOUR), event: { at: ago(1 * MIN), counts: false } }], reason: 'IDLE' },
+  // Joost P3: another session type's window. AUTOMATION, driven 26h ago: outside the default 24h window, IDLE.
+  IdleAutomation: { sessions: [{ type: 'AUTOMATION', startedAt: ago(30 * HOUR), updatedAt: ago(26 * HOUR) }], reason: 'IDLE' },
+  // AUTOMATION driven an hour ago: live, no reason.
+  LiveAutomation: { sessions: [{ type: 'AUTOMATION', startedAt: ago(2 * HOUR), updatedAt: ago(HOUR) }], reason: null },
   // Live with a future expiry: no reason.
   LiveExpiring: { sessions: [{ startedAt: ago(60 * MIN), updatedAt: ago(1 * MIN), expiresAt: new Date(Date.now() + HOUR) }], reason: null },
 };
@@ -144,10 +155,12 @@ beforeEach(async () => {
       data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), role: 'engineer', heldByUserId: member.id },
       select: { id: true },
     });
-    for (const s of scenario.sessions) {
+    for (const { event, ...s } of scenario.sessions) {
+      const id = generateId();
       await db.session.create({
-        data: { id: generateId(), appId: app.id, userId: member.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', ...s },
+        data: { id, appId: app.id, userId: member.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', ...s },
       });
+      if (event) await db.usageEvent.create({ data: { id: generateId(), sessionId: id, type: 'read', createdAt: event.at, countsAsActivity: event.counts } });
     }
   }
 });
@@ -220,7 +233,7 @@ describe('acceptance 2: the differential — has a reason exactly when the WORKE
 });
 
 describe('the expiry boundary, on a controlled clock (R5, cor:agt:020:03)', () => {
-  it('expiresAt exactly now has ended the session: ENDED, as isSessionLive says not live; one ms later it is IDLE', async () => {
+  it('expiresAt exactly now has ended the session: ENDED, as isSessionLive says not live; one ms earlier it is IDLE', async () => {
     const at = new Date(Date.now() - 2 * HOUR);
     const row = { type: 'DEVELOPER' as const, startedAt: new Date(at.getTime() - 30 * HOUR), updatedAt: new Date(at.getTime() - 26 * HOUR), expiresAt: at };
     await db.session.create({ data: { id: generateId(), appId: app.id, userId: member.id, workerId: w.Never.id, agentId: agent.id, ...row } });
