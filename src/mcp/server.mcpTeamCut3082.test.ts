@@ -9,6 +9,7 @@ import { hashLaunchGrant } from '../lib/hostOperations/launch.js';
 import { generateId } from '../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
+import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
 
@@ -239,6 +240,25 @@ describe('worker binding refuses before looking up a worker or grant', () => {
       expect(await server.callTool('hadron_start_session', { workerRef: 'nonexistent' })).toEqual(result);
     });
   }
+  it('worker-binding parameters describe the MCP refusal rather than a supported bind', () => {
+    const server = createTestableMcpServer(auth);
+    for (const field of ['workerRef', 'launchGrant']) expect(server.toolParamDescription('hadron_start_session', field)).toContain('MCP_WORKER_BINDING_UNSUPPORTED');
+  });
+  it('GraphQL SDL points to the CLI, with no disabled tool remedy', () => {
+    for (const name of DISABLED) expect(typeDefs.split(/[^a-z_]+/)).not.toContain(name);
+  });
+  it('whoami and worker end-with-claim receipts offer only supported tools', async () => {
+    const server = createTestableMcpServer(auth);
+    const who = await server.callToolText('hadron_whoami', {});
+    const session = await db.session.findFirstOrThrow();
+    const end = await server.callToolText('hadron_end_session', { id: session.id, resumeClaim: true });
+    expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).endedAt).not.toBeNull();
+    expect(await db.resumeClaim.count({ where: { sessionId: session.id, consumedAt: null } })).toBeGreaterThan(0);
+    for (const name of DISABLED) {
+      expect(who.split(/[^a-z_]+/), 'whoami receipt').not.toContain(name);
+      expect(end.split(/[^a-z_]+/), 'end receipt').not.toContain(name);
+    }
+  });
   it('plain start/end receipts use only kept tools; force alone binds no worker', async () => {
     const server = createTestableMcpServer(auth);
     const start = await server.callToolText('hadron_start_session', { description: 'plain', force: true });
