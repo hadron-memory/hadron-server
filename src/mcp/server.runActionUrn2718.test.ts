@@ -174,23 +174,50 @@ describe('#2718 — hadron_run_action by action URN', () => {
     expect(await run(outsider.id, actionUrn(agent.urn, CODE))).toBe(notFound(actionUrn(agent.urn, CODE)));
   });
 
-  it('lets a database fault after resolution surface, never as not-found (cor:api:140:03)', async () => {
+  it('runs the RESOLVED entry id, not an emitted-URN twin (a healed entry in a legacy compound memory)', async () => {
+    // The emitted v2 node URN is lossy: a compound memory `<prefix>:legacy` with loc
+    // `register:<code>` emits the same string as memory `<prefix>` with loc
+    // `legacy:register:<code>` (dev:findings:emitted-node-urn-is-lossy-compare-identity).
+    // Re-parsing it would run the unrelated twin; the run must keep the entry id.
+    const entry = await registerEntry(memoryId, CODE);
+    const prefix = `${org.urn}:compound-run`;
+    const dest = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:initial-run`, name: 'legacy destination', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    await M.moveNode({}, { sourceRef: entry.id, targetUrn: emitNodeUrnV2(dest.urn, `register:${CODE}`) }, gqlCtx(admin.id));
+    await db.memory.update({ where: { id: dest.id }, data: { urn: `${prefix}:legacy` } });
+    const twinMem = await db.memory.create({
+      data: { id: generateId(), organizationId: org.id, urn: prefix, name: 'prefix twin', class: 'knowledge', visibility: 'ORGANIZATION' },
+    });
+    await db.node.create({ data: { id: generateId(), memoryId: twinMem.id, loc: `legacy:register:${CODE}`, name: 'twin', content: 'UNRELATED-TWIN-BODY' } });
+    const ran = await run(admin.id, actionUrn(agent.urn, CODE), { who: 'identity' });
+    expect(ran).toContain('RUN-BODY-2718 identity');
+    expect(ran).not.toContain('UNRELATED-TWIN-BODY');
+  });
+
+  it('lets a database fault on ANY URN-only Memory read surface, never as not-found (cor:api:140:03)', async () => {
     await registerEntry(memoryId, CODE);
     const urn = actionUrn(agent.urn, CODE);
-    // Count the URN-only Memory reads one successful action run makes, then fail the LAST one (the run branch's own lookup).
     const real = db.memory.findUnique.bind(db.memory) as (a: any) => Promise<unknown>;
     let calls = 0;
     let failAt = Infinity;
+    let fired = false;
     const spy = vi.spyOn(db.memory, 'findUnique').mockImplementation(((a: any) => {
-      if (a?.select?.urn === true && ++calls === failAt) return Promise.reject(new Error('db down'));
+      if (a?.select?.urn === true && ++calls === failAt) { fired = true; return Promise.reject(new Error('db down')); }
       return real(a);
     }) as any);
     try {
       expect(await run(admin.id, urn, { who: 'F' })).toContain('RUN-BODY-2718 F');
-      failAt = calls; calls = 0;
-      const outcome = await run(admin.id, urn).then((t) => t, (e) => String(e));
-      expect(outcome).not.toContain('RUN-BODY-2718');
-      expect(outcome).not.toBe(notFound(urn));
+      const reads = calls;
+      expect(reads).toBeGreaterThan(0);
+      // Fail each such read in turn: none may read as an absence.
+      for (let i = 1; i <= reads; i++) {
+        calls = 0; failAt = i; fired = false;
+        const outcome = await run(admin.id, urn).then((t) => t, (e) => String(e));
+        expect(fired, `injection fired at read #${i}`).toBe(true);
+        expect(outcome, `read #${i}`).not.toContain('RUN-BODY-2718');
+        expect(outcome, `read #${i}`).not.toBe(notFound(urn));
+      }
     } finally {
       spy.mockRestore();
     }

@@ -4956,10 +4956,14 @@ export function createMcpServerInstance(
       return null;
     }
     if (!(await canReadMemory(db, auth, agent.systemMemoryId, EXPLICIT_REF))) return null;
+    // The DB read sits outside the catch below: a database fault is not an
+    // absence and must surface as a fault (cor:api:140:03), on the read and run
+    // surfaces alike (#2718 review).
+    const systemMemoryUrn = await loadMemoryUrn(agent.systemMemoryId);
     let entryId: string;
     try {
       ({ id: entryId } = await resolveNodeRefForAuth(
-        emitNodeUrnV2(await loadMemoryUrn(agent.systemMemoryId), `register:${code}`),
+        emitNodeUrnV2(systemMemoryUrn, `register:${code}`),
         auth,
       ));
     } catch (error) {
@@ -8487,16 +8491,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
         const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
         if (!entry) return unreadable();
-        // The DB read stays OUTSIDE the catch: an operational fault is not an
-        // absence and must surface as one (cor:api:140:03), not as not-found.
-        const entryMemoryUrn = await loadMemoryUrn(entry.memoryId);
-        let entryUrn: string;
-        try {
-          entryUrn = emitNodeUrnV2(entryMemoryUrn, entry.loc);
-        } catch {
-          return unreadable(); // an unemittable stored loc names no runnable address
-        }
-        const viaEntry = await loadNodeForRun(entryUrn);
+        // Carry the RESOLVED entry's id, never a re-emitted node URN: the emitted
+        // v2 URN is lossy (a compound memory and its prefix twin emit the same
+        // string), so re-parsing it can run a different node. Operational faults
+        // (the DB reads inside) are not caught: they surface as faults, not as
+        // not-found (cor:api:140:03).
+        const viaEntry = await loadRunNodeById(entry);
         if ('error' in viaEntry) return unreadable();
         return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
       }
@@ -8538,8 +8538,27 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
       return { error: `Memory not found: "${memoryUrn}".` };
     }
-    const node = await db.node.findUnique({
-      where: { loc_memoryId: { loc, memoryId: memory.id } },
+    const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
+    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    return { node, loc };
+  }
+
+  // #2718 — the action spelling's loader: the entry is already RESOLVED (by id),
+  // so it is gated and fetched by that id through the SAME memory gate and the
+  // SAME node fetch the URN spelling uses, with no URN round trip.
+  async function loadRunNodeById(
+    entry: { id: string; memoryId: string },
+  ): Promise<{ node: RunNode; loc: string } | { error: string }> {
+    if (!(await canReadMemory(db, auth, entry.memoryId))) return { error: 'Node not readable.' };
+    const node = await findRunNode({ id: entry.id });
+    if (!node) return { error: 'Node not found.' };
+    return { node, loc: node.loc };
+  }
+
+  // The run node with its live dependency edges, by either unique key.
+  async function findRunNode(where: Prisma.NodeWhereUniqueInput): Promise<RunNode | null> {
+    return db.node.findUnique({
+      where,
       // #1063 — the same edge filter the GraphQL `renderRunNode` query uses.
       // Without it a soft-deleted edge kept carrying its target, and a
       // soft-deleted NODE kept being served through any edge pointing at it —
@@ -8555,8 +8574,6 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         },
       },
     });
-    if (!node) return { error: `Node "${rawUrn}" not found.` };
-    return { node, loc };
   }
 
   // {{arg}} substitution + inlined edge-linked node content + one action-run
