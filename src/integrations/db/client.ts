@@ -49,6 +49,10 @@ function stampNodeCreate(data: NodeData): void {
 }
 
 function stampNodeUpdate(data: NodeData): void {
+  // #887: deleted nodes never carry a passage truncation declaration.
+  if (data.deletedAt != null && !(typeof data.deletedAt === 'object' && 'set' in data.deletedAt && data.deletedAt.set == null)) {
+    data.embeddingTruncatedChunks = null;
+  }
   if (!Object.keys(data).some((key) => ATTRIBUTED_NODE_FIELDS.has(key))) return;
   const actor = currentActor();
   if (!('updatedByWorkerId' in data)) data.updatedByWorkerId = actor.workerId;

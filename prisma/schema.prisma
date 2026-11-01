@@ -1272,6 +1272,8 @@ model Node {
   embeddingFailedAt   DateTime?           @map("embedding_failed_at")
   /// Attempt counter for backoff / give-up. Non-null; reset to 0 on success/revoke.
   embeddingAttempts   Int                 @default(0) @map("embedding_attempts")
+  /// Passage chunks omitted by the per-node cap (#887); NULL when not truncated.
+  embeddingTruncatedChunks Int? @map("embedding_truncated_chunks")
   /// Last embed error (diagnosability; surfaced by hadron_validate).
   embeddingError      String?             @map("embedding_error")
   /// Number of input tokens.
@@ -2146,6 +2148,7 @@ model Agent {
   importedBy         AgentImport[]       @relation("ImportedAgent")
   orgGrants          AgentOrgGrant[]
   aiServiceConfigs   AiServiceConfig[]
+  modelGroups        ModelGroup[]
   scopes             Scope[]
   registerAttendeeOf RegisterEntry[]     @relation("RegisterAttendeeAgent")
   readStates         ChannelReadState[]  @relation("ReadStateAgent")
@@ -3435,6 +3438,7 @@ model App {
   usageEvents             UsageEvent[]
   pendingSetups           PendingSetup[]
   aiServiceConfigs        AiServiceConfig[]
+  modelGroups             ModelGroup[]
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
   slackConnections        SlackConnection[]
@@ -5987,6 +5991,32 @@ model WorkerAvailability {
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
   @@map("worker_availability")
+}
+
+/// #2831 S1 (cor:agt:060:12) — a model group: an opaque name over a list of model
+/// patterns (globs), declared by the team Agent (`agentId`) or by an App (`appId`,
+/// an override of the Agent's group of that name, or an App-only group). Exactly
+/// one owner (chk_model_group_owner). Resolved LIVE at match time, App's row else
+/// the Agent's (src/lib/agentTasks/modelGroups.ts); never copied at install. The
+/// platform gives name and patterns no meaning, and a group is never an
+/// authorization input. `name` and every pattern are stored lowercase.
+model ModelGroup {
+  id        String    @id @default(cuid())
+  name      String
+  agentId   String?   @map("agent_id")
+  appId     String?   @map("app_id")
+  patterns  String[]
+  createdAt DateTime  @default(now()) @map("created_at")
+  createdBy String?   @map("created_by")
+  updatedAt DateTime? @updatedAt @map("updated_at")
+  updatedBy String?   @map("updated_by")
+
+  agent Agent? @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  app   App?   @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, name])
+  @@unique([appId, name])
+  @@map("model_groups")
 }
 
 /// #1706 — one model family's availability for work in one App

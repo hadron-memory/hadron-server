@@ -179,6 +179,14 @@ ALTER TABLE ai_service_configs
   ADD CONSTRAINT chk_ai_service_config_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, app_id, agent_id) = 1);
 
+-- ─── #2831 S1: a model group belongs to exactly one owner (Agent or App) ──
+-- Synced with the 20261031230000 migration.
+ALTER TABLE model_groups
+  DROP CONSTRAINT IF EXISTS chk_model_group_owner;
+ALTER TABLE model_groups
+  ADD CONSTRAINT chk_model_group_owner
+  CHECK (num_nonnulls(agent_id, app_id) = 1);
+
 -- ─── #696: secrets are ORG/USER-owned only ───────────────────────────────
 -- D-2026-07-15-006 narrows the #679 secret store to org/user owners (the flat
 -- v2 secret URN carries a single root principal; app-/memory-owned shapes are

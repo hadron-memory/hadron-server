@@ -348,17 +348,49 @@ export async function sendMagicLink(
 
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
 
-  await getResend().emails.send({
-    from: fromAddress,
-    to: email,
-    subject: 'Sign in to Hadron',
-    html: `
+  // #2988: the SDK resolves a refused send as `{ data: null, error }`; an unchecked await reported it as sent.
+  // Throwing lets both callers answer a fault, and the token that can no longer be delivered is removed.
+  const startedAt = Date.now();
+  let result: Awaited<ReturnType<Resend['emails']['send']>> | undefined;
+  try {
+    result = await getResend().emails.send({
+      from: fromAddress,
+      to: email,
+      subject: 'Sign in to Hadron',
+      html: `
       <p>Click the link below to sign in to Hadron:</p>
       <p><a href="${verifyUrl}">Sign in to Hadron</a></p>
       <p>This link expires in ${TOKEN_EXPIRY_MINUTES} minutes.</p>
       <p>If you didn't request this, you can safely ignore this email.</p>
     `,
-  });
+    });
+    assertProviderAck(result);
+    logMagicLinkSend('acked', startedAt, { providerId: result.data?.id });
+  } catch (err) {
+    logMagicLinkSend(result ? 'refused' : 'error', startedAt, {
+      // The provider's free-text message can echo the recipient, so only its machine name is kept.
+      providerError: result?.error?.name,
+    });
+    await db.emailVerificationToken.deleteMany({ where: { token } });
+    throw err;
+  }
+}
+
+/**
+ * #2988: one line per sign-in send, so a "no email arrived" report is answerable from the log alone: the provider's
+ * message id (look it up in Resend's Emails log), how long the provider call took, and whether it was acknowledged.
+ * Never the address, the token or the link, and never the provider's free-text message.
+ */
+function logMagicLinkSend(
+  outcome: 'acked' | 'refused' | 'error',
+  startedAt: number,
+  extra: { providerId?: string; providerError?: string },
+): void {
+  // eslint-disable-next-line no-console
+  console.warn(
+    '[auth] auth.magic_link.send',
+    JSON.stringify({ event: 'auth.magic_link.send', outcome, durationMs: Date.now() - startedAt, ...extra }),
+  );
 }
 
 /**

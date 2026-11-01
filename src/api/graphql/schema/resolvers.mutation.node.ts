@@ -1662,6 +1662,7 @@ async function writeNodeCoreRaw(
             let revivedPendingAt: Date | null | undefined;
             if (reviving && authoritative) {
               await tx.nodeEmbedding.deleteMany({ where: { nodeId: authoritative.id } });
+              await tx.node.updateMany({ where: { id: authoritative.id }, data: { embeddingTruncatedChunks: null } });
               const indexed = await tx.memory.findUniqueOrThrow({
                 where: { id: input.memoryId }, select: { vectorIndexEnabled: true, class: true },
               });
