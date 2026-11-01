@@ -535,7 +535,11 @@ export function validateChatScopeInvariants(args: {
 export type ChatScopeErrorCode =
   | 'SHARED_CHAT_REQUIRES_APP_CONTEXT'
   | 'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS'
-  | 'CHAT_MEMORY_OUT_OF_SCOPE';
+  | 'CHAT_MEMORY_OUT_OF_SCOPE'
+  // #3097: expected refusal states of `startChat`'s conversation selection.
+  | 'AGENT_HAS_NO_CONVERSATIONS'
+  | 'CONVERSATION_NOT_FOUND'
+  | 'CONVERSATION_HAS_NO_STAGES';
 
 /** Typed error thrown by the chat-scope layer. */
 /**

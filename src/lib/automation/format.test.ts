@@ -112,6 +112,16 @@ describe('strict compiled format', () => {
     }
     const f = fixture(); f.nodes.entry.flow = { tools: [], extractionSpec: [] }; expect(() => validate(f)).toThrow('TOOLS_AND_EXTRACTION');
   });
+  it('accepts a script node and holds its tool to the same checks; script excludes tools and extraction (#670)', () => {
+    const ok = fixture(); ok.nodes.entry.flow = { script: { call: { tool: 'hadron_read_node', args: { urn: 'x' } } } };
+    expect(() => validate(ok)).not.toThrow();
+    for (const extra of [{ tools: ['hadron_read_node'] }, { extractionSpec: [{ field: 'a' }] }]) {
+      const f = fixture(); f.nodes.entry.flow = { script: { call: { tool: 'hadron_read_node' } }, ...extra };
+      expect(() => validate(f)).toThrow('SCRIPT_AND_TOOLS_OR_EXTRACTION');
+    }
+    const reg = fixture(); reg.nodes.entry.flow = { script: { call: { tool: 'mcp__crm__lookup' } } };
+    expect(() => validate(reg)).toThrow('MISSING_REGISTRATION');
+  });
   it('revalidates all caps on load, counting UTF-8 bytes rather than characters', () => {
     const f = fixture(); f.nodes.entry.content = '😀';
     expect(() => validateCompiledAutomation(f, { ...options, limits: { ...SPEC_LIMITS, CONTENT_BYTES: 3 } })).toThrow('LIMIT_EXCEEDED:AUTOMATION_MAX_CONTENT_BYTES');

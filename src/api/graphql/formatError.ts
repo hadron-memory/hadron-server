@@ -29,6 +29,7 @@ import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
 import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
+import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 
@@ -122,6 +123,15 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     (err): err is AssetUploadError => err instanceof AssetUploadError,
     (err) => ({ code: err.code }),
     { silenceInSentry: false },
+  ),
+  // #2979: setAgentAssetUploadEnabled's refusals (PERMISSION_DENIED, NOT_FOUND) are caller errors with a code on the
+  // instance, exactly as AssetUploadError above. The message is the operation's fixed text (no ref, no id), so it is
+  // safe to show, and #1946's same-answer property for an unreadable-vs-absent Agent is kept by the resolver's gate.
+  // Silenced in Sentry: a refused caller is not a server fault.
+  mapping(
+    (err): err is SetAssetEnabledError => err instanceof SetAssetEnabledError,
+    (err) => ({ code: err.code }),
+    { silenceInSentry: true },
   ),
   // #1578/#1789: git failures carry a FIXED message by design (argv and stderr can hold the installation token), so the
   // text is safe and the code is the class's own. Still reported: a failing sync is ours to know about.

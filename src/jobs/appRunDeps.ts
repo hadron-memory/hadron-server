@@ -31,6 +31,7 @@ import { selectNextEdge } from '../lib/runner/selectNextEdge.js';
 import { loadFlowNode, resolveFlowMemory } from '../lib/runner/loadFlowNode.js';
 import { expandWriteTo } from '../lib/runner/writeToPattern.js';
 import { resolveRunTools } from '../lib/runner/tools/index.js';
+import { admitAndExecuteTool, type ToolCallRecord } from '../lib/runner/toolAdmission.js';
 import {
   isMcpRunToolName,
   materializeMcpRunTools,
@@ -138,6 +139,35 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
           tools = names;
         }
       }
+      // #670 (cor:agt:010:04 rules 1-2): a script node declares one tool call and no model. Its tool is validated
+      // by the same unknown-name check as `data.tools`, and `script` excludes both other bodies.
+      let script: RunNodeSpec['script'] = null;
+      if (data.script !== undefined && data.script !== null) {
+        const call = (data.script as { call?: { tool?: unknown; args?: unknown } } | null)?.call;
+        if (!call || typeof call.tool !== 'string' || call.tool.length === 0) {
+          throw new Error(`Node "${nodeUrn}" declares data.script without a call.tool (cor:agt:010:04).`);
+        }
+        if (call.args !== undefined && (call.args === null || typeof call.args !== 'object' || Array.isArray(call.args))) {
+          throw new Error(`Node "${nodeUrn}" has data.script.call.args that is not an object (cor:agt:010:04).`);
+        }
+        // Presence counts, even an empty list: the same exclusion the automation import format applies.
+        if (tools || extractionSpec || Array.isArray(data.tools) || Array.isArray(data.extractionSpec)) {
+          throw new Error(
+            `Node "${nodeUrn}" declares data.script together with data.tools or data.extractionSpec — ` +
+              `a script node has one body (cor:agt:010:04 rule 1).`,
+          );
+        }
+        const name = call.tool;
+        const unknown = isMcpRunToolName(name)
+          ? await unknownMcpToolNames(db, run.organizationId, [name])
+          : isHaRunToolName(name)
+            ? await unknownHaToolNames(db, run.organizationId, [name])
+            : resolveRunTools([name]).unknown;
+        if (unknown.length > 0) {
+          throw new Error(`Unknown tool(s) on "${nodeUrn}": ${unknown.join(', ')}.`);
+        }
+        script = { tool: name, args: (call.args ?? {}) as Record<string, unknown> };
+      }
       // D-TL-5: tools × extraction are mutually exclusive per node (v1).
       if (tools && extractionSpec) {
         throw new Error(
@@ -145,7 +175,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
             `v1 supports one per node (plan-tools D-TL-5).`,
         );
       }
-      return { extractionSpec, hasOutput: data.output != null, tools };
+      return { extractionSpec, hasOutput: data.output != null, tools, script };
     },
 
     selectNext: async (run, nodeUrn, view) => {
@@ -191,6 +221,23 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         onToolCall: opts.onToolCall,
         toolCtx: { log: opts.log, db, run, principal: runContext(db, run), nodeUrn: opts.nodeUrn },
       });
+    },
+
+    // #670: a script node's declared call. Same tool resolution as `llmTools`, same admission function.
+    callScript: async (run, call, opts) => {
+      const def = isMcpRunToolName(call.tool)
+        ? (await materializeMcpRunTools(db, run, [call.tool]))[0]
+        : isHaRunToolName(call.tool)
+          ? (await materializeHaRunTools(db, run, [call.tool]))[0]
+          : resolveRunTools([call.tool]).tools.find((t) => t.name === call.tool);
+      if (!def) throw new Error(`Script tool "${call.tool}" is not available to this run.`);
+      const toolCalls: ToolCallRecord[] = [];
+      const result = await admitAndExecuteTool(def, call.args, {
+        onToolCall: opts.onToolCall,
+        toolCtx: { log: opts.log, db, run, principal: runContext(db, run), nodeUrn: opts.nodeUrn },
+        record: (r) => toolCalls.push(r),
+      });
+      return { result, toolCalls };
     },
 
     onTerminal: (run) => dispatchRunCallback(db, run),
