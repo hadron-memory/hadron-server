@@ -5742,6 +5742,9 @@ model AgentTask {
   blocked              Boolean   @default(false)
   releasedAt           DateTime? @map("released_at")
   startBy              DateTime? @map("start_by")
+  /// #2648 (cor:agt:050:14): the finish-by deadline. Set, it exempts the task from every stall window; one alarm
+  /// when it passes with the task neither finished nor cancelled.
+  finishBy             DateTime? @map("finish_by")
   startedAt            DateTime? @map("started_at")
   finishedAt           DateTime? @map("finished_at")
   cancelledAt          DateTime? @map("cancelled_at")

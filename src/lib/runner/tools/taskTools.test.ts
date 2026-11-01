@@ -294,3 +294,30 @@ describe('follow-ups to #1756 (#1832, #1833)', () => {
     expect(typeDefs).toMatch(/type AgentTeamEvent \{[^}]*\bactorRunId: ID\b/);
   });
 });
+
+describe('#2648 — a run-created task judges finish-by after every lock its create takes (LOCAL P2-2)', () => {
+  it('a past finish-by is refused, and so is a deadline that passes while the create waits on its counter row', async () => {
+    const run = await mintRun({ userId: person.id });
+    const p = () => runContext(db, run);
+    expect(await code(createRootTaskForRun(p(), run, { title: 'past', finishBy: new Date(Date.now() - 60_000).toISOString() } as any))).toBe('BAD_USER_INPUT');
+    const first = await createRootTaskForRun(p(), run, { title: 'first' } as any);
+    const parentTaskId = (await db.agentTask.findUniqueOrThrow({ where: { id: first.id } })).parentTaskId as string;
+    const before = await db.agentTask.count();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM agent_task_counters WHERE app_id = ${appId} AND parent_task_id = ${parentTaskId} FOR UPDATE`;
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await isLocked;
+    const creating = code(createRootTaskForRun(p(), run, { title: 'late', finishBy: new Date(Date.now() + 1_500).toISOString() } as any));
+    await new Promise((r) => setTimeout(r, 2_500)); // the deadline passes while the create waits
+    release();
+    await holder;
+    expect(await creating).toBe('BAD_USER_INPUT');
+    expect(await db.agentTask.count()).toBe(before);
+  }, 20_000);
+});

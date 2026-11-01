@@ -32,6 +32,7 @@ export const hadronTaskCreate: RunToolDef = {
       assignee: PARTY,
       tags: { type: 'array', items: { type: 'string' } },
       startBy: { type: 'string', description: 'ISO date-time.' },
+      finishBy: { type: 'string', description: 'ISO date-time: the finish-by deadline (#2648); not in the past, not before startBy.' },
       closeSessionWhenDone: { type: 'boolean', description: 'Default false: the assignee\'s session ends only when you ask (cor:agt:050:10).' },
     },
     required: ['title'],
@@ -51,6 +52,7 @@ export const hadronTaskCreate: RunToolDef = {
       assignee: args.assignee as never,
       tags: args.tags as string[] | undefined,
       startBy: args.startBy,
+      finishBy: args.finishBy,
       closeSessionWhenDone: args.closeSessionWhenDone as boolean | undefined,
     });
     ctx.log(`created root task ${task.handle ?? task.id}`);

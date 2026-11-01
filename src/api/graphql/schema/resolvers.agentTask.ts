@@ -819,6 +819,40 @@ function parseStartBy(value: unknown): Date | null {
   return d;
 }
 
+function parseFinishBy(value: unknown): Date | null {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(d.getTime())) throw badInput('finishBy is not a valid date-time.');
+  return d;
+}
+
+/**
+ * #2648 (cor:agt:050:14, Refused values): a call that SETS the finish-by time is refused if it is in the past or
+ * earlier than the start-by time; a call that sets only the start-by time is refused if it is later than the
+ * finish-by time, even one that has passed. Equal times are allowed; a call that sets neither, or clears one, is not
+ * checked. Thrown before any write, so a refused call changes nothing.
+ */
+function checkFinishBy(a: { finishBy: Date | null; startBy: Date | null; setsFinishBy: boolean; setsStartBy: boolean; now: Date }): void {
+  if (a.setsFinishBy && a.finishBy) {
+    if (a.finishBy.getTime() < a.now.getTime()) throw badInput('finishBy is in the past; name a time that has not passed yet.');
+    if (a.startBy && a.finishBy.getTime() < a.startBy.getTime()) throw badInput('finishBy is earlier than startBy; a task cannot be due to finish before it is due to start.');
+  } else if (a.setsStartBy && a.startBy && a.finishBy && a.startBy.getTime() > a.finishBy.getTime()) {
+    throw badInput('startBy is later than the task\'s finishBy; a task cannot be due to start after it is due to finish.');
+  }
+}
+
+/**
+ * #2648 (BLIND P2 at 2c7474dc; LOCAL P2-2 at 6feb16dd): a create judges its finish-by time against the database
+ * clock as the LAST statement of its write transaction, after every lock it takes (the authority anchors, the
+ * counter row inside insertTask, and the blocker graph after the insert), as the edit path does. A deadline that
+ * passed while the create waited is refused, and the rollback leaves nothing inserted.
+ */
+async function checkFinishByAtDbClock(tx: Prisma.TransactionClient, finishBy: Date | null, startBy: Date | null): Promise<void> {
+  if (!finishBy) return;
+  const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+  checkFinishBy({ finishBy, startBy, setsFinishBy: true, setsStartBy: startBy !== null, now: at });
+}
+
 // ── Audit stamping (#1610 actor shape) ────────────────────────────────────
 
 function createdStamp(ctx: Context) {
@@ -1033,6 +1067,8 @@ type CreateInput = {
   assignee?: PartyInput;
   requirements?: RequirementsInput | null;
   startBy?: unknown;
+  /** #2648 (cor:agt:050:14): the finish-by deadline; exempts the task from every stall window. */
+  finishBy?: unknown;
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
   status?: string | null;
@@ -1050,7 +1086,7 @@ async function insertTask(
   tx: Prisma.TransactionClient,
   a: {
     app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
-    tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean; priority?: number;
+    tags: string[]; startBy: Date | null; finishBy?: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
     /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
     properties?: Prisma.InputJsonObject | null;
@@ -1105,6 +1141,7 @@ async function insertTask(
       taskNumber: counter!.last_number,
       handle,
       title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
+      finishBy: a.finishBy ?? null,
       closeSessionWhenDone: a.closeSessionWhenDone,
       priority: a.priority ?? 1,
       status: a.status ?? 'pending',
@@ -1175,6 +1212,7 @@ export async function createRootTaskForRun(
   const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
   const tags = normalizeTags(input.tags);
   const startBy = parseStartBy(input.startBy);
+  const finishBy = parseFinishBy(input.finishBy);
   const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
   const now = new Date();
   const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
@@ -1191,12 +1229,14 @@ export async function createRootTaskForRun(
     }
     // #2162 (cor:agt:050:27 §4): never onto a worker that is resetting.
     await refuseResettingAssignee(tx, fresh.id, assignee?.workerId);
-    return insertTask(tx, {
-      app: fresh, parentId: null, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee,
+    const inserted = await insertTask(tx, {
+      app: fresh, parentId: null, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, owner, assignee,
       created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
       evActor,
     });
+    await checkFinishByAtDbClock(tx, finishBy, startBy);
+    return inserted;
   }, { lockWorkerIds: [lockedAssignee] });
   if (made.queued) await matchAfterChange(principal.db, app.id);
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1278,6 +1318,10 @@ export const agentTaskMutations = {
           };
         }
       }
+      // #2648 (LOCAL P2-1 at 2c7474dc): a call that NAMES finishBy or startBy sets it (cor:agt:050:14, "a call that
+      // sets the finish-by time"), even when the value equals the stored one; it is judged below, before the no-op.
+      let namedFinishBy: Date | null | undefined;
+      let namedStartBy: Date | null | undefined;
       for (const field of TASK_EDIT_FIELDS) {
         if (!Object.hasOwn(input, field)) continue;
         let value: unknown;
@@ -1287,13 +1331,28 @@ export const agentTaskMutations = {
           case 'tags': value = normalizeTags(input.tags as string[] | null); break;
           case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
           case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
+          case 'finishBy': value = input.finishBy === '' ? null : parseFinishBy(input.finishBy); break;
           case 'closeSessionWhenDone':
             if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
             value = input.closeSessionWhenDone ?? false; break;
         }
+        if (field === 'finishBy') namedFinishBy = value as Date | null;
+        if (field === 'startBy') namedStartBy = value as Date | null;
         if (isDeepStrictEqual(task[field], value)) continue;
         fields.push(field);
         Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
+      }
+      const setsFinishBy = namedFinishBy !== undefined;
+      const setsStartBy = namedStartBy !== undefined;
+      // #2648: judged on the values the task would hold, against the database clock after all authority/task waits,
+      // before the no-op return and the write, so a refused call changes nothing.
+      if (setsFinishBy || setsStartBy) {
+        const [{ at: judgedAt }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+        checkFinishBy({
+          finishBy: setsFinishBy ? namedFinishBy! : task.finishBy,
+          startBy: setsStartBy ? namedStartBy! : task.startBy,
+          setsFinishBy, setsStartBy, now: judgedAt,
+        });
       }
       if (fields.length === 0 && !propertiesChange) return;
       // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
@@ -1374,6 +1433,7 @@ export const agentTaskMutations = {
     const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
     const tags = normalizeTags(input.tags);
     const startBy = parseStartBy(input.startBy);
+    const finishBy = parseFinishBy(input.finishBy);
     const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
     // #1754: backlog or pending — and a backlog task carries no assignee.
     const status = normalizeCreateStatus(input.status);
@@ -1452,7 +1512,7 @@ export const agentTaskMutations = {
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       const made = await insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
+        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
       const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1462,6 +1522,7 @@ export const agentTaskMutations = {
       for (const ref of [...new Set(input.blockedBy ?? [])]) {
         await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
       }
+      await checkFinishByAtDbClock(tx, finishBy, startBy);
       return made;
     }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
