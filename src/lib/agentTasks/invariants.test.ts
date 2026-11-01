@@ -418,3 +418,12 @@ describe('task references SQL parity (#2649)', () => {
     expect(migration.endsWith(source)).toBe(true);
   });
 });
+
+// #3125 S2: the external id's CHECK and partial unique index, one source shared with its migration.
+describe('task external id SQL parity (#3125 S2)', () => {
+  it('the external id migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-external-id-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101160000_agent_task_external_id/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+  });
+});
