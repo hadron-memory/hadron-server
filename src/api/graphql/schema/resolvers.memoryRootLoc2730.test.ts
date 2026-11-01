@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -16,6 +17,16 @@ const M = resolvers.Mutation as any;
 let org: any, app: any, agent: any, admin: any, outsider: any;
 const ctx = (userId: string): Context => ({ db, userId, roles: [] });
 const graphEntries = () => readdirSync(process.env.GRAPHS_PATH!).length;
+
+/** Assert a refused create leaves no graph residue, with `interleave` run between the snapshots. */
+async function refusedWithoutResidue(create: () => Promise<unknown>, interleave: () => void = () => {}) {
+  const entries = graphEntries();
+  interleave();
+  await expect(create()).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  expect(await db.memory.count()).toBe(0);
+  expect(await db.node.count()).toBe(0);
+  expect(graphEntries()).toBe(entries);
+}
 
 type Door = { label: string; create: (name: string, who?: string) => Promise<any> };
 const doors = (): Door[] => [
@@ -60,11 +71,7 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
     const d = () => doors().find(x => x.label === door)!;
     for (const [label, name] of unprojectable) {
       it(`refuses ${label} as BAD_USER_INPUT and leaves no residue`, async () => {
-        const entries = graphEntries();
-        await expect(d().create(name)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-        expect(await db.memory.count()).toBe(0);
-        expect(await db.node.count()).toBe(0);
-        expect(graphEntries()).toBe(entries);
+        await refusedWithoutResidue(() => d().create(name));
       });
     }
     for (const [label, name] of admitted) {
@@ -73,6 +80,15 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
         expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
       });
     }
+    it('#2796 an entry another worker adds to the shared run root between the snapshots is not residue', async () => {
+      // The run's graph root is shared by every worker (#1951); simulate a concurrent file writing a node.
+      const other = join(process.env.GRAPHS_PATH!, `other-worker-2796-${generateId()}`);
+      try {
+        await refusedWithoutResidue(() => d().create('abc:'), () => mkdirSync(other));
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+    });
     it('keeps the authorization refusal ahead of the name refusal', async () => {
       const code = await d().create('abc:', outsider.id).catch(e => e.extensions?.code);
       expect(code).not.toBe('BAD_USER_INPUT');
