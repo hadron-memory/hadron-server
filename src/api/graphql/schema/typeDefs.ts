@@ -218,6 +218,18 @@ export const typeDefs = `#graphql
     "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
+    #3113 — an explicit list of node types, a union: only nodes whose type is in the list
+    (hrn:node:hadronmemory.com:specs:cor:api:090:02). It narrows, ANDs every other filter and, being
+    explicit, replaces the default that leaves out system nodes; it never lifts the memory-class
+    default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown
+    value matches nothing. null is the same as omitted. Refused with BAD_USER_INPUT: an empty list,
+    both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
+    before duplicates are dropped), and a list containing "comment" (search comments with nodeType
+    or contentScope). Exact total where the mode already has one; vector and hybrid keep total
+    null and their bounded, widening candidate window. Applies to findNodes and appNodes.
+    """
+    nodeTypes: [String!]
+    """
     #1608 — content, comments or both (hrn:node:hadronmemory.com:specs:cor:dmo:110:08).
     Default CONTENT. Applied by the server before ranking, pagination and
     limits in every mode (keyword, regex, vector, hybrid and filter-only), so a
