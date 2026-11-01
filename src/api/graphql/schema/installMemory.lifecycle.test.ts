@@ -315,6 +315,19 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     expect(await N.updatedByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
   });
 
+  it('#1151 (Rico §10): Node.createdByUser reads nothing on a concealed install-write parent (it would re-read createdBy by node id)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const creator = await db.user.create({ data: { id: generateId(), handle: 'concealed-creator', roles: ['READER'] } });
+    await db.node.update({ where: { id: node.id }, data: { createdBy: creator.id } });
+    const { INSTALL_CONCEALED } = await import('./installMemory.js');
+    const N = resolvers.Node as any;
+    // Control: an ordinary parent of the same node names the creator.
+    expect(await N.createdByUser({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toMatchObject({ handle: 'concealed-creator' });
+    // A concealed parent keeps id and memoryId but not createdBy: the resolver must not re-read the live row.
+    expect(await N.createdByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
+  });
+
   it('withInstallConcealment never reaches the original resolver for a concealed parent, and passes others through', async () => {
     const { withInstallConcealment, INSTALL_CONCEALED, INSTALL_CONCEALED_FIELDS } = await import('./installMemory.js');
     let calls = 0;
