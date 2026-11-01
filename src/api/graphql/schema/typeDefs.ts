@@ -11218,7 +11218,10 @@ export const typeDefs = `#graphql
     GDPR erasure posture). Requires a user credential (JWT or hdr_user key);
     App-key callers are rejected.
 
-    Omitting userRef deletes the CALLER's own account (no role needed).
+    Omitting userRef (or passing null) deletes the CALLER's own account
+    (no role needed). A userRef that is supplied but empty after trimming
+    is refused with BAD_USER_INPUT for every caller and deletes nothing
+    (hrn:node:hadronmemory.com:specs:cor:aut:020:03).
     A platform ADMIN/OWNER may name another user; userRef accepts the
     user's ID, handle, or hrn:user:<handle> URN. Any other caller naming a
     target receives the same FORBIDDEN error whether or not that user

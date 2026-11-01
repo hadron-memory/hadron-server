@@ -22,6 +22,7 @@ import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
+import { assertNoGenericMessageSeqWrite, isLegacyMessageSeqError } from '../lib/legacyMessageSeq.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -6301,6 +6302,9 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
+        // #2987 (V13): the seq gate for a create runs UNDER the lock, on the full locked row. It cannot run here:
+        // this probe selects no seq (a same-seq tombstone recreation would read as a change), and it would answer
+        // before the Channel gate, which lives in the lock helper (Beckett LOCAL review).
         assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,
@@ -6326,6 +6330,7 @@ export function createMcpServerInstance(
         );
       } catch (e) {
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         throw e;
       }
 
@@ -6668,6 +6673,8 @@ export function createMcpServerInstance(
           await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false, auth);
 
           const pre = await snapshotOverwrittenNode(tx);
+          // #2987 — re-judged on the locked tombstone, before anything is written.
+          assertNoGenericMessageSeqWrite(pre, nodeType, seq, 'create');
 
           // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
           // handler is its parity implementation, so the gate is repeated here).
@@ -6742,6 +6749,7 @@ export function createMcpServerInstance(
           return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
@@ -6864,6 +6872,8 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
+        // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
+        if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
         assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
@@ -6883,6 +6893,7 @@ export function createMcpServerInstance(
         );
       } catch (e) {
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         throw e;
       }
 
@@ -7090,6 +7101,8 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #2987 — re-judged on the locked row, before any write.
+            assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(
@@ -7171,6 +7184,7 @@ export function createMcpServerInstance(
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
           if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+          if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
           if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
           if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);

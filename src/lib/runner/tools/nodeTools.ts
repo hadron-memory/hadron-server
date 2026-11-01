@@ -100,7 +100,7 @@ export const hadronCreateNode: RunToolDef = {
   description:
     'Create a new Hadron node at the given fully-qualified URN (hrn:node:<root>:<memory>:<loc>). ' +
     'Fails if a node already exists there — use hadron_update_node to change one. ' +
-    'Set seq when appending ordered items (e.g. chat messages).',
+    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order.',
   inputSchema: {
     type: 'object',
     properties: WRITE_ARG_PROPERTIES,

@@ -239,6 +239,17 @@ export const orgMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // #3016 (cor:aut:020:03): only an OMITTED (or null) userRef means "me".
+      // A supplied ref that is empty after JS trim ('', spaces, a stray U+FEFF
+      // BOM, an empty template variable) names nobody, so it is refused here,
+      // before the principal check and before any target resolution. The
+      // refusal does not depend on role or on any user row, so it reveals
+      // nothing, and it can never fall through to erasing the caller.
+      if (userRef != null && !userRef.trim()) {
+        throw new GraphQLError('userRef is blank; omit it to delete your own account.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       const forbidden = () =>
         new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       // NON-throwing boolean principal check FIRST: the owner-or-self shape
@@ -248,7 +259,7 @@ export const orgMutations = {
       // (conventions:crud-mutation-naming, the deleteMemoryShare trap).
       const platformAdmin = isPlatformAdmin(ctx);
       let targetUserId: string;
-      if (!userRef?.trim()) {
+      if (userRef == null) {
         // Omitted target = "me" (the self-service path; needs no role — a
         // platform admin's own admin bit never blocks their own deletion).
         targetUserId = ctx.userId;
