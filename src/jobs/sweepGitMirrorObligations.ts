@@ -12,6 +12,7 @@ export const MAX_ATTEMPTS = 10;
 const INTERVAL_MS = 10 * 60_000;
 const MAX_MEMORIES = 20;
 let running = false;
+type DueMemory = { memoryId: string; source: string; memoryUrn: string; orgUrn: string; dueAt: Date };
 
 /** One bounded run. The selection is a hint; withMirrorCheckout re-reads each row inside its memory lock. */
 export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Promise<number> {
@@ -24,7 +25,7 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
     let afterDue: Date | null = null;
     let afterId = '';
     while (handled < MAX_MEMORIES) {
-      const candidates = await db.$queryRaw<Array<{ memoryId: string; source: string; memoryUrn: string; orgUrn: string; dueAt: Date }>>`
+      const candidates: DueMemory[] = await db.$queryRaw<DueMemory[]>`
         WITH due AS (
         SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn",
           MIN(o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72)) AS "dueAt"
