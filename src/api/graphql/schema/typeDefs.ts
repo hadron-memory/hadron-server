@@ -215,7 +215,7 @@ export const typeDefs = `#graphql
     memoryIds: [ID!]
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryIds) overrides that."
     memoryClasses: [MemoryClass!]
-    "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
+    "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
     #1608 — content, comments or both (hrn:node:hadronmemory.com:specs:cor:dmo:110:08).
