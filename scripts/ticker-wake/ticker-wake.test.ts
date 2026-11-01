@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { Config, Runner } from '../orca-attention-router/router.js';
 import { buildSchema, parse, validate } from 'graphql';
 import { typeDefs } from '../../src/api/graphql/schema/typeDefs.js';
-import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync } from './ticker-wake.js';
+import { pass, main, acquireLock, proofCoverage, nudgeText, QUERY, ACK, WORKER_CHECK, TASK_STATE, SUBSCRIBERS, SUBSCRIBERS_PAGE, CURRENT_SESSION, ALARM_EVENT, DELIVERY_POOL, SUBMIT_PROBE_S, runCommandAsync, holdOf } from './ticker-wake.js';
 import type { RunResult } from '../orca-attention-router/router.js';
 
 const RULE = '─'.repeat(112);
@@ -1788,6 +1788,31 @@ describe('#2138: a stranded draft is detected and listed for a person, never sub
     expect(receipt().strandedAt).toBeUndefined();
   });
 
+  describe('#2746 the hold file names a mature stranded draft', () => {
+    const holdsPath = () => join(dir, 'ticker-wake', 'holds.log');
+    const lastHold = () => readFileSync(holdsPath(), 'utf8').split('\n').filter(Boolean).at(-1) ?? '';
+
+    it('before 60 s, at first detection, on a later pass and when not recorded, the file says stranded-draft', async () => {
+      await stranded();
+      await go(at(T0 + 30_000));
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+      await go(at(T0 + 61_000)); // first detection: `stranded draft, 61s; ... needs a person`
+      expect(log()).toContain('stranded draft, 61s');
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+      await go(at(T0 + 180_000)); // later pass: `(first seen ...)`
+      expect(log()).toContain('first seen');
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+    });
+
+    it('a draft whose strandedAt cannot be recorded is still stranded-draft in the file', async () => {
+      await stranded();
+      mkdirSync(`${receiptsFile()}.${process.pid}.tmp`);
+      try { await go(at(T0 + 60_000)); } finally { rmSync(`${receiptsFile()}.${process.pid}.tmp`, { recursive: true, force: true }); }
+      expect(log()).toMatch(/not recorded/);
+      expect(lastHold()).toMatch(/ Ada w-ada stranded-draft$/);
+    });
+  });
+
   it('dry run is a no-op', async () => {
     await stranded();
     await go({ ...at(T0 + 60_000), dry: true });
@@ -3053,6 +3078,35 @@ describe('#2746: a readable per-pass hold reason', () => {
     f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'END_SESSION')], proof(['T:1']))];
     await go();
     expect(holds()[0]).toMatch(/ Ada w-ada carries-other-reasons$/);
+  });
+
+  it.each([
+    ['left alone (also carries END_SESSION; the proof would record them delivered unseen)', 'carries-other-reasons'],
+    ['held (no receiver on this host)', 'no-receiver-on-host'],
+    ["held (the proof's tick coverage cannot be read)", 'proof-coverage-unreadable'],
+    ['held (the wake carries no server timing)', 'no-server-timing'],
+    ['held (another send to this terminal is in flight)', 'terminal-send-in-flight'],
+    ['an earlier send is unreconciled for another receiver', 'unreconciled-other-receiver'],
+    ['an earlier send is unreconciled', 'unreconciled-earlier-send'],
+    ['earlier request still unreconciled (x); no delivery evidence yet (y); needs a person', 'unreconciled-earlier-send'],
+    ['our nudge is in the composer', 'stranded-draft'],
+    ['held (the uncovered tick work cannot be identified)', 'uncovered-work-unidentified'],
+    ['held (the alarm cannot be read)', 'alarm-unreadable'],
+    ["held (the alarm's rule is not established)", 'alarm-rule-unestablished'],
+    ['held (the alarm was acknowledged)', 'alarm-acknowledged'],
+    ["held (the worker's check status cannot be read)", 'check-status-unreadable'],
+    ['held (the terminal incarnation changed)', 'terminal-changed'],
+    ['held (the old request could not be retained)', 'state-write-failed'],
+    ['nudged x but the receipt could not be written', 'state-write-failed'],
+    ['send not confirmed', 'send-unconfirmed'],
+    ['could not type; will retry', 'send-failed-will-retry'],
+    ['nudged x; ack FAILED', 'ack-failed'],
+    ['nudged x; acked', 'ok'],
+    ['tick line not typeable', 'info'],
+    ['held (something new)', 'other'],
+    ['a line nobody mapped', 'other'],
+  ])('#2746 every log wording maps to its closed code: %s', (body, code) => {
+    expect(holdOf(body)).toBe(code);
   });
 
   it('a delivered wake writes no hold line', async () => {

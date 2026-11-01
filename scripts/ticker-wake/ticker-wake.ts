@@ -242,7 +242,7 @@ const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,40}$/;
 const PLAIN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** What a per-worker log body means for the hold file: a closed code, 'ok' (delivered, clears an earlier hold) or 'info' (not a hold). */
-function holdOf(body: string): HoldCode | 'ok' | 'info' {
+export function holdOf(body: string): HoldCode | 'ok' | 'info' {
   const rules: Array<[RegExp, HoldCode | 'ok' | 'info']> = [
     [/^left alone \(/, 'carries-other-reasons'],
     [/^held \(.* on this host\)$/, 'no-receiver-on-host'],
@@ -945,7 +945,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
             if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
             else {
               const s = why === 'composer not provably empty' ? strandedDraft(prior) : null;
-              if (s) { log(`${ts} ${name}: ${s}`); return; }
+              if (s) { log(`${ts} ${name}: ${s}`, 'stranded-draft'); return; } // every wording (first, later, not recorded) is the one reason
               const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r?.detail ?? prior.detail)})`;
               const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
               log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
