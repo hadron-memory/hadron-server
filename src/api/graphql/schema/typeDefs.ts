@@ -15102,10 +15102,11 @@ export const typeDefs = `#graphql
     modelReportedAt: DateTime
     """
     Current matching model-group names, resolved live from the Team Agent and App overrides.
-    Empty without a reported model or match; uses this roster's existing audience.
+    Empty without a reported model or match; null with a field error if group lookup fails.
+    Uses this roster's existing audience; group configuration is read live when selected.
     Advisory only, never authorization (hrn:node:hadronmemory.com:specs:cor:agt:060:12).
     """
-    modelGroups: [String!]!
+    modelGroups: [String!]
 
     "Coarse tier from the server model mapping: high, mid or low. Null when unbound, unreported or unmapped; advisory, never authorization."
     tier: String

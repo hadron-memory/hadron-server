@@ -83,6 +83,18 @@ describe('#2831 S3 current model groups', () => {
     expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).toEqual(['all', 'custom']);
   });
 
+  it('normalizes supported writes and exposes only the existing participant inputs', async () => {
+    await M.setAppModelGroup({}, { appRef: app.id, name: 'Custom', patterns: [' MODEL-* '] }, ctx(admin.id));
+    await session('Anne', { llmModel: 'model-one' });
+    const visible = await Q.effectiveModelGroups({}, { appRef: app.id }, ctx(mia.id));
+    expect(visible).toEqual([{ name: 'custom', patterns: ['model-*'], origin: 'APP' }]);
+    expect((await projected()).errors).toBeUndefined();
+    expect(((await projected()).data as any).teamRoster.workers[0]).toMatchObject({ model: 'model-one', modelGroups: ['custom'] });
+    await expect(Q.effectiveModelGroups({}, { appRef: app.id }, ctx(outsider.id))).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+    expect((await projected(outsider.id)).errors?.[0].extensions?.code).toBe('APP_NOT_FOUND');
+    expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(outsider.id))).toBeNull();
+  });
+
   it('reads live App overrides and Team Agent edits without copying groups', async () => {
     const agent = await db.agent.findUniqueOrThrow({ where: { id: agentId } });
     await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'roles:engineer', name: 'engineer', content: '' } });
@@ -123,7 +135,7 @@ describe('#2831 S3 current model groups', () => {
     await session('Kit', { llmModel: 'model' });
     let reads = 0;
     const traced = db.$extends({ query: { modelGroup: { findMany: async ({ args, query }) => { reads++; return query(args); } } } });
-    const c = { ...ctx(mia.id), db: traced };
+    const c = { ...ctx(mia.id), db: traced as unknown as Context['db'] };
     const worker = (name: string) => ({ id: w[name].id, appId: app.id });
     await Promise.all(['Anne', 'Kit'].map(name => F.Worker.modelGroups(worker(name), {}, c, { operation: { operation: 'query' } })));
     expect(reads).toBe(1); // No Team Agent installed: one App-list query for all workers.
@@ -148,7 +160,12 @@ describe('#2831 S3 current model groups', () => {
     await session('Anne', { llmModel: 'model' });
     let reads = 0;
     const traced = db.$extends({ query: { modelGroup: { findMany: async ({ args, query }) => { reads++; return query(args); } } } });
-    const read = () => Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
+    const read = async () => {
+      const c = { ...ctx(mia.id), db: traced as unknown as Context['db'] };
+      const result = await Q.teamRoster({}, { appRef: app.id }, c);
+      for (const row of result.workers) row.modelGroups = await F.TeamRosterEntry.modelGroups(row, {}, c, { operation: { operation: 'query' } });
+      return result;
+    };
     const before = await read();
     expect(reads).toBe(1);
     await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Extra', slug: 'extra', heldByUserId: mia.id } });
@@ -170,7 +187,11 @@ describe('#2831 S3 current model groups', () => {
     }
     await session('Anne', { llmModel: 'model' });
     await expect(F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).rejects.toMatchObject({ extensions: { code: 'TEAM_AGENT_AMBIGUOUS' } });
-    expect((await projected()).errors?.[0].extensions?.code).toBe('TEAM_AGENT_AMBIGUOUS');
+    const result = await projected();
+    expect(result.errors?.[0].extensions?.code).toBe('TEAM_AGENT_AMBIGUOUS');
+    expect(result.errors?.[0].path).toEqual(['teamRoster', 'workers', 0, 'modelGroups']);
+    expect((result.data as any).teamRoster.workers).toHaveLength(3);
+    expect((result.data as any).teamRoster.workers[0].modelGroups).toBeNull();
   });
 
   it('keeps core roster and composition readable without selecting failing optional group metadata', async () => {
@@ -180,12 +201,12 @@ describe('#2831 S3 current model groups', () => {
       reads++;
       throw new GraphQLError('test group lookup unavailable', { extensions: { code: 'GROUP_METADATA_TEST_UNAVAILABLE' } });
     } } } });
-    const c = { ...ctx(mia.id), db: traced };
+    const c = { ...ctx(mia.id), db: traced as unknown as Context['db'] };
     const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { worker { id name } model } } }` }, { contextValue: c });
     if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
     expect(result.body.singleResult.errors).toBeUndefined();
     expect((result.body.singleResult.data as any).teamRoster.workers).toHaveLength(3);
-    await expect(Q.teamComposition({}, { appRef: app.id }, { ...ctx(mia.id), db: traced })).resolves.toMatchObject({ appId: app.id });
+    await expect(Q.teamComposition({}, { appRef: app.id }, { ...ctx(mia.id), db: traced as unknown as Context['db'] })).resolves.toMatchObject({ appId: app.id });
     expect(reads).toBe(0);
   });
 
@@ -194,7 +215,7 @@ describe('#2831 S3 current model groups', () => {
     const traced = db.$extends({ query: { modelGroup: { findMany: async () => {
       throw new GraphQLError('test group lookup unavailable', { extensions: { code: 'GROUP_METADATA_TEST_UNAVAILABLE' } });
     } } } });
-    const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { worker { id name } model modelGroups } } }` }, { contextValue: { ...ctx(mia.id), db: traced } });
+    const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { worker { id name } model modelGroups } } }` }, { contextValue: { ...ctx(mia.id), db: traced as unknown as Context['db'] } });
     if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
     expect(result.body.singleResult.errors?.map(e => ({ code: e.extensions?.code, path: e.path }))).toEqual([
       { code: 'GROUP_METADATA_TEST_UNAVAILABLE', path: ['teamRoster', 'workers', 0, 'modelGroups'] },

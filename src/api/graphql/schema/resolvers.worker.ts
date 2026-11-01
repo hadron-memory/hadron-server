@@ -1,4 +1,3 @@
-import { effectiveModelGroups, matchingModelGroupNames, type EffectiveModelGroup } from '../../../lib/agentTasks/modelGroups.js';
 import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
@@ -15,6 +14,7 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { effectiveModelGroups, matchingModelGroupNames, type EffectiveModelGroup } from '../../../lib/agentTasks/modelGroups.js';
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';

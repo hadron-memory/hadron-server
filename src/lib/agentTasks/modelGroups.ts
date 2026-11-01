@@ -82,8 +82,8 @@ export async function effectiveModelGroups(
 function matchesModel(pattern: string, model: string): boolean {
   let p = 0, m = 0, star = -1, retry = 0;
   while (m < model.length) {
-    if (pattern[p] === '?' || pattern[p] === model[m]) { p++; m++; }
-    else if (pattern[p] === '*') { star = p++; retry = m; }
+    if (pattern[p] === '*') { star = p++; retry = m; }
+    else if (pattern[p] === '?' || pattern[p] === model[m]) { p++; m++; }
     else if (star >= 0) { p = star + 1; m = ++retry; }
     else return false;
   }
@@ -95,5 +95,5 @@ function matchesModel(pattern: string, model: string): boolean {
 export function matchingModelGroupNames(groups: EffectiveModelGroup[], model: string | null | undefined): string[] {
   const normalized = model?.trim().toLowerCase();
   if (!normalized) return [];
-  return groups.filter(g => g.patterns.some(p => matchesModel(p, normalized))).map(g => g.name).sort();
+  return groups.filter(g => g.patterns.some(p => matchesModel(p.trim().toLowerCase(), normalized))).map(g => g.name).sort();
 }
