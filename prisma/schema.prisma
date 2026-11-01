@@ -6514,7 +6514,7 @@ model WorkerWakeAck {
   workerId        String   @map("worker_id")
   wakeKey         String   @map("wake_key")
   ackedAt         DateTime @map("acked_at")
-  /// #3022: last accepted proof's issue time; independent of the actual acknowledgement/floor clock.
+  /// #3022: issue time that spent/covered this key; absorbed keys inherit the descendant's issue time.
   /// NULL is an old writer's receipt: replay comparison falls back to ackedAt.
   issuedAt        DateTime? @map("issued_at")
   ackedByUserId   String?  @map("acked_by_user_id")

@@ -164,8 +164,8 @@ export async function acknowledgeWakes(args: {
       // clock (080:13) and the once-per-wake budget test (080:15). #3022: remember the accepted issue separately:
       // it can lead this server's clock by 60s, so acked_at alone cannot identify its replay. NULL watermarks from
       // old writers fall back to acked_at; neither a repeat nor an older proof refreshes the actual floor clock.
-      // Written only for an issue after BOTH clocks, while the
-      // same wake offered again after the floor (a fresh issue) is a new delivery, floored and charged again (Vera, #2072).
+      // The receipt advances only for an issue after BOTH clocks. Its timestamp and acker stay paired on clock rollback.
+      // The same wake offered again after the floor (a fresh issue) is a new delivery, floored and charged again (Vera, #2072).
       const issuedNaive = toNaiveUtc(new Date(p.issuedAt));
       const delivered = (await tx.$executeRaw`
         INSERT INTO worker_wake_acks (worker_id, wake_key, acked_at, issued_at, acked_by_user_id, acked_by_worker_id, acked_by_app_key_id)
@@ -174,9 +174,9 @@ export async function acknowledgeWakes(args: {
         ON CONFLICT (worker_id, wake_key) DO UPDATE SET
           acked_at = GREATEST(worker_wake_acks.acked_at, EXCLUDED.acked_at),
           issued_at = EXCLUDED.issued_at,
-          acked_by_user_id = EXCLUDED.acked_by_user_id,
-          acked_by_worker_id = EXCLUDED.acked_by_worker_id,
-          acked_by_app_key_id = EXCLUDED.acked_by_app_key_id
+          acked_by_user_id = CASE WHEN EXCLUDED.acked_at >= worker_wake_acks.acked_at THEN EXCLUDED.acked_by_user_id ELSE worker_wake_acks.acked_by_user_id END,
+          acked_by_worker_id = CASE WHEN EXCLUDED.acked_at >= worker_wake_acks.acked_at THEN EXCLUDED.acked_by_worker_id ELSE worker_wake_acks.acked_by_worker_id END,
+          acked_by_app_key_id = CASE WHEN EXCLUDED.acked_at >= worker_wake_acks.acked_at THEN EXCLUDED.acked_by_app_key_id ELSE worker_wake_acks.acked_by_app_key_id END
         WHERE GREATEST(worker_wake_acks.acked_at, worker_wake_acks.issued_at) < ${issuedNaive}::timestamp`) > 0;
       // Only the reservation of THIS wake is spent or void: the one carrying this proof's wake key. A re-read of an
       // unchanged wake shares the key, so it is freed whichever proof is acknowledged. Under R53 a mark no longer moves,
@@ -202,9 +202,9 @@ export async function acknowledgeWakes(args: {
               ON CONFLICT (worker_id, wake_key) DO UPDATE SET
                 acked_at = GREATEST(worker_wake_acks.acked_at, EXCLUDED.acked_at),
                 issued_at = GREATEST(worker_wake_acks.issued_at, EXCLUDED.issued_at),
-                acked_by_user_id = EXCLUDED.acked_by_user_id,
-                acked_by_worker_id = EXCLUDED.acked_by_worker_id,
-                acked_by_app_key_id = EXCLUDED.acked_by_app_key_id
+                acked_by_user_id = CASE WHEN EXCLUDED.acked_at >= worker_wake_acks.acked_at THEN EXCLUDED.acked_by_user_id ELSE worker_wake_acks.acked_by_user_id END,
+                acked_by_worker_id = CASE WHEN EXCLUDED.acked_at >= worker_wake_acks.acked_at THEN EXCLUDED.acked_by_worker_id ELSE worker_wake_acks.acked_by_worker_id END,
+                acked_by_app_key_id = CASE WHEN EXCLUDED.acked_at >= worker_wake_acks.acked_at THEN EXCLUDED.acked_by_app_key_id ELSE worker_wake_acks.acked_by_app_key_id END
               WHERE worker_wake_acks.acked_at < EXCLUDED.acked_at
                  OR GREATEST(worker_wake_acks.acked_at, worker_wake_acks.issued_at) < EXCLUDED.issued_at`;
           }
