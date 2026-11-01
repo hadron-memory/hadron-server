@@ -117,7 +117,7 @@ import { startSchedulerLoop } from './jobs/scheduler.js';
 import { startTaskStallEvaluatorLoop } from './jobs/taskStallEvaluator.js';
 import { startTaskMatcherLoop } from './jobs/taskMatcher.js';
 import { mountWebhookRoutes } from './api/webhooks.js';
-import { mountHealthRoutes } from './api/health.js';
+import { mountHealthRoutes, type ReadinessSource } from './api/health.js';
 import { mountCapabilitiesRoute } from './api/capabilities.js';
 import { mountPublicAssetRoutes } from './api/assetPublic.js';
 import { mountEmailEventRoutes } from './api/emailEvents.js';
@@ -188,7 +188,13 @@ const sentryApolloPlugin: ApolloServerPlugin<BaseContext> = {
   },
 };
 
-export async function createServer(): Promise<Express> {
+/**
+ * Build the Express app. `readiness` (#2998) is what `/ready` reads: the
+ * entry point passes the tracker for this process's first startup and its
+ * shutdown signal. Omitted (tests that never start up), `/ready` answers
+ * `starting`.
+ */
+export async function createServer({ readiness }: { readiness?: ReadinessSource } = {}): Promise<Express> {
   // #421: before anything else, so a weak signing secret never serves.
   assertProductionSigningSecret();
   // AM Q13: absent leaves team record operations unavailable; an invalid
@@ -1848,8 +1854,10 @@ export async function createServer(): Promise<Express> {
   mountPublicAssetRoutes(app, db);
 
   // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
-  // unhealthy. See src/api/health.ts.
-  mountHealthRoutes(app, db, { checkConfiguration: () => checkRateConfiguration(db) });
+  // unhealthy. #2998: /ready adds the first startup and the shutdown signal
+  // on top of the same probe. #1793: both probes also check the live rate
+  // keyring/manifest configuration without exposing it.
+  mountHealthRoutes(app, db, { readiness, checkConfiguration: () => checkRateConfiguration(db) });
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.
