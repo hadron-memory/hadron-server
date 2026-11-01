@@ -215,11 +215,7 @@ const MEMORY_REF: Probe[] = [
   { name: 'hadron_set_active_memory', tool: 'hadron_set_active_memory', args: (m) => ({ memoryUrn: memUrn(m) }) },
   { name: 'hadron_validate', tool: 'hadron_validate', args: (m) => ({ memoryUrn: memUrn(m) }) },
   { name: 'hadron_sync_graph', tool: 'hadron_sync_graph', args: (m) => ({ memoryUrn: memUrn(m) }) },
-  {
-    name: 'hadron_create_channel',
-    tool: 'hadron_create_channel',
-    args: (m) => ({ memory: memUrn(m), loc: 'chats:oracle', name: 'oracle' }),
-  },
+  // #3082: channel creation is no longer an MCP door; core-memory controls remain.
   {
     name: 'hadron_replace_text(memoryUrns)',
     tool: 'hadron_replace_text',

@@ -622,9 +622,9 @@ describe('MCP parity and discovery gate', () => {
   const auth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
 
 
-  it('stops advertising the capability once the tools would refuse the App (#1362 review)', async () => {
+  it('never advertises retired team-attention, including an admitted App (#3082)', async () => {
     const probe = () => createTestableMcpServer(auth()).callToolText('hadron_server_info', {});
-    expect(await probe()).toContain('team-attention');
+    expect(await probe()).not.toContain('team-attention');
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     expect(await probe()).not.toContain('team-attention');
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });

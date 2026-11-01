@@ -2,7 +2,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 /**
  * #2790 — `WakeReason.tickDueAt`: a TICK reason's own oldest unacknowledged tick time (cor:agt:080:23), per reason,
  * computed at read time, null for every other kind; `anchorAt` stays the minimum over all reasons (cor:agt:080:27).
- * The same value is shown by the MCP `hadron_due_wakes`.
+ * GraphQL/lib coverage remains after the #3082 MCP cut.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -16,8 +16,6 @@ import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { runAsActor } from '../requestActor.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
-import { createTestableMcpServer } from '../../mcp/server.js';
-import type { AuthContext } from '../../middleware/auth.js';
 
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -97,12 +95,6 @@ const iso = (d: Date | null | undefined) => d?.toISOString() ?? null;
 const tickOf = (w: any, tickerId: string) => w.reasons.find((r: any) => r.kind === 'TICK' && r.ticker.id === tickerId);
 const at = (ms: number) => new Date(ms);
 const SEC = 1000;
-const auth = (userId: string) => ({ userId, roles: ['READER'], clientId: `user:${userId}` }) as AuthContext;
-const mcpText = async (userId: string) => {
-  const sh = createTestableMcpServer(auth(userId), { sessionId: `td-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-  const r: any = await sh.callTool('hadron_due_wakes', { appRef: app.id });
-  return r.content[0].text as string;
-};
 /** Moves the one posted message `agoSec` seconds into the past (the mention's post time is the wake's anchor). */
 const backdate = (agoSec: number) => db.node.updateMany({ where: { messageChannelId: channel.id }, data: { createdAt: at(Date.now() - agoSec * SEC) } });
 
@@ -209,20 +201,4 @@ describe('#2790 tickDueAt: a TICK reason carries its own oldest unacknowledged t
   });
 });
 
-describe('#2790 MCP parity: hadron_due_wakes shows a TICK reason\'s tickDueAt and no other kind\'s', () => {
-  it('the tick line carries tickDueAt; a mention-only wake carries none', async () => {
-    const anchor = Date.now() - 1000 * SEC;
-    const t = await mkTicker({ cadenceSeconds: 600, anchorAt: at(anchor) });
-    await subscribe(t.id, liam.id);
-    await say(channel, 'plain news');
-    const text = await mcpText(manager.id);
-    expect(text).toContain(`tick Eng tickDueAt ${at(anchor + 600 * SEC).toISOString()}`);
-
-    await db.appWakeReservation.deleteMany();
-    await db.tickerSubscription.deleteMany();
-    await say(channel, 'for you', mention('liam'));
-    const mentionOnly = await mcpText(manager.id);
-    expect(mentionOnly).toContain('mention');
-    expect(mentionOnly).not.toContain('tickDueAt');
-  });
-});
+// #3082: retired MCP wrapper-only cases; authoritative GraphQL/lib cases remain.

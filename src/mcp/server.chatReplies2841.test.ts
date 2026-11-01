@@ -3,8 +3,6 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { ensureChannelWithRoot } from '../lib/channels.js';
-import { createTestableMcpServer } from './server.js';
-import type { AuthContext } from '../middleware/auth.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
     writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
@@ -43,10 +41,6 @@ beforeEach(async () => {
     await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id });
     release = (await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:release', name: 'release', createdBy: admin.id })).channel;
 });
-function server(userId: string) {
-    const auth = { userId, roles: ['READER'], clientId: `user:${userId}`, appId: app.id, organizationId: org.id } as AuthContext;
-    return createTestableMcpServer(auth, { sessionId: `ccm-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-}
 import { buildSchema } from 'graphql';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { resolvers } from '../api/graphql/schema/resolvers.js';
@@ -57,13 +51,14 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 const Q = resolvers.Query as any;
 const context = (userId = admin.id) => ({ db, userId, roles: ['READER'] });
 async function fixture(encrypted: boolean) {
-    const s = server(admin.id);
-    await s.callToolText('hadron_team_chat_post', { asMe: true, body: 'target' });
+    // Fixture writes use the retained GraphQL mutation; read assertions below are unchanged.
+    const post = (body: string, replyToSeq?: number) => (resolvers.Mutation as any).createTeamChatMessage({}, { appRef: app.id, body, replyToSeq }, context());
+    await post('target');
     const author = await db.user.findUniqueOrThrow({ where: { id: admin.id } });
-    await s.callToolText('hadron_team_chat_post', { asMe: true, body: `reply A @${author.handle}`, replyToSeq: 1 });
-    await s.callToolText('hadron_team_chat_post', { asMe: true, body: 'unrelated' });
-    await s.callToolText('hadron_team_chat_post', { asMe: true, body: 'reply B', replyToSeq: 1 });
-    await s.callToolText('hadron_team_chat_post', { asMe: true, body: 'nested', replyToSeq: 2 });
+    await post(`reply A @${author.handle}`, 1);
+    await post('unrelated');
+    await post('reply B', 1);
+    await post('nested', 2);
     const channel = await db.channel.findFirstOrThrow({ where: { memory: { appId: app.id }, name: 'team' } });
     if (encrypted) {
         const key = generateDataKey();
@@ -74,7 +69,7 @@ async function fixture(encrypted: boolean) {
             await db.node.update({ where: { id: m.id }, data: { content: enc.content, data: enc.data as never } });
         }
     }
-    return { s, channel };
+    return { channel };
 }
 const seqs = (p: any) => p.items.map((m: any) => m.seq);
 const code = async (p: Promise<unknown>) => { try {

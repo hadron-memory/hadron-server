@@ -12,7 +12,6 @@ import { collectRegisterRows } from '../../../lib/resolveRegister.js';
 import { loadWorkerWorkStates, matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { setUpResetFixture, M as ResetM, ctx as resetCtx } from '../../../test/contextResetFixture.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
@@ -144,48 +143,4 @@ describe('#2493 context reset reads the open session\'s agent (c)', () => {
   });
 });
 
-describe('#2493 hadron_get_worker recovery: the explicit session argument selects the placement', () => {
-  const asUser = (u: { id: string }) => createTestableMcpServer({ userId: u.id, appId: app.id, roles: ['READER'], clientId: `user:${u.id}` } as any);
-  const read = (u: { id: string }, session: string) => asUser(u).callToolText('hadron_get_worker', { workerRef: worker.id, session });
-
-  it('the owner of the open session, reconnected with no session id, gets A\'s briefing and register', async () => {
-    const open = await bind();
-    await change();
-    const text = await read(admin, open.id);
-    expect(text).toContain('A-PROMPT Ruin security-engineer Security');
-    expect(text).not.toContain('B-PROMPT');
-  });
-
-  it('a bare id is never trusted: another admin naming that session, an ended session and an unknown id read the live row', async () => {
-    const open = await bind();
-    await change();
-    const other = await db.user.create({ data: { githubId: 94_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `other-${generateId()}`, roles: ['READER'] } });
-    await db.orgMember.create({ data: { organizationId: org.id, userId: other.id, role: 'ADMIN' } });
-    expect(await read(other, open.id)).toContain('B-PROMPT Ruin specs-engineer Specs');
-    expect(await read(admin, generateId())).toContain('B-PROMPT');
-    await db.session.update({ where: { id: open.id }, data: { endedAt: new Date() } });
-    expect(await read(admin, open.id)).toContain('B-PROMPT');
-  });
-
-  it('the binding rule is the shared one: a hard-expired and a dormant session read the live row (each pinned on its own)', async () => {
-    const open = await bind();
-    await change();
-    await db.session.update({ where: { id: open.id }, data: { expiresAt: new Date(Date.now() - 60_000) } });
-    expect(await read(admin, open.id)).toContain('B-PROMPT');
-    // Dormant: no hard expiry, nobody drove it for longer than the App's threshold.
-    const old = new Date(Date.now() - 400 * 24 * 3600 * 1000);
-    await db.session.update({ where: { id: open.id }, data: { expiresAt: null, startedAt: old, updatedAt: old } });
-    await db.app.update({ where: { id: app.id }, data: { sessionDormancyDays: 30 } });
-    expect(await read(admin, open.id)).toContain('B-PROMPT');
-    await db.session.update({ where: { id: open.id }, data: { startedAt: new Date(), updatedAt: new Date() } });
-    expect(await read(admin, open.id)).toContain('A-PROMPT');
-  });
-
-
-  it('a user who owns the session but is no longer a participant of its App reads the live row (callerStillDrives, on its own)', async () => {
-    const open = await bind();
-    await change();
-    await db.orgMember.deleteMany({ where: { organizationId: org.id, userId: admin.id } });
-    expect(await read(admin, open.id)).not.toContain('A-PROMPT');
-  });
-});
+// #3082: retired MCP wrapper-only cases; authoritative GraphQL/lib cases remain.

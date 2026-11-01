@@ -21,7 +21,6 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -210,23 +209,4 @@ describe('#1742 controls: readers keep their answers', () => {
   });
 });
 
-describe('#1742 MCP delegates, so its worker tools are closed as well', () => {
-  const auth = (userId: string) => ({ userId, roles: ['READER' as const] });
-  const tools: Array<[string, (ref: string) => Record<string, unknown>]> = [
-    ['hadron_get_worker', (ref) => ({ workerRef: ref })],
-    ['hadron_update_worker', (ref) => ({ workerRef: ref })],
-    ['hadron_set_worker_reports_to', (ref) => ({ workerRef: ref, reportsTo: null })],
-  ];
-  // #1149: hadron_get_worker reads the PROFILE for any signed-in user
-  // (resolvers.workerProfile1149.test.ts), so its outsider is another App's key.
-  const outsiderAuth = (tool: string) =>
-    tool === 'hadron_get_worker' ? ({ appId: foreignApp.id, roles: [] as const } as never) : auth(outsider.id);
-  for (const [tool, args] of tools) {
-    it(`${tool}: a real name and a guessed one read the same to an outsider`, async () => {
-      const real = await createTestableMcpServer(outsiderAuth(tool)).callToolText(tool, args(danUrn()));
-      const guessed = await createTestableMcpServer(outsiderAuth(tool)).callToolText(tool, args(nobodyUrn()));
-      expect(real).not.toMatch(/not authorized|forbidden/i);
-      expect(real.replace(danUrn(), '<ref>')).toBe(guessed.replace(nobodyUrn(), '<ref>'));
-    });
-  }
-});
+// #3082: retired MCP wrapper-only cases; authoritative GraphQL/lib cases remain.
