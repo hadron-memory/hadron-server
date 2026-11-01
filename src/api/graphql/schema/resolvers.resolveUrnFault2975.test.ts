@@ -207,6 +207,29 @@ describe('#2975 resolveUrn: refusals stay byte-identical (names nothing / not yo
     }
   });
 
+  // §10 P2 on #3134 (Rico): a NUL or a lone surrogate passes the urn-lib
+  // grammar but Postgres rejects it as a query parameter. With the catches
+  // narrowed, that rejection became INTERNAL_SERVER_ERROR (main answered null).
+  // Such a ref names nothing: null, no error, no logged fault.
+  it.each(ARMS)('%s arm: a ref holding NUL or a lone surrogate names nothing (null, no error, no fault)', async (arm) => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const base = urn[arm]!.mine;
+    for (const bad of ['\0', '\uD800', '\uDC00', 'a\uD800b']) {
+      for (const u of [`${base}${bad}`, `${base.slice(0, -1)}${bad}${base.slice(-1)}`]) {
+        const r = await gql('owner', u);
+        expect(r, JSON.stringify(u)).toEqual({ status: 200, data: { resolveUrn: null }, errors: undefined });
+      }
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('Rico probe shapes: NUL / lone surrogate in the root segment answer null with no error', async () => {
+    for (const u of ['hrn:mem:a\0b:c', 'hrn:org:a\0b', 'hrn:user:a\0b', 'hrn:user:\uD800x', 'hrn:agent:a\0b:c', 'hrn:app:a\uDC00b:c', 'hrn:action:a\0b:c:d']) {
+      const r = await gql('outsider', u);
+      expect(r, JSON.stringify(u)).toEqual({ status: 200, data: { resolveUrn: null }, errors: undefined });
+    }
+  });
+
   it.each(ARMS.filter((a) => a !== 'user'))('oracle: for an outsider, %s not-yours and unknown are byte-identical', async (arm) => {
     const mine = await gql('outsider', urn[arm]!.mine);
     const unknown = await gql('outsider', urn[arm]!.unknown);
