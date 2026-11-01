@@ -264,28 +264,3 @@ describe('teamRoster — order, audience, shape', () => {
     );
   });
 });
-
-describe('hadron_team_roster (MCP)', () => {
-  const authOf = (userId: string) => ({ userId, roles: ['READER'], clientId: `user:${userId}` }) as AuthContext;
-  const mcp = (auth: AuthContext) =>
-    createTestableMcpServer(auth, { sessionId: `ro-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-  const text = (r: { content: Array<{ text: string }> }) => r.content[0].text;
-
-  it('renders one line per worker with its state and facts; an outsider is refused', async () => {
-    await bind('Kit', 'codex');
-    const out = text(await mcp(authOf(mia.id)).callTool('hadron_team_roster', { appRef: app.id }));
-    expect(out).toMatch(/^Roster as of /);
-    expect(out).toMatch(/Kit — AVAILABLE: role engineer; bound as codex; free for work as codex; never assigned/);
-    expect(out).toMatch(/Anne — NOT_LAUNCHABLE: role engineer; unbound; never assigned/);
-    expect(text(await mcp(authOf(outsider.id)).callTool('hadron_team_roster', { appRef: app.id }))).toMatch(/^\[app_not_found\]/);
-  });
-
-  it('hadron_start_session takes a family', async () => {
-    const out = text(await mcp(authOf(mia.id)).callTool('hadron_start_session', {
-      description: 'stint', workerRef: w.Kit.id, family: 'glm', llmModel: 'claude-opus-5-5',
-    }));
-    expect(out).not.toMatch(/^\[/);
-    const s = await db.session.findFirstOrThrow({ where: { workerId: w.Kit.id } });
-    expect(s.family).toBe('glm');
-  });
-});

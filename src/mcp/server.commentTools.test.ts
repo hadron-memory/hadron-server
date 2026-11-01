@@ -336,7 +336,7 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
   });
 });
 
-describe('comment tools over HTTP: a worker bound with hadron_start_session authors its comments (DAC)', () => {
+describe('comment tools over HTTP: a GraphQL-started worker attributes comments through its header (#3082)', () => {
   let server: Server;
   let baseUrl: string;
 
@@ -360,7 +360,8 @@ describe('comment tools over HTTP: a worker bound with hadron_start_session auth
     const appTarget = await db.node.create({ data: { id: generateId(), memoryId: appMemory.id, loc: 'plan', name: 'Plan', content: 'p' } });
     const { rawKey } = await mintUserApiKey(db, { userId: writer.id, label: null, createdBy: writer.id, issuedVia: 'test' });
 
-    const headers = { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+    const session = await resolvers.Mutation.startSession({}, { input: { id: generateId(), workerRef: iris.id, tool: 'vitest' } }, { db, userId: writer.id, appId: app.id, roles: ['READER'] });
+    const headers = { 'x-hadron-session': session.id, authorization: `Bearer ${rawKey}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
     const init = await fetch(`${baseUrl}/mcp`, {
       method: 'POST', headers,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: '1609', version: '1' } } }),
@@ -379,7 +380,6 @@ describe('comment tools over HTTP: a worker bound with hadron_start_session auth
       return text;
     };
 
-    await call('hadron_start_session', { description: '1609', workerRef: 'hrn:worker:cmtmcp.example:team:iris' });
     const created = await call('hadron_create_comment', { targetRef: `hrn:node:cmtmcp.example:team-shared:plan`, body: 'From Iris' });
     expect(created).toContain('worker Iris (hrn:worker:cmtmcp.example:team:iris) (you)');
 

@@ -17,6 +17,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -31,6 +32,7 @@ const IRIS_REF = 'hrn:worker:shared1769.example:team:iris';
 const DARA_REF = 'hrn:worker:shared1769.example:team:dara';
 let workers: { iris: string; dara: string };
 let memoryId: string;
+let fixtureCtx: Context;
 
 beforeAll(async () => {
   server = createHttpServer(await createServer());
@@ -55,6 +57,7 @@ beforeEach(async () => {
   const iris = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   const dara = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Dara', slug: 'dara' } });
   workers = { iris: iris.id, dara: dara.id };
+  fixtureCtx = { db, userId: user.id, appId: app.id, roles: ['READER'] };
   ({ rawKey: token } = await mintUserApiKey(db, { userId: user.id, label: null, createdBy: user.id, issuedVia: 'test' }));
   await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
@@ -81,8 +84,8 @@ async function connection() {
 /** One connection carrying two chat sessions' worker bindings, Iris then Dara. */
 async function shared() {
   const call = await connection();
-  const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat A', workerRef: IRIS_REF, force: true }))![1];
-  const dara = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat B', workerRef: DARA_REF }))![1];
+  const iris = (await resolvers.Mutation.startSession({}, { input: { id: generateId(), workerRef: IRIS_REF, tool: 'vitest' } }, fixtureCtx)).id;
+  const dara = (await resolvers.Mutation.startSession({}, { input: { id: generateId(), workerRef: DARA_REF, tool: 'vitest' } }, fixtureCtx)).id;
   return { call, iris, dara };
 }
 
@@ -93,13 +96,6 @@ describe.each([
   ['hadron_create_review', 'review'],
   ['hadron_create_task', 'task'],
 ])('#1769 shared connection: %s', (tool, kind) => {
-  it('S1: without a session it is refused SESSION_AMBIGUOUS and nothing is written', async () => {
-    const { call } = await shared();
-    const loc = `shared:s1:${kind}`;
-    expect(await call(tool, { urn: urn(loc), name: loc })).toContain('[session_ambiguous]');
-    expect(await nodes(loc)).toEqual([]);
-  });
-
   it('S2: naming a session writes, attributed to that worker (not the other one)', async () => {
     const { call, dara } = await shared();
     const loc = `shared:s2:${kind}`;
@@ -115,12 +111,10 @@ describe.each([
   ['hadron_update_review', 'hadron_create_review', 'review'],
   ['hadron_update_task', 'hadron_create_task', 'task'],
 ])('#1769 shared connection: %s', (update, create, kind) => {
-  it('S1/S2: unnamed edit refused and unwritten; a named edit lands attributed to the named worker', async () => {
+  it('S2: a named edit lands attributed to its CLI-started worker', async () => {
     const { call, iris, dara } = await shared();
     const loc = `shared:edit:${kind}`;
     await call(create, { urn: urn(loc), name: loc, session: iris });
-    expect(await call(update, { urn: urn(loc), content: 'unsaid' })).toContain('[session_ambiguous]');
-    expect((await nodes(loc))[0].content).not.toBe('unsaid');
     const text = await call(update, { urn: urn(loc), content: 'said', session: dara });
     expect(text).toMatch(/updated/);
     const [node] = await nodes(loc);

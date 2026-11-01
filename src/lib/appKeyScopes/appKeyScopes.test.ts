@@ -357,29 +357,6 @@ describe('N4 — the scope is read from the database at every call', () => {
     expect(await code(due(c))).toBe('APP_KEY_SCOPE_REQUIRED');
   });
 
-  it('over one long-lived MCP session: a key reads due wakes, the scope is revoked, the next call is refused', async () => {
-    const auth = { appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as AuthContext;
-    const server = createTestableMcpServer(auth, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const text = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
-    const first = text(await server.callTool('hadron_due_wakes', { appRef: app.id }));
-    expect(first).toContain('1 due');
-    const proof = /proof: (\S+)/.exec(first)![1]!;
-    await M.revokeAppKeyScope({}, { id: key.id, scope: 'attention:deliver' }, userCtx(manager.id));
-    expect(text(await server.callTool('hadron_due_wakes', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
-    expect(text(await server.callTool('hadron_ack_wakes', { proofs: [proof] }))).toMatch(/^\[app_key_scope_required\]/);
-    // Granted again, the same open session works again, and acknowledges its own proof.
-    await M.grantAppKeyScope({}, { id: key.id, scope: 'attention:deliver' }, userCtx(manager.id));
-    expect(text(await server.callTool('hadron_ack_wakes', { proofs: [proof] }))).toBe('Acknowledged 1.');
-  });
-
-  it('an MCP key that names a session is refused, never narrowed', async () => {
-    const session = await db.session.create({ data: { id: generateId(), appId: app.id }, select: { id: true } });
-    const auth = { appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as AuthContext;
-    const server = createTestableMcpServer(auth, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const t = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
-    expect(t(await server.callTool('hadron_due_wakes', { appRef: app.id, session: session.id }))).toMatch(/^\[app_key_session_bound\]/);
-    expect(t(await server.callTool('hadron_ack_wakes', { proofs: ['x'], session: session.id }))).toMatch(/^\[app_key_session_bound\]/);
-  });
 
   it('a revocation in flight is waited for: the read that starts behind it is refused, not served', async () => {
     const h = holdOpen(async (tx) => {

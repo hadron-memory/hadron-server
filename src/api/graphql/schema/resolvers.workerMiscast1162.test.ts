@@ -53,17 +53,6 @@ describe('#1162 never-referenced repair', () => {
     expect(await db.memory.findUnique({ where: { id: worker.memoryId } })).toBeNull();
   });
 
-  it('MCP exposes the same empty-stint repair gate', async () => {
-    const worker = await cast();
-    const session = await M.startSession({}, { input: { id: generateId(), appRef: appId, workerRef: worker.id, tool: 'test' } }, ctx);
-    await M.endSession({}, { id: session.id }, ctx);
-    await M.releaseWorker({}, { workerRef: worker.id }, ctx);
-    const text = await createTestableMcpServer({ userId: ctx.userId, roles: ['READER'] }).callToolText(
-      'hadron_delete_worker', { workerRef: worker.id, confirmNoExternalAttribution: true },
-    );
-    expect(text).not.toMatch(/error|WORKER_IN_USE/i);
-    expect(await db.worker.findUnique({ where: { id: worker.id } })).toBeNull();
-  });
 
   it('keeps an open binding in use', async () => {
     const worker = await cast();
@@ -71,17 +60,6 @@ describe('#1162 never-referenced repair', () => {
     await expect(remove(worker.id)).rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
   });
 
-  it('MCP reports omitted and false external confirmation as errors', async () => {
-    const worker = await cast();
-    for (const confirmation of [undefined, false]) {
-      const result = await createTestableMcpServer({ userId: ctx.userId, roles: ['READER'] }).callTool(
-        'hadron_delete_worker', { workerRef: worker.id, confirmNoExternalAttribution: confirmation },
-      );
-      expect((result as { isError?: boolean }).isError).toBe(true);
-      expect(JSON.stringify(result)).toContain('WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED');
-      expect(await db.worker.findUnique({ where: { id: worker.id } })).not.toBeNull();
-    }
-  });
 
   it('a never-bound verified-empty casting remains removable', async () => {
     const worker = await cast();

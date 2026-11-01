@@ -226,35 +226,3 @@ describe('who may read it', () => {
     expect(await F.Worker.checkStatus(worker, {}, ctx(outsider.id))).toBeNull();
   });
 });
-
-describe('MCP renderings', () => {
-  const authOf = (userId: string) => ({ userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` }) as AuthContext;
-  const mcp = () => createTestableMcpServer(authOf(member.id), { sessionId: `cs-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-
-  beforeEach(async () => {
-    await bind('Kit', 300);
-    await assign('Kit', 200);
-    await checked('Kit', teamChannel.id, 40);
-    await bind('Rook');
-  });
-
-  it('hadron_team_roster shows each worker\'s check status', async () => {
-    const out = (await mcp().callTool('hadron_team_roster', { appRef: app.id })).content[0].text;
-    expect(out).toMatch(/Kit — [A-Z_]+: [^\n]*check OVERDUE/);
-    expect(out).toMatch(/Rook — [A-Z_]+: [^\n]*check PENDING \(no task\)/);
-    expect(out).toMatch(/Anne — [A-Z_]+: [^\n]*check NO_SESSION/);
-  });
-
-  it('hadron_list_workers shows it as a flag', async () => {
-    const out = await mcp().callToolText('hadron_list_workers', { app: app.id });
-    expect(out).toMatch(/Kit[^\n]*check OVERDUE/);
-    expect(out).toMatch(/Rook[^\n]*check PENDING \(no task\)/);
-  });
-
-  it('hadron_get_worker shows it with the last check', async () => {
-    const out = await mcp().callToolText('hadron_get_worker', { workerRef: w.Kit.id });
-    expect(out).toMatch(/Check status: OVERDUE \(last checked \d{4}-\d\d-\d\dT[\d:.]+Z\)/);
-    const rook = await mcp().callToolText('hadron_get_worker', { workerRef: w.Rook.id });
-    expect(rook).toMatch(/Check status: PENDING \(no task; never checked\)/);
-  });
-});

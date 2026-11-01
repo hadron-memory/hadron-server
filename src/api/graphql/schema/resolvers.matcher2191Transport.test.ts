@@ -55,13 +55,8 @@ it('GraphQL refuses invalid syntax and both family lists without creating a task
   }
   expect(await db.agentTask.count()).toBe(0);
 });
-it('MCP task-create handler reaches the same canonical requirement storage', async () => {
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = createTestableMcpServer({ userId, roles: ['READER'], clientId: `user:${userId}` });
-  const text = await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'SDK', requirements: { familyIn: [' OPENAI ', 'custom-7'] } });
-  expect(text).toContain('Created');
-  expect((await db.agentTask.findFirstOrThrow({ where: { title: 'SDK' } })).requirements).toEqual({ familyIn: ['codex', 'custom-7'] });
-});
+
+
 it('GraphQL session start, update and open resume share explicit alias normalization', async () => {
   const started = await post('mutation($i: SessionInput!) { startSession(input: $i) { id family } }', { i: { id: generateId(), appRef: appId, workerRef: workerId, family: ' Anthropic ' } });
   expect(started.errors).toBeUndefined();

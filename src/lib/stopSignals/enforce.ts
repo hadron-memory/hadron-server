@@ -42,7 +42,7 @@ export async function refuseStoppedAssignee(tx: Prisma.TransactionClient, appId:
   const more = list.length > 1 ? ` and ${list.length - 1} more` : '';
   const message = `Can't assign to ${who?.name ?? workerId}: a ${first.level} stop signal (${first.scope}, set by ${setter}, `
     + `until ${first.until ?? 'lifted'})${more} covers them. Assign someone else, or whoever manages the App lifts it `
-    + `(hadron_stop_signal_lift id=${first.id}).`;
+    + `(hadron team stop lift id=${first.id}).`;
   throw new GraphQLError(message, {
     extensions: {
       code: 'TASK_STOPPED',

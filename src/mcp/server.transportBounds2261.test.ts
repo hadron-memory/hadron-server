@@ -369,28 +369,6 @@ describe('#2261 eviction touches connection-local state only', () => {
     return { userId, token, workerId: worker.id };
   }
 
-  it('leaves the durable Session row and worker hold unchanged; resume lands on the same open session', async () => {
-    const { userId, token, workerId } = await workerFixture();
-    const sid = await open(token);
-    const started = await callTool(token, sid, 'hadron_start_session', { description: 'evict me', workerRef: workerId });
-    const sessionId = started.match(/Session started: (\S+)/)?.[1];
-    expect(sessionId, started).toBeTruthy();
-    const claim = await callTool(token, sid, 'hadron_create_resume_claim', { session: sessionId });
-    expect(claim).toContain(sessionId!);
-
-    const beforeSession = await db.session.findUniqueOrThrow({ where: { id: sessionId! } });
-    const beforeWorker = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
-    await sweepIdleMcpTransportsForTests(FAR_FUTURE());
-    expect(mcpTransportStateForTests().sessionIds).not.toContain(sid);
-    expect(await db.session.findUniqueOrThrow({ where: { id: sessionId! } })).toEqual(beforeSession);
-    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toEqual(beforeWorker);
-    expect(beforeSession.endedAt).toBeNull();
-
-    const fresh = await open(token);
-    const resumed = await callTool(token, fresh, 'hadron_resume_session', {});
-    expect(resumed).toContain(sessionId!);
-    expect(await db.session.count({ where: { userId } })).toBe(1);
-  });
 
   it('a different principal presenting an evicted id gets the same 404 and creates no state', async () => {
     const a = await makeUser();

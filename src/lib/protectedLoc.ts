@@ -102,7 +102,7 @@ export async function protectedLocsIn(db: ChannelReader, memoryId: string): Prom
     source: 'channel',
     channelId: r.id,
     live: r.deletedAt === null,
-    owner: 'createTeamChatMessage / hadron_team_chat_post',
+    owner: 'createTeamChatMessage / hadron team chat post',
   }));
 }
 
@@ -215,7 +215,7 @@ export function protectedCoversForOp(entry: ProtectedLoc, loc: string, op: strin
  * The remedy sentence — what a refused caller should use INSTEAD, when anything can.
  *
  * `live` matters, and getting it wrong is the defect #1226 was filed for.
- * `createTeamChatMessage` / `hadron_team_chat_post` resolve only LIVE Channels,
+ * `createTeamChatMessage` / `hadron team chat post` resolve only LIVE Channels,
  * so offering them for a TOMBSTONED one names an operation the caller cannot
  * reach — the original complaint, which survived the op carve-out because a
  * dead Channel still refuses `create` (@copilot, PR #1257). A dead address has
@@ -227,7 +227,7 @@ function protectedRemedy(op: string, live: boolean): string {
     return `The Channel is DELETED, so none of its operations can be reached — the address stays reserved so it cannot be occupied and then restored over. Recreate the Channel (createChannel) to write here, or delete what it orphaned.`;
   }
   return CHANNEL_BACKED_OPS.has(op)
-    ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
+    ? `Post with createTeamChatMessage / hadron team chat post; the generic node surface does not reach it.`
     : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
 }
 

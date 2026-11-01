@@ -75,13 +75,6 @@ describe('#2249 every create path defaults the flag to false', () => {
     expect(await stored(child.id)).toBe(false);
   });
 
-  it('the MCP hadron_task_create tool', async () => {
-    const session = await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id } });
-    const mcp = createTestableMcpServer({ userId: member.id, roles: ['READER'], clientId: `user:${member.id}` }, { sessionId: `cs-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const out = (await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'via mcp', session: session.id })) as { content: Array<{ text: string }> };
-    const id = /\(id: ([0-9a-z]+)\)/.exec(out.content[0].text)![1];
-    expect(await stored(id)).toBe(false);
-  });
 
   it('the run tool hadron_task_create', async () => {
     const run = await db.appRun.create({

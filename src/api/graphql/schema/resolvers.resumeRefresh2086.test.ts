@@ -266,12 +266,5 @@ describe('controls', () => {
     }
   });
 
-  it('MCP hadron_resume_session refreshes through the same resolver and keeps the stored tool', async () => {
-    const s = await start(holder, ada);
-    const srv = createTestableMcpServer({ userId: holder, roles: ['READER'], clientId: `user:${holder}` }, { sessionId: generateId() });
-    await srv.callToolText('hadron_create_resume_claim', { session: s.id });
-    const text = await srv.callToolText('hadron_resume_session', { llmModel: 'claude-opus-5-5' });
-    expect(text).toContain(`Session resumed: ${s.id}`);
-    expect(await row(s.id)).toMatchObject({ tool: 'claude-code', llmModel: 'claude-opus-5-5', family: 'claude' });
-  });
+
 });

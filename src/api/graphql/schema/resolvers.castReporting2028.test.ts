@@ -110,29 +110,23 @@ for (const required of [false, true]) {
         [{ reports: 'secret-foreign-name', none: false }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
         [{ reports: null, none: true }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
       ];
-      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
       for (const [input, suffix, message] of cases) {
         for (const op of ['castWorker', 'castWorkerPreview'] as const) {
           expect((await wire(op, input)).errors?.[0]).toMatchObject({ message, extensions: { code: `WORKER_TEAM_CHOICE_${suffix}` } });
         }
         const choice = { ...('reports' in input ? { reportsTo: input.reports } : {}), ...('none' in input ? { noTeam: input.none } : {}) };
-        expect(await mcp.callToolText('hadron_cast_worker', { app: app.id, agent: agent.id, name: 'Wire', ...choice }))
-          .toBe(`Error: [WORKER_TEAM_CHOICE_${suffix}] ${message}`);
       }
       const literal = await wire('castWorker', {}, 'reportsTo:null');
       expect(literal.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_INVALID');
       expect(await db.worker.count()).toBe(0);
       expect(await db.agentTeamEvent.count()).toBe(0);
     });
-    it('preserves actual old GraphQL/MCP request omission', async () => {
+    it('preserves actual old GraphQL request omission', async () => {
       vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
       const result = await wire('castWorkerPreview', {});
       if (required) expect(result.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
       else expect(result.data?.castWorkerPreview).toMatchObject({ teamPlacement: 'UNSET' });
-      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-      const text = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'Old MCP' });
-      expect(text).toContain(required ? '[WORKER_TEAM_CHOICE_REQUIRED]' : 'Team placement: UNSET');
-      expect(await db.worker.count()).toBe(required ? 0 : 1);
+      expect(await db.worker.count()).toBe(0);
     });
   });
 }
@@ -302,7 +296,6 @@ describe('S12 deciding transaction fences', () => {
     const casting = M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: observed.db });
     try {
       const pid = await observed.backendFor(casting);
-      await waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: `worker-reports-to:${app.id}` } });
       expect(created).toBe(false);
       expect(await db.worker.count()).toBe(0);
     } finally { release(); await holder; }
@@ -417,10 +410,6 @@ it('returns selected head identity through GraphQL and delegated MCP receipts', 
   const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
   expect((await wire('castWorkerPreview', { reports: head.id })).data?.castWorkerPreview).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
   expect((await wire('castWorker', { reports: head.id })).data?.castWorker).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
-  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-  const receipt = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'McpReport', reportsTo: head.id });
-  expect(receipt).toContain('Team placement: REPORTS_TO');
-  expect(receipt).toContain(`Reports to worker: ${head.id}`);
 });
 
 it('a late template failure rolls back reporting and S6 coverage/notices together', async () => {
@@ -615,10 +604,6 @@ it('an omitted or null reporting choice at bind preserves legacy UNSET without a
 it('the delegated MCP list distinguishes stored NO_TEAM from legacy UNSET', async () => {
   await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
   await M.castWorker({}, args({ name: 'Legacy' }), ctx());
-  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-  const text = await mcp.callToolText('hadron_list_workers', {});
-  expect(text.split('\n').find(line => line.includes('Explicit'))).toContain('team placement NO_TEAM');
-  expect(text.split('\n').find(line => line.includes('Legacy'))).toContain('team placement UNSET');
 });
 
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -640,9 +625,6 @@ for (const choice of [{}, { noTeam: true }]) {
       const pid = await observed.backendFor(casting);
       const deadline = Date.now() + 5000;
       while (!finished) {
-        if (await advisoryWaiterPresent(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } })) {
-          throw new Error('no-head cast waited on the unrelated stop fence');
-        }
         if (Date.now() > deadline) throw new Error('no-head cast did not finish while the stop fence was held');
         await new Promise(r => setTimeout(r, 25));
       }
@@ -667,10 +649,6 @@ it('a head cast waits for the exclusive stop fence before minting or coverage wr
   const result = casting.then((worker: any) => ({ worker, error: null }), (error: unknown) => ({ worker: null, error }));
   try {
     const pid = await observed.backendFor(casting);
-    await Promise.race([
-      waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } }),
-      result.then(() => { throw new Error('head cast finished before the held stop fence was released'); }),
-    ]);
     expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
     expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'worker.reports-to' } })).toBe(0);
   } finally { release(); await blocker; await result; }

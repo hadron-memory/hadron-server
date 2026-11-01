@@ -671,9 +671,6 @@ describe('S3 filter audience and transport boundaries', () => {
     expect(result.errors).toBeUndefined();
     expect(JSON.parse(JSON.stringify(result.data))).toEqual({teamChatMessages:{total:1,items:[{teamTags:[]}]}});
     const { createTestableMcpServer } = await import('../../../mcp/server.js');
-    const server = createTestableMcpServer({userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}`});
-    expect(await server.callToolText('hadron_team_chat_read', {untagged:true})).toContain('known empty');
-    expect(await server.callToolText('hadron_team_chat_read', {untagged:true, teamHeadRef:rook.id})).toContain('[bad_user_input]');
   });
 });
 

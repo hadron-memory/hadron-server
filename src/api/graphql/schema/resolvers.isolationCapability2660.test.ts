@@ -120,13 +120,6 @@ describe('#2660 capability differential', () => {
     } finally { await server.stop(); }
   });
 
-  it('MCP wake-settings read carries the same capability for person and worker sessions', async () => {
-    const mcp = createTestableMcpServer({ userId: adminId, roles: ['READER'], clientId: `user:${adminId}` } as never);
-    const plain = await db.session.create({ data: { id: generateId(), userId: adminId } });
-    const bound = await db.session.create({ data: { id: generateId(), userId: adminId, appId, workerId: otherId, agentId } });
-    expect(text(await mcp.callTool('hadron_worker_wake_settings', { workerRef: targetId, session: plain.id }))).toContain('canManageIsolation: true');
-    expect(text(await mcp.callTool('hadron_worker_wake_settings', { workerRef: targetId, session: bound.id }))).toContain('canManageIsolation: false');
-  });
 
   it('propagates a capability lookup failure instead of silently advertising a denial', async () => {
     const s = await Q.workerWakeSettings({}, { workerRef: targetId }, ctx(adminId));

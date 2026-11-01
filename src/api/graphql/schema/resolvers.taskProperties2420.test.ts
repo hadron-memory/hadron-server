@@ -499,28 +499,7 @@ describe('surfaces #2420', () => {
     await apollo.stop();
   });
 
-  it('MCP hadron_task_create and hadron_task_update carry properties through the same resolver', async () => {
-    const session = await db.session.create({ data: { id: generateId(), userId: owner.id } });
-    const server = createMcpServerInstance({ userId: owner.id, roles: ['READER'], clientId: `user:${owner.id}` } as any, () => undefined, { kind: 'multi-app' });
-    const client = new Client({ name: 'props', version: '1' });
-    const [a, b] = InMemoryTransport.createLinkedPair();
-    await server.connect(b);
-    await client.connect(a);
-    try {
-      const upd = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: { via: 'mcp' } }, session: session.id } });
-      expect(upd.isError).not.toBe(true);
-      expect((await stored()).properties).toEqual({ via: 'mcp' });
-      const bad = await client.callTool({ name: 'hadron_task_update', arguments: { taskId: task.id, input: { properties: [1] }, session: session.id } });
-      expect(bad.isError).toBe(true);
-      expect(JSON.stringify(bad.content)).toContain('[properties_not_an_object]');
-      const created = await client.callTool({ name: 'hadron_task_create', arguments: { appRef: app.id, title: 'Mcp', source: 's', properties: { made: 'mcp' }, session: session.id } });
-      expect(created.isError).not.toBe(true);
-      expect((await db.agentTask.findFirstOrThrow({ where: { title: 'Mcp' } }) as any).properties).toEqual({ made: 'mcp' });
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
+
 });
 
 

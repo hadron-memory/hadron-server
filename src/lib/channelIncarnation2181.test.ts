@@ -131,8 +131,6 @@ afterEach(() => {
 });
 
 
-
-
 const mcpAuth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
 const readState = () => db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
 const currentIncarnation = async () => (await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).incarnation;
@@ -517,25 +515,5 @@ describe('#2181 the pinned read', () => {
     await wake;
     expect(await reading).toMatchObject({ total: 1 });
     expect((await readState())?.lastCheckedAt).not.toBeNull(); // the pinned mentions read still counts as a check
-  });
-});
-
-describe('#2181 MCP parity', () => {
-  it('reads end with the envelope line, a pinned stale read is [channel_incarnation_changed], marks take the pin', async () => {
-    await post('one');
-    const server = createTestableMcpServer({ ...mcpAuth(), sessionId });
-    const read = await server.callToolText('hadron_channel_read', { channel: channel.id, sinceSeq: 0, session: sessionId });
-    expect(read.trimEnd().endsWith(`channel ${channel.id} incarnation 1`)).toBe(true);
-    const team = await server.callToolText('hadron_team_chat_read', { sinceSeq: 0, session: sessionId, app: app.id });
-    expect(team.trimEnd().endsWith(`channel ${channel.id} incarnation 1`)).toBe(true);
-    const ok = await server.callToolText('hadron_team_chat_mark_read', { session: sessionId, app: app.id, channel: channel.id, seq: 1, expectedIncarnation: 1 });
-    expect(ok).toContain('"channelIncarnation": 1');
-    expect(ok).toContain('"cursorIncarnation": 1');
-    await recreate();
-    const stale = await server.callToolText('hadron_team_chat_mark_read', { session: sessionId, app: app.id, channel: channel.id, seq: 1, expectedIncarnation: 1 });
-    expect(stale).toContain('[channel_incarnation_changed]');
-    expect(stale).toContain('now incarnation 2');
-    const staleRead = await server.callToolText('hadron_channel_read', { channel: channel.id, sinceSeq: 0, session: sessionId, expectedIncarnation: 1 });
-    expect(staleRead).toContain('[channel_incarnation_changed]');
   });
 });

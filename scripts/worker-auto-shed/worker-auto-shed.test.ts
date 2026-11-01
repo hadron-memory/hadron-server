@@ -82,7 +82,7 @@ function emittedByHook(hook: string): string {
 const REQUIREMENTS: Array<[string, (p: string) => boolean]> = [
   ['leads with whoami --check and keeps a bound-open binding (no rebind)', (p) => /whoami --check/.test(p) && /do NOT\s+start or rebind a session/.test(p)],
   ['unbound recovery is `session start` with NO --as', (p) => /session start\\?`? with NO --as/.test(p.replace(/\\`/g, '`'))],
-  ['names the MCP branch hadron_resume_session()', (p) => p.includes('hadron_resume_session()')],
+  ['MCP-only binding is unsupported; recovery uses CLI', (p) => !p.includes('hadron_resume_session') && p.includes('MCP-only worker binding is unsupported')],
   ['CHOOSE (exit 2) asks the human and never selects automatically', (p) => /CHOOSE[\s\S]{0,160}ask the human/.test(p) && /Never select automatically/.test(p)],
   ['exit 5 has two meanings: still bound OR RESUME_REFUSED', (p) => /RESUME_REFUSED/.test(p) && /still bound/.test(p)],
   ['a transport error is not NOTHING_TO_RESUME', (p) => /transport[\s\S]{0,80}NOT an absent claim/.test(p)],
@@ -152,7 +152,7 @@ describe('the emitted recovery ladder (#1958)', () => {
       'CHOOSE (exit 2) asks the human and never selects automatically',
       'exit 5 has two meanings: still bound OR RESUME_REFUSED',
       'a transport error is not NOTHING_TO_RESUME',
-      'names the MCP branch hadron_resume_session()',
+      'MCP-only binding is unsupported; recovery uses CLI',
       'never posts or records anything as the human',
     ];
     for (const name of mustFailOnOld) {

@@ -170,32 +170,6 @@ it('GraphQL exposes both fields, preserves omissions, and atomically refuses nul
   await server.stop();
 });
 
-it('actual MCP SDK updates, preserves omitted fields, reads raw templates and refuses H26 bound edits', async () => {
-  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
-  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
-  const { createMcpServerInstance } = await import('../../../mcp/server.js');
-  const server = createMcpServerInstance({ userId: admin.id, roles: ['READER'], clientId: `sig:${admin.id}` } as any, () => undefined, { kind: 'multi-app' });
-  const client = new Client({ name: 'signature-test', version: '1' });
-  const [local, remote] = InMemoryTransport.createLinkedPair();
-  await server.connect(remote); await client.connect(local);
-  try {
-    const call = (args: any) => client.callTool({ name: 'hadron_update_worker', arguments: { workerRef: worker.id, ...args } });
-    const good: any = await call({ signature: 'mcp {{worker.name}}', trailer: '' });
-    expect(good.content[0].text).toContain('Updated **Anne**');
-    expect(await row()).toMatchObject({ signature: 'mcp {{worker.name}}', trailer: '' });
-    await call({});
-    expect((await row()).signature).toBe('mcp {{worker.name}}');
-    const read: any = await client.callTool({ name: 'hadron_get_worker', arguments: { workerRef: worker.id } });
-    expect(read.content[0].text).toContain('Signature template:\nmcp {{worker.name}}');
-    const before = await row();
-    await call({ signature: null }); expect(await row()).toEqual(before);
-    await db.worker.update({ where: { id: worker.id }, data: { heldByUserId: admin.id, heldAt: new Date() } });
-    const session = await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, workerId: worker.id, agentId: agent.id } });
-    await call({ signature: 'bound', session: session.id });
-    expect((await row()).signature).toBe('mcp {{worker.name}}');
-    await call({ signature: 'human' }); expect((await row()).signature).toBe('human');
-  } finally { await client.close(); await server.close(); }
-});
 
 async function withSignatureSdk(fn: (call: (args: Record<string, unknown>) => Promise<any>) => Promise<void>, authExtra: object = {}) {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');

@@ -97,12 +97,8 @@ describe('#2087 development diagnostic boundaries',()=>{
     spy.mockRestore(); expect(result.content[0].text).toContain('[forbidden] refused');
     expect(result.content[0].text).toContain(`appRef: ${absent}`); noDiagnostics(result);
   });
-  it('MCP typed-error mapping strips supplied diagnostic extensions, preserving public extras',async()=>{
-    const id=await mcpOpen();
-    const spy=vi.spyOn(resolvers.Query as any,'appDeliverySettings').mockRejectedValueOnce(new GraphQLError('App not found.',{extensions:{code:'APP_NOT_FOUND',appRef:absent,...diagnostics}}));
-    const result=await tool(id,'hadron_delivery_settings_get',{appRef:absent});
-    spy.mockRestore(); expect(result.isError).toBe(true); expect(result.content[0].text).toContain(`appRef: ${absent}`); noDiagnostics(result);
-  });
+
+
 });
 describe('#2087 formatter diagnostics supplied by callers',()=>{
   it('keeps Prisma internals redacted and the original error available to reporting',()=>{

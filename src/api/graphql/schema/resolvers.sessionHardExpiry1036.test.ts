@@ -83,16 +83,8 @@ describe('#1036 no-reap hard expiry', () => {
     const row = await session();
     expect(await preserveHeartbeatIfLapsed(db as never, row.id)).toEqual({ updatedAt: row.updatedAt });
   });
-  it.each([false, true])('MCP post refuses expiry with no heartbeat (channel=%s)', async (channelPath) => {
-    const row = await session();
-    const memory = await db.memory.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId,
-      appId: app.id, name: 'shared', urn: `expiry-shared-${generateId()}`, class: 'app' } });
-    const channel = (await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: holder.id, asDefaultOfAppId: app.id })).channel;
-    const tool = createTestableMcpServer({ userId: holder.id, roles: ['READER'], clientId: `user:${holder.id}` });
-    const out = await tool.callToolText('hadron_team_chat_post', { session: row.id, app: app.id, body: 'must refuse', ...(channelPath ? { channel: channel.id } : {}) });
-    expect(out).toMatch(/expired at its promised deadline/);
-    expect((await db.session.findUniqueOrThrow({ where: { id: row.id } })).updatedAt).toEqual(row.updatedAt);
-  });
+
+
   it('MCP whoami reports hard expiry, not a resumable idle lapse', async () => {
     const row = await session();
     const tool = createTestableMcpServer({ userId: holder.id, roles: ['READER'], clientId: `user:${holder.id}` });

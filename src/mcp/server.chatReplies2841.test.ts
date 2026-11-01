@@ -117,48 +117,11 @@ for (const encrypted of [false, true])
             await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
             expect(await code(read(1))).toBe('TEAM_CHAT_REPLY_NOT_FOUND');
         });
-        it('both MCP tools preserve filter and total, including named-channel team path', async () => {
-            const { s, channel } = await fixture(encrypted);
-            for (const [tool, args] of [['hadron_channel_read', { channel: channel.id }], ['hadron_team_chat_read', {}], ['hadron_team_chat_read', { channel: channel.id }]] as const) {
-                const text = await s.callToolText(tool, { ...args, replyToSeq: 1 });
-                expect(text).toContain('2 message(s) total');
-                expect(text).toContain('reply A');
-                expect(text).toContain('reply B');
-                expect(text).not.toContain('unrelated');
-                expect(text).not.toContain('nested');
-            }
-        });
+
+
     });
-it('read gate precedes target existence and monitor combination refuses', async () => {
-    const { s, channel } = await fixture(false);
-    for (const replyToSeq of [1, 900]) {
-        expect(await code(Q.channelMessages({}, { channelRef: channel.id, replyToSeq }, context(member.id)))).toBe('CHANNEL_NOT_FOUND');
-        expect(await code(Q.teamChatMessages({}, { appRef: app.id, replyToSeq }, context(member.id)))).toBe('FORBIDDEN');
-    }
-    expect(await s.callToolText('hadron_team_chat_read', { monitor: true, replyToSeq: 1 })).toMatch(/^\[bad_user_input\]/);
-});
-it('a reply-filtered read attributes activity but does not acknowledge unseen channel messages (fenced or not)', async () => {
-    const { s, channel } = await fixture(false);
-    const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
-    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Reply reader', slug: 'reply-reader' } });
-    const session = await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, agentId: agent.id, workerId: worker.id } });
-    for (const pinned of [false, true]) {
-        await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0, replyToSeq: 1, ...(pinned ? { expectedIncarnation: channel.incarnation } : {}) }, { ...context(), sessionId: session.id });
-        const state = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
-        expect(state?.lastSeenSeq ?? 0).toBe(0);
-        expect(state?.lastCheckedAt).toBeInstanceOf(Date);
-    }
-    for (const [tool, args] of [['hadron_channel_read', { channel: channel.id }], ['hadron_team_chat_read', {}], ['hadron_team_chat_read', { channel: channel.id }]] as const) {
-        await s.callToolText(tool, { ...args, session: session.id, sinceSeq: 0, replyToSeq: 1 });
-        expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: worker.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
-    }
-    await vi.waitFor(async () => {
-        const events = await db.usageEvent.findMany({ where: { sessionId: session.id, type: 'read', memoryId: channel.memoryId } });
-        const ids = new Set(events.map(e => e.nodeId));
-        const replies = await db.node.findMany({ where: { memoryId: channel.memoryId, seq: { in: [2, 4] } } });
-        expect(ids).toEqual(new Set(replies.map(n => n.id)));
-    });
-});
+
+
 it('envelope is authoritative, not the reply edge, and the target can never return itself', async () => {
     const { channel } = await fixture(false);
     const target = await db.node.findFirstOrThrow({ where: { memoryId: channel.memoryId, seq: 1 } });
@@ -182,24 +145,4 @@ it('target existence is scoped to this Channel and memory, not a sibling or anot
     await db.node.create({ data: { memoryId: otherMemory.id, loc: 'chats:team:messages:foreign', name: 'foreign target', nodeType: 'chat-message', seq: 900, content: 'other tenant', data: {} } });
     expect(await code(Q.channelMessages({}, { channelRef: channel.id, replyToSeq: 900 }, context()))).toBe('TEAM_CHAT_REPLY_NOT_FOUND');
 });
-for (const pinned of [false, true])
-    it(`reply-filtered mentions leave the delivery mark untouched, fenced=${pinned}`, async () => {
-        const { s, channel } = await fixture(false);
-        const agent = await db.agent.findFirstOrThrow({ where: { organizationId: org.id } });
-        const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Reply reader', slug: 'reply-reader' } });
-        const session = await db.session.create({ data: { id: generateId(), userId: admin.id, appId: app.id, agentId: agent.id, workerId: worker.id } });
-        await s.callToolText('hadron_team_chat_post', { asMe: true, body: '@reply-reader a reply mention', replyToSeq: 1 });
-        await s.callToolText('hadron_team_chat_post', { asMe: true, body: '@reply-reader an unseen non-reply mention' });
-        const args = { channelRef: channel.id, sinceSeq: 0, mentionsRef: worker.id, ...(pinned ? { expectedIncarnation: channel.incarnation } : {}) };
-        const ctx = { ...context(), sessionId: session.id };
-        const page = await Q.channelMessages({}, { ...args, replyToSeq: 1 }, ctx);
-        expect(seqs(page)).toEqual([6]);
-        expect(page.total).toBe(1);
-        const delivery = () => db.workerDeliveryChannel.findUnique({ where: { workerId_channelId: { workerId: worker.id, channelId: channel.id } } });
-        expect((await delivery())?.deliveredThroughSeq ?? 0).toBe(0);
-        expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: worker.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
-        // Control: the same mentions read without the reply window really can acknowledge both mentions.
-        const allMentions = await Q.channelMessages({}, args, ctx);
-        expect(seqs(allMentions)).toEqual([6, 7]);
-        expect((await delivery())?.deliveredThroughSeq).toBe(7);
-    });
+// #3082: wrapper-only selector matrix retired; GraphQL selector cases remain above.

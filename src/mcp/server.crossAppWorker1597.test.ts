@@ -150,28 +150,8 @@ describe('cross-App bare-name bind (#1597)', () => {
     expect((await start('Iris')).workerId).toBe(held.id);
     expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(user.id);
   });
-  it('direct and actual MCP ambiguity include an already-held user-owned match without claiming its namesake', async () => {
-    const own = await db.app.create({ data: { ownerUserId: other.id, name: 'Solo', urn: `solo-${generateId()}:team` } });
-    await db.appAgent.create({ data: { appId: own.id, agentId } });
-    await db.appMember.create({ data: { appId: own.id, userId: user.id, role: 'owner' } });
-    const held = await worker(own, 'Iris', { heldByUserId: user.id, heldAt: new Date() });
-    await db.appMember.update({ where: { appId_userId: { appId: own.id, userId: user.id } }, data: { role: 'member' } });
-    const a = await worker(appA);
-    // Both explicit memberships keep MCP authentication in its multi-App
-    // state; otherwise the existing auth resolver selects the sole member App.
-    await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'member' } });
-    const e = await refusal(start('Iris'));
-    expect(e.extensions.code).toBe('SESSION_WORKER_NAME_AMBIGUOUS');
-    expect(e.extensions.candidates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: held.id }), expect.objectContaining({ id: a.id }),
-    ]));
-    const c = await mcp();
-    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'held identity is not absent', workerRef: 'Iris' } }));
-    expect(out).toContain('ambiguous'); expect(out).toContain(held.urn); expect(out).toContain(a.urn);
-    expect(await db.session.count()).toBe(0);
-    expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(user.id);
-    expect((await db.worker.findUniqueOrThrow({ where: { id: a.id } })).heldByUserId).toBeNull();
-  });
+
+
   it('App-membership alone admits org Apps but org READER alone does not', async () => {
     await db.orgMember.updateMany({ where: { userId: user.id }, data: { role: 'READER' } });
     await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'reader' } });
@@ -201,23 +181,6 @@ describe('cross-App bare-name bind (#1597)', () => {
     vi.spyOn(db.app, 'findMany').mockRejectedValueOnce(new Error('candidate db unavailable'));
     await expect(start('Iris')).rejects.toThrow('candidate db unavailable');
   });
-  it('actual MCP transport binds a unique name without selected App and returns briefing', async () => {
-    const w = await worker(appA); await worker(hiddenApp);
-    const c = await mcp();
-    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'build safely', workerRef: 'Iris', llmModel: 'test' } }));
-    expect(out).toContain('Session started:'); expect(out).toContain(w.urn); expect(out).toContain('Boot briefing');
-    expect(await db.session.count({ where: { workerId: w.id } })).toBe(1);
-    const workerRead = text(await c.callTool({ name: 'hadron_get_worker', arguments: { workerRef: 'Iris' } }));
-    expect(workerRead).toContain(w.id); // successful bind pins its App on this connection
-    await worker(appB); // the connection's selected App wins over new global ambiguity
-    const next = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'same App', workerRef: 'Iris', force: true } }));
-    expect(next).toContain('Session started:'); expect(next).toContain(w.urn);
-  });
-  it('actual MCP ambiguity lists both candidates and binds nothing', async () => {
-    const a = await worker(appA); const b = await worker(appB); const hidden = await worker(hiddenApp);
-    const c = await mcp();
-    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'no guess', workerRef: 'Iris' } }));
-    expect(out).toContain('ambiguous'); expect(out).toContain(a.urn); expect(out).toContain(b.urn);
-    expect(out).not.toContain(hidden.urn); expect(await db.session.count()).toBe(0);
-  });
+
+
 });

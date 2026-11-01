@@ -222,15 +222,8 @@ describe('R57 own-live-session batches', () => {
     expect(await code(selfAck(s, [b.id]))).toBe('SESSION_NOT_LIVE');
     expect(await db.workerDeliveryChannel.count()).toBe(0);
   });
-  it('MCP own-session selector reads and acknowledges the same self batch', async () => {
-    const s = await ownSession(); await postForBoth();
-    const { createTestableMcpServer } = await import('../../../mcp/server.js');
-    const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'] } as never, { sessionId: `self-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const text = (r: any) => r.content[0].text;
-    const result = JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id })));
-    expect(result.batches.map((b: any) => b.workerId)).toEqual([kit.id]);
-    expect(text(await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [result.batches[0].id], session: s.id }))).toBe('Acknowledged 1.');
-  });
+
+
   it('a committed membership revocation denies even the same owned session', async () => {
     const s = await ownSession(); await postForBoth();
     await db.orgMember.delete({ where: { organizationId_userId: { organizationId: org.id, userId: manager.id } } });
@@ -327,13 +320,6 @@ describe('R57 own-live-session batches', () => {
     expect(await code(Q.deliveryBatches({}, { appRef: app.id }, context))).toBe('SESSION_NOT_FOUND');
   });
 
-  it('MCP read forwards each explicit session independently of the ambient binding', async () => {
-    const kitSession = await ownSession(); const rookSession = await ownSession({ workerId: rook.id }); await postForBoth();
-    const { createTestableMcpServer } = await import('../../../mcp/server.js');
-    const server = createTestableMcpServer({ userId: manager.id, sessionId: kitSession.id, roles: ['READER'] } as never, { sessionId: `mixed-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const results = await Promise.all([kitSession, rookSession].map(s => server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id })));
-    expect(results.map((r: any) => JSON.parse(r.content[0].text).batches.map((b: any) => b.workerId))).toEqual([[kit.id], [rook.id]]);
-  });
 
   it('an end winning after ack entry but before the transaction prevents every mark', async () => {
     const s = await ownSession(); await postForBoth(); const [b] = (await selfRead(s)).batches;
@@ -374,18 +360,6 @@ describe('R57 own-live-session batches', () => {
     expect(await db.appLogEntry.count()).toBe(0);
   });
 
-  it('MCP explicit validated session replaces a refused ambient binding', async () => {
-    const s = await ownSession(); await postForBoth();
-    const { createTestableMcpServer } = await import('../../../mcp/server.js');
-    const server = createTestableMcpServer({ userId: manager.id, roles: ['READER'], sessionBindingRefused: true } as never, { sessionId: `refused-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const result: any = await server.callTool('hadron_team_chat_inbox', { appRef: app.id, session: s.id });
-    expect(result.isError).not.toBe(true);
-    const batches = JSON.parse(result.content[0].text).batches;
-    expect(batches.map((b: any) => b.workerId)).toEqual([kit.id]);
-    const ack: any = await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [batches[0].id], session: s.id });
-    expect(ack.isError).not.toBe(true);
-    expect(ack.content[0].text).toBe('Acknowledged 1.');
-  });
 
 });
 

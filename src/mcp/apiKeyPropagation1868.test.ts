@@ -77,48 +77,7 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
     expect(await db.node.count({ where: { nodeType: 'comment' } })).toBe(0);
   });
 
-  it('agentTaskTools: hadron_task_create is refused and creates no task', async () => {
-    const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
-    const { mcp, revoke } = await keyedConnection(member.id);
-    await revoke();
-    const t = text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'after revocation', session: plain.id }));
-    // The agent-task resolvers conceal an authority denial as the App being unknown.
-    expect(code(t)).toBe('APP_NOT_FOUND');
-    expect(await db.agentTask.count()).toBe(0);
-  });
 
-  it('tickerTools: hadron_ack_wakes with a genuine proof is refused at the key check', async () => {
-    const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
-    const { mcp, revoke } = await keyedConnection(member.id);
-    await revoke();
-    const t = text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }));
-    // acknowledgeWakes maps the transaction's denial to the requester-mismatch refusal.
-    expect(code(t)).toBe('WAKE_PROOF_REQUESTER_MISMATCH');
-  });
-
-  it('server.ts worker tools: hadron_set_worker_reports_to is refused and changes nothing (Anne #1872 sweep)', async () => {
-    const { mcp, revoke } = await keyedConnection(admin.id);
-    await revoke();
-    const t = text(await mcp.callTool('hadron_set_worker_reports_to', { workerRef: workerId, reportsTo: rookId, app: app.id }));
-    // The tool renders the transaction's denial as the reports-to refusal text.
-    expect(t).toMatch(/may change who it reports to/);
-    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).reportsToWorkerId).toBeNull();
-  });
-
-  it('a live key still writes through the same tools (the control)', async () => {
-    const target = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 't:2', name: 'Target', content: 'Body' } });
-    const plain = await db.session.create({ data: { id: generateId(), userId: member.id }, select: { id: true } });
-    const { mcp } = await keyedConnection(member.id);
-    expect(code(text(await mcp.callTool('hadron_create_comment', { targetRef: target.id, body: 'live key' })))).toBe('NO_ERROR');
-    expect(code(text(await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'live key', session: plain.id })))).toBe('NO_ERROR');
-    expect(text(await mcp.callTool('hadron_ack_wakes', { proofs: [proofFor(member.id)], session: plain.id }))).toMatch(/^Acknowledged /);
-  });
-
-  it('a live key sets reports-to (the worker-tool control)', async () => {
-    const { mcp } = await keyedConnection(admin.id);
-    expect(code(text(await mcp.callTool('hadron_set_worker_reports_to', { workerRef: workerId, reportsTo: rookId, app: app.id })))).toBe('NO_ERROR');
-    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).reportsToWorkerId).toBe(rookId);
-  });
 });
 
 describe('#1868: no MCP GraphQL context drops the presented key (source audit)', () => {

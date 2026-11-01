@@ -418,41 +418,6 @@ describe('#2931 the nested surface is no wider than today (executable schema)', 
   });
 });
 
-describe('#2931 no MCP (R-e): an MCP connection authenticated by the host key is refused as today', () => {
-  it('G7: hadron_ticker_list over a host-key connection answers what an unscoped key\'s connection answers', async () => {
-    const call = async (k: { id: string }) => {
-      const server = createMcpServerInstance({ appId: appX.id, appKeyId: k.id, roles: [] } as unknown as AuthContext, () => undefined, { kind: 'multi-app' } as never);
-      const client = new Client({ name: 'hk2931', version: '1' });
-      const [local, remote] = InMemoryTransport.createLinkedPair();
-      await server.connect(remote); await client.connect(local);
-      try {
-        const r = await client.callTool({ name: 'hadron_ticker_list', arguments: { appRef: appX.id } });
-        return { isError: r.isError, text: (r.content as Array<{ text: string }>).map((i) => i.text).join('\n') };
-      } finally { await client.close(); await server.close(); }
-    };
-    const host = await call(hostKey);
-    expect(host.isError).toBe(true);
-    expect(host.text).toMatch(/app_not_found/i);
-    expect(host).toEqual(await call(plainKey));
-  });
-
-  it('G7: that refusal is a recorded use of the host key, with its code; an unscoped key records nothing', async () => {
-    const recorded = (k: { id: string }) => db.hostKeyUse.findMany({ where: { appKeyId: k.id, id: { notIn: setupUses } }, select: { action: true, hostId: true, count: true, refusedCode: true } });
-    const server = (k: { id: string }) => createMcpServerInstance({ appId: appX.id, appKeyId: k.id, roles: [] } as unknown as AuthContext, () => undefined, { kind: 'multi-app' } as never);
-    for (const k of [hostKey, plainKey]) {
-      const s = server(k);
-      const client = new Client({ name: 'hk2931', version: '1' });
-      const [local, remote] = InMemoryTransport.createLinkedPair();
-      await s.connect(remote); await client.connect(local);
-      try {
-        expect((await client.callTool({ name: 'hadron_ticker_list', arguments: { appRef: appX.id } })).isError).toBe(true);
-      } finally { await client.close(); await s.close(); }
-    }
-    expect(await recorded(hostKey)).toEqual([{ action: 'read', hostId: 'orca1', count: null, refusedCode: 'APP_NOT_FOUND' }]);
-    expect(await recorded(plainKey)).toEqual([]);
-  });
-});
-
 describe('#2931 Ticker.subscribers is a host-key read of its own: anchored, re-judged and recorded', () => {
   const uses = (k: { id: string }) =>
     db.hostKeyUse.findMany({ where: { appKeyId: k.id, id: { notIn: setupUses } }, orderBy: [{ usedAt: 'asc' }, { id: 'asc' }], select: { action: true, hostId: true, count: true, refusedCode: true } });

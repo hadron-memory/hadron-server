@@ -52,5 +52,5 @@ export async function appendDeliveryPending<T>(result: T, ctx: Context, namedSes
   if (!pending) return result;
   const r = result as { _meta?: Record<string, unknown>; content?: unknown[] };
   return { ...result, _meta: { ...r._meta, 'hadron/deliveryPending': pending },
-    ...(pending.count > 0 && Array.isArray(r.content) ? { content: [...r.content, { type: 'text', text: `${pending.count} ${pending.count === 1 ? 'message' : 'messages'} waiting; pull with hadron_team_chat_inbox.` }] } : {}) };
+    ...(pending.count > 0 && Array.isArray(r.content) ? { content: [...r.content, { type: 'text', text: `${pending.count} ${pending.count === 1 ? 'message' : 'messages'} waiting; pull with hadron team chat inbox.` }] } : {}) };
 }

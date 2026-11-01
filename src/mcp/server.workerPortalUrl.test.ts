@@ -115,44 +115,7 @@ function expectLinkForEveryUrn(out: string): void {
 }
 
 describe('#1026 — a worker URN never appears without its link', () => {
-  it('hadron_get_worker', async () => {
-    await castWorker('Dara', 'dara');
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_get_worker', {
-      workerRef: 'Dara',
-    });
-    expect(out).toContain(`hrn:worker:${org.urn}:team:dara`);
-    expectLinkForEveryUrn(out);
-  });
 
-  it('hadron_list_workers — one link per roster row', async () => {
-    await castWorker('Dara', 'dara');
-    await castWorker('Gil', 'gil');
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_list_workers', {});
-    expect(workerUrns(out)).toHaveLength(2);
-    expectLinkForEveryUrn(out);
-  });
-
-  it('hadron_cast_worker — the one-time mint whose receipt a human keeps', async () => {
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_cast_worker', {
-      role: 'server-engineer',
-      name: 'Dara',
-    });
-    expect(out).toContain(`hrn:worker:${org.urn}:team:dara`);
-    expectLinkForEveryUrn(out);
-  });
-
-  it('hadron_start_session — the bind, where a worker FIRST needs its identity', async () => {
-    await castWorker('Dara', 'dara');
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_start_session', {
-      workerRef: 'Dara',
-      description: 'a stint',
-    });
-    // Before #1026 the bind receipt printed NEITHER, so the briefing's own
-    // instruction ("your exact URN is the urn line from hadron_get_worker")
-    // forced a second call at the exact moment the need arises.
-    expect(out).toContain(`hrn:worker:${org.urn}:team:dara`);
-    expectLinkForEveryUrn(out);
-  });
 
   it('hadron_whoami — the post-compaction recovery read', async () => {
     const worker = await castWorker('Dara', 'dara');
@@ -162,40 +125,5 @@ describe('#1026 — a worker URN never appears without its link', () => {
     const out = await createTestableMcpServer(auth()).callToolText('hadron_whoami', {});
     expect(out).toContain(`hrn:worker:${org.urn}:team:dara`);
     expectLinkForEveryUrn(out);
-  });
-});
-
-describe('#1026 — no portal origin means no link, never a guess', () => {
-  beforeEach(() => {
-    process.env.FRONTEND_URL = '';
-  });
-
-  it('omits the URL line on every surface while keeping the URN', async () => {
-    const worker = await castWorker('Dara', 'dara');
-    await db.session.create({
-      data: { id: generateId(), workerId: worker.id, appId: app.id, userId: user.id },
-    });
-    const srv = createTestableMcpServer(auth());
-    for (const [tool, args] of [
-      ['hadron_get_worker', { workerRef: 'Dara' }],
-      ['hadron_list_workers', {}],
-      ['hadron_whoami', {}],
-    ] as const) {
-      const out = await srv.callToolText(tool, args as never);
-      expect(urlLines(out), `${tool} emitted a link with no portal configured`).toEqual([]);
-      // The identifier survives — losing the link must not cost the caller the
-      // URN, which is the part that is still usable as a workerRef.
-      expect(out, `${tool} dropped the URN`).toContain(`hrn:worker:${org.urn}:team:dara`);
-    }
-  });
-
-  it('omits it on a malformed FRONTEND_URL too (parse, do not pattern-match)', async () => {
-    process.env.FRONTEND_URL = 'https://host:abc';
-    await castWorker('Dara', 'dara');
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_get_worker', {
-      workerRef: 'Dara',
-    });
-    expect(urlLines(out)).toEqual([]);
-    expect(out).toContain(`hrn:worker:${org.urn}:team:dara`);
   });
 });

@@ -290,42 +290,6 @@ describe('#1149 the profile never widens a list', () => {
   });
 });
 
-describe('#1149 hadron_get_worker delegates to the profile read and keeps working state masked', () => {
-  const auth = (userId: string) => ({ userId, roles: ['READER' as const] });
-
-  it('the stranger reads the name and URN, with no liveness flag, override or briefing', async () => {
-    const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(text).toContain('**Dan** (server-engineer)');
-    expect(text).toContain(`Worker URN: ${danUrn()}`);
-    expect(text).not.toMatch(/\b(taken|free)\b/);
-    expect(text).not.toContain('secret override');
-    expect(text).not.toContain('Boot briefing');
-  });
-
-  it('does not claim the worker has no template or override when the reader cannot see them (#2918)', async () => {
-    const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-        expect(text).not.toContain('No boot briefing');
-  });
-
-  it('a departed participant gets no recovery line for its own still-open session', async () => {
-    const own = await db.session.create({
-      data: { id: generateId(), appId: appA.id, userId: contributor.id, agentId: orgAgent.id, workerId: teamDan.id, role: 'server-engineer' },
-    });
-    const before = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(before).toContain(`Your active session: ${own.id}`);
-    await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: contributor.id }, data: { deletedAt: new Date() } });
-    const after = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(after).toContain('**Dan** (server-engineer)');
-    expect(after).not.toContain(own.id);
-    expect(after).not.toContain('Your active session');
-  });
-
-  it('a participant still sees the liveness flag', async () => {
-    const text = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(text).toContain('**Dan** (server-engineer) — free');
-  });
-});
-
 describe('#1149 the profile fields judge the App, not the path that reached the Worker', () => {
   const W = resolvers.Worker as unknown as Record<string, (w: unknown, a: unknown, c: Context) => Promise<unknown>>;
   const row = () => db.worker.findUniqueOrThrow({ where: { id: teamDan.id } });

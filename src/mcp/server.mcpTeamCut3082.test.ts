@@ -1,5 +1,5 @@
 /** #3082 / V7 R1-R4: the literal ruled cut, not an implementation-derived oracle. */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createMcpServerInstance, createTestableMcpServer } from './server.js';
@@ -161,7 +161,7 @@ const principals = {
   impersonation: { userId: 'u', roles: ['ADMIN'], impersonation: { sessionId: 's', actorUserId: 'admin', orgId: 'o', expiresAt: new Date('2099-01-01') } },
 };
 const close: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const fn of close.splice(0)) await fn(); });
+afterEach(async () => { for (const fn of close.splice(0)) await fn(); vi.unstubAllEnvs(); });
 async function clientFor(auth: AuthContext) {
   const server = createMcpServerInstance(auth, () => undefined, { kind: 'multi-app' });
   const client = new Client({ name: 'cut3082', version: '1' });
@@ -180,6 +180,12 @@ for (const [kind, auth] of Object.entries(principals)) {
     for (const n of DISABLED) expect(names).not.toContain(n);
   });
 }
+it('the three existing opt-in signing tools are also kept', async () => {
+  vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+  const client = await clientFor(principals.user as AuthContext);
+  const names = (await client.listTools()).tools.map(t => t.name).sort();
+  expect(names).toEqual([...KEPT, 'hadron_request_signature', 'hadron_get_signing_request', 'hadron_withdraw_signing_request'].sort());
+});
 it.each(['hadron_task_list', 'hadron_ticker_list', 'hadron_stop_signal_list', 'hadron_list_workers'])(
   '%s is exactly an unknown tool at the SDK boundary', async name => {
     const client = await clientFor(principals.user as AuthContext);
@@ -233,6 +239,18 @@ describe('worker binding refuses before looking up a worker or grant', () => {
       expect(await server.callTool('hadron_start_session', { workerRef: 'nonexistent' })).toEqual(result);
     });
   }
+  it('plain start/end receipts use only kept tools; force alone binds no worker', async () => {
+    const server = createTestableMcpServer(auth);
+    const start = await server.callToolText('hadron_start_session', { description: 'plain', force: true });
+    const id = start.match(/Session started: (\S+)/)?.[1];
+    expect(id).toBeTruthy();
+    expect((await db.session.findUniqueOrThrow({ where: { id } })).workerId).toBeNull();
+    const end = await server.callToolText('hadron_end_session', { id });
+    for (const n of DISABLED) {
+      expect(start.split(/[^a-z_]+/)).not.toContain(n);
+      expect(end.split(/[^a-z_]+/)).not.toContain(n);
+    }
+  });
   it('server info advertises no retired team capabilities', async () => {
     const server = createTestableMcpServer(auth);
     const info = await server.callToolText('hadron_server_info', {});

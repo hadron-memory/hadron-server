@@ -94,31 +94,3 @@ it('GraphQL refuses a malformed name as BAD_USER_INPUT', async () => {
   expect(r.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   expect(await db.agentTask.count()).toBe(0);
 });
-
-it('MCP task-create stores the groups, task-get shows them, update replaces them', async () => {
-  await group('large');
-  await group('small');
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = mcpFor();
-  expect(await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP g', requirements: { modelGroupIn: ['large'], modelGroupNotIn: ['small'] } })).toContain('Created');
-  const row = await db.agentTask.findFirstOrThrow({ where: { title: 'MCP g' } });
-  expect(row.requirements).toEqual({ modelGroupIn: ['large'], modelGroupNotIn: ['small'] });
-  expect(await mcp.callToolText('hadron_task_get', { session: session.id, taskId: row.id })).toContain('"modelGroupIn":["large"]');
-  await mcp.callToolText('hadron_task_update', { session: session.id, taskId: row.id, input: { requirements: { modelGroupIn: ['small'] } } });
-  expect((await db.agentTask.findUniqueOrThrow({ where: { id: row.id } })).requirements).toEqual({ modelGroupIn: ['small'] });
-});
-
-it('MCP refuses an unknown name on create and update and stores nothing', async () => {
-  await group('large');
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = mcpFor();
-  const created = await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP ghost', requirements: { modelGroupIn: ['ghost'] } }).catch((e: unknown) => String(e));
-  expect(created).not.toContain('Created');
-  expect(created).toContain('ghost');
-  expect(await db.agentTask.count({ where: { title: 'MCP ghost' } })).toBe(0);
-  await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'MCP ok', requirements: { modelGroupIn: ['large'] } });
-  const row = await db.agentTask.findFirstOrThrow({ where: { title: 'MCP ok' } });
-  const edit = await mcp.callToolText('hadron_task_update', { session: session.id, taskId: row.id, input: { requirements: { modelGroupNotIn: ['ghost'] } } }).catch((e: unknown) => String(e));
-  expect(edit).not.toContain('Updated');
-  expect((await db.agentTask.findUniqueOrThrow({ where: { id: row.id } })).requirements).toEqual({ modelGroupIn: ['large'] });
-});

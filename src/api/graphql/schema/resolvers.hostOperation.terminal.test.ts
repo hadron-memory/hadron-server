@@ -406,7 +406,7 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
 
   it.each([
     ['idle', null], ['busy', null], ['locked', 'rate_limited'], ['dark', 'bare_shell'],
-  ])('#2924 MCP worker and roster omit terminal for %s while GraphQL keeps it', async (status, reason) => {
+  ])('#2924 GraphQL worker and roster keep terminal for %s', async (status, reason) => {
     const report = rep(kit.id, { status, reason, prompt: 'menu', checkedAt: new Date('2026-01-02T03:04:05Z'), lastTurnAt: new Date('2026-01-02T03:00:00Z') });
     await send(orca1, [report]);
     expect(await stored(kit.id)).toMatchObject({
@@ -414,36 +414,9 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
       checkedAt: report.checkedAt.toISOString(), lastTurnAt: report.lastTurnAt.toISOString(),
     });
     const visible = { status, reason, prompt: 'menu', checkedAt: report.checkedAt, lastTurnAt: report.lastTurnAt };
-    const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
-    for (const text of [
-      await mcp.callToolText('hadron_get_worker', { workerRef: kit.id }),
-      await mcp.callToolText('hadron_team_roster', { appRef: app.id }),
-    ]) {
-      expect(text).toContain('Kit');
-      expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
-      // Pin the report's semantic contents, not just the old `terminal <status>` wording.
-      for (const value of ['Orca One', 'orca1', report.checkedAt.toISOString(), report.lastTurnAt.toISOString(), '2026-01-02', '03:04:05', '03:00:00', ...(reason ? [reason] : [])]) {
-        expect(text).not.toContain(value);
-      }
-      expect(text).not.toMatch(/\b(?:checkedAt|lastTurnAt|reportedAt)\b/);
-      expect(text).not.toMatch(/\bmenu\b/); // The controlled fixture has no other source of this prompt value.
-    }
     expect(await F.Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id: kit.id } }), {}, ctx(manager.id))).toMatchObject(visible);
     const r = await Q.teamRoster({}, { appRef: app.id }, ctx(manager.id));
     expect(F.TeamRosterEntry.terminal(r.workers.find((w: any) => w.workerId === kit.id))).toMatchObject(visible);
-  });
-
-  it('#2924 MCP omits terminal before a report and does not resolve the worker terminal', async () => {
-    const spy = vi.spyOn(F.Worker, 'terminal');
-    try {
-      const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
-      const text = await mcp.callToolText('hadron_get_worker', { workerRef: kit.id });
-      expect(text).toContain('Kit');
-      expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
-      // This spy covers hadron_get_worker only. The roster still reads its GraphQL terminal field.
-      expect(spy).not.toHaveBeenCalled();
-      expect(await mcp.callToolText('hadron_team_roster', { appRef: app.id })).not.toMatch(/terminal (idle|busy|locked|dark)/);
-    } finally { spy.mockRestore(); }
   });
 
   it('the roster query count does not grow with the reports it carries', async () => {

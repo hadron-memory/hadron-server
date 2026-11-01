@@ -83,12 +83,12 @@ describe('#2260 wire surface is unchanged', () => {
     }
   });
 
-  it('keeps the userId-gated team-attention tools present for a user and absent for an App-key principal', async () => {
+  it('keeps the retired team-attention tools absent for every principal (#3082)', async () => {
     const names = async (auth: Record<string, unknown>) => (await surface(auth)).map((t) => t.name);
     const user = await names(VARIANTS.user.auth);
     const app = await names(VARIANTS.appKeyOnly.auth);
     for (const t of ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read']) {
-      expect(user).toContain(t);
+      expect(user).not.toContain(t);
       expect(app).not.toContain(t);
     }
   });
@@ -135,7 +135,7 @@ describe('#2260 per-session state stays per-session', () => {
     const regA = (a as unknown as { _registeredTools: Registered })._registeredTools;
     const regB = (b as unknown as { _registeredTools: Registered })._registeredTools;
     const names = Object.keys(regA).filter((n) => Object.keys(regA[n].inputSchema?.shape ?? {}).length > 0);
-    expect(names.length).toBeGreaterThan(100);
+    expect(names.length).toBeGreaterThan(50) // #3082: 71 team registrations intentionally removed; all remaining shapes checked below.;
 
     // Every field schema is the same object in both instances: the hoist actually happened.
     const unshared: string[] = [];

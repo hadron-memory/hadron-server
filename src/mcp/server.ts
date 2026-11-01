@@ -1,3 +1,4 @@
+import { offTeamTool } from './disabledTeamTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
@@ -2281,6 +2282,7 @@ export function createMcpServerInstance(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
+  const off = offTeamTool(server);
 
   /**
    * "Worker Name (session <id>)" for each session, in order — for refusals and
@@ -3450,11 +3452,6 @@ export function createMcpServerInstance(
           ...MCP_SURFACE_CAPABILITIES,
           // #1925: the same function GET /capabilities answers from, so the two cannot disagree.
           ...switchCapabilities(),
-          // Probed exactly as the tools will admit the call: allowlists, a
-          // live App and current participation (#1362 review).
-          ...(auth.appId && (await teamAttentionAvailable(chatCtx(), auth.appId))
-            ? ['team-attention', 'team-attention-paged']
-            : []),
         ].join(', ')}`,
       ];
       // Spec 049 Phase 1: the resolved active organization and which rung of
@@ -3995,7 +3992,7 @@ export function createMcpServerInstance(
     );
   };
 
-  server.tool(
+  off(
     'hadron_list_channels',
     'List the Channels (spec 049 — durable, server-ordered message streams; each hosted at ONE reserved address in ONE memory) whose host memory you may read. Default: the active App\'s. Every App has a default Channel `team` at chats:team — what hadron_team_chat_post writes to. A Channel\'s address is PROTECTED: generic node writes under it are refused ([loc_protected]).',
     SHAPE_HADRON_LIST_CHANNELS,
@@ -4015,7 +4012,7 @@ export function createMcpServerInstance(
     },
   );
 
-  server.tool(
+  off(
     'hadron_create_channel',
     'Create a named Channel WITH its chat root (spec 049), in ANY memory class you may write — the host memory\'s own audience decides who reads and posts (cor:acl:030:01), so a Channel in a private memory is private. `loc` is the reserved address (e.g. chats:release) — it must not overlap an existing Channel\'s. Every App already has `team` at chats:team. Creating at a DELETED Channel\'s address reuses it and starts CLEAN: the old transcript is tombstoned, the empty Channel watermarks reset, and its first new message resumes above the old seq maximum so old read cursors cannot hide it (#1226).',
     SHAPE_HADRON_CREATE_CHANNEL,
@@ -4080,7 +4077,7 @@ export function createMcpServerInstance(
     });
   };
 
-  server.tool(
+  off(
     'hadron_register_list',
     'List the chat REGISTER (spec 049): which attendee (a Worker, or an Agent in an App — or everyone in the owner\'s context) takes part in which Channel, as declared by the App or its organization. Intent, never permission: what an attendee may actually read or post is the Channel\'s host memory\'s decision. Default: the active App\'s rows. Every install carries a materialised default row for the App\'s `team` Channel.',
     SHAPE_HADRON_REGISTER_LIST,
@@ -4100,7 +4097,7 @@ export function createMcpServerInstance(
     },
   );
 
-  server.tool(
+  off(
     'hadron_register_add',
     'Declare that an attendee takes part in a Channel (spec 049 register). Owner: an App (org ADMIN, or the owner of a user-owned App) or an organization (CONTRIBUTOR+); defaults to the active App. attendee: a Worker or an Agent in the owner\'s context; omit it for every attendee there. Intent, never permission — the row grants nothing.',
     SHAPE_HADRON_REGISTER_ADD,
@@ -4123,7 +4120,7 @@ export function createMcpServerInstance(
     },
   );
 
-  server.tool(
+  off(
     'hadron_register_remove',
     'Remove a register entry you own (spec 049): each owner removes its own rows — an App may remove its install-created default, never an organization\'s row.',
     SHAPE_HADRON_REGISTER_REMOVE,
@@ -9340,16 +9337,24 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     }
     // #1599: the session argument is never the adjacent worker identity.
     const sessionLabel = session.workerId ? 'Worker session id' : 'Session id';
-    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to team tools)${workerLine}`;
+    return `${sharedConnectionNote}\n${sessionLabel}: ${session.id} (pass as \`session\` to core tools for attribution)${workerLine}`;
   }
 
   // ── hadron_start_session ──────────────────────────────────────────────────────
 
   server.tool(
     'hadron_start_session',
-    'Start a session — and when workerRef is passed, a WORKER SESSION: the binding that makes work attributable to that named teammate. Two different things are called a session: the WORKER SESSION is this binding, held server-side; your CHAT SESSION is the conversation you are in — the Claude Desktop window, the Claude Code session, the IDE chat. ENDING YOUR CHAT SESSION DOES NOT END A WORKER SESSION (#1034): closing, archiving or losing the conversation leaves this binding open until hadron_end_session. Since #1114 the reaper no longer ends a session for inactivity — silence is not evidence of abandonment. What DOES change while it sits idle is how it is DESCRIBED: liveness is derived from recent driving, so a session that remains untouched past its idle window reads as not-live and stops blocking a bind, WITHOUT being ended and with its handoff still unwritten rather than lost. That changes no HOLD: a human-held name stays held until explicit release, so only its holder can bind it again. All subsequent tool calls can reference this session ID for attribution. A worker or agent session also BINDS THIS MCP CONNECTION (DAC): every later node write on it records that Worker / Agent as its author beside you (Node.createdByWorker / updatedByWorker), checked afresh on each call, so ending the session stops it at once; a reconnect starts unbound until you start or name a session again. A host may carry SEVERAL chat sessions over one connection (#1701): binding a second worker there (or starting a plain session) does not displace the first, and once more than one worker has been bound on the connection (a plain session counting as a binding to no worker), even one after another, the server cannot tell which chat session is calling, so every writing tool takes an optional `session` argument — pass the id this call returned on each write, or the write is refused SESSION_AMBIGUOUS rather than credited to the wrong worker. The receipt warns you when this bind made the connection shared. Starting a session PINS its App as this session\'s active App, so no hadron_set_active_app is needed afterwards; if the MCP connection is later re-established (which happens transparently), pass the session id back to the team tools to restore that App context. Pass workerRef — the worker\'s NAME ("Iris", resolved within the active App when selected), its id, or its URN (hrn:worker:<root>:<app-slug>:<slug>) — to work AS that named casting, which is required for worker-attributed team chat posts and worklog records. An id or URN workerRef names its own App, so it needs no App selected first; with no App selected, a bare NAME searches only Apps you may bind into: one non-retired match binds, several are listed with App, role and holder and nothing binds. Choose an id or URN to disambiguate; a selected App is never bypassed. On success the worker\'s resolved BOOT BRIEFING comes back with the session: adopt it for the rest of this stint, and never cache or copy it — it is rendered live from the role agent\'s prompt template, so a copy goes stale silently. Binding a worker someone is actively DRIVING refuses WORKER_TAKEN (#1114: an OPEN session is not necessarily a live one — a session whose most recent activity is outside its idle window is not being driven, so that session does not refuse) with who last drove it and when (informed takeover, cor:agt:020:03) — note an open worker session does not by itself mean someone is at the keyboard, since it outlives the chat session that started it; retry with force: true ONLY after surfacing that to the user and getting an explicit override. Binding a worker ENDS your own other open sessions on that same worker (#1617), the lapsed ones and any a force displaces: they are marked "superseded by session <new id>" and end WITHOUT a handoff, so write the handoff with hadron_end_session first if one is owed. Do not bind a second session to recover from a context compaction; recover the existing one with hadron_whoami. A LAPSED session of yours does not need a rebind at all: if you hold the name and nobody else is driving the worker, your next team-chat post, read or mark-read through it resumes it.',
+    'Start a plain, non-worker session in the active App. Closing your chat session does not end a worker session; it is still open until explicitly ended. For this plain server-side session, use hadron_end_session explicitly. MCP worker binding is unsupported: workerRef or launchGrant returns MCP_WORKER_BINDING_UNSUPPORTED before any read or write. Bind workers with hadron team session start --as <worker-URN> --tool <tool>. A live session created through the CLI may still attribute core MCP calls through X-Hadron-Session or the session argument. Use hadron_whoami to recover an existing session after context loss.',
     SHAPE_HADRON_START_SESSION,
     async ({ description, type, repo, branch, prNumber, customerId, language, llmModel, family, parentSessionId, prevSessionId, workerRef, reportsTo, force, launchGrant }) => {
+      // #3082 / V7 R2: before App restoration, worker/grant lookup, supersede or any write.
+      // hrn:node:hadronmemory.com:specs:cor:agt:020:03; all principals get the same non-oracle refusal.
+      if (workerRef?.trim() || launchGrant !== undefined) {
+        const message = 'MCP cannot bind a worker session. Use hadron team session start --as <worker-URN> --tool <tool>.';
+        return { ...refusalResult(`[MCP_WORKER_BINDING_UNSUPPORTED] ${message}`),
+          structuredContent: { error: { code: 'MCP_WORKER_BINDING_UNSUPPORTED', message } } };
+      }
+
       // Spec 026 / D-2026-05-21-003 strict tool: session-start needs App
       // context to attribute the session. Errors with typed [no_active_app]
       // envelope for multi-App OAuth callers without selection.
@@ -9430,7 +9435,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── #1956: resume claims ──────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_create_resume_claim',
     '#1956 (cor:agt:020:03): before a deliberate context reset that KEEPS your worker session open (a shed, a /clear), write a resume claim so the fresh context recovers this worker with hadron_resume_session and no arguments — no binding file, no worker name to remember. The claim is single use, lives 60 seconds from this call, and is redeemable only by you (judged by your credential; it has no id to copy). Write it as the LAST step before the reset, after your handoff or shed note. For a rotation that ENDS the session, pass resumeClaim: true to hadron_end_session instead.',
     SHAPE_HADRON_CREATE_RESUME_CLAIM,
@@ -9449,7 +9454,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         const r = await resolvers.Mutation.createResumeClaim({}, { sessionId: session }, mcpCtx);
         return textResult(
-          `Resume claim written for session ${r.sessionId}. After the reset, call hadron_resume_session with no arguments ` +
+          `Resume claim written for session ${r.sessionId}. After the reset, call hadron team session start with no --as ` +
             `before ${r.expiresAt.toISOString()} (60 seconds, once). Only you can redeem it.`,
         );
       } catch (e) {
@@ -9459,7 +9464,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  server.tool(
+  off(
     'hadron_resume_session',
     '#1956 (cor:agt:020:03): recover your worker binding after a context reset — call this FIRST, with no arguments, when you do not know which worker session you are. One unused resume claim of yours binds it and returns the boot briefing and handoff, exactly as hadron_start_session would: the same open session after a shed, or the worker\'s next session after a rotation that ended the last one. Several claims are LISTED (worker name, description, session id) and nothing is bound: ask the human which, then call again with session. With no claim, if exactly one of your worker sessions is live it is resumed; several are listed, never guessed. Nothing to resume refuses NOTHING_TO_RESUME and binds nothing — then ask the human which worker you are and use hadron_start_session. A claim never overrides the worker\'s current state: if the name moved, you lost the App, or another session of the worker is live, it refuses RESUME_REFUSED. This never posts or records anything as you or anyone else.',
     SHAPE_HADRON_RESUME_SESSION,
@@ -9679,7 +9684,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_whoami',
-    'Answer "what am I driving right now?" — your own OPEN sessions. Optional app and workerRef filters narrow the complete authorized set before paging; omit both for the existing view. Every successful answer opens with an `active memory:` line naming the memory selected on this connection, or `none` when none is set or it is no longer readable (#2515); it describes the connection, not any session row, and is not a guarantee of where a write lands. Each session shows its App, when it started, and the worker it is bound to IF it is bound (#1016). Not every row is a worker session: a session started without workerRef is listed too and says "working as: nobody", which is the shape in which work goes unattributed, so it is shown rather than hidden. This is also the tool that tells you a WORKER SESSION outlived the CHAT SESSION it was started from: the two are independent, and ending a chat session never ends a worker session (#1034), so a bound row here may well be one whose Desktop window or Claude Code session is long gone. For a BOUND row, its session id is the only handle that makes that work attributable, and nothing on the wire carries it: there is no worktree file to read it back from, so a host that loses it to a context compaction loses attribution with it. The chat tools no longer hide the loss: since #1967, hadron_team_chat_post (like hadron_channel_post) refuses a post that names no session on a connection with no bound worker [authorship_required] instead of recording it under the human\'s name, so a lost id surfaces as that refusal — come here for the id. Do NOT read a successful call as evidence your binding is alive: hadron_record_work accepts an ended session on purpose (late attribution, cor:agt:020:05) and hadron_end_session is idempotent, so neither refuses one — both now SAY so in their receipt instead. The team chat is the only surface that refuses outright, because authoring as a worker needs a live session. This tool is the direct answer, and the one to trust. Call this whenever you are unsure which session you are driving, or after any context loss, and pass back a row that is BOUND and still OPEN — with includeEnded this list also returns bound rows marked [ENDED], and team chat refuses an unbound row (SESSION_NOT_WORKER_BOUND) and an ended one (SESSION_ENDED) rather than silently attributing either. Read-only, and scoped to sessions you started — it is not a presence board for the team (use hadron_list_workers to see who is taken).',
+    'Read your sessions and current connection identity. A worker session is separate from your chat session: closing your chat session does not end a worker session. Not every row is bound: an unbound session shows working as: nobody. Use an open session for attribution; an [ENDED] session refuses SESSION_ENDED. Use the CLI hadron team session whoami --check for worker-session recovery and hadron team worker get for the live worker briefing. MCP can attribute core calls to an existing live session, but cannot bind or resume a worker. End a session explicitly with hadron_end_session when asked.',
     SHAPE_HADRON_WHOAMI,
     async ({ limit, includeEnded, app, workerRef }) => {
       // Scoped by IDENTITY, deliberately narrower than the GraphQL `sessions`
@@ -9904,7 +9909,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── hadron_cast_worker ────────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_cast_worker',
     'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole, and the compiled boot prompt every casting of it is served); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
     SHAPE_HADRON_CAST_WORKER,
@@ -10401,7 +10406,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     return bound.actor.workerId ? bound.sessionId : null;
   };
 
-  server.tool(
+  off(
     'hadron_channel_post',
     'Post a message into a Channel by id or ADDRESS — the chat-root URN hadron_list_channels prints (spec 049 — Channels are the durable, server-ordered streams hadron_list_channels shows; every App\'s default `team` Channel is what hadron_team_chat_post writes). Same contract as hadron_team_chat_post: mentions extracted server-side, replyToSeq wires a reply, session posts AS that session\'s Worker. AUTHORSHIP IS EXPLICIT (#1697, parity with the CLI\'s `channel post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. Item J: a Worker of ANOTHER App authors here only when you (its driver) may write the Channel\'s host memory — the post is then marked cross-App. A Channel you may not read is [channel_not_found].',
     SHAPE_HADRON_CHANNEL_POST,
@@ -10436,7 +10441,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  server.tool(
+  off(
     'hadron_channel_read',
     'Read a Channel by id or ADDRESS (the chat-root URN hadron_list_channels prints; spec 049). With no cursor or offset, returns the newest page, ascending by seq; sinceSeq reads forward and beforeSeq pages backward. A Channel you may not read is [channel_not_found].',
     SHAPE_HADRON_CHANNEL_READ,
@@ -10450,7 +10455,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── hadron_team_chat_post / hadron_team_chat_read ─────────────────────────────
 
-  server.tool(
+  off(
     'hadron_team_chat_post',
     'Post a message into the team App\'s chat (#939). The team chat is one well-known chat per team App (loc chats:team in the Team Agent\'s shared app memory), bootstrapped on first post. Mention teammates as @worker-name or @handle — mentions are extracted server-side into the message envelope. Pass session to post AS the Worker bound to that session (the driving session is recorded; the worker must not be retired). AUTHORSHIP IS EXPLICIT (#1967, the same contract as hadron_channel_post and the CLI\'s `team chat post --session | --as-me`): with no session, a connection bound to one worker session (hadron_start_session) posts as that Worker; otherwise pass asMe: true to post as yourself, or the post is refused [authorship_required] — never silently recorded under your name. A Worker of ANOTHER App authors here only when you (its driver) may write the chat\'s host memory — the post is then marked cross-App (spec 049 item J). Pass replyToSeq to reply to an earlier message. Returns the posted message\'s seq.',
     SHAPE_HADRON_TEAM_CHAT_POST,
@@ -10554,7 +10559,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     },
   );
 
-  server.tool(
+  off(
     'hadron_team_chat_read',
     'Read the team App\'s chat (#939), newest page by default, ascending within the page. sinceSeq (including 0) reads forward; beforeSeq pages backward; explicit offset retains oldest-first paging. For unattended routing (#1265), pass monitor:true: the tool derives each of your LIVE Worker sessions\' cursor from ChannelReadState and its WATCH/BOTH + mentionOnly policy from the register, returns each message once with the Workers it concerns, and never routes a message back to its Worker author. It NEVER advances state merely by reading. After routing/action succeeds, call again with monitor:true and the returned acknowledge checkpoint. This makes a restart duplicate work rather than skip it. monitorFor narrows to one of your live Workers; monitoring never wakes sessions or observes another operator\'s sessions.',
     SHAPE_HADRON_TEAM_CHAT_READ,
@@ -10676,7 +10681,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   // ── #2299 hadron_team_chat_search ────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_team_chat_search',
     'Search ONE chat\'s history (#2299, cor:agt:020:04): the team App\'s chat, or the Channel named by channel. A literal, case-insensitive substring of the message text (% _ and the backslash are ordinary characters); query is 2 to 200 characters, counted as typed. Newest first; limit defaults to 20 and is clamped to 50. Each call scans at most 1,000 messages: the result says whether the search reached the start of the history (complete) or stopped, and gives the cursor to continue with. An empty page that is not complete may continue; "no matches" is only ever a complete search. Returns message references only (seq and URN, no text): read the message with hadron_team_chat_read / hadron_channel_read to see it. It matches what a read shows, goes through the same access as a read, and NEVER moves your read position or counts as attention. A chat in an encrypted memory is refused [team_chat_search_encrypted].',
     SHAPE_HADRON_TEAM_CHAT_SEARCH,
@@ -10717,7 +10722,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   // session/consent guards; the capability probe in server_info reports
   // team-attention only for a caller who could actually use it.
   if (auth.userId && !auth.impersonation) {
-    server.tool(
+    off(
       'hadron_team_attention',
       'RETIRED (#1384): the v1 one-shot poll scanned an encrypted Channel\'s whole unread backlog inside one request and now answers UPGRADE_REQUIRED. Use hadron_team_attention_page — the bounded paged successor; your existing since token is accepted there and carries your watermark forward.',
       SHAPE_HADRON_TEAM_ATTENTION,
@@ -10738,7 +10743,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       },
     );
 
-    server.tool(
+    off(
       'hadron_team_attention_page',
       'PAGED ATTENTION (#1384 v2): one bounded slice of the compact unread scan for this operator\'s LIVE Workers — at most scanLimit decrypted rows and limit emitted Worker/Channel pairs per call. Continue with the returned nextPage while scanComplete is false. Items carry no message bodies; counts are exact for the captured range of the issuing scan. The FINAL page alone returns adoptableSince — adopt it only after every listed nudge was accepted; on any partial failure retain your prior watermark and restart the scan (duplicates, never loss). An existing v1 since token starts a scan and carries the watermark forward. Never changes ChannelReadState.',
       SHAPE_HADRON_TEAM_ATTENTION_PAGE,
@@ -10763,7 +10768,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       },
     );
 
-    server.tool(
+    off(
       'hadron_team_attention_switchover',
       'PAGED (#1384 v2): explicitly baseline every current live Worker through captured Channel heads. preview is read-only, pages like the poll tool (continue with its returned nextPage), and yields the short-lived proof ONLY on its final completed page. apply requires that proof and atomically refuses if the operator, App, live-Worker scope, effective register or cursor changed. Messages arriving after the preview freeze remain unread. This is the only supported way to discard the pre-router backlog.',
       SHAPE_HADRON_TEAM_ATTENTION_SWITCHOVER,
@@ -10789,7 +10794,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       },
     );
 
-    server.tool(
+    off(
       'hadron_team_chat_mark_read',
       'Explicitly advance the Worker bound to your live session on one registered Channel. Use after filtered reads, which intentionally never auto-advance. Monotonic; a lower seq is a no-op and a seq beyond the Channel head is refused.',
       SHAPE_HADRON_TEAM_CHAT_MARK_READ,
@@ -10839,7 +10844,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-  server.tool(
+  off(
     'hadron_list_workers',
     'List the team App\'s workers — its named staff (#997). THE roster read: use it when you need to work as a teammate but do not know the names, since hadron_start_session\'s workerRef takes a name. Returns each worker\'s name, URN, role, WHO HOLDS IT, whether a session is live, and whether it is retired. #1050: a name is HELD by a person until released — a held name is not yours to take however idle it looks, and the remedy is to cast your own worker, never to end someone\'s session. An UNHELD worker is held by whoever binds it next. "session live" is a separate fact and only ever a question about your own worker. Retired workers are excluded unless includeRetired — their names stay reserved forever, so they explain a WORKER_NAME_TAKEN refusal.',
     SHAPE_HADRON_LIST_WORKERS,
@@ -11051,7 +11056,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   // ── hadron_get_worker ─────────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_get_worker',
     'Read ONE worker, including its resolved BOOT BRIEFING (#1015). THE recovery read: hadron_start_session returns the briefing once, at bind time, and the briefing must never be cached — so an agent whose context was compacted has no copy and no legitimate way back to it. This is that way. It reserves nothing and mints nothing, so recovering costs neither a second session nor a force-takeover of yourself (both of which corrupt the provenance record the Worker model exists to produce). workerRef takes the same three forms as hadron_start_session — the worker\'s NAME ("Iris"), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its id; an id or URN names its own App, a bare NAME needs one selected (or passed as app/session). Re-read this whenever you are unsure you are still working as the worker you bound.',
     SHAPE_HADRON_GET_WORKER,
@@ -11253,7 +11258,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
               ? `Boot prompt pointer: ${bootPromptRef}${bootPromptTargetDeleted ? ' (TARGET DELETED: nothing can be served from it; clear or repoint it)' : ''}\n`
               : '') +
             (mine
-              ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to team tools; since ${mine.startedAt.toISOString()})\n`
+              ? `Your active session: ${mine.id} (worker session id; pass as \`session\` to core tools for attribution; since ${mine.startedAt.toISOString()})\n`
               : '') +
             // Shown separately from the briefing, and labelled as the editable
             // part, so hadron_update_worker's replace semantics have something
@@ -11280,7 +11285,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
   );
 
   // #1162: one eligibility implementation across transports.
-  server.tool(
+  off(
     'hadron_delete_worker',
     'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts.',
     SHAPE_HADRON_DELETE_WORKER,
@@ -11303,7 +11308,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   // ── hadron_update_worker ──────────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_update_worker',
     "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
     SHAPE_HADRON_UPDATE_WORKER,
@@ -11386,7 +11391,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   // ── hadron_change_worker_agent ────────────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_change_worker_agent',
     "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
     SHAPE_HADRON_CHANGE_WORKER_AGENT,
@@ -11440,7 +11445,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   // ── hadron_set_worker_reports_to ───────────────────────────────────────────
 
-  server.tool(
+  off(
     'hadron_set_worker_reports_to',
     "#1726 — set, hand over or clear who a worker reports to: one other, non-retired worker of the same App (never itself, never a cycle). It belongs to the casting, not to a session, so it outlasts session rotation and a dormant team; every change is a `worker.reports-to` team event. Who may change it: whoever manages the App; the worker it reports to now (handing it over or clearing it is its agreement); for a worker that reports to nobody, also a worker claiming it for itself when one person holds both, or its own holder (interim rule, pending a ruling). A worker acts through its bound session, so pass `session`. Informational: nothing is refused on the strength of it except the task authority cor:agt:050:09 gives a worker over the tasks of workers that report to it.",
     SHAPE_HADRON_SET_WORKER_REPORTS_TO,
@@ -11483,7 +11488,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
   );
   // ── hadron_record_work / hadron_team_work_items ───────────────────────────────
 
-  server.tool(
+  off(
     'hadron_record_work',
     'Record an externally visible work milestone (a PR opened, a branch pushed, an issue closed) into the team App\'s worklog (#947) — the append-only, authoritative PR-session join. Pass the session doing the work; ref accepts a github URL or short form (owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo) and is stored in ONE canonical spelling. A bare number is refused — include the repo. kind: pr also updates the session\'s displayed PR number. Correct a wrong record by recording a newer one (records are never edited). Capability note (#1398): the optional `model` argument is honored when hadron_server_info advertises the `worklog-model` capability — an older build silently DROPS the argument and records the session\'s model instead, so test for the token before relying on an explicit model report.',
     SHAPE_HADRON_RECORD_WORK,
@@ -11574,7 +11579,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
     },
   );
 
-  server.tool(
+  off(
     'hadron_team_work_items',
     'Read the team App\'s worklog (#947) — the provenance query. Two directions: which sessions produced this PR/artifact (pass ref as a github URL or owner/repo#N, owner/repo@sha, owner/repo:branch, owner/repo; an ownerless cli#793 matches every readable repo whose name ends in cli, never guesses an owner), and what has one WORKER done (pass worker, by name, id or URN — #1035; a retired worker still resolves, because retirement ends the casting, not the history). Newest first. Filter further by session, tool, or kind, and combine filters freely. Each item carries the sessionId; read the session for its transcript path.',
     SHAPE_HADRON_TEAM_WORK_ITEMS,
@@ -13198,7 +13203,7 @@ const SHAPE_HADRON_END_SESSION = {
     .boolean()
     .optional()
     .describe(
-      '#1956: also write a RESUME CLAIM, with the handoff and before the end, so the fresh context after this rotation recovers the worker with hadron_resume_session and no arguments. Single use, 60 seconds, redeemable only by you. Your own worker session only.',
+      '#1956: also write a RESUME CLAIM, with the handoff and before the end, so the fresh context after this rotation recovers the worker with hadron team session start (no --as). Single use, 60 seconds, redeemable only by you. Your own worker session only.',
     ),
   inputTokens: z.number().optional().describe('Total input tokens used'),
   outputTokens: z.number().optional().describe('Total output tokens used'),
