@@ -409,6 +409,11 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
   ])('#2924 MCP worker and roster omit terminal for %s while GraphQL keeps it', async (status, reason) => {
     const report = rep(kit.id, { status, reason, prompt: 'menu', checkedAt: new Date('2026-01-02T03:04:05Z'), lastTurnAt: new Date('2026-01-02T03:00:00Z') });
     await send(orca1, [report]);
+    expect(await stored(kit.id)).toMatchObject({
+      host: { id: 'orca1', label: 'Orca One' }, status, reason, prompt: 'menu',
+      checkedAt: report.checkedAt.toISOString(), lastTurnAt: report.lastTurnAt.toISOString(),
+    });
+    const visible = { status, reason, prompt: 'menu', checkedAt: report.checkedAt, lastTurnAt: report.lastTurnAt };
     const mcp = createTestableMcpServer({ userId: manager.id, appId: app.id, roles: ['READER'], clientId: `user:${manager.id}` });
     for (const text of [
       await mcp.callToolText('hadron_get_worker', { workerRef: kit.id }),
@@ -417,14 +422,15 @@ describe('the read path: Worker.terminal and the roster, behind maySeeWorkerInte
       expect(text).toContain('Kit');
       expect(text).not.toMatch(/terminal (idle|busy|locked|dark)/);
       // Pin the report's semantic contents, not just the old `terminal <status>` wording.
-      for (const value of ['Orca One', 'orca1', report.checkedAt.toISOString(), report.lastTurnAt.toISOString(), ...(reason ? [reason] : [])]) {
+      for (const value of ['Orca One', 'orca1', report.checkedAt.toISOString(), report.lastTurnAt.toISOString(), '2026-01-02', '03:04:05', '03:00:00', ...(reason ? [reason] : [])]) {
         expect(text).not.toContain(value);
       }
       expect(text).not.toMatch(/\b(?:checkedAt|lastTurnAt|reportedAt)\b/);
+      expect(text).not.toMatch(/\bmenu\b/); // The controlled fixture has no other source of this prompt value.
     }
-    expect(await F.Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id: kit.id } }), {}, ctx(manager.id))).toMatchObject({ status, reason });
+    expect(await F.Worker.terminal(await db.worker.findUniqueOrThrow({ where: { id: kit.id } }), {}, ctx(manager.id))).toMatchObject(visible);
     const r = await Q.teamRoster({}, { appRef: app.id }, ctx(manager.id));
-    expect(F.TeamRosterEntry.terminal(r.workers.find((w: any) => w.workerId === kit.id))).toMatchObject({ status, reason });
+    expect(F.TeamRosterEntry.terminal(r.workers.find((w: any) => w.workerId === kit.id))).toMatchObject(visible);
   });
 
   it('#2924 MCP omits terminal before a report and does not resolve the worker terminal', async () => {
