@@ -47,6 +47,8 @@ vi.mock('../integrations/github/execGit.js', () => ({
   }),
 }));
 
+import * as nodeLoader from '../integrations/github/nodeWrittenSubscriber.js';
+import * as mirrorDebt from '../integrations/github/mirrorObligations.js';
 import { withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { settleMirrorObligations, takeAttemptSeq, type MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
@@ -382,4 +384,40 @@ describe('#3056 shared row budget', () => {
     expect(await rows()).toEqual([untouched]);
     expect(await db.gitMirrorObligation.findMany({ where: { memoryId: other.id } })).toEqual([]);
   });
+});
+
+
+describe('#3151 second-refresh settlement', () => {
+ it('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed', async () => {
+  const first=await makeNode('refresh-fails'), next=await makeNode('next'), later=await makeNode('later');
+  const firstDebt=await owe(first.id,{lastAttemptAt:new Date(old().getTime()-1000)});
+  const nextDebt=await owe(next.id);
+  const untouched=await owe(later.id,{lastAttemptAt:new Date(Date.now()+7*24*60*60_000)});
+  const seqs=vi.spyOn(mirrorDebt,'tryTakeAttemptSeq');
+  const load=nodeLoader.loadNodeForGit;
+  let firstReads=0, nextReads=0;
+  let nextAtEntry: typeof nextDebt | undefined;
+  vi.spyOn(nodeLoader,'loadNodeForGit').mockImplementation(async (...args) => {
+   if(args[1].nodeId===first.id && ++firstReads===2) throw new Error('synthetic second-refresh failure');
+   if(args[1].nodeId===next.id && ++nextReads===1) {
+    // The first row's failure must not consume, clear or restamp the next row.
+    nextAtEntry=await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:next.id}});
+   }
+   return load(...args);
+  });
+  await tick();
+  const failed=await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:first.id}});
+  expect(firstReads).toBe(2);
+  expect(failed).toMatchObject({state:'FAILED',errorClass:'TREE_WRITE',attempts:2});
+  expect(failed.lastAttemptAt.getTime()).toBeGreaterThan(firstDebt.lastAttemptAt.getTime());
+  expect(seqs.mock.calls.length).toBe(2);
+  expect(failed.attemptSeq).toBe(await seqs.mock.results[0].value);
+  expect(nextAtEntry).toEqual(nextDebt);
+  expect(nextReads).toBe(2);
+  expect(await db.gitMirrorObligation.findFirst({where:{memoryId,nodeId:next.id}})).toBeNull();
+  expect(remoteFile('next')).toContain('current content');
+  expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
+  expect(await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:later.id}})).toEqual(untouched);
+  expect(()=>remoteFile('refresh-fails')).toThrow();
+ });
 });
