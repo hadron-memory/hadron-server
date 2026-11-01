@@ -183,6 +183,24 @@ it.each(['member', 'outside'] as const)('a task read for a holder who may read i
   expect(task.id).toBeTruthy();
 });
 
+// Rico's §10 pin: the task gate is on the memory the task was LOCATED in, not the one the walk started from. The task
+// sits in the inherited Base (uninstalled); both holders can read roleA, only the member can read Base.
+it.each(['member', 'outside'] as const)('a task located in an inherited base the holder cannot read is refused, though the start memory is readable (%s enriched first)', async first => {
+  await f.entry('tick.shared');
+  await f.node(f.base.systemMemoryId, tickTaskLoc2733, { isRunnable: true });
+  await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.base.id } } });
+  const { byMember, byOutside } = await twoHolders(first);
+  const out = await due();
+  const urn = 'hrn:node:' + f.base.memory.urn + ':' + tickTaskLoc2733;
+  expect(tick(out, byMember.id).action).toEqual({ code: 'tick.shared', state: 'MAPPED', taskLoc: tickTaskLoc2733, taskUrn: urn });
+  expect(tick(out, byOutside.id).action).toEqual({ code: 'tick.shared', state: 'UNRESOLVED', taskLoc: tickTaskLoc2733 });
+  const memberStored = JSON.stringify((await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: byMember.id } })).wake);
+  const outsideStored = JSON.stringify((await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: byOutside.id } })).wake);
+  expect(memberStored).toContain(urn);
+  expect(outsideStored).toContain(tickTaskLoc2733);
+  expect(outsideStored).not.toContain(urn);
+});
+
 // ---- the inherited-link filter, now applied to the shared row -------------------
 
 // A comment can't be a fixture here (the COMMENT_INVARIANT trigger: only the comment path creates one), so the
