@@ -61,8 +61,8 @@ beforeEach(async () => {
   await db.app.create({ data: { organizationId: org.id, name: 'helper app', urn: a.urn } });
   const handle = `own-${n}`;
   await db.user.update({ where: { id: ownerId }, data: { handle } });
-  const umem = await db.memory.create({ data: { class: 'system', name: 'own system', urn: `${handle}:own-system`, userId: null } as any }).catch(() => null);
-  const ua = await db.agent.create({ data: { ownerUserId: ownerId, name: 'own', urn: `${handle}:own`, visibility: 'PERSONAL', ...(umem ? { systemMemoryId: umem.id } : {}) } as any });
+  const umem = await db.memory.create({ data: { class: 'system', name: 'own system', urn: `${handle}:own-system`, ownerUserId: ownerId } as any });
+  const ua = await db.agent.create({ data: { ownerUserId: ownerId, name: 'own', urn: `${handle}:own`, visibility: 'PERSONAL', systemMemoryId: umem.id } as any });
   userAgent = { id: ua.id, urn: ua.urn };
 });
 
