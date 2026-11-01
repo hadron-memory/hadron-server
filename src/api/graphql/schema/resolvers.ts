@@ -163,6 +163,8 @@ export const resolvers = {
   UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
   GraphNode: commentFieldResolvers.GraphNode,
   NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
+  // #1151: edge attribution, gated on the edge's own memory.
+  Edge: { ...typeResolvers.Edge, ...nodeAttributionFieldResolvers.Edge },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
