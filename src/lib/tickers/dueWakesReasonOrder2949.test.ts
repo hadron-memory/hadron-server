@@ -50,8 +50,9 @@ async function moveToEnd(tickerId: string): Promise<void> {
   await db.tickerSubscription.delete({ where: { id: row.id } });
   await db.tickerSubscription.create({ data: row });
 }
+/** The rows' physical (heap) order, read by ctid so the answer does not depend on which plan the query takes. */
 const physicalOrder = async () =>
-  (await db.$queryRaw<Array<{ ticker_id: string }>>`SELECT ticker_id FROM ticker_subscriptions WHERE worker_id = ${liam.id}`).map((r) => r.ticker_id);
+  (await db.$queryRaw<Array<{ ticker_id: string }>>`SELECT ticker_id FROM ticker_subscriptions WHERE worker_id = ${liam.id} ORDER BY ctid`).map((r) => r.ticker_id);
 
 /**
  * A context whose subscription read returns the same rows in the order `arrange` picks, as a heap-order plan would.
@@ -159,6 +160,16 @@ describe('#2949 an unchanged outstanding wake is re-handed byte-identical', () =
     }
     const days = await db.appWakeDay.findMany({ where: { appId: app.id } });
     expect(days.reduce((n, d) => n + d.wakes, 0)).toBe(1);
+    const acked = await db.workerDeliveryTick.findMany({ where: { workerId: liam.id }, orderBy: { tickerId: 'asc' } });
+
+    // Replays, in either order, acknowledge nothing more and charge nothing more.
+    for (const proof of [reordered, wakes[0]!.proof]) {
+      const replay = await M.acknowledgeWakes({}, { proofs: [proof] }, ctx(manager.id));
+      expect(replay.acknowledged).toBe(0);
+    }
+    const daysAfter = await db.appWakeDay.findMany({ where: { appId: app.id } });
+    expect(daysAfter.reduce((n, d) => n + d.wakes, 0)).toBe(1);
+    expect(await db.workerDeliveryTick.findMany({ where: { workerId: liam.id }, orderBy: { tickerId: 'asc' } })).toEqual(acked);
   });
 
   it('a genuinely new reason still joins the outstanding wake (absorb path unchanged), in the stable order', async () => {
