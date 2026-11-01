@@ -586,7 +586,12 @@ export const nodeQueries = {
           try {
             ({ id } = await resolveNodeRefForCaller(ctx, baseUrn));
           } catch (error) {
+            // A globally-ambiguous historical address is a loud refusal once
+            // the caller can read a claimant (resolveNodeRefForCaller conceals
+            // it otherwise). Only a name-resolution outcome is the uniform
+            // null; a fault propagates (#3130, cor:api:260:01).
             if (error instanceof AmbiguousLegacyUrnError) throw error;
+            if (!refNamesNothing(error)) throw error;
             return null;
           }
           const node = await ctx.db.node.findUnique({
@@ -698,8 +703,10 @@ export const nodeQueries = {
             ));
           } catch (error) {
             // A globally-ambiguous historical address stays a loud refusal,
-            // exactly as the `node` arm treats it.
+            // exactly as the `node` arm treats it. A fault is not an absence
+            // and propagates (#3130, cor:api:260:01).
             if (error instanceof AmbiguousLegacyUrnError) throw error;
+            if (!refNamesNothing(error)) throw error;
             return null;
           }
           const entry = await ctx.db.node.findUnique({
