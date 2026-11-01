@@ -254,6 +254,38 @@ it('#1793 a genuinely terminated caller backend preserves the original store err
   await expect(admitRate(db,'CREDENTIALS',id)).resolves.toMatchObject({admitted:true});
 },25_000);
 
+it('#1793 cleanup deletes expired windows in bounded batches and preserves the current allowance',async()=>{
+  await policy();await admitRate(db,'FAN_OUT_READS',id);
+  const now=new Date();
+  await db.rateLimitBucket.updateMany({data:{windowStart:new Date(now.getTime()-48*3600_000),expiresAt:new Date(now.getTime()-24*3600_000)}});
+  await admitRate(db,'FAN_OUT_READS',id);
+  const current=await db.rateLimitBucket.findMany({where:{expiresAt:{gt:now}},orderBy:{dimension:'asc'}});
+  expect(current).toHaveLength(3);
+  expect(await cleanupRateBuckets(db,2)).toEqual({count:2});
+  expect(await cleanupRateBuckets(db)).toEqual({count:1});
+  expect(await db.rateLimitBucket.findMany({orderBy:{dimension:'asc'}})).toEqual(current);
+  await admitRate(db,'FAN_OUT_READS',id);
+  expect((await used()).every(r=>r.used==='2')).toBe(true);
+});
+
+it('#1793 a concurrent maintenance owner prevents duplicate candidate selection without waiting',async()=>{
+  await admitRate(db,'FAN_OUT_READS',id);
+  await db.rateLimitBucket.updateMany({data:{expiresAt:new Date(0)}});
+  let entered!:()=>void,release!:()=>void;
+  const ready=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+  const holder=db.$transaction(async tx=>{
+    await configFence(tx);
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(1793,1)`;
+    entered();await gate;
+  });
+  await ready;
+  try {
+    expect(await cleanupRateBuckets(db)).toEqual({count:0});
+    expect(await db.rateLimitBucket.count()).toBe(3);
+  } finally {release();await holder;}
+  expect(await cleanupRateBuckets(db)).toEqual({count:3});
+});
+
 it('#1793 a partially missing policy set is readiness failure, not env re-seeding',async()=>{
   await db.rateLimitPolicy.delete({where:{fieldClass:'FAN_OUT_READS'}});
   await expect(assertRateReadiness(db)).rejects.toThrow('readiness');
@@ -265,6 +297,16 @@ it('#1793 store outage cannot turn an empty or forged internal identity into an 
   await expect(admitRate(fake,'FAN_OUT_READS',{internal:false})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
   await expect(admitRate(fake,'FAN_OUT_READS',{principal:'USER:a',internal:true})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
   expect(fake.$transaction).not.toHaveBeenCalled();
+});
+
+it('#1793 only a transaction-start timeout is a pool outage, not every P2028',async()=>{
+  const poolError=Object.assign(new Error('pool wait expired'),{code:'P2028',meta:{error:'Unable to start a transaction in the given time.'}});
+  const pool={$transaction:vi.fn().mockRejectedValue(poolError)} as any;
+  await expect(admitRate(pool,'FAN_OUT_READS',id)).resolves.toMatchObject({admitted:true});
+  await expect(admitRate(pool,'CREDENTIALS',id)).rejects.toBeInstanceOf(RateLimited);
+  const invalid=Object.assign(new Error('invalid transaction use'),{code:'P2028',meta:{error:'Transaction already closed'}});
+  const broken={$transaction:vi.fn().mockRejectedValue(invalid)} as any;
+  await expect(admitRate(broken,'FAN_OUT_READS',id)).rejects.toBe(invalid);
 });
 
 it('#1793 unreadable policy row is not a malformed row and leaves a usable fail-open transaction',async()=>{

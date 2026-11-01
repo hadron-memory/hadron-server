@@ -1,4 +1,4 @@
-import { admitRate } from '../../../lib/rateLimit/index.js';
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
@@ -1155,7 +1155,7 @@ export const nodeQueries = {
       if (args.expand != null && (!Number.isInteger(args.expand) || args.expand < 0 || args.expand > 3)) {
         throw new GraphQLError('findNodes `expand` must be an integer in [0, 3].', { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      await admitRate(ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+      await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
       const { scope, appRef, ...coreArgs } = args;
 
       // The pre-spec-049 resolver, unchanged, as a local so the scope wrapper

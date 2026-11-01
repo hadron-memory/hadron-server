@@ -17,6 +17,9 @@ function storeUnavailable(error: unknown): boolean {
   const e=error as {code?:unknown;errorCode?:unknown;meta?:{code?:unknown}};
   const code=String(e.code ?? e.errorCode ?? '');
   if (['P1001','P1002','P1008','P1017','P2024'].includes(code)) return true;
+  // Only pool-acquisition expiry, not arbitrary use of a closed/invalid tx.
+  if (code==='P2028' && e.meta && 'error' in e.meta &&
+    typeof e.meta.error==='string' && e.meta.error.startsWith('Unable to start a transaction')) return true;
   const sqlState=String(e.meta?.code ?? '');
   return code==='P2010' && (sqlState.startsWith('08') || ['53300','57P01','57P02','57P03'].includes(sqlState));
 }
@@ -100,6 +103,16 @@ export class RateLimited extends GraphQLError {
 function observe(fieldClass: FieldClass, dimension: 'principal'|'key'|'ip'|'store', mode: string) {
   console.info('rate-limit-observation', { fieldClass, dimension, mode });
 }
+/** A disconnected caller transaction cannot be repaired by a savepoint. Keep
+ * the deciding failure rather than replacing it with the rollback's error. */
+async function restoreSavepoint(tx: RateTx, name: 'rate_limit_policy'|'rate_limit_admission', original: unknown) {
+  try {
+    await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${name}`);
+    await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${name}`);
+  } catch {
+    throw original;
+  }
+}
 /** Policy read failures are separate from malformed configuration; rollback restores a usable caller transaction. */
 async function policySnapshot(tx: RateTx, fieldClass: FieldClass) {
   await tx.$executeRawUnsafe('SAVEPOINT rate_limit_policy');
@@ -113,8 +126,7 @@ async function policySnapshot(tx: RateTx, fieldClass: FieldClass) {
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT rate_limit_policy');
     return {p,manifest,keys};
   } catch(error) {
-    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT rate_limit_policy');
-    await tx.$executeRawUnsafe('RELEASE SAVEPOINT rate_limit_policy');
+    await restoreSavepoint(tx,'rate_limit_policy',error);
     if (storeUnavailable(error)) return null;
     throw error;
   }
@@ -165,8 +177,7 @@ export async function admitRateInTx(tx: RateTx, fieldClass: FieldClass, identity
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT rate_limit_admission');
     return { admitted: true, retryAfterSeconds: over ? retry : 0, fieldClass };
   } catch (error) {
-    await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT rate_limit_admission');
-    await tx.$executeRawUnsafe('RELEASE SAVEPOINT rate_limit_admission');
+    await restoreSavepoint(tx,'rate_limit_admission',error);
     if (error instanceof RateLimited || error instanceof RateConfigurationError || !storeUnavailable(error)) throw error;
     observe(fieldClass, 'store', p.enforcementMode);
     if (p.enforcementMode === 'ENFORCING' && closed) throw new RateLimited(fieldClass, p.windowSeconds);
@@ -183,10 +194,27 @@ export async function admitRate(db: PrismaClient, fieldClass: FieldClass, identi
     return unknownMode(fieldClass);
   }
 }
+// A GraphQL operation shares one Context across sibling aliases. Queue BEFORE
+// opening admission transactions, so one wide operation cannot occupy the pool
+// with connections all waiting on its own principal. Every alias still charges.
+const operationAdmissions=new WeakMap<object,Promise<void>>();
+export async function admitOperationRate(operation: object, db: PrismaClient, fieldClass: FieldClass, identity: RateIdentity) {
+  const previous=operationAdmissions.get(operation) ?? Promise.resolve();
+  let release!:()=>void;
+  const done=new Promise<void>(r=>release=r);
+  operationAdmissions.set(operation,done);
+  await previous;
+  try {return await admitRate(db,fieldClass,identity);}
+  finally {release();if(operationAdmissions.get(operation)===done)operationAdmissions.delete(operation);}
+}
 /** Cleanup uses the same config→subject order and checks expiry after waits; never refreshes a refusal. */
 export async function cleanupRateBuckets(db: PrismaClient, take = 200) {
   return db.$transaction(async tx => {
     await configFence(tx);
+    // One fleet-wide cleanup batch owns candidate selection at a time, so
+    // processes do not select the same rows before waiting on subject locks.
+    const [{ acquired }] = await tx.$queryRaw<Array<{acquired:boolean}>>`SELECT pg_try_advisory_xact_lock(1793, 1) AS acquired`;
+    if (!acquired) return {count:0};
     const candidates = await tx.rateLimitBucket.findMany({ where: { expiresAt: { lt: new Date() } }, take: Math.min(200,Math.max(1,take)), orderBy: { expiresAt: 'asc' } });
     await subjectLocks(tx,candidates.map(r => `${r.fieldClass}:${r.dimension}:${r.subject}`));
     const [{now}] = await tx.$queryRaw<Array<{now:Date}>>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;

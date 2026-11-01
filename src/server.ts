@@ -64,6 +64,7 @@ import {
   resolveAuthContext,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
+import { startRateBucketCleanupLoop } from './lib/rateLimit/maintenance.js';
 import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
@@ -1861,12 +1862,11 @@ export async function createServer(): Promise<Express> {
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
   // #1793: bounded inactive-counter retention, identical with/without the optional bus.
   if (process.env.NODE_ENV !== 'test') {
-    const timer = setInterval(() => {
-      void (async () => {
-        for (let pass=0;pass<20;pass++) if ((await cleanupRateBuckets(db)).count < 200) break;
-      })().catch(() => console.error('rate-limit cleanup failed'));
-    }, 60_000);
-    timer.unref();
+    startRateBucketCleanupLoop(()=>cleanupRateBuckets(db),error=>{
+      const raw=error && typeof error==='object' ? (error as {code?:unknown}).code : undefined;
+      const code=typeof raw==='string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
+      console.error('rate-limit cleanup failed',{code});
+    });
   }
 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
