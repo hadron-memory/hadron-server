@@ -1533,7 +1533,7 @@ export const typeDefs = `#graphql
     updatedByAgent: ActorRef
     "#2176 - the User behind the last authored edit, as handle and URN only (the same projection as a revision's editedByUser, and always the user that revision records). Cleared like updatedByWorker: an authored edit with no user behind it (a system job, a git sync, an API key with no account) clears it. Null also for a deleted user and for nodes last edited before #2176, which are not backfilled."
     updatedByUser: NodeRevisionEditor
-    "#1151 - the User behind this node's creation, as handle and URN only (the same projection as updatedByUser). Null when the creator was an API client or a system job (the stored value is then not a user, and is never echoed), for a deleted user, and for nodes written before the column was stamped, which are not backfilled."
+    "#1151 - the User behind this node's creation, as handle and URN only (the same projection as updatedByUser). Null when the stored creator resolves to no live user (a system job, an app key, a deleted user; the stored value is never echoed), and for nodes written before the column was stamped, which are not backfilled."
     createdByUser: NodeRevisionEditor
     "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
     commentSummary: CommentSummary!
@@ -1797,9 +1797,9 @@ export const typeDefs = `#graphql
     governedKind: EdgeGovernedKind
     "#1151 - when the edge was created."
     createdAt: DateTime!
-    "#1151 - when the edge row last changed; null for a row never updated."
+    "#1151 - when the edge row last changed (stamped on create too; null only for a row inserted outside the API)."
     updatedAt: DateTime
-    "#1151 - the User behind this edge's creation, as handle and URN only (the revision-editor projection; never a raw id). Null when the creator was an API client or a system job, for a deleted user, for edges written before attribution was stamped (not backfilled), and for a caller who cannot read the memory the edge lives in (an edge's memory is its source side), so a cross-memory edge never names another tenant's user."
+    "#1151 - the User behind this edge's creation, as handle and URN only (the revision-editor projection; never a raw id). Null when the stored creator resolves to no live user (a system job, an app key, a deleted user; the stored value is never echoed), for edges written before attribution was stamped (not backfilled), and for a caller who cannot read the memory the edge lives in (an edge's memory is its source side), so a cross-memory edge never names another tenant's user."
     createdByUser: NodeRevisionEditor
     "#1151 - the User behind the last update of this edge; null under the same conditions as createdByUser."
     updatedByUser: NodeRevisionEditor
