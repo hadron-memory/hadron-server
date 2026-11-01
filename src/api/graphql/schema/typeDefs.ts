@@ -234,6 +234,16 @@ export const typeDefs = `#graphql
     "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
     role: String
     locPrefix: String
+    """
+    #2832 — direct children only (hrn:node:hadronmemory.com:specs:cor:api:090:02). Matches the nodes whose loc is
+    exactly the given loc plus one more segment (no further colon); the empty string means the top-level nodes.
+    Judged on loc strings alone: edges and parentRel play no part, and a loc whose parent has no node of its own is
+    still listed. An absent or null value is no filter, so the empty string is a value. Applies in every mode
+    (keyword, regex, vector, hybrid and filter-only), under the same access and default exclusions as the rest of
+    the filter, and pages and counts like any findNodes read. With no query and no sort the order is the sibling
+    order of hrn:node:hadronmemory.com:specs:cor:dmo:020:01 (positioned nodes first, then by loc). Not supported by appNodes.
+    """
+    childrenOf: String
     createdBy: String
     updatedAfter: String
     updatedBefore: String
