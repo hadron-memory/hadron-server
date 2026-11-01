@@ -72,6 +72,7 @@ import { recoveryMemoryIds } from './resolvers.recovery.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
+import { refHasUnstorableChars, refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -481,6 +482,11 @@ export const nodeQueries = {
     // Spec: cor:api:180 — cross-entity URN resolution
     // (:00 surface & result shape, :01 resolution semantics).
     resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {
+      // #2975 (§10 P2 on #3134): a NUL or a lone surrogate passes the urn-lib
+      // grammar but no stored URN holds one, and Postgres rejects it as a
+      // parameter. It names nothing, so refuse it here, before any lookup,
+      // rather than let the driver error reach the narrowed catches as a fault.
+      if (refHasUnstorableChars(urn)) return null;
       const isGlobalAdmin =
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       // Membership check mirroring the per-kind queries' "member of the org"
@@ -525,7 +531,10 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveMemoryRef(ctx.db, urn));
-          } catch {
+          } catch (error) {
+            // #2975: only a name-resolution outcome is the uniform refusal; a
+            // fault propagates (cor:api:260:01).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           // #1104 — the RECORD gate, not the generic org/owner one this branch
@@ -602,7 +611,10 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveOrgRef(ctx.db, urn));
-          } catch {
+          } catch (error) {
+            // #2975: only a name-resolution outcome is the uniform refusal; a
+            // fault propagates (cor:api:260:01).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           if (!(await isOrgMember(id))) return null;
@@ -612,7 +624,10 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveAgentRef(ctx.db, urn));
-          } catch {
+          } catch (error) {
+            // #2975: only a name-resolution outcome is the uniform refusal; a
+            // fault propagates (cor:api:260:01).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           const agent = await ctx.db.agent.findUnique({
@@ -648,9 +663,11 @@ export const nodeQueries = {
               ctx.db,
               composeUrnV2('agent', parsed.root, parsed.segments[0]!),
             ));
-          } catch {
+          } catch (error) {
             // Malformed leaf (charset/length/arity) or an unknown/renamed-away
-            // agent — both name nothing (uniform refusal).
+            // agent — both name nothing (uniform refusal). A fault is not an
+            // absence and propagates (#2975, cor:api:260:01).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           const agent = await ctx.db.agent.findUnique({
@@ -707,7 +724,10 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveAppRef(ctx.db, urn));
-          } catch {
+          } catch (error) {
+            // #2975: only a name-resolution outcome is the uniform refusal; a
+            // fault propagates (cor:api:260:01).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           const app = await ctx.db.app.findUnique({
@@ -728,7 +748,10 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveUserRef(ctx.db, urn));
-          } catch {
+          } catch (error) {
+            // #2975: only a name-resolution outcome is the uniform refusal; a
+            // fault propagates (cor:api:260:01).
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           // A user reference resolves for the user themselves, a platform admin,
