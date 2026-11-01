@@ -12,6 +12,7 @@ import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import {
@@ -369,6 +370,25 @@ describe('#2261 eviction touches connection-local state only', () => {
     return { userId, token, workerId: worker.id };
   }
 
+
+  it('#3082 transport eviction preserves a CLI-path worker session and GraphQL resume', async () => {
+    const { userId, token, workerId } = await workerFixture();
+    const worker = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+    const ctx: Context = { db, userId, appId: worker.appId, roles: ['READER'] };
+    const started = await resolvers.Mutation.startSession({}, { input: { id: generateId(), workerRef: workerId, tool: 'vitest' } }, ctx);
+    await resolvers.Mutation.createResumeClaim({}, { sessionId: started.id }, ctx);
+    const sid = await open(token);
+    const beforeSession = await db.session.findUniqueOrThrow({ where: { id: started.id } });
+    const beforeWorker = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+    await sweepIdleMcpTransportsForTests(FAR_FUTURE());
+    expect(mcpTransportStateForTests().sessionIds).not.toContain(sid);
+    expect(await db.session.findUniqueOrThrow({ where: { id: started.id } })).toEqual(beforeSession);
+    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toEqual(beforeWorker);
+    expect(beforeSession.endedAt).toBeNull();
+    await open(token);
+    expect(await resolvers.Mutation.resumeSession({}, { input: {} }, ctx)).toMatchObject({ session: { id: started.id } });
+    expect(await db.session.count({ where: { userId } })).toBe(1);
+  });
 
   it('a different principal presenting an evicted id gets the same 404 and creates no state', async () => {
     const a = await makeUser();
