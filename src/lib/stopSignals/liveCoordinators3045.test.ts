@@ -130,7 +130,8 @@ describe('#3045 cor:agt:090:04 V20 — the coordinator set of a live pause-dispa
     expect(await told(ada, L)).toEqual(['A:stop', 'B:stop']);
     await reportsTo(dan, liam);
     expect(await told(ada, L).then((x) => x.filter((n) => n.endsWith(':resume')))).toEqual([]);
-    expect(await told(liam, L)).toEqual(['A:stop']);
+    // Liam gains A, and B too: B covers Liam and Dan now reports to him (the definition, unchanged).
+    expect(await told(liam, L)).toEqual(['A:stop', 'B:stop']);
     // A's stop was never delivered to Ada and no longer applies: only B's is offered, then nothing.
     const offered = await pendingStopNotices(db, app.id, [ada.id]);
     expect(offered.get(ada.id)?.signalId).toBe(b.id);

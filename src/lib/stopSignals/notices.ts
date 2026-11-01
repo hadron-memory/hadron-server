@@ -17,6 +17,12 @@ import type { EventActor } from '../agentTasks/events.js';
 import type { StopLevel, StopSignal } from './state.js';
 
 export const STOP_NOTICE_EVENT = 'stop.notice';
+/**
+ * #3045 (V20): a worker left a live `pause-dispatch`'s coordinators while another live one still names it. No resume is
+ * sent for the signal it left, and a notice of that signal it was never offered no longer applies: this event, newer
+ * than that notice, drops it from the offer (`pendingStopNotices`). It is never a notice itself and is never offered.
+ */
+export const STOP_NOTICE_WITHDRAWN_EVENT = 'stop.notice.withdrawn';
 export const STOP_LIFECYCLE_EVENTS = ['stop.set', 'stop.lifted', 'stop.expired'] as const;
 
 export type StopNoticeKind = 'stop' | 'resume';
@@ -93,6 +99,25 @@ export async function appendStopNotice(
         signalId: args.signalId, level: args.level, notice: args.notice, interrupt,
         ...('userId' in args.recipient ? { recipientUserId: args.recipient.userId } : {}),
       },
+      createdAt: args.at,
+    },
+  });
+}
+
+/** Append `stop.notice.withdrawn` for one worker and one `pause-dispatch` (see `STOP_NOTICE_WITHDRAWN_EVENT`). */
+export async function appendStopNoticeWithdrawn(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; workerId: string; signalId: string; at: Date },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: STOP_NOTICE_WITHDRAWN_EVENT,
+      actorUserId: null,
+      actorWorkerId: null,
+      actorAgentId: null,
+      subjectWorkerId: args.workerId,
+      payload: { signalId: args.signalId, level: 'pause-dispatch' },
       createdAt: args.at,
     },
   });

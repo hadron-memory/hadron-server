@@ -17,8 +17,9 @@
  *   sends none;
  * - nothing that stops its time covers it any more (it left the coverage, or the last such signal ended): one resume.
  *
- * `pause-dispatch` tells its coordinators once when it is set and once when it ends, and the workers it covers nothing
- * (D-2026-10-16-003); moving in or out of its coverage sends nothing. Because the ledger is only ever written here,
+ * `pause-dispatch` tells its coordinators when it is set and when it ends, and the workers it covers nothing
+ * (D-2026-10-16-003); moving in or out of its coverage sends them nothing. While it is live its coordinators are
+ * recomputed on every reconcile and the change is told (V20, #3045, `reconcileCoordinators`). Because the ledger is only ever written here,
  * under the exclusive fence, a second reconcile at the same state writes nothing: one transition, one notice per
  * recipient, whichever of a lift, an expiry sweep or a topology change gets there first.
  */
@@ -28,11 +29,12 @@ import { appManagerUserIds } from '../auth/appManagement.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import {
-  SIGNAL_COLUMNS, coveringSignals, levelRank, stopsTime,
+  SIGNAL_COLUMNS, coveringSignals, levelRank, liveSql, stopsTime,
   type StopLevel, type StopScope, type StopSignal,
 } from './state.js';
 import {
-  appendStopEndEvent, appendStopNotice, appendStopSetEvent, pauseDispatchRecipients,
+  appendStopEndEvent, appendStopNotice, appendStopNoticeWithdrawn, appendStopSetEvent, pauseDispatchRecipients,
+  STOP_NOTICE_EVENT, STOP_NOTICE_WITHDRAWN_EVENT,
   type StopActor,
 } from './notices.js';
 
@@ -61,10 +63,16 @@ async function coordinatorInputs(tx: Tx, appId: string) {
   return { workers, managers: await appManagerUserIds(tx, app) };
 }
 
-/** Tell a `pause-dispatch`'s coordinators (090:04): once at set (`stop`), once at its end (`resume`). */
-async function notifyCoordinators(tx: Tx, s: StopSignal, covered: ReadonlySet<string>, notice: 'stop' | 'resume', at: Date): Promise<number> {
+/**
+ * Tell a `pause-dispatch`'s coordinators (090:04): at its end (`resume`), and at its set (`stop`). At set the reconcile
+ * that just ran already told the worker coordinators (the same step that tells a coordinator who joins later, V20), so
+ * the set passes `only: 'people'`: the managers' fallback, which has no worker lane and is not tracked afterwards.
+ */
+async function notifyCoordinators(
+  tx: Tx, s: StopSignal, covered: ReadonlySet<string>, notice: 'stop' | 'resume', at: Date, only: 'all' | 'people' = 'all',
+): Promise<number> {
   const { workers, managers } = await coordinatorInputs(tx, s.appId);
-  const recipients = pauseDispatchRecipients(covered, workers, managers);
+  const recipients = pauseDispatchRecipients(covered, workers, managers).filter((r) => only === 'all' || 'userId' in r);
   for (const recipient of recipients) {
     await appendStopNotice(tx, { appId: s.appId, recipient, signalId: s.id, level: s.level, notice, at });
   }
@@ -165,7 +173,67 @@ export async function reconcileStopCoverage(tx: Tx, appId: string, now: Date): P
     notices++;
   }
 
+  // 6. A live pause-dispatch's coordinators, as they are now (V20).
+  notices += await reconcileCoordinators(tx, appId, now, covering);
+
   return { entered, left, notices, expired: expiredRows.map((s) => s.id) };
+}
+
+/**
+ * cor:agt:090:04 V20: every live `pause-dispatch`'s coordinator set is recomputed on each reconcile (so on every change
+ * that can move it: a reporting line, team membership, a host registration, a retirement), against who was last told
+ * and not since released. The definition of who the coordinators are is `pauseDispatchRecipients`, unchanged (H24 is
+ * Proposed). A worker newly named gets the signal's stop notice; one no longer named gets one resume, unless another
+ * live `pause-dispatch` still names it: then none, and a notice of the signal it was never offered is withdrawn.
+ * "Last told" is read off the signal's own notice events (the latest of its stop / resume / withdrawal per worker), so
+ * nothing new is stored and a second reconcile at the same state writes nothing. A manager recipient (the fallback,
+ * no worker lane) is told at the set and the end only.
+ */
+async function reconcileCoordinators(tx: Tx, appId: string, now: Date, covering: Map<string, StopSignal[]>): Promise<number> {
+  const live = await tx.$queryRaw<StopSignal[]>(Prisma.sql`
+    SELECT ${SIGNAL_COLUMNS} FROM team_stop_signals s
+    WHERE s.app_id = ${appId} AND s.level = 'pause-dispatch' AND ${liveSql(now)} ORDER BY s.set_at, s.id`);
+  if (live.length === 0) return 0;
+  const { workers, managers } = await coordinatorInputs(tx, appId);
+  const want = new Map<string, Set<string>>();
+  for (const s of live) {
+    const covered = new Set<string>();
+    for (const [w, list] of covering) if (list.some((x) => x.id === s.id)) covered.add(w);
+    const ids = pauseDispatchRecipients(covered, workers, managers).flatMap((r) => ('workerId' in r ? [r.workerId] : []));
+    want.set(s.id, new Set(ids));
+  }
+  // Who each live signal last named, and whether the latest stop to them was delivered.
+  const last = await tx.$queryRaw<Array<{ signalId: string; workerId: string; named: boolean; delivered: boolean }>>(Prisma.sql`
+    SELECT DISTINCT ON (e.payload ->> 'signalId', e.subject_worker_id)
+           e.payload ->> 'signalId' AS "signalId", e.subject_worker_id AS "workerId",
+           (e.type = ${STOP_NOTICE_EVENT} AND e.payload ->> 'notice' = 'stop') AS named,
+           EXISTS (SELECT 1 FROM worker_delivery_task_events d WHERE d.event_id = e.id AND d.worker_id = e.subject_worker_id
+                   AND d.chain_index = 0 AND d.delivered_at IS NOT NULL) AS delivered
+    FROM agent_team_events e
+    WHERE e.app_id = ${appId} AND e.type IN (${STOP_NOTICE_EVENT}, ${STOP_NOTICE_WITHDRAWN_EVENT}) AND e.subject_worker_id IS NOT NULL
+      AND e.payload ->> 'signalId' IN (${Prisma.join(live.map((s) => s.id))})
+    ORDER BY e.payload ->> 'signalId', e.subject_worker_id, e.created_at DESC, e.id DESC`);
+  const retired = new Set((await tx.worker.findMany({ where: { appId, retiredAt: { not: null } }, select: { id: true } })).map((r) => r.id));
+  let sent = 0;
+  for (const s of live) {
+    const now_ = want.get(s.id)!;
+    const named = new Set(last.filter((l) => l.signalId === s.id && l.named).map((l) => l.workerId));
+    for (const w of [...now_].sort()) {
+      if (named.has(w)) continue;
+      await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: s.id, level: s.level, notice: 'stop', at: now });
+      sent++;
+    }
+    for (const w of [...named].sort()) {
+      if (now_.has(w)) continue;
+      if (live.some((o) => o.id !== s.id && want.get(o.id)!.has(w))) {
+        await appendStopNoticeWithdrawn(tx, { appId, workerId: w, signalId: s.id, at: now });
+      } else if (!retired.has(w)) {
+        await appendStopNotice(tx, { appId, recipient: { workerId: w }, signalId: s.id, level: s.level, notice: 'resume', at: now });
+        sent++;
+      }
+    }
+  }
+  return sent;
 }
 
 export type SetStopSignalInput = {
@@ -197,7 +265,7 @@ export async function setStopSignal(tx: Tx, input: SetStopSignalInput, now: Date
   const signal = await readSignal(tx, id);
   await appendStopSetEvent(tx, signal, input.by);
   await reconcileStopCoverage(tx, input.appId, now);
-  if (signal.level === 'pause-dispatch') await notifyCoordinators(tx, signal, await openCoverageOf(tx, id), 'stop', now);
+  if (signal.level === 'pause-dispatch') await notifyCoordinators(tx, signal, await openCoverageOf(tx, id), 'stop', now, 'people');
   return signal;
 }
 
