@@ -68,6 +68,9 @@ describe.each(DOORS)('#2701 %s on an install memory', (_name, call, field) => {
     await db.node.delete({ where: { id: f.node.id } });
     const missing = await call(f, f.stranger.id).catch(error => error);
     expect(missing).toMatchObject({ extensions: { code: 'NODE_NOT_FOUND' } });
+    if (!(denied instanceof Error) || !(missing instanceof Error)) {
+      throw new Error('Both refused calls must throw Error instances');
+    }
     expect(denied.message).toBe(missing.message);
   });
 
