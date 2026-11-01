@@ -61,7 +61,7 @@ export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.propert
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
 
-export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone'] as const;
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone', 'references'] as const;
 export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
