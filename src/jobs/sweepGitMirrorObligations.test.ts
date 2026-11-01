@@ -174,7 +174,7 @@ it('exhausts the tenth failed attempt, exposes the cap in validate, and never re
  await tick(new Date(Date.now()+7*24*60*60_000));expect(commands).toEqual([]);expect((await rows())[0].attempts).toBe(10);
 });
 it('ordinary writer failure after EXHAUSTED stays outside the sweep cap, while ordinary success clears',async()=>{
- const n=await makeNode();await owe(n.id,{state:'EXHAUSTED',attempts:10});rejectPushes();
+ const n=await makeNode();await owe(n.id,{branch:'hadron-updates',state:'EXHAUSTED',attempts:10});rejectPushes();
  await writeNodeToGit({...n,outgoingEdges:[]},'',null,memoryId);
  expect((await rows())[0]).toMatchObject({state:'FAILED',attempts:11});commands=[];
  await tick(new Date(Date.now()+7*24*60*60_000));expect(commands).toEqual([]);
@@ -301,7 +301,7 @@ describe('#3056 shared row budget', () => {
 
     await tick();
     expect(await rows()).toEqual([untouched]);
-    expect(commands.filter(args => args[0] === 'push')).toHaveLength(2);
+    expect(commands.filter(args => args[0] === 'push')).toHaveLength(1); // #3042 batches the two funded rows on one branch
     commands = [];
     await tick();
     expect(await rows()).toEqual([]);
