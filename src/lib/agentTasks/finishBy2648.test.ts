@@ -160,6 +160,17 @@ describe('#2648 — the finish-by alarm (cor:agt:050:14)', () => {
     await tick('12:30');
     expect(await alarms()).toMatchObject([{ type: 'stall.no-progress', episodeStart: at('11:30') }]);
   });
+
+  it('clearing it on a pending task floors the start window at the edit, not the assignment', async () => {
+    const t = await assignedToAnne('10:00', { finishBy: at('12:00') });
+    await db.agentTask.update({ where: { id: t.id }, data: { finishBy: null } });
+    await edited(t.id, '11:30', ['finishBy']);
+    await tick('11:30');
+    await tick('11:44');
+    expect(await alarms()).toEqual([]);
+    await tick('11:45');
+    expect(await alarms()).toMatchObject([{ type: 'stall.not-started', episodeStart: at('11:30') }]);
+  });
 });
 
 describe('#2648 — a stop signal never moves the deadline (pure)', () => {
