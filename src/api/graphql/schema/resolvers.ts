@@ -71,6 +71,7 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
+import { modelGroupMutations, modelGroupQueries } from './resolvers.modelGroup.js';
 import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
@@ -191,6 +192,7 @@ export const resolvers = {
     ...agentTaskQueries,
     ...tickerQueries,
     ...agentTickerTemplateQueries,
+    ...modelGroupQueries,
     ...deliverySettingsQueries,
     ...wakeQueries,
     ...stopSignalQueries,
@@ -253,6 +255,7 @@ export const resolvers = {
     ...agentTaskMutations,
     ...tickerMutations,
     ...agentTickerTemplateMutations,
+    ...modelGroupMutations,
     ...deliverySettingsMutations,
     ...stopSignalMutations,
     ...wakeMutations,

@@ -69,6 +69,7 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   memory_subscriptions: ['created_by', 'updated_by', 'deleted_by'],
   hadron_server: ['created_by', 'updated_by', 'deleted_by'],
   ai_service_configs: ['created_by', 'updated_by'],
+  model_groups: ['created_by', 'updated_by'],
   server_log: ['created_by', 'updated_by'],
   memory_log: ['created_by', 'updated_by'],
   org_member_invitations: ['created_by', 'updated_by', 'deleted_by'],
