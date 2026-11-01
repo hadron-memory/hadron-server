@@ -23,7 +23,7 @@ tsx scripts/ticker-wake/ticker-wake.ts loop [--interval <seconds>=120] [--budget
 
 Config: the router's `~/.config/hadron-orca-attention-router/config.json`
 (app, `hadronCli`, `orcaCli`, `stateDir`, and an optional roster). State lives
-in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`, `needs-person.json`).
+in `<stateDir>/ticker-wake/` (`lock`, `receipts.json`, `needs-person.json`, `holds.log`).
 
 **Receivers (#2138, Hugo #26221).** The roster is not hand-kept. A hand-kept
 file missed 17 subscribed workers, whose wakes stayed due while every pass
@@ -364,3 +364,13 @@ existing receipt remediation remain separate; rollout requires Hugo's actual gra
 ## Open-task line (#2613)
 
 Every wake this script types ends with ` You have N open task(s) (as read when this was sent); run `hadron team task mine`.` when the delivered worker holds assigned PENDING or STARTED tasks in the wake App (the same set as `hadron team task mine`). The count comes from the existing `agentTasks` read under this script's credential, shared in `scripts/lib/openTaskLine.ts`. Zero adds nothing; a refused, malformed or over-budget read also adds nothing and never says "none", and logs ONE diagnostic per delivery attempt naming only the worker and a closed reason (`refused`, `malformed`, `timeout` or `page_cap`), never anything the read returned (#2630). The count is the read as of send: it is read before the final gates and is never revalidated after them. Existing wake text is unchanged ahead of the added line. Merging deploys nothing. Fresh/recovery briefs and the future in-poller delivery (hadron-cli#907) are out of scope; that delivery needs the same line.
+
+## Hold reasons (`holds.log`, #2746)
+
+A worker's hold reason otherwise goes only to stdout, which on a host that runs the loop as a system-journal user is
+unreadable to the operator. Each non-dry pass therefore appends one line per worker whose wake was held, left alone or
+not confirmed: `<iso time> <worker name> <worker id> <code>`. The code is one of a closed list (`HOLD_CODES` in
+`ticker-wake.ts`, e.g. `no-receiver-on-host`, `unreconciled-earlier-send`, `send-unconfirmed`, `pass-budget-spent`);
+nothing else is written, so no wake text, tick line, proof, request detail or server message reaches the file. A name or
+id outside its plain shape is written as `-`. A delivered wake writes nothing. The file keeps the newest 200 lines, is
+replaced atomically with mode 0644, and a failure to write it is logged and never fails the pass. `--dry` writes nothing.
