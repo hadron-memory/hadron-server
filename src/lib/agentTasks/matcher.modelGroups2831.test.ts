@@ -76,10 +76,20 @@ describe('#2831 S2 pure pieces', () => {
       new RegExp(`^${pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 's').test(m);
     const alpha = ['a', 'b', '*', '?'];
     const words = (n: number): string[] => (n === 0 ? [''] : words(n - 1).flatMap((w) => alpha.map((c) => w + c)));
-    const models = (n: number): string[] => (n === 0 ? [''] : models(n - 1).flatMap((w) => ['a', 'b'].map((c) => w + c)));
+    // Models may themselves contain `*` and `?` (a model string is not validated as a token): they are literals there.
+    const models = (n: number): string[] => (n === 0 ? [''] : models(n - 1).flatMap((w) => ['a', 'b', '*', '?'].map((c) => w + c)));
     const pats = [0, 1, 2, 3, 4].flatMap(words);
-    const ms = [0, 1, 2, 3, 4, 5].flatMap(models);
+    const ms = [0, 1, 2, 3, 4].flatMap(models);
     for (const pat of pats) for (const m of ms) expect(modelMatchesPattern(pat, m), `${pat} vs ${m}`).toBe(ref(pat, m));
+  });
+
+  it('a pattern star is a wildcard even against a model that contains a literal star or question mark', () => {
+    expect(modelMatchesPattern('*', '*x')).toBe(true);
+    expect(modelMatchesPattern('*x', '*yx')).toBe(true);
+    expect(modelMatchesPattern('a*b', 'a*?b')).toBe(true);
+    expect(modelMatchesPattern('?', '*')).toBe(true);
+    expect(modelMatchesPattern('a?', 'a*')).toBe(true);
+    expect(modelMatchesPattern('*y', '*x')).toBe(false);
   });
 
   it('modelMatchesPattern does not backtrack on separated stars: the worst legal pattern against a long model is fast', () => {

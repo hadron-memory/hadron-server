@@ -92,12 +92,14 @@ export function modelMatchesPattern(pattern: string, model: string): boolean {
   let star = -1;
   let mark = 0;
   while (j < s.length) {
-    if (i < p.length && (p[i] === '?' || p[i] === s[j])) {
-      i++;
-      j++;
-    } else if (i < p.length && p[i] === '*') {
+    // The star is judged FIRST: a model may itself contain a literal `*` (or `?`), and a pattern's `*` is always a
+    // wildcard, never a literal to be equality-matched against that character.
+    if (i < p.length && p[i] === '*') {
       star = i++;
       mark = j;
+    } else if (i < p.length && (p[i] === '?' || p[i] === s[j])) {
+      i++;
+      j++;
     } else if (star !== -1) {
       i = star + 1;
       j = ++mark;
