@@ -1298,7 +1298,6 @@ export async function createRootTaskForRun(
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
 }
 
-/** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
 /**
  * #3125 S3 (cor:agt:120:03, V42): claim one outside item for the caller, in its OWN write transaction. A root task
  * through the root create gate (the participant re-judged under the anchors by `inTaskWriteTx`), owned by and assigned
@@ -1338,6 +1337,7 @@ export async function createStartedClaim(
   }
 }
 
+/** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
 async function requireTaskDirection(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow) {
   if (!(await mayDirectTask(tx, txCtx, app, actor, task))) throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task sets its priority or blockers.', { taskId: task.id });
 }

@@ -15,7 +15,7 @@
  * Titles and labels are the tracker's text: returned as data, never interpreted, never logged (V48).
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { GithubReadError, isObj, mintRepositoryReadToken, postGraphql } from '../githubIssueSnapshot.js';
+import { isObj, mintRepositoryReadToken, postGraphql } from '../githubIssueSnapshot.js';
 import type { StoredTaskIntegration } from '../appProperties.js';
 
 /** The permissions a task-integration read is minted with (V31 needs the pull-request read). */
@@ -103,12 +103,12 @@ async function readRepository(db: Pick<PrismaClient, 'organization'>, organizati
     if (!r.ok) return { issues, incompleteReason: r.reason };
     const repo = r.data.repository;
     const conn = isObj(repo) ? repo.issues : null;
-    if (!isObj(conn) || !Array.isArray(conn.nodes) || !conn.nodes.every(isRawIssue) || !isObj(conn.pageInfo)) {
-      return { issues, incompleteReason: 'github_error' };
-    }
-    issues.push(...(conn.nodes as RawIssue[]));
-    if (conn.pageInfo.hasNextPage !== true) break;
-    const cursor = conn.pageInfo.endCursor;
+    // A page that does not say whether another follows is an unexpected response, never read as the last page.
+    if (!isConn(conn, isRawIssue)) return { issues, incompleteReason: 'github_error' };
+    const page = conn as { nodes: RawIssue[]; pageInfo: Record<string, unknown> };
+    issues.push(...page.nodes);
+    if (!page.pageInfo.hasNextPage) break;
+    const cursor = page.pageInfo.endCursor;
     if (!isStr(cursor)) return { issues, incompleteReason: 'github_error' };
     after = cursor;
   }
@@ -137,7 +137,9 @@ export function passesLabelFilters(labels: readonly string[], integration: Store
 /**
  * Every untracked item of `integration` in App `appId`, filtered and ordered. A repository the installation cannot
  * grant refuses the whole call (typed `GithubReadError`, cor:agt:120:03 Edge Cases), never an empty answer.
- * `claimedIn` answers which of a batch of URLs some task of THIS App holds as external id, in any status.
+ * `claimedIn` answers which of a batch of URLs some task of THIS App holds as external id, in any status. It is called
+ * at least once after every GitHub read, even when nothing was read or everything was filtered out, because the
+ * caller's re-run of the read gate lives there.
  */
 export async function listUntrackedItems(
   db: Pick<PrismaClient, 'organization'>,
@@ -169,11 +171,11 @@ export async function listUntrackedItems(
     }
   }
   const claimed = new Set<string>();
-  for (let i = 0; i < read.length; i += 500) {
-    for (const url of await input.claimedIn(read.slice(i, i + 500).map((it) => it.url))) claimed.add(url);
+  const batches: string[][] = [];
+  for (let i = 0; i < read.length; i += 500) batches.push(read.slice(i, i + 500).map((it) => it.url));
+  for (const batch of batches.length ? batches : [[]]) {
+    for (const url of await input.claimedIn(batch)) claimed.add(url);
   }
   const items = read.filter((it) => !claimed.has(it.url)).sort(compareUntracked);
   return { items, complete: incompleteReason === null, incompleteReason };
 }
-
-export { GithubReadError };

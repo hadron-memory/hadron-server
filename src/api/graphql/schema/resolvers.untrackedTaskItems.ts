@@ -180,7 +180,9 @@ export const untrackedTaskItemMutations = {
         // An unexpected failure: with nothing claimed yet it surfaces as any error does; after a claim it is logged
         // (ids only) and the claims already committed are still returned (cor:agt:120:03).
         if (tasks.length === 0) throw e;
-        console.error('untracked.claim_failed', { appId: app.id, integration: resolved.integration.name, claimed: tasks.length });
+        // The error's name only: its message may carry tracker text or row values.
+        const error = e instanceof Error ? e.name : typeof e;
+        console.error('untracked.claim_failed', { appId: app.id, integration: resolved.integration.name, claimed: tasks.length, error });
         incompleteReason = 'claim_failed';
         break;
       }
