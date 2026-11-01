@@ -13,6 +13,7 @@
 import type { App, PrismaClient } from '../../generated/prisma/index.js';
 import { ASSET_UPLOAD_TOOL_KEY } from '../../lib/asset/gate.js';
 import { resolveAgentRef } from '../../lib/entityRef/agentRef.js';
+import { AgentNotFoundError, AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
 import { UrnNotQualifiedError } from '../../lib/urn.js';
 
 export class SetAssetEnabledError extends Error {
@@ -56,7 +57,12 @@ export async function setAgentAssetUploadEnabled(
     ({ id: resolvedAgentId } = await resolveAgentRef(db, input.agentUrn));
   } catch (e) {
     if (e instanceof UrnNotQualifiedError) throw e;
-    throw new SetAssetEnabledError('NOT_FOUND', 'agent not found');
+    // #2979 (Atilla's P2): NARROW. This class is a trusted typed refusal on the wire, so only a ref that names nothing
+    // (or an ambiguous legacy one) may become NOT_FOUND; an outage must stay a fault. Same set as the resolver's gate.
+    if (e instanceof AgentNotFoundError || e instanceof AmbiguousLegacyUrnError) {
+      throw new SetAssetEnabledError('NOT_FOUND', 'agent not found');
+    }
+    throw e;
   }
   const agent = await db.agent.findUnique({
     where: { id: resolvedAgentId },
