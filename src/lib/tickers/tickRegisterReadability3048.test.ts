@@ -222,25 +222,27 @@ it('a memory outside the declared set is answered by canReadMemory alone', async
 });
 
 it('a principal\'s batch never answers for another principal, even for the same user', async () => {
-  // Two context objects for one person: each gets its own batch (the reader and a holder are two principals).
+  // The reader and a holder are two principals with two context objects; each gets its own batch, in either order.
   await db.$transaction(async tx => {
-    const data = new RegisterData(tx);
-    data.readability.cover([f.team.systemMemoryId, f.roleA.systemMemoryId]);
-    const asMember = { db: tx, userId: f.member.id, roles: ['READER'] } as never;
-    const asOutside = { db: tx, userId: f.outside.id, roles: ['READER'] } as never;
     // member: an org ADMIN, reads the uninstalled roleA; outside: App owner only, reads only what the App installs.
     await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.member.id, role: 'ADMIN' } });
     await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
     await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.roleA.id } } });
-    for (const order of [[asMember, asOutside], [asOutside, asMember]] as const) {
-      const fresh = new RegisterData(tx);
-      fresh.readability.cover([f.team.systemMemoryId, f.roleA.systemMemoryId]);
-      const answers = new Map<unknown, boolean>();
-      for (const ctx of order) answers.set(ctx, (await fresh.readability.answer(ctx, f.roleA.systemMemoryId))!);
-      expect(answers.get(asMember)).toBe(true);
-      expect(answers.get(asOutside)).toBe(false);
+    const asMember = { db: tx, userId: f.member.id, roles: ['READER'] } as never;
+    const asOutside = { db: tx, userId: f.outside.id, roles: ['READER'] } as never;
+    // The same user twice: as a platform ADMIN (no access map) and as a plain READER.
+    const outsideAsAdmin = { db: tx, userId: f.outside.id, roles: ['ADMIN'] } as never;
+    const pairs = [[asMember, true, asOutside, false], [outsideAsAdmin, true, asOutside, false]] as const;
+    for (const [a, aReads, b, bReads] of pairs) {
+      for (const order of [[a, b], [b, a]]) {
+        const data = new RegisterData(tx);
+        data.readability.cover([f.team.systemMemoryId, f.roleA.systemMemoryId]);
+        const answers = new Map<unknown, boolean>();
+        for (const ctx of order) answers.set(ctx, (await data.readability.answer(ctx, f.roleA.systemMemoryId))!);
+        expect(answers.get(a)).toBe(aReads);
+        expect(answers.get(b)).toBe(bReads);
+      }
     }
-    expect(data).toBeTruthy();
   });
 });
 
