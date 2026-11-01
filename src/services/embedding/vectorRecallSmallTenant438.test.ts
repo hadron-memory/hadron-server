@@ -13,7 +13,9 @@
  *
  * This is an INVESTIGATION slice (no production change), so the recall regressions are `it.fails`: they are
  * red today and turn into a hard failure the moment a fix lands, which is the follow-up slice's cue to flip
- * them. The contract pins (scope, and a short result is never reported as exhausted) are plain and green.
+ * them. Each one goes through `expectRecallMiss`, so ONLY a recall assertion mismatch satisfies `it.fails`: a
+ * retrieval error or a malformed response makes the expected failure fail. The contract pins (scope, exact-plan
+ * ground truth on every path, and a short result is never reported as exhausted) are plain and green.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -62,6 +64,7 @@ const findNodes = (handle: typeof db, args: Record<string, unknown>) =>
   (resolvers.Query as any).findNodes(null, args, { db: handle, roles: ['ADMIN'], userId: 'admin-438' } as Context);
 
 let big: string;
+let savedEmbeddingApiUrl: string | undefined;
 let small: string;
 let smallIds: string[];
 let smallSpecIds: string[];
@@ -84,6 +87,7 @@ async function embed(memoryId: string, noise: number) {
 
 beforeAll(async () => {
   await cleanDb(db);
+  savedEmbeddingApiUrl = process.env.EMBEDDING_API_URL;
   process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
   setEmbeddingClientForTests(stub);
   const made = await createDbOrgAndGraph(db, { orgName: 'r438-org', graphName: 'r438/big' });
@@ -103,13 +107,38 @@ beforeAll(async () => {
 
 afterAll(() => {
   resetEmbeddingClientForTests();
-  delete process.env.EMBEDDING_API_URL;
+  if (savedEmbeddingApiUrl === undefined) delete process.env.EMBEDDING_API_URL;
+  else process.env.EMBEDDING_API_URL = savedEmbeddingApiUrl;
 });
 
 const hnsw = () => withLocalSettings(db, PREFER_HNSW);
 const exact = () => withLocalSettings(withLocalSettings(db, PREFER_HNSW), EXACT_PLAN);
 const nodeIds = (res: any) => res.hits.map((h: any) => h.node.id).sort();
 const passageIds = (res: any) => res.passages.map((p: any) => p.parentNodeId).sort();
+
+/**
+ * The body of a recall `it.fails`, narrowed so that only the recall mismatch counts as the expected failure.
+ * `it.fails` passes on ANY throw, so a SQL error or a broken response shape would otherwise read as "recall lost".
+ * Here retrieval and id extraction must succeed, and the only error allowed out is the assertion's own
+ * AssertionError. Anything else is swallowed after logging, so the test body RETURNS normally and `it.fails`
+ * reports it as a failure.
+ */
+async function expectRecallMiss(run: () => Promise<unknown>, ids: (res: any) => string[], expected: string[]) {
+  let got: string[];
+  try {
+    got = ids(await run());
+    if (!Array.isArray(got) || got.some((id) => typeof id !== 'string')) throw new Error(`malformed ids: ${JSON.stringify(got)}`);
+  } catch (err) {
+    console.error('#438 recall pin: retrieval did not succeed, so this is NOT the expected recall failure:', err);
+    return;
+  }
+  try {
+    expect(got).toEqual(expected);
+  } catch (err) {
+    if ((err as Error)?.name === 'AssertionError') throw err;
+    console.error('#438 recall pin: unexpected non-assertion error:', err);
+  }
+}
 
 describe('#438 the fixture means what it says', () => {
   it('the HNSW handle reaches the index and the exact handle does not; exact ground truth returns all of SMALL', async () => {
@@ -130,27 +159,31 @@ describe('#438 the fixture means what it says', () => {
 
 describe('#438 RED: on the HNSW plan the small tenant loses its eligible top-k (expected failures until the fix)', () => {
   it.fails('node, memory-scoped: mode vector returns all 5 of SMALL\'s eligible nodes', async () => {
-    const res = await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } });
-    expect(nodeIds(res)).toEqual(smallIds);
+    await expectRecallMiss(() => findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } }), nodeIds, smallIds);
   });
 
   it.fails('chunk, memory-scoped: granularity chunk returns all 5 of SMALL\'s passages', async () => {
-    const res = await findNodes(hnsw(), { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } });
-    expect(passageIds(res)).toEqual(smallIds);
+    await expectRecallMiss(() => findNodes(hnsw(), { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } }), passageIds, smallIds);
   });
 
   it.fails('node, role-filtered: the window widens to the cap (ef_search 1000) and still misses SMALL\'s spec nodes', async () => {
-    const res = await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } });
-    expect(nodeIds(res)).toEqual(smallSpecIds);
+    await expectRecallMiss(() => findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } }), nodeIds, smallSpecIds);
   });
 
   it.fails('hybrid with no keyword match: the vector leg brings SMALL\'s nodes', async () => {
-    const res = await findNodes(hnsw(), { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } });
-    expect(nodeIds(res)).toEqual(smallIds);
+    await expectRecallMiss(() => findNodes(hnsw(), { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } }), nodeIds, smallIds);
   });
 });
 
 describe('#438 contract today (green): scope holds and a short ANN result is never proven absence', () => {
+  it('on the exact plan every RED path retrieves SMALL\'s full eligible set (the recall pins\' ground truth)', async () => {
+    const ex = exact();
+    expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } })), 'node').toEqual(smallIds);
+    expect(passageIds(await findNodes(ex, { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } })), 'chunk').toEqual(smallIds);
+    expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } })), 'role').toEqual(smallSpecIds);
+    expect(nodeIds(await findNodes(ex, { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } })), 'hybrid').toEqual(smallIds);
+  });
+
   it('a SMALL-scoped search never returns a BIG node, on either plan and every path', async () => {
     for (const h of [hnsw(), exact()]) {
       for (const args of [
