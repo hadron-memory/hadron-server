@@ -133,3 +133,27 @@ it('#1793 live manifest/key disagreement makes existing health readiness fail wi
     expect(oldId).toBeTruthy();
   } finally {process.env.RATE_LIMIT_KEYRING=initial;}
 });
+
+
+it('#1793 merged /ready keeps startup and stopping precedence and rejects a live key mismatch',async()=>{
+  const {beginRateKeyOverlap}=await import('../lib/rateLimit/lifecycle.js');
+  const initial=process.env.RATE_LIMIT_KEYRING!;
+  let state:'starting'|'settled'='starting';let stopping=false;
+  try {
+    server=httpServer(await createServer({readiness:{startup:()=>state,stopping:()=>stopping}}));
+    await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+    const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const ready=()=>fetch(base+'/ready');
+    expect(await (await ready()).json()).toEqual({ok:false,error:'starting'});
+    expect((await fetch(base+'/health')).status).toBe(200);
+    state='settled';expect((await ready()).status).toBe(200);
+    const ring=JSON.parse(initial);
+    process.env.RATE_LIMIT_KEYRING=JSON.stringify({...ring,keys:{...ring.keys,next:'2'.repeat(64)}});
+    await beginRateKeyOverlap(db,'next');process.env.RATE_LIMIT_KEYRING=initial;
+    const refused=await ready();expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({ok:false,error:'database_unavailable'});
+    stopping=true;
+    const stopped=await ready();expect(stopped.status).toBe(503);
+    expect(await stopped.json()).toEqual({ok:false,error:'stopping'});
+  } finally {process.env.RATE_LIMIT_KEYRING=initial;}
+});
