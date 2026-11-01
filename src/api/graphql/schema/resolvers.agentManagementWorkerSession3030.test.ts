@@ -85,6 +85,16 @@ describe('#3030 ticker templates under a worker session', () => {
     expect(await codeOf(asWorker(() => createTemplate('BASE')))).toBe(REFUSED);
   });
 
+  it('the answer does not depend on the target: a missing, a deleted and a malformed id get the same refusal', async () => {
+    const gone = await createTemplate('gone');
+    await deleteTemplate(gone.id, 1);
+    for (const id of [generateId(), gone.id, 'not-an-id']) {
+      expect(await codeOf(asWorker(() => updateTemplate(id, 1)))).toBe(REFUSED);
+      expect(await codeOf(asWorker(() => deleteTemplate(id, 1)))).toBe(REFUSED);
+    }
+    expect(await codeOf(asWorker(() => M.createAgentTickerTemplate({}, { agentRef: generateId(), input: { name: 'x', cadenceSeconds: 600 } }, ctx)))).toBe(REFUSED);
+  });
+
   it('the same manager without a worker session still creates, updates and deletes (S1)', async () => {
     const t = await createTemplate('base');
     expect((await updateTemplate(t.id, 1)).revision).toBe(2);
@@ -114,6 +124,12 @@ describe('#3030 Agent model groups under a worker session', () => {
     expect(await codeOf(asWorker(() => deleteGroup('large')))).toBe(REFUSED);
     expect(await groups()).toEqual(before);
     expect(await codeOf(asWorker(() => deleteGroup('absent')))).toBe(REFUSED);
+  });
+
+  it('the answer does not depend on the target Agent: a missing Agent gets the same refusal', async () => {
+    const missing = generateId();
+    expect(await codeOf(asWorker(() => M.setAgentModelGroup({}, { agentRef: missing, name: 'large', patterns: ['x*'] }, ctx)))).toBe(REFUSED);
+    expect(await codeOf(asWorker(() => M.deleteAgentModelGroup({}, { agentRef: missing, name: 'large' }, ctx)))).toBe(REFUSED);
   });
 
   it('the same manager without a worker session still sets and deletes', async () => {

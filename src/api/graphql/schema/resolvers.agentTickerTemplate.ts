@@ -139,6 +139,7 @@ export const agentTickerTemplateQueries = {
 
 export const agentTickerTemplateMutations = {
   createAgentTickerTemplate: async (_: unknown, { agentRef, input }: { agentRef: string; input: TemplateInput }, ctx: Context) => {
+    assertNoWorkerSessionAgentManagement('createAgentTickerTemplate'); // first, so the answer never depends on the target (#3030)
     const agent = await resolveReadableAgentRef(ctx, agentRef);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     const name = cleanName(input.name);
@@ -173,6 +174,7 @@ export const agentTickerTemplateMutations = {
   updateAgentTickerTemplate: async (
     _: unknown, { id, expectedRevision, input }: { id: string; expectedRevision: number; input: TemplatePatch }, ctx: Context,
   ) => {
+    assertNoWorkerSessionAgentManagement('updateAgentTickerTemplate'); // first, so the answer never depends on the target (#3030)
     const { template: seen, agent } = await loadTemplate(ctx, id);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     const data = patchFromInput(input);
@@ -201,6 +203,7 @@ export const agentTickerTemplateMutations = {
   },
 
   deleteAgentTickerTemplate: async (_: unknown, { id, expectedRevision }: { id: string; expectedRevision: number }, ctx: Context) => {
+    assertNoWorkerSessionAgentManagement('deleteAgentTickerTemplate'); // first, so the answer never depends on the target (#3030)
     const { template: seen, agent } = await loadTemplate(ctx, id);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     await writeAsAgentEditor(ctx, agent, 'deleteAgentTickerTemplate', async (tx, txCtx) => {

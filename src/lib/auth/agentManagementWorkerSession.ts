@@ -7,8 +7,11 @@
 // unconditional. The worker is read from the request's published actor (`boundWorkerId`), which the HTTP session
 // binding, the MCP connection binding and `runAsActor` all fill.
 //
-// Callers decide it inside the deciding transaction, next to the person gate and before any existence, revision or
-// name check, so the refusal says nothing about the row it was aimed at and nothing is written.
+// Callers check it twice. First, at the resolver's entry, before the Agent or row is looked up: the answer is then
+// the same whether the target exists, is deleted, is unreadable or is stale, so it says nothing about the row it was
+// aimed at. Second, inside the deciding transaction next to the person gate, where the gate requires the decision
+// to live. The actor is request-scoped and nothing in a request changes it, so the two always agree; nothing is
+// written either way.
 
 import { GraphQLError } from 'graphql';
 import { boundWorkerId } from '../bootPrompt.js';

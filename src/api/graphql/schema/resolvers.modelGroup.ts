@@ -134,6 +134,7 @@ export const modelGroupMutations = {
     { agentRef, name, patterns }: { agentRef: string; name: string; patterns: string[] },
     ctx: Context,
   ) => {
+    assertNoWorkerSessionAgentManagement('setAgentModelGroup'); // first, so the answer never depends on the target (#3030)
     const group = cleanName(name);
     const list = cleanPatterns(patterns);
     const agent = await resolveReadableAgentRef(ctx, agentRef);
@@ -150,6 +151,7 @@ export const modelGroupMutations = {
   },
 
   deleteAgentModelGroup: async (_: unknown, { agentRef, name }: { agentRef: string; name: string }, ctx: Context) => {
+    assertNoWorkerSessionAgentManagement('deleteAgentModelGroup'); // first, so the answer never depends on the target (#3030)
     const group = cleanName(name);
     const agent = await resolveReadableAgentRef(ctx, agentRef);
     await requireAgentAccess(ctx, agent, 'ADMIN');
