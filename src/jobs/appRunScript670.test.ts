@@ -204,9 +204,15 @@ describe('script node (#670, cor:agt:010:04)', () => {
     it('with no comm.outbound ticket the send is skipped by the tool, as for a model call', async () => {
       await makeNode('flow:s', emailScript({ to: 'person@example.net', subject: 'Alert', text: 'x' }));
       const run = await mint();
-      await executeAppRun(db, run.id, deps().d);
+      // The tool reports the skip as its result (not a throw), so the hop and the run complete: pinned (#3148).
+      expect(await executeAppRun(db, run.id, deps().d)).toBe('completed');
       expect(sendResendEmail).not.toHaveBeenCalled();
-      expect(await quotaUsed('app')).toBe(0); // refunded: nothing was sent
+      // Charged, then refunded: the counter row exists at 0. "Never charged" would leave no row, so this tells them apart.
+      const row = await db.quotaCounter.findFirst({ where: { scopeKind: 'app', scopeId: appId, action: 'email.send', window: 'day' } });
+      expect(row).not.toBeNull();
+      expect(row!.used).toBe(0);
+      const hops = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).hops as Array<Record<string, unknown>>;
+      expect(hops[0]).toMatchObject({ tokensSpent: 0, toolCalls: [{ name: 'hadron_send_email', ok: true }] });
     });
 
     it('S4 for the send: {{alertEmail}} with no value sends nothing, consumes no quota and no ticket', async () => {
@@ -230,7 +236,10 @@ describe('script node (#670, cor:agt:010:04)', () => {
       await makeNode('flow:s', { data: { script: { call: { tool: 'hadron_log', args: {} } }, ...extra } as never });
       const run = await mint();
       expect(await executeAppRun(db, run.id, deps().d)).toBe('failed');
-      expect((await failureOf(run.id)).code).toBe('NODE_LOAD_FAILED');
+      const f = await failureOf(run.id);
+      expect(f.code).toBe('NODE_LOAD_FAILED');
+      // Refused for the exclusion itself, not for some unrelated load fault (#3148).
+      expect(f.message).toContain('data.script together with');
     }
   });
 
