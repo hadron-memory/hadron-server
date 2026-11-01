@@ -67,7 +67,7 @@ export function assertProviderAck(result: { data?: unknown; error?: { message?: 
   if (!result || result.error || !result.data) {
     // #3012: the provider's free-text message can echo the recipient, and this error reaches the fault log and
     // Sentry, so only the provider's machine name is carried.
-    throw new Error(`mail provider did not acknowledge: ${result?.error?.name ?? 'no data'}`);
+    throw new Error(`mail provider did not acknowledge: ${result?.error?.name ?? 'unknown'}`);
   }
 }
 
