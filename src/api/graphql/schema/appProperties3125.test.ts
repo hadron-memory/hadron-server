@@ -5,6 +5,9 @@
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildSchema, type GraphQLObjectType } from 'graphql';
+import { ApolloServer } from '@apollo/server';
+import { canonicalJson } from '../../../lib/agentTasks/properties.js';
+import { APP_PROPERTIES_MAX_BYTES, checkAppPropertiesShape } from '../../../lib/appProperties.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -26,7 +29,7 @@ let ada: { id: string; slug: string }, marco: { id: string; slug: string }, fore
 const ctx = (userId?: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra });
 const set = (properties: unknown, c = ctx(manager.id), appRef = appId, expectedRevision?: number) =>
   Promise.resolve().then(() => M.setAppProperties({}, { appRef, properties, expectedRevision }, c));
-const read = async (c = ctx(member.id), id = appId) => {
+const read = async (c = ctx(manager.id), id = appId) => {
   const row = await db.app.findUniqueOrThrow({ where: { id } });
   return { properties: await A.properties(row, {}, c), revision: await A.propertiesRevision(row, {}, c) };
 };
@@ -83,7 +86,7 @@ describe('#3125 S1 SDL', () => {
 });
 
 describe('#3125 S1 round trip (V34)', () => {
-  it('a manager writes an object, a participant reads it back, and null clears it', async () => {
+  it('a manager writes an object, a reader of the App reads it back, and null clears it', async () => {
     const value = { notes: { tone: 'dry' }, [`taskIntegrations`]: [integration()] };
     const out = await set(value);
     expect(out.id).toBe(appId);
@@ -298,5 +301,85 @@ describe('#3125 S1 database invariant', () => {
   it('the CHECK refuses a non-object and a negative revision', async () => {
     await expect(db.$executeRawUnsafe(`UPDATE apps SET properties = '[1]'::jsonb WHERE id = '${appId}'`)).rejects.toThrow(/chk_apps_properties/);
     await expect(db.$executeRawUnsafe(`UPDATE apps SET properties_revision = -1 WHERE id = '${appId}'`)).rejects.toThrow(/chk_apps_properties/);
+  });
+});
+
+describe('#3125 S1 size cap after normalisation (PR #3131 local P2)', () => {
+  it('an object within 16 KiB as sent but over it once leads become worker ids is refused, and nothing is written', async () => {
+    const value: Record<string, unknown> = {
+      pad: '',
+      taskIntegrations: [integration({ teams: [{ lead: 'Ada', label: 'a' }, { lead: 'Marco', label: 'm' }] })],
+    };
+    value.pad = 'x'.repeat(APP_PROPERTIES_MAX_BYTES - Buffer.byteLength(canonicalJson(value), 'utf8'));
+    expect(Buffer.byteLength(canonicalJson(value), 'utf8')).toBe(APP_PROPERTIES_MAX_BYTES);
+    expect(() => checkAppPropertiesShape(value)).not.toThrow();
+    await refused(set(value), 'PROPERTIES_TOO_LARGE', '');
+    expect(await stored()).toEqual({ properties: null, propertiesRevision: 0 });
+    expect(await events()).toEqual([]);
+  });
+
+  it('the same object with leads sent as worker ids (no growth) at exactly 16 KiB is stored', async () => {
+    const value: Record<string, unknown> = {
+      pad: '',
+      taskIntegrations: [integration({ repositories: ['hadron-memory/hadron-server'], teams: [{ lead: ada.id, label: 'a' }, { lead: marco.id, label: 'm' }] })],
+    };
+    value.pad = 'x'.repeat(APP_PROPERTIES_MAX_BYTES - Buffer.byteLength(canonicalJson(value), 'utf8'));
+    await set(value);
+    expect((await stored()).propertiesRevision).toBe(1);
+  });
+});
+
+describe('#3125 S1 read gate (PR #3131 security P2-1): App.properties reads like app(ref:)', () => {
+  const apollo = new ApolloServer<Context>({ typeDefs, resolvers });
+  const viaTickers = async (c: Context) => {
+    const res = await apollo.executeOperation({
+      query: 'query($a: String!) { tickers(appRef: $a) { app { id properties propertiesRevision } } }',
+      variables: { a: appId },
+    }, { contextValue: c });
+    if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
+    return res.body.singleResult;
+  };
+  beforeEach(async () => {
+    await set({ taskIntegrations: [integration()], notes: 'team-only' });
+    await db.ticker.create({ data: { tickCode: 'tick.props', appId, name: 'props', slug: 'props', cadenceSeconds: 600, ownerUserId: manager.id } });
+  });
+
+  it('an App member who is not an org member reads null through tickers { app }', async () => {
+    const out = await viaTickers(ctx(member.id));
+    expect(out.errors).toBeUndefined();
+    expect((out.data as any).tickers).toHaveLength(1);
+    expect((out.data as any).tickers[0].app).toMatchObject({ id: appId, properties: null, propertiesRevision: null });
+  });
+
+  it('an App key of the App (host key or not) reads null; an outsider reads null', async () => {
+    const key = await db.appKey.create({ data: { appId, label: 'Host', keyHash: generateId(), keyPreview: 'test' } });
+    for (const c of [ctx(undefined, { appId, appKeyId: key.id } as Partial<Context>), ctx(outsider.id)]) {
+      expect(await read(c)).toEqual({ properties: null, revision: null });
+    }
+  });
+
+  it('an org member, the org admin, an App owner-member and the user-owner read the value', async () => {
+    const reader = await db.user.create({ data: { handle: `props-${generateId()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: reader.id, role: 'READER' } });
+    for (const u of [reader.id, manager.id, owner.id]) {
+      const r = await read(ctx(u));
+      expect(r.revision).toBe(1);
+      expect(r.properties).toMatchObject({ notes: 'team-only' });
+    }
+    const out = await viaTickers(ctx(manager.id));
+    expect((out.data as any).tickers[0].app).toMatchObject({ propertiesRevision: 1, properties: { notes: 'team-only' } });
+    await set({ mine: true }, ctx(personalOwner.id), personalAppId);
+    expect(await read(ctx(personalOwner.id), personalAppId)).toEqual({ properties: { mine: true }, revision: 1 });
+    expect(await read(ctx(manager.id), personalAppId)).toEqual({ properties: null, revision: null });
+  });
+
+  it('setAppProperties returns an App its writer can read back, even an App owner-member outside the org', async () => {
+    const res = await apollo.executeOperation({
+      query: 'mutation($a: String!, $p: JSON) { setAppProperties(appRef: $a, properties: $p) { properties propertiesRevision } }',
+      variables: { a: appId, p: { notes: 'owner-wrote' } },
+    }, { contextValue: ctx(owner.id) });
+    if (res.body.kind !== 'single') throw new Error('unexpected incremental response');
+    expect(res.body.singleResult.errors).toBeUndefined();
+    expect((res.body.singleResult.data as any).setAppProperties).toEqual({ properties: { notes: 'owner-wrote' }, propertiesRevision: 2 });
   });
 });
