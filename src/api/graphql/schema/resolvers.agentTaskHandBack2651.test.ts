@@ -12,7 +12,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  *   couldn't-be-assigned alarm is raised once the App's window passes (S5).
  * - Refused, with nothing changed: a non-assignee, and a pending, backlog, finished or cancelled task; a code outside
  *   the set; text over the cap.
- * - A stall alarm raised before the hand-back does not survive it (its episode ends).
+ * - An ordinary stall alarm raised before the hand-back does not survive it (its episode ends); a finish-by episode is
+ *   kept (cor:agt:050:13; gate-owner disposition, Xan, PR #3104 comment 6556326061).
  * - A task with open children may be handed back; its children (and their owner) are untouched.
  * - A concurrent hand-back and finish: exactly one wins.
  */
@@ -131,6 +132,26 @@ describe('acceptance 1: the assignee hands back a started task (S1)', () => {
     expect(F.AgentTask.handBack(await row(t.id))).toMatchObject({ code: 'CANNOT_DO', text: null });
   });
 
+  it('a worker already excluded is not added twice (Joost P3)', async () => {
+    const t = await anneTask();
+    await db.agentTask.update({ where: { id: t.id }, data: { requirements: { excludeWorkerIds: [anne.id, rook.id] } } });
+    await asWorker(anne, () => handBack(t.id, { code: 'CANNOT_DO' }));
+    expect((await row(t.id)).requirements).toEqual({ excludeWorkerIds: [anne.id, rook.id] });
+  });
+
+  it('reason text is trimmed, and blank text is stored as none (Joost P3)', async () => {
+    const a = await anneTask();
+    await asWorker(anne, () => handBack(a.id, { code: 'CANNOT_DO', text: '   ' }));
+    expect(F.AgentTask.handBack(await row(a.id))).toMatchObject({ code: 'CANNOT_DO', text: null });
+    const b = await anneTask();
+    await asWorker(anne, () => handBack(b.id, { code: 'CANNOT_DO', text: `  needs the API key \n` }));
+    expect((await row(b.id)).handBackReasonText).toBe('needs the API key');
+    // The cap is judged after trimming: 2,000 characters padded with blanks is accepted.
+    const c = await anneTask();
+    await asWorker(anne, () => handBack(c.id, { code: 'CANNOT_DO', text: ` ${'z'.repeat(2000)} ` }));
+    expect((await row(c.id)).handBackReasonText).toHaveLength(2000);
+  });
+
   it('a person who hands a task back is not excluded (the platform assigns only workers)', async () => {
     const t = await M.createAgentTask({}, { input: { appRef: app.id, title: 'Read the contract', assignee: { user: mia.id } } }, ctx(mia.id));
     await M.startAgentTask({}, { taskId: t.id }, ctx(mia.id));
@@ -229,7 +250,8 @@ describe('acceptance 3: refused, nothing changed', () => {
     expect(await snapshot(t.id)).toEqual(before);
   });
 
-  it.each(['bored', 'missing_input', '', 'MISSING INPUT'])('a code outside the set (%j), and the task stays started (S4)', async (code) => {
+  // 'BORED' passes the name shape, so only the closed-set check refuses it (Riana §10 P3-1, Atilla P3-1).
+  it.each(['bored', 'BORED', 'missing_input', '', 'MISSING INPUT'])('a code outside the set (%j), and the task stays started (S4)', async (code) => {
     const t = await anneTask();
     const before = await snapshot(t.id);
     await expectCode(asWorker(anne, () => handBack(t.id, { code })), 'BAD_USER_INPUT');
@@ -247,6 +269,27 @@ describe('acceptance 3: refused, nothing changed', () => {
 });
 
 describe('acceptance 4: a raised stall alarm does not survive the hand-back (cor:agt:050:13)', () => {
+  it('a raised finish-by episode is KEPT across the hand-back, and no couldn\'t-be-assigned alarm follows (Xan disposition, PR #3104)', async () => {
+    const t = await anneTask();
+    const startedAt = (await row(t.id)).startedAt!;
+    const finishBy = new Date(startedAt.getTime() + 5 * MIN);
+    await db.agentTask.update({ where: { id: t.id }, data: { finishBy } });
+    await taskStallTick(db, new Date(finishBy.getTime() + MIN));
+    const alarm = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'stall.finish-by' } });
+    const key = alarmEpisodeKey(t.id, alarm.type, alarm.episodeStart!);
+    const probe = [{ taskId: t.id, type: alarm.type, episodeStart: alarm.episodeStart }];
+    await asWorker(anne, () => handBack(t.id, { code: 'MISSING_INPUT' }));
+    const after = await row(t.id);
+    expect(after).toMatchObject({ status: 'pending', assigneeWorkerId: null, finishBy });
+    // Still the same episode while the task is pending: the hand-back neither ends nor restarts it.
+    const queuedAt = (await events(t.id)).filter((e) => e.type === 'assignment.queued').at(-1)!.createdAt;
+    expect(await currentAlarmEpisodes(db, probe, new Date(finishBy.getTime() + 2 * MIN))).toContain(key);
+    // A task with a finish-by time follows only the finish-by rule, so the queued task raises no unassignable alarm.
+    await taskStallTick(db, new Date(queuedAt.getTime() + 31 * MIN));
+    expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'assignment.unassignable' } })).toBe(0);
+    expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'stall.finish-by' } })).toBe(1);
+  });
+
   it('the no-progress episode ends with the hand-back', async () => {
     const t = await anneTask();
     const startedAt = (await row(t.id)).startedAt!;

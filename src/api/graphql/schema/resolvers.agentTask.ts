@@ -1864,9 +1864,12 @@ export const agentTaskMutations = {
    * a returning WORKER added to `requirements.excludeWorkerIds` so the matcher never gives it back to that worker
    * (cor:agt:060:06); a person is not added, since the platform assigns only workers. The reason code (closed set)
    * rides the `task.handed-back` event; the optional text is stored on the task only (cor:agt:050:01, :11). No result
-   * is written, and the task's children are left untouched (cor:agt:050:07). Leaving `started` ends every stall
-   * episode the task had (cor:agt:050:13): no not-started or no-progress rule holds for a queued task, and the
-   * `assignment.queued` appended here starts the unassignable rule's new episode.
+   * is written, and the task's children are left untouched (cor:agt:050:07). Leaving `started` ends every ORDINARY
+   * stall episode the task had (cor:agt:050:13): no not-started or no-progress rule holds for a queued task, and the
+   * `assignment.queued` appended here starts the unassignable rule's new episode. A finish-by episode is KEPT: the
+   * hand-back keeps `finishBy`, and a task with a finish-by time follows only the finish-by rule (:13, :14), whose
+   * episode runs until the task ends or the time is edited (gate-owner disposition, Xan, PR #3104 comment
+   * 6556326061; the :29 vs :13 reconciliation is Vera's).
    *
    * Concurrency: `mutateTask` takes the assignee's per-worker lock and the task row `FOR UPDATE` before this judges
    * anything, so a concurrent finish (which takes the same locks) runs strictly before or after; the loser reads the

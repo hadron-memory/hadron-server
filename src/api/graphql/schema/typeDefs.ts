@@ -10288,8 +10288,8 @@ export const typeDefs = `#graphql
     returning worker is added to requirements.excludeWorkerIds, so the platform's matcher assigns it to another
     matching worker (hrn:node:hadronmemory.com:specs:cor:agt:060:06), and whoever may assign the task can remove
     that exclusion. A person who hands a task back is not added. One task.handed-back event carries the code only; no
-    result is written; child tasks are untouched; every stall episode the task had ends
-    (hrn:node:hadronmemory.com:specs:cor:agt:050:13). taskRef is the task's id or handle. Refusals: TASK_NOT_FOUND,
+    result is written; child tasks are untouched; every ordinary stall episode the task had ends, while a finish-by
+    episode is kept until the task ends or its finish-by time is edited (hrn:node:hadronmemory.com:specs:cor:agt:050:13). taskRef is the task's id or handle. Refusals: TASK_NOT_FOUND,
     TASK_NOT_ASSIGNEE (anyone else, or a task with no assignee), TASK_ENDED (finished or cancelled),
     TASK_INVALID_TRANSITION (pending), BAD_USER_INPUT (a code outside the set, or text over 2,000 characters),
     SESSION_NOT_BOUND, APP_UNINSTALLED. Nothing changes on a refusal.
