@@ -9,7 +9,7 @@ import type { Context } from './resolvers.helpers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const M = resolvers.Mutation as any;
-const context = (userId: string, roles: string[] = []): Context => ({ db, userId, roles, clientId: `user:${userId}` });
+const context = (userId: string, roles: Context['roles'] = []): Context => ({ db, userId, roles, clientId: `user:${userId}` });
 beforeEach(async () => { await cleanDb(db); });
 afterEach(() => vi.restoreAllMocks());
 
