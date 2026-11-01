@@ -27,7 +27,10 @@ async function expectNameOnly(call: () => Promise<unknown>) {
   const err = await call().then(() => null, (e: unknown) => e as Error);
   expect(err).toBeInstanceOf(Error);
   expect(err!.message).toBe('mail provider send failed: NetworkFault');
-  expect(JSON.stringify([err!.message, err!.stack, (err as { cause?: unknown }).cause])).not.toContain(RECIPIENT);
+  // `cause` is asserted directly: JSON.stringify of an Error drops its message, so scanning a serialized cause
+  // proves nothing (§10 Rico, #3155: a regression attaching the SDK error as the cause passed every pin).
+  expect((err as { cause?: unknown }).cause).toBeUndefined();
+  expect(JSON.stringify([err!.message, err!.stack])).not.toContain(RECIPIENT);
   expect(err!.message).not.toContain('ECONNRESET');
 }
 
