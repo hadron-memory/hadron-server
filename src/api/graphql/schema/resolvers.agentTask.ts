@@ -116,7 +116,7 @@ import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/ma
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
-import { normalizeExternalId, normalizeTaskReferences, referenceKind, storedTaskReferences, REFERENCE_KIND_TO_GQL, TaskReferenceError, TASK_EXTERNAL_ID_MAX, TASK_REFERENCE_TARGET_MAX, type TaskReference } from '../../../lib/agentTasks/references.js';
+import { checkExternalIdText, normalizeExternalId, normalizeTaskReferences, referenceKind, storedTaskReferences, REFERENCE_KIND_TO_GQL, TaskReferenceError, TASK_EXTERNAL_ID_MAX, TASK_REFERENCE_TARGET_MAX, type TaskReference } from '../../../lib/agentTasks/references.js';
 import { isUniqueViolationOn } from '../../../auth/userProvision.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
@@ -2135,8 +2135,13 @@ export const agentTaskQueries = {
     if (args.source != null) filters.push({ source: args.source });
     if (args.externalId != null) {
       // #3125 S2: after the App read gate above, so it only narrows tasks the caller may already read. Exact match.
-      if (typeof args.externalId !== 'string' || args.externalId.length < 1 || args.externalId.length > TASK_EXTERNAL_ID_MAX) {
-        throw badInput(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+      // Fix head 1: the same character count and surrogate check as the create (checkExternalIdText).
+      if (typeof args.externalId !== 'string') throw badInput(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+      try {
+        checkExternalIdText(args.externalId);
+      } catch (e) {
+        if (e instanceof TaskReferenceError) throw badInput(e.message);
+        throw e;
       }
       filters.push({ externalId: args.externalId });
     }
