@@ -56,7 +56,7 @@ function deps(opts: { noConfig?: boolean } = { noConfig: true }) {
   const llmObject = vi.fn();
   const llmTools = vi.fn();
   const resolveConfig = vi.fn(async () => {
-    if (opts.noConfig) throw new NoAiConfigAvailableError('no AI configuration');
+    if (opts.noConfig) throw new NoAiConfigAvailableError('default', 'this run');
     return { config: { provider: 'anthropic', model: 'test' } } as never;
   });
   const d: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig, llm, llmObject, llmTools, onTerminal: undefined };
