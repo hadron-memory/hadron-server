@@ -208,13 +208,18 @@ describe('references refusals write nothing (#2649)', () => {
   ];
   it.each(malformed)('create refuses %s target %j with BAD_USER_INPUT and makes no task', async (kind, target) => {
     const before = await db.agentTask.count();
-    await expect(create({ references: [{ kind: 'ISSUE', target: ISSUE }, { kind, target }] })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    const err = await create({ references: [{ kind: 'ISSUE', target: ISSUE }, { kind, target }] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    // Rodolfo's §10 P3-1: the refusal names the item's position, never its text.
+    if (target.trim()) expect((err as Error).message).not.toContain(target.trim());
     expect(await db.agentTask.count()).toBe(before);
   });
 
   it.each(malformed)('edit refuses %s target %j with BAD_USER_INPUT and changes nothing', async (kind, target) => {
     const t = await create({ references: three, title: 'Keep' });
-    await expect(edit(t.id, { title: 'Changed', references: [{ kind, target }] })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    const err = await edit(t.id, { title: 'Changed', references: [{ kind, target }] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    if (target.trim()) expect((err as Error).message).not.toContain(target.trim());
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }) as any;
     expect(row.title).toBe('Keep');
     expect(row.references).toHaveLength(3);
