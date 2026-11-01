@@ -235,6 +235,32 @@ describe('#2766 admission is unchanged: the census treats the cast\'s own events
     await expect(M.deleteWorker({}, { workerRef: caster.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
   });
 
+  // #2788: isolate the event's subject column: no current reports-to edge or payload id may mask a widened exemption.
+  it('worker.reports-to history about a worker is use, not subject-side self-bookkeeping', async () => {
+    const w = await cast(ctxOf(admin.id), 'Iris');
+    const event = await db.agentTeamEvent.create({ data: {
+      appId: app.id, type: 'worker.reports-to', actorUserId: admin.id, subjectWorkerId: w.id,
+      payload: { from: null, to: null, setBy: 'app-manager' },
+    } });
+    expect(event.actorWorkerId).toBeNull();
+    await expect(M.deleteWorker({}, { workerRef: w.id, confirmNoExternalAttribution: true }, ctxOf(admin.id)))
+      .rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+    expect(await db.worker.count({ where: { id: w.id } })).toBe(1);
+  });
+
+  // #2788: isolate the actor column: a non-staffing event about ANOTHER worker is still this actor's history.
+  it('a non-staffing event performed by a worker is use, not actor-side staffing bookkeeping', async () => {
+    const subject = await cast(ctxOf(admin.id), 'Iris');
+    const event = await db.agentTeamEvent.create({ data: {
+      appId: app.id, type: 'worker.reports-to', actorUserId: admin.id, actorWorkerId: caster.id, actorAgentId: agentId,
+      subjectWorkerId: subject.id, payload: { from: null, to: null, setBy: 'app-manager' },
+    } });
+    expect(event.subjectWorkerId).not.toBe(caster.id);
+    await expect(M.deleteWorker({}, { workerRef: caster.id, confirmNoExternalAttribution: true }, ctxOf(admin.id)))
+      .rejects.toMatchObject({ extensions: { code: 'WORKER_IN_USE' } });
+    expect(await db.worker.count({ where: { id: caster.id } })).toBe(1);
+  });
+
   it('a NULL-subject staffing-typed event that names the worker in its payload still counts (null-safe exclusion)', async () => {
     const w = await cast(ctxOf(admin.id), 'Iris');
     await db.agentTeamEvent.create({ data: { appId: app.id, type: 'worker.cast', actorUserId: admin.id, subjectWorkerId: null, payload: { workerId: w.id } } });
