@@ -1509,6 +1509,12 @@ export const nodeQueries = {
        * filtered, floored hits fill the page, or the provider reports its raw
        * candidate window exhausted.
        * Past the cap a page can still be short; it is never wrong.
+       *
+       * #2836 review (Atilla P2): the check runs on EVERY vector search, not
+       * only with explicit filters. Without a nodeType the unqualified-search
+       * default exclusion (system, chat-message) still drops hits at hydration,
+       * and an older chat-message vector can fill an unfiltered window. The
+       * first window keeps its size (`fetchN`); it widens only when short.
        */
       const widenVectorWindow = async <T extends { nodeId: string; score: number }>(
         search: (limit: number, onWindow: (w: { exhausted: boolean }) => void) => Promise<T[]>,
@@ -1522,7 +1528,7 @@ export const nodeQueries = {
           // exhausted, so an unknown provider widens to the cap.
           let exhausted = false;
           const hits = await search(limit, (w) => { exhausted = w.exhausted; });
-          if (!hasStructuredFilters || limit >= VECTOR_FETCH_CAP || exhausted) return hits;
+          if (limit >= VECTOR_FETCH_CAP || exhausted) return hits;
           const floored = scoreFloor == null ? hits : hits.filter((h) => h.score >= scoreFloor);
           const ok = await eligibleIds([...new Set(floored.map((h) => h.nodeId))]);
           if (floored.filter((h) => ok.has(h.nodeId)).length >= page) return hits;

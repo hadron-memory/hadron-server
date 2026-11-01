@@ -114,10 +114,23 @@ describe('findNodes leaves chat-message nodes out of unqualified search (cor:api
     expect(locs(res)).toEqual([BOT_ROOT, BOT_MSG]);
   });
 
+  it('vector: older message vectors that outrank every eligible node never empty a small page', async () => {
+    // The two messages keep the query vector (similarity 1); every other node
+    // moves to an orthogonal one, so the messages fill the first ANN window.
+    // The default exclusion must widen that window like an explicit filter.
+    const ortho = new Array(DIM).fill(0); ortho[2] = 1;
+    for (const n of await db.node.findMany({ where: { memoryId: memory.id, nodeType: { not: 'chat-message' }, deletedAt: null } })) {
+      await upsertAbstractVector(db as any, { nodeId: n.id, memoryId: memory.id, provider: 'test', model: 'stub-model', dim: DIM, embedding: ortho });
+    }
+    const res = await findNodes({ query: 'harbor', mode: 'vector', filter: { memoryIds: [memory.id] }, limit: 1 });
+    expect(res.hits).toHaveLength(1);
+    expect(MSG_LOCS).not.toContain(res.hits[0].node.loc);
+  });
+
   it('the browse total counts what the page can show', async () => {
-    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: `${CHAT_ROOT}` }, limit: 50 });
+    const res = await findNodes({ filter: { memoryIds: [memory.id], locPrefix: `${CHAT_ROOT}` }, includeTotal: true, limit: 50 });
     expect(locs(res)).toEqual([CHAT_ROOT]);
-    if (res.total != null) expect(res.total).toBe(1);
+    expect(res.total).toBe(1);
   });
 
   it.each(MODES)('%s: explicit nodeType chat-message returns them', async (_m, args) => {
