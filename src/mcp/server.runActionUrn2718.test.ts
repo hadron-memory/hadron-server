@@ -223,6 +223,47 @@ describe('#2718 — hadron_run_action by action URN', () => {
     }
   });
 
+  describe('the final fetch is pinned to the GATED memory and the live row (post-gate interleaving)', () => {
+    /** Run `mutate` once, right BEFORE the run's final node fetch (the one carrying the dependency edges), i.e. after every gate passed. */
+    async function runWithInterleave(as: string, urn: string, mutate: () => Promise<unknown>) {
+      const real = db.node.findUnique.bind(db.node) as (a: any) => Promise<unknown>;
+      let fired = false;
+      const spy = vi.spyOn(db.node, 'findUnique').mockImplementation((async (a: any) => {
+        if (a?.include?.outgoingEdges && !fired) { fired = true; await mutate(); }
+        return real(a);
+      }) as any);
+      try {
+        const text = await run(as, urn);
+        expect(fired, 'interleave fired').toBe(true);
+        return text;
+      } finally {
+        spy.mockRestore();
+      }
+    }
+
+    it('does not serve a node moved, after the gate, to a memory the caller cannot read', async () => {
+      const entry = await registerEntry(memoryId, CODE);
+      await installForOutsider();
+      const dest = await db.memory.create({
+        data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:run-dest`, name: 'run-dest', class: 'knowledge', visibility: 'ORGANIZATION' },
+      });
+      const urn = actionUrn(agent.urn, CODE);
+      const text = await runWithInterleave(outsider.id, urn, () =>
+        db.node.update({ where: { id: entry.id }, data: { memoryId: dest.id, content: 'DEST-ONLY-CONTENT' } }));
+      expect(text).toBe(notFound(urn));
+      expect(text).not.toContain('DEST-ONLY-CONTENT');
+    });
+
+    it('does not serve a node soft-deleted after the gate', async () => {
+      const entry = await registerEntry(memoryId, CODE);
+      const urn = actionUrn(agent.urn, CODE);
+      const text = await runWithInterleave(admin.id, urn, () =>
+        db.node.update({ where: { id: entry.id }, data: { deletedAt: new Date() } }));
+      expect(text).toBe(notFound(urn));
+      expect(text).not.toContain('RUN-BODY-2718');
+    });
+  });
+
   it('still refuses a non-action, non-node URN with the qualification message', async () => {
     const text = await run(admin.id, 'not-a-urn');
     expect(text).not.toContain('RUN-BODY-2718');

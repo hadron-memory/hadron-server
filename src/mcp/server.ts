@@ -8550,7 +8550,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     entry: { id: string; memoryId: string },
   ): Promise<{ node: RunNode; loc: string } | { error: string }> {
     if (!(await canReadMemory(db, auth, entry.memoryId))) return { error: 'Node not readable.' };
-    const node = await findRunNode({ id: entry.id });
+    // Pin the fetch to the GATED memory and the live row: an id-only fetch
+    // after the gate would serve a node moved away or soft-deleted in between.
+    const node = await findRunNode({
+      id: entry.id,
+      memoryId: entry.memoryId,
+      deletedAt: null,
+    });
     if (!node) return { error: 'Node not found.' };
     return { node, loc: node.loc };
   }
