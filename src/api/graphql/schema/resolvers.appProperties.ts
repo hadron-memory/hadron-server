@@ -61,7 +61,7 @@ export async function writeAppProperties(
     let next: Prisma.InputJsonObject | null = null;
     if (rawProperties !== null && rawProperties !== undefined) {
       const shaped = checkAppPropertiesShape(rawProperties);
-      if (TASK_INTEGRATIONS_KEY in shaped) {
+      if (Object.hasOwn(shaped, TASK_INTEGRATIONS_KEY)) {
         // #3125 Ask 5: task integrations reach GitHub through the organization's installation; an App with no
         // organization has none, so it may not hold them (Holger may veto).
         if (!fresh.organizationId) {

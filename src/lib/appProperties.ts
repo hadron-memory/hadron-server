@@ -7,6 +7,7 @@
  * the App gets the same refusal whatever the object holds):
  *   1. a JSON object (or null to clear)                         → PROPERTIES_NOT_AN_OBJECT
  *   2. at most 64 levels deep and 16 KiB of canonical JSON      → PROPERTIES_TOO_LARGE (names the path)
+ *   2a. no key named `__proto__`, at any depth                  → PROPERTIES_KEY_RESERVED (names the path)
  *   3. `taskIntegrations` only on an App with an organization   → TASK_INTEGRATION_ORG_REQUIRED (#3125 Ask 5)
  *   4. `taskIntegrations` well-formed                           → TASK_INTEGRATION_INVALID (names the path)
  * A refusal names a JSON path, never a value (V47).
@@ -69,7 +70,26 @@ function tooDeepPath(value: object, max: number): string | null {
   return null;
 }
 
-/** Checks 1 and 2. */
+/**
+ * The path of the first object key named `__proto__`, at any depth; null when none is. PR #3131 blind P2: the Prisma
+ * JSON writer drops such an own key, so the row would silently store something other than what was sent (and a
+ * write of `{"__proto__": ...}` would bump the revision for an unchanged `{}`). Refused instead of stored lossily.
+ */
+function reservedKeyPath(value: object): string | null {
+  const stack: Array<[object, string]> = [[value, '']];
+  while (stack.length > 0) {
+    const [node, path] = stack.pop() as [object, string];
+    for (const k of Object.keys(node)) {
+      const at = Array.isArray(node) ? `${path}[${k}]` : path === '' ? k : `${path}.${k}`;
+      if (!Array.isArray(node) && k === '__proto__') return at;
+      const child = (node as Record<string, unknown>)[k];
+      if (child !== null && typeof child === 'object') stack.push([child, at]);
+    }
+  }
+  return null;
+}
+
+/** Checks 1, 2 and 2a. */
 export function checkAppPropertiesShape(value: unknown): Prisma.InputJsonObject {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw refusal('PROPERTIES_NOT_AN_OBJECT', 'properties must be a JSON object (or null to clear them).');
@@ -80,6 +100,10 @@ export function checkAppPropertiesShape(value: unknown): Prisma.InputJsonObject 
   }
   if (Buffer.byteLength(canonicalJson(value), 'utf8') > APP_PROPERTIES_MAX_BYTES) {
     throw refusal('PROPERTIES_TOO_LARGE', `properties may hold at most ${APP_PROPERTIES_MAX_BYTES} bytes of JSON.`, '');
+  }
+  const reserved = reservedKeyPath(value);
+  if (reserved !== null) {
+    throw refusal('PROPERTIES_KEY_RESERVED', `properties.${reserved}: the key __proto__ cannot be stored. Nothing was changed.`, reserved);
   }
   return value as Prisma.InputJsonObject;
 }
@@ -166,12 +190,16 @@ export async function normalizeTaskIntegrations(raw: unknown, resolveLead: LeadR
   return out;
 }
 
-/** The top-level keys whose value differs between two objects (null = none), sorted. Values never leave here. */
+/**
+ * The top-level keys whose value differs between two objects (null = none), sorted. Values never leave here.
+ * OWN keys only (PR #3131 blind P2): `in` and a plain lookup see Object.prototype, so a JSON key named `__proto__`
+ * would read as present on an empty object and its write or removal would be dropped as a no-op.
+ */
 export function changedTopLevelKeys(before: Record<string, unknown> | null, after: Record<string, unknown> | null): string[] {
   const a = before ?? {}, b = after ?? {};
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   return [...keys]
-    .filter((k) => !(k in a) || !(k in b) || canonicalJson(a[k]) !== canonicalJson(b[k]))
+    .filter((k) => !Object.hasOwn(a, k) || !Object.hasOwn(b, k) || canonicalJson(a[k]) !== canonicalJson(b[k]))
     .sort();
 }
 

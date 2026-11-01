@@ -229,6 +229,39 @@ describe('#3125 S1 expected revision (V34)', () => {
     await set(null, ctx(manager.id), appId, 2);
     expect((await stored()).propertiesRevision).toBe(2);
   });
+
+  // PR #3131 blind P2 (Atilla): change detection must look at OWN keys only. With `in`, a prototype-named key read as
+  // present on an empty object, so its write or removal was dropped as a no-op.
+  for (const key of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__defineGetter__']) {
+    it(`a top-level key named ${key} is stored, bumps the revision and records an event, on write and on removal`, async () => {
+      const value = JSON.parse(`{"${key}": {}}`); // own key, as a GraphQL variable or MCP JSON arrives
+      await set(value);
+      const after = await stored();
+      expect(after.propertiesRevision).toBe(1);
+      expect(JSON.stringify(after.properties)).toBe(`{"${key}":{}}`);
+      await set({}, ctx(manager.id), appId, 1);
+      expect(await stored()).toEqual({ properties: null, propertiesRevision: 2 });
+      expect((await events()).map((r) => (r.payload as any).keys)).toEqual([[key], [key]]);
+    });
+  }
+
+  // The Prisma JSON writer drops an own `__proto__` key, so it could never be stored as sent: refused at any depth,
+  // naming the path, nothing written and no event. A non-manager still gets the manager-gate refusal first.
+  for (const [json, path] of [
+    ['{"__proto__": {}}', '__proto__'],
+    ['{"a": {"b": [1, {"__proto__": 1}]}}', 'a.b[1].__proto__'],
+    ['{"taskIntegrations": [], "__proto__": null}', '__proto__'],
+  ] as const) {
+    it(`refuses a key named __proto__ (${path}) with PROPERTIES_KEY_RESERVED and writes nothing`, async () => {
+      await set({ keep: 1 });
+      const e = await refused(set(JSON.parse(json), ctx(manager.id), appId, 1), 'PROPERTIES_KEY_RESERVED', path);
+      expect(e.message).not.toMatch(/"/);
+      expect(await stored()).toEqual({ properties: { keep: 1 }, propertiesRevision: 1 });
+      expect(await events()).toHaveLength(1);
+      const other = await set(JSON.parse(json), ctx(member.id)).then(() => null, (err) => err);
+      expect(other?.extensions?.code).not.toBe('PROPERTIES_KEY_RESERVED');
+    });
+  }
 });
 
 describe('#3125 S1 audit event (V43)', () => {
