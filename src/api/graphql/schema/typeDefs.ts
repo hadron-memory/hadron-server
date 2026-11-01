@@ -550,7 +550,7 @@ export const typeDefs = `#graphql
   server-attributed — a platform entity, created one-to-one with its chat root.
   Creating it RESERVES and PROTECTS the address: generic node writes under it
   are refused (LOC_PROTECTED); its own operations (createTeamChatMessage,
-  hadron_team_chat_post) are the only writers. The audience is the host
+  the CLI hadron team chat post / channel post) are the only writers. The audience is the host
   memory's (cor:acl:030:01) — a Channel has no access layer of its own.
   \`lastSeq\` / \`lastMessageAt\` are the platform-maintained watermark.
   """

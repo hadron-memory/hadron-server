@@ -9559,7 +9559,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (claimRefused) {
         return textResult(
           `No resume claim was written, so the session is STILL OPEN and was not ended: a claim needs your own open worker session. ` +
-            'End it without resumeClaim, or start the next stint by naming the worker.',
+            'End it without resumeClaim, or use hadron team session start --as <worker-URN> --tool <tool> for the next stint.',
         );
       }
 
@@ -9610,7 +9610,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let claimNote = '';
       if (resumeClaim && auth.userId && session.workerId && session.appId) {
         const { expiresAt } = await writeResumeClaim(db, { sessionId: id, appId: session.appId, workerId: session.workerId, holderUserId: auth.userId });
-        claimNote = `\nResume claim written: the next context recovers this worker with hadron_resume_session (no arguments) until ${expiresAt.toISOString()} (60 seconds, once).`;
+        claimNote = `\nResume claim written: the next context recovers this worker with hadron team session start (no --as) until ${expiresAt.toISOString()} (60 seconds, once).`;
       }
 
       // FIRST END WINS, through the SHARED writer the GraphQL resolver uses
@@ -9851,7 +9851,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         // identifier cannot disagree.
         const url = workerPortalUrl(urn);
         return (
-          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to team tools)' : ' (session id)'}\n` +
+          `- session ${s.id}${s.endedAt ? ' [ENDED]' : ''}${s.workerId ? ' (worker session id; pass as `session` to core MCP tools for attribution)' : ' (session id)'}\n` +
           (s.endedAt ? `    ended: ${s.endedAt.toISOString()} · end reason: ${sessionEndReason(s)}\n` : '') +
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
@@ -9893,11 +9893,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // one (SESSION_NOT_WORKER_BOUND) — so unconditional "post as the
           // worker" advice contradicts the "working as: nobody" row directly
           // above it, and promises a call that cannot succeed.
-          'Pass a row that is BOUND and still OPEN to hadron_team_chat_post to post AS that worker — an ' +
-          'unbound row is refused SESSION_NOT_WORKER_BOUND and an [ENDED] one SESSION_ENDED, neither ' +
-          'silently posted as you. Any session id works for ' +
-          'hadron_record_work and hadron_end_session. Re-fetch a worker\'s boot briefing with hadron_get_worker. ' +
-          'A bound row is a worker session. One created by hadron_start_session has no hard expiry and ' +
+          'For core MCP attribution, pass a BOUND, OPEN, live session as `session`; an [ENDED] one cannot attribute. ' +
+          'For team work use hadron team chat post and hadron team session log; re-fetch a worker briefing with hadron team worker get. ' +
+          'End a session with hadron_end_session. MCP cannot bind or resume a worker: use hadron team session start. ' +
+          'A bound row is a worker session. One created by the CLI worker-session path has no hard expiry and ' +
           'stays open until hadron_end_session, no matter what happened to the chat session that started ' +
           'it. A session created elsewhere with a non-null hard expiry can also be ended by the reaper ' +
           'when that deadline passes. While open and recently active ' +
@@ -13162,13 +13161,13 @@ const SHAPE_HADRON_START_SESSION = {
   customerId: z.string().optional().describe('Customer ID for chatbot sessions'),
   language: z.string().optional().describe('Programming language'),
   llmModel: z.string().optional().describe('LLM model being used'),
-  family: z.string().optional().describe('The model family this session runs as (cor:agt:060:04), e.g. claude, codex or glm. Omit to derive it from llmModel; a session nothing classifies gets no family, and its worker is not matched to queued tasks until one is given. A matching input only, never authorization.'),
+  family: z.string().optional().describe('The model family of this plain session (cor:agt:060:04), e.g. claude, codex or glm. Omit to derive it from llmModel. Never authorization.'),
   parentSessionId: z.string().optional().describe('Parent session ID'),
   prevSessionId: z.string().optional().describe('Previous session ID'),
-  workerRef: z.string().optional().describe('The Worker (named casting) this session works as. Three forms resolve: the worker\'s NAME ("Iris" — unique within the App, case-insensitive, and what a human will say), its URN (hrn:worker:<root>:<app-slug>:<slug>), or its bare id. Prefer the name for a human-driven pickup; the URN when addressing a worker across App context. Must belong to this App; stamps the session\'s agentId from the casting and returns the worker\'s boot briefing.'),
-  reportsTo: z.string().optional().describe('#1726 — the worker this worker reports to (its name in this App, URN or id), set in the same step as the bind, as a spawn brief would. Sets it only when the worker reports to nobody, or already to that worker; naming a different one refuses the bind (WORKER_REPORTS_TO_HELD) unless you manage the App. Omit to leave it unchanged.'),
-  force: z.boolean().optional().describe('Take over a WORKER_TAKEN worker — one someone drove RECENTLY (#1114: a merely-open session no longer refuses, so if you are seeing this refusal the session is live rather than just unclosed). That open session may be someone else\'s live work, or your own left behind by a chat session that ended without ending it (ending a chat session never ends a worker session); the server cannot tell which, so neither should you assume. Use only on the user\'s explicit override, after showing who last drove it.'),
-  launchGrant: z.string().optional().describe('#1709: the single-use launch grant your host gave you when it started you (cor:agt:070:08). Pass it with your holder\'s own credential; it binds the worker it names, so workerRef may be omitted. It cannot be combined with force.'),
+  workerRef: z.string().optional().describe('MCP worker binding is unsupported. A nonblank worker reference returns MCP_WORKER_BINDING_UNSUPPORTED before any lookup or write. Bind with hadron team session start --as <worker-URN> --tool <tool>. Omit for a plain session.'),
+  reportsTo: z.string().optional().describe('Worker reporting lines belong to the CLI worker-session path. MCP cannot bind a worker; omit for a plain session.'),
+  force: z.boolean().optional().describe('MCP cannot take over a worker. A workerRef or launchGrant is refused MCP_WORKER_BINDING_UNSUPPORTED even with force:true; force alone never binds a worker.'),
+  launchGrant: z.string().optional().describe('MCP worker binding is unsupported. Supplying this parameter, including an empty string, returns MCP_WORKER_BINDING_UNSUPPORTED before grant lookup or consumption. Redeem host launch grants through the CLI worker-session path.'),
 };
 
 const SHAPE_HADRON_CREATE_RESUME_CLAIM = {

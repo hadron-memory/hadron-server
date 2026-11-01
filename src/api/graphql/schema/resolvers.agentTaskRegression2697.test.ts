@@ -51,11 +51,10 @@ beforeEach(async () => {
   otherKeyId = (await db.appKey.create({ data: { appId: otherAppId, keyHash: `h-${generateId()}`, keyPreview: 'other' } })).id;
 });
 
-async function surfaces(auth: AuthContext, run: (api: ApolloServer<Context>, client: Client) => Promise<void>) {
+async function surfaces(_auth: AuthContext, run: (api: ApolloServer<Context>) => Promise<void>) {
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
   await api.start();
-  try {
-  } finally { await api.stop(); }
+  try { await run(api); } finally { await api.stop(); }
 }
 
 const query = `query($app:ID!,$source:String,$after:DateTime){
@@ -92,8 +91,14 @@ it.each(['foreign key', 'revoked key', 'removed member'] as const)('%s conceals 
     ? { userId, clientId: `user:${userId}`, roles: ['READER'] } : keyAuth(mode !== 'foreign key');
   const admittedRef = mode === 'foreign key' ? otherAppId : appId;
   const admittedId = mode === 'foreign key' ? foreign.id : own.id;
-  // The same MCP identity must list its admitted App before its denial can prove concealment.
-  await surfaces(auth, async (_api, client) => {
+  // The same authenticated GraphQL identity must first read its admitted App.
+  await surfaces(auth, async api => {
+    const admitted = await api.executeOperation({ query, variables: { app: admittedRef, source: '', after: at(1).toISOString() } }, { contextValue: { db, ...auth } as Context });
+    expect(admitted.body.kind).toBe('single');
+    if (admitted.body.kind === 'single') {
+      expect(admitted.body.singleResult.errors).toBeUndefined();
+      expect((admitted.body.singleResult.data as any).agentTasks.map((row: any) => row.id)).toEqual([admittedId]);
+    }
   });
   let c: Context;
   if (mode === 'foreign key') c = keyContext(false);
@@ -111,7 +116,7 @@ it.each(['foreign key', 'revoked key', 'removed member'] as const)('%s conceals 
       });
     }
   }
-  await surfaces(auth, async (api, client) => {
+  await surfaces(auth, async (api) => {
     for (const ref of [appId, generateId()]) {
       // Calendar-invalid ISO is accepted by the global DateTime scalar, so this reaches the resolver gate.
       const gql = await api.executeOperation({ query, variables: { app: ref, source: '', after: invalidCalendar } }, { contextValue: c });
@@ -119,6 +124,7 @@ it.each(['foreign key', 'revoked key', 'removed member'] as const)('%s conceals 
       if (gql.body.kind !== 'single') throw new Error('expected single GraphQL response');
       expect(gql.body.singleResult.data).toBeNull();
       expect(gql.body.singleResult.errors).toMatchObject([{ message: 'App not found.', extensions: { code: 'APP_NOT_FOUND' } }]);
+
     }
   });
 });
@@ -156,18 +162,19 @@ it('pins overdue against one PostgreSQL instant even when both JS Date clocks ar
   });
 });
 
-it('uses identical positive filter arguments and identities on resolver, GraphQL', async () => {
+it('uses identical positive filter arguments and identities on resolver and GraphQL', async () => {
   const wanted = await task('own empty source', { source: '', tags: ['red', 'blue'], createdAt: at(3) });
   await task('wrong source', { source: 'not-empty', tags: ['red', 'blue'], createdAt: at(3) });
   const foreign = await task('foreign exact match', { appId: otherAppId, source: '', tags: ['red', 'blue'], createdAt: at(3) });
   const args = { ...compound, createdAfter: at(3).toISOString() };
   expect(ids(await list(args))).toEqual([wanted.id]);
-  await surfaces({ userId, roles: ['READER'], clientId: `user:${userId}` }, async (api, client) => {
+  await surfaces({ userId, roles: ['READER'], clientId: `user:${userId}` }, async (api) => {
     const gql = await api.executeOperation({ query, variables: { app: appId, source: args.source, after: args.createdAfter } }, { contextValue: userContext() });
     expect(gql.body.kind).toBe('single');
     if (gql.body.kind !== 'single') throw new Error('expected single GraphQL response');
     expect(gql.body.singleResult.errors).toBeUndefined();
     expect(gql.body.singleResult.data).toEqual({ agentTasks: [{ id: wanted.id, title: wanted.title }] });
+
   });
 });
 
@@ -178,7 +185,7 @@ it('characterizes compact offsets and typed date refusals without changing the p
   expect(Number.isFinite(new Date(compact).getTime())).toBe(true); // Conversion alone is insufficient.
   for (const instant of ['2026-01-03T00:00:00Z', '2026-01-03T02:00:00+02:00'])
     expect(ids(await list({ createdAfter: instant, createdBefore: instant }))).toEqual([wanted.id]);
-  await surfaces({ userId, roles: ['READER'], clientId: `user:${userId}` }, async (api, client) => {
+  await surfaces({ userId, roles: ['READER'], clientId: `user:${userId}` }, async (api) => {
     for (const value of [compact, invalidCalendar, '2026-01-03T00:00:00']) {
       await expect(list({ createdAfter: value })).rejects.toMatchObject({ message: dateMessage, extensions: { code: 'BAD_USER_INPUT' } });
       const gql = await api.executeOperation({ query, variables: { app: appId, after: value } }, { contextValue: userContext() });

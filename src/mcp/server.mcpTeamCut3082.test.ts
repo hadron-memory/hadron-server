@@ -274,7 +274,8 @@ describe('worker binding refuses before looking up a worker or grant', () => {
   it('server info advertises no retired team capabilities', async () => {
     const server = createTestableMcpServer(auth);
     const info = await server.callToolText('hadron_server_info', {});
-    for (const token of ['worker-model', 'worker-boot-briefing', 'team-chat', 'team-worklog', 'session-app-recovery', 'channels', 'team-chat-monitor', 'worklog-model', 'team-attention', 'team-attention-paged']) expect(info).not.toMatch(new RegExp(`(?:^|[ ,])${token}(?:[ ,]|$)`, 'm'));
+    expect(info).toContain('session-app-recovery'); // Kept end_session adopts App from its id, per the plan exception.
+    for (const token of ['worker-model', 'worker-boot-briefing', 'team-chat', 'team-worklog', 'channels', 'team-chat-monitor', 'worklog-model', 'team-attention', 'team-attention-paged']) expect(info).not.toMatch(new RegExp(`(?:^|[ ,])${token}(?:[ ,]|$)`, 'm'));
   });
   it('GraphQL still serves each disabled family', async () => {
     const ctx = { ...auth, db } as Context;

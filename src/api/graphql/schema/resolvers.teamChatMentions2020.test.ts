@@ -662,7 +662,7 @@ describe('S3 filter audience and transport boundaries', () => {
       await expect(Q.channelMessages({}, {channelRef: channel.id, limit: 0, ...filter}, ctx(manager.id))).rejects.toMatchObject({extensions: {code: 'TEAM_CHAT_TEAM_METADATA_FORBIDDEN'}});
     }
   });
-  it('carries nullable structured pairs through actual GraphQL and applies the MCP filter without fallback', async () => {
+  it('carries nullable structured pairs through actual GraphQL', async () => {
     vi.stubEnv('TEAM_TAGS_ENABLED', 'true');
     await humanSays(manager.id, 'known empty');
     const { graphql, buildSchema, defaultFieldResolver } = await import('graphql');
@@ -670,7 +670,7 @@ describe('S3 filter audience and transport boundaries', () => {
     const result = await graphql({schema: buildSchema(typeDefs), fieldResolver: (parent, args, context, info) => { const fields = resolvers[info.parentType.name as keyof typeof resolvers] as Record<string, Function> | undefined; const fn = fields?.[info.fieldName]; return typeof fn === 'function' ? fn(parent,args,context,info) : defaultFieldResolver(parent,args,context,info); }, source: 'query($app:ID!){teamChatMessages(appRef:$app,untagged:true){total items{teamTags{headId label}}}}', variableValues: {app: app.id}, contextValue: ctx(manager.id)});
     expect(result.errors).toBeUndefined();
     expect(JSON.parse(JSON.stringify(result.data))).toEqual({teamChatMessages:{total:1,items:[{teamTags:[]}]}});
-    const { createTestableMcpServer } = await import('../../../mcp/server.js');
+
   });
 });
 

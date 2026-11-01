@@ -83,7 +83,6 @@ it('exposes the filters in executable GraphQL', async () => {
     const result = await api.executeOperation({ query: `query($app:ID!){agentTasks(appRef:$app,tagsAny:["red"],tagsAll:["blue"],source:"issue:exact",createdAfter:"2026-01-03T00:00:00Z",createdBefore:"2026-01-03T00:00:00Z"){title}}`, variables: { app: appId } }, { contextValue: ctx() });
     expect(result.body.kind).toBe('single');
     if (result.body.kind === 'single') { expect(result.body.singleResult.errors).toBeUndefined(); expect(result.body.singleResult.data).toEqual({ agentTasks: [{ title: 'both' }] }); }
-    const ids = (value: string) => [...value.matchAll(/\(id: ([0-9a-z]+)\)/g)].map(match => match[1]);
     for (const args of [{ overdue: true }, { startedAfter: day(1).toISOString() }, { startedBefore: day(9).toISOString() }, { finishedAfter: day(1).toISOString() }, { finishedBefore: day(9).toISOString() }, { source: 'issue:' }]) {
       expect(await list(args)).toEqual([]);
     }
@@ -97,7 +96,7 @@ it('refuses invalid or reversed date ranges after the same read gate', async () 
   }
 });
 
-it('rejects lenient date strings on the resolver, GraphQL paths', async () => {
+it('rejects lenient date strings on the resolver and GraphQL paths', async () => {
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
   await api.start();
   try {
@@ -116,7 +115,7 @@ it('rejects lenient date strings on the resolver, GraphQL paths', async () => {
 });
 
 // #2696: tagsAny/tagsAll obey the same bounds a task's own tags do (32 elements, 64 characters each).
-it.each(['tagsAny', 'tagsAll'])('%s accepts 32 tags and a 64-character tag, refuses 33 and 65, on resolver, GraphQL', async field => {
+it.each(['tagsAny', 'tagsAll'])('%s accepts 32 tags and a 64-character tag, refuses 33 and 65, on resolver and GraphQL', async field => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`);
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
   await api.start();

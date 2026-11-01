@@ -106,6 +106,10 @@ Rows below describe test edits, not a claim that a sibling suite has identical w
 
 ## Release and downstream limits
 
-No MCP `instructions` text exists in the server to rewrite. The header/auth middleware and shared session settlement are unchanged. Existing pre-cut worker sessions can still attribute core calls; a deployment restart discards in-memory connection bindings. No migration/origin marker is introduced. MCP end-session may still issue a claim, redeemable with CLI `hadron team session start` without `--as`.
+No MCP `instructions` text exists in the server to rewrite. The header/auth middleware and shared session settlement are unchanged. Existing pre-cut worker sessions can still attribute core calls; a deployment restart discards in-memory connection bindings. No migration/origin marker is introduced. The non-team `session-app-recovery` token is retained with a narrowed description: kept `end_session` still calls `adoptAppFromSession(id)` and its reconnect pin passes. It promises no MCP worker bind/resume. Other team tokens are removed. MCP end-session may still issue a claim, redeemable with CLI `hadron team session start` without `--as`.
 
 **MERGE/DEPLOY HOLD:** Petra must post phase-2 sweep-clear on #3082 and a CLI release newer than v0.33.0 containing C1–C3 and M5 must be published. S2 cli#1511 and P2 portal#1550 regenerate at the deployed S1 SHA, not this build. Vera owns S3 spec marking; Victor S4 Built lines after deploy. This PR does not modify those repos or mint specs.
+
+## Validation correction before freeze
+
+The first WIP validation pass at 3e1515bfb was stopped and is EXCLUDED: review of the test migration found overly broad edits that removed GraphQL callback execution and race waits. Nine mixed suites were restored from the red-first base, then changed with explicit MCP-only cuts; the waits and callback execution are preserved. Corrected focused run: 10 files, 288 tests pass. This draft had no frozen head or seat verdict to carry. A corrected full-suite run is required. Three additional caller-text pins were red before the fix (worker-binding parameter advice, SDL remedy, actual whoami/claim-end receipts).

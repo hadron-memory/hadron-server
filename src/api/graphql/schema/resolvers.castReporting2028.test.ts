@@ -296,6 +296,7 @@ describe('S12 deciding transaction fences', () => {
     const casting = M.castWorker({}, args({ noTeam: true }), { ...ctx(), db: observed.db });
     try {
       const pid = await observed.backendFor(casting);
+      await waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: `worker-reports-to:${app.id}` } });
       expect(created).toBe(false);
       expect(await db.worker.count()).toBe(0);
     } finally { release(); await holder; }
@@ -406,10 +407,11 @@ it('a head cast enters existing S6 team stop coverage atomically', async () => {
   expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: made.id, type: 'worker.reports-to' } })).toBe(1);
 });
 
-it('returns selected head identity through GraphQL and delegated MCP receipts', async () => {
+it('returns selected head identity through GraphQL', async () => {
   const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
   expect((await wire('castWorkerPreview', { reports: head.id })).data?.castWorkerPreview).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
   expect((await wire('castWorker', { reports: head.id })).data?.castWorker).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
+
 });
 
 it('a late template failure rolls back reporting and S6 coverage/notices together', async () => {
@@ -601,10 +603,6 @@ it('an omitted or null reporting choice at bind preserves legacy UNSET without a
   }
 });
 
-it('the delegated MCP list distinguishes stored NO_TEAM from legacy UNSET', async () => {
-  await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
-  await M.castWorker({}, args({ name: 'Legacy' }), ctx());
-});
 
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { advisoryWaiterPresent } from '../../../test/advisoryWaiter.js';
@@ -625,6 +623,9 @@ for (const choice of [{}, { noTeam: true }]) {
       const pid = await observed.backendFor(casting);
       const deadline = Date.now() + 5000;
       while (!finished) {
+        if (await advisoryWaiterPresent(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } })) {
+          throw new Error('no-head cast waited on the unrelated stop fence');
+        }
         if (Date.now() > deadline) throw new Error('no-head cast did not finish while the stop fence was held');
         await new Promise(r => setTimeout(r, 25));
       }
@@ -649,6 +650,10 @@ it('a head cast waits for the exclusive stop fence before minting or coverage wr
   const result = casting.then((worker: any) => ({ worker, error: null }), (error: unknown) => ({ worker: null, error }));
   try {
     const pid = await observed.backendFor(casting);
+    await Promise.race([
+      waitForAdvisoryWaiter(db, { pid, key: { form: 'hashed-bigint', value: `stop-signals:${app.id}` } }),
+      result.then(() => { throw new Error('head cast finished before the held stop fence was released'); }),
+    ]);
     expect(await db.worker.count({ where: { appId: app.id } })).toBe(1);
     expect(await db.agentTeamEvent.count({ where: { appId: app.id, type: 'worker.reports-to' } })).toBe(0);
   } finally { release(); await blocker; await result; }

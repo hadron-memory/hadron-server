@@ -98,7 +98,7 @@ it('a non-participant gets APP_NOT_FOUND with text, valid or not', async () => {
     await expect(list({ text }, outsider())).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
 });
 
-it('GraphQL agree on the match and the refusal', async () => {
+it('GraphQL serves on the match and the refusal', async () => {
   await task('Fix the Login Page');
   await task('Other', { description: 'login again' });
   await task('Unrelated');

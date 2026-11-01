@@ -136,6 +136,8 @@ export const HADRON_SERVER_VERSION = '0.21.0';
  * goes away keeps its token only if the surface still honours it.
  */
 export const MCP_SURFACE_CAPABILITIES = [
+  /** #3082: kept end_session recovers active App scope from its own session id; no worker bind/resume. */
+  'session-app-recovery',
   /** Spec 026 — hadron_list_apps / hadron_set_active_app selection regimes. */
   'app-selection',
   /** #1009 — refusals caused by a reconnect say so instead of reading as a client limit. */

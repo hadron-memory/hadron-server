@@ -179,7 +179,7 @@ describe('delivery settings #2025', () => {
     const overflow = { oldestPostedAt: new Date('2026-10-18T10:01:00Z'), lastDueMessageAt: new Date('2026-10-18T10:09:00Z') };
     expect(batchTiming(settings, overflow).deliverAfter).toEqual(new Date('2026-10-18T10:03:00Z'));
   });
-  it('GraphQL select and return the same contract; MCP requires a named plain session', async () => {
+  it('GraphQL selects and returns the delivery-settings contract', async () => {
     const { ApolloServer } = await import('@apollo/server');
     const { typeDefs } = await import('./typeDefs.js');
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -189,9 +189,6 @@ describe('delivery settings #2025', () => {
       if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
       expect(r.body.singleResult.errors).toBeUndefined();
       expect(r.body.singleResult.data?.setAppDeliverySettings).toEqual({ ...defaults, busyDelaySeconds: 500 });
-      const { createTestableMcpServer } = await import('../../../mcp/server.js');
-      const plain = await db.session.create({ data: { id: generateId(), userId: manager.id } });
-      const text = (r: any) => r.content[0].text;
     } finally { await server.stop(); }
   });
 });
@@ -274,12 +271,10 @@ describe('#2138 §3.6 — the team pause', () => {
     expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId } })).pausedUntil).toEqual(until);
   });
 
-  it('is exposed on the App and has an MCP twin', async () => {
+  it('is exposed on the App through GraphQL', async () => {
     await pause(true);
     const { typeDefs } = await import('./typeDefs.js');
     expect(typeDefs).toContain('teamPausedAt: DateTime');
-    const { TICKER_WRITE_TOOLS } = await import('../../../mcp/tickerTools.js');
-    expect(TICKER_WRITE_TOOLS).toContain('hadron_set_team_pause');
   });
 });
 
