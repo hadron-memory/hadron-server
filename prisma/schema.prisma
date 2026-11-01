@@ -2653,11 +2653,10 @@ model NodeRevision {
   /// column landed — revision history would otherwise silently drop
   /// abstract edits.
   abstract           String?
-  /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// revision capture. Restored verbatim by `restoreNodeRevision`;
-  /// legacy revisions (pre-spec) have NULL here, which short-circuits
-  /// the staleness check on the live row after restore (no false
-  /// positives).
+  /// Revision snapshot of `Node.abstractOriginHash` at capture time
+  /// (cor:dmo:020:03, cor:dmo:060:02). Restored verbatim by `restoreNodeRevision`.
+  /// A restored NULL on a node with both an abstract and content means the abstract is
+  /// unverified, neither stale nor fresh. A NULL on a node with no abstract or no content needs no check.
   abstractOriginHash String?             @map("abstract_origin_hash")
   content            String?
   tags               String[]
