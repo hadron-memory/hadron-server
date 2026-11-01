@@ -78,7 +78,7 @@ describe('#3125 S1 SDL', () => {
     const schema = buildSchema(typeDefs);
     const app = schema.getType('App') as GraphQLObjectType;
     expect(String(app.getFields().properties?.type)).toBe('JSON');
-    expect(String(app.getFields().propertiesRevision?.type)).toBe('Int!');
+    expect(String(app.getFields().propertiesRevision?.type)).toBe('Int');
     const m = schema.getMutationType()!.getFields().setAppProperties!;
     expect(m.args.map((a) => `${a.name}:${String(a.type)}`)).toEqual(['appRef:String!', 'properties:JSON', 'expectedRevision:Int']);
     expect(String(m.type)).toBe('App!');

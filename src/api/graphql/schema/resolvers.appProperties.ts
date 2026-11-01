@@ -5,19 +5,26 @@
  * Write gate (V33): whoever manages the App (`actorManagesApp`, the gate of the App's ticker and delivery settings,
  * cor:agt:080:19), a person acting as themselves; a worker session, an App key and an impersonation are refused. The
  * gate is judged first, inside the App's EXCLUSIVE write transaction, so a caller who doesn't manage the App gets the
- * same refusal whatever the object holds. Read gate: whoever may read the App (the App type's own gate).
+ * same refusal whatever the object holds. Read gate (PR #3131 security P2-1): the App row reaches a caller through
+ * fields that don't gate it (`Ticker.app`, `AppGrant.app`), so these two fields judge the reader themselves, on the
+ * `app(ref:)` predicate (`requireOwnerOrOrgRole` READER) or `managesApp` (so an App owner-member outside the org reads
+ * back what `setAppProperties` returns). Anyone else, an App key (host key or not) included, reads null for both.
  *
  * A write replaces the whole object (V34); `expectedRevision`, when sent, must equal the stored `propertiesRevision`.
  * An empty object is stored as null. A write that changes nothing leaves the row (and its revision) as it was and records no event; a changing write
  * moves the revision by one and appends `app.properties-changed` naming the changed top-level keys (V43).
  */
+import { GraphQLError } from 'graphql';
 import { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { actorManagesApp, resolveParticipatedApp, resolveTaskWorkerId, taskError } from './resolvers.agentTask.js';
 import { writeInApp } from './resolvers.ticker.js';
 import { appendAppPropertiesChangedEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
+import { canonicalJson } from '../../../lib/agentTasks/properties.js';
 import {
+  APP_PROPERTIES_MAX_BYTES,
   TASK_INTEGRATIONS_KEY,
   changedTopLevelKeys,
   checkAppPropertiesShape,
@@ -25,7 +32,36 @@ import {
   projectAppProperties,
 } from '../../../lib/appProperties.js';
 
-type AppPropertiesRow = { id: string; properties?: unknown; propertiesRevision?: number };
+type AppPropertiesRow = {
+  id: string; organizationId?: string | null; ownerUserId?: string | null; properties?: unknown; propertiesRevision?: number;
+};
+
+/** One verdict per App per request: both fields share it. */
+const readVerdicts = new WeakMap<object, Map<string, Promise<boolean>>>();
+
+/** May this caller read the App's properties? `app(ref:)`'s predicate, or whoever manages the App. */
+function mayReadProperties(ctx: Context, a: AppPropertiesRow): Promise<boolean> {
+  let perCtx = readVerdicts.get(ctx);
+  if (!perCtx) readVerdicts.set(ctx, (perCtx = new Map()));
+  let verdict = perCtx.get(a.id);
+  if (!verdict) {
+    verdict = (async () => {
+      const app = a.organizationId !== undefined && a.ownerUserId !== undefined
+        ? { id: a.id, organizationId: a.organizationId, ownerUserId: a.ownerUserId }
+        : await ctx.db.app.findUnique({ where: { id: a.id }, select: { id: true, organizationId: true, ownerUserId: true } });
+      if (!app) return false;
+      try {
+        await requireOwnerOrOrgRole(ctx, app, 'READER');
+        return true;
+      } catch (e) {
+        if (!(e instanceof GraphQLError) || e.extensions?.code !== 'FORBIDDEN') throw e;
+        return managesApp(ctx, app);
+      }
+    })();
+    perCtx.set(a.id, verdict);
+  }
+  return verdict;
+}
 
 async function storedProperties(ctx: Context, a: AppPropertiesRow): Promise<{ properties: unknown; propertiesRevision: number }> {
   if (a.properties !== undefined && a.propertiesRevision !== undefined) {
@@ -44,10 +80,14 @@ async function leadUrns(ctx: Context, workerIds: string[]): Promise<Map<string, 
 }
 
 export const appPropertiesTypeResolvers = {
-  properties: async (a: AppPropertiesRow, _: unknown, ctx: Context) =>
-    projectAppProperties((await storedProperties(ctx, a)).properties, (ids) => leadUrns(ctx, ids)),
-  propertiesRevision: async (a: AppPropertiesRow, _: unknown, ctx: Context) =>
-    (await storedProperties(ctx, a)).propertiesRevision,
+  properties: async (a: AppPropertiesRow, _: unknown, ctx: Context) => {
+    if (!(await mayReadProperties(ctx, a))) return null;
+    return projectAppProperties((await storedProperties(ctx, a)).properties, (ids) => leadUrns(ctx, ids));
+  },
+  propertiesRevision: async (a: AppPropertiesRow, _: unknown, ctx: Context) => {
+    if (!(await mayReadProperties(ctx, a))) return null;
+    return (await storedProperties(ctx, a)).propertiesRevision;
+  },
 };
 
 export async function writeAppProperties(
@@ -80,6 +120,15 @@ export async function writeAppProperties(
       } else {
         next = shaped;
       }
+    }
+    // PR #3131 local P2: normalising a lead (name or URN -> worker id) can grow the object past the cap the input
+    // check passed, so the stored form is measured too, before the revision check and any write.
+    if (next !== null && Buffer.byteLength(canonicalJson(next), 'utf8') > APP_PROPERTIES_MAX_BYTES) {
+      throw taskError(
+        'PROPERTIES_TOO_LARGE',
+        `properties may hold at most ${APP_PROPERTIES_MAX_BYTES} bytes of JSON as stored (each team lead is stored as its worker id). Nothing was changed.`,
+        { path: '' },
+      );
     }
     const cur = await tx.app.findUniqueOrThrow({ where: { id: fresh.id }, select: { properties: true, propertiesRevision: true } });
     if (expectedRevision != null && expectedRevision !== cur.propertiesRevision) {
