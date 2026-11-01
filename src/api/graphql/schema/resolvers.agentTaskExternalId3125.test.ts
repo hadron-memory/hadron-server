@@ -199,6 +199,15 @@ describe('externalId validation (V46)', () => {
     ['a user name', 'https://someone@github.com/o/r/issues/1'],
     ['a user name and password', 'https://u:p@github.com/o/r/issues/1'],
     ['an empty userinfo', 'https://@github.com/o/r/issues/1'],
+    // Fix head 1 (Diego LOCAL P2): malformed URLs the WHATWG parser repairs into URLs that carry credentials.
+    ['a third slash before the userinfo', 'https:///user:pass@example.com/'],
+    ['backslashes before the userinfo', 'https:\\\\user:pass@example.com/'],
+    ['a slash and a backslash before the userinfo', 'https:/\\user:pass@example.com/'],
+    // Fix head 1 (Rook §10 P3): a lone surrogate is not text Postgres can store; refused, not an internal error.
+    ['a lone high surrogate', 'https://x/a\uD800'],
+    ['a lone low surrogate', 'https://x/a\uDC00b'],
+    // Fix head 1 (Andi BLIND P2): the length is counted in characters (code points), as the database counts it.
+    ['513 supplementary characters', '\u{1F600}'.repeat(513)],
   ];
   for (const [what, value] of refused) {
     it(`refuses ${what} with BAD_USER_INPUT, writing nothing and never echoing the value`, async () => {
@@ -215,6 +224,23 @@ describe('externalId validation (V46)', () => {
     const max = `https://example.com/${'a'.repeat(492)}`;
     expect(max).toHaveLength(512);
     for (const value of [max, 'jira:PROJ-123', 'https://example.com/users/@me/x?by=a@b#c@d']) {
+      const t = await create({ externalId: value });
+      expect(await externalIdOf(t.id)).toBe(value);
+    }
+  });
+
+  it('counts characters, not UTF-16 units: 512 supplementary characters are accepted and stored (fix head 1)', async () => {
+    const max = '\u{1F600}'.repeat(512);
+    expect(Array.from(max)).toHaveLength(512);
+    expect(max.length).toBe(1024);
+    const t = await create({ externalId: max });
+    expect(await externalIdOf(t.id)).toBe(max);
+    const [{ n }] = await db.$queryRawUnsafe<Array<{ n: number }>>('SELECT char_length(external_id)::int AS n FROM agent_tasks WHERE id = $1', t.id);
+    expect(n).toBe(512);
+  });
+
+  it('a URL that parses with no userinfo is still accepted (fix head 1 keeps opaque and plain ids working)', async () => {
+    for (const value of ['https://example.com/a', 'urn:x:@y', 'mailto:someone@example.com']) {
       const t = await create({ externalId: value });
       expect(await externalIdOf(t.id)).toBe(value);
     }
@@ -263,6 +289,21 @@ describe('agentTasks(externalId:) filter (#3125 S2)', () => {
       const err = await list({ externalId }).catch((e: any) => e);
       expect(err?.extensions?.code).toBe('BAD_USER_INPUT');
       expect(err.message).not.toContain('yyyy');
+    }
+  });
+
+  it('counts characters, not UTF-16 units: a 512-character supplementary id filters, 513 is refused (fix head 1)', async () => {
+    const max = '\u{1F600}'.repeat(512);
+    const mine = await create({ externalId: max });
+    expect((await list({ externalId: max })).map((r: any) => r.id)).toEqual([mine.id]);
+    const err = await list({ externalId: '\u{1F600}'.repeat(513) }).catch((e: any) => e);
+    expect(err?.extensions?.code).toBe('BAD_USER_INPUT');
+  });
+
+  it('refuses a filter value with a lone surrogate with BAD_USER_INPUT, not an internal error (fix head 1)', async () => {
+    for (const externalId of ['https://x/a\uD800', '\uDC00']) {
+      const err = await list({ externalId }).catch((e: any) => e);
+      expect(err?.extensions?.code).toBe('BAD_USER_INPUT');
     }
   });
 
