@@ -361,7 +361,7 @@ describe('untrackedTaskItems: an incomplete read', () => {
 describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
   it('with no limit claims one item: started, owned by and assigned to the caller, no parent', async () => {
     fake.repos.widgets = [issue('widgets', 1), issue('widgets', 2)];
-    const r = await asWorker(anne, () => claim({ repository: 'acme/widgets' }));
+    const r: any = await asWorker(anne, () => claim({ repository: 'acme/widgets' }));
     expect(r.complete).toBe(true);
     expect(r.incompleteReason).toBeNull();
     expect(r.refusalCode).toBeNull();
@@ -382,7 +382,7 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
 
   it('records task.created then task.started, and the stall evaluator raises no not-started alarm for it', async () => {
     fake.repos.widgets = [issue('widgets', 1)];
-    const r = await asWorker(anne, () => claim({ repository: 'acme/widgets' }));
+    const r: any = await asWorker(anne, () => claim({ repository: 'acme/widgets' }));
     const taskId = r.tasks[0].id;
     const events = await db.agentTeamEvent.findMany({ where: { taskId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
     const types = events.map((e) => e.type);
