@@ -203,6 +203,7 @@ describe('externalId validation (V46)', () => {
     ['a third slash before the userinfo', 'https:///user:pass@example.com/'],
     ['backslashes before the userinfo', 'https:\\\\user:pass@example.com/'],
     ['a slash and a backslash before the userinfo', 'https:/\\user:pass@example.com/'],
+    ['a third slash before a user name alone', 'https:///user@example.com/'],
     // Fix head 1 (Rook §10 P3): a lone surrogate is not text Postgres can store; refused, not an internal error.
     ['a lone high surrogate', 'https://x/a\uD800'],
     ['a lone low surrogate', 'https://x/a\uDC00b'],
