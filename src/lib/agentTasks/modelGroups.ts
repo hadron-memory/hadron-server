@@ -78,13 +78,35 @@ export async function effectiveModelGroups(
   return [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-/** The pure glob primitive (#2831 S2): full-string, case-insensitive, `*` (any run) and `?` (one char) only. */
+/**
+ * The pure glob primitive (#2831 S2): full-string, case-insensitive, `*` (any run) and `?` (one char) only. Iterative
+ * two-pointer match that remembers only the LAST star, so it is O(pattern x model) in the worst case and never
+ * backtracks exponentially: a manager-written pattern of separated stars cannot slow a matching pass (BLIND and LOCAL
+ * review of the first head, where a regex expansion took over a second on a 41-character legal pattern).
+ */
 export function modelMatchesPattern(pattern: string, model: string): boolean {
-  const re = new RegExp(
-    `^${pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
-    's',
-  );
-  return re.test(model.toLowerCase());
+  const p = pattern.toLowerCase();
+  const s = model.toLowerCase();
+  let i = 0;
+  let j = 0;
+  let star = -1;
+  let mark = 0;
+  while (j < s.length) {
+    if (i < p.length && (p[i] === '?' || p[i] === s[j])) {
+      i++;
+      j++;
+    } else if (i < p.length && p[i] === '*') {
+      star = i++;
+      mark = j;
+    } else if (star !== -1) {
+      i = star + 1;
+      j = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (i < p.length && p[i] === '*') i++;
+  return i === p.length;
 }
 
 /** Is `model` in the named group? No model, or a name no group carries, is in nothing. */

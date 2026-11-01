@@ -14,6 +14,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { __matcherTesting, matchQueuedTasks, parseRequirements } from './matcher.js';
 import { anchorNow } from '../stopSignals/state.js';
 import { modelInGroup, modelMatchesPattern } from './modelGroups.js';
@@ -70,6 +71,26 @@ describe('#2831 S2 pure pieces', () => {
     expect(modelMatchesPattern('claude-?-5', 'claude-xx-5')).toBe(false);
     expect(modelMatchesPattern('a.b*', 'axb')).toBe(false); // "." is literal
   });
+  it('modelMatchesPattern agrees with a regex reference on every short input over a small alphabet', () => {
+    const ref = (pat: string, m: string) =>
+      new RegExp(`^${pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 's').test(m);
+    const alpha = ['a', 'b', '*', '?'];
+    const words = (n: number): string[] => (n === 0 ? [''] : words(n - 1).flatMap((w) => alpha.map((c) => w + c)));
+    const models = (n: number): string[] => (n === 0 ? [''] : models(n - 1).flatMap((w) => ['a', 'b'].map((c) => w + c)));
+    const pats = [0, 1, 2, 3, 4].flatMap(words);
+    const ms = [0, 1, 2, 3, 4, 5].flatMap(models);
+    for (const pat of pats) for (const m of ms) expect(modelMatchesPattern(pat, m), `${pat} vs ${m}`).toBe(ref(pat, m));
+  });
+
+  it('modelMatchesPattern does not backtrack on separated stars: the worst legal pattern against a long model is fast', () => {
+    const pattern = `${'a*'.repeat(63)}b`; // 127 chars, inside MODEL_GROUP_PATTERN_MAX
+    expect(pattern.length).toBeLessThanOrEqual(128);
+    const t0 = performance.now();
+    expect(modelMatchesPattern(pattern, 'a'.repeat(5000))).toBe(false);
+    expect(modelMatchesPattern(`${'a*'.repeat(20)}?b`, `${'a'.repeat(5000)}c`)).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
   it('modelInGroup: no model is in no group; an unknown group holds nothing', () => {
     const groups = [{ name: 'large', patterns: ['*opus*'], origin: 'APP' as const }];
     expect(modelInGroup(groups, 'large', OPUS)).toBe(true);
@@ -141,9 +162,17 @@ describe('#2831 S2 matching', () => {
     expect(await assigneeOf(fam.id)).toBeNull();
   });
 
-  it('a model switch mid-session counts: the newest binding decides', async () => {
+  it('a worker that rebinds on a new session counts by its newest binding', async () => {
     await db.session.updateMany({ where: { workerId: liam.id }, data: { endedAt: at('10:59') } });
     await bind(liam, OPUS, at('11:00'));
+    await db.session.updateMany({ where: { workerId: baloo.id }, data: { endedAt: at('10:59') } });
+    const t = await queued({ modelGroupIn: ['large'] });
+    await run();
+    expect(await assigneeOf(t.id)).toBe(liam.id);
+  });
+
+  it('a model switch on the SAME open session counts: llmModel updated in place', async () => {
+    await db.session.updateMany({ where: { workerId: liam.id }, data: { llmModel: OPUS } });
     await db.session.updateMany({ where: { workerId: baloo.id }, data: { endedAt: at('10:59') } });
     const t = await queued({ modelGroupIn: ['large'] });
     await run();
@@ -197,5 +226,26 @@ describe('#2831 S2 the assignment transaction re-reads the groups on the decidin
   it('control: the same attempt with the worker in the group assigns', async () => {
     const t = await queued({ modelGroupIn: ['large'] });
     expect(await attempt(t, baloo)).toBe('assigned');
+  });
+});
+
+describe('#2831 S2 groups inherited from the Team Agent reach the matcher', () => {
+  it('an Agent group admits by its patterns, and an App override of the same name replaces it (no merge)', async () => {
+    const org = await db.organization.findFirstOrThrow({ where: { urn: { startsWith: 'grp-' } } });
+    const admin = await db.user.create({ data: { githubId: 700_000 + Math.floor(Math.random() * 100_000), githubUsername: `grp-admin-${generateId()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+    const team = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Group Team Agent' }, { db, userId: admin.id, roles: ['READER'] });
+    await db.node.create({ data: { id: generateId(), memoryId: team.systemMemoryId, loc: 'roles:engineer', name: 'engineer', content: '', data: { names: ['Iris'] } } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: team.id } });
+    await db.modelGroup.create({ data: { agentId: team.id, name: 'big', patterns: ['*opus*'] } });
+    await bind(baloo, OPUS);
+    await bind(liam, SONNET);
+    const inherited = await queued({ modelGroupIn: ['big'] });
+    await run();
+    expect(await assigneeOf(inherited.id)).toBe(baloo.id);
+    await db.modelGroup.create({ data: { appId: app.id, name: 'big', patterns: ['*sonnet*'] } });
+    const overridden = await queued({ modelGroupIn: ['big'] });
+    await run();
+    expect(await assigneeOf(overridden.id)).toBe(liam.id);
   });
 });
