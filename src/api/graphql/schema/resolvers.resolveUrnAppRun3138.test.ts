@@ -66,13 +66,13 @@ describe('#3138 resolveUrn apprun fault boundary', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const original = db.app.findFirst.bind(db.app);
     let injected = false;
-    vi.spyOn(db.app, 'findFirst').mockImplementation(async (args) => {
+    vi.spyOn(db.app, 'findFirst').mockImplementation(((async (args: Parameters<typeof db.app.findFirst>[0]) => {
       if (!injected && typeof args?.where?.urn === 'string') {
         injected = true;
         throw new Error('3138 database outage private-detail');
       }
       return original(args);
-    });
+    }) as typeof db.app.findFirst));
     const response = await resolve(absentRunUrn);
     expect(injected, 'the apprun ref resolver reached the injected App lookup').toBe(true);
     expect(response.status).toBe(200);
