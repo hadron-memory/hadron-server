@@ -239,3 +239,11 @@ describe('#2644 MCP blocker and priority parity', () => {
     } finally { await client.close(); await server.close(); }
   });
 });
+
+it('#2831 S3 roster renders current model-group names, including an explicit empty list', async () => {
+  await db.modelGroup.create({ data: { appId: app.id, name: 'custom', patterns: ['unknown-*'] } });
+  await db.session.create({ data: { appId: app.id, workerId: anne.id, agentId, userId: member.id, llmModel: 'unknown-model' } });
+  const result = text(await mcp(authOf(member.id)).callTool('hadron_team_roster', { appRef: app.id }));
+  expect(result.split('\n').find(line => line.startsWith('Anne —'))).toContain('model groups custom');
+  expect(result.split('\n').find(line => line.startsWith('Rook —'))).toContain('model groups none');
+});
