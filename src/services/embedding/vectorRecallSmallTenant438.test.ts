@@ -111,6 +111,8 @@ afterAll(() => {
   else process.env.EMBEDDING_API_URL = savedEmbeddingApiUrl;
 });
 
+/** The multi-call pins run several findNodes calls; a role arm with the fallback off widens to the ef_search cap (~2 s each on a loaded host), so vitest's 5 s default is too tight (#3062 CI shard 2). */
+const LOOP_TIMEOUT_MS = 60_000;
 const hnsw = () => withLocalSettings(db, PREFER_HNSW);
 const exact = () => withLocalSettings(withLocalSettings(db, PREFER_HNSW), EXACT_PLAN);
 const nodeIds = (res: any) => res.hits.map((h: any) => h.node.id).sort();
@@ -158,7 +160,7 @@ describe('#438 contract: scope holds and a short ANN result is never proven abse
     expect(passageIds(await findNodes(ex, { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } })), 'chunk').toEqual(smallIds);
     expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } })), 'role').toEqual(smallSpecIds);
     expect(nodeIds(await findNodes(ex, { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } })), 'hybrid').toEqual(smallIds);
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('a SMALL-scoped search never returns a BIG node, on either plan and every path', async () => {
     for (const h of [hnsw(), exact()]) {
@@ -174,7 +176,7 @@ describe('#438 contract: scope holds and a short ANN result is never proven abse
         expect(got.filter((id: string) => !smallIds.includes(id)), JSON.stringify(args)).toEqual([]);
       }
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('when the HNSW window comes back short of SMALL\'s eligible rows, the provider never reports it exhausted (node and chunk)', async () => {
     const provider = getRetrievalProvider();
@@ -185,7 +187,7 @@ describe('#438 contract: scope holds and a short ANN result is never proven abse
       expect(flag, kind).not.toBeNull();
       if (got.length < smallIds.length) expect(flag, kind).toBe(false);
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 });
 
 /**
@@ -248,7 +250,7 @@ describe('#3054 the bounded exact fallback', () => {
       expect(got.length, a.name).toBeGreaterThan(0);
       expect(got.filter((id: string) => !smallIds.includes(id)), a.name).toEqual([]);
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('the exact path reports the window exhausted (it ranked every eligible row); with the fallback off, a short window stays not exhausted', async () => {
     const provider = getRetrievalProvider();
@@ -262,7 +264,7 @@ describe('#3054 the bounded exact fallback', () => {
         expect(flag, `${kind} bound=${bound}`).toBe(want);
       }
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('over the bound: a short, not-exhausted window takes no exact path and returns today\'s result (all four arms)', async () => {
     for (const a of ARMS) {
@@ -273,7 +275,7 @@ describe('#3054 the bounded exact fallback', () => {
       expect(exactCalls(), a.name).toBe(0);
       expect(got, a.name).toEqual(today);
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('only a short, not-exhausted window falls back: an exhausted window and a full (truncated) window take no exact path', async () => {
     // Exhausted: the exact plan serves the ANN query, so SMALL's window holds every eligible row.
@@ -292,7 +294,7 @@ describe('#3054 the bounded exact fallback', () => {
       expect(got.length, kind).toBe(5);
       expect(exactCalls(), `${kind} truncated`).toBe(0);
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('#3062 P2: eligible rows added between the count and the exact query never push the exact work past the bound', async () => {
     // SMALL has 5 eligible rows and the bound is 5, so the count admits the fallback. Right after the count returns,
@@ -340,5 +342,5 @@ describe('#3054 the bounded exact fallback', () => {
         await db.node.deleteMany({ where: { id: { in: extra.map((e) => e.id) } } });
       }
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 });
