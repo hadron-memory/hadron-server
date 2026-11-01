@@ -35,9 +35,9 @@ beforeEach(async () => {
 });
 
 // A textless v3 wake keeps its identity across a fresh issue after the floor (#2072).
-const proof = (issuedAt: number) => signWakeProof({
+const proof = (issuedAt: number, wakeKey = 'clock-wake') => signWakeProof({
   v: 3, kind: 'wake-proof', appId, workerId, requester: { userId },
-  channels: [], ticks: [], tasks: [], exempt: false, issuedAt, wakeKey: 'clock-wake',
+  channels: [], ticks: [], tasks: [], exempt: false, issuedAt, wakeKey,
 } satisfies WakeProof);
 const ack = (p: string, at: number) => acknowledgeWakes({
   ctx, requester: { userId }, proofs: [p], now: new Date(at), mayReadWorker: async () => true,
@@ -82,6 +82,20 @@ describe('repeat acknowledgement across issue/ack clock skew', () => {
     expect(await ack(old, later + 1000)).toEqual({ acknowledged: 0, unchanged: 1 });
     expect(await charged()).toBe(2);
     expect(await receipt()).toEqual(second);
+  });
+
+  it('an absorbed ancestor with a future issue is not charged after its descendant is acknowledged', async () => {
+    const ancestor = proof(AT.getTime() + 1000, 'ancestor');
+    const descendant = proof(AT.getTime() + 30_000);
+    await db.appWakeReservation.create({ data: {
+      workerId, appId, wakeKey: 'clock-wake', reservedAt: AT, wake: {}, absorbedKeys: ['ancestor'],
+    } });
+    expect(await ack(descendant, AT.getTime())).toEqual({ acknowledged: 1, unchanged: 0 });
+    expect(await db.appWakeReservation.count({ where: { workerId } })).toBe(0);
+    const rows = await db.workerWakeAck.findMany({ where: { workerId }, orderBy: { wakeKey: 'asc' } });
+    expect(await ack(ancestor, AT.getTime() + 500)).toEqual({ acknowledged: 0, unchanged: 1 });
+    expect(await charged()).toBe(1);
+    expect(await db.workerWakeAck.findMany({ where: { workerId }, orderBy: { wakeKey: 'asc' } })).toEqual(rows);
   });
 
   it('serializes concurrent acknowledgements of the same future-issued proof into one charge', async () => {
