@@ -11,11 +11,10 @@
  * out. Exact ground truth comes from the exact plan; the production-at-scale plan is forced with
  * `enable_sort = off` (the #1970 pattern, `findings:vector-test-exact-assertion-hnsw-plan-flip`).
  *
- * This is an INVESTIGATION slice (no production change), so the recall regressions are `it.fails`: they are
- * red today and turn into a hard failure the moment a fix lands, which is the follow-up slice's cue to flip
- * them. Each one goes through `expectRecallMiss`, so ONLY a recall assertion mismatch satisfies `it.fails`: a
- * retrieval error or a malformed response makes the expected failure fail. The contract pins (scope, exact-plan
- * ground truth on every path, and a short result is never reported as exhausted) are plain and green.
+ * #3054 is the fix: a short, not-exhausted ANN window over a tenant with at most VECTOR_EXACT_FALLBACK_MAX_ROWS
+ * eligible rows is re-ranked exactly (vectors.ts takeExactFallback). The four recall pins that #3035 shipped as
+ * `it.fails` are plain now; the #3054 block pins the guards (short-and-not-exhausted, the bound, scope on the exact
+ * path, the window flag).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -25,6 +24,7 @@ import type { EmbeddingClient } from '../../lib/embedding/index.js';
 import { setEmbeddingClientForTests, resetEmbeddingClientForTests } from '../../lib/embedding/index.js';
 import { getRetrievalProvider } from '../../lib/retrieval/postgres.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { vectorExactFallbackMaxRows, VECTOR_EXACT_FALLBACK_DEFAULT_MAX_ROWS } from './vectors.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -75,14 +75,14 @@ let smallSpecIds: string[];
  * and SMALL 0.1 (about 0.2), so every BIG vector is nearer the query than every SMALL one; the fixture test checks.
  * `r.rn > 0` correlates the subquery with the row, so random() is drawn per row, not once.
  */
-async function embed(memoryId: string, noise: number) {
+async function embed(memoryId: string, noise: number, onlyIds?: string[]) {
   await db.$executeRawUnsafe(`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
     SELECT md5(r.id), r.id, r.memory_id, 'chunk', 'test', 'stub-model', ${DIM}, 0, 0, 4, 'body',
       (SELECT array_agg(CASE WHEN g = 2 THEN 1 ELSE (random() - 0.5) * ${2 * noise} END ORDER BY g)
          FROM generate_series(1, ${DIM}) g WHERE r.rn > 0)::real[]::vector,
       now()
-    FROM (SELECT id, memory_id, row_number() OVER (ORDER BY id) AS rn FROM nodes WHERE memory_id = '${memoryId}') r`);
+    FROM (SELECT id, memory_id, row_number() OVER (ORDER BY id) AS rn FROM nodes WHERE memory_id = '${memoryId}'${onlyIds ? ` AND id IN (${onlyIds.map((i) => `'${i}'`).join(',')})` : ''}) r`);
 }
 
 beforeAll(async () => {
@@ -111,34 +111,12 @@ afterAll(() => {
   else process.env.EMBEDDING_API_URL = savedEmbeddingApiUrl;
 });
 
+/** The multi-call pins run several findNodes calls; a role arm with the fallback off widens to the ef_search cap (~2 s each on a loaded host), so vitest's 5 s default is too tight (#3062 CI shard 2). */
+const LOOP_TIMEOUT_MS = 60_000;
 const hnsw = () => withLocalSettings(db, PREFER_HNSW);
 const exact = () => withLocalSettings(withLocalSettings(db, PREFER_HNSW), EXACT_PLAN);
 const nodeIds = (res: any) => res.hits.map((h: any) => h.node.id).sort();
 const passageIds = (res: any) => res.passages.map((p: any) => p.parentNodeId).sort();
-
-/**
- * The body of a recall `it.fails`, narrowed so that only the recall mismatch counts as the expected failure.
- * `it.fails` passes on ANY throw, so a SQL error or a broken response shape would otherwise read as "recall lost".
- * Here retrieval and id extraction must succeed, and the only error allowed out is the assertion's own
- * AssertionError. Anything else is swallowed after logging, so the test body RETURNS normally and `it.fails`
- * reports it as a failure.
- */
-async function expectRecallMiss(run: () => Promise<unknown>, ids: (res: any) => string[], expected: string[]) {
-  let got: string[];
-  try {
-    got = ids(await run());
-    if (!Array.isArray(got) || got.some((id) => typeof id !== 'string')) throw new Error(`malformed ids: ${JSON.stringify(got)}`);
-  } catch (err) {
-    console.error('#438 recall pin: retrieval did not succeed, so this is NOT the expected recall failure:', err);
-    return;
-  }
-  try {
-    expect(got).toEqual(expected);
-  } catch (err) {
-    if ((err as Error)?.name === 'AssertionError') throw err;
-    console.error('#438 recall pin: unexpected non-assertion error:', err);
-  }
-}
 
 describe('#438 the fixture means what it says', () => {
   it('the HNSW handle reaches the index and the exact handle does not; exact ground truth returns all of SMALL', async () => {
@@ -157,32 +135,32 @@ describe('#438 the fixture means what it says', () => {
   });
 });
 
-describe('#438 RED: on the HNSW plan the small tenant loses its eligible top-k (expected failures until the fix)', () => {
-  it.fails('node, memory-scoped: mode vector returns all 5 of SMALL\'s eligible nodes', async () => {
-    await expectRecallMiss(() => findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } }), nodeIds, smallIds);
+describe('#438 / #3054: on the HNSW plan the small tenant keeps its eligible top-k', () => {
+  it('node, memory-scoped: mode vector returns all 5 of SMALL\'s eligible nodes', async () => {
+    expect(nodeIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
   });
 
-  it.fails('chunk, memory-scoped: granularity chunk returns all 5 of SMALL\'s passages', async () => {
-    await expectRecallMiss(() => findNodes(hnsw(), { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } }), passageIds, smallIds);
+  it('chunk, memory-scoped: granularity chunk returns all 5 of SMALL\'s passages', async () => {
+    expect(passageIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
   });
 
-  it.fails('node, role-filtered: the window widens to the cap (ef_search 1000) and still misses SMALL\'s spec nodes', async () => {
-    await expectRecallMiss(() => findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } }), nodeIds, smallSpecIds);
+  it('node, role-filtered: returns SMALL\'s spec nodes', async () => {
+    expect(nodeIds(await findNodes(hnsw(), { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } }))).toEqual(smallSpecIds);
   });
 
-  it.fails('hybrid with no keyword match: the vector leg brings SMALL\'s nodes', async () => {
-    await expectRecallMiss(() => findNodes(hnsw(), { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } }), nodeIds, smallIds);
+  it('hybrid with no keyword match: the vector leg brings SMALL\'s nodes', async () => {
+    expect(nodeIds(await findNodes(hnsw(), { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } }))).toEqual(smallIds);
   });
 });
 
-describe('#438 contract today (green): scope holds and a short ANN result is never proven absence', () => {
-  it('on the exact plan every RED path retrieves SMALL\'s full eligible set (the recall pins\' ground truth)', async () => {
+describe('#438 contract: scope holds and a short ANN result is never proven absence', () => {
+  it('on the exact plan every recall path retrieves SMALL\'s full eligible set (the recall pins\' ground truth)', async () => {
     const ex = exact();
     expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small] } })), 'node').toEqual(smallIds);
     expect(passageIds(await findNodes(ex, { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5, filter: { memoryIds: [small] } })), 'chunk').toEqual(smallIds);
     expect(nodeIds(await findNodes(ex, { query: 'q', mode: 'vector', limit: 5, filter: { memoryIds: [small], role: 'spec' } })), 'role').toEqual(smallSpecIds);
     expect(nodeIds(await findNodes(ex, { query: 'zzzunmatchable', mode: 'hybrid', limit: 5, filter: { memoryIds: [small] } })), 'hybrid').toEqual(smallIds);
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('a SMALL-scoped search never returns a BIG node, on either plan and every path', async () => {
     for (const h of [hnsw(), exact()]) {
@@ -198,7 +176,7 @@ describe('#438 contract today (green): scope holds and a short ANN result is nev
         expect(got.filter((id: string) => !smallIds.includes(id)), JSON.stringify(args)).toEqual([]);
       }
     }
-  });
+  }, LOOP_TIMEOUT_MS);
 
   it('when the HNSW window comes back short of SMALL\'s eligible rows, the provider never reports it exhausted (node and chunk)', async () => {
     const provider = getRetrievalProvider();
@@ -209,5 +187,160 @@ describe('#438 contract today (green): scope holds and a short ANN result is nev
       expect(flag, kind).not.toBeNull();
       if (got.length < smallIds.length) expect(flag, kind).toBe(false);
     }
+  }, LOOP_TIMEOUT_MS);
+});
+
+/**
+ * #3054 — a handle that records every raw query that took the exact fallback (the only SQL in the vector path
+ * with a MATERIALIZED CTE). The exact query runs on the base client, outside any transaction.
+ */
+function spied(base: typeof db): { handle: typeof db; exactCalls: () => number } {
+  let calls = 0;
+  const handle = new Proxy(base, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop);
+      if (prop === '$queryRaw') {
+        return (strings: TemplateStringsArray, ...vals: unknown[]) => {
+          if (Array.isArray(strings) && strings.join('').includes('MATERIALIZED')) calls++;
+          return (v as any).call(target, strings, ...vals);
+        };
+      }
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
   });
+  return { handle, exactCalls: () => calls };
+}
+
+/** The four arms, SMALL-scoped. */
+const ARMS: { name: string; args: Record<string, unknown>; ids: (res: any) => string[] }[] = [
+  { name: 'node', args: { query: 'q', mode: 'vector', limit: 5 }, ids: nodeIds },
+  { name: 'chunk', args: { query: 'q', mode: 'vector', granularity: 'chunk', limit: 5 }, ids: passageIds },
+  { name: 'node+role', args: { query: 'q', mode: 'vector', limit: 5, role: 'spec' }, ids: nodeIds },
+  { name: 'hybrid', args: { query: 'zzzunmatchable', mode: 'hybrid', limit: 5 }, ids: nodeIds },
+];
+const armArgs = (a: (typeof ARMS)[number], memoryIds: string[]) => {
+  const { role, ...rest } = a.args as any;
+  return { ...rest, filter: { memoryIds, ...(role ? { role } : {}) } };
+};
+
+async function withBound<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+  const saved = process.env.VECTOR_EXACT_FALLBACK_MAX_ROWS;
+  if (value === undefined) delete process.env.VECTOR_EXACT_FALLBACK_MAX_ROWS;
+  else process.env.VECTOR_EXACT_FALLBACK_MAX_ROWS = value;
+  try { return await run(); } finally {
+    if (saved === undefined) delete process.env.VECTOR_EXACT_FALLBACK_MAX_ROWS;
+    else process.env.VECTOR_EXACT_FALLBACK_MAX_ROWS = saved;
+  }
+}
+
+describe('#3054 the bounded exact fallback', () => {
+  it('the bound: unset, empty, invalid, unsafe or over 2^31-1 is the default 2000; 0 disables; a non-negative integer (surrounding whitespace trimmed) is taken as is', async () => {
+    expect(VECTOR_EXACT_FALLBACK_DEFAULT_MAX_ROWS).toBe(2000);
+    for (const [raw, want] of [[undefined, 2000], ['', 2000], ['  ', 2000], ['abc', 2000], ['-1', 2000], ['1.5', 2000], ['1e99', 2000], ['9007199254740993', 2000], ['2147483648', 2000], ['0', 0], ['4', 4], [' 4 ', 4], ['10000', 10000], ['2147483647', 2147483647]] as const) {
+      expect(await withBound(raw, async () => vectorExactFallbackMaxRows()), String(raw)).toBe(want);
+    }
+  });
+
+  it('cross-tenant: on all four arms SMALL recovers THROUGH the exact path, and no BIG vector (all nearer the query) comes back', async () => {
+    for (const a of ARMS) {
+      const { handle, exactCalls } = spied(hnsw());
+      const res = await findNodes(handle, armArgs(a, [small]));
+      expect(exactCalls(), a.name).toBeGreaterThan(0);
+      const got = [...res.hits.map((x: any) => x.node.id), ...(res.passages ?? []).map((p: any) => p.parentNodeId)];
+      expect(got.length, a.name).toBeGreaterThan(0);
+      expect(got.filter((id: string) => !smallIds.includes(id)), a.name).toEqual([]);
+    }
+  }, LOOP_TIMEOUT_MS);
+
+  it('the exact path reports the window exhausted (it ranked every eligible row); with the fallback off, a short window stays not exhausted', async () => {
+    const provider = getRetrievalProvider();
+    for (const [bound, want] of [[undefined, true], ['0', false]] as const) {
+      for (const kind of ['node', 'chunk'] as const) {
+        let flag: boolean | null = null;
+        const opts = { db: hnsw(), queryEmbedding: qvec(), memoryIds: [small], limit: 50, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
+        const got = await withBound(bound, () => kind === 'node' ? provider.vectorSearch(opts) : provider.vectorSearchChunks(opts));
+        if (want) expect(got.map((h) => h.nodeId).sort(), `${kind} bound=${bound}`).toEqual(smallIds);
+        else expect(got.length, `${kind} bound=${bound}: the fixture must still lose recall without the fallback`).toBeLessThan(smallIds.length);
+        expect(flag, `${kind} bound=${bound}`).toBe(want);
+      }
+    }
+  }, LOOP_TIMEOUT_MS);
+
+  it('over the bound: a short, not-exhausted window takes no exact path and returns today\'s result (all four arms)', async () => {
+    for (const a of ARMS) {
+      const today = a.ids(await withBound('0', () => findNodes(hnsw(), armArgs(a, [small]))));
+      const { handle, exactCalls } = spied(hnsw());
+      // SMALL has 5 eligible rows; a bound of 4 puts it over.
+      const got = a.ids(await withBound('4', () => findNodes(handle, armArgs(a, [small]))));
+      expect(exactCalls(), a.name).toBe(0);
+      expect(got, a.name).toEqual(today);
+    }
+  }, LOOP_TIMEOUT_MS);
+
+  it('only a short, not-exhausted window falls back: an exhausted window and a full (truncated) window take no exact path', async () => {
+    // Exhausted: the exact plan serves the ANN query, so SMALL's window holds every eligible row.
+    for (const a of ARMS) {
+      const { handle, exactCalls } = spied(exact());
+      expect(a.ids(await findNodes(handle, armArgs(a, [small]))).length, a.name).toBeGreaterThan(0);
+      expect(exactCalls(), `${a.name} exhausted`).toBe(0);
+    }
+    // Truncated: BIG fills the page from the ANN window. The bound is raised over BIG's size, so only the
+    // short-and-not-exhausted guard keeps the exact path off.
+    const provider = getRetrievalProvider();
+    for (const kind of ['node', 'chunk'] as const) {
+      const { handle, exactCalls } = spied(hnsw());
+      const opts = { db: handle, queryEmbedding: qvec(), memoryIds: [big], limit: 5, onWindow: () => {} };
+      const got = await withBound('1000000', () => kind === 'node' ? provider.vectorSearch(opts) : provider.vectorSearchChunks(opts));
+      expect(got.length, kind).toBe(5);
+      expect(exactCalls(), `${kind} truncated`).toBe(0);
+    }
+  }, LOOP_TIMEOUT_MS);
+
+  it('#3062 P2: eligible rows added between the count and the exact query never push the exact work past the bound', async () => {
+    // SMALL has 5 eligible rows and the bound is 5, so the count admits the fallback. Right after the count returns,
+    // 3 more eligible SMALL rows land. The exact query must read at most bound + 1 rows, see the overflow and keep
+    // today's ANN result (and its not-exhausted flag), never rank the enlarged set.
+    const provider = getRetrievalProvider();
+    for (const kind of ['node', 'chunk'] as const) {
+      const today = await withBound('0', () => {
+        const o = { db: hnsw(), queryEmbedding: qvec(), memoryIds: [small], limit: 50 };
+        return kind === 'node' ? provider.vectorSearch(o) : provider.vectorSearchChunks(o);
+      });
+      const extra = Array.from({ length: 3 }, (_, i) => ({ id: generateId(), memoryId: small, loc: `race-${kind}-${i}`, name: `race${i}`, content: 'body', role: 'review' }));
+      let injected = false;
+      let exactTotal: number | null = null;
+      const handle = new Proxy(hnsw(), {
+        get(target, prop) {
+          const v = Reflect.get(target, prop);
+          if (prop === '$queryRaw') {
+            return async (strings: TemplateStringsArray, ...vals: unknown[]) => {
+              const sql = Array.isArray(strings) ? strings.join('') : '';
+              const out = await (v as any).call(target, strings, ...vals);
+              if (!injected && sql.includes('count(*)::int AS n') && !sql.includes('MATERIALIZED')) {
+                injected = true;
+                await db.node.createMany({ data: extra });
+                await embed(small, 0.1, extra.map((e) => e.id));
+              }
+              if (sql.includes('MATERIALIZED')) exactTotal = Number((out as any[])[0]?.total);
+              return out;
+            };
+          }
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
+      try {
+        let flag: boolean | null = null;
+        const o = { db: handle, queryEmbedding: qvec(), memoryIds: [small], limit: 50, onWindow: (w: { exhausted: boolean }) => { flag = w.exhausted; } };
+        const got = await withBound('5', () => kind === 'node' ? provider.vectorSearch(o) : provider.vectorSearchChunks(o));
+        expect(injected, kind).toBe(true);
+        expect(got.map((h) => h.nodeId), kind).toEqual(today.map((h) => h.nodeId));
+        expect(got.some((h) => extra.some((e) => e.id === h.nodeId)), kind).toBe(false);
+        expect(flag, kind).toBe(false);
+        expect(exactTotal, `${kind}: the exact CTE stops at bound + 1`).toBe(6);
+      } finally {
+        await db.$executeRawUnsafe(`DELETE FROM node_embeddings WHERE node_id IN (${extra.map((e) => `'${e.id}'`).join(',')})`);
+        await db.node.deleteMany({ where: { id: { in: extra.map((e) => e.id) } } });
+      }
+    }
+  }, LOOP_TIMEOUT_MS);
 });

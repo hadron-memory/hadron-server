@@ -405,12 +405,16 @@ export async function vectorSearchNodes(
   // `ann_rows` is the RAW candidate count, before the node dedup (a window full
   // of one node's chunks dedupes to one hit, #1345 review). Exhaustion compares
   // it with an independent eligible count — see vectorWindowExhausted.
-  const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<{ node_id: string; distance: number; ann_rows: number }[]>`
+  // #3054: ONE eligibility fragment serves the ANN window, the independent
+  // count and the exact fallback, so the three can never disagree on scope.
+  const eligibleFrom = Prisma.sql`FROM node_embeddings ne
+      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}`;
+  type NodeRow = { node_id: string; distance: number; ann_rows: number };
+  const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<NodeRow[]>`
     WITH ann AS (
       SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
-      FROM node_embeddings ne
-      JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}
+      ${eligibleFrom}
       ORDER BY ne.embedding <=> ${qvec}::vector
       LIMIT ${candidateK}
     )
@@ -421,23 +425,83 @@ export async function vectorSearchNodes(
     ORDER BY distance ASC
     LIMIT ${k}
   `);
-  if (opts.onWindow) {
-    const truncated = rows.length >= k;
-    // No row carries ann_rows when the join left nothing; the window count is
-    // unknown then, so only an empty scope can be called exhausted.
-    const windowRows = rows.length > 0 ? Number(rows[0].ann_rows) : 0;
-    let exhausted = false;
-    if (!truncated && (rows.length === 0 || windowRows < candidateK)) {
-      const [c] = await db.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM node_embeddings ne
-        JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}`;
-      const eligibleRows = Number(c?.n ?? 0);
-      exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
+  const truncated = rows.length >= k;
+  // No row carries ann_rows when the join left nothing; the window count is
+  // unknown then, so only an empty scope can be called exhausted.
+  const windowRows = rows.length > 0 ? Number(rows[0].ann_rows) : 0;
+  const bound = vectorExactFallbackMaxRows();
+  let exhausted = false;
+  // The count runs when a caller wants the window flag, or when the fallback
+  // is enabled and could use it (#3054: never only on a caller's onWindow).
+  if ((opts.onWindow || bound > 0) && !truncated && (rows.length === 0 || windowRows < candidateK)) {
+    const [c] = await db.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n ${eligibleFrom}`;
+    const eligibleRows = Number(c?.n ?? 0);
+    exhausted = rows.length === 0 ? eligibleRows === 0 : vectorWindowExhausted({ windowRows, eligibleRows, truncated });
+    if (takeExactFallback({ exhausted, eligibleRows, bound })) {
+      // Every eligible row is ranked, so the ANN horizon cannot hide one. The
+      // MATERIALIZED CTE has no ORDER BY, so the HNSW index cannot serve it on
+      // any plan (no planner switch, nothing to leak to the pool). The count
+      // above is a separate statement, so the eligible set may have grown
+      // since (#3062 blind P2): the CTE reads at most bound + 1 rows, and an
+      // overflow keeps the ANN result. `total` always yields one row, so the
+      // overflow is visible even when no hit survives the deleted-node join.
+      const exact = await db.$queryRaw<{ node_id: string | null; distance: number | null; total: number }[]>`
+        WITH ann AS MATERIALIZED (
+          SELECT ne.node_id, ne.embedding <=> ${qvec}::vector AS distance
+          ${eligibleFrom}
+          LIMIT ${bound + 1}
+        ), total AS (SELECT count(*)::int AS n FROM ann)
+        SELECT h.node_id, h.distance, t.n AS total
+        FROM total t
+        LEFT JOIN LATERAL (
+          SELECT a.node_id, MIN(a.distance) AS distance
+          FROM ann a
+          JOIN nodes n ON n.id = a.node_id AND n.deleted_at IS NULL
+          GROUP BY a.node_id
+          ORDER BY distance ASC
+          LIMIT ${k}
+        ) h ON TRUE
+        ORDER BY h.distance ASC NULLS LAST
+      `;
+      if (Number(exact[0]?.total ?? 0) <= bound) {
+        const hits = exact.filter((r) => r.node_id != null);
+        // Short of k after ranking every eligible row = every hit is here.
+        opts.onWindow?.({ exhausted: hits.length < k });
+        return hits.map((r) => ({ nodeId: r.node_id!, score: 1 - Number(r.distance) }));
+      }
+      // Overflow: the set grew past the bound; today's ANN result and flag stand.
+      exhausted = false;
     }
-    opts.onWindow({ exhausted });
   }
+  opts.onWindow?.({ exhausted });
   return rows.map((r) => ({ nodeId: r.node_id, score: 1 - Number(r.distance) }));
+}
+
+/** #3054 default: the gate's ruling from the #438 cost table (exact on <= 2000 rows stays in the tens of ms). */
+export const VECTOR_EXACT_FALLBACK_DEFAULT_MAX_ROWS = 2000;
+
+/**
+ * #3054 — the largest eligible-row count for which a short, not-exhausted ANN
+ * window is re-ranked exactly. Env `VECTOR_EXACT_FALLBACK_MAX_ROWS`, read per
+ * call: a non-negative safe integer; `0` disables the fallback; unset, empty
+ * or invalid falls back to the default.
+ */
+export function vectorExactFallbackMaxRows(): number {
+  const raw = process.env.VECTOR_EXACT_FALLBACK_MAX_ROWS;
+  if (raw == null || raw.trim() === '') return VECTOR_EXACT_FALLBACK_DEFAULT_MAX_ROWS;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 && n <= 2_147_483_647 ? n : VECTOR_EXACT_FALLBACK_DEFAULT_MAX_ROWS;
+}
+
+/**
+ * #3054 / #438 — the shared HNSW index post-filters by memory, so a small
+ * tenant's eligible rows can sit beyond the scan horizon and a short window is
+ * not proof of absence. Re-rank exactly only when the window was short and NOT
+ * exhausted, and the eligible set is small enough to rank in full. Over the
+ * bound, today's ANN result and its not-exhausted flag stand.
+ */
+export function takeExactFallback(w: { exhausted: boolean; eligibleRows: number; bound: number }): boolean {
+  return !w.exhausted && w.bound > 0 && w.eligibleRows > 0 && w.eligibleRows <= w.bound;
 }
 
 export interface ChunkHit {
@@ -500,38 +564,53 @@ export async function vectorSearchChunks(
   // chunks even when same-node chunks cluster near the top.
   const candidateK = Math.max(k, k * (opts.candidateFactor ?? 10));
   const chunkScopeSql = opts.scope === 'CONTENT' ? Prisma.sql`AND n.node_type <> 'comment'` : Prisma.empty;
-  const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<
-    {
-      node_id: string;
-      chunk_index: number;
-      char_start: number;
-      char_end: number;
-      chunk_text: string;
-      distance: number;
-    }[]
-  >`
+  // #3054: one eligibility fragment for the ANN window, the count and the exact fallback.
+  const eligibleFrom = Prisma.sql`FROM node_embeddings ne
+    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL ${chunkScopeSql}
+    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}`;
+  type ChunkRow = { node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number };
+  let rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<ChunkRow[]>`
     SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
            ne.embedding <=> ${qvec}::vector AS distance
-    FROM node_embeddings ne
-    JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL ${chunkScopeSql}
-    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}
+    ${eligibleFrom}
     ORDER BY ne.embedding <=> ${qvec}::vector
     LIMIT ${candidateK}
   `);
   // Exhausted = every eligible chunk (independent count; see
   // vectorWindowExhausted) was fetched AND fits in `k` (the slice truncates nothing).
-  if (opts.onWindow) {
-    const truncated = rows.length > k;
-    let exhausted = false;
-    if (!truncated && rows.length < candidateK) {
-      const [c] = await db.$queryRaw<{ n: number }[]>`
-        SELECT count(*)::int AS n FROM node_embeddings ne
-        JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL ${chunkScopeSql}
-        WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}`;
-      exhausted = vectorWindowExhausted({ windowRows: rows.length, eligibleRows: Number(c?.n ?? 0), truncated });
+  const truncated = rows.length > k;
+  const bound = vectorExactFallbackMaxRows();
+  let exhausted = false;
+  if ((opts.onWindow || bound > 0) && !truncated && rows.length < candidateK) {
+    const [c] = await db.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n ${eligibleFrom}`;
+    const eligibleRows = Number(c?.n ?? 0);
+    exhausted = vectorWindowExhausted({ windowRows: rows.length, eligibleRows, truncated });
+    if (takeExactFallback({ exhausted, eligibleRows, bound })) {
+      // See vectorSearchNodes: every eligible chunk ranked; the MATERIALIZED
+      // CTE leaves the HNSW index nothing to serve and reads at most bound + 1
+      // rows (an overflow keeps the ANN result). k + 1 tells whether the slice
+      // below truncates.
+      const exact = await db.$queryRaw<(Omit<ChunkRow, 'node_id'> & { node_id: string | null; total: number })[]>`
+        WITH exact AS MATERIALIZED (
+          SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
+                 ne.embedding <=> ${qvec}::vector AS distance
+          ${eligibleFrom}
+          LIMIT ${bound + 1}
+        ), total AS (SELECT count(*)::int AS n FROM exact)
+        SELECT e.*, t.n AS total
+        FROM total t
+        LEFT JOIN LATERAL (SELECT * FROM exact ORDER BY distance ASC LIMIT ${k + 1}) e ON TRUE
+        ORDER BY e.distance ASC NULLS LAST
+      `;
+      if (Number(exact[0]?.total ?? 0) <= bound) {
+        rows = exact.filter((r): r is typeof r & { node_id: string } => r.node_id != null);
+        exhausted = rows.length <= k;
+      } else {
+        exhausted = false;
+      }
     }
-    opts.onWindow({ exhausted });
   }
+  opts.onWindow?.({ exhausted });
   return rows.slice(0, k).map((r) => ({
     nodeId: r.node_id,
     chunkIndex: Number(r.chunk_index),
