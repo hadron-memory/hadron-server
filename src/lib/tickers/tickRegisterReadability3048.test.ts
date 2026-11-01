@@ -125,11 +125,14 @@ it('a holder\'s readability costs at most 28 operations, at depth 1 and at depth
   expect(deep, measured).toBeLessThanOrEqual(shallow + 1);
 }, 180_000);
 
-// ---- the batched answer equals the per-memory gate, for every row class ---------
+// ---- the batched answer equals the per-memory gate, for the row classes enrichment reaches ---------
 
 /**
- * One memory of each row class the gate (#3048 amendment 1, item 2) names, and
- * principals of every relevant shape. For each principal the batched answer
+ * One memory of each row class the gate (#3048 amendment 1, item 2) names, plus a
+ * private memory, read by user-shaped principals: the reader and the holders
+ * enrichment asks for are users. Worker-session and App-key principals, and
+ * worker working or install memories, are not covered: this call site covers
+ * only system-class chain memories (Ralion's §10 P3-1). For each principal the batched answer
  * (RegisterLookup.readable over a covered set, so `filterReadableMemoryIds`
  * once) must equal `canReadMemory` asked memory by memory. Equality alone can't
  * catch a change to `canReadMemoryRow` (both sides use it), so the rows whose
@@ -153,6 +156,7 @@ async function rowClasses() {
     appScoped: await mem('app-scoped', { class: 'app', appId: f.app.id }),
     publicKnowledge: await mem('public', { class: 'knowledge', visibility: 'PUBLIC' }),
     freePersonal: await mem('free-personal', { class: 'personal', userId: owner.id }),
+    freePrivate: await mem('free-private', { class: 'private', userId: owner.id }),
     encrypted: await mem('encrypted', { class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true }),
     agentSystem: f.roleA.memory,
     appPersonal: await mem('app-personal', { class: 'personal', userId: appMember.id, appId: f.app.id, userMemoryOfAgentId: f.roleA.id }),
@@ -166,7 +170,7 @@ async function rowClasses() {
   return { memories, principals, roles };
 }
 
-it('the batched answer equals canReadMemory for every row class and principal, and FR-016 holds', async () => {
+it('the batched answer equals canReadMemory for each named row class and user principal, and FR-016 holds', async () => {
   const { memories, principals, roles } = await rowClasses();
   const ids = Object.values(memories).map(m => m.id);
   const table: Record<string, Record<string, boolean>> = {};
@@ -192,6 +196,8 @@ it('the batched answer equals canReadMemory for every row class and principal, a
   expect(table.platformAdmin!.freePersonal).toBe(false);
   expect(table.platformOwner!.freePersonal).toBe(false);
   expect(table.owner!.freePersonal).toBe(true);
+  expect(table.owner!.freePrivate).toBe(true);
+  expect(table.stranger!.freePrivate).toBe(false);
   expect(table.stranger).toMatchObject({ publicKnowledge: true, orgKnowledge: false, appScoped: false, freePersonal: false, encrypted: false });
   expect(table.revoked!.orgKnowledge).toBe(false);
   expect(table.appMember!.otherAppScoped).toBe(false);
