@@ -40,6 +40,10 @@ describe('closed mirror diagnostic allowlist', () => {
     const inherited = Object.create({ [key]: value, ...(key === 'providerCode' ? { code: 'GIT_COMMAND_FAILED' } : {}) });
     expect(mirrorFailureMetadata(inherited, 'settle', 'SETTLEMENT')).toEqual({ phase: 'settle', class: 'SETTLEMENT' });
   });
+  it('an own wrapper marker does not read an inherited providerCode', () => {
+    const error = Object.create({ providerCode: 'EACCES' }, { code: { value: 'GIT_COMMAND_FAILED', enumerable: true } });
+    expect(mirrorFailureMetadata(error, 'push', 'PUSH_FAILED')).toEqual({ phase: 'push', class: 'PUSH_FAILED', providerCode: 'GIT_COMMAND_FAILED' });
+  });
   it('a non-allowlisted native code falls through to an allowlisted errorCode', () => {
     expect(mirrorFailureMetadata({ code: 'EPERM', errorCode: 'P1001' }, 'sequence', 'ATTEMPT_SEQUENCE'))
       .toEqual({ phase: 'sequence', class: 'ATTEMPT_SEQUENCE', providerCode: 'P1001' });
