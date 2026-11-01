@@ -75,6 +75,7 @@ import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolver
 import { modelGroupMutations, modelGroupQueries } from './resolvers.modelGroup.js';
 import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
+import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
@@ -142,6 +143,8 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
+  // #3125 S1: the App's properties and their revision.
+  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers },
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
@@ -262,6 +265,7 @@ export const resolvers = {
     ...agentTickerTemplateMutations,
     ...modelGroupMutations,
     ...deliverySettingsMutations,
+    ...appPropertiesMutations,
     ...stopSignalMutations,
     ...wakeMutations,
     ...deliveryBatchMutations,

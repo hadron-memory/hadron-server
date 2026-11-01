@@ -697,6 +697,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- 20261101120000_agent_task_references (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-references-invariants.sql
 
+-- #3125 S1: an App's properties are a JSON object when set. One source, shared verbatim with migration
+-- 20261101150000_app_properties (pinned by src/api/graphql/schema/appProperties3125.test.ts).
+\ir app-properties-invariants.sql
+
 -- #3125 S2: a task's external id (1..512) and its per-App partial unique index. One source, shared verbatim with
 -- migration 20261101160000_agent_task_external_id (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-external-id-invariants.sql
