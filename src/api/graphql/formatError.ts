@@ -26,7 +26,7 @@ import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQ
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
-import { AmbiguousLegacyUrnError } from '../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
@@ -61,6 +61,12 @@ function mapping<E>(
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
+  // #3009: declining the encrypted-vector disclosure is a caller refusal on both consumers of this list.
+  mapping(
+    (err): err is EncryptedVectorIndexNotAcknowledgedError => err instanceof EncryptedVectorIndexNotAcknowledgedError,
+    (err) => ({ code: 'ENCRYPTED_VECTOR_INDEX_NOT_ACKNOWLEDGED', disclosure: err.disclosure, memoryRef: err.memoryRef }),
+    { silenceInSentry: true },
+  ),
   // hadron-internal#3 L4: an over-limit operation is the caller's, not a fault. The refusal already carries its fixed
   // text and `extensions` (code, limit, max, http status), so nothing is added.
   mapping(

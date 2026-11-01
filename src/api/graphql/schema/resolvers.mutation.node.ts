@@ -906,7 +906,10 @@ async function writeNodeCoreRaw(
       if (memEncInfo.isEncrypted) {
         const key = sessionKeyCache.getByMemoryId(memEncInfo.id);
         if (!key) {
-          throw new Error('SESSION_EXPIRED: memory is encrypted but no active session key is available');
+          throw new GraphQLError(
+            `SESSION_EXPIRED: memory ${memEncInfo.id} is encrypted but no active session key is available.`,
+            { extensions: { code: 'SESSION_EXPIRED', memoryId: memEncInfo.id } },
+          );
         }
         // Spec 031 — `abstract` joins the encrypted-fields set; rationale
         // in nodeCrypto.ts EncryptedNodeFields doc-comment.
@@ -2097,7 +2100,7 @@ export async function updateNodePropertiesWith(
 
   // Encrypted memory: require an active session up front (mirrors
   // updateNodeData / writeNodeCore) so a missing key fails with a typed
-  // SESSION_EXPIRED rather than writeNodeCore's bare throw. `properties`
+  // SESSION_EXPIRED, as writeNodeCore does. `properties`
   // itself is plaintext, but the write round-trips the node's encrypted
   // fields, so the key is still required to persist.
   const memEnc = await getMemoryEncryptionInfo(ctx.db, meta.memoryId);
