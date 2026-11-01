@@ -13788,13 +13788,6 @@ export const typeDefs = `#graphql
     expiresAt: DateTime
   }
 
-  # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────
-
-  """
-  An agent task's status (hrn:node:hadronmemory.com:specs:cor:agt:050:02). FINISHED and CANCELLED are the end states.
-  BACKLOG (#1754) is parked: no assignee, never matched, never waited on, no alarms; assigning it or making it
-  ready moves it to PENDING.
-  """
   "#3125 S3: the caller's ready filter against the integration's readyLabel (ANY by default). ONLY on an integration with no readyLabel lists nothing."
   enum ReadyFilter {
     ONLY
@@ -13835,6 +13828,13 @@ export const typeDefs = `#graphql
     refusalCode: String
   }
 
+  # ── #1705 Agent tasks (Task Management T1, epic #1704; hrn:node:hadronmemory.com:specs:cor:agt:050) ──────
+
+  """
+  An agent task's status (hrn:node:hadronmemory.com:specs:cor:agt:050:02). FINISHED and CANCELLED are the end states.
+  BACKLOG (#1754) is parked: no assignee, never matched, never waited on, no alarms; assigning it or making it
+  ready moves it to PENDING.
+  """
   enum AgentTaskStatus {
     BACKLOG
     PENDING
