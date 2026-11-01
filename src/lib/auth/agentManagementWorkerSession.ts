@@ -13,8 +13,10 @@
 // against the state it commits on (Beckett, LOCAL P2-2 on #3044).
 //
 // The one thing decided before the transaction is a target that does not resolve. Under a worker session a missing,
-// deleted, malformed or unreadable target answers with this same refusal (`absentAsWorkerRefusal`), so a bound worker
-// learns nothing about which rows exist (BLIND P2 on #3044). Outside a worker session the not-found answer is unchanged.
+// deleted, malformed or unreadable target answers with this same refusal (`absentAsWorkerRefusal`, BLIND P2 on #3044).
+// What the answer reveals is therefore bounded by the holder's READ access: a target on an Agent the holder cannot read
+// answers like an absent one, and FORBIDDEN (holder reads but does not manage the Agent) is only seen on a target the
+// same worker can already read. Outside a worker session the not-found answer is unchanged.
 
 import { GraphQLError } from 'graphql';
 import { boundWorkerId } from '../bootPrompt.js';

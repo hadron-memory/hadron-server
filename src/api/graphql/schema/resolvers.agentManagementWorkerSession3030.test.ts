@@ -3,7 +3,8 @@
  * in this cut (ticker-template create/update/delete, setAgentModelGroup, deleteAgentModelGroup) refuse a write under
  * a bound worker session, even when the person behind it is the org ADMIN who manages the Agent, and write nothing.
  * The same person without a worker session is unchanged (S1). The refusal comes before the revision and existence
- * checks inside the deciding transaction, so it says nothing about the row it was aimed at.
+ * checks inside the deciding transaction; a target the holder cannot read answers like an absent one, so the answer
+ * reveals nothing beyond the holder's own read access.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -162,10 +163,19 @@ describe('#3030 the decision is inside the transaction: a queued holder demotion
       locked();
       await done;
     }, { timeout: 30_000 });
-    await ready;
+    await Promise.race([ready, holder]);
     const writing = codeOf(asWorker(write));
-    await waitForLockWaitersOfType(db as any, 'advisory');
-    release();
+    // A write that answers without queueing on the anchor (a guard outside the transaction) wins the race and fails on
+    // its code, not on the barrier's timeout.
+    const barrier = waitForLockWaitersOfType(db as any, 'advisory');
+    barrier.catch(() => {});
+    try {
+      await Promise.race([barrier, writing]);
+    } finally {
+      // Release the holder whatever the barrier did, and settle both sides, so a failed wait leaves nothing queued.
+      release();
+      await Promise.allSettled([holder, writing]);
+    }
     await holder;
     return writing;
   }
@@ -175,8 +185,68 @@ describe('#3030 the decision is inside the transaction: a queued holder demotion
     expect(await templates()).toEqual([]);
   });
 
+  it('template update answers FORBIDDEN and writes nothing', async () => {
+    const t = await createTemplate('base');
+    const before = await templates();
+    expect(await demoteWhileWaiting(() => updateTemplate(t.id, 1))).toBe('FORBIDDEN');
+    expect(await templates()).toEqual(before);
+  });
+
+  it('template delete answers FORBIDDEN and writes nothing', async () => {
+    const t = await createTemplate('base');
+    const before = await templates();
+    expect(await demoteWhileWaiting(() => deleteTemplate(t.id, 1))).toBe('FORBIDDEN');
+    expect(await templates()).toEqual(before);
+  });
+
   it('setAgentModelGroup answers FORBIDDEN and writes nothing', async () => {
     expect(await demoteWhileWaiting(() => setGroup('large', ['claude-opus-*']))).toBe('FORBIDDEN');
     expect(await groups()).toEqual([]);
+  });
+
+  it('deleteAgentModelGroup answers FORBIDDEN and writes nothing', async () => {
+    await setGroup('large', ['claude-opus-*']);
+    const before = await groups();
+    expect(await demoteWhileWaiting(() => deleteGroup('large'))).toBe('FORBIDDEN');
+    expect(await groups()).toEqual(before);
+  });
+});
+
+/**
+ * BLIND P2 on 64fb5490 (Greta): what the answer reveals is bounded by the holder's READ access. A target on an Agent
+ * the holder cannot read answers like an absent one (the worker refusal), so FORBIDDEN is only ever seen on a target
+ * the same worker can already read. Outside a worker session the person gets the same readable/absent split, which
+ * this PR does not change.
+ */
+describe('#3030 what a refusal reveals is bounded by the holder read access', () => {
+  it('an unreadable Agent template answers exactly like an absent one under a worker session', async () => {
+    const other = await db.organization.create({ data: { id: generateId(), name: 'Foreign3030', urn: 'foreign3030.example' } });
+    const otherAdmin = await db.user.create({ data: { id: generateId(), githubId: 303002, githubUsername: 'ws3030-foreign', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: otherAdmin.id, role: 'ADMIN' } });
+    const otherCtx: Context = { db, userId: otherAdmin.id, roles: ['READER'] };
+    const foreignAgent = (await M.createAgent({}, { orgId: other.id, name: 'Foreign role' }, otherCtx)).id;
+    const foreign = await M.createAgentTickerTemplate({}, { agentRef: foreignAgent, input: { name: 'f', cadenceSeconds: 600 } }, otherCtx);
+
+    expect(await codeOf(asWorker(() => updateTemplate(foreign.id, 1)))).toBe(REFUSED);
+    expect(await codeOf(asWorker(() => deleteTemplate(foreign.id, 1)))).toBe(REFUSED);
+    expect(await codeOf(asWorker(() => updateTemplate(generateId(), 1)))).toBe(REFUSED);
+    // The person baseline: unreadable and absent are both not-found.
+    expect(await codeOf(updateTemplate(foreign.id, 1))).toBe('TICKER_TEMPLATE_NOT_FOUND');
+    expect(await codeOf(updateTemplate(generateId(), 1))).toBe('TICKER_TEMPLATE_NOT_FOUND');
+  });
+
+  it('a reader-not-manager holder sees FORBIDDEN on a readable template, as the same person does without a session', async () => {
+    const t = await createTemplate('base');
+    const reader = await db.user.create({ data: { id: generateId(), githubId: 303003, githubUsername: 'ws3030-reader', roles: [] } });
+    await db.orgMember.create({ data: { organizationId: orgId, userId: reader.id, role: 'CONTRIBUTOR' } });
+    ctx = { db, userId: reader.id, roles: ['READER'] };
+    const before = await templates();
+
+    expect(await codeOf(asWorker(() => updateTemplate(t.id, 1)))).toBe('FORBIDDEN');
+    expect(await codeOf(updateTemplate(t.id, 1))).toBe('FORBIDDEN');
+    // The worker can read the very template the FORBIDDEN is about: the answer adds nothing to its read access.
+    const listed: Array<{ id: string }> = await asWorker(() => (resolvers.Query as any).agentTickerTemplates({}, { agentRef: agentId }, ctx));
+    expect(listed.map((x: { id: string }) => x.id)).toEqual([t.id]);
+    expect(await templates()).toEqual(before);
   });
 });
