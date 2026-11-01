@@ -71,6 +71,15 @@ describe('hadron_find_nodes nodeTypes (#3113)', () => {
     expect(chunk).toContain('nodeTypes');
   });
 
+  it('the REGISTERED schema accepts null as omitted and still rejects a non-array (zod runs before the handler)', () => {
+    const schema = mcp.toolParamSchema('hadron_find_nodes', 'nodeTypes');
+    expect(() => schema.parse(null)).not.toThrow();
+    expect(() => schema.parse(undefined)).not.toThrow();
+    expect(() => schema.parse(['task'])).not.toThrow();
+    expect(() => schema.parse('task')).toThrow();
+    expect(() => schema.parse([1])).toThrow();
+  });
+
   it('the singular nodeType is unchanged', async () => {
     expect(await find({ query: '*', nodeType: 'task' })).toContain('m.task');
   });
