@@ -788,7 +788,8 @@ export const nodeQueries = {
           let id: string;
           try {
             ({ id } = await resolveAppRunRef(ctx.db, baseUrn));
-          } catch {
+          } catch (error) {
+            if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
             return null;
           }
           const run = await ctx.db.appRun.findUnique({
