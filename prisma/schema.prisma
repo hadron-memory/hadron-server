@@ -5725,6 +5725,10 @@ model AgentTask {
   description          String?
   /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
   source               String?
+  /// #3125 S2 (V29, V46; cor:agt:120:02): the claim on an outside item, set once at create. Unique within an App,
+  /// whatever the task's state, through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
+  /// agent-task-external-id-invariants.sql: Prisma cannot model a partial unique). Compared exactly as written.
+  externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).
   parentTaskId         String?   @map("parent_task_id")
   ownerWorkerId        String?   @map("owner_worker_id")
