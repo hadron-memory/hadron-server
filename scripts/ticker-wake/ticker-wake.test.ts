@@ -2379,6 +2379,16 @@ describe('#2138 — fresh ticks after two unreconciled cadences', () => {
     await go(at(T0 + 1_200_001));
     expect(f.sent).toHaveLength(2); // restart/re-offer is not another fresh request
   });
+  it('#2746: a hold logged earlier in a delivery is cleared when the same delivery then succeeds', async () => {
+    await stuck();
+    const holdsPath = join(dir, 'ticker-wake', 'holds.log');
+    expect(readFileSync(holdsPath, 'utf8').trim().split('\n')).toHaveLength(1); // pass one: send accepted but unconfirmed
+    f.sendReply = () => JSON.stringify(CONFIRMED);
+    await go(at(T0 + 1_200_000));
+    expect(f.acked).toHaveLength(1);
+    expect(log()).toContain('earlier request still unreconciled'); // a hold line was logged before the fresh request succeeded
+    expect(readFileSync(holdsPath, 'utf8').trim().split('\n')).toHaveLength(1); // pass two delivered: no new hold line
+  });
   it('a confirmed replacement acks only its newer proof; the old entry survives the ack', async () => {
     await stuck();
     f.sendReply = () => JSON.stringify(CONFIRMED);
@@ -3017,5 +3027,127 @@ describe('#2754 — the server tick line', () => {
     f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
     await go({ dry: true });
     expect(f.sent).toEqual([]);
+  });
+});
+
+describe('#2746: a readable per-pass hold reason', () => {
+  const holdsFile = () => join(dir, 'ticker-wake', 'holds.log');
+  const holds = () => (existsSync(holdsFile()) ? readFileSync(holdsFile(), 'utf8').split('\n').filter(Boolean) : []);
+  const TEXT_SENTINEL = 'PRIVATE-TICK-TEXT-SENTINEL-2746a1';
+  const PROOF_SENTINEL = 'OPAQUE-PROOF-SENTINEL-2746b2';
+
+  it('a held wake writes one line naming the worker and a closed reason', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    expect(f.sent).toEqual([]);
+    const lines = holds();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\S+ Zed w-other no-receiver-on-host$/);
+  });
+
+  it('each hold site maps to its own closed code', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], 'opaque')];
+    await go();
+    expect(holds()[0]).toMatch(/ Ada w-ada proof-coverage-unreadable$/);
+    rmSync(holdsFile());
+    f.wakes = [wake('w-ada', 'Ada', [TICK, task('t1', 'END_SESSION')], proof(['T:1']))];
+    await go();
+    expect(holds()[0]).toMatch(/ Ada w-ada carries-other-reasons$/);
+  });
+
+  it('a delivered wake writes no hold line', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    await go();
+    expect(f.acked).toHaveLength(1);
+    expect(holds()).toEqual([]);
+  });
+
+  it('an earlier unreconciled send is reported as such, the incident of #2746', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.sendReply = () => JSON.stringify({ ok: true, result: { send: { accepted: false } } });
+    await go();
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1'], 'y'))];
+    await go();
+    expect(holds().some((l) => / Ada w-ada (unreconciled-earlier-send|send-unconfirmed)$/.test(l))).toBe(true);
+  });
+
+  it('the file never carries tick text, a proof, or a server message', async () => {
+    f.wakes = [wake('w-other', `Zed`, [TICK], `${PROOF_SENTINEL}.sig`, [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}`)];
+    await go();
+    f.wakes = [wake('w-ada', 'Ada', [TICK], `${PROOF_SENTINEL}`, [], undefined, `tick coordinator-tick: ${TEXT_SENTINEL}`)];
+    await go();
+    const text = holds().join('\n');
+    expect(text).not.toBe('');
+    expect(text).not.toContain(TEXT_SENTINEL);
+    expect(text).not.toContain(PROOF_SENTINEL);
+  });
+
+  it('a worker name or id outside the plain shape is not written as sent', async () => {
+    f.wakes = [wake('w-x y\nFORGED', 'Bad Name\nFORGED 2026 w-ada ok', [TICK])];
+    await go();
+    const lines = holds();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('FORGED');
+    expect(lines[0].split(' ')).toHaveLength(4);
+  });
+
+  it('the file is capped: it keeps only the newest lines', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    for (let i = 0; i < 230; i++) await go();
+    const lines = holds();
+    expect(lines.length).toBe(200);
+  });
+
+  it('the file is world-readable, so the orca user can read it', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    const { statSync } = await import('node:fs');
+    expect(statSync(holdsFile()).mode & 0o444).toBe(0o444);
+  });
+
+  it('--dry writes no hold file', async () => {
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go({ dry: true });
+    expect(existsSync(holdsFile())).toBe(false);
+  });
+
+  it('a failed ack is reported as ack-failed', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    f.ackReply = () => ({ errors: [{ message: 'x', extensions: { code: 'WAKE_PROOF_STALE' } }] });
+    await go();
+    expect(holds()).toHaveLength(1);
+    expect(holds()[0]).toMatch(/ Ada w-ada ack-failed$/);
+  });
+
+  it('a wake left past the pass budget is reported as pass-budget-spent', async () => {
+    f.wakes = [wake('w-ada', 'Ada', [TICK], proof(['T:1']))];
+    await pass(cfg(), f.run, { budgetMs: 0 }, (l) => lines.push(l));
+    expect(f.sent).toEqual([]);
+    expect(holds()[0]).toMatch(/ Ada w-ada pass-budget-spent$/);
+  });
+
+  it('--dry writes nothing even when the state directory exists', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go({ dry: true });
+    expect(existsSync(holdsFile())).toBe(false);
+  });
+
+  it('the file is world-readable even under a restrictive umask', async () => {
+    const { statSync } = await import('node:fs');
+    const old = process.umask(0o077);
+    try {
+      f.wakes = [wake('w-other', 'Zed', [TICK])];
+      await go();
+    } finally { process.umask(old); }
+    expect(statSync(holdsFile()).mode & 0o777).toBe(0o644);
+  });
+
+  it('an unwritable hold file is logged and never fails the pass', async () => {
+    mkdirSync(join(dir, 'ticker-wake'), { recursive: true });
+    mkdirSync(holdsFile());
+    f.wakes = [wake('w-other', 'Zed', [TICK])];
+    await go();
+    expect(log()).toContain('hold reasons not written');
   });
 });
