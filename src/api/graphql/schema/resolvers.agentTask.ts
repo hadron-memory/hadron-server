@@ -93,6 +93,7 @@ import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { touchSessionIfLive } from '../../../lib/sessionActivity.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { keyHostId } from '../../../lib/hostOperations/hostKey.js';
 import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
@@ -981,6 +982,8 @@ async function mutateTask(
       }
     }
   }
+  // #2694 (cor:agt:020:11 r3): a worker's accepted task write through its own live session is that worker driving it.
+  if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
   return ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
 }
 
@@ -1467,6 +1470,8 @@ export const agentTaskMutations = {
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
     await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
+    // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
+    if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
     return created;
   },
 
