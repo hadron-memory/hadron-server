@@ -27,19 +27,36 @@ export function isEmailSenderConfigured(): boolean {
 }
 
 /**
+ * #3047 (same class as #3012 item 1): send one message and require the provider's acknowledgement. A THROWN SDK error's
+ * message is free text that can name the recipient (a network error does), and these errors reach the fault log, Sentry
+ * and the deletion-notice job's console.error, so only the thrown error's name is kept. A refusal the SDK RESOLVES goes
+ * through {@link assertProviderAck}, already name-only. The one place the three non-magic-link senders send.
+ */
+async function sendAcked(message: Parameters<Resend['emails']['send']>[0]): Promise<void> {
+  // Outside the try: a missing key is a configuration fault that keeps its own message, not a send failure.
+  const client = getResend();
+  let result: Awaited<ReturnType<Resend['emails']['send']>>;
+  try {
+    result = await client.emails.send(message);
+  } catch (err) {
+    throw new Error(`mail provider send failed: ${err instanceof Error ? err.name : 'unknown'}`);
+  }
+  assertProviderAck(result);
+}
+
+/**
  * #1647: tell a user an administrator erased their account. The text deliberately carries NO reason: the reason is an
  * audit record, not something the notice discloses. Throws when the provider refuses, so the caller can count a try.
  */
 export async function sendAccountDeletionNotice(to: string): Promise<void> {
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  const result = await getResend().emails.send({
+  await sendAcked({
     from: fromAddress,
     to,
     subject: 'Your Hadron account was deleted',
     html: '<p>A Hadron administrator deleted your account, and your data was erased.</p>' +
       '<p>If you believe this was a mistake, contact Hadron support.</p>',
   });
-  assertProviderAck(result);
 }
 
 /**
@@ -407,7 +424,7 @@ function logMagicLinkSend(
  */
 export async function sendCeremonySignInLink(to: string, verifyUrl: string): Promise<void> {
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  const result = await getResend().emails.send({
+  await sendAcked({
     from: fromAddress,
     to,
     subject: 'Confirm it is you, to manage your Hadron passkeys',
@@ -418,7 +435,6 @@ export async function sendCeremonySignInLink(to: string, verifyUrl: string): Pro
       <p>If you didn't request this, you can safely ignore this email.</p>
     `,
   });
-  assertProviderAck(result);
 }
 
 /** What a passkey registration notice says (cor:aut:040:02). */
@@ -460,7 +476,7 @@ export function passkeyNoticeEmail(n: PasskeyNoticeContent): { subject: string; 
 export async function sendPasskeyRegisteredNotice(to: string, n: PasskeyNoticeContent): Promise<void> {
   const { subject, html } = passkeyNoticeEmail(n);
   const fromAddress = process.env.EMAIL_FROM || 'Hadron <noreply@hadrongraph.io>';
-  assertProviderAck(await getResend().emails.send({ from: fromAddress, to, subject, html }));
+  await sendAcked({ from: fromAddress, to, subject, html });
 }
 
 export async function verifyMagicLink(
