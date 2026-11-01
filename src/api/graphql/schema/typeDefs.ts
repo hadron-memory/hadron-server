@@ -13034,7 +13034,7 @@ export const typeDefs = `#graphql
 
     A worker's post that repeats its own earlier message is refused: the same worker
     (across its sessions), the same Channel, exactly the same body and the same reply
-    target (or none on both sides), earlier than ten minutes ago, with TEAM_CHAT_DUPLICATE.
+    target (or none on both sides), within the preceding ten minutes, with TEAM_CHAT_DUPLICATE.
     The earlier message was posted, so do not retry: the text and the typed fields
     (earlierSeq, channelId) name it. Nothing is stored. A post made as the human
     (no session) is not judged.
