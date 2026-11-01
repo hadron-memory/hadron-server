@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { resolveRevisionEditor } from './resolvers.types.js';
 import { typeDefs } from './typeDefs.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -96,6 +97,25 @@ describe('#2574 githubId is personal, githubUsername and avatarUrl are identity 
   });
 });
 
+describe('#2574 githubId at the field resolver for callers with no plain user viewer (Riana §10 P3-1)', () => {
+  beforeEach(async () => cleanDb(db));
+  const githubId = (resolvers.User as Record<string, (u: unknown, a: unknown, c: Context) => Promise<unknown>>).githubId;
+
+  it('a caller with no userId (App key, anonymous) reads null githubId', async () => {
+    const f = await fixture();
+    expect(await githubId({ id: f.target.id, githubId: GITHUB_ID }, {}, { db, roles: [] } as unknown as Context)).toBeNull();
+  });
+
+  it('an impersonation scoped to an org the target is not in reads null githubId, though the impersonated user is a co-member', async () => {
+    const f = await fixture();
+    const otherOrgId = (await db.orgMember.findFirstOrThrow({ where: { userId: f.unrelated.id } })).organizationId;
+    const ctx = { db, userId: f.coMember.id, roles: ['READER'], impersonation: { orgId: otherOrgId, adminUserId: f.admin.id } } as unknown as Context;
+    expect(await githubId({ id: f.target.id, githubId: GITHUB_ID }, {}, ctx)).toBeNull();
+    // Control: the same co-member without impersonation reads it.
+    expect(await githubId({ id: f.target.id, githubId: GITHUB_ID }, {}, { db, userId: f.coMember.id, roles: ['READER'] } as Context)).toBe(GITHUB_ID);
+  });
+});
+
 describe('#2574 the username stays a public search key (cor:acl:070:02, V28 keeps it)', () => {
   beforeEach(async () => cleanDb(db));
 
@@ -103,6 +123,15 @@ describe('#2574 the username stays a public search key (cor:acl:070:02, V28 keep
     const f = await fixture();
     const data = await run(BY_USERNAME, { q: 'target-2574' }, f.outsider.id);
     expect(data.users.items.map((u: { id: string }) => u.id)).toEqual([f.target.id]);
+  });
+
+  it('an outsider resolves a github:<login> revision editor to the target (exact match, handle and urn only)', async () => {
+    const f = await fixture();
+    const ctx = { db, userId: f.outsider.id, roles: ['READER'] } as Context;
+    expect(await resolveRevisionEditor(ctx, [`github:${USERNAME.toUpperCase()}`])).toEqual({
+      handle: f.target.handle,
+      urn: `hrn:user:${f.target.handle}`,
+    });
   });
 
   it('an outsider locates the target by githubUsername through globalSearch', async () => {
