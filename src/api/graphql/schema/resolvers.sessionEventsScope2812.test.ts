@@ -19,7 +19,7 @@ it('#2812 denies a private-bound parent even when its unbound event passes the e
     organizationId: org.id, userId: owner.id, name: 'Private', urn: `${org.urn}:private`, class: 'private',
   } });
   const parent = await db.session.create({ data: {
-    appId: app.id, userId: owner.id, memoryId: memory.id,
+    id: generateId(), appId: app.id, userId: owner.id, memoryId: memory.id,
   }, select: { id: true } });
   // memoryId null is intentional: this event survives the independent event-memory
   // filter, so only the nested SESSION guard can withhold it from the non-owner.
