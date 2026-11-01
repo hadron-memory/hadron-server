@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { MODEL_GROUPS_PER_OWNER_MAX } from '../../../lib/agentTasks/modelGroups.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -230,6 +231,66 @@ describe('the live walk', () => {
     const other = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
     await db.modelGroup.create({ data: { appId: other.id, name: 'theirs', patterns: ['t*'] } });
     expect(await effective(ctx(admin.id))).toEqual([]);
+  });
+});
+
+describe('Agent writers re-decide inside the transaction (§10, #3008)', () => {
+  /** Wait until some other connection is blocked on an advisory lock, i.e. the writer reached its anchor wait. */
+  async function writerBlocked(): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      const [{ n }] = await db.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`;
+      if (n > 0n) return;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    throw new Error('the writer never blocked on its authority anchor');
+  }
+
+  /**
+   * A racer that holds the CALLER'S USER anchor exclusively, the last anchor withAuthorizedTx takes. The outer gate waits on the
+   * org and agent anchors, not this one, so the writer passes it and then blocks inside the transaction; only then does the racer
+   * change authority and commit. A racer on the org or agent anchor would block the outer gate itself and mask the in-transaction
+   * gate this pins.
+   */
+  async function raceWith(write: () => Promise<unknown>, change: (tx: any) => Promise<void>): Promise<unknown> {
+    let outcome: Promise<unknown> = Promise.resolve();
+    await db.$transaction(async (tx) => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: admin.id }], 'exclusive');
+      outcome = write().then(() => 'wrote', (e) => e);
+      await writerBlocked();
+      await change(tx);
+    });
+    return outcome;
+  }
+
+  it.each(['READER', 'CONTRIBUTOR'])('an ADMIN demoted to %s while the write waits is refused and nothing is written', async (role) => {
+    const result = await raceWith(
+      () => setAgent(ctx(admin.id), 'large', ['x*']),
+      (tx) => tx.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { role } }),
+    );
+    expect(result).not.toBe('wrote');
+    expect(((result as any).extensions?.code ?? (result as any).code)).toBe('FORBIDDEN');
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it('an ADMIN revoked while a delete waits is refused and the group stays', async () => {
+    await setAgent(ctx(admin.id), 'large', ['x*']);
+    const result = await raceWith(
+      () => M.deleteAgentModelGroup({}, { agentRef: teamAgent.id, name: 'large' }, ctx(admin.id)),
+      (tx) => tx.orgMember.updateMany({ where: { organizationId: org.id, userId: admin.id }, data: { deletedAt: new Date() } }),
+    );
+    expect(result).not.toBe(true);
+    expect((await rows()).map((r) => r.name)).toEqual(['large']);
+  });
+
+  it('deleting one Agent’s group never touches another Agent’s group of the same name', async () => {
+    await setAgent(ctx(admin.id), 'large', ['a*'], teamAgent.id);
+    await setAgent(ctx(admin.id), 'large', ['b*'], otherAgent.id);
+    await db.modelGroup.create({ data: { name: 'large', appId: app.id, patterns: ['c*'] } });
+    expect(await M.deleteAgentModelGroup({}, { agentRef: teamAgent.id, name: 'large' }, ctx(admin.id))).toBe(true);
+    expect((await rows()).map((r) => [r.agentId, r.appId, r.patterns[0]])).toEqual([
+      [otherAgent.id, null, 'b*'],
+      [null, app.id, 'c*'],
+    ].sort((x, y) => String(x[2]).localeCompare(String(y[2]))));
   });
 });
 

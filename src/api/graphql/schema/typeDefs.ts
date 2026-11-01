@@ -10277,13 +10277,13 @@ export const typeDefs = `#graphql
     #2831 S1 (hrn:node:hadronmemory.com:specs:cor:agt:060:12) - set an Agent's model group: the name is created or its whole pattern list replaced (no
     merge). Patterns are lowercase globs matched against a session's self-reported model (* any run, ? one character); an
     empty list is allowed. Whoever manages the Agent only. A group only steers matching, never authorization. Refusals:
-    AGENT_NOT_FOUND, FORBIDDEN, BAD_USER_INPUT, MODEL_GROUP_LIMIT_REACHED.
+    AGENT_NOT_FOUND, FORBIDDEN, BAD_USER_INPUT, MODEL_GROUP_LIMIT_REACHED, AGENT_OWNERSHIP_CHANGED.
     """
     setAgentModelGroup(agentRef: ID!, name: String!, patterns: [String!]!): ModelGroup!
 
     """
     #2831 S1 - remove an Agent's model group. Installs that override it keep their own list. Whoever manages the Agent only.
-    Refusals: AGENT_NOT_FOUND, FORBIDDEN, BAD_USER_INPUT, MODEL_GROUP_NOT_FOUND.
+    Refusals: AGENT_NOT_FOUND, FORBIDDEN, BAD_USER_INPUT, MODEL_GROUP_NOT_FOUND, AGENT_OWNERSHIP_CHANGED.
     """
     deleteAgentModelGroup(agentRef: ID!, name: String!): Boolean!
 

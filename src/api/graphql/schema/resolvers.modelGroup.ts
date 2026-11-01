@@ -81,7 +81,10 @@ async function writeAsAgentManager<T>(
       });
       if (!current || current.deletedAt) throw new AgentNotFoundError(agent.id);
       if (current.organizationId !== agent.organizationId || current.ownerUserId !== agent.ownerUserId) {
-        throw new Error('Agent ownership changed; retry the model group change');
+        throw taskError(
+          'AGENT_OWNERSHIP_CHANGED',
+          'This Agent changed owner while the change was being made; nothing was written. Read it again and retry.',
+        );
       }
       await requireAgentAccess(txCtx, current, 'ADMIN');
     },

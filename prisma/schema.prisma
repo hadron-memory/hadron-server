@@ -5991,9 +5991,6 @@ model WorkerAvailability {
   @@map("worker_availability")
 }
 
-/// #1706 — one model family's availability for work in one App
-/// (cor:agt:060:03): at most one row per App and family; with none, the family
-/// is available. Set only by whoever manages the App (cor:agt:060:09).
 /// #2831 S1 (cor:agt:060:12) — a model group: an opaque name over a list of model
 /// patterns (globs), declared by the team Agent (`agentId`) or by an App (`appId`,
 /// an override of the Agent's group of that name, or an App-only group). Exactly
@@ -6020,6 +6017,9 @@ model ModelGroup {
   @@map("model_groups")
 }
 
+/// #1706 — one model family's availability for work in one App
+/// (cor:agt:060:03): at most one row per App and family; with none, the family
+/// is available. Set only by whoever manages the App (cor:agt:060:09).
 model ModelFamilyAvailability {
   appId         String    @map("app_id")
   /// The model family, e.g. `claude`, `codex`, `glm` (cor:agt:060:04).
