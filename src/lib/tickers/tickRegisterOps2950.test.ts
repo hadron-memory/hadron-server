@@ -21,6 +21,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { tickFixture2733, tickNow2733, tickTaskLoc2733 } from '../../test/tickRegister2733.js';
 import { enrichTickWakes } from './tickActions.js';
+import { inheritable, RegisterData, RegisterLookup } from '../actionRegister/lookup.js';
 import { computeDueWakes } from './dueWakes.js';
 import type { WorkerWake } from './wakeRule.js';
 
@@ -28,6 +29,8 @@ vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: 
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
 let f: Awaited<ReturnType<typeof tickFixture2733>>;
+// Deterministic holder ids, distinct within this file and outside the fixture's 2733xx range.
+let nextGithubId = 295_000;
 beforeEach(async () => { f = await tickFixture2733(); });
 afterEach(() => vi.restoreAllMocks());
 
@@ -75,7 +78,7 @@ async function build(shape: Shape, label: string) {
   ]) });
   const workers: string[] = [];
   for (let i = 0; i < shape.holders; i++) {
-    const u = await db.user.create({ data: { githubId: 295000 + workers.length + Math.floor(Math.random() * 1e6), githubUsername: 'ops-' + label + '-h' + i, roles: ['READER'] } });
+    const u = await db.user.create({ data: { githubId: nextGithubId++, githubUsername: 'ops-' + label + '-h' + i, roles: ['READER'] } });
     await db.appMember.create({ data: { appId: f.app.id, userId: u.id, role: 'member' } });
     workers.push((await f.worker('Ops' + label + 'w' + i, f.roleA.id, u.id)).id);
   }
@@ -152,8 +155,12 @@ it.each(['member', 'outside'] as const)('an entry read for a holder who may read
   const out = await due();
   expect(tick(out, byMember.id).action).toMatchObject({ code: 'tick.shared', state: 'MAPPED', taskLoc: tickTaskLoc2733 });
   expect(tick(out, byOutside.id).action).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
-  const stored = await db.appWakeReservation.findMany({ where: { appId: f.app.id } });
-  const outsideStored = JSON.stringify(stored.filter(r => JSON.stringify(r).includes(byOutside.id)));
+  // The stored wakes, selected by their worker key: both must exist and carry the code, so the absence check below
+  // inspects a real reservation (the member's carries the loc, proving the stored wake records it when allowed).
+  const memberStored = JSON.stringify((await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: byMember.id } })).wake);
+  const outsideStored = JSON.stringify((await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: byOutside.id } })).wake);
+  expect(memberStored).toContain(tickTaskLoc2733);
+  expect(outsideStored).toContain('tick.shared');
   expect(outsideStored).not.toContain(tickTaskLoc2733);
 });
 
@@ -168,8 +175,11 @@ it.each(['member', 'outside'] as const)('a task read for a holder who may read i
   expect(tick(out, byMember.id).action).toEqual({ code: 'tick.shared', state: 'MAPPED', taskLoc: tickTaskLoc2733, taskUrn: urn });
   // Worker-side unreadable nearest task: UNRESOLVED with the loc, never the URN, never a farther task.
   expect(tick(out, byOutside.id).action).toEqual({ code: 'tick.shared', state: 'UNRESOLVED', taskLoc: tickTaskLoc2733 });
-  const stored = await db.appWakeReservation.findMany({ where: { appId: f.app.id } });
-  expect(JSON.stringify(stored.filter(r => JSON.stringify(r).includes(byOutside.id)))).not.toContain(urn);
+  const memberStored = JSON.stringify((await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: byMember.id } })).wake);
+  const outsideStored = JSON.stringify((await db.appWakeReservation.findUniqueOrThrow({ where: { workerId: byOutside.id } })).wake);
+  expect(memberStored).toContain(urn);
+  expect(outsideStored).toContain(tickTaskLoc2733);
+  expect(outsideStored).not.toContain(urn);
   expect(task.id).toBeTruthy();
 });
 
@@ -195,4 +205,25 @@ it.each([
   await db.appWakeReservation.deleteMany({ where: { appId: f.app.id } });
   await entry(f.team.systemMemoryId);
   expect(tick(await due(), w.id).action).toMatchObject({ code: 'tick.shared', state: 'MAPPED', taskLoc: tickTaskLoc2733 });
+});
+
+// The comment half of the filter, on controlled rows (a comment can't be a fixture, above): only a non-comment row
+// whose role is not a boot prompt is inherited through a chain link.
+it.each([
+  [{ nodeType: 'comment', role: null }, false],
+  [{ nodeType: 'comment', role: 'boot-prompt' }, false],
+  [{ nodeType: 'info', role: 'boot-prompt' }, false],
+  [{ nodeType: 'info', role: 'boot-prompt.lane' }, false],
+  [{ nodeType: 'info', role: null }, true],
+  [{ nodeType: 'info', role: 'boot-prompter' }, true],
+] as const)('inheritable(%o) is %s', (row, expected) => {
+  expect(inheritable(row)).toBe(expected);
+});
+
+it('a lookup refuses shared rows that belong to another transaction', async () => {
+  const data = new RegisterData(db as never);
+  await db.$transaction(async tx => {
+    expect(() => new RegisterLookup(tx, f.context(), f.app.id, Date.now() + 1000, false, undefined, data)).toThrow(/another transaction/);
+    expect(new RegisterLookup(tx, f.context(), f.app.id, Date.now() + 1000, false, undefined, new RegisterData(tx)).data.tx).toBe(tx);
+  });
 });

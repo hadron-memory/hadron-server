@@ -114,7 +114,7 @@ export class RegisterData {
 }
 
 /** Not inherited through a chain: a comment, or a boot prompt (the filter `readEntry` applied in SQL before #2950). */
-function inheritable(row: EntryRow): boolean {
+export function inheritable(row: Pick<EntryRow, 'nodeType' | 'role'>): boolean {
   return row.nodeType !== 'comment' && (row.role === null || (row.role !== 'boot-prompt' && !row.role.startsWith('boot-prompt.')));
 }
 
@@ -130,6 +130,8 @@ export class RegisterLookup {
   private team: Promise<string | null> | undefined;
   readonly data: RegisterData;
   constructor(readonly tx: Prisma.TransactionClient, readonly ctx: Context, readonly appId: string, readonly deadline: number, readonly ungatedWorker = false, readonly teamMemoryHint?: string | null, data?: RegisterData) {
+    // The shared rows belong to ONE bounded transaction; a lookup gating in another would read rows outside its own.
+    if (data && data.tx !== tx) throw new Error('RegisterLookup: shared RegisterData belongs to another transaction');
     this.data = data ?? new RegisterData(tx);
   }
 
