@@ -3,7 +3,8 @@
  * check its team channel is doing so. Derived at read time, never stored, and a
  * status only (the alarm on it is deferred).
  *
- * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`).
+ * - `NO_SESSION`: no live session (cor:agt:020:11, the shared `isSessionLive`),
+ *   with its reason (#3077): IDLE, ENDED or NEVER_BOUND (`loadNoSessionReasons`).
  * - `PENDING`: not expected to check, with its reason: a team pause, its own
  *   pause, isolated, on standby, or no task. The reasons come from the ticker's
  *   own `loadPendingReasons`, so the roster and the `live-check` rule can't
@@ -29,10 +30,19 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 export type WorkerCheckState = 'NO_SESSION' | 'PENDING' | 'OK' | 'OVERDUE';
 export type WorkerPendingReason = PendingReason;
+/**
+ * #3077 — why a worker reads NO_SESSION (cor:agt:100:03; idle vs ended per cor:agt:020:03):
+ * - `IDLE`: it has an open session that would bind it again, but nobody drove it inside its idle window;
+ * - `ENDED`: every session it has had is over: ended, auto-expired, or past its promised `expiresAt`;
+ * - `NEVER_BOUND`: it has never had a session (soft-deleted sessions count for nothing).
+ */
+export type WorkerNoSessionReason = 'IDLE' | 'ENDED' | 'NEVER_BOUND';
 
 export type WorkerCheckStatus = {
   status: WorkerCheckState;
   pendingReason: WorkerPendingReason | null;
+  /** #3077: set only when status is NO_SESSION. */
+  noSessionReason: WorkerNoSessionReason | null;
   /** When it last checked the App's team channel through its own session; null if never. */
   lastCheckedAt: Date | null;
   /**
@@ -47,6 +57,8 @@ export type WorkerCheckInputs = {
   liveSessionStartedAt: Date | null;
   /** Why it isn't expected to check (`loadPendingReasons`); null = it has a task and is expected to. */
   pendingReason: WorkerPendingReason | null;
+  /** #3077: why it has no live session (`loadNoSessionReasons`); read only when `liveSessionStartedAt` is null. */
+  noSessionReason?: WorkerNoSessionReason | null;
   /** Its newest open assignment, if any. */
   lastAssignedAt: Date | null;
   lastCheckedAt: Date | null;
@@ -99,6 +111,7 @@ export function deriveWorkerCheckStatus(i: WorkerCheckInputs, s: CheckSettings, 
   const out = (status: WorkerCheckState, pendingReason: WorkerPendingReason | null = null): WorkerCheckStatus => ({
     status,
     pendingReason,
+    noSessionReason: status === 'NO_SESSION' ? (i.noSessionReason ?? null) : null,
     lastCheckedAt: i.lastCheckedAt,
     resumedAt: resumedAt(i, now),
   });
@@ -180,6 +193,8 @@ export async function loadWorkerCheckStatuses(
     const prev = liveStart.get(s.workerId);
     if (!prev || s.startedAt > prev) liveStart.set(s.workerId, s.startedAt);
   }
+  // #3077: why the workers without a live session have none, in a separate read so the live-session read stays as it is.
+  const noSessionReasons = await loadNoSessionReasons(db, ids.filter((id) => !liveStart.has(id)), now);
   const openTask = new Map(tasks.map((t) => [t.assigneeWorkerId as string, t._max.assignedAt]));
   const checkedAt = new Map(readStates.map((r) => [r.workerId as string, r.lastCheckedAt]));
   const wake = new Map(wakeSettings.map((ws) => [ws.workerId, ws]));
@@ -192,6 +207,7 @@ export async function loadWorkerCheckStatuses(
         {
           liveSessionStartedAt: liveStart.get(w.id) ?? null,
           pendingReason: pending.get(w.id) ?? null,
+          noSessionReason: noSessionReasons.get(w.id) ?? null,
           lastAssignedAt: openTask.get(w.id) ?? null,
           lastCheckedAt: checkedAt.get(w.id) ?? null,
           pausedUntil: wake.get(w.id)?.pausedUntil ?? null,
@@ -208,17 +224,46 @@ export async function loadWorkerCheckStatuses(
   return out;
 }
 
-const reasonWords = (r: WorkerPendingReason): string => r.toLowerCase().replace(/_/g, ' ');
+/**
+ * #3077 — the NO_SESSION reason of each worker in `workerIds`, all of which the caller has already found to have no
+ * live session (`isSessionLive` over their open, undeleted sessions). Gate settlement (issue comment 6554106259):
+ * - IDLE when an open (`endedAt` null), undeleted, not auto-expired session's promised `expiresAt` has not passed:
+ *   it is not live, so it was driven outside its window. An expiry at or before `now` has ended it (R5,
+ *   cor:agt:020:03), even before the reaper stamps `endedAt` (Pin A).
+ * - ENDED when any undeleted Session row exists, auto-expired rows included.
+ * - NEVER_BOUND when none does (Pin B): the same reader as `Worker.lastActiveAt` being null.
+ * Soft-deleted sessions count for nothing, as in the bind gate and `Worker.lastActiveAt` (gate amendment, after
+ * team chat #60698).
+ * Classification only: it never decides liveness, so it can't become a second liveness rule (cor:agt:020:11). It
+ * reveals nothing beyond the closed reason; callers expose it only inside the masked `checkStatus`.
+ */
+export async function loadNoSessionReasons(db: Db, workerIds: string[], now: Date): Promise<Map<string, WorkerNoSessionReason>> {
+  if (workerIds.length === 0) return new Map();
+  const [open, any] = await Promise.all([
+    db.session.groupBy({
+      by: ['workerId'],
+      where: { workerId: { in: workerIds }, endedAt: null, deletedAt: null, autoExpiredAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    }),
+    db.session.groupBy({ by: ['workerId'], where: { workerId: { in: workerIds }, deletedAt: null } }),
+  ]);
+  const idle = new Set(open.map((r) => r.workerId));
+  const seen = new Set(any.map((r) => r.workerId));
+  return new Map(workerIds.map((id) => [id, idle.has(id) ? 'IDLE' : seen.has(id) ? 'ENDED' : 'NEVER_BOUND']));
+}
 
-/** The short form for a roster line: `check OK`, `check PENDING (no task)`. */
+const reasonWords = (r: WorkerPendingReason | WorkerNoSessionReason): string => r.toLowerCase().replace(/_/g, ' ');
+
+/** The short form for a roster line: `check OK`, `check PENDING (no task)`, `check NO_SESSION (idle)`. */
 export function renderCheckStatusShort(s: WorkerCheckStatus): string {
-  return `check ${s.status}${s.pendingReason ? ` (${reasonWords(s.pendingReason)})` : ''}`;
+  const reason = s.pendingReason ?? s.noSessionReason;
+  return `check ${s.status}${reason ? ` (${reasonWords(reason)})` : ''}`;
 }
 
 /** The long form for a single-worker read: the status, its reason and the last check. */
 export function renderCheckStatusLong(s: WorkerCheckStatus): string {
   const detail = [
     s.pendingReason ? reasonWords(s.pendingReason) : null,
+    s.noSessionReason ? reasonWords(s.noSessionReason) : null,
     s.lastCheckedAt ? `last checked ${s.lastCheckedAt.toISOString()}` : 'never checked',
   ].filter(Boolean);
   return `Check status: ${s.status} (${detail.join('; ')})`;

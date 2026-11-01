@@ -15009,7 +15009,7 @@ export const typeDefs = `#graphql
 
   "#2138 §3.4 (experimental) — a worker's check status. Draft spec: hrn:node:hadronmemory.com:hadron-dev-team-vera:work:2138-experiment-spec."
   enum WorkerCheckState {
-    "No live session."
+    "No live session; noSessionReason says why."
     NO_SESSION
     "Not expected to check now; pendingReason says why."
     PENDING
@@ -15036,6 +15036,19 @@ export const typeDefs = `#graphql
   }
 
   """
+  #3077 — why a worker is NO_SESSION (hrn:node:hadronmemory.com:specs:cor:agt:100:03; idle versus ended per
+  hrn:node:hadronmemory.com:specs:cor:agt:020:03). A closed set: it carries no session id or timestamp.
+  """
+  enum WorkerNoSessionReason {
+    "An open session would bind it, but nobody drove it inside its idle window."
+    IDLE
+    "Every session it had is over: ended, auto-expired, or past its promised expiresAt."
+    ENDED
+    "It has never had a session. Deleted sessions count for nothing."
+    NEVER_BOUND
+  }
+
+  """
   #2138 §3.4 — a worker's check status. A worker HAS A TASK when an open task is
   assigned to it or its Agent has usesTasks: false. The OVERDUE clock runs from
   the latest of lastCheckedAt, its newest open assignment, its live session's
@@ -15045,6 +15058,8 @@ export const typeDefs = `#graphql
     status: WorkerCheckState!
     "Set only when status is PENDING."
     pendingReason: WorkerPendingReason
+    "#3077: set only when status is NO_SESSION."
+    noSessionReason: WorkerNoSessionReason
     "When it last checked the App's team channel through its own session; null if never."
     lastCheckedAt: DateTime
   }
