@@ -5,6 +5,7 @@
  * unchanged: only a manager of a live, attached App merges.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -71,7 +72,11 @@ describe.each(DOORS)('#2701 %s on an install memory', (_name, call, field) => {
     if (!(denied instanceof Error) || !(missing instanceof Error)) {
       throw new Error('Both refused calls must throw Error instances');
     }
-    expect(denied.message).toBe(missing.message);
+    // Compare the client-visible GraphQL envelope, including all extensions,
+    // path and locations when present; stack traces are server-local details.
+    expect(denied).toBeInstanceOf(GraphQLError);
+    expect(missing).toBeInstanceOf(GraphQLError);
+    expect((denied as GraphQLError).toJSON()).toEqual((missing as GraphQLError).toJSON());
   });
 
   it('refuses the manager of a DETACHED install memory (Agent erased)', async () => {
