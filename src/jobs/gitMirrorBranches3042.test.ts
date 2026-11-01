@@ -136,6 +136,29 @@ const on = (branch: string, loc='topic') => git(env.bare,'show',`refs/heads/${br
 const rekey = (nodeId: string, from: string, to: string, seq: bigint, result: 'failed'|'cleared'='failed', cap=10) =>
  settleMirrorObligations(db,memoryId,[ref(nodeId,from)], result==='cleared'?{result}:{result,errorClass:'PUSH_FAILED'},seq,cap,{targetBranch:to});
 
+it.each(['drifted/A', '-invalid'])('retained unroutable %s cannot starve a healthy row at budget one', async branch => {
+ const stuck = await makeNode('stuck'), healthy = await makeNode('healthy');
+ await db.memory.update({where:{id:memoryId},data:{writeBranch:'client/{client}'}});
+ await owe(stuck.id,{branch,lastAttemptAt:new Date(old().getTime()-60_000)});
+ await owe(healthy.id,{branch:'client/A'});
+ const before = (await rows()).find(r => r.nodeId === stuck.id);
+ vi.stubEnv('GIT_MIRROR_SWEEP_MAX_ROWS','1');
+ await tick();
+ expect(await rows()).toEqual([before]);
+ expect(on('client/A','healthy')).toContain('current content');
+});
+
+it('a ciphertext WRITE cannot exhaust or prevent a healthy sibling in the same branch batch', async () => {
+ const bad = await makeNode('bad'), healthy = await makeNode('healthy');
+ await db.node.update({where:{id:bad.id},data:{data:{__enc:'synthetic-envelope'}}});
+ await owe(bad.id,{branch:'hadron-updates',attempts:9});
+ await owe(healthy.id,{branch:'hadron-updates',attempts:9});
+ await tick();
+ expect(await rows()).toEqual([expect.objectContaining({nodeId:bad.id,attempts:10,state:'EXHAUSTED'})]);
+ expect(remoteFile('healthy')).toContain('current content');
+ expect(git(env.bare,'ls-tree','-r','--name-only','refs/heads/hadron-updates')).not.toContain('bad.md');
+});
+
 it('records two client branches independently and fences A success away from B',async()=>{
  const n=await makeNode();await fail(n.id,'client/A',10n);await fail(n.id,'client/B',20n);
  expect(await rows()).toHaveLength(2);
