@@ -735,23 +735,23 @@ describe('#2044 install memory — lock order and the pooled-only writers (Diego
     expect(await deleting).toBe('deleted');
   });
 
-  it('writers that cannot recheck inside their own fenced transaction fail closed on an install memory (restore, move, delete node)', async () => {
+  it('#2734 restore, move and delete now recheck in their own fenced transactions', async () => {
     const f = await fixture();
     const node = await f.create(f.admin, 'prompts:lane');
     await M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v2' } }, ctxOf(f.admin.id));
     const [row] = await f.installRows();
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: node.id }, orderBy: { revNo: 'asc' } });
     const before = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).rejects.toThrow();
-    await expect(M.deleteNode({}, { nodeRef: node.id }, ctxOf(f.admin.id))).rejects.toThrow();
-    // The title promised "move" and the body never called it (Andi, Xan, Clark): relocate within the install memory.
-    await expect(M.moveNode({}, { sourceRef: node.id, targetUrn: emitNodeUrnV2(row!.urn, 'prompts:moved') }, ctxOf(f.admin.id)))
-      .rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+    await expect(M.restoreNodeRevision({}, { revisionId: rev.id }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    await expect(M.moveNode({}, { sourceRef: node.id, targetUrn: emitNodeUrnV2(row!.urn, 'prompts:moved') }, ctxOf(f.admin.id))).resolves.toMatchObject({ loc: 'prompts:moved' });
+    // The original supported door still writes after the move.
+    await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:moved', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    await expect(M.deleteNode({}, { nodeRef: node.id }, ctxOf(f.admin.id))).resolves.toBe(true);
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
-    expect({ content: after.content, deletedAt: after.deletedAt, revSeq: after.revSeq, loc: after.loc, memoryId: after.memoryId })
-      .toEqual({ content: before.content, deletedAt: before.deletedAt, revSeq: before.revSeq, loc: before.loc, memoryId: before.memoryId });
-    expect(row).toBeTruthy();
-    // The supported doors still write.
-    await expect(M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'v3' } }, ctxOf(f.admin.id))).resolves.toBeTruthy();
+    expect(after.memoryId).toBe(before.memoryId);
+    expect(after.loc).toBe('prompts:moved');
+    expect(after.content).toBe('v3');
+    expect(after.deletedAt).not.toBeNull();
+    expect(after.revSeq).toBeGreaterThan(before.revSeq);
   });
 });

@@ -336,7 +336,8 @@ describe('3-node flow through production deps (§10)', () => {
       const started = Date.now();
       await create.execute(
         { log: opts.log, db, run: r, principal: runContext(db, r) },
-        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', seq: 3, tags: ['urgent'] },
+        // #2987 (V13): the tool defaults nodeType to 'record', and a record outside a Channel refuses an explicit seq — name an ordinary type to keep the seq-parity assertion.
+        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', nodeType: 'info', seq: 3, tags: ['urgent'] },
       );
       opts.log('task node created');
       return {
@@ -437,7 +438,7 @@ describe('3-node flow through production deps (§10)', () => {
     const urn = `${ORG_URN}::flowmem::notes:standup`;
 
     await hadronCreateNode.execute(toolCtx, {
-      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, seq: 7,
+      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, nodeType: 'info', seq: 7, // #2987: record + seq is refused outside a Channel
     });
     // Create on an occupied loc must point authors at update, not clobber.
     await expect(hadronCreateNode.execute(toolCtx, { urn, name: 'again' })).rejects.toThrow(/already exists/);
