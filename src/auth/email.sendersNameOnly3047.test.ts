@@ -57,6 +57,23 @@ describe('thrown mail-SDK errors are rethrown name-only (#3047)', () => {
     expect(err!.message).toBe('mail provider send failed: unknown');
   });
 
+  it('a missing API key is a configuration error and keeps its own message, not a send failure (Gloria P3-1)', async () => {
+    // getResend() caches its client, so load a fresh module with the key absent.
+    vi.resetModules();
+    delete process.env.RESEND_API_KEY;
+    const { sendAccountDeletionNotice, sendCeremonySignInLink, sendPasskeyRegisteredNotice } = await import('./email.js');
+    const calls = [
+      () => sendAccountDeletionNotice(RECIPIENT),
+      () => sendCeremonySignInLink(RECIPIENT, 'https://example.test/v?t=1'),
+      () => sendPasskeyRegisteredNotice(RECIPIENT, { kind: 'later', label: 'laptop', registeredAt: new Date('2026-11-01T10:00:00Z') }),
+    ];
+    for (const call of calls) {
+      const err = await call().then(() => null, (e: unknown) => e as Error);
+      expect(err!.message).toBe('RESEND_API_KEY env var is required');
+    }
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('a send that resolves still works and a resolved refusal stays name-only (unchanged)', async () => {
     const { sendAccountDeletionNotice } = await import('./email.js');
     send.mockResolvedValueOnce({ data: { id: 'em_1' }, error: null });

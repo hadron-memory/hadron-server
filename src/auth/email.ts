@@ -33,9 +33,11 @@ export function isEmailSenderConfigured(): boolean {
  * through {@link assertProviderAck}, already name-only. The one place the three non-magic-link senders send.
  */
 async function sendAcked(message: Parameters<Resend['emails']['send']>[0]): Promise<void> {
+  // Outside the try: a missing key is a configuration fault that keeps its own message, not a send failure.
+  const client = getResend();
   let result: Awaited<ReturnType<Resend['emails']['send']>>;
   try {
-    result = await getResend().emails.send(message);
+    result = await client.emails.send(message);
   } catch (err) {
     throw new Error(`mail provider send failed: ${err instanceof Error ? err.name : 'unknown'}`);
   }
