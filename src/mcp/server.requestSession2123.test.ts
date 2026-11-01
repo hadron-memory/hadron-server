@@ -26,6 +26,8 @@ const opened: Array<{ id: string; token: string }> = [];
 
 // The suite and retained-state regression must exercise the same fixture path.
 async function startRequestSessionFixture() {
+  // A worker clone can retain a previous file's manifest after its env is restored.
+  await cleanDb(db);
   return createServer();
 }
 
@@ -43,6 +45,8 @@ afterEach(async () => {
   }
 });
 afterAll(async () => {
+  // Preserve the primary startup error when beforeAll never created a server.
+  if (!server) return;
   server.closeAllConnections?.();
   await new Promise<void>(resolve => server.close(() => resolve()));
 });
