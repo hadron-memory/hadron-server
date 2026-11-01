@@ -215,3 +215,30 @@ describe('#2648 — a stop signal never moves the deadline (pure)', () => {
       .toMatchObject([{ rule: 'finish-by', episodeStart: t('12:00') }]);
   });
 });
+
+describe('#2648 — BLIND P3: clearing floors every ordinary window at the edit (pure)', () => {
+  const base = (): StallInputs => ({
+    task: { id: 'task', appId: 'app', status: 'pending', parentTaskId: null, ownerWorkerId: 'ada', ownerUserId: null,
+      assigneeWorkerId: null, assigneeUserId: null, assignedAt: null, startedAt: null, createdAt: at('10:00'),
+      startBy: null, finishBy: null, blocked: false, releasedAt: null },
+    openChildCount: 0, lastChildEndedAt: null, lastProgressAt: null, assigneeActivityAt: null, queuedAt: at('10:00'), endedChildren: [],
+    finishByEditedAt: at('11:30'),
+  });
+
+  it('a queued task gets its full assignment window from the clearing edit', () => {
+    const i = base();
+    expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, at('11:59'))).toEqual([]);
+    expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, at('12:00'))).toMatchObject([{ rule: 'unassignable', episodeStart: at('11:30') }]);
+  });
+
+  it('the owner-reaction window also counts from the clearing edit', () => {
+    const i = base();
+    i.task.assigneeWorkerId = 'anne'; i.task.assignedAt = at('09:30'); i.task.status = 'started'; i.task.startedAt = at('09:40');
+    i.endedChildren = [{ id: 'child', endedAt: at('10:00'), ownerWorkerId: 'anne', ownerActivityAt: null }];
+    i.lastChildEndedAt = at('10:00');
+    const reaction = (now: string) => stallCandidates(i, STALL_WINDOW_DEFAULTS, at(now)).filter((c) => c.rule === 'owner-unreactive');
+    expect(reaction('11:49')).toEqual([]);
+    expect(reaction('11:50')).toMatchObject([{ episodeStart: at('11:30') }]);
+  });
+});
+

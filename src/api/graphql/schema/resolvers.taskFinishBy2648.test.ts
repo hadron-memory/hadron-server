@@ -83,3 +83,26 @@ describe('#2648 — edit', () => {
     expect((await row(t.id)).startBy).toBeNull();
   });
 });
+
+describe('#2648 — BLIND P2: a create judges finish-by after its lock waits, on the database clock', () => {
+  it('a deadline that passes while the create waits on a lock is refused and nothing is inserted', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${owner.id} FOR UPDATE`;
+      locked();
+      await held;
+    }, { timeout: 20_000 });
+    await isLocked;
+    const deadline = new Date(Date.now() + 1_500);
+    const creating = create({ finishBy: deadline.toISOString() });
+    await new Promise((r) => setTimeout(r, 2_500)); // the deadline passes while the create waits
+    release();
+    await holder;
+    await expect(creating).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await db.agentTask.count()).toBe(0);
+  }, 20_000);
+});
+

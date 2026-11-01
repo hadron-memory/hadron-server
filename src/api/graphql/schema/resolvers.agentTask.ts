@@ -839,6 +839,17 @@ function checkFinishBy(a: { finishBy: Date | null; startBy: Date | null; setsFin
   }
 }
 
+/**
+ * #2648 (BLIND P2 at 2c7474dc): a create judges its finish-by time inside the write transaction, after every
+ * authority and lock wait and immediately before the insert, against the database clock, as the edit path does. A
+ * deadline that passed while the create waited is refused and nothing is inserted.
+ */
+async function checkFinishByAtDbClock(tx: Prisma.TransactionClient, finishBy: Date | null, startBy: Date | null): Promise<void> {
+  if (!finishBy) return;
+  const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+  checkFinishBy({ finishBy, startBy, setsFinishBy: true, setsStartBy: startBy !== null, now: at });
+}
+
 // ── Audit stamping (#1610 actor shape) ────────────────────────────────────
 
 function createdStamp(ctx: Context) {
@@ -1199,7 +1210,6 @@ export async function createRootTaskForRun(
   const finishBy = parseFinishBy(input.finishBy);
   const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
   const now = new Date();
-  checkFinishBy({ finishBy, startBy, setsFinishBy: finishBy !== null, setsStartBy: startBy !== null, now });
   const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
   const lockedAssignee = await partyWorkerForLock(principal, app.id, input.assignee);
   const made = await inTaskWriteTx(principal, app, { kind: 'run', runId: run.id }, () => appNotFound(run.appId), async (tx, txCtx, fresh) => {
@@ -1214,6 +1224,7 @@ export async function createRootTaskForRun(
     }
     // #2162 (cor:agt:050:27 §4): never onto a worker that is resetting.
     await refuseResettingAssignee(tx, fresh.id, assignee?.workerId);
+    await checkFinishByAtDbClock(tx, finishBy, startBy);
     return insertTask(tx, {
       app: fresh, parentId: null, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, owner, assignee,
       created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
@@ -1408,7 +1419,6 @@ export const agentTaskMutations = {
     const startBy = parseStartBy(input.startBy);
     const finishBy = parseFinishBy(input.finishBy);
     const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
-    checkFinishBy({ finishBy, startBy, setsFinishBy: finishBy !== null, setsStartBy: startBy !== null, now: new Date() });
     // #1754: backlog or pending — and a backlog task carries no assignee.
     const status = normalizeCreateStatus(input.status);
     if (status === 'backlog' && input.assignee) {
@@ -1485,6 +1495,7 @@ export const agentTaskMutations = {
       }
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
+      await checkFinishByAtDbClock(tx, finishBy, startBy);
       const made = await insertTask(tx, {
         app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
