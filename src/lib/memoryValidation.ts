@@ -260,7 +260,7 @@ export async function validateMemoryNodes(
         kind: 'GIT_MIRROR_FAILED',
         nodeId: o.nodeId,
         nodeLoc,
-        detail: `${o.kind === 'REMOVE' ? 'Git mirror removal of this path' : 'Git mirror write'} did not land (${o.errorClass}, ${o.attempts} attempt${o.attempts === 1 ? '' : 's'}); the repository may be stale`,
+        detail: `${o.kind === 'REMOVE' ? 'Git mirror removal of this path' : 'Git mirror write'} did not land (${o.errorClass}, ${o.attempts} attempt${o.attempts === 1 ? '' : 's'}); the repository may be stale${o.state === 'EXHAUSTED' ? `; retries stopped after ${o.attempts} attempts` : ''}`,
       });
     }
   }
