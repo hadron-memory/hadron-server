@@ -22,6 +22,12 @@ vi.mock('resend', () => ({
   },
 }));
 
+const captureMock = vi.hoisted(() => vi.fn());
+vi.mock('@sentry/node', async (importActual) => {
+  const actual = await importActual<typeof import('@sentry/node')>();
+  return { ...actual, captureException: captureMock };
+});
+
 let server: Server;
 let baseUrl: string;
 
@@ -40,6 +46,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await cleanDb(db);
   sendMock.mockReset();
+  captureMock.mockReset();
 });
 
 const refused = { data: null, error: { message: 'recipient is suppressed', name: 'validation_error' } };
@@ -163,6 +170,90 @@ describe('#2988 the per-send log line', () => {
       expect(lines[0]).not.toContain(email);
     } finally {
       spy.mockRestore();
+    }
+  });
+});
+
+describe('#3012 the failure path of a sign-in send', () => {
+  const leaky = (email: string) => ({ data: null, error: { message: `${email} is on the suppression list`, name: 'validation_error' } });
+
+  function sendLines(spy: ReturnType<typeof vi.spyOn>): string[] {
+    return spy.mock.calls
+      .map((c: unknown[]) => c.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' '))
+      .filter((l: string) => l.includes('auth.magic_link.send'));
+  }
+
+  it('POST /auth/email: neither the fault log nor Sentry carries the address or the provider free text', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const email = uniqueEmail();
+      sendMock.mockResolvedValue(leaky(email));
+      const res = await post('/auth/email', { email, client_state: 'nonce' });
+      expect(res.status).toBe(500);
+      const logged = errSpy.mock.calls.map((c: unknown[]) => c.map((x) => (x instanceof Error ? `${x.name} ${x.message}` : JSON.stringify(x, (_k, v) => (v instanceof Error ? `${v.name} ${v.message}` : v)))).join(' ')).join('\n');
+      const sentry = captureMock.mock.calls.map((c: unknown[]) => c.map((x) => (x instanceof Error ? `${x.name} ${x.message}` : JSON.stringify(x))).join(' ')).join('\n');
+      expect(logged).toContain('internal_fault');
+      expect(sentry).toContain('validation_error');
+      for (const text of [logged, sentry]) {
+        expect(text).not.toContain(email);
+        expect(text).not.toContain('suppression list');
+      }
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a send that throws logs outcome "error" with the error machine name, no address or token, and leaves no token row', async () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const email = uniqueEmail();
+      const boom = Object.assign(new Error(`socket hang up talking about ${email}`), { name: 'ConnectTimeoutError' });
+      sendMock.mockRejectedValue(boom);
+      const thrown = await sendMagicLink(email, db).then(() => null, (e: unknown) => e as Error);
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).not.toContain(email);
+      const lines = sendLines(spy);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/"outcome":"error"/);
+      expect(lines[0]).toContain('ConnectTimeoutError');
+      expect(lines[0]).not.toContain(email);
+      const raw = lines[0]!;
+      const payload = JSON.parse(raw.slice(raw.indexOf('{'))) as Record<string, unknown>;
+      expect(Object.keys(payload).sort()).toEqual(['durationMs', 'event', 'outcome', 'providerError']);
+      expect(await db.emailVerificationToken.count({ where: { email } })).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a failing cleanup does not replace the original send failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const del = vi.spyOn(db.emailVerificationToken, 'deleteMany').mockRejectedValue(new Error('db down'));
+    try {
+      sendMock.mockResolvedValue(refused);
+      await expect(sendMagicLink(uniqueEmail(), db)).rejects.toThrow(/did not acknowledge/);
+      expect(del).toHaveBeenCalledOnce();
+    } finally {
+      del.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('cleanup removes only this call\'s token, not an earlier delivered link for the same address', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const email = uniqueEmail();
+      sendMock.mockResolvedValue(accepted);
+      await sendMagicLink(email, db);
+      const earlier = await db.emailVerificationToken.findFirstOrThrow({ where: { email } });
+      sendMock.mockResolvedValue(refused);
+      await expect(sendMagicLink(email, db)).rejects.toThrow();
+      const rows = await db.emailVerificationToken.findMany({ where: { email } });
+      expect(rows.map((r) => r.token)).toEqual([earlier.token]);
+    } finally {
+      warn.mockRestore();
     }
   });
 });
