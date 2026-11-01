@@ -9,6 +9,8 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  *   crosses batch boundaries, including a duplicate seq (a pre-#919 backfill) at a boundary.
  * - An unresolvable or cross-tenant `mentionsRef` is the same empty page, `total` 0, on both paths.
  * - The own-read advance (#2018) still sees a partial forward page as partial.
+ * - #3001: parity compares message identity (urn), not seq, since duplicate seqs are in the fixture; a createdAt tie
+ *   at one seq makes every keyset arm load-bearing; encrypted team-tag and head reads are pinned too.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -86,11 +88,18 @@ async function filler(n: number): Promise<void> {
   });
 }
 
-/** A second row at an existing message's seq, as a pre-#919 backfill left them (same envelope, its own loc). */
-async function duplicateSeq(seq: number): Promise<void> {
-  const src = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, nodeType: 'chat-message', seq } });
-  await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: `${src.loc}-dup`, name: `${src.name}-dup`, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: src.content, data: src.data as never, createdAt: src.createdAt } });
+/**
+ * A second row at an existing message's seq, as a pre-#919 backfill left them (same envelope, its own loc). By default
+ * it copies the source's createdAt; pass `createdAt` and a `loc` to build a tie that orders on createdAt first.
+ */
+async function duplicateSeq(seq: number, opts: { createdAt?: Date; loc?: string } = {}): Promise<void> {
+  const src = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, nodeType: 'chat-message', seq }, orderBy: { createdAt: 'asc' } });
+  const loc = opts.loc ?? `${src.loc}-dup`;
+  await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc.split(':').pop()!, nodeType: 'chat-message', seq, messageChannelId: channel.id, content: src.content, data: src.data as never, createdAt: opts.createdAt ?? src.createdAt } });
 }
+
+/** Message identity: two rows at one seq differ here, so a page that repeats one and drops its sibling cannot pass. */
+const ids = (page: { items: Array<{ urn: string }> }): string[] => page.items.map((m) => m.urn);
 
 /** Count every row `node.findMany` hands back while `fn` runs on the returned context. */
 function countingCtx(base: Context): { ctx: Context; rows: () => number } {
@@ -210,7 +219,7 @@ describe('parity: items are the same with and without total, at a batch size tha
       if (tuning) Object.assign(tuning, { batch, maxBatch });
       const full = await Q.channelMessages({}, { channelRef: channel.id, ...base, ...shape }, c, WITH_TOTAL);
       const bounded = await Q.channelMessages({}, { channelRef: channel.id, ...base, ...shape }, c, ITEMS_ONLY);
-      expect(bounded.items.map((m: any) => m.seq), `batch ${batch}`).toEqual(full.items.map((m: any) => m.seq));
+      expect(ids(bounded), `batch ${batch}`).toEqual(ids(full));
       // total counts the matches inside the cursors' range (offset and limit never narrow it).
       const lo = (shape.sinceSeq as number | undefined) ?? -Infinity;
       const hi = (shape.beforeSeq as number | undefined) ?? Infinity;
@@ -231,7 +240,7 @@ describe('parity: items are the same with and without total, at a batch size tha
       if (tuning) Object.assign(tuning, { batch, maxBatch: batch });
       const full = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: liam.id, ...shape }, ctx(liam.holder), WITH_TOTAL);
       const bounded = await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: liam.id, ...shape }, ctx(liam.holder), ITEMS_ONLY);
-      expect(bounded.items.map((m: any) => m.seq)).toEqual(full.items.map((m: any) => m.seq));
+      expect(ids(bounded)).toEqual(ids(full));
     }
   });
 
@@ -246,16 +255,47 @@ describe('parity: items are the same with and without total, at a batch size tha
     const bounded = await Q.channelMessages({}, { channelRef: channel.id, mentionsRef: holderB.id, limit: 1 }, ctx(holderB.id), ITEMS_ONLY);
     expect(full.items.map((m: any) => m.seq)).toEqual([hit.seq]);
     expect(bounded.items.map((m: any) => m.seq)).toEqual([hit.seq]);
+    expect(ids(bounded)).toEqual(ids(full));
   });
 
+  it('a createdAt tie at one seq: every keyset arm decides an order, and both paths agree on every row', async () => {
+    const { liamSeqs } = await history();
+    // Three rows at one mention's seq: the original (oldest createdAt, the LARGEST loc) and two newer rows sharing
+    // one createdAt, whose locs sort below the original's. Order is (seq, createdAt, loc), so the original comes first,
+    // the createdAt arm alone moves past it, and the loc arm alone separates the two newer rows.
+    const s = liamSeqs[0]!;
+    const src = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, nodeType: 'chat-message', seq: s } });
+    const newer = new Date(src.createdAt.getTime() + 1000);
+    await duplicateSeq(s, { createdAt: newer, loc: `${channel.loc}:messages:000-tie-a` });
+    await duplicateSeq(s, { createdAt: newer, loc: `${channel.loc}:messages:000-tie-b` });
+    liamSeqs.unshift(s, s);
+    const all = await Q.channelMessages({}, { channelRef: channel.id, mentionsRef: liam.id, limit: 100 }, ctx(liam.holder), WITH_TOTAL);
+    expect(all.items.slice(0, 3).map((m: any) => m.urn.split(':').pop())).toEqual([src.loc.split(':').pop(), '000-tie-a', '000-tie-b']);
+    const tieShapes: Array<Record<string, unknown>> = [{ limit: 1 }, { limit: 2 }, { limit: 50 }, { sinceSeq: 0, limit: 2 }, { offset: 1, limit: 2 }, { beforeSeq: s + 1, limit: 2 }];
+    for (const shape of tieShapes) await compare(ctx(liam.holder), { mentionsRef: liam.id }, shape, liamSeqs, [[1, 1], [2, 2]]);
+  }, 30_000);
+
   /** The history plus a second thread, then every message sealed under a session key. */
-  async function encryptedHistory(): Promise<{ liamSeqs: number[]; parent: number; replies: number[] }> {
+  async function encryptedHistory(): Promise<{ liamSeqs: number[]; parent: number; replies: number[]; tagged: number[]; untagged: number[] }> {
     const { liamSeqs } = await history();
     const parent = await humanSays(manager.id, 'second thread');
     const r1 = await humanSays(manager.id, 'r1', parent.seq);
     await filler(3);
     const r2 = await humanSays(manager.id, 'r2 @liam', parent.seq);
     liamSeqs.push(r2.seq);
+    // #3001: Liam heads a team (Rook reports to him); every third message, and one row of the duplicate seq, carries
+    // his team tag, stamped as the write path does (teamTagsVersion 1, teamTags, teamHeadIds), then sealed below.
+    await db.worker.update({ where: { id: rook.id }, data: { reportsToWorkerId: liam.id } });
+    const rows = await db.node.findMany({ where: { memoryId: memory.id, nodeType: 'chat-message' }, orderBy: [{ seq: 'asc' }, { createdAt: 'asc' }, { loc: 'asc' }] });
+    const tagged: number[] = [];
+    const untagged: number[] = [];
+    for (const [i, m] of rows.entries()) {
+      const stamp = i % 3 === 0 || m.loc.endsWith('-dup');
+      (stamp ? tagged : untagged).push(m.seq!);
+      if (!stamp) continue;
+      const data = { ...(m.data as Record<string, unknown>), teamTagsVersion: 1, teamTags: [{ headId: liam.id, label: 'team.liam' }], teamHeadIds: [liam.id] };
+      await db.node.update({ where: { id: m.id }, data: { data: data as never } });
+    }
     const key = generateDataKey();
     sessionKeyCache.set('ms-2980', memory.id, key);
     await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true } });
@@ -263,7 +303,7 @@ describe('parity: items are the same with and without total, at a batch size tha
       const enc = encryptNodeFieldsWithKey({ content: m.content ?? null, data: (m.data ?? null) as unknown }, key);
       await db.node.update({ where: { id: m.id }, data: { content: enc.content ?? null, data: enc.data as never } });
     }
-    return { liamSeqs, parent: parent.seq, replies: [r1.seq, r2.seq] };
+    return { liamSeqs, parent: parent.seq, replies: [r1.seq, r2.seq], tagged, untagged };
   }
   // Every read decrypts its rows, so these sweep three batch settings (one row, three rows, the default) and get
   // a longer budget than vitest's 5 s default.
@@ -278,6 +318,21 @@ describe('parity: items are the same with and without total, at a batch size tha
     const { parent, replies } = await encryptedHistory();
     for (const [, shape] of shapes) await compare(ctx(liam.holder), { replyToSeq: parent }, shape, replies, ENCRYPTED_BATCHES);
   }, 30_000);
+
+  it('an encrypted channel: the selected-head read (teamHeadRef) matches on both paths', async () => {
+    const { tagged, untagged } = await encryptedHistory();
+    expect(tagged.length).toBeGreaterThan(3);
+    expect(untagged.length).toBeGreaterThan(3);
+    for (const [, shape] of shapes) await compare(ctx(manager.id), { teamHeadRef: liam.id }, shape, tagged, ENCRYPTED_BATCHES);
+  }, 30_000);
+
+  it('an encrypted channel: the untagged and tagged reads match on both paths', async () => {
+    const { tagged, untagged } = await encryptedHistory();
+    for (const [, shape] of shapes) {
+      await compare(ctx(manager.id), { untagged: true }, shape, untagged, ENCRYPTED_BATCHES);
+      await compare(ctx(manager.id), { untagged: false }, shape, tagged, ENCRYPTED_BATCHES);
+    }
+  }, 60_000);
 });
 
 describe('an unresolvable or cross-tenant mentionsRef is the same empty page on both paths (cor:agt:020:04)', () => {

@@ -126,14 +126,21 @@ export async function upsertAbstractVector(
 /** Delete all of a node's vectors (re-index / disable / cleared abstract). */
 export async function deleteNodeVectors(db: PrismaClient, nodeId: string, expected?: PendingAtGuard): Promise<void> {
   if (expected === undefined) {
-    await db.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+    await db.$transaction(async tx => {
+      await tx.$executeRaw`SELECT id FROM nodes WHERE id = ${nodeId} FOR NO KEY UPDATE`;
+      await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+      await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = NULL WHERE id = ${nodeId}`;
+    });
     return;
   }
   await db.$transaction(async (tx) => {
     const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
       SELECT n.id FROM nodes n WHERE n.id = ${nodeId} AND ${pendingGuard(expected)} FOR NO KEY UPDATE
     `);
-    if (rows.length) await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+    if (rows.length) {
+      await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId}`;
+      await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = NULL WHERE id = ${nodeId}`;
+    }
   });
 }
 
@@ -181,6 +188,7 @@ async function deleteNodeKindVectors(
     `);
     if (locked.length === 0) return false;
     await tx.$executeRaw`DELETE FROM node_embeddings WHERE node_id = ${nodeId} AND kind = ${kind}::"EmbeddingKind"`;
+    if (kind === 'chunk') await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = NULL WHERE id = ${nodeId}`;
     return true;
   });
 }
@@ -239,6 +247,7 @@ export async function upsertChunkVectors(
   nodeId: string,
   rows: ChunkVectorRow[],
   expectedPendingAt?: PendingAtGuard,
+  omittedChunks: number | null = null,
 ): Promise<boolean> {
   return db.$transaction(async (tx) => {
     // Lock and guard in ONE statement, so the marker is judged under the lock:
@@ -261,14 +270,17 @@ export async function upsertChunkVectors(
         VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'chunk', ${row.provider}, ${row.model}, ${row.dim}, ${row.chunkIndex}, ${row.charStart}, ${row.charEnd}, ${row.chunkText}, ${toVectorLiteral(row.embedding)}::vector, now())
       `;
     }
+    await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = ${rows.length ? omittedChunks : null} WHERE id = ${nodeId}`;
     return true;
   });
 }
 
 /** Delete every vector for a memory (revoke / disable). */
 export async function deleteMemoryVectors(db: PrismaClient, memoryId: string): Promise<void> {
-  await db.node.updateMany({ where: { memoryId }, data: { embeddingPendingAt: null, embeddingWorkToken: null } });
-  await db.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId}`;
+  await db.$transaction(async tx => {
+    await tx.node.updateMany({ where: { memoryId, OR: [{ embeddingPendingAt: { not: null } }, { embeddingWorkToken: { not: null } }, { embeddingTruncatedChunks: { not: null } }] }, data: { embeddingPendingAt: null, embeddingWorkToken: null, embeddingTruncatedChunks: null } });
+    await tx.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId}`;
+  });
 }
 
 /**
@@ -276,7 +288,13 @@ export async function deleteMemoryVectors(db: PrismaClient, memoryId: string): P
  * summary index cannot be switched off, so disabling its passages or changing the source manages chunk rows only.
  */
 export async function deleteMemoryChunkVectors(db: PrismaClient, memoryId: string): Promise<void> {
-  await db.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId} AND kind = 'chunk'`;
+  await db.$transaction(async tx => {
+    await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = NULL,
+      embedding_work_token = CASE WHEN embedding_pending_at IS NOT NULL THEN gen_random_uuid() ELSE NULL END
+      WHERE memory_id = ${memoryId}
+        AND (embedding_truncated_chunks IS NOT NULL OR embedding_pending_at IS NOT NULL OR embedding_work_token IS NOT NULL)`;
+    await tx.$executeRaw`DELETE FROM node_embeddings WHERE memory_id = ${memoryId} AND kind = 'chunk'`;
+  });
 }
 
 /**

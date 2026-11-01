@@ -74,7 +74,7 @@ export const typeDefs = `#graphql
     CHATBOT
   }
 
-  "Retrieval modes for findNodes (cor:api:090:01). keyword is stemmed FTS; vector/hybrid need the memory's vector index; regex is a POSIX pattern match."
+  "Retrieval modes for findNodes (hrn:node:hadronmemory.com:specs:cor:api:090:01). keyword is stemmed FTS; vector/hybrid need the memory's vector index; regex is a POSIX pattern match. vector/hybrid offset pages are not snapshot-stable while the index fills; page with keyword over one memory when every match must appear exactly once (#2991)."
   enum FindNodesMode {
     keyword
     vector
@@ -227,6 +227,9 @@ export const typeDefs = `#graphql
     "#725 — collection facet: only nodes whose objectType equals this (e.g. \\"competitor\\")."
     objectType: String
     tags: [String!]
+    """
+    #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04)
+    """
     isRunnable: Boolean
     "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
     role: String
@@ -1056,6 +1059,9 @@ export const typeDefs = `#graphql
     sourceNodeId: ID
     "Edges arriving at this node."
     targetNodeId: ID
+    """
+    #2999 — runnability is tri-state, with parity to the node filter. true returns only runnable edges; false returns only edges explicitly marked not runnable. An edge never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:dmo:060:03)
+    """
     isRunnable: Boolean
     "Include soft-deleted edges (default false)."
     includeDeleted: Boolean
@@ -1648,6 +1654,8 @@ export const typeDefs = `#graphql
     backoff ceiling and likely needs operator attention). System-managed.
     """
     embeddingAttempts: Int!
+    "Passages omitted by the per-node indexing cap; null when not truncated (hrn:node:hadronmemory.com:specs:cor:rag:010:01)."
+    indexTruncated: IndexTruncated
     """
     The node's text. Include tags and data variables resolve for the reader
     (hrn:node:hadronmemory.com:specs:cor:dmo:150:03); pass raw: true for the stored text with its tags as
@@ -6413,6 +6421,12 @@ export const typeDefs = `#graphql
     servedPrompt: ServedPrompt
   }
 
+  "Declared successful partial passage indexing (hrn:node:hadronmemory.com:specs:cor:rag:010:01)."
+  type IndexTruncated {
+    "Number of passage chunks not embedded."
+    omittedChunks: Int!
+  }
+
   "One health check the validator runs (#819)."
   enum MemoryValidationCheck {
     "An edge whose target node is missing OR soft-deleted. A hard-deleted target cannot occur - Edge.target is FK-enforced with onDelete: Cascade - so in practice this means a dangling edge to a tombstone."
@@ -6423,6 +6437,8 @@ export const typeDefs = `#graphql
     STALE_ABSTRACT
     "embedding_failed_at is set - a retryable failure awaiting its backoff, or the permanent class (deterministic 4xx, dimension mismatch, #206 encrypted-no-plaintext) recoverable via retryFailedEmbeddings (spec 033 / #882). Such a node is absent from vector search, which from outside looks identical to no hits matching."
     EMBED_FAILED
+    "Informational: passage indexing succeeded with later chunks omitted by the cap; does not make ok false."
+    INDEX_TRUNCATED
     "A Git-mirror attempt for this node did not land (#430): a fixed failure class and an attempt count, never exception text. The repository may be stale until the next successful mirror, and a repo-wins sync can revert the lost write. Recorded for failures the process survives; a crash before the record, or a lost event, leaves no row."
     GIT_MIRROR_FAILED
     "objectType/properties violate the memory declared schema (#725)."
@@ -6452,15 +6468,18 @@ export const typeDefs = `#graphql
     memoryId: ID!
     "Live (non-deleted) nodes scanned - soft-deleted tombstones are excluded, since their findings would be unactionable (#884). The whole memory in one pass - the checks are cross-referential, so a partial scan would produce false positives rather than fewer findings."
     nodesChecked: Int!
-    "Findings, capped by the limit argument."
+    "Findings, capped by the limit argument, with problems before informational declarations."
     findings: [MemoryValidationFinding!]!
-    "The TRUE finding count, before any truncation - gate CI on this, not on findings.length."
+    "The TRUE problem count, before any truncation. Excludes informational INDEX_TRUNCATED. Gate health and CI on ok, which also accounts for skipped checks."
     totalFindings: Int!
-    "True when findings was capped and totalFindings is larger."
+    "The TRUE informational declaration count, before any truncation. Does not affect health."
+    totalInformational: Int!
+    "True when findings was capped and totalFindings + totalInformational is larger."
     truncated: Boolean!
     skippedChecks: [MemoryValidationSkippedCheck!]!
     """
-    True only when EVERY check ran and none found anything. A skipped check
+    True only when EVERY check ran and none found a problem. INDEX_TRUNCATED
+    is informational and does not make this false. A skipped check
     makes this false even with zero findings - you cannot claim health for a
     check you did not run.
     """
@@ -8191,7 +8210,7 @@ export const typeDefs = `#graphql
       orgId: ID
       "#437 — primary page size, default 20 (also null), clamped to 1–200. Expansion neighbors are additional. hrn:node:hadronmemory.com:specs:cor:api:090"
       limit: Int
-      "#437 — page offset, default 0 (also null); negative values become 0. No offset ceiling. hrn:node:hadronmemory.com:specs:cor:api:090"
+      "#437 — page offset, default 0 (also null); negative values become 0. No offset ceiling. #2991: in vector and hybrid modes, offset pages are not snapshot-stable while the memory's vector index is filling (an embedding landing between reads can repeat one hit and skip another); callers who need complete, duplicate-free paging use mode: keyword on one memory, ordered score DESC then loc (unique within a memory; across memories, hits with equal score and loc have no defined order). hrn:node:hadronmemory.com:specs:cor:api:090"
       offset: Int
       "Optional absolute relevance floor (cor:api:090 / #497): drop ranked hits whose score is below this value. Scores are NOT comparable across modes, so the meaningful scale differs per mode (keyword ts_rank is roughly 0..a-few; vector cosine similarity is 0..1; hybrid is a small RRF fraction) — pick a floor for the mode in use. Ignored on the no-query browse list (unscored) and never trims expand-neighbours. A floor returns fewer hits, never weaker ones."
       minScore: Float
@@ -9794,10 +9813,11 @@ export const typeDefs = `#graphql
     on Node at all), and property-schema conformance. So unlike other gaps
     there is no slow client-side fallback.
 
-    Returns TYPED findings so a caller can branch and CI can gate on
-    totalFindings. findings is capped by limit (default 200, max 1000) while
-    totalFindings reports the true count - so a gate is never fooled by
-    truncation. Read gate as the rest of the memory reads.
+    Returns TYPED findings so a caller can branch. Gate health and CI on ok,
+    which accounts for both problems and skipped checks. findings is capped
+    by limit (default 200, max 1000); totalFindings reports the full problem
+    count before truncation, excluding informational declarations. Read gate
+    as the rest of the memory reads.
     """
     validateMemory(memoryRef: ID!, limit: Int): MemoryValidationResult!
 

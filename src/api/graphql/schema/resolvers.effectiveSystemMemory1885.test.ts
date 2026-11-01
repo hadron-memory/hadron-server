@@ -250,7 +250,7 @@ describe('an inherited node shows its content and none of the base tenant\'s rec
       // served `urn` already discloses more of — and carries no record or person.
       'id', 'revision', 'memoryId', 'nodeType', 'objectType', 'loc', 'urn', 'portalUrl', 'actionUrn', 'inheritedFrom',
       'isPlaceholder', 'isLink', 'name', 'alias', 'description', 'abstract', 'abstractOriginHash',
-      'embeddingPendingAt', 'embeddingFailedAt', 'embeddingError', 'embeddingAttempts', 'content', 'tokens',
+      'embeddingPendingAt', 'embeddingFailedAt', 'embeddingError', 'embeddingAttempts', 'indexTruncated', 'content', 'tokens',
       'tags', 'properties', 'data', 'seq', 'ownerRepo', 'isRunnable', 'role', 'llmModel', 'aiAgent',
       'createdAt', 'updatedAt',
     ];
