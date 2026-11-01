@@ -20,6 +20,7 @@ import { generateId } from '../../../lib/id.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
+import { normalizeUrnForLookup, parseUrnInput } from '../../../lib/urn.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -43,6 +44,8 @@ let baseUrl: string;
 const key: Record<string, string> = {};
 /** Per arm: a URN the owner resolves, the same URN shape naming nothing, and a URN of the arm's kind the outsider cannot read. */
 const urn: Record<string, { mine: string; unknown: string }> = {};
+/** Per arm: an OLD address that two live rows both hold as their legacyUrn (#697 alias map). */
+const ambiguous: Record<string, string> = {};
 
 async function gql(principal: string, u: string): Promise<Gql> {
   const response = await fetch(`${baseUrl}/graphql`, {
@@ -110,6 +113,26 @@ beforeAll(async () => {
   urn.action = { mine: `hrn:action:${agent.urn}:${CODE}`, unknown: `hrn:action:${org.urn}:no-such-agent:${CODE}` };
   urn.app = { mine: `hrn:app:${app.urn}`, unknown: `hrn:app:${org.urn}:no-such-app` };
   urn.user = { mine: `hrn:user:${owner.handle}`, unknown: `hrn:user:no-such-user-${s}` };
+  // Ambiguous legacy addresses: two live rows of the kind share one legacyUrn.
+  const lookup = (u: string) => normalizeUrnForLookup(parseUrnInput(u).value);
+  const created2 = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent Two' }, ownerCtx);
+  const memory2 = await db.memory.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:fault-mem-2`, name: 'fault-mem-2', class: 'knowledge', visibility: 'ORGANIZATION' },
+  });
+  const app2 = await db.app.create({ data: { id: generateId(), name: 'fault-app-2', urn: `${org.urn}:fault-app-2`, organizationId: org.id } });
+  ambiguous.agent = `hrn:agent:${org.urn}:old-agent`;
+  ambiguous.action = `hrn:action:${org.urn}:old-agent:${CODE}`;
+  ambiguous.memory = `hrn:mem:${org.urn}:old-mem`;
+  ambiguous.app = `hrn:app:${org.urn}:old-app`;
+  await db.agent.updateMany({ where: { id: { in: [agent.id, created2.id] } }, data: { legacyUrn: lookup(ambiguous.agent) } });
+  await db.memory.updateMany({ where: { id: { in: [memory.id, memory2.id] } }, data: { legacyUrn: lookup(ambiguous.memory) } });
+  await db.app.updateMany({ where: { id: { in: [app.id, app2.id] } }, data: { legacyUrn: lookup(ambiguous.app) } });
+  // Organization has no legacyUrn column: its aliases live only in the #1079 rename map.
+  ambiguous.org = `hrn:org:old-org-${s}`;
+  await db.urnAlias.createMany({
+    data: [org.id, otherOrg.id].map((entityId) => ({ urn: lookup(ambiguous.org!), entityType: 'ORGANIZATION' as const, entityId, reason: 'RENAME' as const })),
+  });
+
   // Guard against a fixture that never reaches the arm it pins.
   expect(emitNodeUrnV2(sysMem.urn, `register:${CODE}`)).toContain(CODE);
 
@@ -157,6 +180,18 @@ describe('#2975 resolveUrn: refusals stay byte-identical (names nothing / not yo
     const r = await gql('owner', urn[arm]!.unknown);
     expect(r.errors, arm).toBeUndefined();
     expect(r.data?.resolveUrn, arm).toBeNull();
+  });
+
+  // Gate ruling (a) on #2975 (Xanthos, team chat #63349): an ambiguous legacy
+  // address keeps today's uniform null on the entity arms. Letting
+  // AmbiguousLegacyUrnError escape would hand any caller a typed
+  // AMBIGUOUS_LEGACY_URN (formatError maps it), i.e. a new existence signal.
+  it.each(['agent', 'action', 'memory', 'app', 'org'])('%s arm: an ambiguous legacy address stays the uniform null', async (arm) => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const r = await gql('owner', ambiguous[arm]!);
+    expect(r.errors, arm).toBeUndefined();
+    expect(r.data?.resolveUrn, arm).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('a malformed leaf names nothing: null with no error', async () => {

@@ -14,6 +14,7 @@ import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
+import { normalizeUrnForLookup, parseUrnInput } from '../lib/urn.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -141,6 +142,22 @@ describe('#2975 hadron_get_node by action URN: refusals stay byte-identical', ()
       expect(r.content[0]!.text, urn).toBe(notFound(urn));
       expect(r.structuredContent, urn).toBeUndefined();
     }
+  });
+
+  // Gate ruling (a) on #2975 (Xanthos, team chat #63349): an ambiguous AGENT
+  // alias keeps today's uniform not-found here; only faults change.
+  it('an ambiguous legacy agent address stays the uniform not-found', async () => {
+    const created2 = await (resolvers.Mutation as any).createAgent({}, { orgId: org.id, name: 'Fault Agent Two' }, gqlCtx(owner.id));
+    const old = `hrn:agent:${org.urn}:old-agent`;
+    await db.agent.updateMany({
+      where: { id: { in: [agent.id, created2.id] } },
+      data: { legacyUrn: normalizeUrnForLookup(parseUrnInput(old).value) },
+    });
+    const urn = actionUrn(`${org.urn}:old-agent`);
+    const r = await getNode(owner.id, urn);
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toBe(notFound(urn));
+    expect(r.structuredContent).toBeUndefined();
   });
 
   it('oracle: for an outsider, not-yours and unknown differ only by the echoed URN', async () => {
