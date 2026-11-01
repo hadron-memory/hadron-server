@@ -49,7 +49,7 @@ function restoreEnv() {
   }
 }
 
-let server: Server;
+let server: Server | undefined;
 let baseUrl: string;
 let adminId: string;
 let memberId: string;
@@ -74,17 +74,26 @@ beforeAll(async () => {
   await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
   expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual(['previous-file']);
 
+  // Own this private worker DB before boot, not only before the first test.
+  await cleanDb(db);
   const app = await createServer();
-  server = createHttpServer(app);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const listening = createHttpServer(app);
+  server = listening;
+  await new Promise<void>((resolve) => listening.listen(0, '127.0.0.1', resolve));
+  baseUrl = `http://127.0.0.1:${(listening.address() as AddressInfo).port}`;
   // The authorize URL is built from BASE_URL; point it at this server so the test can follow it.
   process.env.BASE_URL = baseUrl;
 });
 
 afterAll(async () => {
-  restoreEnv();
-  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  try {
+    // beforeAll may have refused startup; preserve that error rather than masking it.
+    const listening = server;
+    if (listening) await new Promise<void>((resolve, reject) => listening.close((err) => (err ? reject(err) : resolve())));
+  } finally {
+    restoreEnv();
+    await cleanDb(db);
+  }
 });
 
 beforeEach(async () => {
