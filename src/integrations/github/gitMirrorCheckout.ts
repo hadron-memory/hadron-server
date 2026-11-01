@@ -182,6 +182,8 @@ export async function withMirrorCheckout(
         where: { id: resolvedMemoryId }, include: { organization: true },
       });
       if (!memory || !memory.organization || !memory.source || (opts.retry && memory.deletedAt)) return 'skipped';
+      // The branch may have changed while this retry waited. No sequence or attempt without a provable route (#3042).
+      if (opts.retry && memory.writeBranch?.includes('{client}')) return 'skipped';
       // R206 / cor:sec:040:05: re-check the live encryption state after the
       // checkout wait, before ANY Git/filesystem mutation. No key (request,
       // session or cache) is an exception, and neither is a path-only cleanup.

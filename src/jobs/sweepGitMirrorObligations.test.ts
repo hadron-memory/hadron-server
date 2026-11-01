@@ -9,6 +9,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 
 const env = vi.hoisted(() => ({
+  onRetryLock: null as null | (() => void),
   tokenFails: false, root: '', bare: '', failOn: null as null | ((args: string[]) => boolean),
   stdoutFor: null as null | ((args: string[]) => string | null),
 }));
@@ -18,6 +19,15 @@ vi.mock('../integrations/github/githubApp.js', async (importOriginal) => ({
   getInstallationToken: vi.fn(async () => { if (env.tokenFails) throw new Error(`https://x-access-token:${TOKEN}@github.com/acme/repo.git`); return TOKEN; }),
 }));
 vi.mock('../config.js', () => ({ get GRAPHS_PATH() { return env.root; } }));
+// Observe queue arrival without replacing the real PostgreSQL lock. A sleep alone can release the holder
+// before a cold dynamic import reaches the sweep, making an apparent interleave vacuous.
+vi.mock('../integrations/github/mirrorCheckoutLock.js', async importOriginal => {
+ const real = await importOriginal<typeof import('../integrations/github/mirrorCheckoutLock.js')>();
+ return {...real, withMirrorCheckoutLock: <T>(id: string, work: () => Promise<T>, opts?: {fenceEncryption?: boolean}) => {
+  if (opts?.fenceEncryption) env.onRetryLock?.();
+  return real.withMirrorCheckoutLock(id, work, opts);
+ }};
+});
 vi.mock('../integrations/github/execGit.js', () => ({
   execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
     if (env.failOn?.(args)) throw new Error('Git command failed. Check the repository and branch, then retry.');
@@ -98,11 +108,16 @@ const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
 const remoteFile = (loc='topic') => git(env.bare,'show',`refs/heads/hadron-updates:${loc}.md`);
 const rejectPushes = () => {const hook=join(env.bare,'hooks','pre-receive');writeFileSync(hook,'#!/bin/sh\nexit 1\n');chmodSync(hook,0o755);};
 let commands:string[][];
+const retryQueued = () => new Promise<void>(resolve => { env.onRetryLock = resolve; });
+const expectQueued = (waiting: Promise<void>, running: Promise<unknown>) => Promise.race([
+ waiting, running.then(error => { throw error ?? new Error('sweep finished before requesting the checkout lock'); }),
+]);
+
 
 beforeEach(async()=>{
  env.root=mkdtempSync(join(tmpdir(),'dorian-sweep430-'));
  env.bare=mkdtempSync(join(tmpdir(),'dorian-sweep430-bare-'));
- env.failOn=null;env.stdoutFor=null;env.tokenFails=false;commands=[];errors=[];
+ env.failOn=null;env.stdoutFor=null;env.tokenFails=false;env.onRetryLock=null;commands=[];errors=[];
  vi.spyOn(console,'error').mockImplementation((...a)=>errors.push(a.map(String).join(' ')));
  vi.spyOn(console,'warn').mockImplementation((...a)=>errors.push(a.map(String).join(' ')));
  vi.spyOn(console,'log').mockImplementation(()=>{});
@@ -141,7 +156,9 @@ it('re-reads under the held lock and never revives a newer writer success',async
  const n=await makeNode();await owe(n.id);let release!:()=>void;let entered!:()=>void;
  const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
  const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;await settleMirrorObligations(db,memoryId,[{nodeId:n.id,kind:'WRITE'}],{result:'cleared'},await takeAttemptSeq(db));});
- await acquired;const running=tick().then(()=>null,error=>error);await new Promise(r=>setTimeout(r,60));release();await holder;const error=await running;if(error) throw error;
+ await acquired;const waiting=retryQueued();const running=tick().then(()=>null,error=>error);
+ try {await expectQueued(waiting,running);} finally {release();await holder;}
+ const error=await running;if(error) throw error;
  expect(await rows()).toEqual([]);expect(commands).toEqual([]);
 });
 it('honors the derived backoff and retries at its exact boundary',async()=>{
@@ -195,15 +212,17 @@ it('rechecks encryption after waiting for the checkout lock and leaves the row u
  const n=await makeNode();await owe(n.id);const before=await rows();let release!:()=>void;let entered!:()=>void;
  const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
  const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;await db.memory.update({where:{id:memoryId},data:{isEncrypted:true}});});
- await acquired;const running=tick().then(()=>null,e=>e);await new Promise(r=>setTimeout(r,60));release();await holder;const e=await running;if(e)throw e;
+ await acquired;const waiting=retryQueued();const running=tick().then(()=>null,e=>e);
+ try {await expectQueued(waiting,running);} finally {release();await holder;}
+ const e=await running;if(e)throw e;
  expect(await rows()).toEqual(before);expect(commands).toEqual([]);
 });
 it('skips overlapping local runs and processes the held first run once',async()=>{
  const n=await makeNode();await owe(n.id);let release!:()=>void;let entered!:()=>void;
  const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
  const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;});await acquired;
- const first=tick().then(()=>null,e=>e);await new Promise(r=>setTimeout(r,50));
- try {expect(await tick()).toBe(0);expect(commands).toEqual([]);} finally {release();await holder;}
+ const waiting=retryQueued();const first=tick().then(()=>null,e=>e);
+ try {await expectQueued(waiting,first);expect(await tick()).toBe(0);expect(commands).toEqual([]);} finally {release();await holder;}
  const e=await first;if(e)throw e;expect(await rows()).toEqual([]);expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
 });
 it('handles at most20 eligible memories, oldest due first, without a startup pass',async()=>{
@@ -228,6 +247,32 @@ it('loads node content only after a waiting retry acquires its memory lock',asyn
  const n=await makeNode();await owe(n.id);let release!:()=>void;let entered!:()=>void;
  const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
  const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;await db.node.update({where:{id:n.id},data:{content:'changed while sweep waited'}});});
- await acquired;const running=tick().then(()=>null,e=>e);await new Promise(r=>setTimeout(r,60));release();await holder;const e=await running;if(e)throw e;
+ await acquired;const waiting=retryQueued();const running=tick().then(()=>null,e=>e);
+ try {await expectQueued(waiting,running);} finally {release();await holder;}
+ const e=await running;if(e)throw e;
  expect(await rows()).toEqual([]);expect(remoteFile()).toContain('changed while sweep waited');
+});
+it('redacts a raw Git push rejection from both stored rows and every log',async()=>{
+ const n=await makeNode();await owe(n.id);
+ env.failOn=args=>{commands.push(args);if(args[0]==='push')throw new Error(`synthetic Git failure https://x-access-token:${TOKEN}@github.com/acme/repo.git`);return false;};
+ await tick();expect(commands.some(a=>a[0]==='push')).toBe(true);
+ expect((await rows())[0]).toMatchObject({state:'FAILED',errorClass:'PUSH_FAILED',attempts:2});
+ expect(JSON.stringify(await rows(),(_,v)=>typeof v==='bigint'?v.toString():v)).not.toContain(TOKEN);
+ expect(errors.join('\n')).not.toContain(TOKEN);
+});
+const sequenceValue = () => db.$queryRaw<Array<{value:string;is_called:boolean}>>`SELECT last_value::text AS value,is_called FROM git_mirror_attempt_seq`;
+it('leaves a templated branch debt visible and unchanged without taking an attempt sequence',async()=>{
+ const n=await makeNode();await owe(n.id);await db.memory.update({where:{id:memoryId},data:{writeBranch:'clients/{client}'}});
+ const before=await rows(),seq=await sequenceValue();await tick();
+ expect(await rows()).toEqual(before);expect(await sequenceValue()).toEqual(seq);expect(commands).toEqual([]);
+ expect((await validateMemoryNodes(db,memoryId)).findings.some(f=>f.kind==='GIT_MIRROR_FAILED'&&f.nodeId===n.id)).toBe(true);
+});
+it('rechecks a branch template introduced while the retry waited, before taking any sequence',async()=>{
+ const n=await makeNode();await owe(n.id);const before=await rows(),seq=await sequenceValue();let release!:()=>void;let entered!:()=>void;
+ const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
+ const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;await db.memory.update({where:{id:memoryId},data:{writeBranch:'clients/{client}'}});});
+ await acquired;const waiting=retryQueued();const running=tick().then(()=>null,e=>e);
+ try {await expectQueued(waiting,running);} finally {release();await holder;}
+ const e=await running;if(e)throw e;
+ expect(await rows()).toEqual(before);expect(await sequenceValue()).toEqual(seq);expect(commands).toEqual([]);
 });

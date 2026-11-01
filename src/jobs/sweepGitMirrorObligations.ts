@@ -12,7 +12,7 @@ export const MAX_ATTEMPTS = 10;
 const INTERVAL_MS = 10 * 60_000;
 const MAX_MEMORIES = 20;
 let running = false;
-type DueMemory = { memoryId: string; source: string; memoryUrn: string; orgUrn: string; dueAt: Date };
+type DueMemory = { memoryId: string; source: string; memoryUrn: string; orgUrn: string; writeBranch: string | null; dueAt: Date };
 
 /** One bounded run. The selection is a hint; withMirrorCheckout re-reads each row inside its memory lock. */
 export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Promise<number> {
@@ -27,18 +27,20 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
     while (handled < MAX_MEMORIES) {
       const candidates: DueMemory[] = await db.$queryRaw<DueMemory[]>`
         WITH due AS (
-        SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn",
+        SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn", m.write_branch AS "writeBranch",
           MIN(o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72)) AS "dueAt"
         FROM git_mirror_obligations o JOIN memories m ON m.id = o.memory_id JOIN organizations org ON org.id = m.organization_id
         WHERE o.state IN ('FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
           AND NOT m.is_encrypted AND m.source IS NOT NULL AND m.organization_id IS NOT NULL AND m.deleted_at IS NULL
           AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${now}
-        GROUP BY m.id, m.source, m.urn, org.urn
+        GROUP BY m.id, m.source, m.urn, org.urn, m.write_branch
         ) SELECT * FROM due
         WHERE (${afterDue}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDue}::timestamp, ${afterId}::text))
         ORDER BY "dueAt", "memoryId" LIMIT ${MAX_MEMORIES}`;
       for (const candidate of candidates) {
         try { validateMemorySource(candidate.source); } catch { continue; }
+        // #3042: the recorded debt lacks the client/branch identity; never publish it to the fallback unknown branch.
+        if (candidate.writeBranch?.includes('{client}')) continue;
         if (!existsSync(join(memoryLocalPath(candidate.orgUrn, candidate.memoryUrn), '.git'))) continue;
         if (handled >= MAX_MEMORIES) break;
         handled++;

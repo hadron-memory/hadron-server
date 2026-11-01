@@ -71,7 +71,9 @@ function distinct(refs: readonly MirrorObligationRef[]): Array<{ nodeId: string;
 }
 
 /**
- * Settle one attempt for `refs` in `memoryId`. A failure is an upsert that only applies over an OLDER attempt; a
+ * Settle one attempt for `refs` in `memoryId`. A sweep may supply its attempt cap: reaching it records EXHAUSTED
+ * inside the same fenced upsert. Ordinary writers supply no cap and can recover or leave a new FAILED row.
+ * A failure is an upsert that only applies over an OLDER attempt; a
  * success deletes only rows an older attempt left. Never throws.
  */
 export async function settleMirrorObligations(

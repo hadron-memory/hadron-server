@@ -5624,11 +5624,12 @@ model AppMemoryWriteGrantEvent {
 /// One row per (memory, node, kind, remove_loc): a WRITE row per node, plus one REMOVE row per distinct old loc a move
 /// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
 /// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
-/// a memory that is not mirrored (no source, no org, encrypted, invalid source), delete it. `attempt_seq` comes from
+/// ordinary writes to a memory that is not mirrored delete it. The sweep leaves ineligible memories untouched.
+/// `attempt_seq` comes from
 /// `git_mirror_attempt_seq`, taken INSIDE the per-memory checkout lock and settled before it releases, so a stale
 /// settle can never overwrite a newer one (src/integrations/github/mirrorObligations.ts). `error_class` is a fixed,
 /// CHECK-constrained set (git-mirror-obligation-invariants.sql); no exception text, URL or token is ever stored.
-/// This slice records only failures the process survives: no retry, no reconcile, no writer-side PENDING.
+/// The sweep retries recorded failures only, with capped attempts; no writer-side PENDING or new triggers.
 model GitMirrorObligation {
   memoryId      String                   @map("memory_id")
   nodeId        String                   @map("node_id")
