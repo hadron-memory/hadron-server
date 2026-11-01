@@ -5,7 +5,8 @@
  * 1. Concurrency: a second connection holds the competing act open (the task row, or the member row) while the
  *    edit is started; the edit must wait, then judge the committed state. A mutant that drops the edit door's
  *    task-row lock (`lockTask`) reads the stale row and fails these.
- * 2. No-op equality: the same `startBy` instant or the same `tags` in another order write nothing.
+ * 2. No-op equality: the same `startBy` instant or the same `tags` in the same order write nothing (the same set in
+ *    another order IS an edit today, pinned as such).
  * 3. Clearing `startBy` after an unacknowledged not-started alarm.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,7 +25,7 @@ async function edit(input: Record<string,unknown>, userId=owner.id) {
  expect(M.updateAgentTask, 'the one task edit mutation is implemented').toBeTypeOf('function');
  return M.updateAgentTask({}, {taskId:task.id,input}, ctx(userId));
 }
-const edited = () => db.agentTeamEvent.findMany({where:{taskId:task.id,type:'task.edited'}});
+const edited = () => db.agentTeamEvent.findMany({where:{taskId:task.id,type:'task.edited'},orderBy:{createdAt:'asc'}});
 beforeEach(async()=>{
  await cleanDb(db);
  const org=await db.organization.create({data:{name:'Edit',urn:`edit-${generateId()}.test`}});
@@ -38,18 +39,20 @@ beforeEach(async()=>{
  task=await M.createAgentTask({}, {input:{appRef:app.id,title:'Original',description:'Old text',source:'fixed-source',tags:['old'],assignee:{user:assignee.id}}},ctx());
 });
 
-/** Runs `act` on a second connection inside an open transaction, starts the edit, waits until it is blocked, then commits. */
+/** Runs `act` on a second connection inside an open transaction, starts the edit, waits until the edit is blocked BY that connection, then commits. */
 async function editRacing(act: (c: Client) => Promise<unknown>, input: Record<string, unknown>, userId = owner.id) {
  const c = new Client({ connectionString: process.env.DATABASE_URL });
  await c.connect();
  try {
+  const { rows: [{ pid }] } = await c.query('SELECT pg_backend_pid() AS pid');
   await c.query('BEGIN');
   await act(c);
   let settled = false;
   const outcome = edit(input, userId).then((value) => ({ value }), (error) => ({ error })).finally(() => { settled = true; });
   const deadline = Date.now() + 5000;
   for (;;) {
-   const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_locks WHERE NOT granted`;
+   // Only a backend blocked BY the competing connection counts: an unrelated lock wait cannot release the fixture early.
+   const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`SELECT count(*) AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
    if (Number(n) > 0) break;
    if (Date.now() > deadline) throw new Error('the edit never waited on the competing act');
    await new Promise((r) => setTimeout(r, 25));
