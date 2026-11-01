@@ -4914,9 +4914,16 @@ export function createMcpServerInstance(
    * uniform-refusal rule, worn here as the same single not-found message the
    * node form serves. A globally-ambiguous historical entry address stays a
    * LOUD refusal (AmbiguousLegacyUrnError escapes), exactly as in the arm.
+   *
+   * `agentGate: false` (#2718, Vera's ruling (a), cor:agt:110:04) drops the
+   * `agent` arm's gate and keeps only the memory gates: the RUN surface applies
+   * the node-URN spelling's gate (`loadNodeForRun` -> `canReadMemory`), so a
+   * participant who reads the entry's memory runs it under either address. The
+   * default (true) is the READ surface's, unchanged.
    */
   const resolveActionEntryRef = async (
     rawUrn: string,
+    opts: { agentGate?: boolean } = {},
   ): Promise<{ id: string; memoryId: string; loc: string } | null> => {
     let agentId: string;
     let code: string;
@@ -4942,16 +4949,21 @@ export function createMcpServerInstance(
     // admit what the GraphQL arm (ctx.impersonation-aware) refuses.
     // recoveryCtx() is the established shape for this.
     if (
+      opts.agentGate !== false &&
       agent.visibility !== 'PUBLIC' &&
       !(await isOwnerOrOrgMember({ ...scopeCtx(), impersonation: auth.impersonation ?? undefined }, agent))
     ) {
       return null;
     }
     if (!(await canReadMemory(db, auth, agent.systemMemoryId, EXPLICIT_REF))) return null;
+    // The DB read sits outside the catch below: a database fault is not an
+    // absence and must surface as a fault (cor:api:140:03), on the read and run
+    // surfaces alike (#2718 review).
+    const systemMemoryUrn = await loadMemoryUrn(agent.systemMemoryId);
     let entryId: string;
     try {
       ({ id: entryId } = await resolveNodeRefForAuth(
-        emitNodeUrnV2(await loadMemoryUrn(agent.systemMemoryId), `register:${code}`),
+        emitNodeUrnV2(systemMemoryUrn, `register:${code}`),
         auth,
       ));
     } catch (error) {
@@ -8467,9 +8479,28 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
+      // #2718 — an action URN is a register entry's SECOND address. Resolve it
+      // with the memory gates only (no `agent` arm gate: ruling (a)), then run
+      // the entry through the SAME loader the node spelling uses, so the final
+      // gate and the rendered bundle are one implementation. Every refusal is
+      // ONE message naming nothing (cor:api:140:03): other tenant, unreadable
+      // memory, unknown Agent, missing or malformed code all read alike.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
+        const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
+        if (!entry) return unreadable();
+        // Carry the RESOLVED entry's id, never a re-emitted node URN: the emitted
+        // v2 URN is lossy (a compound memory and its prefix twin emit the same
+        // string), so re-parsing it can run a different node. Operational faults
+        // (the DB reads inside) are not caught: they surface as faults, not as
+        // not-found (cor:api:140:03).
+        const viaEntry = await loadRunNodeById(entry);
+        if ('error' in viaEntry) return unreadable();
+        return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
+      }
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
@@ -8508,8 +8539,33 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
       return { error: `Memory not found: "${memoryUrn}".` };
     }
-    const node = await db.node.findUnique({
-      where: { loc_memoryId: { loc, memoryId: memory.id } },
+    const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
+    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    return { node, loc };
+  }
+
+  // #2718 — the action spelling's loader: the entry is already RESOLVED (by id),
+  // so it is gated and fetched by that id through the SAME memory gate and the
+  // SAME node fetch the URN spelling uses, with no URN round trip.
+  async function loadRunNodeById(
+    entry: { id: string; memoryId: string },
+  ): Promise<{ node: RunNode; loc: string } | { error: string }> {
+    if (!(await canReadMemory(db, auth, entry.memoryId))) return { error: 'Node not readable.' };
+    // Pin the fetch to the GATED memory and the live row: an id-only fetch
+    // after the gate would serve a node moved away or soft-deleted in between.
+    const node = await findRunNode({
+      id: entry.id,
+      memoryId: entry.memoryId,
+      deletedAt: null,
+    });
+    if (!node) return { error: 'Node not found.' };
+    return { node, loc: node.loc };
+  }
+
+  // The run node with its live dependency edges, by either unique key.
+  async function findRunNode(where: Prisma.NodeWhereUniqueInput): Promise<RunNode | null> {
+    return db.node.findUnique({
+      where,
       // #1063 — the same edge filter the GraphQL `renderRunNode` query uses.
       // Without it a soft-deleted edge kept carrying its target, and a
       // soft-deleted NODE kept being served through any edge pointing at it —
@@ -8525,8 +8581,6 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         },
       },
     });
-    if (!node) return { error: `Node "${rawUrn}" not found.` };
-    return { node, loc };
   }
 
   // {{arg}} substitution + inlined edge-linked node content + one action-run
