@@ -10,6 +10,7 @@ import * as manualRun from './resolvers.appRun.js';
 import * as pdfClient from '../../../lib/pdfClient.js';
 import { isMemoryReadableCached } from './resolvers.helpers.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { liveTxContext } from './authorizedTx.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -77,6 +78,25 @@ describe('#2745 composed import authority controls', () => {
     expect(convert).toHaveBeenCalledTimes(1);
     expect(phases).toEqual(['convert', 'mint']);
     if (process.env.HADRON_IMPORT_2745_TIMINGS === '1') process.stdout.write(`#2745 mocked-HTML totalMs=${Math.round(performance.now() - at)}\n`);
+  });
+
+  it.each([true, false])('inner live-context boundary re-asks a real cached share read, revoked=%s', async revoke => {
+    const f = await fixture('agent');
+    const owner = await db.user.create({ data: { id: generateId() } });
+    const probe = await db.memory.create({ data: {
+      name: 'Inner cache probe', urn: 'import2745.test:inner-probe', class: 'personal', userId: owner.id, ownerUserId: owner.id,
+    } });
+    await db.memoryShare.create({ data: { memoryId: probe.id, granteeId: f.user.id, grantorId: owner.id, role: 'reader' } });
+    expect(await isMemoryReadableCached(f.ctx, probe.id)).toBe(true);
+    if (revoke) await db.memoryShare.delete({ where: { memoryId_granteeId: { memoryId: probe.id, granteeId: f.user.id } } });
+    await db.$transaction(async tx => {
+      await lockAuthorityAnchors(tx, [{ kind: 'user', id: f.user.id }], 'shared');
+      const live = await liveTxContext(f.ctx, tx);
+      // Isolate the inner boundary: in a composed import the outer clear can
+      // mask its deletion. Real grant history makes this a permission result,
+      // not an assertion about the helper's object layout.
+      expect(await isMemoryReadableCached(live, probe.id)).toBe(!revoke);
+    });
   });
 
   describe.each(['agent', 'install'] as const)('%s authority', kind => {
