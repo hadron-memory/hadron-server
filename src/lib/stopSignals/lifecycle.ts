@@ -185,7 +185,7 @@ export async function reconcileStopCoverage(tx: Tx, appId: string, now: Date): P
  * and not since released. The definition of who the coordinators are is `pauseDispatchRecipients`, unchanged (H24 is
  * Proposed). A worker newly named gets the signal's stop notice; one no longer named gets one resume, unless another
  * live `pause-dispatch` still names it: then none, and a notice of the signal it was never offered is withdrawn.
- * "Last told" is read off the signal's own notice events (the latest of its stop / resume / withdrawal per worker), so
+ * "Last told" is read off the signal's own notice events (the latest of its stop / resume per worker, a withdrawn stop not counting), so
  * nothing new is stored and a second reconcile at the same state writes nothing. A manager recipient (the fallback,
  * no worker lane) is told at the set and the end only.
  */
@@ -202,14 +202,18 @@ async function reconcileCoordinators(tx: Tx, appId: string, now: Date, covering:
     const ids = pauseDispatchRecipients(covered, workers, managers).flatMap((r) => ('workerId' in r ? [r.workerId] : []));
     want.set(s.id, new Set(ids));
   }
-  // Who each live signal last named, and whether the latest stop to them was delivered.
+  // Who each live signal last named: its latest stop/resume notice to them, a stop that a withdrawal names (by
+  // noticeEventId, never by event order: ids tie-break randomly inside one ms) not counting.
   const last = await tx.$queryRaw<Array<{ signalId: string; workerId: string; eventId: string; named: boolean }>>(Prisma.sql`
     SELECT DISTINCT ON (e.payload ->> 'signalId', e.subject_worker_id)
            e.payload ->> 'signalId' AS "signalId", e.subject_worker_id AS "workerId", e.id AS "eventId",
            (e.type = ${STOP_NOTICE_EVENT} AND e.payload ->> 'notice' = 'stop') AS named
     FROM agent_team_events e
-    WHERE e.app_id = ${appId} AND e.type IN (${STOP_NOTICE_EVENT}, ${STOP_NOTICE_WITHDRAWN_EVENT}) AND e.subject_worker_id IS NOT NULL
+    WHERE e.app_id = ${appId} AND e.type = ${STOP_NOTICE_EVENT} AND e.subject_worker_id IS NOT NULL
       AND e.payload ->> 'signalId' IN (${Prisma.join(live.map((s) => s.id))})
+      AND NOT EXISTS (SELECT 1 FROM agent_team_events w
+                      WHERE w.app_id = ${appId} AND w.type = ${STOP_NOTICE_WITHDRAWN_EVENT}
+                        AND w.payload ->> 'noticeEventId' = e.id)
     ORDER BY e.payload ->> 'signalId', e.subject_worker_id, e.created_at DESC, e.id DESC`);
   const retired = new Set((await tx.worker.findMany({ where: { appId, retiredAt: { not: null } }, select: { id: true } })).map((r) => r.id));
   let sent = 0;

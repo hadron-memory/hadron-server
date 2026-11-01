@@ -200,4 +200,23 @@ describe('#3045 cor:agt:090:04 V20 — the coordinator set of a live pause-dispa
     const offered = (await pendingStopNotices(db, app.id, [ada.id])).get(ada.id);
     expect(offered?.eventId).toBe(second.map((e) => e.id).find((id) => id !== first.id));
   });
+  // Andi #3142 P2: event ids tie-break randomly inside one millisecond, so "named" must follow the withdrawal's own
+  // reference to its stop, not (created_at, id) order. Both id permutations, on the real reconcile path.
+  it.each([
+    ['stop id sorts after its withdrawal', '7fffbfffffffffffffff', '70008000000000000000'],
+    ['stop id sorts before its withdrawal', '70008000000000000000', '7fffbfffffffffffffff'],
+  ])('a same-ms stop and its withdrawal: %s: a rejoin is told again', async (_n, stopSuffix, withdrawnSuffix) => {
+    const a = await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Dan' });
+    await set(ctx(max.id), { level: 'PAUSE_DISPATCH', scope: 'WORKER', worker: 'Liam' });
+    await reportsTo(dan, liam);
+    await new Promise((r) => setTimeout(r, 5));
+    const at = new Date();
+    const prefix = at.getTime().toString(16).padStart(12, '0');
+    const stopId = prefix + stopSuffix;
+    await db.agentTeamEvent.create({ data: { id: stopId, appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice', createdAt: at, payload: { signalId: a.id, level: 'pause-dispatch', notice: 'stop', interrupt: false } } });
+    await db.agentTeamEvent.create({ data: { id: prefix + withdrawnSuffix, appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice.withdrawn', createdAt: at, payload: { signalId: a.id, level: 'pause-dispatch', noticeEventId: stopId } } });
+    await reportsTo(dan, ada);
+    const stops = await db.agentTeamEvent.findMany({ where: { appId: app.id, subjectWorkerId: ada.id, type: 'stop.notice' } });
+    expect(stops.filter((e) => (e.payload as any).signalId === a.id && (e.payload as any).notice === 'stop')).toHaveLength(3);
+  });
 });
