@@ -160,3 +160,18 @@ it('#1793 merged /ready keeps startup and stopping precedence and rejects a live
     expect(await stopped.json()).toEqual({ok:false,error:'stopping'});
   } finally {process.env.RATE_LIMIT_KEYRING=initial;}
 });
+
+
+it('#1793 transient policy read failure leaves /ready healthy when the DB probe answers',async()=>{
+  server=httpServer(await createServer({readiness:{startup:()=> 'settled',stopping:()=>false}}));
+  await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const failure=Object.assign(new Error('synthetic policy connection loss'),{code:'P1001'});
+  const policyRead=vi.spyOn(db,'$transaction').mockRejectedValueOnce(failure);
+  try {
+    const ready=await fetch(base+'/ready');
+    expect(ready.status).toBe(200);expect(await ready.json()).toEqual({ok:true});
+    expect(policyRead).toHaveBeenCalledTimes(1);
+    expect((await fetch(base+'/health')).status).toBe(200);
+  } finally {policyRead.mockRestore();}
+});

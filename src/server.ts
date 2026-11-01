@@ -1855,8 +1855,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
   // unhealthy. #2998: /ready adds the first startup and the shutdown signal
-  // on top of the same probe. #1793: both probes also check the live rate
-  // keyring/manifest configuration without exposing it.
+  // on top of the same probe. #1793: only readiness also checks the live rate
+  // keyring/manifest; /health remains DB liveness, without configuration detail.
   mountHealthRoutes(app, db, { readiness, checkConfiguration: () => checkRateConfiguration(db) });
 
   // Background job: purge expired anonymous memories hourly.
