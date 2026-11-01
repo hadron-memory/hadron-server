@@ -75,10 +75,12 @@ describe('externalId round-trip (#3125 S2)', () => {
     } finally { await api.stop(); }
   });
 
-  it('a non-SDL edit naming externalId changes nothing (set once, never edited)', async () => {
+  it('an edit naming externalId past the SDL is refused and changes nothing (set once, never edited)', async () => {
     const t = await create({ externalId: X });
-    await M.updateAgentTask({}, { taskId: t.id, input: { title: 'renamed', externalId: 'https://example.com/other' } }, ctx());
+    await expect(M.updateAgentTask({}, { taskId: t.id, input: { title: 'renamed', externalId: 'https://example.com/other' } }, ctx()))
+      .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     expect(await externalIdOf(t.id)).toBe(X);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).title).toBe('T');
   });
 
   it('many tasks without an externalId never conflict', async () => {
@@ -104,15 +106,18 @@ describe('externalId round-trip (#3125 S2)', () => {
 describe('externalId is unique per App, whatever the first task state (#3125 S2)', () => {
   const states: Array<[string, Record<string, unknown>]> = [
     ['pending', {}],
-    ['started', { status: 'started', startedAt: new Date() }],
-    ['finished', { status: 'finished', startedAt: new Date(), finishedAt: new Date() }],
+    ['started', { status: 'started', startedAt: new Date(), assigneeUserId: 'OWNER', assignedAt: new Date() }],
+    ['finished', { status: 'finished', startedAt: new Date(), finishedAt: new Date(), resultOutcome: 'done', assigneeUserId: 'OWNER', assignedAt: new Date() }],
     ['cancelled', { status: 'cancelled', cancelledAt: new Date() }],
     ['backlog', { status: 'backlog' }],
   ];
   for (const [state, data] of states) {
     it(`a second create with the same externalId is refused TASK_EXTERNAL_ID_TAKEN when the first is ${state}`, async () => {
       const first = await create({ externalId: X });
-      if (Object.keys(data).length) await db.agentTask.update({ where: { id: first.id }, data: data as any });
+      if (Object.keys(data).length) {
+        const set = { ...data, ...(data.assigneeUserId ? { assigneeUserId: owner.id } : {}) };
+        await db.agentTask.update({ where: { id: first.id }, data: set as any });
+      }
       const before = await db.agentTask.count({ where: { appId: app.id } });
       const err = await create({ title: 'second', externalId: X }, member.id).catch((e: any) => e);
       expect(err?.extensions?.code).toBe('TASK_EXTERNAL_ID_TAKEN');
@@ -173,7 +178,7 @@ describe('externalId is unique per App, whatever the first task state (#3125 S2)
     await create({ externalId: X });
     const u = await create({});
     await expect(db.$executeRawUnsafe('UPDATE agent_tasks SET external_id = $1 WHERE id = $2', X, u.id))
-      .rejects.toThrow(/agent_tasks_app_external_id_uniq/);
+      .rejects.toThrow(/23505[\s\S]*\(app_id, external_id\)/);
   });
 });
 

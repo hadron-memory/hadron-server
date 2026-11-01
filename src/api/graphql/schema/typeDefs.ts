@@ -8067,6 +8067,8 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
+      "#3125 S2: the task with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT). Runs inside the App read gate, so it only finds this App's task."
+      externalId: String
       "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
       reference: AgentTaskReferenceFilter
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
@@ -14501,6 +14503,8 @@ export const typeDefs = `#graphql
     description: String
     "Opaque origin reference (an issue URL, a node URN). Not interpreted."
     source: String
+    "#3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims (an issue's canonical URL), set once at creation and never edited. Unique within the App, whatever the task's state. Null when none."
+    externalId: String
     "Null for a root task."
     parentTaskId: ID
     owner: AgentTaskParty!
@@ -15462,6 +15466,14 @@ export const typeDefs = `#graphql
     title: String!
     description: String
     source: String
+    """
+    #3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims, for example an issue's
+    canonical URL. Stored and compared exactly as written; 1 to 512 characters with no whitespace, control or invisible
+    format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. A second
+    task with the same value in this App, whatever the first task's state, is refused TASK_EXTERNAL_ID_TAKEN, which
+    names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
+    """
+    externalId: String
     """
     Defaults to the creator. A root task's creator may name any other
     participating worker or person as owner (#1757, hrn:node:hadronmemory.com:specs:cor:agt:050:01);

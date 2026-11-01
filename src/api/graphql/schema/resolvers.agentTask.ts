@@ -116,7 +116,8 @@ import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/ma
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
-import { normalizeTaskReferences, referenceKind, storedTaskReferences, REFERENCE_KIND_TO_GQL, TaskReferenceError, TASK_REFERENCE_TARGET_MAX, type TaskReference } from '../../../lib/agentTasks/references.js';
+import { normalizeExternalId, normalizeTaskReferences, referenceKind, storedTaskReferences, REFERENCE_KIND_TO_GQL, TaskReferenceError, TASK_EXTERNAL_ID_MAX, TASK_REFERENCE_TARGET_MAX, type TaskReference } from '../../../lib/agentTasks/references.js';
+import { isUniqueViolationOn } from '../../../auth/userProvision.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
 
@@ -724,6 +725,23 @@ function taskReferencesInput(input: unknown): TaskReference[] {
   }
 }
 
+/** #3125 S2 (V46): the stored external id, or BAD_USER_INPUT with fixed text (never the value). */
+function externalIdInput(input: unknown): string | null {
+  try {
+    return normalizeExternalId(input);
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message);
+    throw e;
+  }
+}
+
+/**
+ * #3125 S2: a P2002 from the partial unique index agent_tasks_app_external_id_uniq. Prisma names it by its columns
+ * (app_id, external_id), or by the index name; no other unique on agent_tasks contains external_id, so that column
+ * alone identifies it (app_id would also match (app_id, handle)).
+ */
+const EXTERNAL_ID_TARGETS = ['external_id', 'agent_tasks_app_external_id_uniq'] as const;
+
 function refKind(kind: unknown): string {
   try {
     return referenceKind(kind);
@@ -1087,6 +1105,8 @@ type CreateInput = {
   blockedBy?: string[] | null;
   description?: string | null;
   source?: string | null;
+  /** #3125 S2 (V29, V46): the claim on an outside item; set only here. */
+  externalId?: unknown;
   owner?: PartyInput;
   assignee?: PartyInput;
   requirements?: RequirementsInput | null;
@@ -1111,6 +1131,8 @@ async function insertTask(
   tx: Prisma.TransactionClient,
   a: {
     app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
+    /** #3125 S2: already validated by the caller; set only here, at creation (V29). */
+    externalId?: string | null;
     tags: string[]; references?: TaskReference[]; startBy: Date | null; finishBy?: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
     /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
@@ -1160,11 +1182,15 @@ async function insertTask(
   if (handle.length > MAX_HANDLE_LENGTH) {
     throw taskError('TASK_TOO_DEEP', `A task handle is at most ${MAX_HANDLE_LENGTH} characters; create this task under a shallower parent.`, { taskId: parentId });
   }
+  // #3125 S2 (V45, cor:agt:120:02): the INSERT is the uniqueness judgement, after every gate above, so only a caller
+  // who may create here can ever learn that its own App already holds the external id. A violation of exactly that
+  // index is TASK_EXTERNAL_ID_TAKEN, naming no task; the transaction rolls back, counter increment included.
   const created = await tx.agentTask.create({
     data: {
       appId: a.app.id,
       taskNumber: counter!.last_number,
       handle,
+      externalId: a.externalId ?? null,
       title: a.title, description: a.description, source: a.source, tags: a.tags, references: a.references ?? [], startBy: a.startBy,
       finishBy: a.finishBy ?? null,
       closeSessionWhenDone: a.closeSessionWhenDone,
@@ -1179,6 +1205,11 @@ async function insertTask(
       ...a.created,
     },
     select: { id: true },
+  }).catch((e: unknown) => {
+    if (a.externalId != null && isUniqueViolationOn(e, EXTERNAL_ID_TARGETS)) {
+      throw taskError('TASK_EXTERNAL_ID_TAKEN', 'This App already has a task for that external id.');
+    }
+    throw e;
   });
   await appendTaskEvent(tx, {
     appId: a.app.id, taskId: created.id, actor: a.evActor,
@@ -1461,6 +1492,8 @@ export const agentTaskMutations = {
     const tags = normalizeTags(input.tags);
     // #2649: judged with the other fields, before any transaction, so a refused list writes nothing.
     const references = taskReferencesInput(input.references);
+    // #3125 S2 (V46): judged with the other fields after the App gate above, so a refused value writes nothing.
+    const externalId = externalIdInput(input.externalId);
     const startBy = parseStartBy(input.startBy);
     const finishBy = parseFinishBy(input.finishBy);
     const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
@@ -1541,7 +1574,7 @@ export const agentTaskMutations = {
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       const made = await insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, references, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
+        app, parentId: parentTaskId, project: input.project === true, title, description, source, externalId, tags, references, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
       const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -2008,6 +2041,7 @@ type ListArgs = {
   tagsAny?: string[] | null;
   tagsAll?: string[] | null;
   source?: string | null;
+  externalId?: string | null;
   /** #2649: tasks carrying a reference with exactly this target (and this kind when given); the label is ignored. */
   reference?: { kind?: string | null; target: string } | null;
   text?: string | null;
@@ -2060,6 +2094,13 @@ export const agentTaskQueries = {
     if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
     if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
     if (args.source != null) filters.push({ source: args.source });
+    if (args.externalId != null) {
+      // #3125 S2: after the App read gate above, so it only narrows tasks the caller may already read. Exact match.
+      if (typeof args.externalId !== 'string' || args.externalId.length < 1 || args.externalId.length > TASK_EXTERNAL_ID_MAX) {
+        throw badInput(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+      }
+      filters.push({ externalId: args.externalId });
+    }
     if (args.reference != null) {
       // #2649 (cor:agt:050:01): after the App read gate above, so it only narrows tasks the caller may already read.
       // jsonb containment: an element holding this target (and kind) matches whatever its label; never a prefix.
