@@ -48,7 +48,7 @@ import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
-import { assertInviteLimits, inviteExpiresAt } from '../../../lib/invitationLimits.js';
+import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
 
 /** #2871: expected org-member refusals are typed so the boundary does not mask them. */
 const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
@@ -552,7 +552,7 @@ export const orgMutations = {
               name: name ?? null,
               email: email ?? null,
               githubUsername: githubUsername ?? null,
-              maxActivations: maxActivations ?? 1,
+              maxActivations: inviteMaxActivations(maxActivations),
               expiresAt: inviteExpiresAt(expiresInDays),
               createdBy: ctx.userId ?? ctx.clientId ?? null,
             },
@@ -584,7 +584,7 @@ export const orgMutations = {
           name: name ?? null,
           email: email ?? null,
           githubUsername: githubUsername ?? null,
-          maxActivations: maxActivations ?? 1,
+          maxActivations: inviteMaxActivations(maxActivations),
           expiresAt: inviteExpiresAt(expiresInDays),
           createdBy: ctx.userId,
         },
