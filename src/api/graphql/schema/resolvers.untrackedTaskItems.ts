@@ -10,7 +10,7 @@
  * slice lands (V45 point 13). Anyone else, and another App's key, is answered APP_NOT_FOUND, the same whether or not
  * the App has an integration. The integration is looked up in the resolved App's own properties only.
  *
- * Judged in this order, each before any GitHub call: the gate, the integration name, the repository, the team, the
+ * Judged in this order, each before any GitHub call: the gate, the App's organization, the integration name, the repository, the team, the
  * page bounds. GitHub calls run OUTSIDE any database transaction; the read of the App's claimed external ids that
  * follows re-runs the gate, so a key revoked during the GitHub read is refused rather than answered.
  */
@@ -52,10 +52,15 @@ type Args = {
   ready?: ReadyFilter | null;
 };
 
-type Resolved = { app: TaskApp; integration: StoredTaskIntegration; filters: UntrackedFilters };
+type Resolved = { app: TaskApp; organizationId: string; integration: StoredTaskIntegration; filters: UntrackedFilters };
 
 /** The integration and filters, judged against the resolved App (on `c`, the gate's own client). */
 async function resolveIntegration(c: Context, app: TaskApp, args: Args): Promise<Resolved> {
+  // #3125 Ask 5: the same typed refusal S1 gives a write, before the integration is looked up or GitHub is read.
+  const organizationId = app.organizationId;
+  if (!organizationId) {
+    throw taskError('TASK_INTEGRATION_ORG_REQUIRED', 'Task integrations need an App that belongs to an organization.');
+  }
   const row = await c.db.app.findUnique({ where: { id: app.id }, select: { properties: true } });
   const props = row?.properties;
   const list = props && typeof props === 'object' && !Array.isArray(props)
@@ -84,7 +89,7 @@ async function resolveIntegration(c: Context, app: TaskApp, args: Args): Promise
     if (!team) throw taskError('TASK_INTEGRATION_TEAM_UNKNOWN', "That worker leads no team in this task integration's team map.");
     teamLabel = team.label;
   }
-  return { app, integration, filters: { repository, teamLabel, ready: args.ready ?? 'ANY' } };
+  return { app, organizationId, integration, filters: { repository, teamLabel, ready: args.ready ?? 'ANY' } };
 }
 
 function bounded(value: number | null | undefined, def: number, min: number, max: number, field: string): number {
@@ -95,14 +100,9 @@ function bounded(value: number | null | undefined, def: number, min: number, max
 
 /** The read itself: GitHub (outside any transaction), then the App's claimed ids under the re-run read gate. */
 async function readUntracked(ctx: Context, appRef: string, r: Resolved) {
-  if (!r.app.organizationId) {
-    throw new GraphQLError('GITHUB_NOT_INSTALLED: the App belongs to no organization, so it has no GitHub installation.', {
-      extensions: { code: 'GITHUB_NOT_INSTALLED' },
-    });
-  }
   try {
     return await listUntrackedItems(ctx.db, {
-      organizationId: r.app.organizationId,
+      organizationId: r.organizationId,
       integration: r.integration,
       filters: r.filters,
       claimedIn: (urls) => withReadableApp(ctx, appRef, async (c, app) => {
