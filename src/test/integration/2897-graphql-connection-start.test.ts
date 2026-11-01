@@ -57,6 +57,8 @@ let orgId: string;
 
 /** #3063: both suite boot and the named retained-state regression use this exact fixture path. */
 async function startConnectionFixture() {
+  // Own this private worker DB before boot, not only before the first test.
+  await cleanDb(db);
   return createServer();
 }
 
