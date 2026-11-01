@@ -113,3 +113,12 @@ describe('Node.createdByUser (#1151)', () => {
     expect((r.data as any).b.createdByUser).toBeNull();
   });
 });
+
+describe('fail closed (#1151)', () => {
+  it('an Edge parent selected without its memory, or without the column, names nobody', async () => {
+    const E = resolvers.Edge as any;
+    expect(await E.createdByUser({ id: edges.user, createdBy: author.id }, {}, rctx(reader.id))).toBeNull(); // no memoryId
+    expect(await E.createdByUser({ id: edges.user, memoryId: memA.id }, {}, rctx(reader.id))).toBeNull(); // column unselected
+    expect((await E.createdByUser({ id: edges.user, memoryId: memA.id, createdBy: author.id }, {}, rctx(reader.id)))?.handle).toBe('ea-author');
+  });
+});
