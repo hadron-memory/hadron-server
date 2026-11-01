@@ -3,6 +3,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
+import { assertRateReadiness, RateConfigurationError } from '../lib/rateLimit/index.js';
+import { readRateKeys } from '../lib/rateLimit/config.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -22,8 +24,13 @@ let userId: string;
 let agentId: string;
 const opened: Array<{ id: string; token: string }> = [];
 
+// The suite and retained-state regression must exercise the same fixture path.
+async function startRequestSessionFixture() {
+  return createServer();
+}
+
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await startRequestSessionFixture());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -307,4 +314,34 @@ describe('#2123 request-local session refusal', () => {
     }
   });
 
+});
+
+describe('startup fixture ownership (#3107)', () => {
+  it('cleans a retained missing-key manifest before boot while raw startup refuses it', async () => {
+    const savedRing = process.env.RATE_LIMIT_KEYRING;
+    const restoreRing = () => {
+      if (savedRing === undefined) delete process.env.RATE_LIMIT_KEYRING;
+      else process.env.RATE_LIMIT_KEYRING = savedRing;
+    };
+    try {
+      // Simulate an earlier file restoring its environment but leaving persisted state.
+      try {
+        process.env.RATE_LIMIT_KEYRING = JSON.stringify({ current: 'previous-file-3107', keys: { 'previous-file-3107': '3'.repeat(64) } });
+        await assertRateReadiness(db);
+      } finally {
+        restoreRing();
+      }
+      const before = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(before.keyIds).toEqual(['previous-file-3107']);
+      expect(before.keyIds.filter(id => readRateKeys().keys.has(id))).toEqual([]);
+      await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
+      const after = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+      await expect(startRequestSessionFixture()).resolves.toBeDefined();
+      expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual([readRateKeys().current]);
+    } finally {
+      restoreRing();
+      await cleanDb(db);
+    }
+  });
 });
