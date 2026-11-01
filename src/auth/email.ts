@@ -46,9 +46,11 @@ export async function sendAccountDeletionNotice(to: string): Promise<void> {
  * The Resend SDK RESOLVES a failure (HTTP 422, network) as `{ data: null, error }` instead of throwing, so a bare
  * `await send()` reads a refused message as delivered. Only a result carrying data is an acknowledgement.
  */
-export function assertProviderAck(result: { data?: unknown; error?: { message?: string } | null } | null | undefined): void {
+export function assertProviderAck(result: { data?: unknown; error?: { message?: string; name?: string } | null } | null | undefined): void {
   if (!result || result.error || !result.data) {
-    throw new Error(`mail provider did not acknowledge: ${result?.error?.message ?? 'no data'}`);
+    // #3012: the provider's free-text message can echo the recipient, and this error reaches the fault log and
+    // Sentry, so only the provider's machine name is carried.
+    throw new Error(`mail provider did not acknowledge: ${result?.error?.name ?? 'no data'}`);
   }
 }
 
@@ -367,12 +369,18 @@ export async function sendMagicLink(
     assertProviderAck(result);
     logMagicLinkSend('acked', startedAt, { providerId: result.data?.id });
   } catch (err) {
-    logMagicLinkSend(result ? 'refused' : 'error', startedAt, {
-      // The provider's free-text message can echo the recipient, so only its machine name is kept.
-      providerError: result?.error?.name,
-    });
-    await db.emailVerificationToken.deleteMany({ where: { token } });
-    throw err;
+    // The provider's free-text message can echo the recipient, so only a machine name is kept: the provider's own
+    // for a refusal, the thrown error's for a send that threw.
+    const providerError = result ? result.error?.name : err instanceof Error ? err.name : undefined;
+    logMagicLinkSend(result ? 'refused' : 'error', startedAt, { providerError });
+    try {
+      await db.emailVerificationToken.deleteMany({ where: { token } });
+    } catch {
+      // #3012: a failed cleanup must not replace the send failure; the token expires on its own.
+    }
+    if (result) throw err; // assertProviderAck's message is already name-only
+    // A thrown SDK error's message is free text too (a network error can name the recipient).
+    throw new Error(`mail provider send failed: ${providerError ?? 'unknown'}`);
   }
 }
 

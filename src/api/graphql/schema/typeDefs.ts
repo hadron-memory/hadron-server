@@ -7902,7 +7902,37 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
+  "Server-owned request cost class (#1793); not a client branching contract."
+  enum RateLimitFieldClass { CREDENTIALS OUTBOUND WRITES FAN_OUT_READS OTHER_READS }
+  "Per-class deployment rollout. LOG_ONLY counts without limiter refusal."
+  enum RateLimitEnforcementMode { LOG_ONLY ENFORCING }
+  "Admin-only projection; no secrets, subject counters or identities."
+  type RateLimitPolicy {
+    fieldClass: RateLimitFieldClass!
+    principalLimit: Int!
+    keyLimit: Int!
+    ipLimit: Int!
+    windowSeconds: Int!
+    retentionSeconds: Int!
+    ipGroupingVersion: String!
+    enforcementMode: RateLimitEnforcementMode!
+    version: Int!
+    updatedAt: DateTime!
+  }
+  "Complete limit triple; mode omitted or null preserves (hrn:node:hadronmemory.com:specs:cor:api:210:01)."
+  input SetRateLimitPolicyInput {
+    fieldClass: RateLimitFieldClass!
+    expectedVersion: Int!
+    principalLimit: Int!
+    keyLimit: Int!
+    ipLimit: Int!
+    enforcementMode: RateLimitEnforcementMode
+    changeReference: String!
+  }
+
   type Query {
+    "Live platform ADMIN/OWNER human only; bounded five-row policy read (#1793)."
+    rateLimitPolicies: [RateLimitPolicy!]!
     """
     Recorded source revisions for exactly revNo of a compiled boot prompt (hrn:node:hadronmemory.com:specs:cor:agt:040:12).
     Uses the compiled node's read gate; denied, missing, deleted or noncompiled nodes return null.
@@ -9945,6 +9975,8 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."
+    setRateLimitPolicy(input: SetRateLimitPolicyInput!): RateLimitPolicy!
     "Restore one retained deleted node in a live memory you can read and write. Restore deleted ancestors first; governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions. hrn:node:hadronmemory.com:specs:cor:acl:130:02"
     restoreNode(nodeRef: ID!): Node!
     "#1719: rebind a trigger to its reviewed graph. expectedHash must match previewAutomation; edits since preview refuse adoption."
@@ -13009,7 +13041,7 @@ export const typeDefs = `#graphql
 
     A worker's post that repeats its own earlier message is refused: the same worker
     (across its sessions), the same Channel, exactly the same body and the same reply
-    target (or none on both sides), earlier than ten minutes ago, with TEAM_CHAT_DUPLICATE.
+    target (or none on both sides), within the preceding ten minutes, with TEAM_CHAT_DUPLICATE.
     The earlier message was posted, so do not retry: the text and the typed fields
     (earlierSeq, channelId) name it. Nothing is stored. A post made as the human
     (no session) is not judged.

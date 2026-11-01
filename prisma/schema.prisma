@@ -6536,12 +6536,15 @@ model WorkerDeliveryChannel {
 /// #2072 (Holger R53, cor:agt:080:04/:13/:15) — the receipt of an acknowledged wake, per (worker, wake key). A wake
 /// carries no message text, so its acknowledgement moves no message mark; this row is what it records instead: the
 /// floor's clock (`ackedAt`) and the budget's once-per-wake test. A row is (re)written only by an acknowledgement of a
-/// proof issued AFTER the receipt last recorded for that key, so a repeat or an older proof's replay changes nothing
+/// proof issued AFTER both the receipt and its accepted-issue watermark, so a repeat or an older proof's replay changes nothing
 /// while the same wake offered again after the floor counts again.
 model WorkerWakeAck {
   workerId        String   @map("worker_id")
   wakeKey         String   @map("wake_key")
   ackedAt         DateTime @map("acked_at")
+  /// #3022: issue time that spent/covered this key; absorbed keys inherit the descendant's issue time.
+  /// NULL is an old writer's receipt: replay comparison falls back to ackedAt.
+  issuedAt        DateTime? @map("issued_at")
   ackedByUserId   String?  @map("acked_by_user_id")
   ackedByWorkerId String?  @map("acked_by_worker_id")
   ackedByAppKeyId String?  @map("acked_by_app_key_id")
@@ -7033,4 +7036,54 @@ model IncludeRetentionGeneration {
   blockedCount              Int @default(0) @map("blocked_count")
 
   @@map("include_retention_generation")
+}
+
+/// #1793: server-owned policy; defaults seed once, mode deploys LOG_ONLY.
+model RateLimitPolicy {
+  fieldClass      String   @id @map("field_class")
+  principalLimit  Int      @map("principal_limit")
+  keyLimit        Int      @map("key_limit")
+  ipLimit         Int      @map("ip_limit")
+  windowSeconds   Int      @map("window_seconds")
+  retentionSeconds Int     @default(86400) @map("retention_seconds")
+  enforcementMode String   @default("LOG_ONLY") @map("enforcement_mode")
+  version         Int      @default(1)
+  updatedAt       DateTime @default(now()) @map("updated_at")
+  @@map("rate_limit_policies")
+}
+
+/// #1793: HMAC subjects only. Window-independent advisory locks protect absent rows too.
+model RateLimitBucket {
+  id          String   @id
+  fieldClass  String   @map("field_class")
+  dimension   String
+  subject     String
+  windowStart DateTime @map("window_start")
+  used        BigInt
+  expiresAt   DateTime @map("expires_at")
+  @@unique([fieldClass, dimension, subject, windowStart])
+  @@index([expiresAt])
+  @@map("rate_limit_buckets")
+}
+
+/// #1793: no secrets, only key IDs and fingerprints. Operators fence overlap/drain transitions.
+model RateLimitManifest {
+  id                String   @id
+  keyIds            String[] @map("key_ids")
+  fingerprints      Json
+  overlapStartedAt  DateTime? @map("overlap_started_at")
+  version           Int      @default(1)
+  @@map("rate_limit_manifests")
+}
+
+/// #1793: platform-admin-only configuration audit; contains no subject/counter/secret.
+model RateLimitPolicyAudit {
+  id              String   @id
+  fieldClass      String   @map("field_class")
+  actorId         String   @map("actor_id")
+  before          Json
+  after           Json
+  changeReference String   @map("change_reference")
+  createdAt       DateTime @default(now()) @map("created_at")
+  @@map("rate_limit_policy_audits")
 }

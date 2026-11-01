@@ -110,6 +110,8 @@ ALTER TABLE memories
 -- (app_id NULL) is exempt. (We deliberately do NOT couple app_id ⇔ agent: a
 -- legacy pre-008 row may have app_id NULL with an agent set, and the MCP gate
 -- has explicit handling + a regression test for that shape.)
+-- #422: supported account erasure deletes Apps (cascading to owned App-scoped
+-- memories) before Agents; relaxing Agent sharing must revisit this SET NULL/CHECK ordering.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories

@@ -39,6 +39,11 @@ const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 
+/** Both variables must be present for Google login to operate: `/auth/google` answers 503 unless each is set. */
+export function isGoogleConfigured(): boolean {
+  return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+}
+
 /**
  * Build the Google authorization redirect URL for the given state-CSRF token. `reauthenticate` (#1631 PR1b, R154)
  * asks Google for a fresh authentication with `max_age=0`; the callback must then check `auth_time`.
