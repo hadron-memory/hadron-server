@@ -5750,6 +5750,11 @@ model AgentTask {
   resultOutcome        String?   @map("result_outcome")
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
+  /// #2651 (cor:agt:050:29, :01): the latest hand-back — its code (closed set, chk_agent_tasks_hand_back), optional
+  /// text (<= 2,000 characters; never put into an event) and time. A later hand-back replaces all three.
+  handBackReasonCode   String?   @map("hand_back_reason_code")
+  handBackReasonText   String?   @map("hand_back_reason_text")
+  handedBackAt         DateTime? @map("handed_back_at")
   tags                 String[]  @default([])
   /// #2649 (cor:agt:050:01 References, :09): the task's ordered typed references, a JSON array of
   /// {kind, target, label} (at most 20, chk_agent_tasks_references). Targets are stored as given and never resolved.

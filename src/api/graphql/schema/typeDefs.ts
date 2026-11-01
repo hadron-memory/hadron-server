@@ -10285,6 +10285,20 @@ export const typeDefs = `#graphql
     cancelAgentTask(taskId: ID!): AgentTask!
 
     """
+    #2651 — hand a started task back: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:29). The task
+    loses its assignee, goes back to PENDING and is queued again (hrn:node:hadronmemory.com:specs:cor:agt:050:03); a
+    returning worker is added to requirements.excludeWorkerIds, so the platform's matcher assigns it to another
+    matching worker (hrn:node:hadronmemory.com:specs:cor:agt:060:06), and whoever may assign the task can remove
+    that exclusion. A person who hands a task back is not added. One task.handed-back event carries the code only; no
+    result is written; child tasks are untouched; every ordinary stall episode the task had ends, while a finish-by
+    episode is kept until the task ends or its finish-by time is edited (hrn:node:hadronmemory.com:specs:cor:agt:050:13). taskRef is the task's id or handle. Refusals: TASK_NOT_FOUND,
+    TASK_NOT_ASSIGNEE (anyone else, or a task with no assignee), TASK_ENDED (finished or cancelled),
+    TASK_INVALID_TRANSITION (pending), BAD_USER_INPUT (a code outside the set, or text over 2,000 characters),
+    SESSION_NOT_BOUND, APP_UNINSTALLED. Nothing changes on a refusal.
+    """
+    handBackAgentTask(taskRef: ID!, reason: AgentTaskHandBackInput!): AgentTask!
+
+    """
     #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
     with no assignee becomes BACKLOG — unassigned, never matched, never waited
     on, no alarms. Whoever may assign a task may park it: its owner, a worker
@@ -13783,6 +13797,35 @@ export const typeDefs = `#graphql
     evidence: String
   }
 
+  """
+  #2651: why an assignee handed a started task back, a closed set (hrn:node:hadronmemory.com:specs:cor:agt:050:29,
+  Proposed details). MISSING_INPUT: something the work needs is not there. CANNOT_DO: the worker lacks the
+  capability. REFUSED: a policy or safety refusal. OUT_OF_SCOPE: the work is not what this task's role does.
+  DUPLICATE: the same work is already tracked elsewhere.
+  """
+  enum AgentTaskHandBackCode {
+    MISSING_INPUT
+    CANNOT_DO
+    REFUSED
+    OUT_OF_SCOPE
+    DUPLICATE
+  }
+
+  "#2651: a task's latest hand-back (hrn:node:hadronmemory.com:specs:cor:agt:050:01, :29), readable by whoever may read the task."
+  type AgentTaskHandBack {
+    code: AgentTaskHandBackCode!
+    "The optional reason text, up to 2,000 characters. Stored on the task only, never in an event."
+    text: String
+    handedBackAt: DateTime!
+  }
+
+  "#2651: the reason a hand-back gives (hrn:node:hadronmemory.com:specs:cor:agt:050:29)."
+  input AgentTaskHandBackInput {
+    code: AgentTaskHandBackCode!
+    "Optional, up to 2,000 characters after trimming; blank is none. Stored on the task, never put into an event."
+    text: String
+  }
+
   input AgentTaskResultInput {
     "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text."
     outcome: String!
@@ -14469,6 +14512,8 @@ export const typeDefs = `#graphql
     cancelledAt: DateTime
     "Set only on a finished task."
     result: AgentTaskResult
+    "#2651: the task's latest hand-back by its assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:29); null when it was never handed back. A later hand-back replaces it; every earlier code stays in the task.handed-back events."
+    handBack: AgentTaskHandBack
     tags: [String!]!
     """
     #2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's ordered, typed references to other things. Each
@@ -14566,7 +14611,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."

@@ -689,6 +689,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
 
+-- #2651: a task's latest hand-back (code, optional text, time). One source, shared verbatim with migration
+-- 20261101090000_agent_task_hand_back (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-hand-back-invariants.sql
+
 -- #2649: a task's references are one JSON array of at most 20 items. One source, shared verbatim with migration
 -- 20261101120000_agent_task_references (pinned by src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-references-invariants.sql
