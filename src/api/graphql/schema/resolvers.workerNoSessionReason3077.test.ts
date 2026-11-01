@@ -7,9 +7,11 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  * - IDLE: an open (`endedAt` null), undeleted, not auto-expired session whose
  *   promised `expiresAt` has not passed, and which is not live (driven outside
  *   its type's idle window).
- * - ENDED: otherwise, any Session row at all: ended, soft-deleted,
- *   auto-expired, or past its `expiresAt` with `endedAt` still null (Pin A).
- * - NEVER_BOUND: no Session row at all (Pin B).
+ * - ENDED: otherwise, any undeleted Session row: ended, auto-expired, or past
+ *   its `expiresAt` with `endedAt` still null (Pin A).
+ * - NEVER_BOUND: no undeleted Session row (Pin B). Soft-deleted sessions count
+ *   for nothing, as in the bind gate and `Worker.lastActiveAt` (gate amendment
+ *   on the issue, after chat #60698).
  *
  * Acceptance 2 is the differential: "has a reason" equals "no open undeleted
  * session is live by `isSessionLive`", read the way startSession's WORKER_TAKEN
@@ -24,6 +26,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
+import { loadNoSessionReasons } from '../../../lib/workerCheckStatus.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -78,8 +81,16 @@ const SCENARIOS: Record<string, { sessions: Shape[]; reason: 'IDLE' | 'ENDED' | 
   Expired: { sessions: [{ startedAt: ago(10 * MIN), updatedAt: ago(1 * MIN), expiresAt: ago(30_000) }], reason: 'ENDED' },
   // Pin A variant: idle AND past its expiry still reads ENDED (expiry wins).
   ExpiredIdle: { sessions: [{ startedAt: ago(30 * HOUR), updatedAt: ago(26 * HOUR), expiresAt: ago(HOUR) }], reason: 'ENDED' },
-  // Gate item 3: a soft-deleted session counts as ended, even an open fresh one.
-  Deleted: { sessions: [{ startedAt: ago(10 * MIN), updatedAt: ago(1 * MIN), deletedAt: ago(1 * MIN) }], reason: 'ENDED' },
+  // Gate amendment: a soft-deleted session counts for nothing, even an open fresh one.
+  Deleted: { sessions: [{ startedAt: ago(10 * MIN), updatedAt: ago(1 * MIN), deletedAt: ago(1 * MIN) }], reason: 'NEVER_BOUND' },
+  // Gate amendment: every session soft-deleted (an ended one and an idle open one) reads NEVER_BOUND.
+  AllDeleted: {
+    sessions: [
+      { startedAt: ago(50 * HOUR), updatedAt: ago(48 * HOUR), endedAt: ago(48 * HOUR), deletedAt: ago(HOUR) },
+      { startedAt: ago(30 * HOUR), updatedAt: ago(26 * HOUR), deletedAt: ago(HOUR) },
+    ],
+    reason: 'NEVER_BOUND',
+  },
   // Gate item 3: a pre-#1114 reaped row (autoExpiredAt + endedAt).
   Reaped: { sessions: [{ startedAt: ago(40 * HOUR), updatedAt: ago(30 * HOUR), endedAt: ago(30 * HOUR), autoExpiredAt: ago(30 * HOUR) }], reason: 'ENDED' },
   // Gate item 3: auto-expired with endedAt left null, and stale, counts as ended, never idle.
@@ -197,11 +208,27 @@ describe('acceptance 2: the differential — has a reason exactly when the WORKE
     }
   });
 
-  it('Pin B: NEVER_BOUND exactly when the worker has no Session row at all', async () => {
+  it('Pin B: NEVER_BOUND exactly when the worker has no undeleted Session row, i.e. exactly when Worker.lastActiveAt is null', async () => {
     for (const name of Object.keys(SCENARIOS)) {
-      const rows = await db.session.count({ where: { workerId: w[name].id } });
-      expect((await workerStatus(name)).noSessionReason === 'NEVER_BOUND', name).toBe(rows === 0);
+      const rows = await db.session.count({ where: { workerId: w[name].id, deletedAt: null } });
+      const neverBound = (await workerStatus(name)).noSessionReason === 'NEVER_BOUND';
+      expect(neverBound, `${name}: vs undeleted rows`).toBe(rows === 0);
+      const worker = await Q.worker({}, { ref: w[name].id }, ctx(member.id));
+      expect(neverBound, `${name}: vs lastActiveAt`).toBe((await F.Worker.lastActiveAt(worker, {}, ctx(member.id))) === null);
     }
+  });
+});
+
+describe('the expiry boundary, on a controlled clock (R5, cor:agt:020:03)', () => {
+  it('expiresAt exactly now has ended the session: ENDED, as isSessionLive says not live; one ms later it is IDLE', async () => {
+    const at = new Date(Date.now() - 2 * HOUR);
+    const row = { type: 'DEVELOPER' as const, startedAt: new Date(at.getTime() - 30 * HOUR), updatedAt: new Date(at.getTime() - 26 * HOUR), expiresAt: at };
+    await db.session.create({ data: { id: generateId(), appId: app.id, userId: member.id, workerId: w.Never.id, agentId: agent.id, ...row } });
+    expect(isSessionLive(row, null, at)).toBe(false);
+    expect((await loadNoSessionReasons(db, [w.Never.id], at)).get(w.Never.id)).toBe('ENDED');
+    const before = new Date(at.getTime() - 1);
+    expect(isSessionLive(row, null, before)).toBe(false); // idle, not yet expired
+    expect((await loadNoSessionReasons(db, [w.Never.id], before)).get(w.Never.id)).toBe('IDLE');
   });
 });
 
