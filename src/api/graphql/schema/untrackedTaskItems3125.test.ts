@@ -17,6 +17,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { taskStallTick } from '../../../jobs/taskStallEvaluator.js';
 import { resolvers, type Context } from './resolvers.js';
+import { TASK_TITLE_MAX } from './resolvers.agentTask.js';
 import { typeDefs } from './typeDefs.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -48,6 +49,8 @@ interface Fake {
   calls: number;
   /** When set, every GraphQL read waits here until released (forces two callers to read the same list). */
   gate: Promise<void> | null;
+  /** The issues connection's pageInfo comes back without hasNextPage (a malformed response). */
+  omitHasNextPage: boolean;
 }
 let fake: Fake;
 
@@ -87,7 +90,9 @@ async function fakeFetch(url: string | URL, init?: RequestInit): Promise<Respons
       data: {
         repository: {
           issues: {
-            pageInfo: { hasNextPage, endCursor: hasNextPage ? String(start + fake.pageSize) : null },
+            pageInfo: fake.omitHasNextPage
+              ? { endCursor: hasNextPage ? String(start + fake.pageSize) : null }
+              : { hasNextPage, endCursor: hasNextPage ? String(start + fake.pageSize) : null },
             nodes: slice.map((i) => ({
               number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, updatedAt: i.updatedAt,
               labels: { nodes: i.labels.map((l) => ({ name: l })), pageInfo: { hasNextPage: i.labelsTruncated === true } },
@@ -131,7 +136,7 @@ const refusal = async (p: Promise<unknown>) => {
 
 beforeEach(async () => {
   await cleanDb(db);
-  fake = { repos: {}, pageSize: 100, mintStatus: 201, rateLimitOn: null, mints: [], graphql: [], calls: 0, gate: null };
+  fake = { repos: {}, pageSize: 100, mintStatus: 201, rateLimitOn: null, mints: [], graphql: [], calls: 0, gate: null, omitHasNextPage: false };
   vi.stubGlobal('fetch', vi.fn(fakeFetch));
   vi.stubEnv('GITHUB_APP_ID', '3125300');
   vi.stubEnv('GITHUB_APP_PRIVATE_KEY', APP_KEY_PEM);
@@ -328,8 +333,9 @@ describe('untrackedTaskItems: refusals, each before any GitHub call', () => {
       data: { name: 'Mine', urn: `mine-${generateId()}:mine`, ownerUserId: member.id, properties: { taskIntegrations: [INTEGRATION()] } as never },
     });
     await db.appMember.create({ data: { appId: mine.id, userId: member.id, role: 'owner' } });
-    for (const p of [list({ appRef: mine.id }), claim({ appRef: mine.id })]) {
-      expect((await refusal(p)).code).toBe('TASK_INTEGRATION_ORG_REQUIRED');
+    // Called one at a time: a promise started before the previous one settles would reject unhandled (Jane, P2-3).
+    for (const call of [() => list({ appRef: mine.id }), () => claim({ appRef: mine.id })]) {
+      expect((await refusal(call())).code).toBe('TASK_INTEGRATION_ORG_REQUIRED');
     }
     // The same answer whether or not the integration name exists.
     expect((await refusal(list({ appRef: mine.id, integration: 'nope' }))).code).toBe('TASK_INTEGRATION_ORG_REQUIRED');
@@ -361,7 +367,43 @@ describe('untrackedTaskItems: App keys (V38)', () => {
   });
 });
 
+describe('untrackedTaskItems: the gate runs again after the GitHub read', () => {
+  /** Revoke the App's own key while its GitHub read is in flight, then let the read finish. */
+  async function revokedMidRead(repos: Record<string, Issue[]>) {
+    fake.repos = repos;
+    let release!: () => void;
+    fake.gate = new Promise<void>((r) => { release = r; });
+    const p = list({ repository: 'acme/widgets' }, keyCtx(app.id, keyX.id));
+    p.catch(() => undefined);
+    while (fake.graphql.length < 1) await new Promise((r) => setTimeout(r, 5));
+    await db.appKey.update({ where: { id: keyX.id }, data: { revokedAt: new Date() } });
+    release();
+    return refusal(p);
+  }
+
+  it('a key revoked during the read is APP_NOT_FOUND when the read found items', async () => {
+    expect((await revokedMidRead({ widgets: [issue('widgets', 1)] })).code).toBe('APP_NOT_FOUND');
+  });
+
+  it('a key revoked during the read is APP_NOT_FOUND when the read found nothing (Jane, P2-1)', async () => {
+    expect((await revokedMidRead({ widgets: [] })).code).toBe('APP_NOT_FOUND');
+  });
+
+  it('a key revoked during the read is APP_NOT_FOUND when every item read was filtered out', async () => {
+    expect((await revokedMidRead({ widgets: [issue('widgets', 1, { labels: ['wontfix'] })] })).code).toBe('APP_NOT_FOUND');
+  });
+});
+
 describe('untrackedTaskItems: an incomplete read', () => {
+  it('a page whose pageInfo carries no hasNextPage is github_error, never read as the last page (Jane, P2-2)', async () => {
+    fake.pageSize = 1;
+    fake.omitHasNextPage = true;
+    fake.repos.widgets = [issue('widgets', 1), issue('widgets', 2)];
+    const r = await list({ repository: 'acme/widgets' });
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toBe('github_error');
+  });
+
   it('a rate limit mid-read returns complete: false, and the token appears nowhere', async () => {
     fake.repos.widgets = [issue('widgets', 1)];
     fake.repos.gadgets = [issue('gadgets', 2)];
@@ -458,7 +500,8 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
     const events = await db.agentTeamEvent.findMany({ where: { taskId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
     const types = events.map((e) => e.type);
     expect(types.indexOf('task.created')).toBeGreaterThanOrEqual(0);
-    expect(types.indexOf('task.started')).toBeGreaterThan(types.indexOf('task.created'));
+    expect(types.indexOf('task.assigned')).toBeGreaterThan(types.indexOf('task.created'));
+    expect(types.indexOf('task.started')).toBeGreaterThan(types.indexOf('task.assigned'));
     await taskStallTick(db as never, new Date(Date.now() + 30 * 60_000));
     const alarms = await db.agentTeamEvent.findMany({ where: { taskId, severity: 'alarm' } });
     expect(alarms.filter((a) => JSON.stringify(a.payload).includes('not-started'))).toEqual([]);
@@ -495,6 +538,56 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
     expect(a.code).toBe('APP_NOT_FOUND');
     expect({ ...b, message: b.message.replace(bareApp.id, app.id) }).toEqual(a);
     expect(fake.calls).toBe(0);
+  });
+
+  it('a worker claims several items in one call (Gloria, P2)', async () => {
+    fake.repos.widgets = [1, 2, 3, 4].map((n) => issue('widgets', n));
+    const r: any = await asWorker(anne, () => claim({ repository: 'acme/widgets', limit: 3 }));
+    expect(r).toMatchObject({ complete: true, incompleteReason: null, refusalCode: null });
+    expect(r.tasks.map((t: any) => t.externalId)).toEqual([1, 2, 3].map((n) => `https://github.com/acme/widgets/issues/${n}`));
+    const rows = await db.agentTask.findMany({ where: { id: { in: r.tasks.map((t: any) => t.id) } } });
+    expect(rows.every((t) => t.status === 'started' && t.ownerWorkerId === anne.id && t.assigneeWorkerId === anne.id)).toBe(true);
+  });
+
+  it('an impersonation session cannot claim: FORBIDDEN before any GitHub call (Rook, P3-2)', async () => {
+    fake.repos.widgets = [issue('widgets', 1)];
+    const imp = ctx(member.id, { impersonation: { orgId: org.id, sessionId: generateId(), actorUserId: outsider.id, expiresAt: new Date(Date.now() + 60000) } } as Partial<Context>);
+    expect((await refusal(claim({ repository: 'acme/widgets' }, imp))).code).toBe('FORBIDDEN');
+    expect(fake.calls).toBe(0);
+    expect(await db.agentTask.count({ where: { appId: app.id, externalId: { not: null } } })).toBe(0);
+  });
+
+  it('a resetting worker claims nothing: the walk stops with WORKER_RESETTING (Rook, P3-3; cor:agt:050:27)', async () => {
+    fake.repos.widgets = [issue('widgets', 1)];
+    await db.workerAvailability.create({
+      data: { workerId: anne.id, state: 'unavailable', reason: 'resetting', setAt: new Date(), setBy: 'context-reset', contextResetId: generateId() },
+    });
+    const r: any = await asWorker(anne, () => claim({ repository: 'acme/widgets' }));
+    expect(r).toMatchObject({ tasks: [], complete: false, incompleteReason: 'claim_refused', refusalCode: 'WORKER_RESETTING' });
+    expect(await db.agentTask.count({ where: { appId: app.id, externalId: { not: null } } })).toBe(0);
+  });
+
+  it('an unexpected failure after a claim keeps the claims made, returns claim_failed, and logs the error name only', async () => {
+    fake.repos.widgets = [1, 2, 3].map((n) => issue('widgets', n));
+    // The read back of a committed claim fails on the second item (a non-GraphQL error the walk cannot classify).
+    let reads = 0;
+    const agentTask = new Proxy(db.agentTask, {
+      get(t, k, r) {
+        if (k !== 'findUniqueOrThrow') return Reflect.get(t, k, r);
+        return (...a: unknown[]) => {
+          reads += 1;
+          if (reads === 2) throw new TypeError(`boom ${'https://github.com/acme/widgets/issues/2'}`);
+          return (t.findUniqueOrThrow as any)(...a);
+        };
+      },
+    });
+    const failing = new Proxy(db, { get: (t, k, r) => (k === 'agentTask' ? agentTask : Reflect.get(t, k, r)) });
+    const r: any = await claim({ repository: 'acme/widgets', limit: 3 }, ctx(member.id, { db: failing as never }));
+    expect(r).toMatchObject({ complete: false, incompleteReason: 'claim_failed', refusalCode: null });
+    expect(r.tasks.map((t: any) => t.externalId)).toEqual(['https://github.com/acme/widgets/issues/1']);
+    const line = logs.find((l) => l[0] === 'untracked.claim_failed');
+    expect(line?.[1]).toMatchObject({ appId: app.id, integration: 'gh', claimed: 1, error: 'TypeError' });
+    expect(JSON.stringify(line)).not.toContain('issues/2');
   });
 
   it('a refusal mid-walk stops it and is returned beside the claims already made, which stay committed', async () => {
@@ -543,7 +636,7 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
     const title: string = r.tasks[0].title;
     expect(title.startsWith('Fix the thing ')).toBe(true);
     expect(/[\u0000-\u001F\u200B]/.test(title)).toBe(false);
-    expect(Array.from(title).length).toBeLessThanOrEqual(500);
+    expect(Array.from(title)).toHaveLength(TASK_TITLE_MAX);
   });
 });
 
