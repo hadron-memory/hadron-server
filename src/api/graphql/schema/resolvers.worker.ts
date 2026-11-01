@@ -2580,6 +2580,36 @@ export async function composeWorkerPrompt(
 
 
 /**
+ * #2969 (cor:agt:040:04, the rendered-values bullet): the worker's signature and trailer, filled as the served boot
+ * prompt fills them. The gates are `composeWorkerPrompt`'s, step for step, so a reader gets a line exactly when the
+ * prompt that carries it would be served to them: worker internals, then (for a user-owned Agent) the owner-or-holder
+ * check, because a signature can hold `{{agent.name}}`. The session placement is the prompt's, so `{{worker.role}}`
+ * agrees with it after a role change, and the caller's own recorded bind keeps the values it was served (a rename does
+ * not rewrite a session's briefing). Null for both when any gate refuses; never a new refusal.
+ */
+type RenderableWorker = { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null };
+
+export async function renderWorkerLines(
+  ctx: Context,
+  worker: RenderableWorker,
+): Promise<{ signature: string; trailer: string } | null> {
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+  const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
+  if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
+  const memo = pageMemoOf(ctx, worker);
+  const agent = memo ? await memo.agent(ctx, worker.agentId) : await readPromptAgent(ctx, worker.agentId);
+  if (agent?.ownerUserId != null && !(await mayReadUserOwnedAgentTemplate(ctx, worker.id, agent.ownerUserId))) return null;
+  const role = worker.role ?? agent?.personaRole ?? '';
+  const platform = await workerPlatformValues(ctx, worker, agent, role, undefined);
+  const recorded = ctx.sessionId
+    ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
+    : null;
+  const values = recorded ? { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues : platform;
+  return { signature: values['worker.signature'], trailer: values['worker.trailer'] };
+}
+
+
+/**
  * #2047 — the text a read of a worker's briefing shows. A worker's own OPEN session finishes under the
  * revision it was bound with (its record), so a recompile approved mid-session reaches the NEXT bind, never this one;
  * a session whose recorded revision was deleted reads `BOOT_PROMPT_RECORDED_REVISION_DELETED` and nothing newer. With no
@@ -3116,6 +3146,9 @@ export const workerFieldResolvers = {
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
     trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
+    /** #2969: the lines as the served boot prompt fills them; the prompt's own gates (see renderWorkerLines). */
+    renderedSignature: async (worker: RenderableWorker, _: unknown, ctx: Context) => (await renderWorkerLines(ctx, worker))?.signature ?? null,
+    renderedTrailer: async (worker: RenderableWorker, _: unknown, ctx: Context) => (await renderWorkerLines(ctx, worker))?.trailer ?? null,
     /** #2048 S11c: current warnings of the stored signature and trailer, behind the same gate as the fields. */
     signatureLint: async (
       worker: { appId: string; slug?: string; signature: string; trailer: string },
