@@ -6,7 +6,7 @@ describe('opaque model-group globs', () => {
     ['a.b', 'axb', false], ['a.b', 'a.b', true], ['model-*', 'prefix-model-x', false],
     ['model-?', 'model-ab', false], ['model-?', 'model-a', true], ['model-*', 'model-', true],
     ['*a*b', 'aaab', true], ['*a*b', 'aaabc', false], ['a**?', 'ab', true],
-    ['model', ' MODEL ', true], ['*', '', false], ['*', null, false],
+    ['model', ' MODEL ', true], [' MODEL-* ', 'model-x', true], ['*b', '*xb', true], ['a*b', 'a*xb', true], ['*', '', false], ['*', null, false],
     ['a/b:@_-', 'a/b:@_-', true],
   ])('%s against %s matches %s', (pattern, model, matches) => {
     expect(matchingModelGroupNames([{ name: 'opaque', patterns: [pattern], origin: 'APP' }], model)).toEqual(matches ? ['opaque'] : []);

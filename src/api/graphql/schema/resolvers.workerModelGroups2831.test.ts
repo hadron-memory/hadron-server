@@ -1,6 +1,7 @@
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #2831 S3 — live model-group membership uses the existing binding fold and audiences. */
 
+import { GraphQLError } from 'graphql';
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -170,6 +171,39 @@ describe('#2831 S3 current model groups', () => {
     await session('Anne', { llmModel: 'model' });
     await expect(F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).rejects.toMatchObject({ extensions: { code: 'TEAM_AGENT_AMBIGUOUS' } });
     expect((await projected()).errors?.[0].extensions?.code).toBe('TEAM_AGENT_AMBIGUOUS');
+  });
+
+  it('keeps core roster and composition readable without selecting failing optional group metadata', async () => {
+    await session('Anne', { llmModel: 'model' });
+    let reads = 0;
+    const traced = db.$extends({ query: { modelGroup: { findMany: async () => {
+      reads++;
+      throw new GraphQLError('test group lookup unavailable', { extensions: { code: 'GROUP_METADATA_TEST_UNAVAILABLE' } });
+    } } } });
+    const c = { ...ctx(mia.id), db: traced };
+    const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { worker { id name } model } } }` }, { contextValue: c });
+    if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
+    expect(result.body.singleResult.errors).toBeUndefined();
+    expect((result.body.singleResult.data as any).teamRoster.workers).toHaveLength(3);
+    await expect(Q.teamComposition({}, { appRef: app.id }, { ...ctx(mia.id), db: traced })).resolves.toMatchObject({ appId: app.id });
+    expect(reads).toBe(0);
+  });
+
+  it('reports a selected group lookup failure only on that nullable field, preserving the roster facts', async () => {
+    await session('Anne', { llmModel: 'model' });
+    const traced = db.$extends({ query: { modelGroup: { findMany: async () => {
+      throw new GraphQLError('test group lookup unavailable', { extensions: { code: 'GROUP_METADATA_TEST_UNAVAILABLE' } });
+    } } } });
+    const result = await server.executeOperation({ query: `{ teamRoster(appRef: "${app.id}") { workers { worker { id name } model modelGroups } } }` }, { contextValue: { ...ctx(mia.id), db: traced } });
+    if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
+    expect(result.body.singleResult.errors?.map(e => ({ code: e.extensions?.code, path: e.path }))).toEqual([
+      { code: 'GROUP_METADATA_TEST_UNAVAILABLE', path: ['teamRoster', 'workers', 0, 'modelGroups'] },
+    ]);
+    expect((result.body.singleResult.data as any)?.teamRoster.workers).toEqual([
+      { worker: { id: w.Anne.id, name: 'Anne' }, model: 'model', modelGroups: null },
+      { worker: { id: w.Kit.id, name: 'Kit' }, model: null, modelGroups: [] },
+      { worker: { id: w.Rook.id, name: 'Rook' }, model: null, modelGroups: [] },
+    ]);
   });
 
 });
