@@ -6,7 +6,8 @@
  * `hadron_create_node` (cost 1, no send), so nothing leaves the process.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbRunConsentPrincipal } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -233,16 +234,34 @@ describe('script node (#670, cor:agt:010:04)', () => {
     }
   });
 
+  it('a script tool whose handler throws fails the run TOOL_FAILED (the call was admitted, then failed)', async () => {
+    await makeNode('flow:s', script({ urn: 'not a urn', name: 'x' }));
+    const run = await mint();
+    expect(await executeAppRun(db, run.id, deps().d)).toBe('failed');
+    expect((await failureOf(run.id)).code).toBe('TOOL_FAILED');
+  });
+
+  it('a runner without the script dependency fails RUNNER_NOT_CONFIGURED, not TOOL_FAILED', async () => {
+    await makeNode('flow:s', script());
+    const run = await mint();
+    const { d } = deps();
+    expect(await executeAppRun(db, run.id, { ...d, callScript: undefined })).toBe('failed');
+    expect((await failureOf(run.id)).code).toBe('RUNNER_NOT_CONFIGURED');
+    expect(await targetNode()).toBeNull();
+  });
+
   it('one dispatcher: a run tool\'s execute is invoked from exactly one non-test call site', () => {
     const hits: string[] = [];
+    // A tripwire, not a proof: it matches the usual receivers of a RunToolDef's execute. Rooted at this file, not the CWD.
+    const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '');
     const walk = (dir: string) => {
-      for (const e of require('node:fs').readdirSync(dir, { withFileTypes: true })) {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
         const p = `${dir}/${e.name}`;
         if (e.isDirectory()) walk(p);
-        else if (p.endsWith('.ts') && !p.endsWith('.test.ts') && /\bdef\.execute\(/.test(readFileSync(p, 'utf8'))) hits.push(p);
+        else if (p.endsWith('.ts') && !p.endsWith('.test.ts') && /\b(?:def|tool|t)\.execute\(/.test(readFileSync(p, 'utf8'))) hits.push(p.slice(root.length + 1));
       }
     };
-    walk('src');
-    expect(hits).toEqual(['src/lib/runner/toolAdmission.ts']);
+    walk(root);
+    expect(hits).toEqual(['lib/runner/toolAdmission.ts']);
   });
 });

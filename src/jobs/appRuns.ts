@@ -968,8 +968,12 @@ async function executeAppRunInner(
         );
       }
 
-      // Non-null for every model hop (resolved just above); a script hop never reads it.
-      const modelCfg = resolved as ResolvedAiConfig;
+      // The resolved AI config, for model hops only (resolved just above). Loud, not a cast: a script hop has none,
+      // so reading it there is a bug, not a null to launder (#3143 blind P3).
+      const modelConfig = (): ResolvedAiConfig => {
+        if (resolved === null) throw new Error('Internal: the AI config was read on a hop that resolved none.');
+        return resolved;
+      };
 
       // A script hop has no prompt: no assembly, no attention section, no model budget (#670).
       let instructions = '';
@@ -992,7 +996,7 @@ async function executeAppRunInner(
       // #2047: the derived blocks this hop saw, appended to the run's log only when they differ from the last entry (an
       // empty list is an entry too, so a block going away is recorded). Guarded on RUNNING, before the hop's LLM call, so
       // a hop that fails or is aborted still shows what it saw.
-      if (servedText !== null) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
+      if (servedText !== null && !spec.script) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
 
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
@@ -1031,11 +1035,13 @@ async function executeAppRunInner(
           model,
           tokensIn,
           tokensOut,
-          keyOwnerType: modelCfg.ownerType,
+          keyOwnerType: modelConfig().ownerType,
           createdBy: run.userId ?? null,
           appRunId: runId,
         });
       };
+      // A runner without the script dependency is a configuration fault, not a tool failure.
+      if (spec.script && !deps.callScript) return fail('RUNNER_NOT_CONFIGURED', 'This runner cannot execute a script node (no script-call dependency).');
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
       let toolCalls: LlmToolLoopResult['toolCalls'] | null = null;
@@ -1052,8 +1058,7 @@ async function executeAppRunInner(
             if (err instanceof ScriptVariableMissingError) return fail('SCRIPT_VARIABLE_MISSING', err.message);
             throw err;
           }
-          if (!deps.callScript) throw new Error('This runner has no script-call dependency (cor:agt:010:04).');
-          const scripted = await deps.callScript(
+          const scripted = await deps.callScript!(
             run,
             { tool: spec.script.tool, args: renderedArgs },
             {
@@ -1079,7 +1084,7 @@ async function executeAppRunInner(
           // activation gate (D-TL-3) — the kill switch bites MID-hop.
           const loopResult = await deps.llmTools(
             run,
-            modelCfg,
+            modelConfig(),
             {
               system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
@@ -1110,7 +1115,7 @@ async function executeAppRunInner(
         } else if (spec.extractionSpec && spec.extractionSpec.length > 0) {
           // D-MN-2(a): one structured call — the object IS this hop's result.
           const objectResult = await deps.llmObject(
-            modelCfg,
+            modelConfig(),
             {
               system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
@@ -1129,7 +1134,7 @@ async function executeAppRunInner(
             model: objectResult.model,
           };
         } else {
-          result = await deps.llm(modelCfg, {
+          result = await deps.llm(modelConfig(), {
             system: serve(
               'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
               'Produce ONLY the requested output document — no preamble, no meta-commentary.'),
@@ -1150,7 +1155,7 @@ async function executeAppRunInner(
           // (terminal code, transient reset): log it and carry on. A charge is never
           // retried here, so what was persisted is not counted twice.
           try {
-            await chargeUsage(partial.tokensIn, partial.tokensOut, modelCfg.config.provider, modelCfg.config.model);
+            await chargeUsage(partial.tokensIn, partial.tokensOut, modelConfig().config.provider, modelConfig().config.model);
           } catch (chargeErr) {
             console.error(`[appRuns] run ${runId}: usage of the completed steps was not fully recorded:`, chargeErr instanceof Error ? chargeErr.message : chargeErr);
           }
