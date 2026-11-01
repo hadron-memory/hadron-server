@@ -131,6 +131,22 @@ describe('#2648 — the finish-by alarm (cor:agt:050:14)', () => {
     expect(await alarms('stall.finish-by')).toHaveLength(1);
   });
 
+  it('LOCAL P2-3: released after its deadline, the episode starts at the release; a later block and release keeps it', async () => {
+    const t = await assignedToAnne('10:00', { finishBy: at('12:00'), blocked: true });
+    await tick('12:10');
+    await db.agentTask.update({ where: { id: t.id }, data: { blocked: false, releasedAt: at('12:30') } });
+    await tick('12:30');
+    const [alarm] = await alarms('stall.finish-by');
+    expect(alarm.episodeStart).toEqual(at('12:30'));
+    await db.agentTask.update({ where: { id: t.id }, data: { blocked: true } });
+    await tick('13:00');
+    await db.agentTask.update({ where: { id: t.id }, data: { blocked: false, releasedAt: at('13:10') } });
+    await tick('13:10');
+    await tick('13:30'); // row 1: 12:30 + the no-progress window
+    expect(await alarms('stall.finish-by')).toHaveLength(1);
+    expect((await rows(alarm.id))[1]).toMatchObject({ wokenAt: at('13:30'), endedAt: null });
+  });
+
   it('assigning, reassigning or starting the task does not end the episode', async () => {
     const t = await task({ ownerWorkerId: ada.id, createdAt: at('10:00'), finishBy: at('12:00') });
     await tick('12:00');
@@ -204,6 +220,17 @@ describe('#2648 — a stop signal never moves the deadline (pure)', () => {
     expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, t('13:00'))).toEqual([]);
     i.stopHolds = [];
     expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, t('13:00'))).toMatchObject([{ rule: 'finish-by' }]);
+  });
+
+  it('LOCAL P2-3: the episode starts at the later of the deadline and the release, and a raised alarm keeps its key', () => {
+    const i = input();
+    i.task.releasedAt = t('12:30');
+    expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, t('12:30'))).toMatchObject([{ rule: 'finish-by', episodeStart: t('12:30'), dueAt: t('12:00') }]);
+    i.task.releasedAt = t('11:00');
+    expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, t('12:30'))).toMatchObject([{ rule: 'finish-by', episodeStart: t('12:00') }]);
+    i.task.releasedAt = t('14:00');
+    i.finishByAlarmStart = t('12:30');
+    expect(stallCandidates(i, STALL_WINDOW_DEFAULTS, t('14:00'))).toMatchObject([{ rule: 'finish-by', episodeStart: t('12:30') }]);
   });
 
   it('the running question still names the episode while blocked or stopped', () => {

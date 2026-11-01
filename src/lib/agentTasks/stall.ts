@@ -171,6 +171,13 @@ export type StallInputs = {
    */
   finishByEditedAt?: Date | null;
   /**
+   * #2648 (LOCAL P2-3 at 2c7474dc): the episode start of a finish-by alarm already raised for the CURRENT finish-by
+   * time, if any. The earliest stored start at or after the deadline: an edit can only set a deadline that has not
+   * passed, so every alarm of an earlier finish-by episode started before it. It keeps the running episode's key
+   * fixed when the task is blocked and released again after the alarm.
+   */
+  finishByAlarmStart?: Date | null;
+  /**
    * #2022 (R68; the Proposed stop-signal exceptions to cor:agt:050:13-:17): when a `pause` or `halt` covered each
    * worker these rules read (the assignee, and each ended child's owner), from the coverage ledger. Time inside them
    * doesn't count. Absent ⇒ none.
@@ -229,7 +236,8 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
     ...children.map((c) => c.ownerWorkerId),
   ].filter((w): w is string => !!w))];
   const ownerUserIds = [...new Set(children.map((c) => c.ownerUserId).filter((u): u is string => !!u))];
-  const [progress, queued, activity, userCalls, startByEdits, finishByEdits] = await Promise.all([
+  const finishByTaskIds = tasks.filter((t) => t.finishBy).map((t) => t.id);
+  const [progress, queued, activity, userCalls, startByEdits, finishByEdits, finishByAlarms] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
@@ -264,6 +272,12 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['finishBy'] } },
       _max: { createdAt: true },
     }),
+    finishByTaskIds.length
+      ? db.agentTeamEvent.findMany({
+        where: { taskId: { in: finishByTaskIds }, type: STALL_EVENT_TYPE['finish-by'], episodeStart: { not: null } },
+        select: { taskId: true, episodeStart: true },
+      })
+      : Promise.resolve([]),
   ]);
   const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
@@ -302,10 +316,21 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       queuedAt: queuedBy.get(task.id) ?? null,
       startByEditedAt: editedBy.get(task.id) ?? null,
       finishByEditedAt: finishByEditedBy.get(task.id) ?? null,
+      finishByAlarmStart: task.finishBy ? currentFinishByAlarmStart(task.id, task.finishBy, finishByAlarms) : null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
   });
+}
+
+/** #2648 — the earliest finish-by alarm start for `taskId` at or after `finishBy` (see `finishByAlarmStart`). */
+function currentFinishByAlarmStart(taskId: string, finishBy: Date, alarms: { taskId: string | null; episodeStart: Date | null }[]): Date | null {
+  let best: Date | null = null;
+  for (const a of alarms) {
+    if (a.taskId !== taskId || !a.episodeStart || a.episodeStart.getTime() < finishBy.getTime()) continue;
+    if (!best || a.episodeStart.getTime() < best.getTime()) best = a.episodeStart;
+  }
+  return best;
 }
 
 /**
@@ -410,13 +435,15 @@ export function stallCandidates(
 
   // cor:agt:050:14 (#2648) — a task with a finish-by time is exempt from every stall window: it raises only the
   // finish-by alarm, once the deadline has passed and the task is neither finished nor cancelled (an open task; a
-  // backlog task is never loaded). The episode key is the deadline itself, so it ends only when the task ends or its
-  // finish-by time is edited (a new value is a new key), never on an assignment, reassignment or start. A blocked
-  // task raised nothing above; one released after its deadline raises now, with the same key. A stop signal never
-  // moves the deadline: a deadline that passed under one raises when it lifts.
+  // backlog task is never loaded). The episode starts when the deadline passes, or at the release if the task was
+  // blocked then (LOCAL P2-3: the later of the deadline and the release). Once its alarm is raised, the stored start
+  // is the key, so the episode ends only when the task ends or its finish-by time is edited, never on an assignment,
+  // reassignment, start, or a later block and release. A blocked task raised nothing above. A stop signal never moves
+  // the deadline: a deadline that passed under one raises when it lifts.
   if (task.finishBy) {
     const stopped = task.assigneeWorkerId ? stopOf(inputs, task.assigneeWorkerId) : assignee ? [] : (inputs.stopHolds ?? []);
-    add('finish-by', task.finishBy, task.finishBy, {}, stopped);
+    const episodeStart = inputs.finishByAlarmStart ?? (latest(task.finishBy, task.releasedAt) as Date);
+    add('finish-by', episodeStart, task.finishBy, {}, stopped);
     return out;
   }
 

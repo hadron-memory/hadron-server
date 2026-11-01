@@ -106,3 +106,61 @@ describe('#2648 — BLIND P2: a create judges finish-by after its lock waits, on
   }, 20_000);
 });
 
+
+describe('#2648 — LOCAL P2-1: a call that names finishBy sets it, even unchanged', () => {
+  it('naming a stored finish-by time that has passed, beside a title, is refused and changes nothing', async () => {
+    const t = await create({ finishBy: iso(2) });
+    const past = new Date(Date.now() - HOUR);
+    await db.agentTask.update({ where: { id: t.id }, data: { finishBy: past } });
+    const before = await row(t.id);
+    await expect(edit(t.id, { finishBy: past.toISOString(), title: 'Renamed' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await row(t.id)).toEqual(before);
+    expect(await edits(t.id)).toHaveLength(0);
+  });
+
+  it('naming an unchanged future finish-by time beside a title is accepted', async () => {
+    const t = await create({ finishBy: iso(2) });
+    const stored = (await row(t.id)).finishBy as Date;
+    expect((await edit(t.id, { finishBy: stored.toISOString(), title: 'Renamed' })).title).toBe('Renamed');
+  });
+});
+
+describe('#2648 — LOCAL P2-2: a create judges finish-by after every lock it takes', () => {
+  const holdThenCreate = async (lockSql: (tx: any) => Promise<unknown>, input: () => Record<string, unknown>) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => { await lockSql(tx); locked(); await held; }, { timeout: 20_000 });
+    await isLocked;
+    const deadline = new Date(Date.now() + 1_500);
+    const creating = create({ ...input(), finishBy: deadline.toISOString() });
+    await new Promise((r) => setTimeout(r, 2_500)); // the deadline passes while the create waits
+    release();
+    await holder;
+    return creating;
+  };
+
+  it('a deadline that passes while the create waits on its counter row is refused; nothing is inserted', async () => {
+    const first = await create({});
+    const parentTaskId = (await row(first.id)).parentTaskId as string;
+    const before = await db.agentTask.count();
+    const creating = holdThenCreate(
+      (tx) => tx.$queryRaw`SELECT 1 FROM agent_task_counters WHERE app_id = ${app.id} AND parent_task_id = ${parentTaskId} FOR UPDATE`,
+      () => ({}),
+    );
+    await expect(creating).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await db.agentTask.count()).toBe(before);
+  }, 20_000);
+
+  it('a deadline that passes while the create waits on a blocker it names is refused; nothing is inserted', async () => {
+    const blocker = await create({});
+    const before = await db.agentTask.count();
+    const creating = holdThenCreate(
+      (tx) => tx.$queryRaw`SELECT 1 FROM agent_tasks WHERE id = ${blocker.id} FOR UPDATE`,
+      () => ({ blockedBy: [blocker.id] }),
+    );
+    await expect(creating).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect(await db.agentTask.count()).toBe(before);
+  }, 20_000);
+});

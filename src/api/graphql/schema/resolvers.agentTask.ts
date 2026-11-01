@@ -840,9 +840,10 @@ function checkFinishBy(a: { finishBy: Date | null; startBy: Date | null; setsFin
 }
 
 /**
- * #2648 (BLIND P2 at 2c7474dc): a create judges its finish-by time inside the write transaction, after every
- * authority and lock wait and immediately before the insert, against the database clock, as the edit path does. A
- * deadline that passed while the create waited is refused and nothing is inserted.
+ * #2648 (BLIND P2 at 2c7474dc; LOCAL P2-2 at 6feb16dd): a create judges its finish-by time against the database
+ * clock as the LAST statement of its write transaction, after every lock it takes (the authority anchors, the
+ * counter row inside insertTask, and the blocker graph after the insert), as the edit path does. A deadline that
+ * passed while the create waited is refused, and the rollback leaves nothing inserted.
  */
 async function checkFinishByAtDbClock(tx: Prisma.TransactionClient, finishBy: Date | null, startBy: Date | null): Promise<void> {
   if (!finishBy) return;
@@ -1224,13 +1225,14 @@ export async function createRootTaskForRun(
     }
     // #2162 (cor:agt:050:27 §4): never onto a worker that is resetting.
     await refuseResettingAssignee(tx, fresh.id, assignee?.workerId);
-    await checkFinishByAtDbClock(tx, finishBy, startBy);
-    return insertTask(tx, {
+    const inserted = await insertTask(tx, {
       app: fresh, parentId: null, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, owner, assignee,
       created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
       evActor,
     });
+    await checkFinishByAtDbClock(tx, finishBy, startBy);
+    return inserted;
   }, { lockWorkerIds: [lockedAssignee] });
   if (made.queued) await matchAfterChange(principal.db, app.id);
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1312,6 +1314,10 @@ export const agentTaskMutations = {
           };
         }
       }
+      // #2648 (LOCAL P2-1 at 2c7474dc): a call that NAMES finishBy or startBy sets it (cor:agt:050:14, "a call that
+      // sets the finish-by time"), even when the value equals the stored one; it is judged below, before the no-op.
+      let namedFinishBy: Date | null | undefined;
+      let namedStartBy: Date | null | undefined;
       for (const field of TASK_EDIT_FIELDS) {
         if (!Object.hasOwn(input, field)) continue;
         let value: unknown;
@@ -1326,21 +1332,27 @@ export const agentTaskMutations = {
             if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
             value = input.closeSessionWhenDone ?? false; break;
         }
+        if (field === 'finishBy') namedFinishBy = value as Date | null;
+        if (field === 'startBy') namedStartBy = value as Date | null;
         if (isDeepStrictEqual(task[field], value)) continue;
         fields.push(field);
         Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
       }
+      const setsFinishBy = namedFinishBy !== undefined;
+      const setsStartBy = namedStartBy !== undefined;
+      // #2648: judged on the values the task would hold, against the database clock after all authority/task waits,
+      // before the no-op return and the write, so a refused call changes nothing.
+      if (setsFinishBy || setsStartBy) {
+        const [{ at: judgedAt }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+        checkFinishBy({
+          finishBy: setsFinishBy ? namedFinishBy! : task.finishBy,
+          startBy: setsStartBy ? namedStartBy! : task.startBy,
+          setsFinishBy, setsStartBy, now: judgedAt,
+        });
+      }
       if (fields.length === 0 && !propertiesChange) return;
       // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
       const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
-      // #2648: judged on the values the task would hold, against the database clock, before the write.
-      if (fields.includes('finishBy') || fields.includes('startBy')) {
-        checkFinishBy({
-          finishBy: fields.includes('finishBy') ? (data.finishBy as Date | null) : task.finishBy,
-          startBy: fields.includes('startBy') ? (data.startBy as Date | null) : task.startBy,
-          setsFinishBy: fields.includes('finishBy'), setsStartBy: fields.includes('startBy'), now: at,
-        });
-      }
       await tx.agentTask.update({ where: { id: task.id }, data: { ...data, ...updatedStamp(ctx) } });
       if (fields.length > 0) {
         await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.edited', fields }, createdAt: at });
@@ -1495,7 +1507,6 @@ export const agentTaskMutations = {
       }
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
-      await checkFinishByAtDbClock(tx, finishBy, startBy);
       const made = await insertTask(tx, {
         app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
@@ -1507,6 +1518,7 @@ export const agentTaskMutations = {
       for (const ref of [...new Set(input.blockedBy ?? [])]) {
         await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
       }
+      await checkFinishByAtDbClock(tx, finishBy, startBy);
       return made;
     }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
