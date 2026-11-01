@@ -7,6 +7,7 @@ import { writeNodeToGit, removeNodeFile } from '../integrations/github/writeNode
 import { loadNodeForGit } from '../integrations/github/nodeWrittenSubscriber.js';
 import { nodeFilePath, orphanedLegacyPaths } from '../integrations/github/nodeFrontmatter.js';
 import { validateMemorySource } from '../lib/gitSource.js';
+import { mirrorFailureMetadata } from '../integrations/github/mirrorFailureMetadata.js';
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
 
 export const MAX_ATTEMPTS = 10;
@@ -98,6 +99,6 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
 export function startGitMirrorObligationSweepLoop(db: PrismaClient, intervalMs = INTERVAL_MS): NodeJS.Timeout | null {
   if (process.env.NODE_ENV === 'test' || process.env.DISABLE_GIT_MIRROR_SWEEP === 'true') return null;
   return setInterval(() => {
-    void gitMirrorSweepTick(db).catch(() => console.error('[git-mirror-sweep] Run failed'));
+    void gitMirrorSweepTick(db).catch(err => console.error('[git-mirror-sweep] Run failed', mirrorFailureMetadata(err, 'sweep', 'SWEEP')));
   }, intervalMs);
 }

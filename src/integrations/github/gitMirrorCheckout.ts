@@ -24,6 +24,7 @@ import { db as defaultDb } from '../db/client.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
@@ -251,7 +252,7 @@ export async function withMirrorCheckout(
             : undefined;
           token = await getInstallationToken(memory.organization.githubInstallationId, credentials);
         } catch (err) {
-          console.error(`${logPrefix} Failed to get installation token`);
+          console.error(`${logPrefix} Failed to get installation token`, mirrorFailureMetadata(err, 'token', 'TOKEN_UNAVAILABLE'));
           return fail('TOKEN_UNAVAILABLE');
         }
       }
@@ -268,7 +269,7 @@ export async function withMirrorCheckout(
         await execGit(['fetch', 'origin'], { cwd: localPath });
         await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
       } catch (err) {
-        console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}`);
+        console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}`, mirrorFailureMetadata(err, 'branch', 'BRANCH_SETUP'));
         await restoreRemote(localPath, memory.source);
         return fail('BRANCH_SETUP');
       }
@@ -292,7 +293,7 @@ export async function withMirrorCheckout(
           return 'skipped';
         }
       } catch (err) {
-        console.error(`${logPrefix} Mirror write failed for ${commitSubject}`);
+        console.error(`${logPrefix} Mirror write failed for ${commitSubject}`, mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
         await restoreRemote(localPath, memory.source);
         return fail('TREE_WRITE');
       }
@@ -340,7 +341,7 @@ export async function withMirrorCheckout(
         if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn })) return fail('TREE_WRITE');
         return 'mirrored';
       } catch (err) {
-        console.error(`${logPrefix} Commit/push failed for ${commitSubject}`);
+        console.error(`${logPrefix} Commit/push failed for ${commitSubject}`, mirrorFailureMetadata(err, 'push', 'PUSH_FAILED'));
         await restoreRemote(localPath, memory.source);
         return fail('PUSH_FAILED');
       }
@@ -353,7 +354,7 @@ export async function withMirrorCheckout(
       logEncryptedGitSyncRefusal(logPrefix, memory.id);
       return notMirrored('refused-encrypted');
     }
-    console.error(`${logPrefix} Checkout lock failed for ${commitSubject}`);
+    console.error(`${logPrefix} Checkout lock failed for ${commitSubject}`, mirrorFailureMetadata(err, 'lock', 'LOCK_FAILED'));
     // Outside the lock by definition (it could not be taken, or the attempt threw before settling), so this settle is not
     // lock-ordered: the sequence number still makes it a no-op against any newer row.
     const lockFailedSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
@@ -377,7 +378,7 @@ async function restoreRemote(localPath: string, originalUrl: string): Promise<vo
   try {
     await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
   } catch (err) {
-    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}`);
+    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}`, mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'));
   }
 }
 
