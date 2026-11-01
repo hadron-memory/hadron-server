@@ -306,6 +306,8 @@ import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOr
 import { GraphQLError as ScopeGraphQLError } from 'graphql';
 // Spec 049 Phase 3 — the search ladder on MCP.
 import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
+import { admitOperationRate } from '../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
@@ -4588,6 +4590,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        limiterIdentity: auth.limiterIdentity,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
@@ -4609,6 +4612,14 @@ export function createMcpServerInstance(
         const inScope = new Set(scopeRes.memoryIds);
         filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
         if (filterMemoryIds.length === 0) {
+          // This valid empty result returns before the resolver. Charge it
+          // here once through the same admission engine, without turning an
+          // empty filter into an unscoped core retrieval.
+          try {
+            await admitOperationRate(ctx,db,'FAN_OUT_READS',auth.limiterIdentity ?? transportRateIdentity(auth));
+          } catch(error) {
+            return toolErrorResult(error,()=>error instanceof Error ? error.message : 'Search failed.','hadron_find_nodes');
+          }
           return textResult(`${scopeNoteLine(scopeRes)}\n\nFound 0 node(s) — ${memSelectors.length ? 'the memories you named are outside this scope' : 'this scope lists no memory you can read'}.`);
         }
       }
@@ -12326,6 +12337,7 @@ async function handleKnownMcpSession(
     // Credential resolution re-reads the live user after the liveness check
     // above. A demotion between those reads must win before tool dispatch.
     active.auth.roles = presented.roles ?? [];
+    active.auth.limiterIdentity = presented.limiterIdentity;
     // #2123: every principal's session-sensitive consumers receive THIS
     // request's binding result, under the same credential/request lock through
     // dispatch. Keep initialization refusal and retained actor state intact.

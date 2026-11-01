@@ -104,15 +104,17 @@ export function createReadiness(): Readiness {
  *
  * `/health` (#1906): 200 `{ ok: true }` when `SELECT 1` completes through
  * `db` within `timeoutMs`, otherwise 503 `{ ok: false, error: 'database_unavailable' }`.
- * It never reads `readiness`.
+ * It never reads `readiness` or the rate configuration.
  *
  * `/ready` (#2998, hrn:node:hadronmemory.com:specs:cor:api:270:01): exactly
  * one of five fixed bodies, checked in this order: 503 `stopping` once
  * shutdown has begun; 503 `starting` while the first startup attempt is
  * pending; 503 `startup_failed` if it rejected; then the same database check
  * as `/health` (the same in-flight query, the same bound): 503
- * `database_unavailable` or 200 `{ ok: true }`, unless shutdown began while
- * that probe was in flight, which still answers `stopping`. Unauthenticated, no side
+ * `database_unavailable` or 200 `{ ok: true }`. A rate configuration fault
+ * also answers `database_unavailable` on /ready only (270:01 Proposed states).
+ * A transient policy read failure does not remove readiness. Shutdown beginning
+ * while that probe is in flight still answers `stopping`. Unauthenticated, no side
  * effects, `Cache-Control: no-store`. Without `readiness` (tests that mount
  * only `/health`), `/ready` reads a source that never saw a startup: `starting`.
  */
@@ -122,15 +124,17 @@ export function mountHealthRoutes(
   {
     timeoutMs = HEALTH_DB_TIMEOUT_MS,
     readiness = createReadiness(),
-  }: { timeoutMs?: number; readiness?: ReadinessSource } = {},
+    checkConfiguration,
+  }: { timeoutMs?: number; readiness?: ReadinessSource; checkConfiguration?: () => Promise<void> } = {},
 ): void {
   let inFlight: Promise<void> | null = null;
+  let readyInFlight: Promise<void> | null = null;
 
   /** One `SELECT 1` shared by every probe that arrives while it is pending. */
   const probe = (): Promise<void> => {
     if (!inFlight) {
       inFlight = Promise.resolve(db.$queryRaw`SELECT 1`)
-        .then(() => undefined)
+        .then(() => {})
         .finally(() => {
           inFlight = null;
         });
@@ -138,17 +142,29 @@ export function mountHealthRoutes(
     return inFlight;
   };
 
+  // A configuration mismatch must remove readiness, not restart otherwise
+  // healthy processes through the liveness probe. Keep this check bounded and
+  // single-flight too, while both routes still share the same DB query.
+  const readyProbe = (): Promise<void> => {
+    if (!readyInFlight) {
+      readyInFlight = probe()
+        .then(async () => { await checkConfiguration?.(); })
+        .finally(() => { readyInFlight = null; });
+    }
+    return readyInFlight;
+  };
+
   /**
-   * True when the shared probe completes within `timeoutMs`. Both routes call
-   * this, so `/ready` can never answer the database differently from `/health`.
+   * Both routes share the bounded database probe; only readiness includes the
+   * configuration check within that same response deadline.
    */
-  const databaseAnswers = async (route: string): Promise<boolean> => {
+  const databaseAnswers = async (route: 'health' | 'ready'): Promise<boolean> => {
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error(`${route} check timed out`)), timeoutMs);
     });
     try {
-      await Promise.race([probe(), timedOut]);
+      await Promise.race([route === 'ready' ? readyProbe() : probe(), timedOut]);
       return true;
     } catch (err) {
       console.warn(`[${route}] database check failed:`, err instanceof Error ? err.message : err);

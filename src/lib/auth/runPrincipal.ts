@@ -1,3 +1,4 @@
+import { internalRateIdentity } from '../rateLimit/identity.js';
 /**
  * The client-id prefix of a headless AppRun principal (`runContext`,
  * cor:agt:010:01): the App plus an optional on-behalf-of user, never a session.
@@ -17,6 +18,6 @@ export function isRunPrincipal(auth: { clientId?: string | null }): boolean {
 
 /** One definition of the authority carried by a headless activation or setup. */
 export function runAuthContext(run: { id: string; appId: string; userId: string | null; organizationId: string }): import('../../middleware/auth.js').AuthContext {
-  return { appId: run.appId, userId: run.userId ?? undefined, organizationId: run.organizationId,
+  return { limiterIdentity: internalRateIdentity(run.appId), appId: run.appId, userId: run.userId ?? undefined, organizationId: run.organizationId,
     clientId: `${RUN_CLIENT_PREFIX}${run.id}`, roles: [] };
 }
