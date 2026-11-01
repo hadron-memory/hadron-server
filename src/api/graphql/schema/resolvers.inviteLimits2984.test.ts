@@ -1,7 +1,7 @@
 /**
  * #2984 — inviteUser and createUserInvitation refuse out-of-range expiresInDays / maxActivations with a typed
- * BAD_USER_INPUT (cor:api:260:01) instead of an INTERNAL_SERVER_ERROR from `new Date(...)` (Holger V45: expiresInDays
- * 1-3650, maxActivations 1-1000, 0 refused; omitted or null keeps today's meaning).
+ * BAD_USER_INPUT (cor:api:260:01) instead of an INTERNAL_SERVER_ERROR from `new Date(...)` (Holger V49: expiresInDays
+ * 1-10, default 10; maxActivations 2-1000, default 2; 0 and an explicit 1 refused).
  * Answers are read off the GraphQL wire (ApolloServer + formatGraphQLError), as the issue's acceptance asks.
  */
 import { ApolloServer } from '@apollo/server';
@@ -62,10 +62,11 @@ beforeEach(async () => {
 describe.each(wires)('#2984 $name limits', ({ run }) => {
   const refused: Array<[string, { e?: number; m?: number }, RegExp]> = [
     ['expiresInDays 99999999', { e: 99999999 }, /expiresInDays/],
-    ['expiresInDays 3651', { e: 3651 }, /expiresInDays/],
+    ['expiresInDays 11', { e: 11 }, /expiresInDays/],
     ['expiresInDays 0', { e: 0 }, /expiresInDays/],
     ['expiresInDays -1', { e: -1 }, /expiresInDays/],
     ['maxActivations 1001', { m: 1001 }, /maxActivations/],
+    ['maxActivations 1', { m: 1 }, /maxActivations/],
     ['maxActivations 0', { m: 0 }, /maxActivations/],
     ['maxActivations -1', { m: -1 }, /maxActivations/],
   ];
@@ -83,8 +84,8 @@ describe.each(wires)('#2984 $name limits', ({ run }) => {
     expect(fault).not.toHaveBeenCalledWith('[graphql] internal_fault', expect.anything());
   });
 
-  it('the boundaries still create: expiresInDays 1 and 3650, maxActivations 1 and 1000', async () => {
-    for (const [e, m] of [[1, 1], [3650, 1000]] as const) {
+  it('the boundaries still create: expiresInDays 1 and 10, maxActivations 2 and 1000', async () => {
+    for (const [e, m] of [[1, 2], [10, 1000]] as const) {
       const a = await run(adminId, { e, m });
       expect(a.error).toBeNull();
       expect(a.data.maxActivations).toBe(m);
@@ -92,20 +93,28 @@ describe.each(wires)('#2984 $name limits', ({ run }) => {
     }
   });
 
-  it('both omitted, and both null, keep no expiry and one activation', async () => {
+  it('both omitted, and both null, give a 10-day expiry and two activations', async () => {
     for (const args of [{}, { e: null, m: null }]) {
       const a = await run(adminId, args);
       expect(a.error).toBeNull();
-      expect(a.data.expiresAt).toBeNull();
-      expect(a.data.maxActivations).toBe(1);
+      expect(Math.abs(new Date(a.data.expiresAt).getTime() - (Date.now() + 10 * DAY))).toBeLessThan(5000);
+      expect(a.data.maxActivations).toBe(2);
     }
+  });
+
+  it('an invitation row written before the ruling (null expiry, one activation) is untouched', async () => {
+    const old = await db.userInvitation.create({ data: { id: generateId(), slug: generateId(), maxActivations: 1, expiresAt: null } });
+    await run(adminId, {});
+    const row = await db.userInvitation.findUniqueOrThrow({ where: { id: old.id } });
+    expect(row.expiresAt).toBeNull();
+    expect(row.maxActivations).toBe(1);
   });
 });
 
 describe('#2984 the org role gate is not turned into an oracle', () => {
   it('a non-admin gets the same refusal for an out-of-range value as for a valid one, and no row', async () => {
     const before = await db.userInvitation.count();
-    const valid = await ask(ctx(readerId), INVITE_ORG, { o: orgId, e: 5, m: 1 });
+    const valid = await ask(ctx(readerId), INVITE_ORG, { o: orgId, e: 5, m: 3 });
     const bad = await ask(ctx(readerId), INVITE_ORG, { o: orgId, e: 99999999, m: 5000 });
     expect(valid.error).not.toBeNull();
     expect(valid.error?.extensions.code).not.toBe('BAD_USER_INPUT');
