@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { PrismaClient } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
+import { withinOneRateWindow } from '../../test/rateWindow.js';
 import { admitRate, admitRateInTx, assertRateReadiness, cleanupRateBuckets, configFence, RateLimited } from './index.js';
 import { beginRateKeyOverlap, retireRateKey } from './lifecycle.js';
 import { readRateKeys } from './config.js';
@@ -19,6 +20,7 @@ const used = async () => (await db.rateLimitBucket.findMany({orderBy:{id:'asc'}}
 describe('#1793 atomic shared admission', () => {
   it.each(['principal','key','ip'] as const)('exhausts %s independently, refusal changes no bucket', async dimension => {
     await policy('FAN_OUT_READS',{principalLimit:100,keyLimit:100,ipLimit:100,[dimension+'Limit']:1});
+    await withinOneRateWindow(db,'FAN_OUT_READS');
     await admitRate(db,'FAN_OUT_READS',id);
     const before = await used();
     await expect(admitRate(db,'FAN_OUT_READS',id)).rejects.toMatchObject({extensions:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'}});
@@ -27,7 +29,7 @@ describe('#1793 atomic shared admission', () => {
     expect(JSON.stringify(before)).not.toContain('USER:a');
   });
   it('two connections at L-1 admit exactly one, counters never partially charge', async () => {
-    await policy();await admitRate(db,'FAN_OUT_READS',id);
+    await policy();await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
     const other = new PrismaClient();
     let release!:()=>void,entered!:()=>void,started!:()=>void;
     const gate=new Promise<void>(r=>release=r),ready=new Promise<void>(r=>entered=r),waiterReady=new Promise<void>(r=>started=r);
@@ -76,6 +78,7 @@ describe('#1793 atomic shared admission', () => {
   });
   it('LOG_ONLY counts over limit; same window refuses after activation without reset', async () => {
     await policy('FAN_OUT_READS',{enforcementMode:'LOG_ONLY',principalLimit:1});
+    await withinOneRateWindow(db,'FAN_OUT_READS');
     await admitRate(db,'FAN_OUT_READS',id);await admitRate(db,'FAN_OUT_READS',id);
     const before=await used();expect(before.every(r=>r.used==='2')).toBe(true);
     await policy('FAN_OUT_READS',{principalLimit:1});
@@ -83,7 +86,7 @@ describe('#1793 atomic shared admission', () => {
     expect(await used()).toEqual(before);
   });
   it('overlap carries old budget, dual-writes max rather than sum, and cannot retire early', async () => {
-    await policy();await admitRate(db,'FAN_OUT_READS',id);
+    await policy();await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
     await beginRateKeyOverlap(db,'new');
     await admitRate(db,'FAN_OUT_READS',id);
     expect(await db.rateLimitBucket.count()).toBe(6);
@@ -124,7 +127,7 @@ describe('#1793 atomic shared admission', () => {
     expect(r).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',retryAfterSeconds:5,fieldClass:'FAN_OUT_READS',message:'Too many requests.'}}});
   });
   it('waits on config before deciding; admin flip fences the attempt', async () => {
-    await policy('FAN_OUT_READS',{enforcementMode:'LOG_ONLY',principalLimit:1});await admitRate(db,'FAN_OUT_READS',id);
+    await policy('FAN_OUT_READS',{enforcementMode:'LOG_ONLY',principalLimit:1});await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
     let unlock!:()=>void;const gate=new Promise<void>(r=>unlock=r);let locked!:()=>void;const entered=new Promise<void>(r=>locked=r);
     const writer=db.$transaction(async tx=>{await configFence(tx,true);await tx.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{enforcementMode:'ENFORCING'}});locked();await gate;});
     await entered;const attempt=admitRate(db,'FAN_OUT_READS',id);unlock();await writer;
@@ -180,7 +183,7 @@ it('#1793 subject lock wait crossing UTC window charges the post-wait window', a
 },90_000);
 
 it('#1793 unequal overlap aliases count max not sum, on one common window', async () => {
-  await policy('FAN_OUT_READS',{principalLimit:10});await admitRate(db,'FAN_OUT_READS',id);
+  await policy('FAN_OUT_READS',{principalLimit:10});await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
   await beginRateKeyOverlap(db,'new');await admitRate(db,'FAN_OUT_READS',id);
   await db.rateLimitBucket.updateMany({where:{subject:{startsWith:'new:'}},data:{used:1n}});
   await admitRate(db,'FAN_OUT_READS',id);
@@ -189,6 +192,7 @@ it('#1793 unequal overlap aliases count max not sum, on one common window', asyn
 
 it('#1793 two rotated key rows still share their authenticated principal allowance', async () => {
   await policy('FAN_OUT_READS',{principalLimit:1});
+  await withinOneRateWindow(db,'FAN_OUT_READS');
   await admitRate(db,'FAN_OUT_READS',id);
   const before=await used();
   await expect(admitRate(db,'FAN_OUT_READS',{...id,key:'USER_KEY:rotated'})).rejects.toBeInstanceOf(RateLimited);
@@ -199,6 +203,7 @@ it('#1793 LOG_ONLY logs would-refusals with no raw subject or identity', async (
   const log=vi.spyOn(console,'info').mockImplementation(()=>{});
   try {
     await policy('FAN_OUT_READS',{enforcementMode:'LOG_ONLY',principalLimit:1});
+    await withinOneRateWindow(db,'FAN_OUT_READS');
     await admitRate(db,'FAN_OUT_READS',id);await admitRate(db,'FAN_OUT_READS',id);
     expect(log).toHaveBeenCalledWith('rate-limit-observation',{fieldClass:'FAN_OUT_READS',dimension:'principal',mode:'LOG_ONLY'});
     expect(JSON.stringify(log.mock.calls)).not.toContain('USER:a');
@@ -255,7 +260,7 @@ it('#1793 a genuinely terminated caller backend preserves the original store err
 },25_000);
 
 it('#1793 cleanup deletes expired windows in bounded batches and preserves the current allowance',async()=>{
-  await policy();await admitRate(db,'FAN_OUT_READS',id);
+  await policy();await withinOneRateWindow(db,'FAN_OUT_READS');await admitRate(db,'FAN_OUT_READS',id);
   const now=new Date();
   await db.rateLimitBucket.updateMany({data:{windowStart:new Date(now.getTime()-48*3600_000),expiresAt:new Date(now.getTime()-24*3600_000)}});
   await admitRate(db,'FAN_OUT_READS',id);
