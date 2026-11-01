@@ -5345,6 +5345,14 @@ export const typeDefs = `#graphql
     """
     prompt: String
     """
+    #2969 (hrn:node:hadronmemory.com:specs:cor:agt:040:04): the worker's signature as the served boot prompt fills it, the platform
+    variables substituted (session.llmModel is the empty string when no model is recorded). Reaches exactly the callers
+    prompt reaches; null for anyone else, with no refusal.
+    """
+    renderedSignature: String
+    "#2969: the worker's trailer, filled as renderedSignature is, for the same callers."
+    renderedTrailer: String
+    """
     #1029 — what a fresh binding of this worker inherits from the last one.
 
     Returned by startSession alongside the boot briefing (binding is briefing,
