@@ -39,8 +39,8 @@ async function fixture(kind: 'install' | 'agent') {
 }
 
 describe('#2745 composed import authority controls', () => {
-  // Install control/races await the separately routed preflight defect (Ada #61678).
-  it.each(['agent'] as const)('%s manager can import and mint (positive control)', async kind => {
+  // #3101 is fixed on main: both paths enter naturally, with no internal preflight flag.
+  it.each(['agent', 'install'] as const)('%s manager can import and mint (positive control)', async kind => {
     const f = await fixture(kind);
     const result = await resolvers.Mutation.importNode({}, { input: f.input }, f.ctx);
     expect(result.status).toBe('FETCH_PENDING');
@@ -79,8 +79,10 @@ describe('#2745 composed import authority controls', () => {
     if (process.env.HADRON_IMPORT_2745_TIMINGS === '1') process.stdout.write(`#2745 mocked-HTML totalMs=${Math.round(performance.now() - at)}\n`);
   });
 
-  it.each([true, false])('Agent authority revoke=%s waits before store, refreshes cached reads, and commits no partial import', async revoke => {
-    const f = await fixture('agent');
+  describe.each(['agent', 'install'] as const)('%s authority', kind => {
+  it.each([true, false])('revoke=%s waits before store, refreshes cached reads, and commits no partial import', async revoke => {
+    const f = await fixture(kind);
+    const anchor = kind === 'agent' ? { kind: 'agent' as const, id: f.agent.id } : { kind: 'app' as const, id: f.app.id };
     const owner = await db.user.create({ data: { id: generateId() } });
     const probe = await db.memory.create({ data: {
       name: 'Shared read probe', urn: 'import2745.test:probe', class: 'personal', userId: owner.id, ownerUserId: owner.id,
@@ -112,7 +114,7 @@ describe('#2745 composed import authority controls', () => {
     let fail!: (error: unknown) => void;
     const ready = new Promise<void>((resolve, reject) => { held = resolve; fail = reject; });
     const holder = db.$transaction(async tx => {
-      await lockAuthorityAnchors(tx, [{ kind: 'agent', id: f.agent.id }], 'exclusive');
+      await lockAuthorityAnchors(tx, [anchor], 'exclusive');
       held();
       await gate;
       if (revoke) {
@@ -135,14 +137,14 @@ describe('#2745 composed import authority controls', () => {
         const [wait] = await db.$queryRaw<Array<{ waiting: number }>>`
           SELECT count(*)::int AS waiting FROM pg_locks
           WHERE locktype = 'advisory' AND NOT granted
-            AND classid = hashtext('authorization:agent')::oid
-            AND objid = hashtext(${f.agent.id})::oid
+            AND classid = hashtext(${`authorization:${anchor.kind}`})::oid
+            AND objid = hashtext(${anchor.id})::oid
             AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
         waiting = wait.waiting;
         if (!completed && waiting === 0) await new Promise(resolve => setTimeout(resolve, 10));
       }
       expect(completed, 'import must not complete while its authority anchor is held exclusively').toBe(false);
-      expect(waiting, 'import must reach the exact Agent authority lock wait').toBe(1);
+      expect(waiting, 'import must reach its exact authority lock wait').toBe(1);
       // M_lock_first: a later write recheck cannot replace acquiring authority
       // before entering the core and taking memory/node/loc locks.
       expect(entered, 'authority must be acquired before entering writeNodeCore').toBe(0);
@@ -153,7 +155,7 @@ describe('#2745 composed import authority controls', () => {
       if (holderError) throw holderError;
     }
     if (process.env.HADRON_IMPORT_2745_TIMINGS === '1') {
-      process.stdout.write(`#2745 timings ${JSON.stringify({ revoke, totalMs: Math.round(performance.now() - started), storeMs, mintMs })}\n`);
+      process.stdout.write(`#2745 timings ${JSON.stringify({ kind, revoke, totalMs: Math.round(performance.now() - started), storeMs, mintMs })}\n`);
     }
     expect(entered).toBe(1);
     if (revoke) {
@@ -165,5 +167,6 @@ describe('#2745 composed import authority controls', () => {
       expect(outcome).toMatchObject({ ok: true, result: { status: 'FETCH_PENDING' } });
       expect(await db.appRun.count()).toBe(1);
     }
+  });
   });
 });
