@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 
 describe('closed mirror diagnostic allowlist', () => {
+  it.each(['P2034', 'P2024', 'P1001', 'P1017'])('keeps actionable Prisma code %s (#3057 BLIND P2)', code => {
+    expect(mirrorFailureMetadata({ code }, 'settle', 'SETTLEMENT').providerCode).toBe(code);
+  });
+  it.each(['PrismaClientInitializationError', 'PrismaClientUnknownRequestError'])('keeps a closed code-less error type %s', name => {
+    expect(mirrorFailureMetadata({ name }, 'sequence', 'ATTEMPT_SEQUENCE')).toEqual({ phase: 'sequence', class: 'ATTEMPT_SEQUENCE', errorType: name });
+  });
+  it('drops free error types, provider codes and signals, including wrapper-shaped fields', () => {
+    expect(mirrorFailureMetadata({ name: 'secret', providerCode: 'secret', signal: 'secret', code: 'P2034secret' }, 'push', 'PUSH_FAILED'))
+      .toEqual({ phase: 'push', class: 'PUSH_FAILED' });
+  });
+
   it.each([128, 0, 255])('retains bounded Git code %s', code => {
     expect(mirrorFailureMetadata({ code }, 'git', 'GIT_COMMAND_FAILED')).toEqual({ phase: 'git', class: 'GIT_COMMAND_FAILED', exitCode: code });
   });
@@ -19,7 +30,7 @@ describe('closed mirror diagnostic allowlist', () => {
       .toEqual({ phase: 'settle', class: 'SETTLEMENT', providerCode: 'P2028' });
     expect(mirrorFailureMetadata({ code: 'P2028SECRET' }, 'settle', 'SETTLEMENT')).toEqual({ phase: 'settle', class: 'SETTLEMENT' });
   });
-  it('never invokes accessors, proxies or conversion hooks', () => {
+  it('avoids accessors/conversion and contains throwing Proxy traps', () => {
     const value = { get code() { throw new Error('secret'); }, toString() { throw new Error('secret'); } };
     const proxy = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('secret'); } });
     for (const error of [value, proxy, 'secret', null, Object.create({ exitCode: 128 })]) {

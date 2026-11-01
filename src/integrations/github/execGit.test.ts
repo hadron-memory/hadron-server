@@ -23,6 +23,8 @@
  * Inverting the first clause is the mutation this file exists to catch: it
  * reads as a guard, matches the prefix shape, and permits `ext::` again.
  */
+import { inspect } from 'node:util';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const calls: string[][] = [];
@@ -67,9 +69,25 @@ describe('GIT_TRANSPORT_GUARD', () => {
 });
 
 describe('execGit', () => {
+  it.each(['ENOENT', 'EACCES', 'ETIMEDOUT'])('retains closed spawn code %s without raw fields (#3057)', async code => {
+    failure = Object.assign(new Error('synthetic-secret-3057'), { code, cause: 'synthetic-secret-3057' });
+    const error = await execGit(['fetch', 'origin']).catch(error => error);
+    expect(mirrorFailureMetadata(error, 'branch', 'BRANCH_SETUP').providerCode).toBe(code);
+    expect(inspect(error, { depth: null })).not.toContain('synthetic-secret-3057');
+  });
+  it.each(['SIGTERM', 'SIGKILL'])('retains closed signal %s without raw fields (#3057)', async signal => {
+    failure = Object.assign(new Error('synthetic-secret-3057'), { code: null, signal, cause: 'synthetic-secret-3057' });
+    const error = await execGit(['fetch', 'origin']).catch(error => error);
+    expect(mirrorFailureMetadata(error, 'branch', 'BRANCH_SETUP').signal).toBe(signal);
+    expect(inspect(error, { depth: null })).not.toContain('synthetic-secret-3057');
+  });
+
   it('retains a bounded numeric exit code without raw command fields (#3057)', async () => {
     failure = Object.assign(new Error('synthetic-secret-3057'), { code: 128, cause: 'synthetic-secret-3057' });
-    await expect(execGit(['fetch', 'origin'])).rejects.toMatchObject({ code: 'GIT_COMMAND_FAILED', exitCode: 128 });
+    const error = await execGit(['fetch', 'origin']).catch(error => error);
+    expect(error).toMatchObject({ code: 'GIT_COMMAND_FAILED', exitCode: 128 });
+    expect(error.cause).toBeUndefined();
+    expect(inspect(error, { depth: null })).not.toContain('synthetic-secret-3057');
   });
 
   it('prepends the guard, ahead of the command', async () => {
