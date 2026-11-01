@@ -2273,7 +2273,7 @@ export const typeDefs = `#graphql
     revision: Int!
     "The approval hash v1 of the pinned content (64 lowercase hex)."
     approvalHash: String!
-    "The signature payload version the signer signs: hadron-signature-v1 until S2b-2's v3."
+    "The signature payload version the signer signs: hadron-signature-v3 (hrn:node:hadronmemory.com:specs:cor:dmo:130:01). A request still open with a v1 pin when v3 deployed ended STALE."
     payloadVersion: String!
     "The effective state."
     state: SigningRequestState!
@@ -2286,6 +2286,8 @@ export const typeDefs = `#graphql
     endedAt: DateTime
     "The signature that completed it; null unless COMPLETED (and when the record does not verify)."
     signature: NodeSignature
+    "The server-hosted ceremony page where the signer signs (hrn:node:hadronmemory.com:specs:cor:dmo:130:08): the server origin plus /signing/<id>, with no token. Copy it verbatim; never compose it. A person signs there with a passkey; no GraphQL or MCP call takes an assertion. An ended request's link only explains that it ended."
+    ceremonyUrl: String!
   }
 
   "#1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:06, hrn:node:hadronmemory.com:specs:cor:dmo:130:07) — one signature on a node. Only the passkey's label is ever shown."
