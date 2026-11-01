@@ -14,7 +14,8 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
-import { matchQueuedTasks, parseRequirements } from './matcher.js';
+import { __matcherTesting, matchQueuedTasks, parseRequirements } from './matcher.js';
+import { anchorNow } from '../stopSignals/state.js';
 import { modelInGroup, modelMatchesPattern } from './modelGroups.js';
 
 const DAY = '2026-10-31';
@@ -166,5 +167,35 @@ describe('#2831 S2 matching', () => {
     const t = await queued({ role: 'reviewer' });
     await run();
     expect(await assigneeOf(t.id)).toBe(rook.id);
+  });
+});
+
+describe('#2831 S2 the assignment transaction re-reads the groups on the deciding row', () => {
+  const claimOf = (t: { id: string }) => ({ id: t.id, appId: app.id, requirements: null, closeSessionWhenDone: false, createdByWorkerId: null });
+  const attempt = async (t: { id: string }, w: { id: string }) =>
+    __matcherTesting.tryAssign(db, claimOf(t), w.id, 'claude', at('11:01'), {}, anchorNow());
+
+  beforeEach(async () => {
+    await bind(baloo, OPUS);
+    await group('large', ['*opus*']);
+  });
+
+  it('In: a group edited after the snapshot so the worker is no longer in it refuses the assignment', async () => {
+    const t = await queued({ modelGroupIn: ['large'] });
+    await db.modelGroup.updateMany({ where: { appId: app.id, name: 'large' }, data: { patterns: ['*haiku*'] } });
+    expect(await attempt(t, baloo)).toBe('worker-not-free');
+    expect(await assigneeOf(t.id)).toBeNull();
+  });
+
+  it('NotIn: a group edited after the snapshot so the worker is now in it refuses the assignment', async () => {
+    const t = await queued({ modelGroupNotIn: ['small'] });
+    await group('small', ['*opus*']);
+    expect(await attempt(t, baloo)).toBe('worker-not-free');
+    expect(await assigneeOf(t.id)).toBeNull();
+  });
+
+  it('control: the same attempt with the worker in the group assigns', async () => {
+    const t = await queued({ modelGroupIn: ['large'] });
+    expect(await attempt(t, baloo)).toBe('assigned');
   });
 });

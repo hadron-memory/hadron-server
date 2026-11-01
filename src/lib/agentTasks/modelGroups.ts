@@ -77,3 +77,30 @@ export async function effectiveModelGroups(
   }
   return [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
+
+/** The pure glob primitive (#2831 S2): full-string, case-insensitive, `*` (any run) and `?` (one char) only. */
+export function modelMatchesPattern(pattern: string, model: string): boolean {
+  const re = new RegExp(
+    `^${pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
+    's',
+  );
+  return re.test(model.toLowerCase());
+}
+
+/** Is `model` in the named group? No model, or a name no group carries, is in nothing. */
+export function modelInGroup(groups: EffectiveModelGroup[], name: string, model: string | null): boolean {
+  if (!model) return false;
+  const g = groups.find((x) => x.name === name);
+  return !!g && g.patterns.some((p) => modelMatchesPattern(p, model));
+}
+
+/** The group requirements of a task, judged on one worker's model: In admits on any one, NotIn refuses on any one. */
+export function modelGroupsAllowed(
+  req: { modelGroupIn?: string[]; modelGroupNotIn?: string[] },
+  model: string | null,
+  groups: EffectiveModelGroup[],
+): boolean {
+  if (req.modelGroupIn && !req.modelGroupIn.some((n) => modelInGroup(groups, n, model))) return false;
+  if (req.modelGroupNotIn && req.modelGroupNotIn.some((n) => modelInGroup(groups, n, model))) return false;
+  return true;
+}
