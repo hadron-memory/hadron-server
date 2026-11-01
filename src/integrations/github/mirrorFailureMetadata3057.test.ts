@@ -1,7 +1,7 @@
 /** #3057: hostile thrown values at every diagnostic boundary; no network or shared DB. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { inspect } from 'node:util';
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 
 const fault = vi.hoisted(() => ({ site: '', value: undefined as unknown }));
 vi.mock('../../config.js', () => ({ GRAPHS_PATH: '/private-test-3057' }));
@@ -30,7 +30,7 @@ import { startGitMirrorObligationSweepLoop } from '../../jobs/sweepGitMirrorObli
 const SECRET = 'https://x-access-token:synthetic-secret-3057@github.com/private/repo Bearer synthetic-bearer-3057';
 function hostile() {
   return Object.assign(new Error(SECRET), { stack: SECRET, cause: { cause: { token: SECRET } },
-    extra: SECRET, name: SECRET, code: SECRET, exitCode: 128, status: 503, toString: () => SECRET });
+    extra: SECRET, name: SECRET, code: SECRET, errorCode: SECRET, exitCode: 128, status: 503, toString: () => SECRET });
 }
 const memory = { id: 'memory-3057', urn: 'org:mirror', source: 'https://github.com/example/repo.git',
   organization: { urn: 'org', name: 'Example', githubInstallationId: 123 }, isEncrypted: false, writeBranch: 'main' };
@@ -57,6 +57,14 @@ const run = () => withMirrorCheckout({ db: client, memoryId: memory.id, commitSu
   obligations: [{ nodeId: 'node-3057', kind: 'WRITE' }] }, async () => { if (fault.site === 'tree') throw fault.value; });
 
 describe('mirror failure metadata at each real call site', () => {
+  it.each(['sequence', 'settle'])('%s uses the actual initialization error shape', async site => {
+    fault.site = site;
+    fault.value = Object.assign(new Prisma.PrismaClientInitializationError(SECRET, 'test', 'P1001'), { cause: { token: SECRET }, extra: SECRET });
+    if (site === 'sequence') await tryTakeAttemptSeq(client);
+    else await settleMirrorObligations(client, memory.id, [{ nodeId: 'node', kind: 'WRITE' }], { result: 'failed', errorClass: 'TREE_WRITE' }, 1n);
+    assertSafe(); expect(output.join('\n')).toContain("providerCode: 'P1001'");
+  });
+
   it.each(['sequence', 'settle'])('%s keeps a closed code-less Prisma type without hostile text', async site => {
     fault.site = site; fault.value = Object.assign(hostile(), { code: undefined, name: 'PrismaClientInitializationError' });
     if (site === 'sequence') await tryTakeAttemptSeq(client);

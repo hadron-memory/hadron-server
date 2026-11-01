@@ -1,7 +1,47 @@
 import { describe, expect, it } from 'vitest';
+import { Prisma } from '../../generated/prisma/index.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 
 describe('closed mirror diagnostic allowlist', () => {
+  it.each(['P1001', 'P1017'])('reads the real Prisma initialization errorCode %s', errorCode => {
+    const error = new Prisma.PrismaClientInitializationError('synthetic-secret-3057', 'test', errorCode);
+    expect(Object.getOwnPropertyDescriptor(error, 'errorCode')?.value).toBe(errorCode);
+    expect(mirrorFailureMetadata(error, 'sequence', 'ATTEMPT_SEQUENCE')).toEqual({
+      phase: 'sequence', class: 'ATTEMPT_SEQUENCE', providerCode: errorCode, errorType: 'PrismaClientInitializationError',
+    });
+  });
+  it.each([
+    ['PrismaClientInitializationError', () => new Prisma.PrismaClientInitializationError('secret', 'test')],
+    ['PrismaClientKnownRequestError', () => new Prisma.PrismaClientKnownRequestError('secret', { clientVersion: 'test', code: 'P2034' })],
+    ['PrismaClientUnknownRequestError', () => new Prisma.PrismaClientUnknownRequestError('secret', { clientVersion: 'test' })],
+    ['PrismaClientRustPanicError', () => new Prisma.PrismaClientRustPanicError('secret', 'test')],
+    ['PrismaClientValidationError', () => new Prisma.PrismaClientValidationError('secret', { clientVersion: 'test' })],
+  ] as const)('preserves the real own name of %s', (name, make) => {
+    const error = make();
+    expect(Object.getOwnPropertyDescriptor(error, 'name')?.value).toBe(name);
+    expect(mirrorFailureMetadata(error, 'settle', 'SETTLEMENT').errorType).toBe(name);
+  });
+  it.each(['Error', 'TypeError', 'RangeError'])('does not advertise unsupported native own-name classification: %s', name => {
+    expect(mirrorFailureMetadata({ name }, 'tree', 'TREE_WRITE')).toEqual({ phase: 'tree', class: 'TREE_WRITE' });
+  });
+  it.each([new Error('secret'), new TypeError('secret'), new RangeError('secret')])('native errors keep phase/class without inherited reads %#', error => {
+    expect(mirrorFailureMetadata(error, 'tree', 'TREE_WRITE')).toEqual({ phase: 'tree', class: 'TREE_WRITE' });
+  });
+  it('prefers native code except for the fixed Git wrapper marker', () => {
+    expect(mirrorFailureMetadata({ code: 'P2002', providerCode: 'ENOENT', errorCode: 'P1001' }, 'settle', 'SETTLEMENT').providerCode).toBe('P2002');
+    expect(mirrorFailureMetadata({ code: 'GIT_COMMAND_FAILED', providerCode: 'EACCES' }, 'push', 'PUSH_FAILED').providerCode).toBe('EACCES');
+    expect(mirrorFailureMetadata({ code: 'GIT_COMMAND_FAILED', providerCode: 'secret' }, 'push', 'PUSH_FAILED').providerCode).toBe('GIT_COMMAND_FAILED');
+  });
+  it('never invokes name or initialization-code getters', () => {
+    let reads = 0;
+    const error = Object.defineProperties({}, {
+      name: { get() { reads++; return 'PrismaClientInitializationError'; } },
+      errorCode: { get() { reads++; return 'P1001'; } },
+    });
+    expect(mirrorFailureMetadata(error, 'settle', 'SETTLEMENT')).toEqual({ phase: 'settle', class: 'SETTLEMENT' });
+    expect(reads).toBe(0);
+  });
+
   it.each(['P2034', 'P2024', 'P1001', 'P1017'])('keeps actionable Prisma code %s (#3057 BLIND P2)', code => {
     expect(mirrorFailureMetadata({ code }, 'settle', 'SETTLEMENT').providerCode).toBe(code);
   });
@@ -9,7 +49,7 @@ describe('closed mirror diagnostic allowlist', () => {
     expect(mirrorFailureMetadata({ name }, 'sequence', 'ATTEMPT_SEQUENCE')).toEqual({ phase: 'sequence', class: 'ATTEMPT_SEQUENCE', errorType: name });
   });
   it('drops free error types, provider codes and signals, including wrapper-shaped fields', () => {
-    expect(mirrorFailureMetadata({ name: 'secret', providerCode: 'secret', signal: 'secret', code: 'P2034secret' }, 'push', 'PUSH_FAILED'))
+    expect(mirrorFailureMetadata({ name: 'secret', providerCode: 'secret', signal: 'secret', code: 'P2034secret', errorCode: 'secret' }, 'push', 'PUSH_FAILED'))
       .toEqual({ phase: 'push', class: 'PUSH_FAILED' });
   });
 

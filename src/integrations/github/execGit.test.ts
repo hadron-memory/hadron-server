@@ -24,8 +24,8 @@
  * reads as a guard, matches the prefix shape, and permits `ext::` again.
  */
 import { inspect } from 'node:util';
-import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 
 const calls: string[][] = [];
 let failure: Error | null = null;
@@ -38,7 +38,7 @@ vi.mock('child_process', () => ({
   }),
 }));
 
-const { execGit, GIT_TRANSPORT_GUARD } = await import('./execGit.js');
+const { execGit, GIT_TRANSPORT_GUARD, GitCommandError } = await import('./execGit.js');
 
 beforeEach(() => {
   calls.length = 0;
@@ -69,22 +69,38 @@ describe('GIT_TRANSPORT_GUARD', () => {
 });
 
 describe('execGit', () => {
+  it('never retains raw provider-code or signal strings on the wrapper (§10 canaries)', async () => {
+    const secret = 'synthetic-secret-3057';
+    failure = Object.assign(new Error(secret), { code: secret, providerCode: secret, signal: secret, cause: secret });
+    const error = await execGit(['fetch', 'origin']).catch(caught => caught);
+    expect(error).toBeInstanceOf(GitCommandError);
+    expect(error.cause).toBeUndefined();
+    expect(error.providerCode).toBeUndefined();
+    expect(error.signal).toBeUndefined();
+    expect(inspect(error, { depth: null })).not.toContain(secret);
+  });
+
   it.each(['ENOENT', 'EACCES', 'ETIMEDOUT'])('retains closed spawn code %s without raw fields (#3057)', async code => {
     failure = Object.assign(new Error('synthetic-secret-3057'), { code, cause: 'synthetic-secret-3057' });
-    const error = await execGit(['fetch', 'origin']).catch(error => error);
+    const error = await execGit(['fetch', 'origin']).catch(caught => caught);
+    expect(error).toBeInstanceOf(GitCommandError);
+    expect(error.cause).toBeUndefined();
     expect(mirrorFailureMetadata(error, 'branch', 'BRANCH_SETUP').providerCode).toBe(code);
     expect(inspect(error, { depth: null })).not.toContain('synthetic-secret-3057');
   });
   it.each(['SIGTERM', 'SIGKILL'])('retains closed signal %s without raw fields (#3057)', async signal => {
     failure = Object.assign(new Error('synthetic-secret-3057'), { code: null, signal, cause: 'synthetic-secret-3057' });
-    const error = await execGit(['fetch', 'origin']).catch(error => error);
+    const error = await execGit(['fetch', 'origin']).catch(caught => caught);
+    expect(error).toBeInstanceOf(GitCommandError);
+    expect(error.cause).toBeUndefined();
     expect(mirrorFailureMetadata(error, 'branch', 'BRANCH_SETUP').signal).toBe(signal);
     expect(inspect(error, { depth: null })).not.toContain('synthetic-secret-3057');
   });
 
   it('retains a bounded numeric exit code without raw command fields (#3057)', async () => {
     failure = Object.assign(new Error('synthetic-secret-3057'), { code: 128, cause: 'synthetic-secret-3057' });
-    const error = await execGit(['fetch', 'origin']).catch(error => error);
+    const error = await execGit(['fetch', 'origin']).catch(caught => caught);
+    expect(error).toBeInstanceOf(GitCommandError);
     expect(error).toMatchObject({ code: 'GIT_COMMAND_FAILED', exitCode: 128 });
     expect(error.cause).toBeUndefined();
     expect(inspect(error, { depth: null })).not.toContain('synthetic-secret-3057');
