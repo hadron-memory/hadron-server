@@ -227,6 +227,9 @@ export const typeDefs = `#graphql
     "#725 — collection facet: only nodes whose objectType equals this (e.g. \\"competitor\\")."
     objectType: String
     tags: [String!]
+    """
+    #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04)
+    """
     isRunnable: Boolean
     "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
     role: String
@@ -1056,6 +1059,9 @@ export const typeDefs = `#graphql
     sourceNodeId: ID
     "Edges arriving at this node."
     targetNodeId: ID
+    """
+    #2999 — runnability is tri-state, with parity to the node filter. true returns only runnable edges; false returns only edges explicitly marked not runnable. An edge never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:dmo:060:03)
+    """
     isRunnable: Boolean
     "Include soft-deleted edges (default false)."
     includeDeleted: Boolean
