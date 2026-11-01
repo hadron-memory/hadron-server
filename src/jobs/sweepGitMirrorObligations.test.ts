@@ -93,7 +93,7 @@ import { existsSync } from 'fs';
 const tick = async (now = new Date()) => (await import('./sweepGitMirrorObligations.js')).gitMirrorSweepTick(db, now);
 const old = () => new Date(Date.now()-24*60*60*1000);
 const makeNode = (loc='topic') => db.node.create({data:{id:generateId(),memoryId,loc,name:loc,content:'current content',tags:[]}});
-const owe = (nodeId:string,extra:Record<string,unknown>={}) => db.gitMirrorObligation.create({data:{memoryId,nodeId,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:1n,lastAttemptAt:old(),...extra} as any});
+const owe = async (nodeId:string,extra:Record<string,unknown>={}) => db.gitMirrorObligation.create({data:{memoryId,nodeId,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:await takeAttemptSeq(db),lastAttemptAt:old(),...extra} as any});
 const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
 const remoteFile = (loc='topic') => git(env.bare,'show',`refs/heads/hadron-updates:${loc}.md`);
 const rejectPushes = () => {const hook=join(env.bare,'hooks','pre-receive');writeFileSync(hook,'#!/bin/sh\nexit 1\n');chmodSync(hook,0o755);};
@@ -170,7 +170,8 @@ it('does not burn a NOT_CLONED attempt until a clone exists',async()=>{
 });
 it.each(['encrypted','no-source','no-org','invalid-source'])('leaves %s memory rows and Git untouched',async mode=>{
  const n=await makeNode();await owe(n.id);
- await db.memory.update({where:{id:memoryId},data:mode==='encrypted'?{isEncrypted:true}:mode==='no-source'?{source:null}:mode==='no-org'?{organizationId:null}:{source:'https://attacker.invalid/repo'}});
+ const owner=mode==='no-org'?await db.user.create({data:{githubId:430999,githubUsername:'sweep-owner'}}):null;
+ await db.memory.update({where:{id:memoryId},data:mode==='encrypted'?{isEncrypted:true}:mode==='no-source'?{source:null}:mode==='no-org'?{organizationId:null,ownerUserId:owner!.id}:{source:'https://attacker.invalid/repo'}});
  const before=await rows();await tick();expect(await rows()).toEqual(before);expect(commands).toEqual([]);
 });
 it('never logs or stores a token-bearing Git provider error',async()=>{
@@ -179,6 +180,54 @@ it('never logs or stores a token-bearing Git provider error',async()=>{
  expect(JSON.stringify(await rows(),(_,v)=>typeof v==='bigint'?v.toString():v)).not.toContain(TOKEN);expect(errors.join('\n')).not.toContain(TOKEN);
 });
 it('clears a missing or soft-deleted WRITE without Git or republishing a tombstone',async()=>{
- const n=await makeNode();await owe(n.id);await db.node.update({where:{id:n.id},data:{deletedAt:new Date()}});await owe('hard-missing');
- await tick();expect(await rows()).toEqual([]);expect(commands).toEqual([]);
+ const n=await makeNode();await owe(n.id);const path=nodeFilePath(local,n.loc,'mirror430-org:mem');writeFileSync(path,'pre-existing tombstone file');
+ await db.node.update({where:{id:n.id},data:{deletedAt:new Date()}});await owe('hard-missing');
+ await tick();expect(await rows()).toEqual([]);expect(commands).toEqual([]);expect(readFileSync(path,'utf8')).toBe('pre-existing tombstone file');
+});
+it('a late cap-reaching settle cannot turn a newer row into EXHAUSTED',async()=>{
+ const n=await makeNode();await owe(n.id,{attempts:9});const stale=await takeAttemptSeq(db);const newer=await takeAttemptSeq(db);
+ await settleMirrorObligations(db,memoryId,[{nodeId:n.id,kind:'WRITE'}],{result:'failed',errorClass:'BRANCH_SETUP'},newer);
+ const before=await rows();
+ await settleMirrorObligations(db,memoryId,[{nodeId:n.id,kind:'WRITE'}],{result:'failed',errorClass:'PUSH_FAILED'},stale,10);
+ expect(await rows()).toEqual(before);expect((await rows())[0].state).toBe('FAILED');
+});
+it('rechecks encryption after waiting for the checkout lock and leaves the row untouched',async()=>{
+ const n=await makeNode();await owe(n.id);const before=await rows();let release!:()=>void;let entered!:()=>void;
+ const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
+ const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;await db.memory.update({where:{id:memoryId},data:{isEncrypted:true}});});
+ await acquired;const running=tick().then(()=>null,e=>e);await new Promise(r=>setTimeout(r,60));release();await holder;const e=await running;if(e)throw e;
+ expect(await rows()).toEqual(before);expect(commands).toEqual([]);
+});
+it('skips overlapping local runs and processes the held first run once',async()=>{
+ const n=await makeNode();await owe(n.id);let release!:()=>void;let entered!:()=>void;
+ const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
+ const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;});await acquired;
+ const first=tick().then(()=>null,e=>e);await new Promise(r=>setTimeout(r,50));
+ try {expect(await tick()).toBe(0);expect(commands).toEqual([]);} finally {release();await holder;}
+ const e=await first;if(e)throw e;expect(await rows()).toEqual([]);expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
+});
+it('handles at most20 eligible memories, oldest due first, without a startup pass',async()=>{
+ const org=await db.organization.findUniqueOrThrow({where:{urn:'mirror430-org'}});
+ const ids:string[]=[];
+ for(let i=0;i<21;i++){
+  const m=await db.memory.create({data:{name:`m${i}`,urn:`mirror430-org:m${i}`,organizationId:org.id,class:'knowledge',source:SOURCE}});ids.push(m.id);
+  mkdirSync(join(env.root,org.urn,`m${i}`,'.git'),{recursive:true});
+  await db.gitMirrorObligation.create({data:{memoryId:m.id,nodeId:`missing${i}`,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:await takeAttemptSeq(db),lastAttemptAt:new Date(old().getTime()-i*60_000)}});
+ }
+ expect(await tick()).toBe(20);
+ const left=await db.gitMirrorObligation.findMany();expect(left).toHaveLength(1);expect(left[0].memoryId).toBe(ids[0]);expect(commands).toEqual([]);
+});
+it('starts only on the interval and honors both disable modes',async()=>{
+ const {startGitMirrorObligationSweepLoop:start}=await import('./sweepGitMirrorObligations.js');
+ expect(start(db)).toBeNull();vi.stubEnv('NODE_ENV','production');vi.stubEnv('DISABLE_GIT_MIRROR_SWEEP','true');expect(start(db)).toBeNull();
+ vi.stubEnv('DISABLE_GIT_MIRROR_SWEEP','false');vi.useFakeTimers();const query=vi.fn().mockResolvedValue([]);const timer=start({$queryRaw:query} as any,10_000);
+ try {expect(query).not.toHaveBeenCalled();await vi.advanceTimersByTimeAsync(9999);expect(query).not.toHaveBeenCalled();await vi.advanceTimersByTimeAsync(1);expect(query).toHaveBeenCalledTimes(1);}
+ finally {if(timer)clearInterval(timer);vi.useRealTimers();vi.unstubAllEnvs();}
+});
+it('loads node content only after a waiting retry acquires its memory lock',async()=>{
+ const n=await makeNode();await owe(n.id);let release!:()=>void;let entered!:()=>void;
+ const acquired=new Promise<void>(r=>entered=r);const hold=new Promise<void>(r=>release=r);
+ const holder=withMirrorCheckoutLock(memoryId,async()=>{entered();await hold;await db.node.update({where:{id:n.id},data:{content:'changed while sweep waited'}});});
+ await acquired;const running=tick().then(()=>null,e=>e);await new Promise(r=>setTimeout(r,60));release();await holder;const e=await running;if(e)throw e;
+ expect(await rows()).toEqual([]);expect(remoteFile()).toContain('changed while sweep waited');
 });
