@@ -35,6 +35,8 @@ const { privateKey: APP_KEY_PEM } = (() => {
 type Issue = {
   number: number; title: string; url: string; createdAt: string; updatedAt: string; state: 'OPEN' | 'CLOSED';
   labels: string[]; prs: boolean[];
+  /** GitHub reports more labels / closing pull requests than the one page read. */
+  labelsTruncated?: boolean; prsTruncated?: boolean;
 };
 interface Fake {
   repos: Record<string, Issue[]>;
@@ -88,8 +90,10 @@ async function fakeFetch(url: string | URL, init?: RequestInit): Promise<Respons
             pageInfo: { hasNextPage, endCursor: hasNextPage ? String(start + fake.pageSize) : null },
             nodes: slice.map((i) => ({
               number: i.number, title: i.title, url: i.url, createdAt: i.createdAt, updatedAt: i.updatedAt,
-              labels: { nodes: i.labels.map((l) => ({ name: l })), pageInfo: { hasNextPage: false } },
-              closedByPullRequestsReferences: { nodes: i.prs.map((merged) => ({ merged })), pageInfo: { hasNextPage: false } },
+              labels: { nodes: i.labels.map((l) => ({ name: l })), pageInfo: { hasNextPage: i.labelsTruncated === true } },
+              closedByPullRequestsReferences: {
+                nodes: i.prs.map((merged) => ({ merged })), pageInfo: { hasNextPage: i.prsTruncated === true },
+              },
             })),
           },
         },
@@ -353,6 +357,58 @@ describe('untrackedTaskItems: an incomplete read', () => {
     expect(urls(r)).toEqual(['https://github.com/acme/widgets/issues/1']);
     expect(JSON.stringify(r)).not.toContain(TOKEN);
     expect(JSON.stringify(logs)).not.toContain(TOKEN);
+  });
+
+  it('an issue whose labels run past one page is left out and the list is item_truncated', async () => {
+    // Its labels decide exclude/team/ready: the unread page could carry `wontfix`, so it is not listed on a guess.
+    fake.repos.widgets = [issue('widgets', 1, { labels: ['ready'], labelsTruncated: true }), issue('widgets', 2)];
+    fake.repos.gadgets = [];
+    const r = await list();
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toBe('item_truncated');
+    expect(urls(r)).toEqual(['https://github.com/acme/widgets/issues/2']);
+  });
+
+  it('an issue whose closing pull requests run past one page is left out and the list is item_truncated', async () => {
+    // The merged flag could sit on the unread page; listing it as not merged would be a guess.
+    fake.repos.widgets = [issue('widgets', 1, { prs: [false], prsTruncated: true }), issue('widgets', 2)];
+    fake.repos.gadgets = [];
+    const r = await list();
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toBe('item_truncated');
+    expect(urls(r)).toEqual(['https://github.com/acme/widgets/issues/2']);
+  });
+
+  it('a claim never takes a truncated item, and reports the list incomplete', async () => {
+    fake.repos.widgets = [issue('widgets', 1, { labelsTruncated: true }), issue('widgets', 2)];
+    const r: any = await asWorker(anne, () => claim({ repository: 'acme/widgets', limit: 5 }));
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toBe('item_truncated');
+    expect(r.tasks.map((t: any) => t.externalId)).toEqual(['https://github.com/acme/widgets/issues/2']);
+  });
+
+  it('a repository is read for at most 20 pages, then the list is page_limit with what was read', async () => {
+    fake.pageSize = 1;
+    fake.repos.widgets = Array.from({ length: 21 }, (_, k) => issue('widgets', k + 1));
+    fake.repos.gadgets = [issue('gadgets', 30)];
+    const r = await list({ limit: 100 });
+    expect(r.complete).toBe(false);
+    expect(r.incompleteReason).toBe('page_limit');
+    expect(fake.graphql.filter((g) => g.variables.name === 'widgets')).toHaveLength(20);
+    expect(urls(r)).toEqual([
+      ...Array.from({ length: 20 }, (_, k) => `https://github.com/acme/widgets/issues/${k + 1}`),
+      'https://github.com/acme/gadgets/issues/30',
+    ]);
+  });
+
+  it('exactly 20 pages that end the repository are complete', async () => {
+    fake.pageSize = 1;
+    fake.repos.widgets = Array.from({ length: 20 }, (_, k) => issue('widgets', k + 1));
+    fake.repos.gadgets = [];
+    const r = await list({ limit: 100 });
+    expect(r.complete).toBe(true);
+    expect(r.incompleteReason).toBeNull();
+    expect(r.total).toBe(20);
   });
 });
 
