@@ -37,6 +37,7 @@ describe('#1793 admin policy contract', () => {
     const noop = await gql(SET, input);
     expect(noop.errors).toBeUndefined();
     expect((noop.data as any).setRateLimitPolicy).toMatchObject({ enforcementMode: 'LOG_ONLY', version: p.version });
+    expect(await db.rateLimitPolicyAudit.count()).toBe(0);
     const changed = await gql(SET, { ...input, principalLimit: 2, enforcementMode: 'ENFORCING' });
     expect(changed.errors).toBeUndefined();
     expect((changed.data as any).setRateLimitPolicy).toMatchObject({ principalLimit: 2, enforcementMode: 'ENFORCING', version: p.version + 1 });
@@ -44,6 +45,54 @@ describe('#1793 admin policy contract', () => {
     const keep = await gql(SET,{...input,expectedVersion:p.version+1,principalLimit:2,enforcementMode:null});
     expect(keep.errors).toBeUndefined();
     expect((keep.data as any).setRateLimitPolicy).toMatchObject({enforcementMode:'ENFORCING',version:p.version+1});
+    expect(await db.rateLimitPolicyAudit.count()).toBe(1);
+  });
+  it('records the successful policy edit with its actor, exact before/after and change reference', async () => {
+    expect((await gql(READ)).errors).toBeUndefined();
+    const before = await db.rateLimitPolicy.findUniqueOrThrow({ where: { fieldClass: 'FAN_OUT_READS' } });
+    const input = { fieldClass: before.fieldClass, expectedVersion: before.version,
+      principalLimit: 27, keyLimit: 13, ipLimit: 41, enforcementMode: 'ENFORCING',
+      changeReference: 'approved-change-1793-audit' };
+    expect((await gql(SET, input)).errors).toBeUndefined();
+    const after = await db.rateLimitPolicy.findUniqueOrThrow({ where: { fieldClass: before.fieldClass } });
+    const projection = (p: typeof before) => ({ fieldClass: p.fieldClass,
+      principalLimit: p.principalLimit, keyLimit: p.keyLimit, ipLimit: p.ipLimit,
+      windowSeconds: p.windowSeconds, retentionSeconds: p.retentionSeconds,
+      enforcementMode: p.enforcementMode, version: p.version,
+      updatedAt: p.updatedAt.toISOString(), ipGroupingVersion: 'v1-ipv6-56' });
+    const audit = await db.rateLimitPolicyAudit.findMany();
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actorId: userId, fieldClass: before.fieldClass,
+      before: projection(before), after: projection(after), changeReference: input.changeReference });
+    expect(after).toMatchObject({ principalLimit: 27, keyLimit: 13, ipLimit: 41,
+      enforcementMode: 'ENFORCING', version: before.version + 1 });
+  });
+  it.each(['role', 'key'] as const)('refuses a policy mutation after its precheck when the presented %s is revoked, without policy or audit writes', async kind => {
+    expect((await gql(READ)).errors).toBeUndefined();
+    const before = await db.rateLimitPolicy.findMany({ orderBy: { fieldClass: 'asc' } });
+    const policy = before.find(p => p.fieldClass === 'FAN_OUT_READS')!;
+    const key = kind === 'key' ? await db.userApiKey.create({ data: { id: generateId(), userId,
+      keyHash: 'rate-write-revocation-key', keyPreview: 'test', oauthScopes: [] } }) : null;
+    let enteredTransaction = false;
+    // The resolver reaches $transaction only AFTER requireRateAdmin(ctx).
+    // Persist the demotion at that seam, before the real authorized transaction
+    // reloads roles. No gate or transaction result is mocked.
+    const demotingDb = new Proxy(db, { get(target, property, receiver) {
+      if (property !== '$transaction') return Reflect.get(target, property, receiver);
+      return async (...args: Parameters<typeof db.$transaction>) => {
+        expect(enteredTransaction).toBe(false);
+        enteredTransaction = true;
+        if (key) await db.userApiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+        else await db.user.update({ where: { id: userId }, data: { roles: ['READER'] } });
+        return (db.$transaction as (...values: unknown[]) => Promise<unknown>)(...args);
+      };
+    } });
+    const result = await gql(SET, { fieldClass: policy.fieldClass, expectedVersion: policy.version,
+      principalLimit: 2, keyLimit: 3, ipLimit: 4, changeReference: 'must-not-be-written' }, { db: demotingDb, ...(key ? { apiKeyId: key.id } : {}) });
+    expect(enteredTransaction).toBe(true);
+    expect(result.errors?.[0].extensions?.code).toBe('FORBIDDEN');
+    expect(await db.rateLimitPolicy.findMany({ orderBy: { fieldClass: 'asc' } })).toEqual(before);
+    expect(await db.rateLimitPolicyAudit.count()).toBe(0);
   });
   it.each([{ appId: 'not-a-human' }, { sessionId: 'bound' }, { clientId: 'run:untrusted' }])('denies non-human admin context %j before policy reads', async extra => {
     const r = await gql(READ, undefined, extra);
@@ -52,6 +101,27 @@ describe('#1793 admin policy contract', () => {
 });
 
 describe('#1793 real consumer refusals', () => {
+  it('queues sibling search admissions before acquiring another pool transaction',async()=>{
+    expect((await gql(READ)).errors).toBeUndefined();
+    let calls=0,entered!:()=>void,release!:()=>void;
+    const ready=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+    const countedDb=new Proxy(db,{get(target,key,receiver){
+      if(key!=='$transaction')return Reflect.get(target,key,receiver);
+      return async(callback:any,options:any)=>{
+        const first=++calls===1;
+        return db.$transaction(async tx=>{if(first){entered();await gate;}return callback(tx);},options);
+      };
+    }});
+    const result=gql('query { first: findNodes(limit:0) { total } second: findNodes(limit:0) { total } }',undefined,{db:countedDb});
+    await ready;
+    let beforeRelease=0;
+    try {await new Promise<void>(r=>setImmediate(r));beforeRelease=calls;}
+    finally {release();}
+    const response=await result;
+    expect(beforeRelease).toBe(1);
+    expect(response.errors).toBeUndefined();
+    expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([2n]);
+  });
   it('charges aliases once each and refuses search before any retrieval', async () => {
     await gql(READ);
     await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
