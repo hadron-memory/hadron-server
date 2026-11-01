@@ -3315,6 +3315,13 @@ model App {
   tickerLiveCap                     Int                  @default(20) @map("ticker_live_cap")
   /// Null = derived (subscribed workers x (86400 / self-subscribe cadence) x 2).
   wakeDailyBudget                   Int?                 @map("wake_daily_budget")
+  /// #3125 S1 (cor:dmo:050:02, cor:dmo:050:20): the App's own JSON object, the App equivalent of `Node.properties`.
+  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform reads only the
+  /// reserved `taskIntegrations` key (cor:agt:120:01). NULL = no properties. CHECK: an object when set.
+  properties                        Json?                @map("properties")
+  /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
+  /// Its own column, not `updatedAt`, which every other App write moves.
+  propertiesRevision                Int                  @default(0) @map("properties_revision")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
   /// avoid spurious portal churn.
