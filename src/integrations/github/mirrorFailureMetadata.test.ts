@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Prisma } from '../../generated/prisma/index.js';
+import { GitCommandError } from './execGit.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 
 describe('closed mirror diagnostic allowlist', () => {
@@ -21,11 +22,33 @@ describe('closed mirror diagnostic allowlist', () => {
     expect(Object.getOwnPropertyDescriptor(error, 'name')?.value).toBe(name);
     expect(mirrorFailureMetadata(error, 'settle', 'SETTLEMENT').errorType).toBe(name);
   });
-  it.each(['Error', 'TypeError', 'RangeError'])('does not advertise unsupported native own-name classification: %s', name => {
+  it.each(['Error', 'TypeError', 'RangeError'])('an own name of %s is not an allowlisted errorType', name => {
     expect(mirrorFailureMetadata({ name }, 'tree', 'TREE_WRITE')).toEqual({ phase: 'tree', class: 'TREE_WRITE' });
   });
-  it.each([new Error('secret'), new TypeError('secret'), new RangeError('secret')])('native errors keep phase/class without inherited reads %#', error => {
+  it.each([new Error('secret'), new TypeError('secret'), new RangeError('secret')])('real native Error instances yield only phase and class (their name is inherited, not own) %#', error => {
     expect(mirrorFailureMetadata(error, 'tree', 'TREE_WRITE')).toEqual({ phase: 'tree', class: 'TREE_WRITE' });
+  });
+  it('the real GitCommandError has an own name and yields errorType GitCommandError', () => {
+    const error = new GitCommandError({ code: 'EACCES' });
+    expect(Object.getOwnPropertyDescriptor(error, 'name')?.value).toBe('GitCommandError');
+    expect(mirrorFailureMetadata(error, 'git', 'GIT_COMMAND_FAILED')).toEqual({
+      phase: 'git', class: 'GIT_COMMAND_FAILED', providerCode: 'EACCES', errorType: 'GitCommandError',
+    });
+  });
+  it.each(['code', 'name', 'errorCode', 'providerCode'] as const)('ignores an inherited allowlisted %s', key => {
+    const value = key === 'name' ? 'PrismaClientInitializationError' : key === 'providerCode' ? 'EACCES' : 'P1001';
+    const inherited = Object.create({ [key]: value, ...(key === 'providerCode' ? { code: 'GIT_COMMAND_FAILED' } : {}) });
+    expect(mirrorFailureMetadata(inherited, 'settle', 'SETTLEMENT')).toEqual({ phase: 'settle', class: 'SETTLEMENT' });
+  });
+  it('a non-allowlisted native code falls through to an allowlisted errorCode', () => {
+    expect(mirrorFailureMetadata({ code: 'EPERM', errorCode: 'P1001' }, 'sequence', 'ATTEMPT_SEQUENCE'))
+      .toEqual({ phase: 'sequence', class: 'ATTEMPT_SEQUENCE', providerCode: 'P1001' });
+    expect(mirrorFailureMetadata({ code: 'EPERM', errorCode: 'EPERM' }, 'sequence', 'ATTEMPT_SEQUENCE'))
+      .toEqual({ phase: 'sequence', class: 'ATTEMPT_SEQUENCE' });
+  });
+  it.each([['sequence', 'ATTEMPT_SEQUENCE'], ['settle', 'SETTLEMENT']] as const)('a real initialization error at %s keeps providerCode and errorType together', (phase, cls) => {
+    const error = new Prisma.PrismaClientInitializationError('synthetic-secret-3057', 'test', 'P1001');
+    expect(mirrorFailureMetadata(error, phase, cls)).toEqual({ phase, class: cls, providerCode: 'P1001', errorType: 'PrismaClientInitializationError' });
   });
   it('prefers native code except for the fixed Git wrapper marker', () => {
     expect(mirrorFailureMetadata({ code: 'P2002', providerCode: 'ENOENT', errorCode: 'P1001' }, 'settle', 'SETTLEMENT').providerCode).toBe('P2002');
