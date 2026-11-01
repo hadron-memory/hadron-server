@@ -9,6 +9,8 @@
  * | owner-unreactive  | a child finished or cancelled; no activity by the | 20 min  | 050:16 (r2) |
  * |                   | parent's assignee (the child's owner)              |         |             |
  * | unassignable      | queued: pending with no assignee                   | 30 min  | 050:17      |
+ * | finish-by         | a finish-by time passed, task neither finished nor | (none)  | 050:14      |
+ *                       cancelled; it replaces the four rules above while set (#2648)
  *
  * EPISODES (cor:agt:050:13, Proposed). An episode's key is (task, rule,
  * episode start), and the episode start is the instant of the MOVE that began
@@ -60,7 +62,7 @@ import { PASSIVE_EVENT_TYPES, appendAlarmEvent, type AlarmChain, type AlarmEvent
 import { markStalled } from './availability.js';
 import { appManagerUserIds } from '../auth/appManagement.js';
 
-export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable'] as const;
+export const STALL_RULES = ['not-started', 'no-progress', 'owner-unreactive', 'unassignable', 'finish-by'] as const;
 export type StallRule = (typeof STALL_RULES)[number];
 
 /** Each rule's alarm type (cor:agt:050:11). */
@@ -69,6 +71,7 @@ export const STALL_EVENT_TYPE: Record<StallRule, AlarmEventType> = {
   'no-progress': 'stall.no-progress',
   'owner-unreactive': 'stall.owner-unreactive',
   unassignable: 'assignment.unassignable',
+  'finish-by': 'stall.finish-by',
 };
 
 /** The App's stall windows, in minutes. */
@@ -92,6 +95,10 @@ const RULE_WINDOW: Record<StallRule, keyof StallWindows> = {
   'no-progress': 'noProgressMinutes',
   'owner-unreactive': 'ownerReactionMinutes',
   unassignable: 'assignmentMinutes',
+  // #2648: the finish-by alarm has no window of its own (it fires at the deadline). Its windowMinutes is only the
+  // cor:agt:050:19 escalation step, which climbs "as the other stall alarms do"; the no-progress window is the one
+  // for work in flight. A reading, not a ruling: listed on the PR.
+  'finish-by': 'noProgressMinutes',
 };
 
 const MINUTE = 60_000;
@@ -124,10 +131,10 @@ type Db = PrismaClient | Prisma.TransactionClient;
 const TASK_SELECT = {
   id: true, appId: true, status: true, parentTaskId: true, blocked: true, releasedAt: true,
   ownerWorkerId: true, ownerUserId: true, assigneeWorkerId: true, assigneeUserId: true,
-  startBy: true, assignedAt: true, startedAt: true, createdAt: true,
+  startBy: true, finishBy: true, assignedAt: true, startedAt: true, createdAt: true,
 } as const;
 type SelectedTaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
-type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt'>>;
+type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy'>>;
 
 /** Everything one task's rules read. */
 export type StallInputs = {
@@ -158,6 +165,11 @@ export type StallInputs = {
   queuedAt: Date | null;
   /** #2645: changing startBy creates a new not-started episode, without changing assignment/progress clocks. */
   startByEditedAt?: Date | null;
+  /**
+   * #2648: the latest edit that changed the finish-by time (set or cleared). While a finish-by time is set no ordinary
+   * stall clock runs, so once it is cleared the ordinary windows count from this edit (cor:agt:050:14).
+   */
+  finishByEditedAt?: Date | null;
   /**
    * #2022 (R68; the Proposed stop-signal exceptions to cor:agt:050:13-:17): when a `pause` or `halt` covered each
    * worker these rules read (the assignee, and each ended child's owner), from the coverage ledger. Time inside them
@@ -217,7 +229,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
     ...children.map((c) => c.ownerWorkerId),
   ].filter((w): w is string => !!w))];
   const ownerUserIds = [...new Set(children.map((c) => c.ownerUserId).filter((u): u is string => !!u))];
-  const [progress, queued, activity, userCalls, startByEdits] = await Promise.all([
+  const [progress, queued, activity, userCalls, startByEdits, finishByEdits] = await Promise.all([
     db.agentTeamEvent.groupBy({
       by: ['taskId'],
       where: { taskId: { in: ids }, type: 'task.progress' },
@@ -247,12 +259,18 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['startBy'] } },
       _max: { createdAt: true },
     }),
+    db.agentTeamEvent.groupBy({
+      by: ['taskId'],
+      where: { taskId: { in: ids }, type: 'task.edited', payload: { path: ['fields'], array_contains: ['finishBy'] } },
+      _max: { createdAt: true },
+    }),
   ]);
   const userCallAt = new Map(userCalls.map((r) => [`${r.appId}:${r.actorUserId}`, r._max.createdAt]));
   const { intervals: stopIntervals, holds: stopHoldsBy } = await loadStopIntervals(db, workerIds, ids);
   const progressBy = new Map(progress.map((p) => [p.taskId, p._max.createdAt]));
   const queuedBy = new Map(queued.map((q) => [q.taskId, q._max.createdAt]));
   const editedBy = new Map(startByEdits.map(e => [e.taskId, e._max.createdAt]));
+  const finishByEditedBy = new Map(finishByEdits.map(e => [e.taskId, e._max.createdAt]));
   const childrenBy = new Map<string, typeof children>();
   for (const c of children) {
     const list = childrenBy.get(c.parentTaskId as string) ?? [];
@@ -283,6 +301,7 @@ export async function loadStallInputs(db: Db, where: Prisma.AgentTaskWhereInput,
       assigneeActivityAt: task.assigneeWorkerId ? activity.get(task.assigneeWorkerId)?.lastActiveAt ?? null : null,
       queuedAt: queuedBy.get(task.id) ?? null,
       startByEditedAt: editedBy.get(task.id) ?? null,
+      finishByEditedAt: finishByEditedBy.get(task.id) ?? null,
       stopIntervals,
       stopHolds: stopHoldsBy.get(task.id) ?? [],
     };
@@ -371,7 +390,8 @@ export function stallCandidates(
 ): StallCandidate[] {
   const { task } = inputs;
   if (task.blocked) return [];
-  const floor = (d: Date) => latest(d, task.releasedAt) as Date;
+  // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
+  const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
   const running = options.episodesRunning === true;
@@ -385,6 +405,18 @@ export function stallCandidates(
       windowMinutes: windows[RULE_WINDOW[rule]], assignee, ...extra,
     });
   };
+
+  // cor:agt:050:14 (#2648) — a task with a finish-by time is exempt from every stall window: it raises only the
+  // finish-by alarm, once the deadline has passed and the task is neither finished nor cancelled (an open task; a
+  // backlog task is never loaded). The episode key is the deadline itself, so it ends only when the task ends or its
+  // finish-by time is edited (a new value is a new key), never on an assignment, reassignment or start. A blocked
+  // task raised nothing above; one released after its deadline raises now, with the same key. A stop signal never
+  // moves the deadline: a deadline that passed under one raises when it lifts.
+  if (task.finishBy) {
+    const stopped = task.assigneeWorkerId ? stopOf(inputs, task.assigneeWorkerId) : assignee ? [] : (inputs.stopHolds ?? []);
+    add('finish-by', task.finishBy, task.finishBy, {}, stopped);
+    return out;
+  }
 
   // cor:agt:050:17 — queued: pending with no assignee. The episode starts when
   // the task entered the queue — its latest `assignment.queued` event: #1754
@@ -415,6 +447,7 @@ export function stallCandidates(
   if (task.status === 'started' && inputs.openChildCount === 0 && task.startedAt) {
     const since = latest(
       task.startedAt, task.assignedAt, inputs.lastChildEndedAt, inputs.lastProgressAt, inputs.assigneeActivityAt, task.releasedAt,
+      inputs.finishByEditedAt,
     ) as Date;
     const stopped = stopOf(inputs, task.assigneeWorkerId);
     add('no-progress', since, countedDueAt(since, windows.noProgressMinutes * MINUTE, stopped), {}, stopped);

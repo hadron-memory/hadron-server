@@ -61,7 +61,7 @@ export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.propert
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
 
-export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'closeSessionWhenDone'] as const;
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone'] as const;
 export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
@@ -204,6 +204,8 @@ export const ALARM_EVENT_TYPES = [
   'stall.no-progress',
   'stall.owner-unreactive',
   'assignment.unassignable',
+  // #2648: the finish-by deadline passed with the task neither finished nor cancelled (cor:agt:050:14).
+  'stall.finish-by',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
