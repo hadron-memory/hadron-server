@@ -113,9 +113,9 @@ describe('#1987 org task catalogue excludes App-memory tasks', () => {
  * The caller is `operator` (org READER + platform ADMIN) because it is the one caller whose read set reaches these
  * rows: a person's org arms exclude App-scoped knowledge and group rows even for a MemoryMember
  * (`getOrgReadableMemoryIds`, #653/#1208). For an owner or participant the read gate hides them before the narrowing
- * runs, so a pin on them could not fail when the narrowing is removed. Whether that person-side absence is right is
- * hadron-server#3070. The positive controls below prove the operator reads each memory, so each absence is the
- * narrowing's.
+ * runs, so a pin on them could not fail when the narrowing is removed. That person-side absence is the rule (#3070,
+ * Holger V23) and is pinned in its own block below. The positive controls prove the operator reads each memory, so
+ * each catalogue absence is the narrowing's.
  */
 describe('#2884 App-scoped knowledge and group memories are not in the org catalogue', () => {
   const ids: Record<'knowledge' | 'group', string> = { knowledge: '', group: '' };
@@ -124,6 +124,8 @@ describe('#2884 App-scoped knowledge and group memories are not in the org catal
     ids.knowledge = (await db.memory.create({ data: { id: generateId(), urn: 'catalogue1987.example:app-kb', name: 'App knowledge', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: orgId, appId } })).id;
     ids.group = (await db.memory.create({ data: { id: generateId(), urn: 'catalogue1987.example:app-group', name: 'App group', class: 'group', organizationId: orgId, appId } })).id;
     await db.memoryMember.create({ data: { memoryId: ids.group, userId: users.operator, role: 'owner' } });
+    await db.memoryMember.create({ data: { memoryId: ids.group, userId: users.owner, role: 'owner' } });
+    await db.memoryMember.create({ data: { memoryId: ids.group, userId: users.participant, role: 'reader' } });
     await task(ids.knowledge, loc.knowledge);
     await task(ids.group, loc.group);
   });
@@ -131,6 +133,21 @@ describe('#2884 App-scoped knowledge and group memories are not in the org catal
   it.each(['knowledge', 'group'] as const)('control: the operator reads the App-scoped %s task by explicit memoryIds', async cls => {
     const hits = await Q.findNodes({}, { filter: { memoryIds: [ids[cls]], isRunnable: true } }, context('operator'));
     expect(locs(hits)).toEqual([loc[cls]]);
+  });
+
+  // #3070 (Vera's ruling; Holger V23 "App only, as built"; cor:acl:010:01, cor:dmo:060:01): an App-scoped knowledge or
+  // group memory is App-internal. A person reads it neither as an org member (any org role) nor as a MemoryMember of
+  // the group (owner, reader), even by naming it. The operator control above is the reader that does reach it.
+  describe('#3070 a person never reads an App-scoped knowledge or group memory', () => {
+    const cases = [
+      ['owner', 'knowledge'], ['owner', 'group'],
+      ['participant', 'knowledge'], ['participant', 'group'],
+      ['member', 'knowledge'], ['member', 'group'],
+    ] as const;
+    it.each(cases)('%s gets nothing from the App-scoped %s memory by explicit memoryIds', async (who, cls) => {
+      const hits = await Q.findNodes({}, { filter: { memoryIds: [ids[cls]], isRunnable: true } }, context(who));
+      expect(hits.hits).toEqual([]);
+    });
   });
 
   it.each(['knowledge', 'group'] as const)('the org catalogue (orgId + isRunnable) omits the App-scoped %s task', async cls => {
