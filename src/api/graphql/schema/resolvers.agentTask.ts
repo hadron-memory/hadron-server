@@ -113,6 +113,7 @@ import {
 import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
+import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
 
@@ -1728,6 +1729,8 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
+      await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
       // #2198: finishing with open children still succeeds (as it always has); the response says so.
       if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
