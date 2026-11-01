@@ -83,6 +83,15 @@ describe('#2694 a task mutation through the worker\'s own live session drives it
     expect(statuses.get(anne.id)!.status).not.toBe('NO_SESSION');
   });
 
+  it('creating a child task refreshes the heartbeat of a live session (the one task write outside mutateTask)', async () => {
+    const parent = await assigned(anne);
+    await asWorker(anne, () => M.startAgentTask({}, { taskId: parent }, ctxFor()));
+    const s = await session(anne, 20);
+    const before = await heartbeat(s.id);
+    await asWorker(anne, () => M.createAgentTask({}, { input: { appRef: app.id, title: 'child', parentTaskId: parent } }, ctxFor(s.id)));
+    expect(await heartbeat(s.id)).toBeGreaterThan(before + HOUR);
+  });
+
   it('fence 2: a session that already lapsed is NOT revived by a task mutation', async () => {
     const s = await session(anne, 30);
     const before = await heartbeat(s.id);
