@@ -278,6 +278,19 @@ it('rechecks a branch template introduced while the retry waited, before taking 
 });
 
 describe('#3056 shared row budget', () => {
+  it('defaults to 200 selected rows and leaves the 201st unchanged', async () => {
+    vi.stubEnv('GIT_MIRROR_SWEEP_MAX_ROWS', undefined);
+    const before = [];
+    for (let i = 0; i < 201; i++) {
+      before.push(await owe(`missing-${String(i).padStart(3, '0')}`));
+    }
+    await tick();
+    expect(await rows()).toEqual([before[200]]);
+    expect(commands).toEqual([]);
+    await tick();
+    expect(await rows()).toEqual([]);
+  }, 30_000);
+
   it('leaves cut-off rows byte-identical and continues them on the next run', async () => {
     vi.stubEnv('GIT_MIRROR_SWEEP_MAX_ROWS', '2');
     const nodes = await Promise.all(['one', 'two', 'three'].map(loc => makeNode(loc)));
@@ -332,5 +345,41 @@ describe('#3056 shared row budget', () => {
     expect(await rows()).toEqual([before]);
     expect(remoteFile('due')).toContain('current content');
     expect(commands.filter(args => args[0] === 'push')).toHaveLength(1);
+  });
+
+  it('selects the oldest due row rather than the oldest attempted row', async () => {
+    vi.stubEnv('GIT_MIRROR_SWEEP_MAX_ROWS', '1');
+    const now = new Date();
+    const olderAttempt = await makeNode('older-attempt');
+    const olderDue = await makeNode('older-due');
+    await owe(olderAttempt.id, { attempts: 9, lastAttemptAt: new Date(now.getTime() - 7 * 60 * 60_000) });
+    await owe(olderDue.id, { lastAttemptAt: new Date(now.getTime() - 2 * 60 * 60_000) });
+    const before = await db.gitMirrorObligation.findFirstOrThrow({ where: { nodeId: olderAttempt.id } });
+    await tick(now);
+    expect(await rows()).toEqual([before]);
+    expect(remoteFile('older-due')).toContain('current content');
+  });
+
+  it('does not reserve another memory\'s budget for a row still in backoff', async () => {
+    vi.stubEnv('GIT_MIRROR_SWEEP_MAX_ROWS', '2');
+    const now = new Date();
+    const due = await makeNode('due');
+    const late = await makeNode('late');
+    await owe(due.id);
+    await owe(late.id, { attempts: 9, lastAttemptAt: new Date(now.getTime() - 60 * 60_000) });
+    const untouched = await db.gitMirrorObligation.findFirstOrThrow({ where: { nodeId: late.id } });
+    const org = await db.organization.findUniqueOrThrow({ where: { urn: 'mirror430-org' } });
+    const other = await db.memory.create({ data: {
+      name: 'next', urn: 'mirror430-org:next', organizationId: org.id, class: 'knowledge', source: SOURCE,
+    } });
+    mkdirSync(join(env.root, org.urn, 'next', '.git'), { recursive: true });
+    await db.gitMirrorObligation.create({ data: {
+      memoryId: other.id, nodeId: 'missing-next', kind: 'WRITE', removeLoc: '', state: 'FAILED',
+      errorClass: 'PUSH_FAILED', attempts: 1, attemptSeq: await takeAttemptSeq(db),
+      lastAttemptAt: new Date(now.getTime() - 2 * 60 * 60_000),
+    } });
+    await tick(now);
+    expect(await rows()).toEqual([untouched]);
+    expect(await db.gitMirrorObligation.findMany({ where: { memoryId: other.id } })).toEqual([]);
   });
 });
