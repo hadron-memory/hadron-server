@@ -24,6 +24,7 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import * as authorityAnchors from '../../../lib/auth/authorityAnchors.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
+import type { Prisma } from '../../../generated/prisma/index.js';
 
 const M = resolvers.Mutation as any;
 let orgA: any, orgB: any, foreign: any, app: any, agent: any;
@@ -38,40 +39,78 @@ const noWrites = async () => {
   expect(await db.node.count()).toBe(0);
 };
 
+type FenceOutcome = 'blocked' | 'settled' | 'timeout';
+const backendPid = async (tx: unknown) =>
+  (await (tx as Prisma.TransactionClient).$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+
 /**
- * Resolve once a backend in this database waits on an advisory lock OR the
- * creator has settled. A mutant that removes the fence lets the creator run
- * straight through; the caller's `settled` assertion then fails, rather than
- * a lock-wait timeout.
+ * Report how the creator met the fence: `blocked` only when another backend
+ * waits on an advisory lock that the PAUSED WRITER's own backend (`writerPid`)
+ * holds; `settled` when the creator finished first (the fence was bypassed);
+ * `timeout` when neither happened in time. Callers assert `'blocked'`, so a
+ * bypass and a stall both fail at the same named assertion, never as a vitest
+ * timeout, and an unrelated waiter cannot satisfy it. The writer is paused in
+ * JS after taking its anchors and the creator is the only other backend that
+ * takes an advisory lock in this per-worker database, so the waiter is the creator.
  */
-async function blockedOrSettled(isSettled: () => boolean, timeoutMs = 3000): Promise<void> {
+async function fenceOutcome(writerPid: number, isSettled: () => boolean, timeoutMs = 3000): Promise<FenceOutcome> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (isSettled()) return;
+    if (isSettled()) return 'settled';
     const [{ waiting }] = await db.$queryRaw<Array<{ waiting: number }>>`
-      SELECT count(*)::int AS waiting FROM pg_locks
-      WHERE locktype = 'advisory' AND NOT granted
-        AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
-    if (waiting >= 1) return;
-    if (Date.now() > deadline) return;
+      SELECT count(*)::int AS waiting FROM pg_locks l
+      WHERE l.locktype = 'advisory' AND NOT l.granted AND l.pid <> ${writerPid}
+        AND ${writerPid}::int = ANY(pg_blocking_pids(l.pid))
+        AND l.pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())`;
+    if (waiting >= 1) return 'blocked';
+    if (Date.now() > deadline) return 'timeout';
     await new Promise((r) => setTimeout(r, 10));
   }
 }
 
 /**
+ * Await a writer's readiness, but fail at once (with the writer's outcome) if
+ * it finishes or throws before it pauses, instead of hanging to the test timeout.
+ */
+async function writerPaused(ready: Promise<number>, writer: Promise<unknown>): Promise<number> {
+  return Promise.race([
+    ready,
+    writer.then(
+      (r) => { throw new Error(`competing writer finished before pausing: ${JSON.stringify(r)}`); },
+      (e) => { throw e; },
+    ),
+  ]);
+}
+
+/** Hand-written competing leg: take the App anchor exclusively, apply `change`, then hold until released. */
+function holdAppAnchor(change: (tx: Prisma.TransactionClient) => Promise<unknown>) {
+  let release!: () => void, held!: (pid: number) => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const ready = new Promise<number>((r) => { held = r; });
+  const done = db.$transaction(async (tx) => {
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
+    await change(tx);
+    held(await backendPid(tx)); await gate;
+  });
+  return { ready, release, done };
+}
+
+/**
  * Pause a REAL writer right after it takes its authority anchors, before its
  * row locks and write. `isWriter` picks the writer's call out of the creator's
- * (the writer's own caller anchor, which the creator never takes).
+ * (the writer's own caller anchor, which the creator never takes). `ready`
+ * resolves with the writer's backend pid, which `fenceOutcome` requires the
+ * creator to be blocked by.
  */
 function pauseRealWriterAfterAnchors(isWriter: (anchors: readonly AuthorityAnchor[]) => boolean) {
   const real = authorityAnchors.lockAuthorityAnchors;
   const calls: Array<{ anchors: AuthorityAnchor[]; mode: string }> = [];
-  let release!: () => void, held!: () => void;
+  let release!: () => void, held!: (pid: number) => void;
   const gate = new Promise<void>((r) => { release = r; });
-  const ready = new Promise<void>((r) => { held = r; });
+  const ready = new Promise<number>((r) => { held = r; });
   vi.spyOn(authorityAnchors, 'lockAuthorityAnchors').mockImplementation(async (tx, anchors, mode) => {
     await real(tx, anchors, mode);
-    if (isWriter(anchors)) { calls.push({ anchors: [...anchors], mode }); held(); await gate; }
+    if (isWriter(anchors)) { calls.push({ anchors: [...anchors], mode }); held(await backendPid(tx)); await gate; }
   });
   return { calls, ready, release };
 }
@@ -103,13 +142,12 @@ describe('#2729 real updateOrgMember demotion wins the race', () => {
     let settled = false;
     let pending: Promise<any> | undefined;
     try {
-      await writer.ready;
+      const writerPid = await writerPaused(writer.ready, demotion);
       // The outer gate reads committed state (still ADMIN) and takes no lock, so
       // the creator reaches withAuthorizedTx and blocks inside it, behind the
       // writer's exclusive anchors: the demotion lands in the in-transaction window.
       pending = outcome(create()).finally(() => { settled = true; });
-      await blockedOrSettled(() => settled);
-      expect(settled, 'creator must wait for the real demotion writer').toBe(false);
+      expect(await fenceOutcome(writerPid, () => settled), 'creator must wait for the real demotion writer').toBe('blocked');
       expect(writer.calls).toHaveLength(1);
       expect(writer.calls[0]!.mode).toBe('exclusive');
       expect(writer.calls[0]!.anchors).toEqual(expect.arrayContaining([
@@ -129,24 +167,17 @@ describe('#2729 real updateOrgMember demotion wins the race', () => {
 
 describe('#2729 org-to-org interleave under the App anchor', () => {
   it('an App moved from A to B while the creator waits refuses, though the caller is ADMIN in both', async () => {
-    let release!: () => void, held!: () => void;
-    const gate = new Promise<void>((r) => { release = r; }), ready = new Promise<void>((r) => { held = r; });
     // Hand-written: no production writer changes App.organizationId (see the audit above).
-    const mover = db.$transaction(async (tx) => {
-      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
-      await tx.app.update({ where: { id: app.id }, data: { organizationId: orgB.id } });
-      held(); await gate;
-    });
+    const mover = holdAppAnchor((tx) => tx.app.update({ where: { id: app.id }, data: { organizationId: orgB.id } }));
     let settled = false;
     let pending: Promise<any> | undefined;
     try {
-      await ready;
+      const writerPid = await writerPaused(mover.ready, mover.done);
       pending = outcome(create()).finally(() => { settled = true; });
-      await blockedOrSettled(() => settled);
-      expect(settled, 'creator must wait behind the App-anchor writer').toBe(false);
+      expect(await fenceOutcome(writerPid, () => settled), 'creator must wait behind the App-anchor writer').toBe('blocked');
     } finally {
-      release();
-      await mover;
+      mover.release();
+      await mover.done;
       await pending;
     }
     // Only the organizationId half of the observed-tuple comparison can refuse:
@@ -167,24 +198,17 @@ describe('#2729 deleted / uninstalled App: the typed refusal', () => {
   });
 
   it('uninstalledAt wins the interleaving: the creator waits, then refuses FORBIDDEN with no writes', async () => {
-    let release!: () => void, held!: () => void;
-    const gate = new Promise<void>((r) => { release = r; }), ready = new Promise<void>((r) => { held = r; });
     // Hand-written: no production writer sets App.uninstalledAt (see the audit above).
-    const uninstaller = db.$transaction(async (tx) => {
-      await lockAuthorityAnchors(tx, [{ kind: 'app', id: app.id }], 'exclusive');
-      await tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-      held(); await gate;
-    });
+    const uninstaller = holdAppAnchor((tx) => tx.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } }));
     let settled = false;
     let pending: Promise<any> | undefined;
     try {
-      await ready;
+      const writerPid = await writerPaused(uninstaller.ready, uninstaller.done);
       pending = outcome(create()).finally(() => { settled = true; });
-      await blockedOrSettled(() => settled);
-      expect(settled, 'creator must wait behind the uninstall').toBe(false);
+      expect(await fenceOutcome(writerPid, () => settled), 'creator must wait behind the uninstall').toBe('blocked');
     } finally {
-      release();
-      await uninstaller;
+      uninstaller.release();
+      await uninstaller.done;
       await pending;
     }
     expect(await pending).toMatchObject({ error: { message: 'Forbidden', extensions: { code: 'FORBIDDEN' } } });
@@ -197,10 +221,9 @@ describe('#2729 deleted / uninstalled App: the typed refusal', () => {
     let settled = false;
     let pending: Promise<any> | undefined;
     try {
-      await writer.ready;
+      const writerPid = await writerPaused(writer.ready, deletion);
       pending = outcome(create()).finally(() => { settled = true; });
-      await blockedOrSettled(() => settled);
-      expect(settled, 'creator must wait for the real deleteApp').toBe(false);
+      expect(await fenceOutcome(writerPid, () => settled), 'creator must wait for the real deleteApp').toBe('blocked');
       expect(writer.calls[0]).toMatchObject({ mode: 'exclusive' });
       expect(writer.calls[0]!.anchors).toEqual(expect.arrayContaining([{ kind: 'app', id: app.id }]));
     } finally {
