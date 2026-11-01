@@ -18,6 +18,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { tickFixture2733 } from '../../test/tickRegister2733.js';
 import { enrichTickWakes } from './tickActions.js';
+import { RegisterData, RegisterLookup } from '../actionRegister/lookup.js';
+import { canReadMemory } from '../../mcp/access-control.js';
 import type { WorkerWake } from './wakeRule.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -110,14 +112,163 @@ async function perHolder(depth: number): Promise<number> {
   return (await gateOpsFor({ codes: 3, holders: 2, depth })) - (await gateOpsFor({ codes: 3, holders: 1, depth }));
 }
 
-it('a holder\'s readability costs at most 12 operations, at depth 1 and at depth 4', async () => {
+it('a holder\'s readability costs at most 28 operations, at depth 1 and at depth 4', async () => {
   const shallow = await perHolder(1);
   const deep = await perHolder(4);
-  // On main each holder pays one canReadMemory round (about 25 operations) per chain memory, so the cost grows
-  // with depth. Batched: one read per holder per call, whatever the depth (the gate's ceiling, #3048 amendment 1).
+  // On main each holder pays one canReadMemory round (about 28 operations) per chain memory: 112 at depth 1, 252 at
+  // depth 4. Batched: one access map (getMemoryAccess, 27) plus one row read per holder per call, whatever the
+  // depth (the gate's ceiling, amended by Xan at #3048 issuecomment-6552556376).
   const measured = `per holder: depth 1 = ${shallow}, depth 4 = ${deep}`;
   expect(shallow, measured).toBeGreaterThan(0); // the scope counts something: a silent counter can't pass
-  expect(shallow, measured).toBeLessThanOrEqual(12);
-  expect(deep, measured).toBeLessThanOrEqual(12);
+  expect(shallow, measured).toBeLessThanOrEqual(28);
+  expect(deep, measured).toBeLessThanOrEqual(28);
   expect(deep, measured).toBeLessThanOrEqual(shallow + 1);
 }, 180_000);
+
+// ---- the batched answer equals the per-memory gate, for every row class ---------
+
+/**
+ * One memory of each row class the gate (#3048 amendment 1, item 2) names, and
+ * principals of every relevant shape. For each principal the batched answer
+ * (RegisterLookup.readable over a covered set, so `filterReadableMemoryIds`
+ * once) must equal `canReadMemory` asked memory by memory. Equality alone can't
+ * catch a change to `canReadMemoryRow` (both sides use it), so the rows whose
+ * answer the spec fixes are also asserted outright: FR-016 (cor:acl:010:01)
+ * keeps a personal memory its owner's, even for a platform ADMIN or OWNER.
+ */
+async function rowClasses() {
+  const mem = (name: string, data: Record<string, unknown>) => db.memory.create({ data: { organizationId: f.org.id, urn: f.org.urn + ':' + name, name, ...data } as never });
+  const user = (handle: string, roles: string[] = ['READER']) => db.user.create({ data: { githubId: nextGithubId++, githubUsername: 'rc-' + handle, roles: roles as never } });
+  const owner = await user('owner');
+  const revoked = await user('revoked');
+  await db.orgMember.create({ data: { organizationId: f.org.id, userId: revoked.id, role: 'READER', deletedAt: new Date() } });
+  const appMember = await user('app-member');
+  await db.appMember.create({ data: { appId: f.app.id, userId: appMember.id, role: 'member' } });
+  const platformAdmin = await user('platform-admin', ['ADMIN']);
+  const platformOwner = await user('platform-owner', ['OWNER']);
+  const stranger = await user('stranger');
+  const otherApp = await db.app.create({ data: { organizationId: f.org.id, name: 'Other', urn: f.org.urn + ':other' } });
+  const memories = {
+    orgKnowledge: await mem('org-knowledge', { class: 'knowledge', visibility: 'ORGANIZATION' }),
+    appScoped: await mem('app-scoped', { class: 'app', appId: f.app.id }),
+    publicKnowledge: await mem('public', { class: 'knowledge', visibility: 'PUBLIC' }),
+    freePersonal: await mem('free-personal', { class: 'personal', userId: owner.id }),
+    encrypted: await mem('encrypted', { class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true }),
+    agentSystem: f.roleA.memory,
+    appPersonal: await mem('app-personal', { class: 'personal', userId: appMember.id, appId: f.app.id, userMemoryOfAgentId: f.roleA.id }),
+    otherAppScoped: await mem('other-app', { class: 'app', appId: otherApp.id }),
+  };
+  const principals = {
+    orgAdmin: f.admin.id, orgMemberViaApp: f.member.id, revoked: revoked.id, appMember: appMember.id,
+    owner: owner.id, platformAdmin: platformAdmin.id, platformOwner: platformOwner.id, stranger: stranger.id, outside: f.outside.id,
+  };
+  const roles: Record<string, string[]> = { [platformAdmin.id]: ['ADMIN'], [platformOwner.id]: ['OWNER'] };
+  return { memories, principals, roles };
+}
+
+it('the batched answer equals canReadMemory for every row class and principal, and FR-016 holds', async () => {
+  const { memories, principals, roles } = await rowClasses();
+  const ids = Object.values(memories).map(m => m.id);
+  const table: Record<string, Record<string, boolean>> = {};
+  let differ = 0;
+  for (const [who, userId] of Object.entries(principals)) {
+    table[who] = {};
+    await db.$transaction(async tx => {
+      const ctx = { db: tx, userId, roles: roles[userId] ?? ['READER'] } as never;
+      const data = new RegisterData(tx);
+      data.readability.cover(ids);
+      const lookup = new RegisterLookup(tx, ctx, f.app.id, Date.now() + 60_000, false, undefined, data);
+      for (const [name, m] of Object.entries(memories)) {
+        const batched = await lookup.readable(ctx, m.id, who);
+        const single = await canReadMemory(tx as never, ctx, m.id);
+        table[who]![name] = batched;
+        if (batched !== single) differ += 1;
+      }
+    });
+  }
+  expect(differ, JSON.stringify(table)).toBe(0);
+  // The spec-fixed rows: FR-016 for ADMIN and OWNER; the owner reads its own; a stranger reads only the PUBLIC row;
+  // a revoked org member is not an org member; per-App isolation keeps the other App's memory from an App member.
+  expect(table.platformAdmin!.freePersonal).toBe(false);
+  expect(table.platformOwner!.freePersonal).toBe(false);
+  expect(table.owner!.freePersonal).toBe(true);
+  expect(table.stranger).toMatchObject({ publicKnowledge: true, orgKnowledge: false, appScoped: false, freePersonal: false, encrypted: false });
+  expect(table.revoked!.orgKnowledge).toBe(false);
+  expect(table.appMember!.otherAppScoped).toBe(false);
+  // Both answers occur, so the table is not vacuous.
+  expect(Object.values(table).flatMap(r => Object.values(r))).toEqual(expect.arrayContaining([true, false]));
+}, 120_000);
+
+it('an ungated worker\'s lookup answers readable without asking the gate, as before', async () => {
+  await db.$transaction(async tx => {
+    const data = new RegisterData(tx);
+    data.readability.cover([f.roleA.systemMemoryId]);
+    const lookup = new RegisterLookup(tx, f.context() as never, f.app.id, Date.now() + 60_000, true, undefined, data);
+    gateOps = 0;
+    expect(await lookup.readable(f.context(f.outside.id), f.roleA.systemMemoryId, 'self')).toBe(true);
+    expect(gateOps).toBe(0);
+  });
+});
+
+it('a memory outside the declared set is answered by canReadMemory alone', async () => {
+  await db.$transaction(async tx => {
+    const data = new RegisterData(tx);
+    data.readability.cover([f.team.systemMemoryId]);
+    const ctx = { db: tx, userId: f.member.id, roles: ['READER'] } as never;
+    expect(data.readability.answer(ctx, f.roleA.systemMemoryId)).toBeNull();
+    const lookup = new RegisterLookup(tx, ctx, f.app.id, Date.now() + 60_000, false, undefined, data);
+    expect(await lookup.readable(ctx, f.roleA.systemMemoryId, 'self')).toBe(await canReadMemory(tx as never, ctx, f.roleA.systemMemoryId));
+  });
+});
+
+it('a principal\'s batch never answers for another principal, even for the same user', async () => {
+  // Two context objects for one person: each gets its own batch (the reader and a holder are two principals).
+  await db.$transaction(async tx => {
+    const data = new RegisterData(tx);
+    data.readability.cover([f.team.systemMemoryId, f.roleA.systemMemoryId]);
+    const asMember = { db: tx, userId: f.member.id, roles: ['READER'] } as never;
+    const asOutside = { db: tx, userId: f.outside.id, roles: ['READER'] } as never;
+    // member: an org ADMIN, reads the uninstalled roleA; outside: App owner only, reads only what the App installs.
+    await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.member.id, role: 'ADMIN' } });
+    await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
+    await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.roleA.id } } });
+    for (const order of [[asMember, asOutside], [asOutside, asMember]] as const) {
+      const fresh = new RegisterData(tx);
+      fresh.readability.cover([f.team.systemMemoryId, f.roleA.systemMemoryId]);
+      const answers = new Map<unknown, boolean>();
+      for (const ctx of order) answers.set(ctx, (await fresh.readability.answer(ctx, f.roleA.systemMemoryId))!);
+      expect(answers.get(asMember)).toBe(true);
+      expect(answers.get(asOutside)).toBe(false);
+    }
+    expect(data).toBeTruthy();
+  });
+});
+
+it('a memory declared after a principal\'s batch was read is answered by canReadMemory, not guessed from the batch', async () => {
+  await db.$transaction(async tx => {
+    const data = new RegisterData(tx);
+    const ctx = { db: tx, userId: f.member.id, roles: ['READER'] } as never;
+    data.readability.cover([f.team.systemMemoryId]);
+    expect(await data.readability.answer(ctx, f.team.systemMemoryId)).toBe(true);
+    data.readability.cover([f.roleA.systemMemoryId]);
+    // roleA is readable to the member (installed), but it is not in the batch already read: no answer from it.
+    expect(data.readability.answer(ctx, f.roleA.systemMemoryId)).toBeNull();
+    const lookup = new RegisterLookup(tx, ctx, f.app.id, Date.now() + 60_000, false, undefined, data);
+    expect(await lookup.readable(ctx, f.roleA.systemMemoryId, 'self')).toBe(true);
+  });
+});
+
+// ---- fresh per call: a revocation between two calls is honoured on the next -------
+
+it('the batch lives for one call: uninstalling the task\'s Agent between two calls is honoured on the second', async () => {
+  const { items, known } = await build({ codes: 1, holders: 1, depth: 1 }, 'fresh');
+  const app = { id: f.app.id, organizationId: f.org.id, ownerUserId: null };
+  const state = async () => {
+    const out = await enrichTickWakes(f.context(), app, items, new Set(items.map(i => i.workerId)), known);
+    return (out.get(items[0]!.workerId)!.stored.reasons[0] as { action?: { state?: string } }).action?.state;
+  };
+  expect(await state()).toBe('MAPPED');
+  await db.appAgent.delete({ where: { appId_agentId: { appId: f.app.id, agentId: f.roleA.id } } });
+  // The holder (an App member, no org role) no longer reads roleA, where the task lives: the nearest task is refused.
+  expect(await state()).toBe('UNRESOLVED');
+});
