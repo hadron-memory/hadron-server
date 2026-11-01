@@ -116,12 +116,13 @@ it('#1793 an empty named MCP scope is still one admitted search attempt',async()
   expect(await read()).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'}}});
 });
 
-it('#1793 live manifest/key disagreement makes existing health readiness fail without exposing secrets',async()=>{
+it('#1793 live manifest/key disagreement refuses readiness without restarting healthy liveness',async()=>{
   const {beginRateKeyOverlap}=await import('../lib/rateLimit/lifecycle.js');
   const initial=process.env.RATE_LIMIT_KEYRING!;
   try {
-    server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
-    const url=`http://127.0.0.1:${(server.address() as AddressInfo).port}/health`;
+    server=httpServer(await createServer({readiness:{startup:()=> 'settled',stopping:()=>false}}));await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+    const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const url=base+'/ready';
     expect((await fetch(url)).status).toBe(200);
     const ring=JSON.parse(initial);const oldId=ring.current;
     process.env.RATE_LIMIT_KEYRING=JSON.stringify({...ring,keys:{...ring.keys,next:'2'.repeat(64)}});
@@ -129,6 +130,7 @@ it('#1793 live manifest/key disagreement makes existing health readiness fail wi
     process.env.RATE_LIMIT_KEYRING=initial; // a non-prepared process must not remain ready after overlap begins
     const r=await fetch(url);expect(r.status).toBe(503);
     expect(await r.json()).toEqual({ok:false,error:'database_unavailable'});
+    expect((await fetch(base+'/health')).status).toBe(200);
     expect(await db.rateLimitManifest.count()).toBe(1);
     expect(oldId).toBeTruthy();
   } finally {process.env.RATE_LIMIT_KEYRING=initial;}
@@ -152,6 +154,7 @@ it('#1793 merged /ready keeps startup and stopping precedence and rejects a live
     await beginRateKeyOverlap(db,'next');process.env.RATE_LIMIT_KEYRING=initial;
     const refused=await ready();expect(refused.status).toBe(503);
     expect(await refused.json()).toEqual({ok:false,error:'database_unavailable'});
+    expect((await fetch(base+'/health')).status).toBe(200);
     stopping=true;
     const stopped=await ready();expect(stopped.status).toBe(503);
     expect(await stopped.json()).toEqual({ok:false,error:'stopping'});
