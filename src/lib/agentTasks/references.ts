@@ -140,14 +140,39 @@ export const TASK_EXTERNAL_ID_MAX = 512;
 export function normalizeExternalId(input: unknown): string | null {
   if (input == null) return null;
   if (typeof input !== 'string') throw new TaskReferenceError('externalId is text.');
-  if (input.length < 1 || input.length > TASK_EXTERNAL_ID_MAX) {
-    throw new TaskReferenceError(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
-  }
+  checkExternalIdText(input);
   if (/[\s\p{Cc}\p{Cf}]/u.test(input)) {
     throw new TaskReferenceError('externalId may not contain whitespace, control or invisible format characters.');
   }
-  if (/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input)?.[1].includes('@')) {
+  if (/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(input)?.[1].includes('@') || parsesWithUserinfo(input)) {
     throw new TaskReferenceError('externalId may not carry a user name or password.');
   }
   return input;
+}
+
+/**
+ * The checks an externalId and an `agentTasks(externalId:)` filter value share: 1 to 512 characters counted as the
+ * database's char_length counts them (code points, so a supplementary character such as an emoji is one, not two
+ * UTF-16 units), and no lone surrogate (not text Postgres can store; it would surface as an internal error).
+ */
+export function checkExternalIdText(input: string): void {
+  if (/\p{Cs}/u.test(input)) {
+    throw new TaskReferenceError('externalId may not contain an unpaired surrogate.');
+  }
+  let n = 0;
+  for (const _ of input) if (++n > TASK_EXTERNAL_ID_MAX) break;
+  if (n < 1 || n > TASK_EXTERNAL_ID_MAX) {
+    throw new TaskReferenceError(`externalId must be 1 to ${TASK_EXTERNAL_ID_MAX} characters.`);
+  }
+}
+
+/**
+ * A malformed URL the WHATWG parser repairs into one that carries credentials (`https:///u:p@host/`,
+ * `https:\\u:p@host/`, `https:/\u:p@host/`) slips past the `scheme://authority` pattern; refuse it by what it parses
+ * to. A value that does not parse as a URL is an opaque id and passes.
+ */
+function parsesWithUserinfo(input: string): boolean {
+  if (!URL.canParse(input)) return false;
+  const u = new URL(input);
+  return u.username !== '' || u.password !== '';
 }
