@@ -150,7 +150,8 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         if (call.args !== undefined && (call.args === null || typeof call.args !== 'object' || Array.isArray(call.args))) {
           throw new Error(`Node "${nodeUrn}" has data.script.call.args that is not an object (cor:agt:010:04).`);
         }
-        if (tools || extractionSpec) {
+        // Presence counts, even an empty list: the same exclusion the automation import format applies.
+        if (tools || extractionSpec || Array.isArray(data.tools) || Array.isArray(data.extractionSpec)) {
           throw new Error(
             `Node "${nodeUrn}" declares data.script together with data.tools or data.extractionSpec — ` +
               `a script node has one body (cor:agt:010:04 rule 1).`,

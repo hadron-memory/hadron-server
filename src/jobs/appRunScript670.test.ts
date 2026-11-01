@@ -18,6 +18,13 @@ vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) })
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
+vi.mock('../lib/resendToolClient.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/resendToolClient.js')>();
+  return { ...actual, sendResendEmail: vi.fn(async () => ({ id: 'email_670' })), isResendToolConfigured: vi.fn(() => true) };
+});
+
+import { sendResendEmail } from '../lib/resendToolClient.js';
+import { encryptResendApiKey } from '../lib/resendSenders.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
 
@@ -162,6 +169,68 @@ describe('script node (#670, cor:agt:010:04)', () => {
     expect(llm).toHaveBeenCalledTimes(1);
     const hops = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).hops as Array<Record<string, unknown>>;
     expect(hops.map((h) => h.tokensSpent)).toEqual([0, 10]);
+  });
+
+
+  // Gizelle P2 (#3143): rule 2 and S1 name an OUTBOUND tool: the quota and ticket of the send must be consumed
+  // through the script path exactly as for a model's call. The provider client is a stub: nothing is sent.
+  describe('hadron_send_email through a script node: quota, ticket, one action (S1, S4)', () => {
+    const emailScript = (args: Record<string, unknown>) => script(args, 'hadron_send_email');
+    beforeEach(async () => {
+      await db.resendSender.create({
+        data: { id: generateId(), organizationId: orgId, fromAddress: 'Acme <agent@acme.example>', apiKeyEncrypted: encryptResendApiKey('re_test_secret') },
+      });
+    });
+    const mintTicket = () => db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId: null, action: 'comm.outbound', mintedBy: 'test' } });
+    const quotaUsed = async (scopeKind: 'app' | 'org') =>
+      (await db.quotaCounter.findFirst({ where: { scopeKind, scopeId: scopeKind === 'app' ? appId : orgId, action: 'email.send', window: 'day' } }))?.used ?? 0;
+
+    it('sends once with the rendered args, consumes email.send at app and org scope and one comm.outbound ticket, no model, no tokens', async () => {
+      await makeNode('flow:s', emailScript({ to: '{{alertEmail}}', subject: 'Alert', text: '{{summary}}' }));
+      const ticket = await mintTicket();
+      const run = await mint({ alertEmail: 'person@example.net', summary: 'disk full' });
+      const { d, llm, llmObject, llmTools } = deps();
+      expect(await executeAppRun(db, run.id, d)).toBe('completed');
+      expect(sendResendEmail).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(sendResendEmail).mock.calls[0]![0]).toMatchObject({ to: 'person@example.net', subject: 'Alert', text: 'disk full' });
+      expect(await quotaUsed('app')).toBe(1);
+      expect(await quotaUsed('org')).toBe(1);
+      expect((await db.actionTicket.findUniqueOrThrow({ where: { id: ticket.id } })).consumedByRunId).toBe(run.id);
+      expect([llm, llmObject, llmTools].map((f) => f.mock.calls.length)).toEqual([0, 0, 0]);
+      expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).tokensSpent).toBe(0);
+    });
+
+    it('with no comm.outbound ticket the send is skipped by the tool, as for a model call', async () => {
+      await makeNode('flow:s', emailScript({ to: 'person@example.net', subject: 'Alert', text: 'x' }));
+      const run = await mint();
+      await executeAppRun(db, run.id, deps().d);
+      expect(sendResendEmail).not.toHaveBeenCalled();
+      expect(await quotaUsed('app')).toBe(0); // refunded: nothing was sent
+    });
+
+    it('S4 for the send: {{alertEmail}} with no value sends nothing, consumes no quota and no ticket', async () => {
+      await makeNode('flow:s', emailScript({ to: '{{alertEmail}}', subject: 'Alert', text: 'x' }));
+      const ticket = await mintTicket();
+      const run = await mint({});
+      expect(await executeAppRun(db, run.id, deps().d)).toBe('failed');
+      const f = await failureOf(run.id);
+      expect(f.code).toBe('SCRIPT_VARIABLE_MISSING');
+      expect(f.message).toContain('alertEmail');
+      expect(sendResendEmail).not.toHaveBeenCalled();
+      expect(await quotaUsed('app')).toBe(0);
+      expect((await db.actionTicket.findUniqueOrThrow({ where: { id: ticket.id } })).consumedAt).toBeNull();
+    });
+  });
+
+  // Gizelle P3: the loader's exclusion follows the import format: present, even empty, counts.
+  it('script together with an empty tools or extractionSpec array is also refused at load (as the import format does)', async () => {
+    for (const extra of [{ tools: [] }, { extractionSpec: [] }]) {
+      await db.node.deleteMany({ where: { memoryId, loc: 'flow:s' } });
+      await makeNode('flow:s', { data: { script: { call: { tool: 'hadron_log', args: {} } }, ...extra } as never });
+      const run = await mint();
+      expect(await executeAppRun(db, run.id, deps().d)).toBe('failed');
+      expect((await failureOf(run.id)).code).toBe('NODE_LOAD_FAILED');
+    }
   });
 
   it('one dispatcher: a run tool\'s execute is invoked from exactly one non-test call site', () => {
