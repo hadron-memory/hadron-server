@@ -108,4 +108,18 @@ describe('#2979 setAgentAssetUploadEnabled refusals are typed on the wire', () =
     expect(a.error?.message).toBe('app for agent not found');
     expect(a.error?.extensions).not.toHaveProperty('requestId');
   });
+
+  // Atilla's P2 on #3144: the operation's own agent lookup used a catch-all, which once the class is a trusted
+  // refusal would turn an outage into NOT_FOUND (no requestId, silenced in Sentry). Only an absent ref may.
+  it.each([[1], [2]])('a database outage on lookup %i stays an INTERNAL_SERVER_ERROR, never a typed NOT_FOUND', async (failOn) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const real = db.agent.findFirst.bind(db.agent) as (...a: unknown[]) => Promise<unknown>;
+    let n = 0;
+    vi.spyOn(db.agent, 'findFirst').mockImplementation(((...a: unknown[]) =>
+      ++n === failOn ? Promise.reject(new Error('connection lost')) : real(...a)) as never);
+    const a = await toggle(adminId, ref(agent));
+    expect(n).toBeGreaterThanOrEqual(failOn);
+    expect(a.error?.extensions.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(a.error?.extensions).toHaveProperty('requestId');
+  });
 });
