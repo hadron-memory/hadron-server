@@ -67,6 +67,11 @@ describe('GIT_TRANSPORT_GUARD', () => {
 });
 
 describe('execGit', () => {
+  it('retains a bounded numeric exit code without raw command fields (#3057)', async () => {
+    failure = Object.assign(new Error('synthetic-secret-3057'), { code: 128, cause: 'synthetic-secret-3057' });
+    await expect(execGit(['fetch', 'origin'])).rejects.toMatchObject({ code: 'GIT_COMMAND_FAILED', exitCode: 128 });
+  });
+
   it('prepends the guard, ahead of the command', async () => {
     await execGit(['clone', '--', 'https://github.com/o/r', '/tmp/r']);
 
