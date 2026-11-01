@@ -5015,8 +5015,9 @@ export const typeDefs = `#graphql
   """
   One page of a chat-history search (#2299, hrn:node:hadronmemory.com:specs:cor:agt:020:04). Newest first. A call stops at
   a full page or at the scan bound, whichever comes first: complete is true only when the search reached the start of the
-  history, and then there is no cursor. An empty page with complete false means the scan bound fired before any match: it
-  may continue with the cursor. No matches is only ever an empty page with complete true.
+  history, and then there is no cursor. A search found nothing only when every page it returned was empty and the last one
+  has complete true. A final empty page with complete true can follow pages that had matches. An empty page with complete
+  false means the scan bound fired; continue with the cursor.
   """
   type TeamChatSearchPage {
     items: [TeamChatSearchMatch!]!
