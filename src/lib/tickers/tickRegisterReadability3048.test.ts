@@ -25,7 +25,7 @@ import type { WorkerWake } from './wakeRule.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
-const gate = vi.hoisted(() => ({ scope: null as AsyncLocalStorage<true> | null }));
+const gate = vi.hoisted(() => ({ scope: null as AsyncLocalStorage<true> | null, calls: 0 }));
 vi.mock('../../mcp/access-control.js', async importOriginal => {
   const { AsyncLocalStorage: Als } = await import('node:async_hooks');
   const real = await importOriginal<typeof import('../../mcp/access-control.js')>();
@@ -33,8 +33,8 @@ vi.mock('../../mcp/access-control.js', async importOriginal => {
   gate.scope = scope;
   return {
     ...real,
-    canReadMemory: (...a: Parameters<typeof real.canReadMemory>) => scope.run(true, () => real.canReadMemory(...a)),
-    filterReadableMemoryIds: (...a: Parameters<typeof real.filterReadableMemoryIds>) => scope.run(true, () => real.filterReadableMemoryIds(...a)),
+    canReadMemory: (...a: Parameters<typeof real.canReadMemory>) => (gate.calls += 1, scope.run(true, () => real.canReadMemory(...a))),
+    filterReadableMemoryIds: (...a: Parameters<typeof real.filterReadableMemoryIds>) => (gate.calls += 1, scope.run(true, () => real.filterReadableMemoryIds(...a))),
   };
 });
 
@@ -204,9 +204,10 @@ it('an ungated worker\'s lookup answers readable without asking the gate, as bef
     const data = new RegisterData(tx);
     data.readability.cover([f.roleA.systemMemoryId]);
     const lookup = new RegisterLookup(tx, f.context() as never, f.app.id, Date.now() + 60_000, true, undefined, data);
-    gateOps = 0;
+    // Count calls to the gate itself: this transaction is not the counted client, so an op count could not fail.
+    gate.calls = 0;
     expect(await lookup.readable(f.context(f.outside.id), f.roleA.systemMemoryId, 'self')).toBe(true);
-    expect(gateOps).toBe(0);
+    expect(gate.calls).toBe(0);
   });
 });
 
