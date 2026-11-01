@@ -4,7 +4,8 @@ export type MirrorFailurePhase = 'token' | 'branch' | 'tree' | 'push' | 'lock' |
 type DiagnosticClass = MirrorErrorClass | 'REMOTE_RESTORE' | 'ATTEMPT_SEQUENCE' | 'SETTLEMENT' | 'SWEEP' | 'GIT_COMMAND_FAILED';
 const ALLOWED_ERROR_CODES = ['GIT_COMMAND_FAILED', 'EACCES', 'ENOENT', 'ETIMEDOUT', 'ECONNRESET', 'P2002', 'P2010', 'P2028', 'P2034', 'P2024', 'P1001', 'P1017'] as const;
 type ProviderCode = typeof ALLOWED_ERROR_CODES[number];
-const ERROR_TYPES = ['Error', 'TypeError', 'RangeError', 'GitCommandError', 'PrismaClientInitializationError',
+// Prisma and our wrapper assign own names. Native Error names are inherited and intentionally not classified.
+const ERROR_TYPES = ['GitCommandError', 'PrismaClientInitializationError',
   'PrismaClientKnownRequestError', 'PrismaClientUnknownRequestError', 'PrismaClientRustPanicError', 'PrismaClientValidationError'] as const;
 const SIGNALS = ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT'] as const;
 export interface MirrorFailureMetadata {
@@ -29,6 +30,7 @@ function isBoundedInteger(value: unknown, min: number, max: number): value is nu
 export function mirrorFailureMetadata(error: unknown, phase: MirrorFailurePhase, failureClass: DiagnosticClass): MirrorFailureMetadata {
   const result: MirrorFailureMetadata = { phase, class: failureClass };
   const code = ownDataProperty(error, 'code');
+  const errorCode = ownDataProperty(error, 'errorCode');
   const providerCode = ownDataProperty(error, 'providerCode');
   const name = ownDataProperty(error, 'name');
   const signal = ownDataProperty(error, 'signal');
@@ -39,9 +41,11 @@ export function mirrorFailureMetadata(error: unknown, phase: MirrorFailurePhase,
   else if (isBoundedInteger(code, 0, 255)) result.exitCode = code;
   if (isBoundedInteger(httpStatus, 100, 599)) result.httpStatus = httpStatus;
   else if (isBoundedInteger(status, 100, 599)) result.httpStatus = status;
-  // A sanitized GitCommandError may retain the original closed spawn code alongside its fixed code.
-  if (typeof providerCode === 'string' && (ALLOWED_ERROR_CODES as readonly string[]).includes(providerCode)) result.providerCode = providerCode as ProviderCode;
+  // Only the fixed Git wrapper marker gives its retained spawn code precedence over the native code.
+  // Prisma initialization errors instead put their code in errorCode; the same closed set applies.
+  if (code === 'GIT_COMMAND_FAILED' && typeof providerCode === 'string' && (ALLOWED_ERROR_CODES as readonly string[]).includes(providerCode)) result.providerCode = providerCode as ProviderCode;
   else if (typeof code === 'string' && (ALLOWED_ERROR_CODES as readonly string[]).includes(code)) result.providerCode = code as ProviderCode;
+  else if (typeof errorCode === 'string' && (ALLOWED_ERROR_CODES as readonly string[]).includes(errorCode)) result.providerCode = errorCode as ProviderCode;
   if (typeof name === 'string' && (ERROR_TYPES as readonly string[]).includes(name)) result.errorType = name as typeof ERROR_TYPES[number];
   if (typeof signal === 'string' && (SIGNALS as readonly string[]).includes(signal)) result.signal = signal as typeof SIGNALS[number];
   return result;

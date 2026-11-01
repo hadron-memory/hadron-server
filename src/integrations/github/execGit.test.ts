@@ -75,9 +75,9 @@ describe('execGit', () => {
     const error = await execGit(['fetch', 'origin']).catch(caught => caught);
     expect(error).toBeInstanceOf(GitCommandError);
     expect(error.cause).toBeUndefined();
+    expect(inspect(error, { depth: null })).not.toContain(secret);
     expect(error.providerCode).toBeUndefined();
     expect(error.signal).toBeUndefined();
-    expect(inspect(error, { depth: null })).not.toContain(secret);
   });
 
   it.each(['ENOENT', 'EACCES', 'ETIMEDOUT'])('retains closed spawn code %s without raw fields (#3057)', async code => {
