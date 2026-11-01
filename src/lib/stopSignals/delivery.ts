@@ -2,11 +2,13 @@
  * #2022 (S6), #2169 (S6b) — which stop-signal notice each worker is due (cor:agt:090:04), and which serving lanes can
  * tell a worker about one (R95).
  *
- * The notices are `stop.notice` events (./notices.ts). A worker is due at most ONE: its newest notice not yet
- * delivered, since each notice says what applies to it NOW (reconcile sends one per change). An older undelivered
- * notice is superseded and never offered. One exception (Vera's receipt §4, Proposed): a `resume` whose worker was never
- * told it was stopped (its latest DELIVERED notice is a resume, or there is none) is not offered either: the
- * never-delivered stop and its resume are dropped together, so no stale interrupt and no puzzling resume reach it.
+ * The notices are `stop.notice` events (./notices.ts). A worker is offered at most ONE at a time, from two streams that
+ * never supersede each other (#3036, V21): its OWN-LEVEL notices (`pause`/`halt`), where the newest undelivered one
+ * stands and an older one is superseded, and COORDINATOR notices (`pause-dispatch`), kept per signal. The own-level
+ * notice is offered first, then coordinator notices oldest first. One exception (Vera's receipt §4, Proposed), per
+ * stream: a `resume` whose worker was never told it was stopped (the latest DELIVERED notice of its own stream, or of
+ * its own signal for a coordinator notice, is a resume, or there is none) is not offered either: the never-delivered
+ * stop and its resume are dropped together, so no stale interrupt and no puzzling resume reach it.
  *
  * Delivery rides the per-event receipt (`worker_delivery_task_events`, chain position 0), so acknowledging a notice
  * moves no chat mark (R53) and a repeat acknowledgement is a no-op.
@@ -37,29 +39,46 @@ export type PendingStopNotice = {
   at: Date;
 };
 
-/** The one notice each of `workerIds` is due now (see the file header), keyed by worker. Workers of no App mix. */
+/** A coordinator notice is a `stop.notice` at this level; only `notifyCoordinators` writes it (cor:agt:090:04 V21). */
+const COORDINATOR_LEVEL = 'pause-dispatch';
+
+/**
+ * The one notice each of `workerIds` is due now (see the file header), keyed by worker. Workers of no App mix.
+ *
+ * cor:agt:090:04 r10 V21: a worker's notices are two streams and neither supersedes the other. OWN-LEVEL (level
+ * `pause`/`halt`): the newest one. COORDINATOR (level `pause-dispatch`): the newest per `signalId`. The offer is the
+ * own-level notice first, then coordinator notices oldest first by `(created_at, id)`; the return stays one per worker.
+ * The resume-drop (Proposed r10) is per stream: an own-level resume looks at the worker's last delivered OWN-LEVEL
+ * notice, a coordinator resume at its last delivered notice of the SAME signal.
+ */
 export async function pendingStopNotices(db: Db, appId: string, workerIds: string[]): Promise<Map<string, PendingStopNotice>> {
   const out = new Map<string, PendingStopNotice>();
   if (workerIds.length === 0) return out;
-  const rows = await db.$queryRaw<Array<PendingStopNotice & { lastDelivered: string | null }>>(Prisma.sql`
-    WITH newest AS (
-      SELECT DISTINCT ON (e.subject_worker_id) e.subject_worker_id AS "workerId", e.id AS "eventId",
+  const rows = await db.$queryRaw<Array<PendingStopNotice & { lastDelivered: string | null; coordinator: boolean }>>(Prisma.sql`
+    WITH ev AS (
+      SELECT e.subject_worker_id AS "workerId", e.id AS "eventId",
              e.payload ->> 'signalId' AS "signalId", e.payload ->> 'level' AS level, e.payload ->> 'notice' AS notice,
-             (e.payload ->> 'interrupt')::boolean AS interrupt, e.created_at AS at
+             (e.payload ->> 'interrupt')::boolean AS interrupt, e.created_at AS at,
+             (e.payload ->> 'level' = ${COORDINATOR_LEVEL}) AS coordinator
       FROM agent_team_events e
       WHERE e.app_id = ${appId} AND e.type = 'stop.notice' AND e.subject_worker_id IN (${Prisma.join(workerIds)})
-      ORDER BY e.subject_worker_id, e.created_at DESC, e.id DESC
+    ), newest AS (
+      SELECT DISTINCT ON ("workerId", coordinator, CASE WHEN coordinator THEN "signalId" ELSE '' END) *
+      FROM ev
+      ORDER BY "workerId", coordinator, CASE WHEN coordinator THEN "signalId" ELSE '' END, at DESC, "eventId" DESC
     )
     SELECT n.*, (
-      SELECT x.payload ->> 'notice' FROM agent_team_events x
-      JOIN worker_delivery_task_events d ON d.event_id = x.id AND d.worker_id = n."workerId" AND d.chain_index = 0 AND d.delivered_at IS NOT NULL
-      WHERE x.app_id = ${appId} AND x.type = 'stop.notice' AND x.subject_worker_id = n."workerId"
-      ORDER BY x.created_at DESC, x.id DESC LIMIT 1
+      SELECT x.notice FROM ev x
+      JOIN worker_delivery_task_events d ON d.event_id = x."eventId" AND d.worker_id = n."workerId" AND d.chain_index = 0 AND d.delivered_at IS NOT NULL
+      WHERE x."workerId" = n."workerId" AND x.coordinator = n.coordinator AND (NOT n.coordinator OR x."signalId" = n."signalId")
+      ORDER BY x.at DESC, x."eventId" DESC LIMIT 1
     ) AS "lastDelivered"
     FROM newest n
     WHERE NOT EXISTS (SELECT 1 FROM worker_delivery_task_events d
-                      WHERE d.worker_id = n."workerId" AND d.event_id = n."eventId" AND d.chain_index = 0 AND d.delivered_at IS NOT NULL)`);
-  for (const { lastDelivered, ...n } of rows) {
+                      WHERE d.worker_id = n."workerId" AND d.event_id = n."eventId" AND d.chain_index = 0 AND d.delivered_at IS NOT NULL)
+    ORDER BY n."workerId", n.coordinator, n.at, n."eventId"`);
+  for (const { lastDelivered, coordinator: _c, ...n } of rows) {
+    if (out.has(n.workerId)) continue;
     if (n.notice === 'resume' && (lastDelivered === null || lastDelivered === 'resume')) continue;
     out.set(n.workerId, n);
   }

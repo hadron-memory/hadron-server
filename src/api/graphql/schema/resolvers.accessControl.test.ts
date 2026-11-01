@@ -1,3 +1,4 @@
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import {
@@ -37,7 +38,8 @@ let appContributor: { id: string };
 let appMember: { id: string };
 
 function ctx(overrides: Partial<Context> = {}): Context {
-  return { db, ...overrides };
+  // #1793: these direct resolver fixtures represent an anonymous/authenticated HTTP caller, not an empty internal context.
+  return { db, limiterIdentity: transportRateIdentity(overrides, '192.0.2.10'), ...overrides };
 }
 
 // findNodes replaced the deleted Query.nodes. It returns a hit envelope; the

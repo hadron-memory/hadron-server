@@ -2292,6 +2292,9 @@ export const nodeMoveOps = {
             for (const memoryId of new Set([source.memoryId, destMemoryId])) {
               await concealUnreadableNodeDenial(txCtx, memoryId, () => nodeNotFoundError(sourceRef), () => requireMemoryWriteAccess(txCtx, memoryId));
             }
+            // #3031: moving content requires the source read reach again after the authority wait.
+            // Match resolveExistingNode's refusal; install-memory audiences remain in their own gate.
+            if (await isWriteBeyondRead(tx as never, txCtx, source.memoryId)) throw nodeNotFoundError(sourceRef);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two

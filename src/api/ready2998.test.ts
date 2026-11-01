@@ -264,3 +264,20 @@ describe('createServer mounts /ready from the readiness it is given (#2998)', ()
     expect((await get(base, '/ready')).status).toBe(200);
   }, 30_000);
 });
+
+
+it('configuration checks share one bounded readiness flight without delaying liveness', async () => {
+  let release!: () => void;
+  const check=vi.fn(()=>new Promise<void>(r=>{release=r;}));
+  const app=express();
+  mountHealthRoutes(app,db,{readiness:source('settled'),timeoutMs:200,checkConfiguration:check});
+  const base=await listen(app);
+  const pending=[get(base,'/ready'),get(base,'/ready')];
+  for(let i=0;i<100 && !check.mock.calls.length;i++) await new Promise(r=>setTimeout(r,5));
+  expect(check).toHaveBeenCalledTimes(1);
+  expect((await get(base,'/health')).status).toBe(200);
+  const answers=await Promise.all(pending);
+  expect(answers.map(a=>a.status)).toEqual([503,503]);
+  expect(check).toHaveBeenCalledTimes(1);
+  release();await settle();
+});

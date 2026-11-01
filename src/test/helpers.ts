@@ -70,6 +70,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.appRun.deleteMany();
   await db.agentSchedule.deleteMany();
   await db.agentWebhook.deleteMany();
+  await db.rateLimitBucket.deleteMany();
+  await db.rateLimitPolicyAudit.deleteMany();
+  await db.rateLimitPolicy.deleteMany();
+  await db.rateLimitManifest.deleteMany();
   await db.quotaCounter.deleteMany();
   await db.actionTicket.deleteMany();
   // #1606 — comment nodes first: their governed edges refuse a delete while

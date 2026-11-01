@@ -1,3 +1,4 @@
+import { assertRateReadiness, checkRateConfiguration, cleanupRateBuckets } from './lib/rateLimit/index.js';
 import { deliveryPendingPlugin } from './api/graphql/deliveryPendingPlugin.js';
 import { verifiedLoginEvidence } from './auth/loginEvidence.js';
 import crypto from 'crypto';
@@ -63,6 +64,7 @@ import {
   resolveAuthContext,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
+import { startRateBucketCleanupLoop } from './lib/rateLimit/maintenance.js';
 import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
@@ -226,6 +228,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   } else {
     app.set('trust proxy', true);
   }
+
+  // Preserve trust-proxy boot validation before the first DB-touching readiness check.
+  // Both prerequisites still complete before this app can listen.
+  await assertRateReadiness(db);
 
   // #557: a production deploy with no webhook secret refuses deliveries (the
   // route answers 503), so say so at BOOT rather than letting the operator
@@ -1849,8 +1855,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   // #1906: /health runs SELECT 1 through this pool, so a wedged pool reads
   // unhealthy. #2998: /ready adds the first startup and the shutdown signal
-  // on top of the same probe. See src/api/health.ts.
-  mountHealthRoutes(app, db, { readiness });
+  // on top of the same probe. #1793: only readiness also checks the live rate
+  // keyring/manifest; /health remains DB liveness, without configuration detail.
+  mountHealthRoutes(app, db, { readiness, checkConfiguration: () => checkRateConfiguration(db) });
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.
@@ -1861,6 +1868,15 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // #1770 — retention for account-merge consent requests: a retired request
   // is deleted 30 days after the later of its expiry and consumption
   // (cor:api:010:02), in bounded batches. Live proofs and sealed receipts stay.
+  // #1793: bounded inactive-counter retention, identical with/without the optional bus.
+  if (process.env.NODE_ENV !== 'test') {
+    startRateBucketCleanupLoop(()=>cleanupRateBuckets(db),error=>{
+      const raw=error && typeof error==='object' ? (error as {code?:unknown}).code : undefined;
+      const code=typeof raw==='string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
+      console.error('rate-limit cleanup failed',{code});
+    });
+  }
+
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
   }
