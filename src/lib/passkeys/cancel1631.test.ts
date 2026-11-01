@@ -141,7 +141,8 @@ describe('issuing', () => {
 describe('guard', () => {
   it('the migration and both schema-push paths carry the same guard', () => {
     const guard = readFileSync('prisma/passkey-registration-invariants.sql', 'utf8');
-    expect(readFileSync('prisma/migrations/20261022030000_passkey_revoke/migration.sql', 'utf8').endsWith(guard)).toBe(true);
+    // The LATEST revision of the guard (#1632 S2b-2 added the SIGN purpose) carries the whole file and ends with it.
+    expect(readFileSync('prisma/migrations/20261101131000_signing_ceremony_binding/migration.sql', 'utf8').endsWith(guard)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir passkey-registration-invariants.sql');
     // #434: post-push.sql (above) is the test template's only path; the vitest global setup no longer re-applies it.
     expect(readFileSync('src/test/globalSetup.ts', 'utf8')).not.toContain('passkey-registration-invariants.sql');
