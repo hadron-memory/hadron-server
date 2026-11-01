@@ -93,6 +93,17 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     const kind = referenceKind(rawKind);
     if (typeof target !== 'string' || target.length === 0) throw new TaskReferenceError(`${at} needs a target.`);
     if (target.length > TASK_REFERENCE_TARGET_MAX) throw new TaskReferenceError(`${at}: a target is at most ${TASK_REFERENCE_TARGET_MAX} characters.`);
+    // #3123 / hrn:node:hadronmemory.com:specs:cor:agt:050:01 (V27): format/direction characters can make a
+    // stored reference show one link and lead to another. Check every kind and label before generic form checks.
+    if (/\p{Cf}/u.test(target) || (typeof label === 'string' && /\p{Cf}/u.test(label))) {
+      throw new TaskReferenceError(`${at}: a target or label may not contain an invisible format character.`);
+    }
+    // Judge userinfo in the written authority, not URL.username/password: https://@host has empty parsed fields.
+    // @ in the path, query or fragment is ordinary target data and stays accepted. Never echo either input.
+    if ((kind === 'issue' || kind === 'pull_request' || kind === 'url')
+      && /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(target)?.[1].includes('@')) {
+      throw new TaskReferenceError(`${at}: the target may not carry a user name or password.`);
+    }
     // Stored as given, so a target the URL parser would silently trim or re-spell is refused, not rewritten.
     // Whitespace and control characters (C0 and DEL) are refused for every kind: the parser trims or encodes them.
     if (/[\s\x00-\x1f\x7f]/.test(target) || !targetHasKindForm(kind, target)) {
