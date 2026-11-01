@@ -224,6 +224,36 @@ it('#1793 fail-open rolls back an actually written partial dimension before cont
   expect(await used()).toEqual([]);
 });
 
+it('#1793 a genuinely terminated caller backend preserves the original store error and commits no state', async () => {
+  await policy('CREDENTIALS',{enforcementMode:'LOG_ONLY'});
+  let originalFailure: unknown;
+  let terminated=false;
+  const operation=db.$transaction(async tx=>{
+    const [{pid}]=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`;
+    const proxy=new Proxy(tx,{get(target,key){
+      if(key==='rateLimitBucket')return {...target.rateLimitBucket,findMany:async(args:any)=>{
+        // This pid belongs only to THIS test's open transaction on its
+        // fingerprinted private clone; never select/terminate another backend.
+        const [result]=await db.$queryRaw<Array<{stopped:boolean}>>`SELECT pg_terminate_backend(${pid}::integer) AS stopped`;
+        terminated=result.stopped;
+        try {return await target.rateLimitBucket.findMany(args);}
+        catch(error){originalFailure=error;throw error;}
+      }};
+      return Reflect.get(target,key);
+    }});
+    await admitRateInTx(proxy,'CREDENTIALS',id);
+  },{timeout:20_000});
+  const caught=await operation.then(()=>undefined,error=>error);
+  expect(terminated).toBe(true);
+  expect(originalFailure).toBeDefined();
+  expect(caught).toBe(originalFailure);
+  expect(await db.rateLimitBucket.count()).toBe(0);
+  expect(await db.userMergeConsent.count()).toBe(0);
+  // A live replacement connection can still admit; LOG_ONLY is not a promise
+  // that an already dead caller transaction can perform its downstream write.
+  await expect(admitRate(db,'CREDENTIALS',id)).resolves.toMatchObject({admitted:true});
+},25_000);
+
 it('#1793 a partially missing policy set is readiness failure, not env re-seeding',async()=>{
   await db.rateLimitPolicy.delete({where:{fieldClass:'FAN_OUT_READS'}});
   await expect(assertRateReadiness(db)).rejects.toThrow('readiness');
