@@ -120,7 +120,6 @@ function refusal(e: unknown) {
 /** One roster line at the server's read instant, including stored pause history with explicit tense. */
 export function renderRosterEntry(r: RosterRow, asOf: Date): string {
   const facts = [
-    r.modelGroups ? `model groups ${r.modelGroups.length ? r.modelGroups.join('/') : 'none'}` : null,
     r.role ? `role ${r.role}` : null,
     r.bound
       ? `bound${r.family ? ` as ${r.family}` : ', no model family reported'}${r.liveSession ? '' : ' (session quiet)'}`
@@ -145,6 +144,7 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
     // #2223: already behind the working-state and name gates by the time it reaches a row.
     r.heldBy ? `held by ${r.heldBy.handle ? `@${r.heldBy.handle} (hrn:user:${r.heldBy.handle})` : `user ${r.heldBy.id}`}${r.heldBy.name ? ` ${r.heldBy.name}` : ''}` : null,
+    r.modelGroups ? `model groups ${r.modelGroups.length ? r.modelGroups.join('/') : 'none'}` : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
