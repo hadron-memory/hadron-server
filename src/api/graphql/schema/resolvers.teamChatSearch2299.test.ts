@@ -7,6 +7,9 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { drainNodeUsage } from '../../../lib/usageRecorder.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -172,6 +175,21 @@ describe('paging and the scan bound', () => {
     expect(p2.cursor).toBeNull();
   });
 
+  // #2890 mutant: use the last match instead of the last scanned row at the scan bound.
+  it.each(both)('%s: a sparse scan resumes below the last scanned row, not its earlier match', async (_n, search) => {
+    await bulk(1101, s => (s === 1101 || s === 101 || s === 5 ? `needle ${s}` : `filler ${s}`));
+    const p1 = await search(member.id, 'needle', { limit: 50 });
+    expect(seqs(p1)).toEqual([1101]);
+    expect(p1.complete).toBe(false);
+    const reads = vi.spyOn(db.node, 'findMany');
+    try {
+      const p2 = await search(member.id, 'needle', { limit: 50, cursor: p1.cursor });
+      expect(reads.mock.calls.some(([args]) => (args?.where?.seq as { lt?: number })?.lt === 102)).toBe(true);
+      expect(seqs(p2)).toEqual([101, 5]);
+      expect(p2).toMatchObject({ complete: true, cursor: null });
+    } finally { reads.mockRestore(); }
+  });
+
   it.each(both)('%s: a scan that finds nothing within the bound is an INCOMPLETE empty page, not "no matches"', async (_n, search) => {
     await bulk(1100, s => (s === 3 ? 'needle 3' : `filler ${s}`));
     const p1 = await search(member.id, 'needle');
@@ -224,6 +242,20 @@ describe('the cursor is bound to (query, channel, incarnation, caller)', () => {
     expect(refused[0]).toBe('TEAM_CHAT_SEARCH_CURSOR_INVALID');
     await db.channel.update({ where: { id: channel.id }, data: { incarnation: { increment: 1 } } });
     expect(await code(viaChannel(member.id, 'needle', { cursor: p1.cursor }))).toBe('TEAM_CHAT_SEARCH_CURSOR_INVALID');
+  });
+
+  // #2890 mutant: remove channelId from searchBinding, leaving the caller unchanged.
+  it('binds a cursor to its channel independently of the caller', async () => {
+    await bulk(30, s => `needle ${s}`);
+    const other = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:other', name: 'other', createdBy: manager.id });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'chats:other:messages:1', name: 'other', nodeType: 'chat-message', seq: 1, messageChannelId: other.channel.id, content: 'needle elsewhere' } });
+    // Both channels admit this SAME manager, at the same incarnation, for the same query and page size.
+    expect(other.channel.incarnation).toBe((await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).incarnation);
+    const p1 = await viaChannel(manager.id, 'needle', { limit: 10 });
+    expect(seqs(p1)).toHaveLength(10);
+    expect(seqs(await viaChannel(manager.id, 'needle', { limit: 10, cursor: p1.cursor }))).toHaveLength(10);
+    expect(seqs(await Q.channelMessageSearch({}, { channelRef: other.channel.id, query: 'needle', limit: 10 }, ctx(manager.id)))).toEqual([1]);
+    expect(await code(Q.channelMessageSearch({}, { channelRef: other.channel.id, query: 'needle', limit: 10, cursor: p1.cursor }, ctx(manager.id)))).toBe('TEAM_CHAT_SEARCH_CURSOR_INVALID');
   });
 
   it('a cursor from the team-chat form continues on the Channel form (same channel, same binding)', async () => {
@@ -324,12 +356,40 @@ describe('a search is not a read', () => {
       state: await db.channelReadState.findMany({ orderBy: { id: 'asc' } }),
       session: await db.session.findUnique({ where: { id: session.id } }),
       channel: await db.channel.findUnique({ where: { id: channel.id } }),
+      usage: await db.usageEvent.findMany({ orderBy: { id: 'asc' } }),
     });
+    // #2890 mutant: add recordNodeUsage to searchChannelRoot. A real content read
+    // first proves that usage recording is active; drain fire-and-forget writes.
+    await Q.channelMessages({}, { channelRef: channel.id, limit: 1 }, ctx(member.id));
+    await drainNodeUsage(db);
+    expect(await db.usageEvent.count()).toBeGreaterThan(0);
     const before = await snap();
     for (const [, search] of both) {
       await search(member.id, 'needle', { limit: 10 }, { sessionId: session.id });
       await search(member.id, 'needle', { limit: 10 });
     }
+    await drainNodeUsage(db);
     expect(await snap()).toBe(before);
   });
+});
+
+// #2890 schema smoke: the actual GraphQL field wiring must expose matches.
+// Mutant: replace the cursor refusal code with BAD_USER_INPUT; the schema must preserve the typed code.
+it('executes schema-level chat search matches and a typed cursor refusal', async () => {
+  const message = await say(manager.id, 'schema needle');
+  const api = new ApolloServer<Context>({ typeDefs, resolvers });
+  try {
+    for (const [field, refArg, ref] of [['teamChatSearch', 'appRef', app.id], ['channelMessageSearch', 'channelRef', channel.id]]) {
+      const query = `query($ref:ID!,$cursor:String){${field}(${refArg}:$ref,query:"needle",cursor:$cursor){items{nodeId seq channelId} complete cursor}}`;
+      const match = await api.executeOperation({ query, variables: { ref } }, { contextValue: ctx(member.id) });
+      if (match.body.kind !== 'single') throw new Error('unexpected response');
+      expect(match.body.singleResult.errors).toBeUndefined();
+      expect(match.body.singleResult.data?.[field]).toEqual({ items: [{ nodeId: message.nodeId, seq: message.seq, channelId: channel.id }], complete: true, cursor: null });
+      const refused = await api.executeOperation({ query, variables: { ref, cursor: 'bad-cursor' } }, { contextValue: ctx(member.id) });
+      if (refused.body.kind !== 'single') throw new Error('unexpected response');
+      expect(refused.body.singleResult.data).toBeNull();
+      expect(refused.body.singleResult.errors).toHaveLength(1);
+      expect(refused.body.singleResult.errors?.[0]).toMatchObject({ path: [field], extensions: { code: 'TEAM_CHAT_SEARCH_CURSOR_INVALID' } });
+    }
+  } finally { await api.stop(); }
 });
