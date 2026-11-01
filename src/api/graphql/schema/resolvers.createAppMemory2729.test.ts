@@ -194,6 +194,8 @@ describe('#2729 deleted / uninstalled App: the typed refusal', () => {
     const unknown = await caught(create(admin.id, { appRef: generateId() }));
     expect(refused).toMatchObject({ message: 'Forbidden', extensions: { code: 'FORBIDDEN' } });
     expect(JSON.stringify(refused)).toBe(JSON.stringify(unknown));
+    // An invalid root must not reach root validation first (BAD_USER_INPUT would reveal the dead App to its org ADMIN).
+    expect(JSON.stringify(await caught(create(admin.id, { name: '../secret' })))).toBe(JSON.stringify(unknown));
     await noWrites();
   });
 
