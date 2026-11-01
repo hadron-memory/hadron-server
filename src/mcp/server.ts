@@ -1009,6 +1009,8 @@ class EdgeLocConflictError extends Error {}
 class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
 class MemoryWriteAccessChangedDuringWriteError extends Error {}
+/** #3052: the move's source stopped being readable between the preflight and the deciding transaction. */
+class MoveSourceBeyondReadError extends Error {}
 
 async function assertLockedMemoryWriteAccess(
   tx: Prisma.TransactionClient,
@@ -8180,6 +8182,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               }
               await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
               await assertLockedMemoryWriteAccess(tx, attemptAuth, toMemory.id);
+              // #3052 (MCP twin of #3039/#3031): a move carries the source's content, so the preflight's content-read
+              // refusal is repeated here on the transaction client with the refreshed roles, after the authority wait
+              // and on every attempt. Same refusal as the preflight, byte for byte; install audiences stay in their own gate.
+              if (await isWriteBeyondRead(tx as never, attemptAuth, fromMemory.id)) throw new MoveSourceBeyondReadError();
             };
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
@@ -8397,6 +8403,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         linkWarnings = completed.linkWarnings;
       } catch (e) {
         if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
+        if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
