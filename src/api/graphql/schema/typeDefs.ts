@@ -5256,6 +5256,13 @@ export const typeDefs = `#graphql
     """
     modelReportedAt: DateTime
     """
+    Current matching model-group names, resolved live from the Team Agent and App overrides.
+    Empty without a reported model or match; null when working-state access is denied.
+    Advisory only, never authorization (hrn:node:hadronmemory.com:specs:cor:agt:060:12).
+    """
+    modelGroups: [String!]
+
+    """
     #2252 (R189) — the coarse tier of model from the platform's one model-to-tier mapping: high (opus-class),
     mid (sonnet-class), low (haiku-class); null when the model is unmapped (no guessed equivalence for another
     family). Advisory: a coordinator's reading aid, never an authorization or routing input in this slice.
@@ -15125,6 +15132,14 @@ export const typeDefs = `#graphql
     model: String
     "When that binding last reported its model; null when unbound or never reported. Not inferred from session activity."
     modelReportedAt: DateTime
+    """
+    Current matching model-group names, resolved live from the Team Agent and App overrides.
+    Empty without a reported model or match; null with a field error if group lookup fails.
+    Uses this roster's existing audience; group configuration is read live when selected.
+    Advisory only, never authorization (hrn:node:hadronmemory.com:specs:cor:agt:060:12).
+    """
+    modelGroups: [String!]
+
     "Coarse tier from the server model mapping: high, mid or low. Null when unbound, unreported or unmapped; advisory, never authorization."
     tier: String
     "Families a live host registration can launch it as (hrn:node:hadronmemory.com:specs:cor:agt:070:01)."

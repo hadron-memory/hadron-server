@@ -77,3 +77,23 @@ export async function effectiveModelGroups(
   }
   return [...byName.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
+
+/** Full-string model glob matching; only `*` and `?` are special. No regex backtracking. */
+function matchesModel(pattern: string, model: string): boolean {
+  let p = 0, m = 0, star = -1, retry = 0;
+  while (m < model.length) {
+    if (pattern[p] === '*') { star = p++; retry = m; }
+    else if (pattern[p] === '?' || pattern[p] === model[m]) { p++; m++; }
+    else if (star >= 0) { p = star + 1; m = ++retry; }
+    else return false;
+  }
+  while (pattern[p] === '*') p++;
+  return p === pattern.length;
+}
+
+/** Current membership (hrn:node:hadronmemory.com:specs:cor:agt:060:12), never authorization or family/tier inference. */
+export function matchingModelGroupNames(groups: EffectiveModelGroup[], model: string | null | undefined): string[] {
+  const normalized = model?.trim().toLowerCase();
+  if (!normalized) return [];
+  return groups.filter(g => g.patterns.some(p => matchesModel(p.trim().toLowerCase(), normalized))).map(g => g.name).sort();
+}
