@@ -62,6 +62,25 @@ describe('#2969 rendered signature/trailer', () => {
     expect(`${after[0]}\n${after[1]}`).toBe(await W.prompt(live, {}, c));
   });
 
+  it('a rename after the bind does not rewrite the bound session\'s lines (recorded values)', async () => {
+    const s = await bind();
+    const c = ctx(admin, { sessionId: s.session?.id ?? s.id });
+    const before = await rendered(worker, c);
+    expect(before[0]).toContain('Anne');
+    await db.worker.update({ where: { id: worker.id }, data: { name: 'Renamed' } });
+    const live = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect(await rendered(live, c)).toEqual(before);
+    expect((await rendered(live, ctx()))[0]).toContain('Renamed');
+  });
+
+  it('an open session with no recorded serve keeps the role it was placed with (prompt placement)', async () => {
+    const sess = await db.session.create({ data: { id: generateId(), workerId: worker.id, userId: admin.id, agentId: agent.id, role: 'engineer', type: 'DEVELOPER', tool: 'vitest', startedAt: new Date() } as never });
+    await db.worker.update({ where: { id: worker.id }, data: { role: 'reviewer' } });
+    const live = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    expect((await rendered(live, ctx(admin, { sessionId: sess.id })))[0]).toContain('[Anne, engineer]');
+    expect((await rendered(live, ctx()))[0]).toContain('[Anne, reviewer]');
+  });
+
   it('a stored literal self-reference stays literal, as at bind', async () => {
     await db.worker.update({ where: { id: worker.id }, data: { signature: '{{worker.signature}}|{{worker.name}}', trailer: '{{worker.trailer}}' } });
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
