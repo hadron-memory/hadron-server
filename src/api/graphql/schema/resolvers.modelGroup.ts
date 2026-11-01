@@ -23,6 +23,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { type Context, requireAgentAccess, resolveReadableAgentRef } from './resolvers.helpers.js';
 import { actorManagesApp, inTaskWriteTx, resolveParticipatedApp, taskError } from './resolvers.agentTask.js';
 import { locateTeamAgent } from './resolvers.worker.js';
+import { type AgentManagementOp, assertNoWorkerSessionAgentManagement } from '../../../lib/auth/agentManagementWorkerSession.js';
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 
@@ -61,10 +62,15 @@ async function lockOwnerGroups(tx: Prisma.TransactionClient, ownerId: string): P
 
 type AgentGate = { id: string; organizationId: string | null; ownerUserId: string | null };
 
-/** Run an Agent group write as whoever manages the Agent, decided again inside the transaction under its anchors. */
+/**
+ * Run an Agent group write as whoever manages the Agent, decided again inside the transaction under its anchors. A
+ * bound worker session is refused there, after the person gate and before the write callback reads any group
+ * (#3030, V19).
+ */
 async function writeAsAgentManager<T>(
   ctx: Context,
   agent: AgentGate,
+  op: AgentManagementOp,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
 ): Promise<T> {
   return withAuthorizedTx(
@@ -87,6 +93,7 @@ async function writeAsAgentManager<T>(
         );
       }
       await requireAgentAccess(txCtx, current, 'ADMIN');
+      assertNoWorkerSessionAgentManagement(op);
     },
     async (tx, txCtx) => {
       await lockOwnerGroups(tx, agent.id);
@@ -131,7 +138,7 @@ export const modelGroupMutations = {
     const list = cleanPatterns(patterns);
     const agent = await resolveReadableAgentRef(ctx, agentRef);
     await requireAgentAccess(ctx, agent, 'ADMIN');
-    return writeAsAgentManager(ctx, agent, async (tx, txCtx) => {
+    return writeAsAgentManager(ctx, agent, 'setAgentModelGroup', async (tx, txCtx) => {
       const existing = await tx.modelGroup.findUnique({ where: { agentId_name: { agentId: agent.id, name: group } } });
       if (!existing && (await tx.modelGroup.count({ where: { agentId: agent.id } })) >= MODEL_GROUPS_PER_OWNER_MAX) throw limitReached();
       const by = txCtx.userId ?? null;
@@ -146,7 +153,7 @@ export const modelGroupMutations = {
     const group = cleanName(name);
     const agent = await resolveReadableAgentRef(ctx, agentRef);
     await requireAgentAccess(ctx, agent, 'ADMIN');
-    return writeAsAgentManager(ctx, agent, async (tx) => {
+    return writeAsAgentManager(ctx, agent, 'deleteAgentModelGroup', async (tx) => {
       const { count } = await tx.modelGroup.deleteMany({ where: { agentId: agent.id, name: group } });
       if (count === 0) throw groupNotFound(group);
       return true;
