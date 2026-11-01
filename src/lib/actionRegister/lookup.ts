@@ -36,14 +36,102 @@ export type RegisterEntry =
   | { state: 'WITHHELD'; checkedMemoryIds: string[] }
   | { state: 'FOUND'; taskLoc: string; memoryId: string; checkedMemoryIds: string[] };
 
-/** One bounded transaction owns this memo. Neither principals nor answers escape to another request. */
+type EntryRow = { data: unknown; nodeType: string; role: string | null; memoryDeleted: boolean };
+type TaskRow = { loc: string; isRunnable: boolean | null; urn: string; memoryDeleted: boolean };
+
+/**
+ * #2950: the register rows one bounded transaction reads, shared by every
+ * {@link RegisterLookup} of that transaction. It holds ROWS, never an answer
+ * about who may read them: a principal reaches a row only through its own
+ * lookup, after its own `readable` check on the memory the row lives in
+ * (cor:agt:110:03, resolution never borrows another principal's access).
+ * Every read stays pinned to the memory being walked or gated, as the
+ * per-principal reads it replaces were.
+ *
+ * Entries: when `codes` lists the codes this transaction will ask for, the
+ * first read of a memory fetches that memory's `register:<code>` rows for all
+ * of them in one query, so the cost of a code no longer multiplies by holders
+ * or chain depth (#2852: 83 codes x 5 holders x depth repeated one findFirst
+ * each). A code outside `codes` is read alone, as before.
+ *
+ * Tasks: the nearest-first location of a loc through a memory's chain, and the
+ * row at that location (fetched by id AND the located memory, so a node moved
+ * meanwhile is not followed), are computed once per transaction for every
+ * principal.
+ */
+export class RegisterData {
+  private entryBatches = new Map<string, Promise<Map<string, EntryRow>>>();
+  private entrySingles = new Map<string, Promise<EntryRow | null>>();
+  private locations = new Map<string, ReturnType<typeof findEffectiveNodeIdByLoc>>();
+  private taskRows = new Map<string, Promise<TaskRow | null>>();
+  private readonly codes: ReadonlySet<string>;
+  constructor(readonly tx: Prisma.TransactionClient, codes: Iterable<string> = []) { this.codes = new Set(codes); }
+
+  /** The live `register:<code>` row of `memoryId`, unfiltered by role or type (the caller applies the chain rule). */
+  entryRow(memoryId: string, code: string): Promise<EntryRow | null> {
+    if (this.codes.has(code)) {
+      let batch = this.entryBatches.get(memoryId);
+      if (!batch) {
+        batch = this.tx.node.findMany({
+          where: { memoryId, loc: { in: [...this.codes].map(c => 'register:' + c) }, deletedAt: null },
+          select: { loc: true, data: true, nodeType: true, role: true, memory: { select: { deletedAt: true } } },
+        }).then(rows => new Map(rows.map(r => [r.loc, { data: r.data, nodeType: r.nodeType, role: r.role, memoryDeleted: !!r.memory.deletedAt }])));
+        this.entryBatches.set(memoryId, batch);
+      }
+      return batch.then(rows => rows.get('register:' + code) ?? null);
+    }
+    const key = memoryId + '\u0000' + code;
+    let single = this.entrySingles.get(key);
+    if (!single) {
+      single = this.tx.node.findFirst({
+        where: { memoryId, loc: 'register:' + code, deletedAt: null },
+        select: { data: true, nodeType: true, role: true, memory: { select: { deletedAt: true } } },
+      }).then(r => r ? { data: r.data, nodeType: r.nodeType, role: r.role, memoryDeleted: !!r.memory.deletedAt } : null);
+      this.entrySingles.set(key, single);
+    }
+    return single;
+  }
+
+  /** Nearest-first location of `loc` through `memoryId`'s chain (principal-independent). */
+  taskLocation(memoryId: string, loc: string): ReturnType<typeof findEffectiveNodeIdByLoc> {
+    const key = memoryId + '\u0000' + loc;
+    let hit = this.locations.get(key);
+    if (!hit) { hit = findEffectiveNodeIdByLoc(this.tx, memoryId, loc); this.locations.set(key, hit); }
+    return hit;
+  }
+
+  /** The located node, pinned to the memory it was located (and gated) in. */
+  taskRow(id: string, memoryId: string): Promise<TaskRow | null> {
+    const key = id + '\u0000' + memoryId;
+    let row = this.taskRows.get(key);
+    if (!row) {
+      row = this.tx.node.findFirst({ where: { id, memoryId, deletedAt: null }, select: { loc: true, isRunnable: true, memory: { select: { urn: true, deletedAt: true } } } })
+        .then(n => n ? { loc: n.loc, isRunnable: n.isRunnable, urn: n.memory.urn, memoryDeleted: !!n.memory.deletedAt } : null);
+      this.taskRows.set(key, row);
+    }
+    return row;
+  }
+}
+
+/** Not inherited through a chain: a comment, or a boot prompt (the filter `readEntry` applied in SQL before #2950). */
+function inheritable(row: EntryRow): boolean {
+  return row.nodeType !== 'comment' && (row.role === null || (row.role !== 'boot-prompt' && !row.role.startsWith('boot-prompt.')));
+}
+
+/**
+ * One bounded transaction owns this memo, for ONE principal. Neither principals nor answers escape to another
+ * request, and no answer is shared between principals: only the rows in {@link RegisterData} are (#2950).
+ */
 export class RegisterLookup {
   private entries = new Map<string, Promise<RegisterEntry>>();
   private tasks = new Map<string, ReturnType<typeof nearestRoleTask>>();
   private readability = new Map<string, Promise<boolean>>();
   private chains = new Map<string, Promise<string[]>>();
   private team: Promise<string | null> | undefined;
-  constructor(readonly tx: Prisma.TransactionClient, readonly ctx: Context, readonly appId: string, readonly deadline: number, readonly ungatedWorker = false, readonly teamMemoryHint?: string | null) {}
+  readonly data: RegisterData;
+  constructor(readonly tx: Prisma.TransactionClient, readonly ctx: Context, readonly appId: string, readonly deadline: number, readonly ungatedWorker = false, readonly teamMemoryHint?: string | null, data?: RegisterData) {
+    this.data = data ?? new RegisterData(tx);
+  }
 
   checkDeadline(): void { if (Date.now() >= this.deadline) throw new Error('Register read deadline'); }
 
@@ -103,13 +191,11 @@ export class RegisterLookup {
       checkedMemoryIds.push(id);
       if (!await this.readable(this.ctx, id, 'reader')) return { state: 'WITHHELD', checkedMemoryIds };
       if (malformed) continue; // no farther mapping may replace the nearest malformed entry
-      const node = await this.tx.node.findFirst({
-        where: { memoryId: id, loc: 'register:' + code, deletedAt: null,
-          ...(id !== memoryId ? { nodeType: { not: 'comment' }, OR: [{ role: null }, { NOT: [{ role: 'boot-prompt' }, { role: { startsWith: 'boot-prompt.' } }] }] } : {}) },
-        select: { data: true, memory: { select: { deletedAt: true } } },
-      });
+      // #2950: the row comes from the transaction's shared rows, read only after THIS principal's gate above.
+      const row = await this.data.entryRow(id, code);
+      const node = row && (id === memoryId || inheritable(row)) ? row : null;
       if (!node) continue;
-      const loc = node.memory.deletedAt ? null : registerTaskLoc(node.data, code);
+      const loc = node.memoryDeleted ? null : registerTaskLoc(node.data, code);
       if (loc) return { state: 'FOUND', taskLoc: loc, memoryId: id, checkedMemoryIds };
       malformed = true;
     }
@@ -120,7 +206,17 @@ export class RegisterLookup {
     this.checkDeadline();
     const key = memoryId + '\u0000' + loc;
     let result = this.tasks.get(key);
-    if (!result) { result = nearestRoleTask(this.tx, memoryId, loc, id => this.readable(this.ctx, id, 'self')); this.tasks.set(key, result); }
+    if (!result) { result = this.resolveTask(memoryId, loc); this.tasks.set(key, result); }
     return result;
+  }
+
+  /** {@link nearestRoleTask} over the shared rows: locate once, gate the chosen memory as THIS principal, never substitute a farther task. */
+  private async resolveTask(memoryId: string, loc: string): Promise<RoleTask | null> {
+    const hit = await this.data.taskLocation(memoryId, loc);
+    if (!hit) return null;
+    if (!await this.readable(this.ctx, hit.memoryId, 'self')) return { memoryId: hit.memoryId, task: null };
+    const node = await this.data.taskRow(hit.id, hit.memoryId);
+    return { memoryId: hit.memoryId, task: node && !node.memoryDeleted && node.isRunnable
+      ? { loc: node.loc, urn: 'hrn:node:' + node.urn + ':' + node.loc } : null };
   }
 }
