@@ -72,7 +72,7 @@ import { recoveryMemoryIds } from './resolvers.recovery.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
-import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
+import { refHasUnstorableChars, refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
 import {
@@ -482,6 +482,11 @@ export const nodeQueries = {
     // Spec: cor:api:180 — cross-entity URN resolution
     // (:00 surface & result shape, :01 resolution semantics).
     resolveUrn: async (_: unknown, { urn }: { urn: string }, ctx: Context) => {
+      // #2975 (§10 P2 on #3134): a NUL or a lone surrogate passes the urn-lib
+      // grammar but no stored URN holds one, and Postgres rejects it as a
+      // parameter. It names nothing, so refuse it here, before any lookup,
+      // rather than let the driver error reach the narrowed catches as a fault.
+      if (refHasUnstorableChars(urn)) return null;
       const isGlobalAdmin =
         !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
       // Membership check mirroring the per-kind queries' "member of the org"

@@ -37,3 +37,15 @@ export function refNamesNothing(
   if (opts.ambiguousNamesNothing && error instanceof AmbiguousLegacyUrnError) return true;
   return false;
 }
+
+/**
+ * #2975 (§10 P2 on #3134): true when `ref` holds a code point no stored URN
+ * can contain, NUL or a lone UTF-16 surrogate. The urn-lib grammar admits
+ * such a ref, but Postgres rejects it as a query parameter, so the lookup
+ * throws a driver error. That error is a fault, and `refNamesNothing` must not
+ * learn Prisma codes (that would hide real faults). A caller rejects the ref
+ * before the lookup instead: it names nothing.
+ */
+export function refHasUnstorableChars(ref: string): boolean {
+  return /\0|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(ref);
+}
