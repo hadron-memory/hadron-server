@@ -10,6 +10,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { normalizeTaskReferences, referenceKind, TaskReferenceError } from '../../../lib/agentTasks/references.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 const M = resolvers.Mutation as any;
@@ -194,6 +195,16 @@ describe('references refusals write nothing (#2649)', () => {
     ['URL', ' https://example.com'],
     ['URL', 'https://example.com/a b'],
     ['URL', ''],
+    // Joost's BLIND P2: shapes the URL parser silently repairs, so the stored string would not be what it accepted.
+    ['ISSUE', 'https:github.com/hadron-memory/hadron-server/issues/2649'],
+    ['PULL_REQUEST', 'https:///github.com/hadron-memory/hadron-server/pull/3104'],
+    ['URL', 'https:example.com/x'],
+    ['URL', 'http:/example.com/x'],
+    ['URL', 'https://example.com\\path'],
+    ['URL', 'http:\\\\example.com'],
+    ['URL', 'https://example.com/\u0001x'],
+    ['URL', 'https://example.com/\u007fx'],
+    ['NODE', `${NODE}\u0000`],
   ];
   it.each(malformed)('create refuses %s target %j with BAD_USER_INPUT and makes no task', async (kind, target) => {
     const before = await db.agentTask.count();
@@ -208,6 +219,12 @@ describe('references refusals write nothing (#2649)', () => {
     expect(row.title).toBe('Keep');
     expect(row.references).toHaveLength(3);
     expect(await edited(t.id)).toHaveLength(0);
+  });
+
+  // Joost's BLIND P3: the helper's lookup must not admit an inherited property name as a kind.
+  it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf'])('referenceKind refuses the inherited name %s', (name) => {
+    expect(() => referenceKind(name)).toThrow(TaskReferenceError);
+    expect(() => normalizeTaskReferences([{ kind: name, target: URL_REF }])).toThrow(TaskReferenceError);
   });
 
   it('an unknown kind is refused', async () => {
