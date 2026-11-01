@@ -1,5 +1,5 @@
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-/** #2278 — roster model metadata uses the existing batched binding fold. */
+/** #2831 S3 — live model-group membership uses the existing binding fold and audiences. */
 
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
@@ -75,6 +75,10 @@ describe('#2831 S3 current model groups', () => {
     const rows = (result.data as any).teamRoster.workers;
     expect(rows.find((r: any) => r.worker.name === 'Anne').modelGroups).toEqual(['all', 'custom']);
     expect(rows.find((r: any) => r.worker.name === 'Kit').modelGroups).toEqual([]);
+    const wire = await server.executeOperation({ query: `{ worker(ref: "${w.Anne.id}") { modelGroups } }` }, { contextValue: ctx(mia.id) });
+    if (wire.body.kind !== 'single') throw new Error('unexpected incremental result');
+    expect(wire.body.singleResult.errors).toBeUndefined();
+    expect((wire.body.singleResult.data as any).worker.modelGroups).toEqual(['all', 'custom']);
     expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).toEqual(['all', 'custom']);
   });
 
@@ -112,4 +116,60 @@ describe('#2831 S3 current model groups', () => {
     expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(outsider.id))).toBeNull();
     expect((await projected(outsider.id)).errors?.[0].extensions?.code).toBe('APP_NOT_FOUND');
   });
+  it('batches group reads across Worker query fields and re-reads mutations', async () => {
+    await group('all', ['*']);
+    await session('Anne', { llmModel: 'model' });
+    await session('Kit', { llmModel: 'model' });
+    let reads = 0;
+    const traced = db.$extends({ query: { modelGroup: { findMany: async ({ args, query }) => { reads++; return query(args); } } } });
+    const c = { ...ctx(mia.id), db: traced };
+    const worker = (name: string) => ({ id: w[name].id, appId: app.id });
+    await Promise.all(['Anne', 'Kit'].map(name => F.Worker.modelGroups(worker(name), {}, c, { operation: { operation: 'query' } })));
+    expect(reads).toBe(1); // No Team Agent installed: one App-list query for all workers.
+    await db.modelGroup.deleteMany({ where: { appId: app.id } });
+    expect(await F.Worker.modelGroups(worker('Anne'), {}, c, { operation: { operation: 'mutation' } })).toEqual([]);
+    expect(reads).toBe(2);
+  });
+
+  it('never reads groups for a denied Worker, and never uses another App group', async () => {
+    const spy = vi.spyOn(db.modelGroup, 'findMany');
+    expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(outsider.id))).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    const other = await db.app.create({ data: { organizationId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name: 'Other', urn: `${appUrn}-other` } });
+    await db.modelGroup.create({ data: { appId: other.id, name: 'wrong-app', patterns: ['*'] } });
+    await session('Anne', { llmModel: 'model' });
+    expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).toEqual([]);
+  });
+
+  it('uses one group resolution for roster growth and leaves work decisions untouched', async () => {
+    await group('all', ['*']);
+    await session('Anne', { llmModel: 'model' });
+    let reads = 0;
+    const traced = db.$extends({ query: { modelGroup: { findMany: async ({ args, query }) => { reads++; return query(args); } } } });
+    const read = () => Q.teamRoster({}, { appRef: app.id }, { ...ctx(mia.id), db: traced });
+    const before = await read();
+    expect(reads).toBe(1);
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Extra', slug: 'extra', heldByUserId: mia.id } });
+    const grown = await read();
+    expect(reads).toBe(2);
+    expect(grown.workers).toHaveLength(before.workers.length + 1);
+    const decisions = (rows: any[]) => rows.map(({ workerId, family, state, free, liveSession, bound }) => ({ workerId, family, state, free, liveSession, bound }));
+    await db.modelGroup.updateMany({ where: { appId: app.id }, data: { patterns: [] } });
+    const after = await read();
+    expect(decisions(after.workers)).toEqual(decisions(grown.workers));
+    expect(after.workers.every((row: any) => row.modelGroups.length === 0)).toBe(true);
+  });
+
+  it('preserves the effective-group typed refusal for ambiguous Team Agents', async () => {
+    for (const name of ['Team A', 'Team B']) {
+      const agent = await M.createAgent({}, { orgId: (await db.app.findUniqueOrThrow({ where: { id: app.id } })).organizationId, name }, ctx(admin.id));
+      await db.node.create({ data: { memoryId: agent.systemMemoryId, loc: 'roles:engineer', name: 'engineer', content: '' } });
+      await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    }
+    await session('Anne', { llmModel: 'model' });
+    await expect(F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).rejects.toMatchObject({ extensions: { code: 'TEAM_AGENT_AMBIGUOUS' } });
+    expect((await projected()).errors?.[0].extensions?.code).toBe('TEAM_AGENT_AMBIGUOUS');
+  });
+
 });

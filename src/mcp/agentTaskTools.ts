@@ -61,6 +61,7 @@ const QA = resolvers.Query as unknown as {
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
 type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  modelGroups?: string[];
   teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
@@ -119,6 +120,7 @@ function refusal(e: unknown) {
 /** One roster line at the server's read instant, including stored pause history with explicit tense. */
 export function renderRosterEntry(r: RosterRow, asOf: Date): string {
   const facts = [
+    r.modelGroups ? `model groups ${r.modelGroups.length ? r.modelGroups.join('/') : 'none'}` : null,
     r.role ? `role ${r.role}` : null,
     r.bound
       ? `bound${r.family ? ` as ${r.family}` : ', no model family reported'}${r.liveSession ? '' : ' (session quiet)'}`

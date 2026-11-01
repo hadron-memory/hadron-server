@@ -1,3 +1,4 @@
+import { matchingModelGroupNames } from '../../../lib/agentTasks/modelGroups.js';
 // #1707 — Task Management slice T3: the team roster (plan
 // design:agent-tasks §7.4). Matching itself has no public surface: the
 // platform assigns (src/lib/agentTasks/matcher.ts). Host registration is a
@@ -16,7 +17,7 @@ import { loadRosterTaskSummaries, type RosterTaskSummary } from '../../../lib/ag
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { loadTeamRoster, type RosterEntry } from '../../../lib/agentTasks/roster.js';
 import type { WorkerCheckStatus } from '../../../lib/workerCheckStatus.js';
-import { loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
+import { loadAppModelGroups, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from './resolvers.worker.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import { groupComposition } from '../../../lib/agentTasks/composition.js';
 import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.js';
@@ -30,8 +31,9 @@ async function readTeamRoster(ctx: Context, appRef: string) {
       const readCtx = withoutRequestCaches(ctx, tx);
       const { app } = await resolveParticipatedApp(readCtx, appRef);
       const asOf = new Date();
-      const [entries, checks] = await Promise.all([
+      const [entries, groups, checks] = await Promise.all([
         loadTeamRoster(tx, app.id, asOf),
+        loadAppModelGroups(readCtx, app.id),
         // #2138 §3.4 — the same derivation as Worker.checkStatus, at the roster's instant.
         loadAppWorkerCheckStatuses(readCtx, app.id, { now: asOf }),
       ]);
@@ -47,7 +49,7 @@ async function readTeamRoster(ctx: Context, appRef: string) {
       return {
         appId: app.id,
         asOf,
-        workers: entries.map((e) => ({ ...e, teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
+        workers: entries.map((e) => ({ ...e, modelGroups: matchingModelGroupNames(groups, e.model), teamPlacement: workingStateVisible ? e.teamPlacement : null, appUrn: app.urn, checkStatus: checks.get(e.workerId) ?? null,
           pausedUntil: pauses.get(e.workerId) ?? null, currentTask: tasks.get(e.workerId) ?? null,
           heldBy: holders.get(e.workerId)?.heldBy ?? null, heldAt: holders.get(e.workerId)?.heldAt ?? null,
           terminal: terminals.get(e.workerId) ?? null })),
@@ -111,6 +113,7 @@ async function loadRosterWorkingState(
 }
 
 type RosterRow = Omit<RosterEntry, 'teamPlacement'> & {
+  modelGroups: string[];
   teamPlacement: RosterEntry['teamPlacement'] | null;
   appUrn: string; checkStatus: WorkerCheckStatus | null; pausedUntil: Date | null; currentTask: RosterTaskSummary | null;
   heldBy: RosterHolder | null; heldAt: Date | null; terminal: StoredWorkerTerminal | null;

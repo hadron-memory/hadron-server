@@ -1,3 +1,4 @@
+import { effectiveModelGroups, matchingModelGroupNames, type EffectiveModelGroup } from '../../../lib/agentTasks/modelGroups.js';
 import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
@@ -2714,6 +2715,25 @@ async function mayReadUserOwnedAgentTemplate(ctx: Context, workerId: string, age
   return w?.heldByUserId === ctx.userId;
 }
 
+/** Live group resolution, shared by Worker fields and the roster's repeatable-read snapshot. */
+export async function loadAppModelGroups(ctx: Context, appId: string, memoize = false): Promise<EffectiveModelGroup[]> {
+  type Cache = Map<string, Promise<EffectiveModelGroup[]>>;
+  const holder = ctx as Context & { workerModelGroupsCache?: Cache };
+  const cache = memoize ? (holder.workerModelGroupsCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+  const pending = (async () => {
+    let teamAgentId: string | null = null;
+    try { teamAgentId = (await locateTeamAgent(ctx, appId, undefined)).id; }
+    catch (error) {
+      if (!(error instanceof GraphQLError && error.extensions?.code === 'TEAM_AGENT_NOT_FOUND')) throw error;
+    }
+    return effectiveModelGroups(ctx.db, appId, teamAgentId);
+  })();
+  cache?.set(appId, pending);
+  return pending;
+}
+
 export async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
   type Cache = Map<string, Promise<boolean>>;
   const holder = ctx as Context & { workerInternalsCache?: Cache };
@@ -3253,6 +3273,18 @@ export const workerFieldResolvers = {
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
+    /** Live advisory membership uses the same newest-open model and working-state gate as `model`. */
+    modelGroups: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string[] | null> => {
+      if (!await maySeeWorkerInternals(ctx, worker.appId)) return null;
+      const activity = await bindingModelOf(ctx, worker, info);
+      if (!activity?.bindingModel) return [];
+      return matchingModelGroupNames(await loadAppModelGroups(ctx, worker.appId, info?.operation?.operation === 'query'), activity.bindingModel);
+    },
     /** #2252 — when that model was self-reported; null when the session never reported one. */
     modelReportedAt: async (
       worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
