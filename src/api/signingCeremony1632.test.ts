@@ -2,11 +2,13 @@
  * #1632 S2b-2 (cor:dmo:130:08, :02, :03; cor:aut:040:06) — the server-hosted signing ceremony, over the real HTTP
  * transport against a real database and a software passkey.
  *
- *   GET  /signing/:id            a static shell, the same for every id; nothing about any node
- *   POST /signing/:id/challenge  opens a proof ceremony for this browser; the same answer for every id
- *   POST /signing/:id/proof      a passkey assertion over it: read access + named-signer match, THEN the content
- *   POST /signing/:id/complete   the signing assertion; one transaction (ceremony, counter, record, end)
- *   POST /signing/:id/decline    the proven signer turns the request down
+ *   GET  /signing/:id                a static shell, the same for every id; nothing about any node
+ *   POST /signing/:id/proof/challenge opens a SIGN_PROOF ceremony for this browser; the same answer for every id
+ *   POST /signing/:id/proof          a passkey assertion over it: read access + named-signer match, THEN the content;
+ *                                    mints the ONE signing ceremony for a proven writer
+ *   POST /signing/:id/challenge      reads that ceremony's bound challenge (SHA-256 of the v3 payload); mints nothing
+ *   POST /signing/:id/complete       the signing assertion; one transaction (ceremony, counter, record, end)
+ *   POST /signing/:id/decline        the proven signer turns the request down
  *
  * Mounted only through signingSurfacePolicy(); off is an ordinary 404.
  */
@@ -22,6 +24,7 @@ import { createSigningRequestInTransaction, withdrawSigningRequestInTransaction 
 import { loadSignatureStatuses } from '../lib/signing/status.js';
 import { signatureChallenge, signaturePayloadBytes } from '../lib/signing/payload.js';
 import { clearSignatureVerifyCache } from '../lib/signing/verify.js';
+import { resolvers } from './graphql/schema/resolvers.js';
 
 const ORIGIN = 'https://sign.example.test';
 const RP = 'example.test';
@@ -61,7 +64,8 @@ beforeEach(async () => {
   reader = await person('cer-reader', 'READER', org.id);
   otherWriter = await person('cer-other-writer', 'CONTRIBUTOR', org.id);
   outsider = await person('cer-outsider', null, org.id);
-  nodeId = (await createDbNode(db, { loc: 'policies:retention', memoryId, name: TITLE, abstract: ABSTRACT, content: CONTENT })).id;
+  nodeId = (await createDbNode(db, { loc: 'policies:retention', memoryId, name: TITLE, content: CONTENT })).id;
+  await db.node.update({ where: { id: nodeId }, data: { abstract: ABSTRACT } });
   server = httpServer(await createServer());
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -91,7 +95,7 @@ interface Proved { cookie: string; ceremonyId: string; json: any; status: number
 
 /** Open a proof ceremony and answer it with `who`'s passkey (counter 1). */
 async function prove(id: string, who: { key: SoftPasskey }, over: { uv?: boolean; origin?: string; counter?: number } = {}): Promise<Proved> {
-  const c = await post(id, 'challenge', {});
+  const c = await post(id, 'proof/challenge', {});
   expect(c.status).toBe(200);
   const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
@@ -100,7 +104,13 @@ async function prove(id: string, who: { key: SoftPasskey }, over: { uv?: boolean
     origin: over.origin ?? ORIGIN, rpId: RP, counter: over.counter ?? 1, uv: over.uv,
   });
   const r = await post(id, 'proof', assertionBody(ceremonyId, who.key, a), cookie);
-  return { cookie, ceremonyId, status: r.status, json: await r.json().catch(() => null) };
+  const json = await r.json().catch(() => null);
+  // After a proof that opened a signing ceremony, `/challenge` hands over its bound challenge (it mints nothing).
+  if (json?.outcome === 'open') {
+    const s = await post(id, 'challenge', {}, cookie);
+    json.signing = s.status === 200 ? await s.json() : null;
+  }
+  return { cookie, ceremonyId, status: r.status, json };
 }
 
 function assertionBody(ceremonyId: string, key: SoftPasskey, a: ReturnType<SoftPasskey['assert']>) {
@@ -133,11 +143,13 @@ describe('the surface is mounted only through signingSurfacePolicy()', () => {
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const never = await fetch(`${base}/nothing-here/${req.id}`);
     const neverPost = await fetch(`${base}/nothing-here/${req.id}/proof`, { method: 'POST' });
-    for (const [method, path, ref] of [['GET', '', never], ['POST', '/challenge', neverPost], ['POST', '/proof', neverPost],
-      ['POST', '/complete', neverPost], ['POST', '/decline', neverPost]] as const) {
+    for (const [method, path, ref] of [['GET', '', never], ['POST', '/proof/challenge', neverPost], ['POST', '/proof', neverPost],
+      ['POST', '/challenge', neverPost], ['POST', '/complete', neverPost], ['POST', '/decline', neverPost]] as const) {
       const r = await fetch(`${base}/signing/${req.id}${path}`, { method, headers: { origin: ORIGIN } });
       expect(r.status, `${method} ${path}`).toBe(ref.status);
-      expect(await r.text(), `${method} ${path}`).toBe(await ref.clone().text());
+      // Express's default 404 names the path it was asked for: compare with each request's own path masked.
+      expect((await r.text()).replaceAll(`/signing/${req.id}${path}`, '<path>'), `${method} ${path}`)
+        .toBe((await ref.clone().text()).replaceAll(ref === never ? `/nothing-here/${req.id}` : `/nothing-here/${req.id}/proof`, '<path>'));
     }
     expect((await fetch(`${base}/signing/ceremony.js`)).status).toBe(404);
   });
@@ -173,13 +185,13 @@ describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
 
   it('the challenge answer is the same shape for a real request and an unknown one, and needs an allowed Origin', async () => {
     const req = await openRequest();
-    const a = await post(req.id, 'challenge', {});
-    const b = await post('B'.repeat(22), 'challenge', {});
+    const a = await post(req.id, 'proof/challenge', {});
+    const b = await post('B'.repeat(22), 'proof/challenge', {});
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     expect(Object.keys(await a.json()).sort()).toEqual(Object.keys(await b.json()).sort());
     for (const origin of ['https://evil.example', null]) {
-      const r = await post(req.id, 'challenge', {}, undefined, origin);
+      const r = await post(req.id, 'proof/challenge', {}, undefined, origin);
       expect(r.status).toBe(403);
       expect(await r.text()).toBe(FORBIDDEN);
     }
@@ -187,7 +199,7 @@ describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
 
   it('sets a strict HttpOnly browser cookie scoped to the ceremony path', async () => {
     const req = await openRequest();
-    const c = await post(req.id, 'challenge', {});
+    const c = await post(req.id, 'proof/challenge', {});
     const cookie = c.headers.get('set-cookie') ?? '';
     expect(cookie).toMatch(/HttpOnly/i);
     expect(cookie).toMatch(/SameSite=Strict/i);
@@ -257,7 +269,7 @@ describe('passkey-proven read access and the named-signer match come BEFORE any 
 
   it('refuses a proof by another browser, a forged cookie, an unlisted Origin, no user verification, and a replay', async () => {
     const req = await openRequest();
-    const c = await post(req.id, 'challenge', {});
+    const c = await post(req.id, 'proof/challenge', {});
     const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
     const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
     const answer = (over: { uv?: boolean; origin?: string } = {}) => assertionBody(ceremonyId, signer.key, signer.key.assert({
@@ -282,7 +294,7 @@ describe('passkey-proven read access and the named-signer match come BEFORE any 
   it('a proof ceremony is bound to its request: one opened for request A proves nothing at request B', async () => {
     const a = await openRequest();
     const b = await openRequest();
-    const c = await post(a.id, 'challenge', {});
+    const c = await post(a.id, 'proof/challenge', {});
     const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
     const { ceremonyId, challenge } = await c.json() as { ceremonyId: string; challenge: string };
     const assertion = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(challenge, 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
@@ -293,28 +305,35 @@ describe('passkey-proven read access and the named-signer match come BEFORE any 
     expect((await post(a.id, 'proof', assertionBody(ceremonyId, signer.key, assertion), cookie)).status).toBe(200);
   });
 
-  it('only /proof mints a signing ceremony: /challenge opens a proof ceremony that can never sign, and a new proof retires the old signing ceremony', async () => {
+  it('only /proof mints a signing ceremony: /proof/challenge opens one that can never sign, /challenge only reads the minted one back, and a new proof retires the old', async () => {
     const req = await openRequest();
-    const c = await post(req.id, 'challenge', {});
-    const challengeBody = await c.json() as Record<string, unknown>;
-    expect(Object.keys(challengeBody).sort()).toEqual(['ceremonyId', 'challenge', 'rpId']);
+    const c = await post(req.id, 'proof/challenge', {});
+    const proofOpen = await c.json() as Record<string, unknown>;
+    expect(Object.keys(proofOpen).sort()).toEqual(['ceremonyId', 'challenge', 'rpId']);
     expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN' } })).toBe(0);
-    // A proof ceremony's own challenge, answered at /complete, signs nothing.
     const cookie = (c.headers.get('set-cookie') ?? '').split(';')[0]!;
-    const a = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(String(challengeBody.challenge), 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
-    expect((await post(req.id, 'complete', assertionBody(String(challengeBody.ceremonyId), signer.key, a), cookie)).status).toBe(403);
+    // Before a proof there is nothing to read back, and a proof ceremony's own challenge, answered at /complete, signs nothing.
+    expect((await post(req.id, 'challenge', {}, cookie)).status).toBe(403);
+    const a = signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(String(proofOpen.challenge), 'base64url'), origin: ORIGIN, rpId: RP, counter: 1 });
+    expect((await post(req.id, 'complete', assertionBody(String(proofOpen.ceremonyId), signer.key, a), cookie)).status).toBe(403);
     expect(await db.nodeSignature.count()).toBe(0);
-    // Two proofs in one browser: only the newest signing ceremony is live.
+    // /proof mints exactly one; /challenge, called twice, returns that same one and mints no other.
     const first = await prove(req.id, signer);
-    const cookieJar = first.cookie;
-    const c2 = await post(req.id, 'challenge', {}, cookieJar);
-    const ck2 = (c2.headers.get('set-cookie') ?? '').split(';')[0] || cookieJar;
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN' } })).toBe(1);
+    const again = await (await post(req.id, 'challenge', {}, first.cookie)).json() as { ceremonyId: string };
+    expect(again.ceremonyId).toBe(first.json.signing.ceremonyId);
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN' } })).toBe(1);
+    // Another browser holds no signing ceremony: /challenge refuses it uniformly.
+    const other = await post(req.id, 'proof/challenge', {});
+    expect((await post(req.id, 'challenge', {}, (other.headers.get('set-cookie') ?? '').split(';')[0]!)).status).toBe(403);
+    // A newer proof in the SAME browser retires the earlier signing ceremony; only the newest is live.
+    const c2 = await post(req.id, 'proof/challenge', {}, first.cookie);
+    const ck2 = (c2.headers.get('set-cookie') ?? '').split(';')[0] || first.cookie;
     const { ceremonyId: id2, challenge: ch2 } = await c2.json() as { ceremonyId: string; challenge: string };
     const proof2 = await post(req.id, 'proof', assertionBody(id2, signer.key, signer.key.assert({ payload: Buffer.alloc(0), rawChallenge: Buffer.from(ch2, 'base64url'), origin: ORIGIN, rpId: RP, counter: 2 })), ck2);
     expect(proof2.status).toBe(200);
-    const live = await db.passkeyCeremony.findMany({ where: { purpose: 'SIGN', consumedAt: null } });
-    expect(live).toHaveLength(1);
-    const staleTry = await post(req.id, 'complete', signingBody(first, signer.key, { counter: 3 }), ck2 === cookieJar ? first.cookie : cookieJar);
+    expect(await db.passkeyCeremony.count({ where: { purpose: 'SIGN', consumedAt: null } })).toBe(1);
+    const staleTry = await post(req.id, 'complete', signingBody(first, signer.key, { counter: 3 }), ck2);
     expect(staleTry.status).toBe(403);
     expect(await db.nodeSignature.count()).toBe(0);
   });
@@ -335,7 +354,8 @@ describe('passkey-proven read access and the named-signer match come BEFORE any 
     const first = await openRequest();
     const p1 = await prove(first.id, signer);
     expect((await post(first.id, 'complete', signingBody(p1, signer.key), p1.cookie)).status).toBe(200);
-    await db.node.update({ where: { id: nodeId }, data: { content: 'Records are kept 90 days.\n' } });
+    // A real edit (it snapshots the signed text and bumps the revision), not a raw column write.
+    await resolvers.Mutation.updateNode(null, { input: { id: nodeId, content: 'Records are kept 90 days.\n' } }, { db, userId: requester.id, roles: [] } as never);
     const second = await openRequest();
     const p2 = await prove(second.id, signer, { counter: 3 });
     const prev = p2.json.view.previous;
@@ -415,7 +435,7 @@ describe('completing: one transaction, every refusal rolls back all of it', () =
   it('refuses a complete with another browser\'s cookie, and one with no Origin', async () => {
     const req = await openRequest();
     const p = await prove(req.id, signer);
-    const other = await post(req.id, 'challenge', {});
+    const other = await post(req.id, 'proof/challenge', {});
     const otherCookie = (other.headers.get('set-cookie') ?? '').split(';')[0]!;
     expect((await post(req.id, 'complete', signingBody(p, signer.key), otherCookie)).status).toBe(403);
     expect((await post(req.id, 'complete', signingBody(p, signer.key), p.cookie, null)).status).toBe(403);
@@ -463,7 +483,7 @@ describe('completing: one transaction, every refusal rolls back all of it', () =
       const { r, body } = await attempt(async (req) => {
         await db.$transaction(async (tx) => {
           await tx.$executeRaw`ALTER TABLE signing_requests DISABLE TRIGGER signing_request_guard`;
-          await tx.$executeRaw`UPDATE signing_requests SET expires_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) - interval '1 second' WHERE id = ${req.id}`;
+          await tx.$executeRaw`UPDATE signing_requests SET created_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) - interval '2 hours', expires_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3) - interval '1 second' WHERE id = ${req.id}`;
           await tx.$executeRaw`ALTER TABLE signing_requests ENABLE TRIGGER signing_request_guard`;
         });
       });
@@ -501,10 +521,10 @@ describe('completing: one transaction, every refusal rolls back all of it', () =
   it('two completes racing on one request: exactly one wins', async () => {
     const req = await openRequest();
     const p = await prove(req.id, signer);
-    const q = await prove(req.id, signer, { counter: 1 });
+    const q = await prove(req.id, signer, { counter: 2 });
     const results = await Promise.all([
-      post(req.id, 'complete', signingBody(p, signer.key, { counter: 2 }), p.cookie),
-      post(req.id, 'complete', signingBody(q, signer.key, { counter: 3 }), q.cookie),
+      post(req.id, 'complete', signingBody(p, signer.key, { counter: 3 }), p.cookie),
+      post(req.id, 'complete', signingBody(q, signer.key, { counter: 4 }), q.cookie),
     ]);
     expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(await db.nodeSignature.count()).toBe(1);
@@ -528,7 +548,7 @@ describe('declining', () => {
     const a = await openRequest();
     const b = await openRequest();
     const pa = await prove(a.id, signer);
-    const stranger = await post(a.id, 'challenge', {});
+    const stranger = await post(a.id, 'proof/challenge', {});
     const strangerCookie = (stranger.headers.get('set-cookie') ?? '').split(';')[0]!;
     expect((await post(a.id, 'decline', { ceremonyId: pa.json.signing.ceremonyId }, strangerCookie)).status).toBe(403);
     expect((await post(a.id, 'decline', {}, pa.cookie)).status).toBe(403);
