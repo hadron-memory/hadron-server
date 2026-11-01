@@ -7,6 +7,8 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
+import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
+import { generateId } from '../lib/id.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithub:vi.fn().mockResolvedValue({error:null})}));
@@ -75,6 +77,43 @@ it('#1793 each MCP tool call uses its current request IP, not the initialize add
   const buckets=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS',dimension:'ip'}});
   expect(buckets).toHaveLength(2);expect(buckets.map(r=>r.used)).toEqual([1n,1n]);
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([2n]);
+});
+
+it('#1793 an App key charges principal, actual key and IP identically over GraphQL and MCP',async()=>{
+  const suffix=generateId();
+  const org=await db.organization.create({data:{name:'rate-app',urn:`rate-org-${suffix}`}});
+  const app=await db.app.create({data:{name:'rate-app',urn:`${org.urn}:rate-app`,organizationId:org.id}});
+  const raw=APP_KEY_PREFIX+'a'.repeat(64);
+  await db.appKey.create({data:{appId:app.id,keyHash:hashAppKey(raw),keyPreview:'test'}});
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const r=await fetch(base+'/graphql',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${raw}`},body:JSON.stringify({query:'query { findNodes(limit:0) { total } }'})});
+  expect((await r.json() as {errors?:unknown}).errors).toBeUndefined();
+  const before=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS'},orderBy:{dimension:'asc'}});
+  expect(before.map(r=>r.dimension)).toEqual(['ip','key','principal']);
+  expect(before.map(r=>r.used)).toEqual([1n,1n,1n]);
+  client=new Client({name:'rate1793-app-key',version:'1'});
+  await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${raw}`}}}));
+  const result=await client.callTool({name:'hadron_find_nodes',arguments:{query:'*',allMemories:true,limit:1}});
+  expect(result.isError).not.toBe(true);
+  const after=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS'},orderBy:{dimension:'asc'}});
+  expect(after.map(r=>({dimension:r.dimension,subject:r.subject,used:r.used})))
+    .toEqual(before.map(r=>({dimension:r.dimension,subject:r.subject,used:2n})));
+});
+
+it('#1793 an empty named MCP scope is still one admitted search attempt',async()=>{
+  const u=await db.user.create({data:{githubId:179395,githubUsername:'rate-empty-scope',roles:['READER']}});
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['READER']});
+  await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
+  client=new Client({name:'rate1793-empty',version:'1'});
+  await client.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'),{requestInit:{headers:{Authorization:`Bearer ${token}`}}}));
+  const read=()=>client!.callTool({name:'hadron_find_nodes',arguments:{query:'*',scope:'global',limit:1}});
+  const first=await read();expect(first.isError).not.toBe(true);
+  expect(JSON.stringify(first.content)).toContain('Found 0 node(s)');
+  expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
+  expect(await read()).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'}}});
 });
 
 it('#1793 live manifest/key disagreement makes existing health readiness fail without exposing secrets',async()=>{
