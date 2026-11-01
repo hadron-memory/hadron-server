@@ -47,6 +47,11 @@ export interface MirrorRepo {
   obligations?: readonly MirrorObligationRef[];
 }
 
+/** Row-local payload refusals in a retry batch; healthy siblings retain their own result. */
+export interface MirrorMutationResult {
+  failedWrites: readonly string[];
+}
+
 /**
  * Why a mirror attempt ended. Only `mirrored` means the repository changed.
  * `skipped` covers every "this memory isn't mirrored here" reason (DB-only
@@ -91,7 +96,7 @@ export async function withMirrorCheckout(
     /** A pushed/no-change checkout must satisfy this before its debt is cleared. */
     verify?: (repo: MirrorRepo) => boolean | Promise<boolean>;
   },
-  mutate: (repo: MirrorRepo) => void | boolean | Promise<void | boolean>,
+  mutate: (repo: MirrorRepo) => void | boolean | MirrorMutationResult | Promise<void | boolean | MirrorMutationResult>,
 ): Promise<MirrorOutcome> {
   const { memoryId, ownerRepo, clientId, commitSubject, logPrefix } = opts;
   const db = opts.db ?? defaultDb;
@@ -295,6 +300,19 @@ export async function withMirrorCheckout(
           return current ? 'refused-encrypted' : 'skipped';
         }
         const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn, obligations });
+        if (typeof shouldCommit === 'object' && shouldCommit !== null) {
+          if (!opts.retry || attemptSeq === null) throw new Error('Row-local outcomes require an admitted retry');
+          const ids = new Set(shouldCommit.failedWrites);
+          const failed = obligations.filter(r => r.kind === 'WRITE' && ids.has(r.nodeId));
+          await settleMirrorObligations(db, resolvedMemoryId, failed, { result: 'failed', errorClass: 'TREE_WRITE' },
+            attemptSeq, opts.retry.maxAttempts, { targetBranch: attemptedBranch });
+          obligations = obligations.filter(r => r.kind !== 'WRITE' || !ids.has(r.nodeId));
+          if (!obligations.length) {
+            settlement = null;
+            await restoreRemote(localPath, memory.source);
+            return 'skipped';
+          }
+        }
         if (shouldCommit === false) {
           await restoreRemote(localPath, memory.source);
           return 'skipped';

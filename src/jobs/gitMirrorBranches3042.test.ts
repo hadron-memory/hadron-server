@@ -49,7 +49,10 @@ vi.mock('../integrations/github/execGit.js', () => ({
   }),
 }));
 
-import { withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
+import { branchFitsTemplate, withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
+import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
+import { isValidGitBranch } from '../lib/gitRef.js';
+import { Prisma } from '../generated/prisma/index.js';
 import { writeNodeToGit } from '../integrations/github/writeNodeToGit.js';
 import { settleMirrorObligations, takeAttemptSeq, type MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
 
@@ -136,7 +139,36 @@ const on = (branch: string, loc='topic') => git(env.bare,'show',`refs/heads/${br
 const rekey = (nodeId: string, from: string, to: string, seq: bigint, result: 'failed'|'cleared'='failed', cap=10) =>
  settleMirrorObligations(db,memoryId,[ref(nodeId,from)], result==='cleared'?{result}:{result,errorClass:'PUSH_FAILED'},seq,cap,{targetBranch:to});
 
-it.each(['drifted/A', '-invalid'])('retained unroutable %s cannot starve a healthy row at budget one', async branch => {
+it('SQL selection agrees with the authoritative branch guard and first-placeholder routing', async () => {
+ const branches = ['', 'main', 'client/A', 'client/é', 'client/K', '-x', '+x', '.x', 'x/.y', 'x.', 'x.lock', 'x.lock/y', 'x..y', '/x', 'x/', 'x//y', '@', 'x@{y',
+   ...['\u0001','\u001f','\u007f',' ','~','^',':','?','*','[','\\'].map(c => `client/a${c}b`),
+   'x_{client}', 'client/{client}', 'client/a/{client}', 'a\u0080b'];
+ for (const template of [null, 'fixed-now', '-invalid', '{client}', 'client/{client}', 'client/{client}/{client}']) {
+  for (const branch of branches) {
+   const raw = template ?? 'hadron-updates';
+   const final = raw.includes('{client}') ? branch : raw;
+   const expected = isValidGitBranch(final) && (!raw.includes('{client}') || branchFitsTemplate(raw,branch));
+   const [row] = await db.$queryRaw<Array<{eligible:boolean}>>(Prisma.sql`SELECT ${mirrorRetryBranchEligibleSql(Prisma.sql`${branch}`,Prisma.sql`${template}`)} AS eligible`);
+   expect(row!.eligible, JSON.stringify({template,branch})).toBe(expected);
+  }
+ }
+});
+
+it('twenty unroutable memories do not consume the memory bound ahead of healthy debt', async () => {
+ const home = await db.memory.findUniqueOrThrow({where:{id:memoryId}});
+ for (let i=0;i<20;i++) {
+  const m = await db.memory.create({data:{id:generateId(),organizationId:home.organizationId,name:`stuck${i}`,urn:`mirror430-org:stuck${i}`,class:'knowledge',source:SOURCE,writeBranch:'client/{client}'}});
+  mkdirSync(join(env.root,'mirror430-org',`stuck${i}`,'.git'),{recursive:true});
+  await db.gitMirrorObligation.create({data:{memoryId:m.id,nodeId:`missing${i}`,kind:'WRITE',branch:'drifted/A',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:await takeAttemptSeq(db),lastAttemptAt:new Date(old().getTime()-60_000)}});
+ }
+ const healthy = await makeNode('healthy');await owe(healthy.id,{branch:'hadron-updates'});
+ expect(await tick()).toBe(1);
+ expect(await rows()).toEqual([]);
+ expect(remoteFile('healthy')).toContain('current content');
+ expect(await db.gitMirrorObligation.count()).toBe(20);
+});
+
+it.each(['drifted/A', '-invalid', ''])('retained unroutable %s cannot starve a healthy row at budget one', async branch => {
  const stuck = await makeNode('stuck'), healthy = await makeNode('healthy');
  await db.memory.update({where:{id:memoryId},data:{writeBranch:'client/{client}'}});
  await owe(stuck.id,{branch,lastAttemptAt:new Date(old().getTime()-60_000)});
@@ -157,6 +189,16 @@ it('a ciphertext WRITE cannot exhaust or prevent a healthy sibling in the same b
  expect(await rows()).toEqual([expect.objectContaining({nodeId:bad.id,attempts:10,state:'EXHAUSTED'})]);
  expect(remoteFile('healthy')).toContain('current content');
  expect(git(env.bare,'ls-tree','-r','--name-only','refs/heads/hadron-updates')).not.toContain('bad.md');
+});
+
+it('an all-ciphertext branch retains failed debt without a push', async () => {
+ const bad = await makeNode('bad');
+ await db.node.update({where:{id:bad.id},data:{data:{__enc:'synthetic-envelope'}}});
+ await owe(bad.id,{branch:'hadron-updates'});
+ await tick();
+ expect(await rows()).toEqual([expect.objectContaining({nodeId:bad.id,attempts:2,errorClass:'TREE_WRITE'})]);
+ expect(commands.filter(a=>a[0]==='push')).toEqual([]);
+ expect(existsSync(nodeFilePath(local,'bad'))).toBe(false);
 });
 
 it('records two client branches independently and fences A success away from B',async()=>{

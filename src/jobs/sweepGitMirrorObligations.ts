@@ -10,6 +10,8 @@ import { validateMemorySource } from '../lib/gitSource.js';
 import { mirrorFailureMetadata } from '../integrations/github/mirrorFailureMetadata.js';
 import { type MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
+import { Prisma } from '../generated/prisma/index.js';
+import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
 
 export const MAX_ATTEMPTS = 10;
 const INTERVAL_MS = 10 * 60_000;
@@ -36,7 +38,7 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
           MIN(o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72)) AS "dueAt"
         FROM git_mirror_obligations o JOIN memories m ON m.id = o.memory_id JOIN organizations org ON org.id = m.organization_id
         WHERE o.state IN ('FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
-          AND (m.write_branch IS NULL OR m.write_branch NOT LIKE '%{client}%' OR o.branch <> '')
+          AND ${mirrorRetryBranchEligibleSql(Prisma.sql`o.branch`, Prisma.sql`m.write_branch`)}
           AND NOT m.is_encrypted AND m.source IS NOT NULL AND m.organization_id IS NOT NULL AND m.deleted_at IS NULL
           AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${now}
         GROUP BY m.id, m.source, m.urn, org.urn, m.write_branch
@@ -54,7 +56,7 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
           SELECT node_id AS "nodeId", kind, remove_loc AS "removeLoc", branch
           FROM git_mirror_obligations
           WHERE memory_id = ${candidate.memoryId} AND state IN ('FAILED', 'NOT_CLONED')
-            AND (${candidate.writeBranch?.includes('{client}') ?? false} = false OR branch <> '')
+            AND ${mirrorRetryBranchEligibleSql(Prisma.sql`branch`, Prisma.sql`${candidate.writeBranch}`)}
             AND attempts < ${MAX_ATTEMPTS}
             AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${now}
           ORDER BY last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72),
@@ -93,13 +95,16 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
               return true;
             },
           }, async ({ localPath, memoryUrn, obligations = [] }) => {
-            // Refresh after remote preparation, and preflight the whole batch before any path mutation.
+            // Refresh after preparation. Refuse each unavailable payload before any path mutation;
+            // a row-local failure must not exhaust healthy siblings sharing the checkout.
             const writes = await loadWrites(obligations);
-            if (writes.some(nodePayloadHasCiphertext)) throw new Error('Mirror payload unavailable');
-            for (const node of writes) writeNodeFile(localPath, node, memoryUrn);
+            const failedWrites = writes.filter(nodePayloadHasCiphertext).map(node => node.id);
+            const rejected = new Set(failedWrites);
+            for (const node of writes) if (!rejected.has(node.id)) writeNodeFile(localPath, node, memoryUrn);
             for (const ref of obligations) if (ref.kind === 'REMOVE' && !await liveOwner(ref.removeLoc ?? '')) {
               removeNodeFile(localPath, ref.removeLoc ?? '', ref.nodeId, memoryUrn);
             }
+            return { failedWrites };
           });
         }
       }
