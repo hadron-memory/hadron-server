@@ -45,6 +45,11 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
       const readerLookup = new RegisterLookup(tx, txCtx, app.id, deadline, false, undefined, data);
       const teamMemoryId = await readerLookup.teamMemory();
       const teamChain = teamMemoryId ? await readerLookup.chain(teamMemoryId) : [];
+      // #3048: every memory this call asks readability about lies on the Team Agent's chain or a woken worker's agent
+      // chain. Declare them once, so each principal answers all of them in ONE batched read (its own, never shared).
+      const workerChains = new Set<string>();
+      for (const w of workers.values()) if (w.agent?.systemMemoryId && !w.agent.deletedAt) for (const id of await readerLookup.chain(w.agent.systemMemoryId)) workerChains.add(id);
+      data.readability.cover([...teamChain, ...workerChains]);
       const holders = new Map<string, Promise<Context | null>>();
       const holder = (id: string): Promise<Context | null> => {
         let found = holders.get(id);
