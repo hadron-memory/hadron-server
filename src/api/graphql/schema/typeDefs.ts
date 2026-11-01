@@ -3090,6 +3090,17 @@ export const typeDefs = `#graphql
     its own authority.
     """
     viewerManages: Boolean!
+    """
+    #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:02, hrn:node:hadronmemory.com:specs:cor:dmo:050:20): the App's
+    own JSON object, written whole by whoever manages it (setAppProperties). Readable by whoever may read the App by
+    app(ref:) (an org member, or the user-owner) and by whoever manages it; null for anyone else, an App key included,
+    whichever field reached the App. Never put a secret here. The platform reads only the taskIntegrations key
+    (hrn:node:hadronmemory.com:specs:cor:agt:120:01), where each team lead reads as its worker URN; every other key is
+    the team's, returned as written. Null = no properties.
+    """
+    properties: JSON
+    "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
+    propertiesRevision: Int
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
@@ -10109,6 +10120,20 @@ export const typeDefs = `#graphql
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
     setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
+    """
+    #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
+    or an empty object clears them. Whoever manages the App only, as a person acting as themselves (a worker session,
+    an App key and an impersonation are refused). Never put a secret here. When expectedRevision is sent it must equal
+    App.propertiesRevision. A write that changes nothing changes no revision and records no event; a changing write
+    records app.properties-changed naming the changed top-level keys, never values. Bounds: 16 KiB of JSON, 64 levels.
+    The taskIntegrations key (hrn:node:hadronmemory.com:specs:cor:agt:120:01) is validated: a list of
+    { name, provider: "github", repositories: ["owner/name"], readyLabel?, excludeLabels?, teams?: [{ lead, label }] },
+    where lead is a worker of this App (URN, id or name). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
+    PROPERTIES_TOO_LARGE, PROPERTIES_KEY_RESERVED (a key named __proto__ at any depth, which cannot be stored; names the
+    path), TASK_INTEGRATION_ORG_REQUIRED (an App with no organization), TASK_INTEGRATION_INVALID (names the JSON path,
+    never the value), APP_PROPERTIES_CONFLICT.
+    """
+    setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int): App!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
     scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
