@@ -7,11 +7,14 @@
 // unconditional. The worker is read from the request's published actor (`boundWorkerId`), which the HTTP session
 // binding, the MCP connection binding and `runAsActor` all fill.
 //
-// Callers check it twice. First, at the resolver's entry, before the Agent or row is looked up: the answer is then
-// the same whether the target exists, is deleted, is unreadable or is stale, so it says nothing about the row it was
-// aimed at. Second, inside the deciding transaction next to the person gate, where the gate requires the decision
-// to live. The actor is request-scoped and nothing in a request changes it, so the two always agree; nothing is
-// written either way.
+// Callers decide it inside the deciding transaction, right after the person gate's re-check, before any row lock or
+// existence, revision or name check. It is not a pre-check outside the transaction: a holder demoted while the write
+// waits on the authority anchors must still get the person gate's FORBIDDEN, which is how the decision is judged
+// against the state it commits on (Beckett, LOCAL P2-2 on #3044).
+//
+// The one thing decided before the transaction is a target that does not resolve. Under a worker session a missing,
+// deleted, malformed or unreadable target answers with this same refusal (`absentAsWorkerRefusal`), so a bound worker
+// learns nothing about which rows exist (BLIND P2 on #3044). Outside a worker session the not-found answer is unchanged.
 
 import { GraphQLError } from 'graphql';
 import { boundWorkerId } from '../bootPrompt.js';
@@ -40,4 +43,17 @@ export function underWorkerSession(): boolean {
 /** Refuse an Agent-management write under a bound worker session, whatever its holder may do. */
 export function assertNoWorkerSessionAgentManagement(op: AgentManagementOp): void {
   if (underWorkerSession()) throw agentManagementWorkerSessionError(op);
+}
+
+/**
+ * Load a write's target; under a worker session, a target that does not resolve answers with the worker refusal
+ * instead of its not-found, so the answer does not depend on whether the row exists. Anything else is rethrown.
+ */
+export async function absentAsWorkerRefusal<T>(op: AgentManagementOp, load: () => Promise<T>, isAbsent: (e: unknown) => boolean): Promise<T> {
+  try {
+    return await load();
+  } catch (e) {
+    if (underWorkerSession() && isAbsent(e)) throw agentManagementWorkerSessionError(op);
+    throw e;
+  }
 }

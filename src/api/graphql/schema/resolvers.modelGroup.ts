@@ -23,7 +23,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { type Context, requireAgentAccess, resolveReadableAgentRef } from './resolvers.helpers.js';
 import { actorManagesApp, inTaskWriteTx, resolveParticipatedApp, taskError } from './resolvers.agentTask.js';
 import { locateTeamAgent } from './resolvers.worker.js';
-import { type AgentManagementOp, assertNoWorkerSessionAgentManagement } from '../../../lib/auth/agentManagementWorkerSession.js';
+import { type AgentManagementOp, absentAsWorkerRefusal, assertNoWorkerSessionAgentManagement } from '../../../lib/auth/agentManagementWorkerSession.js';
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 
@@ -134,10 +134,9 @@ export const modelGroupMutations = {
     { agentRef, name, patterns }: { agentRef: string; name: string; patterns: string[] },
     ctx: Context,
   ) => {
-    assertNoWorkerSessionAgentManagement('setAgentModelGroup'); // first, so the answer never depends on the target (#3030)
     const group = cleanName(name);
     const list = cleanPatterns(patterns);
-    const agent = await resolveReadableAgentRef(ctx, agentRef);
+    const agent = await absentAsWorkerRefusal('setAgentModelGroup', () => resolveReadableAgentRef(ctx, agentRef), (e) => e instanceof AgentNotFoundError);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     return writeAsAgentManager(ctx, agent, 'setAgentModelGroup', async (tx, txCtx) => {
       const existing = await tx.modelGroup.findUnique({ where: { agentId_name: { agentId: agent.id, name: group } } });
@@ -151,9 +150,8 @@ export const modelGroupMutations = {
   },
 
   deleteAgentModelGroup: async (_: unknown, { agentRef, name }: { agentRef: string; name: string }, ctx: Context) => {
-    assertNoWorkerSessionAgentManagement('deleteAgentModelGroup'); // first, so the answer never depends on the target (#3030)
     const group = cleanName(name);
-    const agent = await resolveReadableAgentRef(ctx, agentRef);
+    const agent = await absentAsWorkerRefusal('deleteAgentModelGroup', () => resolveReadableAgentRef(ctx, agentRef), (e) => e instanceof AgentNotFoundError);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     return writeAsAgentManager(ctx, agent, 'deleteAgentModelGroup', async (tx) => {
       const { count } = await tx.modelGroup.deleteMany({ where: { agentId: agent.id, name: group } });

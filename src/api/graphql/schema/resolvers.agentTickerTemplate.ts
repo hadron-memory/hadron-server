@@ -20,7 +20,7 @@ import { lockAgentTemplates, liveTemplates, type TemplateRow } from '../../../li
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import {
-  type AgentManagementOp, assertNoWorkerSessionAgentManagement, underWorkerSession,
+  type AgentManagementOp, absentAsWorkerRefusal, assertNoWorkerSessionAgentManagement, underWorkerSession,
 } from '../../../lib/auth/agentManagementWorkerSession.js';
 
 /** Most live templates one Agent declares. An Agent that wants more is describing something other than a heartbeat. */
@@ -28,6 +28,8 @@ export const TICKER_TEMPLATES_MAX = 20;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 const notFound = (id: string): GraphQLError => taskError('TICKER_TEMPLATE_NOT_FOUND', 'Ticker template not found.', { id });
+const isTemplateAbsent = (e: unknown): boolean => e instanceof GraphQLError && e.extensions?.code === 'TICKER_TEMPLATE_NOT_FOUND';
+const isAgentAbsent = (e: unknown): boolean => e instanceof AgentNotFoundError;
 
 type AgentGate = { id: string; organizationId: string | null; ownerUserId: string | null };
 
@@ -139,8 +141,7 @@ export const agentTickerTemplateQueries = {
 
 export const agentTickerTemplateMutations = {
   createAgentTickerTemplate: async (_: unknown, { agentRef, input }: { agentRef: string; input: TemplateInput }, ctx: Context) => {
-    assertNoWorkerSessionAgentManagement('createAgentTickerTemplate'); // first, so the answer never depends on the target (#3030)
-    const agent = await resolveReadableAgentRef(ctx, agentRef);
+    const agent = await absentAsWorkerRefusal('createAgentTickerTemplate', () => resolveReadableAgentRef(ctx, agentRef), isAgentAbsent);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     const name = cleanName(input.name);
     const cadenceSeconds = checkCadence(input.cadenceSeconds);
@@ -174,8 +175,7 @@ export const agentTickerTemplateMutations = {
   updateAgentTickerTemplate: async (
     _: unknown, { id, expectedRevision, input }: { id: string; expectedRevision: number; input: TemplatePatch }, ctx: Context,
   ) => {
-    assertNoWorkerSessionAgentManagement('updateAgentTickerTemplate'); // first, so the answer never depends on the target (#3030)
-    const { template: seen, agent } = await loadTemplate(ctx, id);
+    const { template: seen, agent } = await absentAsWorkerRefusal('updateAgentTickerTemplate', () => loadTemplate(ctx, id), isTemplateAbsent);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     const data = patchFromInput(input);
     if (Object.keys(data).length === 0) throw badInput('Nothing to change: name at least one field.');
@@ -203,8 +203,7 @@ export const agentTickerTemplateMutations = {
   },
 
   deleteAgentTickerTemplate: async (_: unknown, { id, expectedRevision }: { id: string; expectedRevision: number }, ctx: Context) => {
-    assertNoWorkerSessionAgentManagement('deleteAgentTickerTemplate'); // first, so the answer never depends on the target (#3030)
-    const { template: seen, agent } = await loadTemplate(ctx, id);
+    const { template: seen, agent } = await absentAsWorkerRefusal('deleteAgentTickerTemplate', () => loadTemplate(ctx, id), isTemplateAbsent);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     await writeAsAgentEditor(ctx, agent, 'deleteAgentTickerTemplate', async (tx, txCtx) => {
       await tx.$queryRaw`SELECT id FROM agent_ticker_templates WHERE id = ${seen.id} FOR UPDATE`;

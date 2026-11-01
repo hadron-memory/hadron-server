@@ -11,6 +11,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -21,6 +23,7 @@ const F = resolvers.Agent as any;
 const REFUSED = 'AGENT_MANAGEMENT_WORKER_SESSION_REFUSED';
 
 let ctx: Context;
+let orgId: string;
 let agentId: string;
 let workerId: string;
 
@@ -44,6 +47,7 @@ beforeEach(async () => {
   const org = await db.organization.create({ data: { id: generateId(), name: 'Ws3030', urn: 'ws3030.example' } });
   const admin = await db.user.create({ data: { id: generateId(), githubId: 303001, githubUsername: 'ws3030-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
+  orgId = org.id;
   ctx = { db, userId: admin.id, roles: ['READER'] };
   agentId = (await M.createAgent({}, { orgId: org.id, name: 'Coordinator role' }, ctx)).id;
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Ws team', urn: `${org.urn}:team` } });
@@ -135,6 +139,44 @@ describe('#3030 Agent model groups under a worker session', () => {
   it('the same manager without a worker session still sets and deletes', async () => {
     expect((await setGroup('large', ['claude-opus-*'])).name).toBe('large');
     expect(await deleteGroup('large')).toBe(true);
+    expect(await groups()).toEqual([]);
+  });
+});
+
+/**
+ * LOCAL P2-2 (Beckett): the worker refusal is decided INSIDE the deciding transaction, after the person gate's
+ * re-check, not before it. A holder demoted while the bound worker's write waits on the authority anchors gets the
+ * person gate's FORBIDDEN, judged against the state the transaction commits on; a guard moved outside the
+ * transaction answers the worker refusal first and turns these red.
+ */
+describe('#3030 the decision is inside the transaction: a queued holder demotion', () => {
+  async function demoteWhileWaiting(write: () => Promise<unknown>): Promise<string> {
+    let release!: () => void;
+    const done = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const ready = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      // What a revoker does: the org anchor exclusive first, then the change.
+      await lockAuthorityAnchors(tx, [{ kind: 'org', id: orgId }], 'exclusive');
+      await tx.orgMember.updateMany({ where: { organizationId: orgId, userId: ctx.userId! }, data: { role: 'CONTRIBUTOR' } });
+      locked();
+      await done;
+    }, { timeout: 30_000 });
+    await ready;
+    const writing = codeOf(asWorker(write));
+    await waitForLockWaitersOfType(db as any, 'advisory');
+    release();
+    await holder;
+    return writing;
+  }
+
+  it('template create answers FORBIDDEN and writes nothing', async () => {
+    expect(await demoteWhileWaiting(() => createTemplate('late'))).toBe('FORBIDDEN');
+    expect(await templates()).toEqual([]);
+  });
+
+  it('setAgentModelGroup answers FORBIDDEN and writes nothing', async () => {
+    expect(await demoteWhileWaiting(() => setGroup('large', ['claude-opus-*']))).toBe('FORBIDDEN');
     expect(await groups()).toEqual([]);
   });
 });
