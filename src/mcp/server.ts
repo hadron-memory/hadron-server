@@ -11129,7 +11129,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, continuity, signature, trailer, renderedSignature, renderedTrailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -11140,6 +11140,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.continuity(worker, {}, ctx),
           resolvers.Worker.signature(worker, {}, ctx),
           resolvers.Worker.trailer(worker, {}, ctx),
+          // #2969: the filled lines, through the same field resolvers GraphQL serves.
+          resolvers.Worker.renderedSignature(worker, {}, ctx),
+          resolvers.Worker.renderedTrailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
@@ -11270,6 +11273,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // correct to be given back.
             (signature != null ? `\nSignature template:\n${signature}\n` : '') +
             (trailer != null ? `\nTrailer template:\n${trailer}\n` : '') +
+            (renderedSignature != null ? `\nRendered signature:\n${renderedSignature}\n` : '') +
+            (renderedTrailer != null ? `\nRendered trailer:\n${renderedTrailer}\n` : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:` +
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
