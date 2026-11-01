@@ -191,6 +191,9 @@ describe('references refusals write nothing (#2649)', () => {
     ['TASK', NODE],
     ['URL', 'ftp://example.com/x'],
     ['URL', 'javascript:alert(1)'],
+    // #3115: these pass WRITTEN_AUTHORITY and must reach the protocol allowlist.
+    ['URL', 'javascript://example.com/%0aalert(1)'],
+    ['ISSUE', 'javascript://github.com/x'],
     ['URL', 'example.com'],
     ['URL', ' https://example.com'],
     ['URL', 'https://example.com/a b'],
