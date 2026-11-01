@@ -11367,10 +11367,18 @@ export const typeDefs = `#graphql
     User invitations (org ADMIN or platform ADMIN).
 
     Accepts the entity's ID or URN.
+
+    Limits (#2984): expiresInDays is a whole number from 1 to 3650 and maxActivations from 1 to 1000; omitted or
+    null means no expiry and one activation. 0, negatives and larger values are refused as BAD_USER_INPUT
+    (hrn:node:hadronmemory.com:specs:cor:api:260:01), judged after the org-admin gate.
     """
     createUserInvitation(orgId: ID!, memberRole: Role!, name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
     """
     Platform invite — no org association, just onboards a new user
+
+    Limits (#2984): expiresInDays is a whole number from 1 to 3650 and maxActivations from 1 to 1000; omitted or
+    null means no expiry and one activation. 0, negatives and larger values are refused as BAD_USER_INPUT
+    (hrn:node:hadronmemory.com:specs:cor:api:260:01).
     """
     inviteUser(name: String, email: String, githubUsername: String, maxActivations: Int, expiresInDays: Int): UserInvitation!
     """

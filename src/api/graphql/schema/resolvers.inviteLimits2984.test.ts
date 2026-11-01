@@ -5,7 +5,7 @@
  * Answers are read off the GraphQL wire (ApolloServer + formatGraphQLError), as the issue's acceptance asks.
  */
 import { ApolloServer } from '@apollo/server';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -41,6 +41,8 @@ const wires: Wire[] = [
   { name: 'inviteUser', run: (u, { e, m }) => ask(ctx(u), INVITE_USER, { e, m }) },
   { name: 'createUserInvitation', run: (u, { e, m }) => ask(ctx(u), INVITE_ORG, { o: orgId, e, m }) },
 ];
+
+afterEach(() => vi.restoreAllMocks());
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -79,7 +81,6 @@ describe.each(wires)('#2984 $name limits', ({ run }) => {
     expect(a.data).toBeNull();
     expect(await db.userInvitation.count()).toBe(before);
     expect(fault).not.toHaveBeenCalledWith('[graphql] internal_fault', expect.anything());
-    fault.mockRestore();
   });
 
   it('the boundaries still create: expiresInDays 1 and 3650, maxActivations 1 and 1000', async () => {
