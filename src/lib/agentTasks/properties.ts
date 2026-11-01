@@ -106,19 +106,16 @@ export async function checkAgainstTeamSchema(
   appId: string,
   value: Prisma.InputJsonObject,
 ): Promise<void> {
-  const memoryId = await teamSystemMemoryId(txCtx, appId);
-  if (!memoryId) return;
-  const hit = await findEffectiveNodeIdByLoc(tx, memoryId, TASK_PROPERTIES_SCHEMA_LOC);
-  if (!hit) return;
+  const found = await readTeamSchemaNode(tx, txCtx, appId, TASK_PROPERTIES_SCHEMA_LOC, () => refusal(
+    'PROPERTIES_SCHEMA_UNUSABLE',
+    `More than one installed Agent carries a roles: branch, so the team's ${TASK_PROPERTIES_SCHEMA_LOC} cannot be chosen and no properties can be set until the team has one Team Agent.`,
+  ));
+  if (found === undefined) return;
   const unusable = () => refusal(
     'PROPERTIES_SCHEMA_UNUSABLE',
     `The team's ${TASK_PROPERTIES_SCHEMA_LOC} node exists but is not a usable JSON Schema, so no properties can be set until it is fixed.`,
   );
-  const node = await tx.node.findFirst({
-    where: { id: hit.id, memoryId: hit.memoryId, deletedAt: null },
-    select: { data: true, memory: { select: { deletedAt: true } } },
-  });
-  const schema = node && !node.memory.deletedAt ? node.data : null;
+  const schema = found;
   if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) throw unusable();
   const schemaNodes = schemaNodeCount(schema);
   if (schemaNodes === null) throw unusable();
@@ -224,21 +221,53 @@ function compileSchema(schema: object): ReturnType<Ajv['compile']> {
 }
 
 /**
- * The Team Agent's system memory. No Team Agent at all means no schema can exist. Two or more candidates is NOT "no
- * schema": the platform cannot tell which Agent's schema applies, so it refuses rather than skip the check.
+ * The team's schema node at `loc` (#2420; #2652 reuses it for the outcome set, cor:agt:050:30): the node in the Team
+ * Agent's system memory, found through its base chain, nearest Agent first (cor:dmo:050:14), read as the platform.
+ * `undefined` when there is no Team Agent or no node (no schema applies); the node's `data`, or `null` when the node or
+ * its memory is gone mid-read (the caller treats that as unusable). Two or more Team Agents is NOT "no schema": the
+ * platform cannot tell whose applies, so `onAmbiguous` is thrown rather than the check skipped. With
+ * `ambiguousOnlyIfAnyHasNode` (#2652: finishing is not optional the way properties are), it is thrown only when some
+ * candidate's chain actually holds a node at `loc`; when none does, there is no schema whichever Agent is meant.
  */
+export async function readTeamSchemaNode(
+  tx: Prisma.TransactionClient,
+  txCtx: Context,
+  appId: string,
+  loc: string,
+  onAmbiguous: () => Error,
+  options: { ambiguousOnlyIfAnyHasNode?: boolean } = {},
+): Promise<Prisma.JsonValue | null | undefined> {
+  let memoryId: string | null;
+  try {
+    memoryId = await teamSystemMemoryId(txCtx, appId);
+  } catch (e) {
+    if ((e as { extensions?: { code?: string } }).extensions?.code !== 'TEAM_AGENT_AMBIGUOUS') throw e;
+    if (options.ambiguousOnlyIfAnyHasNode) {
+      const ids = ((e as { extensions?: { candidates?: Array<{ id: string }> } }).extensions?.candidates ?? []).map((c) => c.id);
+      const agents = await tx.agent.findMany({ where: { id: { in: ids } }, select: { systemMemoryId: true } });
+      // Fail closed on a candidate list we cannot read: an empty one is not proof that no candidate has the node.
+      let anyHas = ids.length === 0;
+      for (const a of agents) if (a.systemMemoryId && await findEffectiveNodeIdByLoc(tx, a.systemMemoryId, loc)) anyHas = true;
+      if (!anyHas) return undefined;
+    }
+    throw onAmbiguous();
+  }
+  if (!memoryId) return undefined;
+  const hit = await findEffectiveNodeIdByLoc(tx, memoryId, loc);
+  if (!hit) return undefined;
+  const node = await tx.node.findFirst({
+    where: { id: hit.id, memoryId: hit.memoryId, deletedAt: null },
+    select: { data: true, memory: { select: { deletedAt: true } } },
+  });
+  return node && !node.memory.deletedAt ? node.data : null;
+}
+
+/** The Team Agent's system memory, or null when the App has none; TEAM_AGENT_AMBIGUOUS propagates to the caller. */
 async function teamSystemMemoryId(txCtx: Context, appId: string): Promise<string | null> {
   try {
     return (await locateTeamAgent(txCtx, appId, undefined)).systemMemoryId;
   } catch (e) {
-    const code = (e as { extensions?: { code?: string } }).extensions?.code;
-    if (code === 'TEAM_AGENT_NOT_FOUND') return null;
-    if (code === 'TEAM_AGENT_AMBIGUOUS') {
-      throw refusal(
-        'PROPERTIES_SCHEMA_UNUSABLE',
-        `More than one installed Agent carries a roles: branch, so the team's ${TASK_PROPERTIES_SCHEMA_LOC} cannot be chosen and no properties can be set until the team has one Team Agent.`,
-      );
-    }
+    if ((e as { extensions?: { code?: string } }).extensions?.code === 'TEAM_AGENT_NOT_FOUND') return null;
     throw e;
   }
 }

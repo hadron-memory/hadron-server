@@ -23,7 +23,7 @@
  * Every function here is soft: a settle that cannot be written logs a fixed line and returns, because the DB write that
  * triggered the mirror already committed.
  */
-import { Prisma } from '../../generated/prisma/index.js';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 
 /** The closed set of failure words a row may carry (CHECK in git-mirror-obligation-invariants.sql). */
@@ -55,7 +55,7 @@ export async function tryTakeAttemptSeq(db: PrismaClient): Promise<bigint | null
   try {
     return await takeAttemptSeq(db);
   } catch (err) {
-    console.error(`[git-mirror] Could not take an attempt number; this attempt records nothing: ${errorCode(err)}`);
+    console.error('[git-mirror] Could not take an attempt number; this attempt records nothing', mirrorFailureMetadata(err, 'sequence', 'ATTEMPT_SEQUENCE'));
     return null;
   }
 }
@@ -109,12 +109,6 @@ export async function settleMirrorObligations(
             attempt_seq = EXCLUDED.attempt_seq, last_attempt_at = now()
         WHERE git_mirror_obligations.attempt_seq < EXCLUDED.attempt_seq`;
   } catch (err) {
-    console.error(`[git-mirror] Could not settle ${keys.length} obligation(s) for memory ${memoryId}: ${errorCode(err)}`);
+    console.error(`[git-mirror] Could not settle ${keys.length} obligation(s) for memory ${memoryId}`, mirrorFailureMetadata(err, 'settle', 'SETTLEMENT'));
   }
-}
-
-/** A fixed token for the log line: a Prisma code or the error's name, never its message (which can echo data). */
-function errorCode(err: unknown): string {
-  if (err instanceof Prisma.PrismaClientKnownRequestError) return err.code;
-  return err instanceof Error ? err.name : 'unknown';
 }

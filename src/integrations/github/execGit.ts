@@ -85,6 +85,7 @@
 
 import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
+import { mirrorFailureMetadata, type MirrorFailureMetadata } from './mirrorFailureMetadata.js';
 
 const execFile = promisify(execFileCb);
 
@@ -110,14 +111,22 @@ export interface ExecGitOptions {
  * Never expose an execFile rejection: Node includes the full argv in its
  * message/cmd, and git may repeat the authenticated remote in stderr. The
  * installation token is in that argv for clone and remote set-url. Keep no
- * cause or child-process fields on this error, including in log inspection.
+ * raw cause, command or output on this error. Only bounded allowlisted diagnostic fields survive.
  */
 export class GitCommandError extends Error {
   readonly code = 'GIT_COMMAND_FAILED';
 
-  constructor() {
+  readonly exitCode?: number;
+  readonly providerCode?: MirrorFailureMetadata['providerCode'];
+  readonly signal?: MirrorFailureMetadata['signal'];
+
+  constructor(error?: unknown) {
     super('Git command failed. Check the repository and branch, then retry.');
     this.name = 'GitCommandError';
+    const metadata = mirrorFailureMetadata(error, 'git', 'GIT_COMMAND_FAILED');
+    this.exitCode = metadata.exitCode;
+    this.providerCode = metadata.providerCode;
+    this.signal = metadata.signal;
   }
 }
 
@@ -135,7 +144,7 @@ export async function execGit(
 ): Promise<{ stdout: string; stderr: string }> {
   try {
     return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], options);
-  } catch {
-    throw new GitCommandError();
+  } catch (error) {
+    throw new GitCommandError(error);
   }
 }

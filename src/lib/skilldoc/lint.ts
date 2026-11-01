@@ -89,9 +89,15 @@ const TRIGGER_RE = /\buse (it |this )?when\b/i;
  *  rule is a body; the closing fence is what makes it frontmatter. */
 const FRONTMATTER_RE = /^---\n(?:[\s\S]*?\n)?---\n?[\s\S]*$/;
 
-/** A Mustache placeholder. Export is verbatim, so it ships as literal text —
- *  which may be intended (a briefing template) or a leak, hence a warning. */
-const TEMPLATE_RE = /\{\{[^}]*\}\}/;
+/** A Mustache placeholder. Export copies it as is, so it ships as literal
+ *  text, which may be intended (a briefing template) or a leak, hence a warning.
+ *
+ *  #2943 / hadron-cli#1166: an include tag `{{> part}}` is NOT a placeholder.
+ *  The export resolver splices it (#2048; the opener is exactly `{{>`, as in
+ *  `includes/parseIncludeTags.ts`), so it gets no finding here. Written without
+ *  a lookahead so the Go mirror (RE2) can use the same pattern: a match is `{{`,
+ *  then nothing or a first character that is neither `>` nor `}`, then `}}`. */
+const TEMPLATE_RE = /\{\{(?:[^>}][^}]*)?\}\}/;
 
 /**
  * The measured Cowork predicate (#1341): a `<`, then at least one character

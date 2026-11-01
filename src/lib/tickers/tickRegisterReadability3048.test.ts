@@ -195,6 +195,9 @@ it('the batched answer equals canReadMemory for each named row class and user pr
   // a revoked org member is not an org member; per-App isolation keeps the other App's memory from an App member.
   expect(table.platformAdmin!.freePersonal).toBe(false);
   expect(table.platformOwner!.freePersonal).toBe(false);
+  // #3075 / cor:acl:010:01: private is owner-only too, with no platform-role bypass.
+  expect(table.platformAdmin!.freePrivate).toBe(false);
+  expect(table.platformOwner!.freePrivate).toBe(false);
   expect(table.owner!.freePersonal).toBe(true);
   expect(table.owner!.freePrivate).toBe(true);
   expect(table.stranger!.freePrivate).toBe(false);

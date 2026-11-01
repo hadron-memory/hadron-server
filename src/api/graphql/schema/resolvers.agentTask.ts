@@ -93,6 +93,7 @@ import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { touchSessionIfLive } from '../../../lib/sessionActivity.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { keyHostId } from '../../../lib/hostOperations/hostKey.js';
 import { launchForAssignment } from '../../../lib/hostOperations/launch.js';
@@ -112,6 +113,7 @@ import {
 import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
+import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
 
@@ -1015,6 +1017,8 @@ async function mutateTask(
       }
     }
   }
+  // #2694 (cor:agt:020:11 r3): a worker's accepted task write through its own live session is that worker driving it.
+  if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
   return ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
 }
 
@@ -1528,6 +1532,8 @@ export const agentTaskMutations = {
     // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
     await launchAssignee(ctx.db, created);
     await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
+    // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
+    if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
     return created;
   },
 
@@ -1784,6 +1790,8 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
+      await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
       // #2198: finishing with open children still succeeds (as it always has); the response says so.
       if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { in: OPEN } } })) > 0) warn.push('task.finish.open-children');
       await tx.agentTask.update({
