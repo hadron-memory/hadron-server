@@ -116,7 +116,8 @@ describe('#2661 new free-standing app memory', () => {
   it('refuses deleted/uninstalled Apps before writing', async () => {
     for (const field of ['deletedAt','uninstalledAt']) {
       await db.app.update({ where: { id: app.id }, data: { deletedAt: null, uninstalledAt: null, [field]: new Date() } });
-      await expect(create()).rejects.toThrow();
+      // #2729: the typed refusal (concealed as for an unknown App, #2843), not a bare throw.
+      await expect(create()).rejects.toMatchObject({ message: 'Forbidden', extensions: { code: 'FORBIDDEN' } });
       expect(await db.memory.count()).toBe(0);
     }
   });

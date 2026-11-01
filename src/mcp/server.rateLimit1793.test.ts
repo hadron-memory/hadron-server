@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { withinOneRateWindow } from '../test/rateWindow.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
@@ -17,7 +18,7 @@ beforeEach(async()=>{client=undefined;server=undefined;await cleanDb(db);});
 afterEach(async()=>{await client?.close();server?.closeAllConnections();if(server)await new Promise<void>(r=>server!.close(()=>r()));});
 it('#1793 actual SDK and GraphQL share one search allowance and structured refusal',async()=>{
   const u=await db.user.create({data:{githubId:179399,githubUsername:'rate-wire',roles:['ADMIN']}});
-  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['ADMIN']});
   await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
@@ -40,7 +41,7 @@ it('#1793 GraphQL threads the trusted transport IP into search and consent admis
   // The loopback peer is NOT a trusted production ingress. Forged forwarding
   // headers must not replace the socket address under this CIDR predicate.
   app.set('trust proxy',['203.0.113.0/24']);
-  server=httpServer(app);await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  server=httpServer(app);await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['ADMIN']});
   await db.rateLimitPolicy.update({where:{fieldClass:'CREDENTIALS'},data:{enforcementMode:'ENFORCING'}});
@@ -59,7 +60,7 @@ it('#1793 GraphQL threads the trusted transport IP into search and consent admis
 
 it('#1793 each MCP tool call uses its current request IP, not the initialize address',async()=>{
   const u=await db.user.create({data:{githubId:179396,githubUsername:'rate-mcp-ip',roles:['ADMIN']}});
-  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['ADMIN']});
   let ip='198.51.100.10';
@@ -85,7 +86,7 @@ it('#1793 an App key charges principal, actual key and IP identically over Graph
   const app=await db.app.create({data:{name:'rate-app',urn:`${org.urn}:rate-app`,organizationId:org.id}});
   const raw=APP_KEY_PREFIX+'a'.repeat(64);
   await db.appKey.create({data:{appId:app.id,keyHash:hashAppKey(raw),keyPreview:'test'}});
-  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const r=await fetch(base+'/graphql',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${raw}`},body:JSON.stringify({query:'query { findNodes(limit:0) { total } }'})});
   expect((await r.json() as {errors?:unknown}).errors).toBeUndefined();
@@ -97,13 +98,14 @@ it('#1793 an App key charges principal, actual key and IP identically over Graph
   const result=await client.callTool({name:'hadron_find_nodes',arguments:{query:'*',allMemories:true,limit:1}});
   expect(result.isError).not.toBe(true);
   const after=await db.rateLimitBucket.findMany({where:{fieldClass:'FAN_OUT_READS'},orderBy:{dimension:'asc'}});
-  expect(after.map(r=>({dimension:r.dimension,subject:r.subject,used:r.used})))
-    .toEqual(before.map(r=>({dimension:r.dimension,subject:r.subject,used:2n})));
+  // windowStart is part of the identity: a failure names the windows instead of showing look-alike rows (#3074).
+  expect(after.map(r=>({dimension:r.dimension,subject:r.subject,windowStart:r.windowStart,used:r.used})))
+    .toEqual(before.map(r=>({dimension:r.dimension,subject:r.subject,windowStart:r.windowStart,used:2n})));
 });
 
 it('#1793 an empty named MCP scope is still one admitted search attempt',async()=>{
   const u=await db.user.create({data:{githubId:179395,githubUsername:'rate-empty-scope',roles:['READER']}});
-  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
+  server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const token=await signJwt({sub:u.id,githubId:u.githubId!,githubUsername:u.githubUsername!,roles:['READER']});
   await db.rateLimitPolicy.update({where:{fieldClass:'FAN_OUT_READS'},data:{principalLimit:1,enforcementMode:'ENFORCING'}});
