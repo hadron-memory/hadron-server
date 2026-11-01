@@ -21,9 +21,12 @@ export function lineDiff(before: string | null | undefined, after: string | null
   while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail += 1;
   const am = a.slice(head, a.length - tail);
   const bm = b.slice(head, b.length - tail);
-  const out: DiffLine[] = a.slice(0, head).map((text) => ({ kind: 'same', text }));
+  const out: DiffLine[] = [];
+  for (let k = 0; k < head; k += 1) out.push({ kind: 'same', text: a[k] });
   if (am.length * bm.length > MAX_CELLS) {
-    out.push(...am.map((text): DiffLine => ({ kind: 'del', text })), ...bm.map((text): DiffLine => ({ kind: 'add', text })));
+    // Loops, never spreads: a spread passes every line as an argument and throws RangeError on a large revision.
+    for (const text of am) out.push({ kind: 'del', text });
+    for (const text of bm) out.push({ kind: 'add', text });
   } else {
     // lcs[i][j] = LCS length of am[i..] and bm[j..].
     const w = bm.length + 1;
@@ -43,6 +46,6 @@ export function lineDiff(before: string | null | undefined, after: string | null
     while (i < am.length) { out.push({ kind: 'del', text: am[i] }); i += 1; }
     while (j < bm.length) { out.push({ kind: 'add', text: bm[j] }); j += 1; }
   }
-  out.push(...a.slice(a.length - tail).map((text): DiffLine => ({ kind: 'same', text })));
+  for (let k = a.length - tail; k < a.length; k += 1) out.push({ kind: 'same', text: a[k] });
   return out;
 }

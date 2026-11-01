@@ -33,6 +33,7 @@ import {
   completeSigningRequestInTransaction, declineSigningRequestInTransaction, effectiveRequestState, SigningRefusal,
 } from './requests.js';
 import { lineDiff, type DiffLine } from './lineDiff.js';
+import { loadSignatureStatuses } from './status.js';
 
 export const SIGN_PROOF_TTL_SECONDS = 300;
 /** Long enough to read a long node before signing; the ceremony is single-use and bound, so a longer window adds no replay. */
@@ -99,7 +100,7 @@ export interface CeremonyView {
 }
 
 export type ProofResult =
-  | { outcome: 'open'; view: CeremonyView; canSign: boolean }
+  | { outcome: 'open'; view: CeremonyView; canSign: boolean; /** Server-chosen browser nonce for the route's cookie; never sent in the body. */ sessionNonce?: string }
   | { outcome: 'ended'; state: string };
 
 /** The content as a list of segments, each include tag its own flagged segment: tags are shown, never expanded. */
@@ -122,10 +123,12 @@ async function previousSigned(
   tx: Prisma.TransactionClient, nodeId: string, memoryId: string, requestId: string,
   now: { name: string; abstract: string | null; content: string | null },
 ): Promise<CeremonyView['previous']> {
-  const last = await tx.nodeSignature.findFirst({
-    where: { nodeId, NOT: { signingRequestId: requestId } },
-    orderBy: [{ verifiedAt: 'desc' }, { id: 'desc' }], select: { revision: true },
-  });
+  // The baseline is the newest signature that still VERIFIES under the shared status policy: a record that fails
+  // verification (a forged row, an unverifiable v1 record) is never shown as "the last signed text".
+  const statuses = await loadSignatureStatuses(tx, [nodeId]);
+  const verified = (statuses.get(nodeId)?.signatures ?? []).filter((s) => s.signingRequestId !== requestId);
+  verified.sort((x, y) => y.verifiedAt.getTime() - x.verifiedAt.getTime() || (x.id < y.id ? 1 : -1));
+  const last = verified[0];
   if (!last) return null;
   const rev = await tx.nodeRevision.findFirst({
     where: { nodeId, revNo: last.revision, OR: [{ memoryId: null }, { memoryId }] },
@@ -204,14 +207,19 @@ export async function proveForSigning(db: PrismaClient, a: {
       const canSign = await mayWriteIn(tx)(cred.owner_id, memoryId);
       if (!canSign) return { outcome: 'open' as const, view, canSign: false };
 
-      // ONE live signing ceremony per browser: a newer proof retires the earlier one. `/challenge` only reads it back.
+      // The signing ceremony is bound to a FRESH server-chosen browser nonce, never the pre-proof value: a cookie planted
+      // before the proof (fixation) proves nothing afterwards and cannot read `/challenge` or decline. The route
+      // sets the new value as the cookie. A newer proof, presenting the rotated cookie, retires the earlier ceremony
+      // under it. Concurrent proofs that share one pre-proof cookie each get their own nonce, so neither can touch
+      // the other's ceremony; only the cookie the browser keeps reaches one.
+      const sessionNonce = randomBytes(32).toString('base64url');
       await tx.$executeRaw`UPDATE passkey_ceremonies SET consumed_at = (clock_timestamp() AT TIME ZONE 'UTC')
-        WHERE purpose = 'SIGN' AND browser_nonce_hash = ${a.browserNonceHash} AND consumed_at IS NULL`;
+        WHERE purpose = 'SIGN' AND browser_nonce_hash IN (${a.browserNonceHash}, ${sha256Hex(sessionNonce)}) AND consumed_at IS NULL`;
       const challenge = signatureChallenge(signaturePayloadBytes(row.payloadVersion, { nodeId: row.nodeId, approvalHash: row.approvalHash, requestId: row.id }));
       await tx.$executeRaw`INSERT INTO passkey_ceremonies (id, purpose, browser_nonce_hash, challenge_hash, expires_at, user_id, kind)
-        VALUES (${randomBytes(32).toString('base64url')}, 'SIGN', ${a.browserNonceHash}, ${sha256Hex(challenge)},
+        VALUES (${randomBytes(32).toString('base64url')}, 'SIGN', ${sha256Hex(sessionNonce)}, ${sha256Hex(challenge)},
                 (clock_timestamp() AT TIME ZONE 'UTC') + make_interval(secs => ${SIGN_TTL_SECONDS}), ${cred.owner_id}, 'sign')`;
-      return { outcome: 'open' as const, view, canSign: true };
+      return { outcome: 'open' as const, view, canSign: true, sessionNonce };
     });
   } catch (e) {
     if (e instanceof CeremonyRefused) throw e;

@@ -73,9 +73,10 @@ const PAGE_HEADERS: Record<string, string> = {
 /** The static shell. No request, node or person appears in it: it is byte-identical for every id. */
 const SHELL = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Review and sign</title>
 <style>body{font-family:system-ui,sans-serif;margin:0}main{max-width:44rem;margin:2rem auto;padding:0 1rem}button{font:inherit;min-height:2.75rem;min-width:2.75rem;padding:.5rem 1rem;margin:.25rem .5rem .25rem 0}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.12);padding:.75rem;border-radius:.4rem}mark{background:rgba(255,200,0,.3);padding:0 .15rem}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.12);padding:.75rem;border-radius:.4rem}mark{background:rgba(255,200,0,.3);color:inherit;padding:0 .15rem}
 .diff-add{background:rgba(0,160,0,.18)}.diff-del{background:rgba(220,0,0,.18);text-decoration:line-through}:focus-visible{outline:3px solid #2563eb;outline-offset:2px}</style></head>
 <body><main><h1 id="title" tabindex="-1">Review and sign</h1>
+<noscript><p>This page needs JavaScript to ask for your passkey. Turn it on and reload.</p></noscript>
 <div id="start"><p>To see what you have been asked to sign, confirm it is you with your passkey. Nothing is shown until you do.</p><button id="go" type="button">Use passkey</button></div>
 <div id="view" hidden></div><p id="msg" role="status" aria-live="polite"></p></main><script src="${SIGNING_CEREMONY_PATH}/ceremony.js"></script></body></html>`;
 
@@ -95,11 +96,12 @@ const assertion=(cred,ceremonyId)=>{const r=cred.response;return{ceremonyId,cred
 const focusTitle=()=>{$('title').focus();};
 function lines(parent,rows){const pre=el('pre');rows.forEach((l)=>{const s=el('div',(l.kind==='add'?'+ ':l.kind==='del'?'- ':'  ')+l.text,l.kind==='add'?'diff-add':l.kind==='del'?'diff-del':'');pre.appendChild(s);});parent.appendChild(pre);}
 function section(t){const s=el('section');s.appendChild(el('h2',t));return s;}
-function finish(title,text){view.replaceChildren();start.hidden=true;view.hidden=false;view.appendChild(el('p',text));$('title').textContent=title;say('');focusTitle();}
+function setTitle(t){$('title').textContent=t;document.title=t;}
+function finish(title,text){view.replaceChildren();start.hidden=true;view.hidden=false;view.appendChild(el('p',text));setTitle(title);say('');focusTitle();}
 function ended(state){const w={COMPLETED:'This request was already signed.',DECLINED:'This request was declined.',EXPIRED:'This request expired.',STALE:'The text changed after this was requested, so this request can no longer be signed.',WITHDRAWN:'The person who asked withdrew this request.'};
  finish('This request has ended',(w[state]||'This request has ended.')+' Ask for a new signature request to sign again.');}
 function render(out){
- view.replaceChildren();start.hidden=true;view.hidden=false;$('title').textContent='Review and sign';
+ view.replaceChildren();start.hidden=true;view.hidden=false;setTitle('Review and sign');
  const v=out.view;
  const meta=section('This request');
  meta.appendChild(el('p','Requested by '+v.requester.name+(v.requester.via?' (through '+v.requester.via+')':'')+'. Revision '+v.revision+'. Expires '+new Date(v.expiresAt).toLocaleString()+'.'));
@@ -132,28 +134,32 @@ function render(out){
     const cred=await navigator.credentials.get({publicKey:{challenge:u2b(o.challenge),rpId:o.rpId,userVerification:'required',timeout:120000,allowCredentials:o.allowCredentials.map((x)=>({type:'public-key',id:u2b(x)}))}});
     sent=true;
     const r=await post('complete',assertion(cred,o.ceremonyId));
-    const j=await r.json().catch(()=>({}));
+    if(r.status>=500)throw new Error('uncertain');
+    const j=await r.json().catch(()=>null);
+    if(j===null)throw new Error('uncertain');
     if(r.ok){finish('Signed','Your signature was recorded. You can close this page.');return;}
     if(j.error==='SIGNING_REQUEST_ENDED'){ended(j.state);return;}
     if(j.error==='ENCRYPTED_MEMORY_NOT_APPLICABLE'){finish('Not signable','This node is in an encrypted memory, which is never signed.');return;}
-    if(j.error==='SIGNATURE_NOT_VERIFIED'){say('That did not verify. Nothing was recorded. You can try again.');lock(false);return;}
-    say('That did not work and nothing was recorded. Reload this page and start again.');lock(false);
+    if(j.error==='SIGNATURE_NOT_VERIFIED'){say('That did not verify. Nothing was recorded. You can try again.');lock(false);sign.focus();return;}
+    say('That did not work and nothing was recorded. Reload this page and start again.');lock(false);sign.focus();
    }catch(e){
-    if(sent){say('We could not confirm whether your signature was recorded. Reload this page and check before trying again.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());actions.appendChild(re);}
-    else{say('That did not work and nothing was recorded. You can try again.');lock(false);}
+    if(sent){say('We could not confirm whether your signature was recorded. Reload this page and check before trying again.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());actions.appendChild(re);re.focus();}
+    else{say('That did not work and nothing was recorded. You can try again.');lock(false);sign.focus();}
    }
   });
   dec.addEventListener('click',()=>{
    if(busy)return;
-   actions.replaceChildren(el('p','Decline this request? The person who asked is told it was declined.'));
+   actions.replaceChildren(el('p','Decline this request? It will be ended and can no longer be signed.'));
    const yes=el('button','Yes, decline');yes.type='button';const no=el('button','Cancel');no.type='button';
    no.addEventListener('click',()=>render(out));
    yes.addEventListener('click',async()=>{yes.disabled=true;no.disabled=true;say('');
-    try{const r=await post('decline',{ceremonyId:(await (await post('challenge')).json()).ceremonyId});const j=await r.json().catch(()=>({}));
+    try{const r=await post('decline',{ceremonyId:(await (await post('challenge')).json()).ceremonyId});if(r.status>=500)throw new Error('uncertain');
+     const j=await r.json().catch(()=>null);
+     if(j===null)throw new Error('uncertain');
      if(r.ok){finish('Declined','You declined this request. You can close this page.');return;}
      if(j.error==='SIGNING_REQUEST_ENDED'){ended(j.state);return;}
-     say('That did not work and nothing was changed. Reload this page and start again.');yes.disabled=false;no.disabled=false;
-    }catch(e){say('We could not confirm whether the request was declined. Reload this page and check.');}});
+     say('That did not work and nothing was changed. Reload this page and start again.');yes.disabled=false;no.disabled=false;yes.focus();
+    }catch(e){say('We could not confirm whether the request was declined. Reload this page and check.');const re=el('button','Reload this page');re.type='button';re.addEventListener('click',()=>location.reload());actions.appendChild(re);re.focus();}});
    actions.appendChild(yes);actions.appendChild(no);no.focus();
   });
   actions.appendChild(sign);actions.appendChild(dec);
@@ -162,6 +168,7 @@ function render(out){
 }
 go.addEventListener('click',async()=>{
  go.disabled=true;say('');
+ if(!(navigator.credentials&&navigator.credentials.get&&window.PublicKeyCredential)){say('This browser cannot use a passkey here. Open this page in a current browser that supports passkeys.');go.disabled=false;return;}
  try{
   const o=await post('proof/challenge');if(!o.ok)throw new Error('refused');const opt=await o.json();
   const cred=await navigator.credentials.get({publicKey:{challenge:u2b(opt.challenge),rpId:opt.rpId,userVerification:'required',timeout:120000}});
@@ -169,7 +176,7 @@ go.addEventListener('click',async()=>{
   if(!r.ok)throw new Error('refused');
   const out=await r.json();
   if(out.outcome==='ended')ended(out.state);else render(out);
- }catch(e){say('That did not work. You may not be able to open this request, or it may no longer be available. Try again.');go.disabled=false;}
+ }catch(e){say('That did not work. You may not be able to open this request, or it may no longer be available. Try again.');go.disabled=false;go.focus();}
 });
 })();`;
 
@@ -205,7 +212,7 @@ export function mountSigningCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
     try {
       const requestId = requestIdOf(req.params.id);
       if (!originAllowed(req) || !requestId) return void refuse(res);
-      // The same browser keeps its nonce, so a newer proof in it retires the earlier signing ceremony.
+      // The pre-proof nonce only binds the proof ceremony; the proof rotates it (see proveForSigning).
       const existing = cookieValue(req);
       const nonce = existing && /^[A-Za-z0-9_-]{20,64}$/.test(existing) ? existing : randomBytes(32).toString('base64url');
       const { ceremonyId, challenge } = await openProofCeremony(db, { requestId, browserNonceHash: sha256Hex(nonce) });
@@ -219,7 +226,10 @@ export function mountSigningCeremonyRoutes(app: Express, env: NodeJS.ProcessEnv 
       const parsed = parseAssertion(req);
       if (!parsed) return void refuse(res);
       const result = await proveForSigning(db, { ...parsed, rpId: passkeyRpId(), origins: signingCeremonyOrigins() });
-      json(res, 200, result);
+      const { sessionNonce, ...body } = result.outcome === 'open' ? result : { ...result, sessionNonce: undefined };
+      // Rotate the browser value at a successful proof: whatever the browser held before proves nothing now.
+      if (sessionNonce) res.cookie(COOKIE, sessionNonce, { ...cookieOptions(req), maxAge: SIGN_TTL_SECONDS * 1000 });
+      json(res, 200, body);
     } catch { refuse(res); }
   });
 
