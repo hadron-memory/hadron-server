@@ -25,7 +25,7 @@ was the one it forbade. `genfix.go` is that program, committed.
 #    unchanged reproduces it byte for byte (its `sourceCommit` says the same).
 #    Move it forward only to a commit whose Go matches the law you pin: an
 #    older one regenerates retired rules (@codex, PR #1295).
-COMMIT=9e7d2bd
+COMMIT=3582c97
 rm -rf /tmp/cli && mkdir -p /tmp/cli
 gh api repos/hadron-memory/hadron-cli/tarball/$COMMIT | tar xz -C /tmp/cli --strip-components=1
 
