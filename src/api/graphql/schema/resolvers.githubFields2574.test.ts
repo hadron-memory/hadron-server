@@ -99,7 +99,7 @@ describe('#2574 githubId is personal, githubUsername and avatarUrl are identity 
 
 describe('#2574 githubId at the field resolver for callers with no plain user viewer (Riana §10 P3-1)', () => {
   beforeEach(async () => cleanDb(db));
-  const githubId = (resolvers.User as Record<string, (u: unknown, a: unknown, c: Context) => Promise<unknown>>).githubId;
+  const githubId = (resolvers.User as unknown as Record<string, (u: unknown, a: unknown, c: Context) => Promise<unknown>>).githubId;
 
   it('a caller with no userId (App key, anonymous) reads null githubId', async () => {
     const f = await fixture();
