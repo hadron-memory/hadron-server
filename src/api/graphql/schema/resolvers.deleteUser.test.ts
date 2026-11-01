@@ -171,7 +171,10 @@ describe('Mutation.deleteUser — self-delete happy path (org-less user)', () =>
 });
 
 describe('Mutation.deleteUser — app-scoped personal memory erasure (#422)', () => {
-  it.each([false, true])('erases the Agent-linked memory before its Agent (installed and cast: %s)', async (cast) => {
+  it.each([
+    { label: 'without an install or casting', cast: false },
+    { label: 'with an install and Worker casting', cast: true },
+  ])('erases the Agent-linked memory before its Agent ($label)', async ({ cast }) => {
     const user = await makeUser();
     const agent = await db.agent.create({
       data: { id: generateId(), ownerUserId: user.id, urn: `${user.handle}:assistant`, name: 'Assistant', visibility: 'PERSONAL' },
@@ -197,8 +200,13 @@ describe('Mutation.deleteUser — app-scoped personal memory erasure (#422)', ()
       },
     }) : null;
 
-    // This persisted shape activates chk_memory_personal_agent_id: deleting
-    // the Agent first would SET NULL on its FK and violate that CHECK.
+    // Prove the SQL-only CHECK is enforced, not merely that the row has the
+    // right shape: this single failed statement rolls back its own update.
+    await expect(db.memory.update({
+      where: { id: personal.id }, data: { userMemoryOfAgentId: null },
+    })).rejects.toThrow('chk_memory_personal_agent_id');
+    // Deleting the Agent first would attempt that same SET NULL; the valid
+    // shape must survive the negative control before supported erasure.
     expect(await db.memory.findUniqueOrThrow({ where: { id: personal.id } })).toMatchObject({
       class: 'personal', appId: app.id, userId: user.id, userMemoryOfAgentId: agent.id,
     });
