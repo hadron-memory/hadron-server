@@ -1,3 +1,4 @@
+import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { currentActor } from '../../../lib/requestActor.js';
@@ -359,6 +360,12 @@ async function writeNodeCoreRaw(
      * trustworthy. No caller needs it yet: no platform writer sets a role.
      */
     platformWrite?: boolean;
+    /**
+     * #2987 — set only by `cloneNode`, which copies the source's `seq` onto a NEW row: a copy of existing
+     * order, not a reorder, so it is exempt from the legacy-message seq gate — but ONLY onto a loc with no row: a clone
+     * over a tombstone revives existing history and takes the normal gate (Beckett LOCAL delta of #2989). No other caller passes it.
+     */
+    copiesSeq?: boolean;
   },
 ) {
       // Keep the historical `input` name so the body below stays a
@@ -615,6 +622,9 @@ async function writeNodeCoreRaw(
       // it). Every caller of the core — createNode/updateNode, the kind doors,
       // updateNodeData/Properties, importNode, cloneNode — passes through here.
       assertNotCommentWrite(existing?.nodeType, input.nodeType, mode === 'update' ? 'update' : 'create');
+      // #2987 (V13) — a message outside a Channel (assertLocWritable above already refused one under a
+      // Channel) keeps its seq: no generic write sets or changes it. A clone copies the source's seq to a new row.
+      if (!opts?.copiesSeq || existing) assertNoGenericMessageSeqWrite(existing, input.nodeType, input.seq, mode === 'update' ? 'update' : 'create');
       // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
       assertBootPromptWriteAllowed(existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its decision codes: only the decision
@@ -1183,6 +1193,8 @@ async function writeNodeCoreRaw(
         // the same window, and it is the one with teeth.
         // #1606 — the comment gate, re-checked under the lock with the row it guards.
         assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
+        // #2987 — re-checked under the lock with the row it guards, like the comment gate.
+        if (!opts?.copiesSeq) assertNoGenericMessageSeqWrite(current, input.nodeType, input.seq, 'update');
         assertBootPromptWriteAllowed(current, { nodeType: input.nodeType, role: normalizeRole(input.role) }, 'update');
         assertGovernedWrite(
           current,
@@ -1561,6 +1573,10 @@ async function writeNodeCoreRaw(
                   extensions: { code: err.name, loc: err.loc, memoryId: err.memoryId },
                 });
               }
+              // #2987 — the AUTHORITATIVE row, locked: a message tombstone that appeared after the unlocked probe is
+              // still history, so no exemption applies (the clone exemption is for a loc with no row at all) and the
+              // refusal comes before any snapshot or revival write (Beckett LOCAL delta 2, Rico P3).
+              assertNoGenericMessageSeqWrite(authoritative, input.nodeType, input.seq, 'create');
             }
             await enforceNodeSchemaOnWrite(
               tx, input.memoryId,
@@ -3919,7 +3935,7 @@ export const nodeMutations = {
         srcPlain.abstract == null ||
         srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
       ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
-      return writeNodeCore(input, ctx, 'create', { copiedAuthorship });
+      return writeNodeCore(input, ctx, 'create', { copiedAuthorship, copiesSeq: true });
     },
 
     // Fold a source node into a target node, returning the updated target.
@@ -4570,6 +4586,8 @@ export const nodeMutations = {
       // #1606 — a comment's history is not restorable through the generic
       // surface, and no revision may turn a node into one (cor:dmo:110:04).
       assertNotCommentWrite(node.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+      // #2987 — a revision restores a message's old seq verbatim: that is a reorder (security P2-2).
+      assertNoGenericMessageSeqWrite(node, (restoreFields as { nodeType?: string | null }).nodeType, (restoreFields as { seq?: number | null }).seq, 'restore');
       assertBootPromptWriteAllowed(node, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
       assertGovernedWrite(
         node,
@@ -4675,6 +4693,7 @@ export const nodeMutations = {
         // The preflight checks above are useful fast refusals, but they cannot
         // protect a restore that waited behind a concurrent writer.
         assertNotCommentWrite(current.nodeType, (restoreFields as { nodeType?: string | null }).nodeType, 'restore');
+        assertNoGenericMessageSeqWrite(current, (restoreFields as { nodeType?: string | null }).nodeType, (restoreFields as { seq?: number | null }).seq, 'restore');
         assertBootPromptWriteAllowed(current, restoreFields as { nodeType?: string | null; role?: string | null }, 'restore');
         assertGovernedWrite(
           current,
