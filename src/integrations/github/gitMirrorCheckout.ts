@@ -43,6 +43,8 @@ export interface MirrorRepo {
   localPath: string;
   /** The write branch the mutation will be committed to. */
   branch: string;
+  /** #3042: refs admitted under the checkout lock; retries include only still-current due rows. */
+  obligations?: readonly MirrorObligationRef[];
 }
 
 /**
@@ -82,10 +84,10 @@ export async function withMirrorCheckout(
      */
     obligations?: readonly MirrorObligationRef[];
     /** Retry consumers use the same checkout/lock, but never create work for an ineligible or no-longer-due row. */
-    retry?: { now: Date; maxAttempts: number };
+    retry?: { now: Date; maxAttempts: number; branch?: string };
     db?: PrismaClient;
     /** Under the lock, before ANY Git: false means the debt no longer requires a file operation. */
-    beforeGit?: () => Promise<boolean>;
+    beforeGit?: (refs: readonly MirrorObligationRef[]) => Promise<boolean>;
     /** A pushed/no-change checkout must satisfy this before its debt is cleared. */
     verify?: (repo: MirrorRepo) => boolean | Promise<boolean>;
   },
@@ -132,7 +134,7 @@ export async function withMirrorCheckout(
   // #430: every return before the lock is a memory that is NOT mirrored (configuration, not a failure): its rows go.
   const foundMemoryId = memory.id;
   const notMirrored = async (outcome: MirrorOutcome): Promise<MirrorOutcome> => {
-    if (preSeq !== null) await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'cleared' }, preSeq);
+    if (preSeq !== null) await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'cleared' }, preSeq, undefined, { allBranches: true });
     return outcome;
   };
 
@@ -170,7 +172,10 @@ export async function withMirrorCheckout(
       // one memory apply in lock order. Every return of the attempt that is not a failure settles as `cleared`: a success, or
       // a memory that is not mirrored.
       let attemptSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
-      let settlement: MirrorSettlement = { result: 'cleared' };
+      let settlement: MirrorSettlement | null = { result: 'cleared' };
+      let attemptedBranch: string | undefined;
+      let fixedBranch = false;
+      let allBranches = true;
       const fail = (errorClass: MirrorErrorClass): 'failed' => {
         settlement = { result: 'failed', errorClass };
         return 'failed';
@@ -183,8 +188,6 @@ export async function withMirrorCheckout(
         where: { id: resolvedMemoryId }, include: { organization: true },
       });
       if (!memory || !memory.organization || !memory.source || (opts.retry && memory.deletedAt)) return 'skipped';
-      // The branch may have changed while this retry waited. No sequence or attempt without a provable route (#3042).
-      if (opts.retry && memory.writeBranch?.includes('{client}')) return 'skipped';
       // R206 / cor:sec:040:05: re-check the live encryption state after the
       // checkout wait, before ANY Git/filesystem mutation. No key (request,
       // session or cache) is an exception, and neither is a path-only cleanup.
@@ -202,45 +205,46 @@ export async function withMirrorCheckout(
         throw e;
       }
 
+      // #3042: resolve before NOT_CLONED or any Git. Retries never substitute an unknown client.
+      const rawBranch = memory.writeBranch ?? 'hadron-updates';
+      fixedBranch = !rawBranch.includes('{client}');
+      const capturedBranch = opts.retry?.branch ?? '';
+      const branch = opts.retry
+        ? (fixedBranch ? rawBranch : capturedBranch)
+        : rawBranch.replace('{client}', clientId ?? 'unknown');
+      if (opts.retry && !fixedBranch && !branchFitsTemplate(rawBranch, capturedBranch)) {
+        settlement = null; return 'skipped';
+      }
+      // #1146: validate the final substituted/stored value, never only its template.
+      try { validateGitBranch(branch, 'writeBranch'); }
+      catch {
+        console.warn(`${logPrefix} Refusing invalid mirror branch`);
+        settlement = null; return 'skipped';
+      }
+      attemptedBranch = branch;
+      allBranches = false;
+      if (!opts.retry) obligations = obligations.map(r => ({ ...r, branch }));
       const localPath = memoryLocalPath(memory.organization.urn, memory.urn);
-
       if (!existsSync(join(localPath, '.git'))) {
         console.warn(`${logPrefix} Repo not cloned yet at ${localPath} — skipping git write`);
         if (!opts.retry) settlement = { result: 'failed', errorClass: 'NOT_CLONED' };
         return 'skipped';
       }
-
       if (opts.retry) {
-        // Selection is only a hint: another server/writer may have settled while we waited.
+        // Exact captured branch key, re-read under the shared memory checkout lock.
         const rows = await db.gitMirrorObligation.findMany({ where: {
           memoryId: resolvedMemoryId, state: { in: ['FAILED', 'NOT_CLONED'] },
           attempts: { lt: opts.retry.maxAttempts },
-          OR: obligations.map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc ?? '' })),
+          OR: obligations.map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc ?? '', branch: r.branch ?? capturedBranch })),
         } });
         const now = opts.retry.now.getTime();
         obligations = rows.filter(r => r.lastAttemptAt.getTime() + Math.min(300_000 * 2 ** Math.min(r.attempts - 1, 7), 21_600_000) <= now)
-          .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc }));
+          .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc, branch: r.branch }));
         if (!obligations.length) return 'skipped';
         attemptSeq = await tryTakeAttemptSeq(db);
-        if (attemptSeq === null) return 'skipped'; // a retry must not run without its settlement fence
+        if (attemptSeq === null) return 'skipped';
       }
-      if (opts.beforeGit && !await opts.beforeGit()) return 'no-changes';
-
-      // 2. Resolve the branch name.
-      const rawBranch = memory.writeBranch ?? 'hadron-updates';
-      const branch = rawBranch.replace('{client}', clientId ?? 'unknown');
-      // #1146: validate the SUBSTITUTED result, not the template. `branch` reaches
-      // `git checkout` and `git push` as a positional argument, and `clientId` is
-      // caller-supplied — a `writeBranch` of exactly `{client}` makes the whole
-      // branch name the client's to choose, leading `-` included. Neither the
-      // mutation guard nor a check on `rawBranch` would see that, because the
-      // dangerous value does not exist until this line.
-      try {
-        validateGitBranch(branch, 'writeBranch');
-      } catch (e) {
-        console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: invalid branch`);
-        return 'skipped';
-      }
+      if (opts.beforeGit && !await opts.beforeGit(obligations)) return 'no-changes';
 
       // 3. Get the installation token.
       let token: string | null = null;
@@ -262,14 +266,16 @@ export async function withMirrorCheckout(
       // "pull --ff-only; on failure checkout -b origin/main" path failed on a
       // non-default branch with no upstream tracking (see gitBranch.ts).
       try {
-        if (token) {
-          const tokenUrl = toHttpsUrl(memory.source, token);
+        if (token || opts.retry) {
+          // #3042: a tokenless retry must follow current source config too, not the clone's stale origin.
+          const tokenUrl = token ? toHttpsUrl(memory.source, token) : memory.source;
           await execGit(['remote', 'set-url', 'origin', tokenUrl], { cwd: localPath });
         }
-        await execGit(['fetch', 'origin'], { cwd: localPath });
+        // #3042: remove stale remote-tracking refs, so a deleted owed branch is published again.
+        await execGit(opts.retry ? ['fetch', '--prune', 'origin'] : ['fetch', 'origin'], { cwd: localPath });
         await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
       } catch (err) {
-        console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}`, mirrorFailureMetadata(err, 'branch', 'BRANCH_SETUP'));
+        console.error(`${logPrefix} Branch setup failed for ${commitSubject}`, mirrorFailureMetadata(err, 'branch', 'BRANCH_SETUP'));
         await restoreRemote(localPath, memory.source);
         return fail('BRANCH_SETUP');
       }
@@ -282,12 +288,13 @@ export async function withMirrorCheckout(
           where: { id: resolvedMemoryId }, select: { isEncrypted: true },
         });
         if (!current || current.isEncrypted) {
+          allBranches = true;
           if (current) logEncryptedGitSyncRefusal(logPrefix, resolvedMemoryId);
           else console.warn(`${logPrefix} Skipping write for memory ${resolvedMemoryId}: memory changed during preparation`);
           await restoreRemote(localPath, memory.source);
           return current ? 'refused-encrypted' : 'skipped';
         }
-        const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn });
+        const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn, obligations });
         if (shouldCommit === false) {
           await restoreRemote(localPath, memory.source);
           return 'skipped';
@@ -309,7 +316,7 @@ export async function withMirrorCheckout(
           // ahead state) lands in the catch below as 'failed', never 'no-changes'.
           if ((await unpublishedCommitCount(localPath, branch, memory.readBranch ?? undefined)) === 0) {
             await restoreRemote(localPath, memory.source);
-            if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn })) return fail('TREE_WRITE');
+            if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, obligations })) return fail('TREE_WRITE');
             return 'no-changes';
           }
         } else {
@@ -334,11 +341,11 @@ export async function withMirrorCheckout(
             ['push', '-u', 'origin', `refs/heads/${branch}:refs/heads/${branch}`],
             { cwd: localPath },
           );
-          console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}@${branch}`);
+          console.log(`${logPrefix} Pushed ${commitSubject} → ${memory.urn}`);
         } finally {
           await restoreRemote(localPath, memory.source);
         }
-        if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn })) return fail('TREE_WRITE');
+        if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, obligations })) return fail('TREE_WRITE');
         return 'mirrored';
       } catch (err) {
         console.error(`${logPrefix} Commit/push failed for ${commitSubject}`, mirrorFailureMetadata(err, 'push', 'PUSH_FAILED'));
@@ -346,7 +353,10 @@ export async function withMirrorCheckout(
         return fail('PUSH_FAILED');
       }
       })();
-      if (attemptSeq !== null) await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq, opts.retry?.maxAttempts);
+      if (attemptSeq !== null && settlement !== null) await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq, opts.retry?.maxAttempts, {
+        allBranches, clearLegacy: fixedBranch && !opts.retry,
+        ...(opts.retry && !allBranches ? { targetBranch: attemptedBranch } : {}),
+      });
       return outcome;
     }, { fenceEncryption: true });
   } catch (err) {
@@ -359,7 +369,11 @@ export async function withMirrorCheckout(
     // lock-ordered: the sequence number still makes it a no-op against any newer row.
     const lockFailedSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
     if (lockFailedSeq !== null) {
-      await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
+      // The one capture outside the lock: validate the pre-lock snapshot, never a caller's raw branch.
+      const branch = (memory.writeBranch ?? 'hadron-updates').replace('{client}', clientId ?? 'unknown');
+      try { validateGitBranch(branch, 'writeBranch'); }
+      catch { console.warn(`${logPrefix} Refusing invalid mirror branch`); return 'failed'; }
+      await settleMirrorObligations(db, foundMemoryId, obligations.map(r => ({ ...r, branch })), { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
     }
     return 'failed';
   }
@@ -393,4 +407,12 @@ function decryptToken(ciphertext: string): string {
   const decipher = createDecipheriv('aes-256-gcm', keyBuf, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
+}
+
+/** #3042: first-placeholder replacement, nonempty client segment; final branch validation remains authoritative. */
+export function branchFitsTemplate(template: string, branch: string): boolean {
+  const at = template.indexOf('{client}');
+  if (at < 0) return branch === template;
+  const prefix = template.slice(0, at), suffix = template.slice(at + '{client}'.length);
+  return branch.length > prefix.length + suffix.length && branch.startsWith(prefix) && branch.endsWith(suffix);
 }

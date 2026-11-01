@@ -5621,7 +5621,7 @@ model AppMemoryWriteGrantEvent {
 }
 
 /// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.
-/// One row per (memory, node, kind, remove_loc): a WRITE row per node, plus one REMOVE row per distinct old loc a move
+/// One row per (memory, node, kind, remove_loc, branch): a WRITE row per node/branch, plus one REMOVE row per distinct old loc/branch a move
 /// left behind (remove_loc is '' for WRITE). `node_id` carries NO foreign key on purpose, so a REMOVE row survives the
 /// node's hard delete; the memory FK cascades. A row exists only while the last settled attempt failed: success, and
 /// ordinary writes to a memory that is not mirrored delete it. The sweep leaves ineligible memories untouched.
@@ -5635,6 +5635,8 @@ model GitMirrorObligation {
   nodeId        String                   @map("node_id")
   kind          GitMirrorObligationKind
   removeLoc     String                   @default("") @map("remove_loc")
+  /// #3042: resolved attempted branch; empty only for legacy unknown-branch debt.
+  branch        String                   @default("")
   state         GitMirrorObligationState
   errorClass    String                   @map("error_class")
   attempts      Int                      @default(1)
@@ -5643,7 +5645,7 @@ model GitMirrorObligation {
 
   memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
 
-  @@id([memoryId, nodeId, kind, removeLoc])
+  @@id([memoryId, nodeId, kind, removeLoc, branch])
   @@index([memoryId, state])
   @@map("git_mirror_obligations")
 }
