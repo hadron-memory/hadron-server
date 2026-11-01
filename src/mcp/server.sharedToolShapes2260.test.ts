@@ -135,7 +135,12 @@ describe('#2260 per-session state stays per-session', () => {
     const regA = (a as unknown as { _registeredTools: Registered })._registeredTools;
     const regB = (b as unknown as { _registeredTools: Registered })._registeredTools;
     const names = Object.keys(regA).filter((n) => Object.keys(regA[n].inputSchema?.shape ?? {}).length > 0);
-    expect(names.length).toBeGreaterThan(50) // #3082: 71 team registrations intentionally removed; all remaining shapes checked below.;
+    // #3082: 68 kept runtime tools, including three without parameters.
+    expect(Object.keys(regA)).toHaveLength(68);
+    expect(Object.keys(regA).filter(n => !names.includes(n)).sort()).toEqual([
+      'hadron_list_apps', 'hadron_list_memories', 'hadron_server_info',
+    ]);
+    expect(names).toHaveLength(65);
 
     // Every field schema is the same object in both instances: the hoist actually happened.
     const unshared: string[] = [];

@@ -83,7 +83,11 @@ describe('#1868: a revoked hdr_user_ key cannot write through the delegating MCP
 it('#3082 a live key still writes through the kept comment tool', async () => {
   const target = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 't:2', name: 'Target', content: 'Body' } });
   const { mcp } = await keyedConnection(member.id);
-  expect(code(text(await mcp.callTool('hadron_create_comment', { targetRef: target.id, body: 'live key' })))).toBe('NO_ERROR');
+  const result = await mcp.callTool('hadron_create_comment', { targetRef: target.id, body: 'live key' });
+  expect(result).not.toMatchObject({ isError: true });
+  expect(code(text(result))).toBe('NO_ERROR');
+  expect(await db.node.count({ where: { nodeType: 'comment' } })).toBe(1);
+  expect(await db.node.findFirstOrThrow({ where: { nodeType: 'comment' } })).toMatchObject({ content: 'live key' });
 });
 
 describe('#1868: no MCP GraphQL context drops the presented key (source audit)', () => {

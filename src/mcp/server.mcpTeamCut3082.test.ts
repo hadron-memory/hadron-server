@@ -9,6 +9,8 @@ import { hashLaunchGrant } from '../lib/hostOperations/launch.js';
 import { generateId } from '../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
+import { ensureChannelWithRoot } from '../lib/channels.js';
+import { runAsActor } from '../lib/requestActor.js';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -244,6 +246,20 @@ describe('worker binding refuses before looking up a worker or grant', () => {
     const server = createTestableMcpServer(auth);
     for (const field of ['workerRef', 'launchGrant']) expect(server.toolParamDescription('hadron_start_session', field)).toContain('MCP_WORKER_BINDING_UNSUPPORTED');
   });
+  it.each(['', '   '])('blank workerRef %j starts an ordinary session', async workerRef => {
+    const server = createTestableMcpServer(auth);
+    const text = await server.callToolText('hadron_start_session', { workerRef, description: 'ordinary' });
+    const id = text.match(/Session started: (\S+)/)?.[1];
+    expect(id).toBeTruthy();
+    expect(await db.session.findUniqueOrThrow({ where: { id } })).toMatchObject({ workerId: null, agentId: null });
+  });
+  it.each([false, true])('empty whoami offers supported plain and CLI worker starts (includeEnded=%s)', async includeEnded => {
+    await db.session.deleteMany();
+    const text = await createTestableMcpServer(auth).callToolText('hadron_whoami', { includeEnded });
+    expect(text).toContain('hadron_start_session(description: "<task>")');
+    expect(text).toContain('hadron team session start --as <worker-URN>');
+    expect(text).not.toContain('workerRef:');
+  });
   it('GraphQL SDL points to the CLI, with no disabled tool remedy', () => {
     for (const name of DISABLED) expect(typeDefs.split(/[^a-z_]+/)).not.toContain(name);
   });
@@ -280,18 +296,110 @@ describe('worker binding refuses before looking up a worker or grant', () => {
   it('GraphQL still serves each disabled family', async () => {
     const ctx = { ...auth, db } as Context;
     const Q = resolvers.Query as any; const M = resolvers.Mutation as any;
-    const appRef = auth.appId;
-    expect((await Q.worker({}, { ref: workerId }, ctx)).id).toBe(workerId);
-    expect((await Q.registerEntries({}, { appRef }, ctx)).items).toEqual([]);
-    expect((await Q.teamChatMessages({}, { appRef }, ctx)).items).toEqual([]);
-    expect(await Q.teamAttentionPage({}, { appRef }, ctx)).toBeTruthy();
-    expect(await Q.agentTasks({}, { appRef }, ctx)).toBeDefined();
-    expect(await Q.teamRoster({}, { appRef }, ctx)).toBeTruthy();
-    expect((await Q.teamStopSignals({}, { appRef }, ctx)).signals).toEqual([]);
-    expect(await Q.tickers({}, { appRef }, ctx)).toEqual([]);
+    const appRef = auth.appId!;
+    const app = await db.app.findUniqueOrThrow({ where: { id: appRef } });
+    const worker = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+    const memory = await db.memory.create({ data: {
+      name: 'Family fixture', urn: 'cut3082.test:family', class: 'app', appId: appRef,
+      organizationId: app.organizationId, sharedMemoryOfAgentId: worker.agentId,
+    } });
+    const { channel } = await ensureChannelWithRoot(db, {
+      memoryId: memory.id, loc: 'chats:team', name: 'Team', createdBy: auth.userId!, asDefaultOfAppId: appRef,
+    });
+    const entry = await db.registerEntry.create({ data: {
+      appId: appRef, channelId: channel.id, attendeeWorkerId: workerId, role: 'BOTH',
+    } });
+    expect(await Q.worker({}, { ref: workerId }, ctx)).toMatchObject({ id: workerId, name: 'Fixture' });
+    expect((await Q.registerEntries({}, { filter: { ownerRef: appRef }, orgId: app.organizationId }, ctx)).items)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: entry.id, channelId: channel.id })]));
+    const baseline = await Q.teamAttentionPage({}, { appRef }, ctx);
+    expect(baseline).toMatchObject({ scanComplete: true, nextPage: null, adoptableSince: expect.any(String) });
+    await M.createTeamChatMessage({}, { appRef, body: 'family fixture @fixture' }, ctx);
+    expect((await Q.teamChatMessages({}, { appRef }, ctx)).items)
+      .toEqual([expect.objectContaining({ seq: 1, body: 'family fixture @fixture' })]);
+    expect((await Q.teamAttentionPage({}, { appRef, since: baseline.adoptableSince }, ctx)).items)
+      .toEqual([expect.objectContaining({ worker: workerId, channel: channel.id, unread: 1, lastSeq: 1 })]);
+    const task = await db.agentTask.create({ data: { appId: appRef, title: 'Family task', ownerUserId: auth.userId! } });
+    expect(await Q.agentTasks({}, { appRef }, ctx))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: task.id, title: 'Family task' })]));
+    expect((await Q.teamRoster({}, { appRef }, ctx)).workers)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ workerId, name: 'Fixture' })]));
     const session = await db.session.findFirstOrThrow();
     expect(await M.createResumeClaim({}, { sessionId: session.id }, ctx)).toMatchObject({ sessionId: session.id, workerId });
     expect(await M.resumeSession({}, { input: {} }, ctx)).toMatchObject({ session: { id: session.id } });
+    const signal = await db.teamStopSignal.create({ data: {
+      id: generateId(), appId: appRef, level: 'pause-dispatch', scope: 'worker', targetWorkerId: workerId,
+      setAt: new Date(), setByUserId: auth.userId!,
+    } });
+    expect((await Q.teamStopSignals({}, { appRef }, ctx)).signals)
+      .toEqual([expect.objectContaining({ id: signal.id })]);
+    const ticker = await db.ticker.create({ data: {
+      appId: appRef, ownerUserId: auth.userId!, name: 'Family ticker', slug: 'family', tickCode: 'tick.family',
+      cadenceSeconds: 600, anchorAt: new Date(),
+    } });
+    expect(await Q.tickers({}, { appRef }, ctx)).toEqual([expect.objectContaining({ id: ticker.id, name: 'Family ticker' })]);
+  });
+  it.each(['other owner', 'lost participation', 'uninstalled', 'deleted'] as const)(
+    'kept end_session cannot recover App scope through %s', async mode => {
+      const session = await db.session.findFirstOrThrow();
+      const app = await db.app.findUniqueOrThrow({ where: { id: auth.appId! } });
+      await db.app.create({ data: { name: 'Second', urn: 'cut3082.test:second', organizationId: app.organizationId } });
+      let userId = auth.userId!;
+      if (mode === 'other owner') {
+        const other = await db.user.create({ data: { githubId: 3082002, githubUsername: 'cut3082-other', roles: ['READER'] } });
+        // Isolate session ownership: this caller DOES participate in the target App.
+        await db.orgMember.create({ data: { organizationId: app.organizationId!, userId: other.id, role: 'CONTRIBUTOR' } });
+        userId = other.id;
+      } else if (mode === 'lost participation') {
+        await db.appMember.deleteMany({ where: { appId: app.id, userId } });
+        await db.orgMember.deleteMany({ where: { organizationId: app.organizationId!, userId } });
+      } else {
+        await db.app.update({ where: { id: app.id }, data: mode === 'uninstalled' ? { uninstalledAt: new Date() } : { deletedAt: new Date() } });
+      }
+      const coldAuth: AuthContext = { userId, roles: ['READER'], clientId: `end-recovery:${generateId()}` };
+      const server = createTestableMcpServer(coldAuth, { sessionId: generateId(), cachedAppResolution: { kind: 'multi-app' } });
+      const before = await db.session.findUniqueOrThrow({ where: { id: session.id } });
+      const result = await server.callToolText('hadron_end_session', { id: session.id });
+      expect(result).toContain('multiple_apps_resolved');
+      expect(coldAuth.appId).toBeUndefined();
+      expect(await db.session.findUniqueOrThrow({ where: { id: session.id } })).toEqual(before);
+    },
+  );
+  it('kept end_session recovers an owned live App after reconnect and ends only that session', async () => {
+    const session = await db.session.findFirstOrThrow();
+    const coldAuth: AuthContext = { userId: auth.userId, roles: ['READER'], clientId: `end-positive:${generateId()}` };
+    const server = createTestableMcpServer(coldAuth, { sessionId: generateId(), cachedAppResolution: { kind: 'multi-app' } });
+    const result = await server.callToolText('hadron_end_session', { id: session.id });
+    expect(result).not.toContain('multiple_apps_resolved');
+    expect(coldAuth.appId).toBe(session.appId);
+    expect((await db.session.findUniqueOrThrow({ where: { id: session.id } })).endedAt).toBeInstanceOf(Date);
+    expect(await db.session.count()).toBe(1);
+  });
+  it('a kept core write refuses an ambiguous actor, while concurrent named writes remain isolated', async () => {
+    const first = await db.session.findFirstOrThrow();
+    const app = await db.app.findUniqueOrThrow({ where: { id: auth.appId! } });
+    const other = await db.worker.create({ data: {
+      ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: first.agentId!, name: 'Other', slug: 'other', heldByUserId: auth.userId!,
+    } });
+    const second = await db.session.create({ data: { id: generateId(), appId: app.id, userId: auth.userId!, workerId: other.id, agentId: first.agentId } });
+    const memory = await db.memory.create({ data: { name: 'Actors', urn: 'cut3082.test:actors', class: 'app', appId: app.id, organizationId: app.organizationId } });
+    const server = createTestableMcpServer(auth);
+    // Exercise a pre-existing shared request actor without re-enabling any worker-binding tool.
+    const results = await runAsActor({ workerId: null, agentId: null, ambiguousSessionIds: [first.id, second.id] }, () => Promise.all([
+      server.callTool('hadron_create_node', { urn: `hrn:node:${memory.urn}:first`, name: 'First', session: first.id }),
+      server.callTool('hadron_create_node', { urn: `hrn:node:${memory.urn}:second`, name: 'Second', session: second.id }),
+      server.callTool('hadron_create_node', { urn: `hrn:node:${memory.urn}:unnamed`, name: 'Must not land' }),
+    ]));
+    expect(results[0]).not.toMatchObject({ isError: true });
+    expect(results[1]).not.toMatchObject({ isError: true });
+    expect(results[2]).toMatchObject({ isError: true });
+    expect(JSON.stringify(results[2])).toContain('session_ambiguous');
+    const rows = await db.node.findMany({ where: { memoryId: memory.id }, orderBy: { loc: 'asc' } });
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual([
+      expect.objectContaining({ loc: 'first', createdByWorkerId: workerId }),
+      expect.objectContaining({ loc: 'second', createdByWorkerId: other.id }),
+    ]);
   });
   it('resume is unknown and leaves a live resume claim untouched', async () => {
     const client = await clientFor(auth); const before = await snapshot();

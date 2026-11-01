@@ -114,7 +114,6 @@ for (const required of [false, true]) {
         for (const op of ['castWorker', 'castWorkerPreview'] as const) {
           expect((await wire(op, input)).errors?.[0]).toMatchObject({ message, extensions: { code: `WORKER_TEAM_CHOICE_${suffix}` } });
         }
-        const choice = { ...('reports' in input ? { reportsTo: input.reports } : {}), ...('none' in input ? { noTeam: input.none } : {}) };
       }
       const literal = await wire('castWorker', {}, 'reportsTo:null');
       expect(literal.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_INVALID');
@@ -127,6 +126,19 @@ for (const required of [false, true]) {
       if (required) expect(result.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
       else expect(result.data?.castWorkerPreview).toMatchObject({ teamPlacement: 'UNSET' });
       expect(await db.worker.count()).toBe(0);
+    });
+    it('preserves the actual GraphQL cast omission branch', async () => {
+      vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
+      const result = await wire('castWorker', {});
+      if (required) {
+        expect(result.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
+        expect(await db.worker.count()).toBe(0);
+      } else {
+        expect(result.errors).toBeUndefined();
+        expect(result.data?.castWorker).toMatchObject({ teamPlacement: 'UNSET' });
+        expect(await db.worker.count()).toBe(1);
+        expect(await db.worker.findFirstOrThrow()).toMatchObject({ name: 'Wire', appId: app.id, agentId: agent.id });
+      }
     });
   });
 }
