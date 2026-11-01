@@ -81,7 +81,7 @@ Rows below describe test edits, not a claim that a sibling suite has identical w
 | `src/mcp/server.oneMark2018.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
 | `src/mcp/server.reconnectLegibility.test.ts` | Retained core tool behavior; worker fixtures start through GraphQL. Obsolete implicit MCP-worker-binding assertions retired; explicit named/header attribution remains. |
 | `src/mcp/server.register.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
-| `src/mcp/server.requestSession2123.test.ts` | Retired wrapper-only suite; this MCP endpoint or connection worker-bind workflow no longer exists. Shared GraphQL/lib rules stay; see family coverage below. |
+| `src/mcp/server.requestSession2123.test.ts` | Retired team-wrapper-only #2123 cases; preserved main's independent #3107 retained-rate-manifest startup regression on merge. Core HTTP attribution/header controls remain in the new cut suite. |
 | `src/mcp/server.sessionHeartbeat.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.sessionVocabulary.test.ts` | Kept supported tool/GraphQL controls; retired worker-bind/team-wrapper assertions or updated advertised text. |
 | `src/mcp/server.sharedToolShapes2260.test.ts` | Intentional golden cut; invert team presence and retain all remaining shared-schema/heap checks. |
