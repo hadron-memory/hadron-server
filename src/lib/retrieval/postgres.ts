@@ -43,7 +43,9 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
     parts.push(`(deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[])))`);
   }
   // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
-  if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
+  // #3113 — an explicit list is also explicit: it narrows to the named types and replaces the default.
+  if (flt.nodeTypes) parts.push(`node_type = ANY(${bind(flt.nodeTypes)}::text[])`);
+  else if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
   else parts.push(`node_type <> 'system'`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);

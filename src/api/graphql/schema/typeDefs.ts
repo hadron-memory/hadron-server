@@ -218,6 +218,18 @@ export const typeDefs = `#graphql
     "An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
+    #3113 — an explicit list of node types, a union: only nodes whose type is in the list
+    (hrn:node:hadronmemory.com:specs:cor:api:090:02). It narrows, ANDs every other filter and, being
+    explicit, replaces the default that leaves out system nodes; it never lifts the memory-class
+    default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown
+    value matches nothing. null is the same as omitted. Refused with BAD_USER_INPUT: an empty list,
+    both nodeType and nodeTypes (an empty string counts as set), more than 20 entries (counted
+    before duplicates are dropped), and a list containing "comment" (search comments with nodeType
+    or contentScope). Exact total where the mode already has one; vector and hybrid keep total
+    null and their bounded, widening candidate window. Applies to findNodes and appNodes.
+    """
+    nodeTypes: [String!]
+    """
     #1608 — content, comments or both (hrn:node:hadronmemory.com:specs:cor:dmo:110:08).
     Default CONTENT. Applied by the server before ranking, pagination and
     limits in every mode (keyword, regex, vector, hybrid and filter-only), so a
@@ -1533,6 +1545,8 @@ export const typeDefs = `#graphql
     updatedByAgent: ActorRef
     "#2176 - the User behind the last authored edit, as handle and URN only (the same projection as a revision's editedByUser, and always the user that revision records). Cleared like updatedByWorker: an authored edit with no user behind it (a system job, a git sync, an API key with no account) clears it. Null also for a deleted user and for nodes last edited before #2176, which are not backfilled."
     updatedByUser: NodeRevisionEditor
+    "#1151 - the User behind this node's creation, as handle and URN only (the same projection as updatedByUser). Null when the stored creator resolves to no live user (a system job, an app key, a deleted user; the stored value is never echoed), and for nodes written before the column was stamped, which are not backfilled."
+    createdByUser: NodeRevisionEditor
     "#1606 — open and resolved discussion on this node (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Batched per request."
     commentSummary: CommentSummary!
     "#1608 — this node AS a comment (author, target, anchor revision, thread) when its nodeType is 'comment'; null for content. Lets a search hit render as feedback, never as content of its target (hrn:node:hadronmemory.com:specs:cor:dmo:110:08)."
@@ -1793,6 +1807,14 @@ export const typeDefs = `#graphql
     UNSUPPORTED_EDGE_GOVERNED_KIND error, never null.
     """
     governedKind: EdgeGovernedKind
+    "#1151 - when the edge was created."
+    createdAt: DateTime!
+    "#1151 - when the edge row last changed (stamped on create too; null only for a row inserted outside the API)."
+    updatedAt: DateTime
+    "#1151 - the User behind this edge's creation, as handle and URN only (the revision-editor projection; never a raw id). Null when the stored creator resolves to no live user (a system job, an app key, a deleted user; the stored value is never echoed), for edges written before attribution was stamped (not backfilled), and for a caller who cannot read the memory the edge lives in (an edge's memory is its source side), so a cross-memory edge never names another tenant's user."
+    createdByUser: NodeRevisionEditor
+    "#1151 - the User behind the last update of this edge; null under the same conditions as createdByUser."
+    updatedByUser: NodeRevisionEditor
   }
 
   "#2288: derived per-session state; ENDED means terminal, not necessarily an explicit end."
@@ -3005,7 +3027,9 @@ export const typeDefs = `#graphql
     not-URN-legal (neither has a URN).
     """
     urn: String
+    "Numeric GitHub account id (#2574, hrn:node:hadronmemory.com:specs:cor:acl:070:01). Personal tier, like name and email: null for a viewer who is not the user, a platform admin, or a co-member of one of their orgs."
     githubId: Int
+    "GitHub username (#2574, hrn:node:hadronmemory.com:specs:cor:acl:070:01). Identity tier: visible to any signed-in viewer, and a public search key (hrn:node:hadronmemory.com:specs:cor:acl:070:02)."
     githubUsername: String
     """
     Google account subject id (#837). Opaque provider identifier, never an
@@ -3028,6 +3052,7 @@ export const typeDefs = `#graphql
     linkedAt: DateTime
     name: String
     email: String
+    "Avatar image URL (#2574, hrn:node:hadronmemory.com:specs:cor:acl:070:01). Identity tier: visible to any signed-in viewer."
     avatarUrl: String
     "Platform roles; an empty list is returned to viewers without personal-field access."
     roles: [Role!]!
@@ -5308,6 +5333,14 @@ export const typeDefs = `#graphql
     with the platform variables filled. Null when no prompt can be served.
     """
     prompt: String
+    """
+    #2969 (hrn:node:hadronmemory.com:specs:cor:agt:040:04): the worker's signature as the served boot prompt fills it, the platform
+    variables substituted (session.llmModel is the empty string when no model is recorded). Reaches exactly the callers
+    prompt reaches; null for anyone else, with no refusal.
+    """
+    renderedSignature: String
+    "#2969: the worker's trailer, filled as renderedSignature is, for the same callers."
+    renderedTrailer: String
     """
     #1029 — what a fresh binding of this worker inherits from the last one.
 
@@ -8042,6 +8075,8 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
+      "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
+      reference: AgentTaskReferenceFilter
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
       text: String
       "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
@@ -10271,6 +10306,20 @@ export const typeDefs = `#graphql
     \`extensions.warnings\` (see createAgentTask); it does not end them.
     """
     cancelAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #2651 — hand a started task back: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:29). The task
+    loses its assignee, goes back to PENDING and is queued again (hrn:node:hadronmemory.com:specs:cor:agt:050:03); a
+    returning worker is added to requirements.excludeWorkerIds, so the platform's matcher assigns it to another
+    matching worker (hrn:node:hadronmemory.com:specs:cor:agt:060:06), and whoever may assign the task can remove
+    that exclusion. A person who hands a task back is not added. One task.handed-back event carries the code only; no
+    result is written; child tasks are untouched; every ordinary stall episode the task had ends, while a finish-by
+    episode is kept until the task ends or its finish-by time is edited (hrn:node:hadronmemory.com:specs:cor:agt:050:13). taskRef is the task's id or handle. Refusals: TASK_NOT_FOUND,
+    TASK_NOT_ASSIGNEE (anyone else, or a task with no assignee), TASK_ENDED (finished or cancelled),
+    TASK_INVALID_TRANSITION (pending), BAD_USER_INPUT (a code outside the set, or text over 2,000 characters),
+    SESSION_NOT_BOUND, APP_UNINSTALLED. Nothing changes on a refusal.
+    """
+    handBackAgentTask(taskRef: ID!, reason: AgentTaskHandBackInput!): AgentTask!
 
     """
     #1754 — park a queued task in the backlog (hrn:node:hadronmemory.com:specs:cor:agt:050:02): pending
@@ -13771,6 +13820,35 @@ export const typeDefs = `#graphql
     evidence: String
   }
 
+  """
+  #2651: why an assignee handed a started task back, a closed set (hrn:node:hadronmemory.com:specs:cor:agt:050:29,
+  Proposed details). MISSING_INPUT: something the work needs is not there. CANNOT_DO: the worker lacks the
+  capability. REFUSED: a policy or safety refusal. OUT_OF_SCOPE: the work is not what this task's role does.
+  DUPLICATE: the same work is already tracked elsewhere.
+  """
+  enum AgentTaskHandBackCode {
+    MISSING_INPUT
+    CANNOT_DO
+    REFUSED
+    OUT_OF_SCOPE
+    DUPLICATE
+  }
+
+  "#2651: a task's latest hand-back (hrn:node:hadronmemory.com:specs:cor:agt:050:01, :29), readable by whoever may read the task."
+  type AgentTaskHandBack {
+    code: AgentTaskHandBackCode!
+    "The optional reason text, up to 2,000 characters. Stored on the task only, never in an event."
+    text: String
+    handedBackAt: DateTime!
+  }
+
+  "#2651: the reason a hand-back gives (hrn:node:hadronmemory.com:specs:cor:agt:050:29)."
+  input AgentTaskHandBackInput {
+    code: AgentTaskHandBackCode!
+    "Optional, up to 2,000 characters after trimming; blank is none. Stored on the task, never put into an event."
+    text: String
+  }
+
   input AgentTaskResultInput {
     "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text."
     outcome: String!
@@ -14450,12 +14528,22 @@ export const typeDefs = `#graphql
     "Derived (hrn:node:hadronmemory.com:specs:cor:agt:050:04): started with at least one pending or started child task. Never stored."
     waitingOnChildren: Boolean!
     startBy: DateTime
+    "The finish-by deadline (#2648, hrn:node:hadronmemory.com:specs:cor:agt:050:14). While set, no stall window applies to the task; one stall.finish-by alarm is raised once it passes with the task neither finished nor cancelled."
+    finishBy: DateTime
     startedAt: DateTime
     finishedAt: DateTime
     cancelledAt: DateTime
     "Set only on a finished task."
     result: AgentTaskResult
+    "#2651: the task's latest hand-back by its assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:29); null when it was never handed back. A later hand-back replaces it; every earlier code stays in the task.handed-back events."
+    handBack: AgentTaskHandBack
     tags: [String!]!
+    """
+    #2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's ordered, typed references to other things. Each
+    target is the string as stored: never fetched or resolved, so it says nothing about the target's content or whether
+    it exists. Empty when none.
+    """
+    references: [AgentTaskReference!]!
     """
     Whether finishing or cancelling asks the assignee to end its worker session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns. #1709: carried out; see sessionEndRequest.
@@ -14497,6 +14585,47 @@ export const typeDefs = `#graphql
     NO_LIVE_HOST
   }
 
+  "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): what a task reference points at, which fixes the form its target takes."
+  enum AgentTaskReferenceKind {
+    "An absolute https URL of an issue. No owner/repo#n shorthand."
+    ISSUE
+    "An absolute https URL of a pull request."
+    PULL_REQUEST
+    "A node URN (hrn:node:...)."
+    NODE
+    "An agent-task URN (hrn:agenttask:<root>:<app-slug>:<task id or handle>), never a bare handle."
+    TASK
+    "An absolute http or https URL."
+    URL
+  }
+
+  "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): one typed reference, as stored. The platform never resolves target."
+  type AgentTaskReference {
+    kind: AgentTaskReferenceKind!
+    "Stored exactly as given (at most 512 characters)."
+    target: String!
+    "Optional, at most 120 characters; null when none was given."
+    label: String
+  }
+
+  """
+  #2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): one reference to set. target must have its kind's form and be
+  at most 512 characters, with no whitespace or control characters (a URL is written scheme://host, with no
+  backslash); label at most 120 (empty means none). A list of more than 20, or any item that fails, is refused
+  BAD_USER_INPUT and nothing is written.
+  """
+  input AgentTaskReferenceInput {
+    kind: AgentTaskReferenceKind!
+    target: String!
+    label: String
+  }
+
+  "#2649: agentTasks(reference:) matches tasks carrying a reference with exactly this target (1 to 512 characters, else BAD_USER_INPUT), and this kind when given. The label is ignored."
+  input AgentTaskReferenceFilter {
+    kind: AgentTaskReferenceKind
+    target: String!
+  }
+
   """
   One append-only record of something that happened in a team App's task work
   (hrn:node:hadronmemory.com:specs:cor:agt:050:11). Never changed or removed; an alarm's acknowledgement is the
@@ -14506,7 +14635,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled; the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
@@ -15316,8 +15445,12 @@ export const typeDefs = `#graphql
     properties: JSON
     "Reanchors only the not-started deadline; null clears the explicit deadline. Existing alarms stay raised."
     startBy: DateTime
+    "#2648 (hrn:node:hadronmemory.com:specs:cor:agt:050:14): set or change the finish-by deadline (refused BAD_USER_INPUT if in the past or earlier than startBy), or null to clear it, which brings the ordinary stall windows back from this edit. Either change ends the current finish-by episode. Setting only startBy is refused if it is later than the finish-by time."
+    finishBy: DateTime
     "Null clears to false; omission preserves the stored choice."
     closeSessionWhenDone: Boolean
+    "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:09): a list replaces the whole list, order kept; null or an empty list clears it; omission leaves it. The task.edited event names references, never the values."
+    references: [AgentTaskReferenceInput!]
   }
 
   """
@@ -15354,7 +15487,11 @@ export const typeDefs = `#graphql
     """
     properties: JSON
     startBy: DateTime
+    "#2648 (hrn:node:hadronmemory.com:specs:cor:agt:050:14): an optional finish-by deadline; refused BAD_USER_INPUT if in the past or earlier than startBy. While set, the task raises no stall-window alarm, only stall.finish-by once it passes unfinished."
+    finishBy: DateTime
     tags: [String!]
+    "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's ordered references; any creator may set them, as it sets the title."
+    references: [AgentTaskReferenceInput!]
     "Defaults to false: the assignee's session ends only when whoever assigns the task asks (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
     closeSessionWhenDone: Boolean
     """

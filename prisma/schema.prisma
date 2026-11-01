@@ -5740,6 +5740,9 @@ model AgentTask {
   blocked              Boolean   @default(false)
   releasedAt           DateTime? @map("released_at")
   startBy              DateTime? @map("start_by")
+  /// #2648 (cor:agt:050:14): the finish-by deadline. Set, it exempts the task from every stall window; one alarm
+  /// when it passes with the task neither finished nor cancelled.
+  finishBy             DateTime? @map("finish_by")
   startedAt            DateTime? @map("started_at")
   finishedAt           DateTime? @map("finished_at")
   cancelledAt          DateTime? @map("cancelled_at")
@@ -5747,7 +5750,16 @@ model AgentTask {
   resultOutcome        String?   @map("result_outcome")
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
+  /// #2651 (cor:agt:050:29, :01): the latest hand-back — its code (closed set, chk_agent_tasks_hand_back), optional
+  /// text (<= 2,000 characters; never put into an event) and time. A later hand-back replaces all three.
+  handBackReasonCode   String?   @map("hand_back_reason_code")
+  handBackReasonText   String?   @map("hand_back_reason_text")
+  handedBackAt         DateTime? @map("handed_back_at")
   tags                 String[]  @default([])
+  /// #2649 (cor:agt:050:01 References, :09): the task's ordered typed references, a JSON array of
+  /// {kind, target, label} (at most 20, chk_agent_tasks_references). Targets are stored as given and never resolved.
+  /// Column named task_references: REFERENCES is reserved in SQL.
+  references           Json      @default("[]") @map("task_references")
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")

@@ -36,6 +36,8 @@ export const TASK_EVENT_TYPES = [
   'task.edited',
   // #2420 (cor:agt:050:28): a change to the task's own properties, sizes and hashes only.
   'task.properties-changed',
+  // #2651 (cor:agt:050:29): a started task handed back by its assignee; the reason code only, never its text.
+  'task.handed-back',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -61,8 +63,16 @@ export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.propert
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
 
-export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'closeSessionWhenDone'] as const;
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone', 'references'] as const;
 export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
+
+/**
+ * #2651 (cor:agt:050:29, Proposed details): the closed set of reasons an assignee hands a started task back for, as
+ * stored on the task and carried by `task.handed-back`. A code outside it is refused (the resolver, and
+ * chk_agent_tasks_hand_back in the database).
+ */
+export const TASK_HAND_BACK_CODES = ['missing_input', 'cannot_do', 'refused', 'out_of_scope', 'duplicate'] as const;
+export type TaskHandBackCode = (typeof TASK_HAND_BACK_CODES)[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
@@ -90,6 +100,8 @@ export type TaskEventPayload =
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
+  /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
+  | { type: 'task.handed-back'; code: TaskHandBackCode }
   | { type: 'task.parked' }
   | { type: 'task.ready' }
   | { type: 'assignment.queued' }
@@ -145,6 +157,9 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { outcome: e.outcome };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
+    case 'task.handed-back':
+      if (!(TASK_HAND_BACK_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task hand-back code');
+      return { code: e.code };
     case 'task.parked':
     case 'task.ready':
     case 'assignment.queued':
@@ -204,6 +219,8 @@ export const ALARM_EVENT_TYPES = [
   'stall.no-progress',
   'stall.owner-unreactive',
   'assignment.unassignable',
+  // #2648: the finish-by deadline passed with the task neither finished nor cancelled (cor:agt:050:14).
+  'stall.finish-by',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.

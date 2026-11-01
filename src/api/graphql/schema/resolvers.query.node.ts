@@ -29,6 +29,7 @@ import {
 import { composeHybridRanking, hybridKeywordCandidates } from '../../../lib/retrieval/hybrid.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
+import { checkNodeTypesFilter, NodeTypesFilterError } from '../../../lib/retrieval/nodeTypeList.js';
 import { BooleanQueryError, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import {
   compileNodeWhere,
@@ -105,6 +106,20 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
 
+/**
+ * #3113 — the validated `filter.nodeTypes` list (or null), refused as
+ * BAD_USER_INPUT. Pure, so findNodes and appNodes run it before admission, scope
+ * resolution and every early return: a bad list is never silently ignored.
+ */
+function nodeTypesOrRefuse(filter: Parameters<typeof checkNodeTypesFilter>[0], surface: string): string[] | null {
+  try {
+    return checkNodeTypesFilter(filter, surface);
+  } catch (e) {
+    if (e instanceof NodeTypesFilterError) throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT' } });
+    throw e;
+  }
+}
+
 /** findNodes' arguments (cor:api:090), shared by the resolver and its spec-049 scope wrapper. */
 export interface FindNodesArgs {
   /** Internal object-store request only, not a GraphQL/MCP search argument. Counts no-query browse matches. */
@@ -116,6 +131,8 @@ export interface FindNodesArgs {
     memoryIds?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
+    /** #3113 — an explicit list of node types (a union); see `checkNodeTypesFilter`. */
+    nodeTypes?: string[] | null;
     /** #1608 — CONTENT (default) | COMMENTS | ALL (cor:dmo:110:08). */
     contentScope?: ContentScope | null;
     objectType?: string | null;
@@ -1155,6 +1172,7 @@ export const nodeQueries = {
       if (args.expand != null && (!Number.isInteger(args.expand) || args.expand < 0 || args.expand > 3)) {
         throw new GraphQLError('findNodes `expand` must be an integer in [0, 3].', { extensions: { code: 'BAD_USER_INPUT' } });
       }
+      nodeTypesOrRefuse(args.filter, 'findNodes');
       await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
       const { scope, appRef, ...coreArgs } = args;
 
@@ -1165,6 +1183,7 @@ export const nodeQueries = {
         query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore, includeTotal,
       }: FindNodesArgs) => {
       const f = filter ?? {};
+      const nodeTypes = nodeTypesOrRefuse(f, 'findNodes'); // #3113 — already refused above; the validated list
 
       // ── (spec 049 scope handling lives in the wrapper at the end of core) ──
       const { limit: finalLimit, offset: off } = normalizeFindNodesPaging(limit, offset);
@@ -1324,7 +1343,9 @@ export const nodeQueries = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
         // Explicit nodeType wins; otherwise exclude system-type nodes (orthogonal
         // to the memory-class exclusion above).
-        ...(f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
+        // #3113 — an explicit list (validated above) is explicit too: it narrows
+        // to the named types and replaces the default.
+        ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : { nodeType: { not: 'system' } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
         ...(f.role != null
@@ -1370,6 +1391,7 @@ export const nodeQueries = {
       const sqlFilter: NodeSqlFilter = {
         ...(f.includeDeleted ? { tombstoneMemoryIds: recoverableIds } : {}),
         nodeType: f.nodeType ?? null,
+        nodeTypes,
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
         role: f.role ?? null,
@@ -1471,7 +1493,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
@@ -2442,6 +2464,8 @@ export const nodeQueries = {
           memoryIds?: string[] | null;
           memoryClasses?: string[] | null;
           nodeType?: string | null;
+          /** #3113 */
+          nodeTypes?: string[] | null;
           objectType?: string | null;
           tags?: string[] | null;
           isRunnable?: boolean | null;
@@ -2462,6 +2486,8 @@ export const nodeQueries = {
     ) => {
       // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
       // computation, shared with appMemoryScope: a second copy would drift.
+      // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
+      const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
       const scope = await resolveAppNodeScope(ctx, appRef);
       if (!scope) return [];
       const { inheritance } = scope;
@@ -2499,7 +2525,7 @@ export const nodeQueries = {
         where: {
           memoryId: { in: memoryIds },
           ...(f.includeDeleted ? {} : { deletedAt: null }),
-          ...(f.nodeType ? { nodeType: f.nodeType } : {}),
+          ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : {}),
           ...(f.objectType ? { objectType: f.objectType } : {}),
           ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
           ...(f.role != null

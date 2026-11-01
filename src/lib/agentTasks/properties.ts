@@ -156,8 +156,8 @@ const SCHEMA_MAP_KEYWORDS = new Set(['properties', 'definitions', '$defs', 'depe
  * The schema's node count, or null when it is out of bounds (size, depth, node cap) or uses regex or reference keywords. Regular expressions are refused outright: `pattern`
  * and `patternProperties` run the engine's backtracking RegExp, and a catastrophic pattern such as `^(a+)+$` takes
  * seconds on a 28-character value and hours on a 40-character one, on the event loop every tenant shares. Walked
- * without recursion so a deeply nested schema cannot overflow the stack. A property merely NAMED `pattern` is fine (its
- * value is a sub-schema, not a string); one named `patternProperties` is refused with the keyword, fail-closed.
+ * without recursion so a deeply nested schema cannot overflow the stack. Properties merely NAMED `pattern` or
+ * `patternProperties` are fine: a name-map key is not a schema keyword. Literal data is never inspected as a schema.
  */
 function schemaNodeCount(schema: object): number | null {
   let nodes = 0;
@@ -174,7 +174,8 @@ function schemaNodeCount(schema: object): number | null {
       if (typeof o.pattern === 'string') return null;
       if (o.patternProperties !== undefined && typeof o.patternProperties === 'object') return null;
       // References let a flat, tiny schema describe an exponential evaluation tree (a chain of anyOf [$ref, $ref] is 2^N
-      // branches and exhausts the heap). Without them evaluation cost is bounded by schema nodes x value nodes, capped by the node cap and the work budget.
+      // branches and exhausts the heap). The schema-nodes x value-nodes work budget bounds linear keyword evaluation;
+      // it is not a bound for quadratic keywords, which need their own refusal (uniqueItems below).
       // uniqueItems compares every pair of an array's items, so its cost is quadratic in the array and no schema-nodes x
       // value-nodes budget bounds it (60 allOf copies against a 1,600-item array cost 0.5-1.1 s per write).
       if (o.uniqueItems === true) return null;

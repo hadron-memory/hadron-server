@@ -385,3 +385,36 @@ describe('task-number SQL parity (#2666)', () => {
     expect(push.indexOf('\\ir agent-task-number-backfill.sql')).toBeLessThan(push.indexOf('\\ir agent-task-number-invariants.sql'));
   });
 });
+
+// #2651: the hand-back columns' CHECK, one source shared with its migration.
+describe('task hand-back SQL parity (#2651)', () => {
+  it('the hand-back migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-hand-back-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101090000_agent_task_hand_back/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+  });
+
+  it('the CHECK refuses a code outside the set, text over 2,000 characters, empty text, and a partial row', async () => {
+    const org = await db.organization.create({ data: { name: 'hb-sql', urn: `hb-sql-${Date.now()}.example` } });
+    const app = await db.app.create({ data: { organizationId: org.id, name: 'A', urn: `${org.urn}:a` } });
+    const u = await db.user.create({ data: { githubId: 2_651_900 + Math.floor(Math.random() * 1000), githubUsername: `hb-sql-${Date.now()}`, roles: ['READER'] } });
+    const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: u.id } });
+    const set = (data: Record<string, unknown>) => db.agentTask.update({ where: { id: t.id }, data });
+    const now = new Date();
+    await expect(set({ handBackReasonCode: 'bored', handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonCode: 'refused', handBackReasonText: 'x'.repeat(2001), handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonCode: 'refused', handBackReasonText: '', handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonCode: 'refused' })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await expect(set({ handBackReasonText: 'why', handedBackAt: now })).rejects.toThrow(/chk_agent_tasks_hand_back/);
+    await set({ handBackReasonCode: 'refused', handBackReasonText: 'y'.repeat(2000), handedBackAt: now });
+  });
+});
+
+// #2649: the references column's CHECK, one source shared with its migration.
+describe('task references SQL parity (#2649)', () => {
+  it('the references migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-references-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101120000_agent_task_references/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+  });
+});

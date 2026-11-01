@@ -106,7 +106,9 @@ import {
   eventActor,
   TASK_EVENT_TYPES,
   TASK_EDIT_FIELDS,
+  TASK_HAND_BACK_CODES,
   type TaskEditField,
+  type TaskHandBackCode,
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
@@ -114,6 +116,7 @@ import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/ma
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
+import { normalizeTaskReferences, referenceKind, storedTaskReferences, REFERENCE_KIND_TO_GQL, TaskReferenceError, TASK_REFERENCE_TARGET_MAX, type TaskReference } from '../../../lib/agentTasks/references.js';
 import { emitTaskWarnings, readAssigneeFacts, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import type { GraphQLResolveInfo } from 'graphql';
 
@@ -127,6 +130,8 @@ export const TASK_EVIDENCE_MAX = 2_048;
 export const TASK_TAG_MAX = 64;
 export const TASK_TAGS_MAX = 32;
 export const TASK_REQUIREMENT_LIST_MAX = 32;
+/** #2651 (cor:agt:050:29): the optional hand-back reason text. */
+export const TASK_HAND_BACK_TEXT_MAX = 2_000;
 /**
  * An outcome is a WORD (cor:agt:050:01: `succeeded`, `failed`, or a word the
  * team chooses) — and it is copied into the event stream, which must never
@@ -709,6 +714,25 @@ function normalizeTitle(title: string): string {
   return t;
 }
 
+/** #2649 (cor:agt:050:01 References): the stored list, or BAD_USER_INPUT with a fixed message (never the target). */
+function taskReferencesInput(input: unknown): TaskReference[] {
+  try {
+    return normalizeTaskReferences(input);
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message);
+    throw e;
+  }
+}
+
+function refKind(kind: unknown): string {
+  try {
+    return referenceKind(kind);
+  } catch (e) {
+    if (e instanceof TaskReferenceError) throw badInput(e.message);
+    throw e;
+  }
+}
+
 function normalizeTags(tags: readonly string[] | null | undefined): string[] {
   if (!tags) return [];
   const out: string[] = [];
@@ -817,6 +841,40 @@ function parseStartBy(value: unknown): Date | null {
   const d = value instanceof Date ? value : new Date(String(value));
   if (Number.isNaN(d.getTime())) throw badInput('startBy is not a valid date-time.');
   return d;
+}
+
+function parseFinishBy(value: unknown): Date | null {
+  if (value == null) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(d.getTime())) throw badInput('finishBy is not a valid date-time.');
+  return d;
+}
+
+/**
+ * #2648 (cor:agt:050:14, Refused values): a call that SETS the finish-by time is refused if it is in the past or
+ * earlier than the start-by time; a call that sets only the start-by time is refused if it is later than the
+ * finish-by time, even one that has passed. Equal times are allowed; a call that sets neither, or clears one, is not
+ * checked. Thrown before any write, so a refused call changes nothing.
+ */
+function checkFinishBy(a: { finishBy: Date | null; startBy: Date | null; setsFinishBy: boolean; setsStartBy: boolean; now: Date }): void {
+  if (a.setsFinishBy && a.finishBy) {
+    if (a.finishBy.getTime() < a.now.getTime()) throw badInput('finishBy is in the past; name a time that has not passed yet.');
+    if (a.startBy && a.finishBy.getTime() < a.startBy.getTime()) throw badInput('finishBy is earlier than startBy; a task cannot be due to finish before it is due to start.');
+  } else if (a.setsStartBy && a.startBy && a.finishBy && a.startBy.getTime() > a.finishBy.getTime()) {
+    throw badInput('startBy is later than the task\'s finishBy; a task cannot be due to start after it is due to finish.');
+  }
+}
+
+/**
+ * #2648 (BLIND P2 at 2c7474dc; LOCAL P2-2 at 6feb16dd): a create judges its finish-by time against the database
+ * clock as the LAST statement of its write transaction, after every lock it takes (the authority anchors, the
+ * counter row inside insertTask, and the blocker graph after the insert), as the edit path does. A deadline that
+ * passed while the create waited is refused, and the rollback leaves nothing inserted.
+ */
+async function checkFinishByAtDbClock(tx: Prisma.TransactionClient, finishBy: Date | null, startBy: Date | null): Promise<void> {
+  if (!finishBy) return;
+  const [{ at }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+  checkFinishBy({ finishBy, startBy, setsFinishBy: true, setsStartBy: startBy !== null, now: at });
 }
 
 // ── Audit stamping (#1610 actor shape) ────────────────────────────────────
@@ -1033,13 +1091,16 @@ type CreateInput = {
   assignee?: PartyInput;
   requirements?: RequirementsInput | null;
   startBy?: unknown;
+  /** #2648 (cor:agt:050:14): the finish-by deadline; exempts the task from every stall window. */
+  finishBy?: unknown;
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
   status?: string | null;
   /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. */
   project?: boolean | null;
   /** #2420 (cor:agt:050:28): the task's own properties; left out, not refused, for a creator who may not write them. */
-  properties?: unknown;
+  properties?: unknown;  /** #2649 (cor:agt:050:01 References): any creator may set them, as it sets the title. */
+  references?: unknown;
 };
 
 /**
@@ -1050,7 +1111,7 @@ async function insertTask(
   tx: Prisma.TransactionClient,
   a: {
     app: TaskApp; parentId: string | null; title: string; description: string | null; source: string | null;
-    tags: string[]; startBy: Date | null; closeSessionWhenDone: boolean; priority?: number;
+    tags: string[]; references?: TaskReference[]; startBy: Date | null; finishBy?: Date | null; closeSessionWhenDone: boolean; priority?: number;
     requirements: Prisma.InputJsonObject | null; owner: TaskParty; assignee: TaskParty | null;
     /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
     properties?: Prisma.InputJsonObject | null;
@@ -1104,7 +1165,8 @@ async function insertTask(
       appId: a.app.id,
       taskNumber: counter!.last_number,
       handle,
-      title: a.title, description: a.description, source: a.source, tags: a.tags, startBy: a.startBy,
+      title: a.title, description: a.description, source: a.source, tags: a.tags, references: a.references ?? [], startBy: a.startBy,
+      finishBy: a.finishBy ?? null,
       closeSessionWhenDone: a.closeSessionWhenDone,
       priority: a.priority ?? 1,
       status: a.status ?? 'pending',
@@ -1175,6 +1237,7 @@ export async function createRootTaskForRun(
   const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
   const tags = normalizeTags(input.tags);
   const startBy = parseStartBy(input.startBy);
+  const finishBy = parseFinishBy(input.finishBy);
   const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
   const now = new Date();
   const evActor: EventActor = { userId: null, workerId: null, agentId: null, runId: run.id };
@@ -1191,12 +1254,14 @@ export async function createRootTaskForRun(
     }
     // #2162 (cor:agt:050:27 §4): never onto a worker that is resetting.
     await refuseResettingAssignee(tx, fresh.id, assignee?.workerId);
-    return insertTask(tx, {
-      app: fresh, parentId: null, title, description, source, tags, startBy, closeSessionWhenDone, requirements, owner, assignee,
+    const inserted = await insertTask(tx, {
+      app: fresh, parentId: null, title, description, source, tags, startBy, finishBy, closeSessionWhenDone, requirements, owner, assignee,
       created: { createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: run.id, updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
       assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
       evActor,
     });
+    await checkFinishByAtDbClock(tx, finishBy, startBy);
+    return inserted;
   }, { lockWorkerIds: [lockedAssignee] });
   if (made.queued) await matchAfterChange(principal.db, app.id);
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1278,6 +1343,10 @@ export const agentTaskMutations = {
           };
         }
       }
+      // #2648 (LOCAL P2-1 at 2c7474dc): a call that NAMES finishBy or startBy sets it (cor:agt:050:14, "a call that
+      // sets the finish-by time"), even when the value equals the stored one; it is judged below, before the no-op.
+      let namedFinishBy: Date | null | undefined;
+      let namedStartBy: Date | null | undefined;
       for (const field of TASK_EDIT_FIELDS) {
         if (!Object.hasOwn(input, field)) continue;
         let value: unknown;
@@ -1287,13 +1356,30 @@ export const agentTaskMutations = {
           case 'tags': value = normalizeTags(input.tags as string[] | null); break;
           case 'requirements': value = await normalizeRequirements(txCtx, app, input.requirements as RequirementsInput | null); break;
           case 'startBy': value = input.startBy === '' ? null : parseStartBy(input.startBy); break;
+          case 'finishBy': value = input.finishBy === '' ? null : parseFinishBy(input.finishBy); break;
           case 'closeSessionWhenDone':
             if (input.closeSessionWhenDone != null && typeof input.closeSessionWhenDone !== 'boolean') throw badInput('closeSessionWhenDone must be a boolean.');
             value = input.closeSessionWhenDone ?? false; break;
+          // #2649 (cor:agt:050:09): a named list replaces the whole list, order kept; null or [] clears it.
+          case 'references': value = taskReferencesInput(input.references); break;
         }
+        if (field === 'finishBy') namedFinishBy = value as Date | null;
+        if (field === 'startBy') namedStartBy = value as Date | null;
         if (isDeepStrictEqual(task[field], value)) continue;
         fields.push(field);
         Object.assign(data, { [field]: field === 'requirements' && value === null ? Prisma.DbNull : value });
+      }
+      const setsFinishBy = namedFinishBy !== undefined;
+      const setsStartBy = namedStartBy !== undefined;
+      // #2648: judged on the values the task would hold, against the database clock after all authority/task waits,
+      // before the no-op return and the write, so a refused call changes nothing.
+      if (setsFinishBy || setsStartBy) {
+        const [{ at: judgedAt }] = await tx.$queryRaw<Array<{ at: Date }>>`SELECT clock_timestamp() AS at`;
+        checkFinishBy({
+          finishBy: setsFinishBy ? namedFinishBy! : task.finishBy,
+          startBy: setsStartBy ? namedStartBy! : task.startBy,
+          setsFinishBy, setsStartBy, now: judgedAt,
+        });
       }
       if (fields.length === 0 && !propertiesChange) return;
       // The episode identity is a deciding time after all authority/task waits, not transaction-start now().
@@ -1373,7 +1459,10 @@ export const agentTaskMutations = {
     const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
     const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
     const tags = normalizeTags(input.tags);
+    // #2649: judged with the other fields, before any transaction, so a refused list writes nothing.
+    const references = taskReferencesInput(input.references);
     const startBy = parseStartBy(input.startBy);
+    const finishBy = parseFinishBy(input.finishBy);
     const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
     // #1754: backlog or pending — and a backlog task carries no assignee.
     const status = normalizeCreateStatus(input.status);
@@ -1452,7 +1541,7 @@ export const agentTaskMutations = {
       await refuseResettingAssignee(tx, app.id, assignee?.workerId);
       await assigneeAdvice(tx, app.id, assignee, null, warn);
       const made = await insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, startBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
+        app, parentId: parentTaskId, project: input.project === true, title, description, source, tags, references, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
         created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
       });
       const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1462,6 +1551,7 @@ export const agentTaskMutations = {
       for (const ref of [...new Set(input.blockedBy ?? [])]) {
         await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
       }
+      await checkFinishByAtDbClock(tx, finishBy, startBy);
       return made;
     }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
@@ -1792,7 +1882,89 @@ export const agentTaskMutations = {
     await emitTaskWarnings(ctx, info, cancelled.appId, { codes: warn, taskId: cancelled.id });
     return cancelled;
   },
+
+  /**
+   * #2651 (hrn:node:hadronmemory.com:specs:cor:agt:050:29, Proposed details): hand a STARTED task back, by its
+   * assignee only. The task loses its assignee, goes back to pending and re-enters the queue (cor:agt:050:03), with
+   * a returning WORKER added to `requirements.excludeWorkerIds` so the matcher never gives it back to that worker
+   * (cor:agt:060:06); a person is not added, since the platform assigns only workers. The reason code (closed set)
+   * rides the `task.handed-back` event; the optional text is stored on the task only (cor:agt:050:01, :11). No result
+   * is written, and the task's children are left untouched (cor:agt:050:07). Leaving `started` ends every ORDINARY
+   * stall episode the task had (cor:agt:050:13): no not-started or no-progress rule holds for a queued task, and the
+   * `assignment.queued` appended here starts the unassignable rule's new episode. A finish-by episode is KEPT: the
+   * hand-back keeps `finishBy`, and a task with a finish-by time follows only the finish-by rule (:13, :14), whose
+   * episode runs until the task ends or the time is edited (gate-owner disposition, Xan, PR #3104 comment
+   * 6556326061; the :29 vs :13 reconciliation is Vera's).
+   *
+   * Concurrency: `mutateTask` takes the assignee's per-worker lock and the task row `FOR UPDATE` before this judges
+   * anything, so a concurrent finish (which takes the same locks) runs strictly before or after; the loser reads the
+   * winner's committed state and is refused. The write is still a guarded `updateMany` on the consumed state.
+   */
+  handBackAgentTask: async (
+    _: unknown,
+    { taskRef, reason }: { taskRef: string; reason: { code: string; text?: string | null } },
+    ctx: Context,
+  ) => {
+    const code = handBackCode(reason?.code);
+    const text = optionalText(reason?.text, TASK_HAND_BACK_TEXT_MAX, 'reason.text');
+    const handedBack = await mutateTask(ctx, taskRef, async (tx, task, actor, app) => {
+      if (!isAssignee(actor, task)) {
+        throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee hands it back.", { taskId: taskRef });
+      }
+      refuseEnded(task);
+      if (task.status !== 'started') {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a started task is handed back.', { taskId: taskRef, status: task.status });
+      }
+      const requirements = withExcludedWorker(task.requirements, task.assigneeWorkerId);
+      const now = new Date();
+      const n = await tx.agentTask.updateMany({
+        where: {
+          id: task.id, appId: app.id, status: 'started',
+          assigneeWorkerId: task.assigneeWorkerId, assigneeUserId: task.assigneeUserId,
+        },
+        data: {
+          status: 'pending', startedAt: null, assigneeWorkerId: null, assigneeUserId: null,
+          ...(requirements ? { requirements } : {}),
+          handBackReasonCode: code, handBackReasonText: text, handedBackAt: now,
+          ...updatedStamp(ctx),
+        },
+      });
+      if (n.count === 0) {
+        throw taskError('TASK_INVALID_TRANSITION', 'Only a started task is handed back.', { taskId: taskRef });
+      }
+      const evActor = eventActor(ctx.userId);
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'task.handed-back', code } });
+      // #1707: it enters the queue again, and this event is the unassignable rule's queue-entry stamp (cor:agt:050:17).
+      await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
+    }, { assignee: true });
+    // #1707 (cor:agt:060:06): another free worker may take it right away; the returning worker is excluded.
+    await matchAfterChange(ctx.db, handedBack.appId);
+    return handedBack;
+  },
 };
+
+/**
+ * #2651: the GraphQL enum name (`MISSING_INPUT`) as the stored word (`missing_input`). Anything that is not exactly
+ * one of the closed set's names is refused, so a direct caller cannot slip a stored word or free text past the enum.
+ */
+function handBackCode(value: unknown): TaskHandBackCode {
+  const word = typeof value === 'string' && /^[A-Z_]+$/.test(value) ? value.toLowerCase() : null;
+  if (!word || !(TASK_HAND_BACK_CODES as readonly string[]).includes(word)) {
+    throw badInput(`reason.code must be one of ${TASK_HAND_BACK_CODES.map((c) => c.toUpperCase()).join(', ')}.`);
+  }
+  return word as TaskHandBackCode;
+}
+
+/**
+ * #2651: the task's requirements with `workerId` added to `excludeWorkerIds` once, every other field kept. Null when
+ * there is nothing to add (a person handed it back), so the caller leaves the column as it is.
+ */
+function withExcludedWorker(requirements: Prisma.JsonValue | null, workerId: string | null): Prisma.InputJsonObject | null {
+  if (!workerId) return null;
+  const r = requirements && typeof requirements === 'object' && !Array.isArray(requirements) ? requirements as Prisma.JsonObject : {};
+  const current = Array.isArray(r.excludeWorkerIds) ? (r.excludeWorkerIds as string[]) : [];
+  return { ...r, excludeWorkerIds: current.includes(workerId) ? current : [...current, workerId] } as Prisma.InputJsonObject;
+}
 
 /**
  * #2198: the advice an assignment earns, read in the write transaction: `unavailable`, `busy` and `paused` are pushed
@@ -1836,6 +2008,8 @@ type ListArgs = {
   tagsAny?: string[] | null;
   tagsAll?: string[] | null;
   source?: string | null;
+  /** #2649: tasks carrying a reference with exactly this target (and this kind when given); the label is ignored. */
+  reference?: { kind?: string | null; target: string } | null;
   text?: string | null;
   overdue?: boolean | null;
   createdAfter?: unknown;
@@ -1886,6 +2060,17 @@ export const agentTaskQueries = {
     if (args.tagsAny?.length) filters.push({ tags: { hasSome: args.tagsAny } });
     if (args.tagsAll?.length) filters.push({ tags: { hasEvery: args.tagsAll } });
     if (args.source != null) filters.push({ source: args.source });
+    if (args.reference != null) {
+      // #2649 (cor:agt:050:01): after the App read gate above, so it only narrows tasks the caller may already read.
+      // jsonb containment: an element holding this target (and kind) matches whatever its label; never a prefix.
+      const { target } = args.reference;
+      if (typeof target !== 'string' || target.length < 1 || target.length > TASK_REFERENCE_TARGET_MAX) {
+        throw badInput(`reference.target must be 1 to ${TASK_REFERENCE_TARGET_MAX} characters.`);
+      }
+      const element: Record<string, string> = { target };
+      if (args.reference.kind != null) element.kind = refKind(args.reference.kind);
+      filters.push({ references: { array_contains: [element] } });
+    }
     if (args.text != null) {
       // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
       // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
@@ -2210,6 +2395,11 @@ export const agentTaskFieldResolvers = {
       t.status === 'finished' && t.resultOutcome
         ? { outcome: t.resultOutcome, summary: t.resultSummary, evidence: t.resultEvidence }
         : null,
+    /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
+    handBack: (t: TaskRow) =>
+      t.handBackReasonCode && t.handedBackAt
+        ? { code: t.handBackReasonCode.toUpperCase(), text: t.handBackReasonText, handedBackAt: t.handedBackAt }
+        : null,
     requirements: (t: TaskRow) => {
       const r = (t.requirements ?? null) as Record<string, unknown> | null;
       if (!r) return null;
@@ -2223,6 +2413,8 @@ export const agentTaskFieldResolvers = {
         modelGroupNotIn: (r.modelGroupNotIn as string[]) ?? null,
       };
     },
+    /** #2649 (cor:agt:050:01 References): the stored strings, in order; nothing about any target is read. */
+    references: (t: TaskRow) => storedTaskReferences(t.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null })),
     /** #1709 (cor:agt:050:10) — the request this task's end made; the task was already read, so its readers read it. */
     sessionEndRequest: async (t: TaskRow, _: unknown, ctx: Context) => {
       const r = await ctx.db.taskSessionEndRequest.findUnique({ where: { taskId: t.id } });

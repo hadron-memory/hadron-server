@@ -2109,13 +2109,18 @@ export const typeResolvers = {
     // case (pre-merge duplicate triage) is a platform admin or the user
     // themselves, both of which this gate admits, so nothing is lost.
     //
-    // Legacy `githubId`/`githubUsername` and `avatarUrl` remain ungated.
     // `externalId` and other account metadata use the #384 gate as of #1522.
-    // Changing the legacy fields needs a separate consumer/contract audit.
     googleId: async (u: { id: string; googleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.googleId ?? null) : null,
     appleId: async (u: { id: string; appleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.appleId ?? null) : null,
+    // #2574 (Holger V28, hrn:node:hadronmemory.com:specs:cor:acl:070:01): the
+    // numeric GitHub id sits with name and email behind the SAME #384 gate;
+    // only admin duplicate triage uses it. `githubUsername` and `avatarUrl`
+    // are identity, so they stay default-resolved for any signed-in viewer
+    // and the username stays the public search key of cor:acl:070:02.
+    githubId: async (u: { id: string; githubId?: number | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.githubId ?? null) : null,
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
