@@ -8052,6 +8052,8 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
+      "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
+      reference: AgentTaskReferenceFilter
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
       text: String
       "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
@@ -14514,6 +14516,12 @@ export const typeDefs = `#graphql
     handBack: AgentTaskHandBack
     tags: [String!]!
     """
+    #2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's ordered, typed references to other things. Each
+    target is the string as stored: never fetched or resolved, so it says nothing about the target's content or whether
+    it exists. Empty when none.
+    """
+    references: [AgentTaskReference!]!
+    """
     Whether finishing or cancelling asks the assignee to end its worker session
     (hrn:node:hadronmemory.com:specs:cor:agt:050:10). Set by whoever assigns. #1709: carried out; see sessionEndRequest.
     """
@@ -14552,6 +14560,47 @@ export const typeDefs = `#graphql
     ENDED
     END_ISSUED
     NO_LIVE_HOST
+  }
+
+  "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): what a task reference points at, which fixes the form its target takes."
+  enum AgentTaskReferenceKind {
+    "An absolute https URL of an issue. No owner/repo#n shorthand."
+    ISSUE
+    "An absolute https URL of a pull request."
+    PULL_REQUEST
+    "A node URN (hrn:node:...)."
+    NODE
+    "An agent-task URN (hrn:agenttask:<root>:<app-slug>:<task id or handle>), never a bare handle."
+    TASK
+    "An absolute http or https URL."
+    URL
+  }
+
+  "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): one typed reference, as stored. The platform never resolves target."
+  type AgentTaskReference {
+    kind: AgentTaskReferenceKind!
+    "Stored exactly as given (at most 512 characters)."
+    target: String!
+    "Optional, at most 120 characters; null when none was given."
+    label: String
+  }
+
+  """
+  #2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): one reference to set. target must have its kind's form and be
+  at most 512 characters, with no whitespace or control characters (a URL is written scheme://host, with no
+  backslash); label at most 120 (empty means none). A list of more than 20, or any item that fails, is refused
+  BAD_USER_INPUT and nothing is written.
+  """
+  input AgentTaskReferenceInput {
+    kind: AgentTaskReferenceKind!
+    target: String!
+    label: String
+  }
+
+  "#2649: agentTasks(reference:) matches tasks carrying a reference with exactly this target (1 to 512 characters, else BAD_USER_INPUT), and this kind when given. The label is ignored."
+  input AgentTaskReferenceFilter {
+    kind: AgentTaskReferenceKind
+    target: String!
   }
 
   """
@@ -15377,6 +15426,8 @@ export const typeDefs = `#graphql
     finishBy: DateTime
     "Null clears to false; omission preserves the stored choice."
     closeSessionWhenDone: Boolean
+    "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:09): a list replaces the whole list, order kept; null or an empty list clears it; omission leaves it. The task.edited event names references, never the values."
+    references: [AgentTaskReferenceInput!]
   }
 
   """
@@ -15416,6 +15467,8 @@ export const typeDefs = `#graphql
     "#2648 (hrn:node:hadronmemory.com:specs:cor:agt:050:14): an optional finish-by deadline; refused BAD_USER_INPUT if in the past or earlier than startBy. While set, the task raises no stall-window alarm, only stall.finish-by once it passes unfinished."
     finishBy: DateTime
     tags: [String!]
+    "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): the task's ordered references; any creator may set them, as it sets the title."
+    references: [AgentTaskReferenceInput!]
     "Defaults to false: the assignee's session ends only when whoever assigns the task asks (hrn:node:hadronmemory.com:specs:cor:agt:050:10)."
     closeSessionWhenDone: Boolean
     """

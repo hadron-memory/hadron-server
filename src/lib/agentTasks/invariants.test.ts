@@ -409,3 +409,12 @@ describe('task hand-back SQL parity (#2651)', () => {
     await set({ handBackReasonCode: 'refused', handBackReasonText: 'y'.repeat(2000), handedBackAt: now });
   });
 });
+
+// #2649: the references column's CHECK, one source shared with its migration.
+describe('task references SQL parity (#2649)', () => {
+  it('the references migration carries a byte-identical copy of the invariants file', () => {
+    const source = readFileSync(new URL('../../../prisma/agent-task-references-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261101120000_agent_task_references/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(source)).toBe(true);
+  });
+});
