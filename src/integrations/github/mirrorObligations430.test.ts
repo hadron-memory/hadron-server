@@ -339,7 +339,7 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
 
   it('(k) the migration carries a byte-identical copy of the invariants file', () => {
     const sql = readFileSync(new URL('../../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8');
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_obligations'));
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_retry_exhausted'));
     expect(dir).toBeDefined();
     const migration = readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8');
     expect(migration.endsWith(sql)).toBe(true);

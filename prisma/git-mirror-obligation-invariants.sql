@@ -9,7 +9,8 @@ CREATE SEQUENCE IF NOT EXISTS git_mirror_attempt_seq AS bigint;
 ALTER TABLE git_mirror_obligations DROP CONSTRAINT IF EXISTS chk_git_mirror_obligation_shape;
 ALTER TABLE git_mirror_obligations ADD CONSTRAINT chk_git_mirror_obligation_shape CHECK (
   error_class IN ('TOKEN_UNAVAILABLE', 'BRANCH_SETUP', 'TREE_WRITE', 'PUSH_FAILED', 'LOCK_FAILED', 'NOT_CLONED') AND
-  (state = 'NOT_CLONED') = (error_class = 'NOT_CLONED') AND
+  ((state::text = 'NOT_CLONED' AND error_class = 'NOT_CLONED') OR
+   (state::text = 'FAILED' AND error_class <> 'NOT_CLONED') OR state::text = 'EXHAUSTED') AND
   ((kind = 'WRITE' AND remove_loc = '') OR (kind = 'REMOVE' AND remove_loc <> '')) AND
   attempts >= 1
 );

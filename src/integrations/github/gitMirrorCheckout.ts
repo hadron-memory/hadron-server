@@ -20,7 +20,8 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
-import { db } from '../db/client.js';
+import { db as defaultDb } from '../db/client.js';
+import type { PrismaClient } from '../../generated/prisma/index.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
 import { execGit } from './execGit.js';
@@ -79,15 +80,23 @@ export async function withMirrorCheckout(
      * Absent means the call records nothing, so a new write trigger needs no edit here.
      */
     obligations?: readonly MirrorObligationRef[];
+    /** Retry consumers use the same checkout/lock, but never create work for an ineligible or no-longer-due row. */
+    retry?: { now: Date; maxAttempts: number };
+    db?: PrismaClient;
+    /** Under the lock, before ANY Git: false means the debt no longer requires a file operation. */
+    beforeGit?: () => Promise<boolean>;
+    /** A pushed/no-change checkout must satisfy this before its debt is cleared. */
+    verify?: (repo: MirrorRepo) => boolean | Promise<boolean>;
   },
   mutate: (repo: MirrorRepo) => void | boolean | Promise<void | boolean>,
 ): Promise<MirrorOutcome> {
   const { memoryId, ownerRepo, clientId, commitSubject, logPrefix } = opts;
-  const obligations = opts.obligations ?? [];
+  const db = opts.db ?? defaultDb;
+  let obligations = opts.obligations ?? [];
 
   // #430: taken BEFORE the configuration is read, so a "not mirrored" observation below can only clear rows older than
   // any attempt that starts after the configuration it saw changed. Null (not taken) records nothing for this call.
-  const preSeq = obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+  const preSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
 
   // 1. Find the Memory config — by id first, then by repo slug.
   let memory = memoryId
@@ -141,7 +150,7 @@ export async function withMirrorCheckout(
     validateMemorySource(memory.source);
   } catch (e) {
     if (e instanceof GitSourceError) {
-      console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: ${e.message}`);
+      console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: invalid stored source`);
       return notMirrored('skipped');
     }
     throw e;
@@ -159,7 +168,7 @@ export async function withMirrorCheckout(
       // #430: the attempt number is taken HERE, inside the lock, and the settle below runs before it releases, so settles for
       // one memory apply in lock order. Every return of the attempt that is not a failure settles as `cleared`: a success, or
       // a memory that is not mirrored.
-      const attemptSeq = obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+      let attemptSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
       let settlement: MirrorSettlement = { result: 'cleared' };
       const fail = (errorClass: MirrorErrorClass): 'failed' => {
         settlement = { result: 'failed', errorClass };
@@ -172,7 +181,7 @@ export async function withMirrorCheckout(
       const memory = await db.memory.findUnique({
         where: { id: resolvedMemoryId }, include: { organization: true },
       });
-      if (!memory || !memory.organization || !memory.source) return 'skipped';
+      if (!memory || !memory.organization || !memory.source || (opts.retry && memory.deletedAt)) return 'skipped';
       // R206 / cor:sec:040:05: re-check the live encryption state after the
       // checkout wait, before ANY Git/filesystem mutation. No key (request,
       // session or cache) is an exception, and neither is a path-only cleanup.
@@ -184,7 +193,7 @@ export async function withMirrorCheckout(
         validateMemorySource(memory.source);
       } catch (e) {
         if (e instanceof GitSourceError) {
-          console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: ${e.message}`);
+          console.warn(`${logPrefix} Refusing to mirror ${memory.urn}: invalid stored source`);
           return 'skipped';
         }
         throw e;
@@ -194,9 +203,25 @@ export async function withMirrorCheckout(
 
       if (!existsSync(join(localPath, '.git'))) {
         console.warn(`${logPrefix} Repo not cloned yet at ${localPath} — skipping git write`);
-        settlement = { result: 'failed', errorClass: 'NOT_CLONED' };
+        if (!opts.retry) settlement = { result: 'failed', errorClass: 'NOT_CLONED' };
         return 'skipped';
       }
+
+      if (opts.retry) {
+        // Selection is only a hint: another server/writer may have settled while we waited.
+        const rows = await db.gitMirrorObligation.findMany({ where: {
+          memoryId: resolvedMemoryId, state: { in: ['FAILED', 'NOT_CLONED'] },
+          attempts: { lt: opts.retry.maxAttempts },
+          OR: obligations.map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc ?? '' })),
+        } });
+        const now = opts.retry.now.getTime();
+        obligations = rows.filter(r => r.lastAttemptAt.getTime() + Math.min(300_000 * 2 ** Math.min(r.attempts - 1, 7), 21_600_000) <= now)
+          .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc }));
+        if (!obligations.length) return 'skipped';
+        attemptSeq = await tryTakeAttemptSeq(db);
+        if (attemptSeq === null) return 'skipped'; // a retry must not run without its settlement fence
+      }
+      if (opts.beforeGit && !await opts.beforeGit()) return 'no-changes';
 
       // 2. Resolve the branch name.
       const rawBranch = memory.writeBranch ?? 'hadron-updates';
@@ -210,7 +235,7 @@ export async function withMirrorCheckout(
       try {
         validateGitBranch(branch, 'writeBranch');
       } catch (e) {
-        console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: ${String(e)}`);
+        console.warn(`${logPrefix} Refusing branch "${branch}" for ${memory.urn}: invalid branch`);
         return 'skipped';
       }
 
@@ -224,7 +249,7 @@ export async function withMirrorCheckout(
             : undefined;
           token = await getInstallationToken(memory.organization.githubInstallationId, credentials);
         } catch (err) {
-          console.error(`${logPrefix} Failed to get installation token:`, err);
+          console.error(`${logPrefix} Failed to get installation token`);
           return fail('TOKEN_UNAVAILABLE');
         }
       }
@@ -241,7 +266,7 @@ export async function withMirrorCheckout(
         await execGit(['fetch', 'origin'], { cwd: localPath });
         await prepareWriteBranch(localPath, branch, memory.readBranch ?? undefined);
       } catch (err) {
-        console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}:`, err);
+        console.error(`${logPrefix} Branch setup failed (${branch}) for ${commitSubject}`);
         await restoreRemote(localPath, memory.source);
         return fail('BRANCH_SETUP');
       }
@@ -265,7 +290,7 @@ export async function withMirrorCheckout(
           return 'skipped';
         }
       } catch (err) {
-        console.error(`${logPrefix} Mirror write failed for ${commitSubject}:`, err);
+        console.error(`${logPrefix} Mirror write failed for ${commitSubject}`);
         await restoreRemote(localPath, memory.source);
         return fail('TREE_WRITE');
       }
@@ -281,6 +306,7 @@ export async function withMirrorCheckout(
           // ahead state) lands in the catch below as 'failed', never 'no-changes'.
           if ((await unpublishedCommitCount(localPath, branch, memory.readBranch ?? undefined)) === 0) {
             await restoreRemote(localPath, memory.source);
+            if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn })) return fail('TREE_WRITE');
             return 'no-changes';
           }
         } else {
@@ -309,14 +335,15 @@ export async function withMirrorCheckout(
         } finally {
           await restoreRemote(localPath, memory.source);
         }
+        if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn })) return fail('TREE_WRITE');
         return 'mirrored';
       } catch (err) {
-        console.error(`${logPrefix} Commit/push failed for ${commitSubject}:`, err);
+        console.error(`${logPrefix} Commit/push failed for ${commitSubject}`);
         await restoreRemote(localPath, memory.source);
         return fail('PUSH_FAILED');
       }
       })();
-      if (attemptSeq !== null) await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq);
+      if (attemptSeq !== null) await settleMirrorObligations(db, resolvedMemoryId, obligations, settlement, attemptSeq, opts.retry?.maxAttempts);
       return outcome;
     }, { fenceEncryption: true });
   } catch (err) {
@@ -324,10 +351,10 @@ export async function withMirrorCheckout(
       logEncryptedGitSyncRefusal(logPrefix, memory.id);
       return notMirrored('refused-encrypted');
     }
-    console.error(`${logPrefix} Checkout lock failed for ${commitSubject}:`, err);
+    console.error(`${logPrefix} Checkout lock failed for ${commitSubject}`);
     // Outside the lock by definition (it could not be taken, or the attempt threw before settling), so this settle is not
     // lock-ordered: the sequence number still makes it a no-op against any newer row.
-    const lockFailedSeq = obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+    const lockFailedSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
     if (lockFailedSeq !== null) {
       await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
     }
@@ -348,7 +375,7 @@ async function restoreRemote(localPath: string, originalUrl: string): Promise<vo
   try {
     await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
   } catch (err) {
-    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}:`, err);
+    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}`);
   }
 }
 

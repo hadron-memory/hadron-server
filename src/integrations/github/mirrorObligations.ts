@@ -76,10 +76,11 @@ function distinct(refs: readonly MirrorObligationRef[]): Array<{ nodeId: string;
  */
 export async function settleMirrorObligations(
   db: PrismaClient, memoryId: string, refs: readonly MirrorObligationRef[],
-  settlement: MirrorSettlement, attemptSeq: bigint,
+  settlement: MirrorSettlement, attemptSeq: bigint, maxAttempts?: number,
 ): Promise<void> {
   const keys = distinct(refs);
   if (keys.length === 0) return;
+  const limit = maxAttempts ?? null;
   const nodeIds = keys.map((k) => k.nodeId);
   const kinds = keys.map((k) => k.kind);
   const locs = keys.map((k) => k.removeLoc);
@@ -97,10 +98,11 @@ export async function settleMirrorObligations(
       INSERT INTO git_mirror_obligations
         (memory_id, node_id, kind, remove_loc, state, error_class, attempts, attempt_seq, last_attempt_at)
       SELECT ${memoryId}, r.node_id, r.kind::git_mirror_obligation_kind, r.remove_loc,
-             ${state}::git_mirror_obligation_state, ${settlement.errorClass}, 1, ${attemptSeq}, now()
+             CASE WHEN ${limit}::int IS NOT NULL AND 1 >= ${limit}::int THEN 'EXHAUSTED' ELSE ${state} END::git_mirror_obligation_state, ${settlement.errorClass}, 1, ${attemptSeq}, now()
       FROM unnest(${nodeIds}::text[], ${kinds}::text[], ${locs}::text[]) AS r(node_id, kind, remove_loc)
       ON CONFLICT (memory_id, node_id, kind, remove_loc) DO UPDATE
-        SET state = EXCLUDED.state, error_class = EXCLUDED.error_class,
+        SET state = CASE WHEN ${limit}::int IS NOT NULL AND git_mirror_obligations.attempts + 1 >= ${limit}::int
+              THEN 'EXHAUSTED'::git_mirror_obligation_state ELSE EXCLUDED.state END, error_class = EXCLUDED.error_class,
             attempts = git_mirror_obligations.attempts + 1,
             attempt_seq = EXCLUDED.attempt_seq, last_attempt_at = now()
         WHERE git_mirror_obligations.attempt_seq < EXCLUDED.attempt_seq`;

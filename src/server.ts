@@ -87,6 +87,7 @@ import { internalFaultErrorHandler, respondInternalFault } from './lib/internalF
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
 import { startAssetJanitorLoop } from './jobs/janitorAssets.js';
 import { startAssetScanSweepLoop } from './jobs/scanPendingAssets.js';
@@ -1851,6 +1852,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // unhealthy. #2998: /ready adds the first startup and the shutdown signal
   // on top of the same probe. See src/api/health.ts.
   mountHealthRoutes(app, db, { readiness });
+
+  // #430: interval-only retries of recorded Git failures; helper skips tests and the disable flag.
+  startGitMirrorObligationSweepLoop(db);
 
   // Background job: purge expired anonymous memories hourly.
   // Skipped in test environments to avoid leaking timers.

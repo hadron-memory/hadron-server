@@ -189,19 +189,31 @@ export function removeNodeFile(localPath: string, loc: string, expectedNodeId: s
  * Write a node to the appropriate git repo and branch, then push.
  * Fire-and-forget safe — errors are logged, not thrown.
  */
+type RetryWriteOptions = Pick<Parameters<typeof withMirrorCheckout>[0], 'db' | 'retry' | 'beforeGit'>;
+// An identity-only retry MUST supply its in-lock loader; ordinary writers retain the full-payload API.
+export function writeNodeToGit(
+  node: Pick<NodeForGit, 'id'>, ownerRepo: string, clientId: string | null | undefined, memoryId: string,
+  refresh: () => Promise<NodeForGit | null>, retryOptions: RetryWriteOptions,
+): Promise<void>;
+export function writeNodeToGit(
+  node: NodeForGit, ownerRepo: string, clientId?: string | null, memoryId?: string,
+  refresh?: () => Promise<NodeForGit | null>,
+): Promise<void>;
 export async function writeNodeToGit(
-  node: NodeForGit,
+  node: NodeForGit | Pick<NodeForGit, 'id'>,
   ownerRepo: string,
   clientId?: string | null,
   memoryId?: string,
   refresh?: () => Promise<NodeForGit | null>,
+  retryOptions: RetryWriteOptions = {},
 ): Promise<void> {
   await withMirrorCheckout(
     {
+      ...retryOptions,
       memoryId,
       ownerRepo,
       clientId,
-      commitSubject: `Update node ${node.loc}`,
+      commitSubject: `Update node ${'loc' in node ? node.loc : node.id}`,
       logPrefix: '[writeNodeToGit]',
       // #430: a failed attempt leaves this node's WRITE obligation. Every caller (the node.written event, edge-source
       // announcements, recovery, merges, search-replace) reaches the repository through here, so none needs an edit.
@@ -211,7 +223,7 @@ export async function writeNodeToGit(
       // The node.written subscriber supplies a loader. It must run AFTER the
       // checkout lock is acquired: a snapshot taken while waiting could land
       // after a newer write and roll the Git file backwards.
-      const latest = refresh ? await refresh() : node;
+      const latest = refresh ? await refresh() : ('loc' in node ? node : null);
       if (!latest) return false;
       return writeNodeFile(localPath, latest, memoryUrn);
     },

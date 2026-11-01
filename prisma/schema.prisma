@@ -5654,10 +5654,11 @@ enum GitMirrorObligationKind {
   @@map("git_mirror_obligation_kind")
 }
 
-/// FAILED = a retryable failure; NOT_CLONED = the repository is configured but not cloned here yet.
+/// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still settle).
 enum GitMirrorObligationState {
   FAILED
   NOT_CLONED
+  EXHAUSTED
 
   @@map("git_mirror_obligation_state")
 }
