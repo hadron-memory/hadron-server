@@ -1009,6 +1009,11 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
+      const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
+        : (await ctx.db.node.findUnique({ where: { id: n.id }, select: { embeddingTruncatedChunks: true } }))?.embeddingTruncatedChunks;
+      return count != null && count > 0 ? { omittedChunks: count } : null;
+    },
     outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),
     incomingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'in'),
     /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */

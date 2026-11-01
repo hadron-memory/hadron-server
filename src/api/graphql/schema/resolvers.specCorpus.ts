@@ -184,6 +184,7 @@ export const specCorpusMutations = {
           // therefore let the placeholder rank for, and chunk search return, the
           // deleted spec's text. A placeholder has no content, so it has no vectors.
           await tx.nodeEmbedding.deleteMany({ where: { nodeId: node.id } });
+          await tx.node.updateMany({ where: { id: node.id }, data: { embeddingTruncatedChunks: null } });
           // The node as the create door built it (relations included), now marked.
           // …with the values this transaction just reset, not the ones read
           // before it (@codex P2, PR #1452): Node.ownerRepo is client-visible.

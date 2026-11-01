@@ -1272,6 +1272,8 @@ model Node {
   embeddingFailedAt   DateTime?           @map("embedding_failed_at")
   /// Attempt counter for backoff / give-up. Non-null; reset to 0 on success/revoke.
   embeddingAttempts   Int                 @default(0) @map("embedding_attempts")
+  /// Passage chunks omitted by the per-node cap (#887); NULL when not truncated.
+  embeddingTruncatedChunks Int? @map("embedding_truncated_chunks")
   /// Last embed error (diagnosability; surfaced by hadron_validate).
   embeddingError      String?             @map("embedding_error")
   /// Number of input tokens.
