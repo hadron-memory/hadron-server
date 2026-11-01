@@ -71,7 +71,7 @@ describe('#2652 — a team with an outcome set', () => {
   });
 
   it('the refusal does not echo the set', async () => {
-    const err = await finish('done').catch((e) => e);
+    const err = await finish('done').catch((e: unknown) => e as Error);
     expect(String(err.message)).not.toContain('changes-requested');
   });
 
