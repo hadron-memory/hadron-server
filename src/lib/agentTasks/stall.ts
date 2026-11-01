@@ -389,12 +389,14 @@ export function stallCandidates(
   options: { episodesRunning?: boolean } = {},
 ): StallCandidate[] {
   const { task } = inputs;
-  if (task.blocked) return [];
+  const running = options.episodesRunning === true;
+  // #2648: a blocked task RAISES nothing, but a finish-by episode is not ended by blocking (cor:agt:050:14: it ends
+  // only when the task ends or its finish-by time is edited), so the running question still names it.
+  if (task.blocked && !(running && task.finishBy)) return [];
   // #2648: clearing a finish-by time brings the ordinary windows back from the edit, so it floors them like a release.
   const floor = (d: Date) => latest(d, task.releasedAt, inputs.finishByEditedAt) as Date;
   const assignee = assigneeOf(task);
   const out: StallCandidate[] = [];
-  const running = options.episodesRunning === true;
   const add = (rule: StallRule, episodeStart: Date, dueAt: Date, extra: Partial<StallCandidate> = {}, stopped: readonly StopInterval[] = []) => {
     if (!running && dueAt.getTime() > now.getTime()) return;
     // #2022: while the stop exception holds, nothing is raised and nobody up the chain is woken (the Proposed
