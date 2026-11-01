@@ -48,8 +48,13 @@ function withLocalSettings(base: typeof db, sets: string[]): typeof db {
     },
   });
 }
-/** What a large production table gets: the ANN query served by the HNSW index. */
-const PREFER_HNSW = ['SET LOCAL enable_sort = off'];
+/**
+ * What a large production table gets: the ANN query served by the HNSW index. `force_custom_plan` first: Prisma
+ * prepares each statement per pooled connection, and after five executions Postgres may cache a GENERIC plan that a
+ * later SET LOCAL enable_* never replans. Without it, a plan built under EXACT_PLAN on one connection served later
+ * "HNSW" calls on that connection, and the result flipped with whichever connection the pool handed out.
+ */
+const PREFER_HNSW = ['SET LOCAL plan_cache_mode = force_custom_plan', 'SET LOCAL enable_sort = off'];
 /** Ground truth: a scan plus a sort, never the index. */
 const EXACT_PLAN = ['SET LOCAL enable_sort = on', 'SET LOCAL enable_indexscan = off'];
 
