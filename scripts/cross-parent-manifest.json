@@ -798,8 +798,8 @@
     },
     "CompiledBootPrompt.node": {
       "target": "Node",
-      "class": "child-gated",
-      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::every principal whose compile succeeds reads the returned node directly, and it is the node in the compile memory"
+      "class": "open",
+      "evidence": "issue: the compiling manager's direct read of the returned node is not shown for every reachable principal; tracked in a private follow-up (#3238 step 3), details not recorded here"
     },
     "ConnectionGrantsPage.items": {
       "class": "parent-implies-child",

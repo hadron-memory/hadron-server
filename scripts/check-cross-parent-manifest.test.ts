@@ -251,18 +251,23 @@ describe('the real schema and the committed manifest', () => {
   it('S2 row 11: Organization.agents is open', () => {
     expect(manifest().entries['Organization.agents'].class).toBe('open');
   });
-  it('#3238: the scope-lens rows and CompiledBootPrompt.node are child-gated, each naming a differential test that exists', () => {
+  it('#3238: the three scope-lens rows are child-gated, each naming a differential test that exists', () => {
     const rows: Array<[string, string]> = [
       ['ScopeMemoryEntry.memory', 'for an ordinary member the lens is exactly the direct read, in scope order'],
       ['ScopeExplanation.memories', 'every Memory the lens returns is one the same principal reads directly (cor:acl:120:01)'],
       ['ScopeExplanation.winner', 'the winner skips an unreadable memory that holds the loc earlier in the order'],
-      ['CompiledBootPrompt.node', 'every principal whose compile succeeds reads the returned node directly, and it is the node in the compile memory'],
     ];
     for (const [coord, title] of rows) {
       const e = manifest().entries[coord];
       expect(e.class, coord).toBe('child-gated');
       expect(e.test, coord).toBe(`src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::${title}`);
     }
+  });
+  it('#3238: CompiledBootPrompt.node stays open, pointing at the private follow-up and not claiming a differential test', () => {
+    const e = manifest().entries['CompiledBootPrompt.node'];
+    expect(e.class).toBe('open');
+    expect(e.test).toBeUndefined();
+    expect(e.evidence).toMatch(/private follow-up/);
   });
   it('S2 row 8: Session.worker is parent-implies-child for the identity fields, citing cor:acl:090:02, with a named masking test', () => {
     const e = manifest().entries['Session.worker'];
