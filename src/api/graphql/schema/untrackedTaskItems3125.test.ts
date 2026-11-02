@@ -567,24 +567,50 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
     expect(await db.agentTask.count({ where: { appId: app.id, externalId: { not: null } } })).toBe(0);
   });
 
-  it('an unexpected failure after a claim keeps the claims made, returns claim_failed, and logs the error name only', async () => {
+  const claimedIds = async () =>
+    (await db.agentTask.findMany({ where: { appId: app.id, externalId: { not: null } }, select: { externalId: true }, orderBy: { externalId: 'asc' } }))
+      .map((t) => t.externalId);
+
+  it('every claim the call committed is in the answer, even if reading a row back would fail (Jane, delta P2)', async () => {
     fake.repos.widgets = [1, 2, 3].map((n) => issue('widgets', n));
-    // The read back of a committed claim fails on the second item (a non-GraphQL error the walk cannot classify).
+    // A plain read of a task row through the request's client fails on the second call. A claim that committed and
+    // then needed that read would be in the database but missing from the answer, and its item no longer untracked.
     let reads = 0;
     const agentTask = new Proxy(db.agentTask, {
       get(t, k, r) {
         if (k !== 'findUniqueOrThrow') return Reflect.get(t, k, r);
         return (...a: unknown[]) => {
           reads += 1;
-          if (reads === 2) throw new TypeError(`boom ${'https://github.com/acme/widgets/issues/2'}`);
+          if (reads === 2) throw new TypeError('read back failed');
           return (t.findUniqueOrThrow as any)(...a);
         };
       },
     });
     const failing = new Proxy(db, { get: (t, k, r) => (k === 'agentTask' ? agentTask : Reflect.get(t, k, r)) });
     const r: any = await claim({ repository: 'acme/widgets', limit: 3 }, ctx(member.id, { db: failing as never }));
+    expect(r.tasks.map((t: any) => t.externalId).sort()).toEqual(await claimedIds());
+  });
+
+  it('an unexpected failure inside a claim rolls it back, keeps the claims made, returns claim_failed, and logs the error name only', async () => {
+    fake.repos.widgets = [1, 2, 3].map((n) => issue('widgets', n));
+    // The second claim's transaction throws a non-GraphQL error after its writes, so they roll back.
+    const tx$ = db.$transaction.bind(db) as (...a: any[]) => Promise<unknown>;
+    const failing = new Proxy(db, {
+      get(t, k, r) {
+        if (k !== '$transaction') return Reflect.get(t, k, r);
+        return (fn: unknown, ...rest: unknown[]) => typeof fn !== 'function' ? tx$(fn, ...rest) : tx$(async (tx: any) => {
+          const out = await (fn as (tx: unknown) => Promise<unknown>)(tx);
+          if (await tx.agentTask.count({ where: { appId: app.id, externalId: { not: null } } }) === 2) {
+            throw new TypeError('boom https://github.com/acme/widgets/issues/2');
+          }
+          return out;
+        }, ...rest);
+      },
+    });
+    const r: any = await claim({ repository: 'acme/widgets', limit: 3 }, ctx(member.id, { db: failing as never }));
     expect(r).toMatchObject({ complete: false, incompleteReason: 'claim_failed', refusalCode: null });
     expect(r.tasks.map((t: any) => t.externalId)).toEqual(['https://github.com/acme/widgets/issues/1']);
+    expect(await claimedIds()).toEqual(['https://github.com/acme/widgets/issues/1']);
     const line = logs.find((l) => l[0] === 'untracked.claim_failed');
     expect(line?.[1]).toMatchObject({ appId: app.id, integration: 'gh', claimed: 1, error: 'TypeError' });
     expect(JSON.stringify(line)).not.toContain('issues/2');
