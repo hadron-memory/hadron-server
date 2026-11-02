@@ -31,9 +31,9 @@ export class TaskReferenceError extends Error {}
  * U+1160, U+3164 and U+FFA0, U+2800 BRAILLE PATTERN BLANK and U+034F COMBINING GRAPHEME JOINER. None is Cf or `\s`,
  * so neither the V27 check nor the whitespace check catches them. Exactly this set; nothing beside it.
  */
-export const BLANK_LOOKING = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/u;
+const BLANK_LOOKING = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/u;
 /** Ruling 0086 A: U+FE00–U+FE0F and U+E0100–U+E01EF (the supplement is not Cf either). Refused in targets only. */
-export const VARIATION_SELECTOR = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+const VARIATION_SELECTOR = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
 
 /** The kind as stored: accepts the GraphQL enum value or the stored word; anything else is refused. */
 export function referenceKind(raw: unknown): TaskReferenceKind {
