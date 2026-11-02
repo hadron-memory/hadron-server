@@ -8,7 +8,6 @@ import { loadNodeForGit } from '../integrations/github/nodeWrittenSubscriber.js'
 import { nodeFilePath, orphanedLegacyPaths } from '../integrations/github/nodeFrontmatter.js';
 import { validateMemorySource } from '../lib/gitSource.js';
 import { mirrorFailureMetadata } from '../integrations/github/mirrorFailureMetadata.js';
-import { type MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
@@ -74,19 +73,17 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
         for (const [branch, group] of byBranch) {
           const memoryId = candidate.memoryId;
           const liveOwner = (loc: string) => db.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true } });
-          const loadWrites = async (refs: readonly MirrorObligationRef[]) => {
-            const writes: NodeForGit[] = [];
-            for (const ref of refs) if (ref.kind === 'WRITE') {
-              const node = await loadNodeForGit(db, { nodeId: ref.nodeId, memoryId });
-              if (node) writes.push(node);
-            }
-            return writes;
-          };
           await withMirrorCheckout({
             db, memoryId, retry: { now, maxAttempts: MAX_ATTEMPTS, branch }, obligations: group,
             commitSubject: 'Retry recorded mirror files', logPrefix: '[git-mirror-sweep]',
             beforeGit: async refs => {
-              if ((await loadWrites(refs)).length) return true;
+              // Only decide whether preparation is needed. A row-local first-load outage must reach
+              // mutate's per-row refresh/settlement, never escape and charge the whole branch batch.
+              for (const ref of refs) if (ref.kind === 'WRITE') {
+                try {
+                  if (await loadNodeForGit(db, { nodeId: ref.nodeId, memoryId })) return true;
+                } catch { return true; }
+              }
               for (const ref of refs) if (ref.kind === 'REMOVE' && !await liveOwner(ref.removeLoc ?? '')) return true;
               return false;
             },

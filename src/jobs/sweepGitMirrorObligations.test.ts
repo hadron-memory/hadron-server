@@ -413,7 +413,7 @@ describe('#3151 second-refresh settlement', () => {
   expect(seqs.mock.calls.length).toBe(1); // one checkout/fence for the admitted branch group
   expect(failed.attemptSeq).toBe(await seqs.mock.results[0].value);
   expect(nextAtEntry).toEqual(nextDebt);
-  expect(nextReads).toBe(2);
+  expect(nextReads).toBe(1); // readiness short-circuits at first work; healthy payload loads after Git preparation
   expect(await db.gitMirrorObligation.findFirst({where:{memoryId,nodeId:next.id}})).toBeNull();
   expect(remoteFile('next')).toContain('current content');
   expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
