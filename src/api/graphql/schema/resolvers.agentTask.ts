@@ -1787,6 +1787,11 @@ export const agentTaskMutations = {
       for (const ref of [...new Set(input.blockedBy ?? [])]) {
         await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
       }
+      // #3245: judge the derived blocker state after adding every requested edge, inside the
+      // create transaction: open blockers refuse atomically, while ended blockers remain valid.
+      if (input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } })).blocked) {
+        throw badInput('A blocked task cannot be matched now.');
+      }
       await checkFinishByAtDbClock(tx, finishBy, startBy);
       return made;
     }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
@@ -1927,7 +1932,7 @@ export const agentTaskMutations = {
       // typed, so the append-only stream never takes a duplicate pair.
       const n = await tx.agentTask.updateMany({
         where: { id: task.id, appId: app.id, status: 'backlog' },
-        data: { status: 'pending', ...updatedStamp(ctx) },
+        data: { status: 'pending', matchPending: false, matchFailedAt: null, matchFailedReason: null, ...updatedStamp(ctx) },
       });
       if (n.count === 0) {
         throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId });
