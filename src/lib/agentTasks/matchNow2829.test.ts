@@ -198,3 +198,56 @@ it.each(['failed', 'held'])('park then ready clears %s matching state and restor
   await matchQueuedTasks(db, new Date(), { appId: app.id });
   expect((await row(task.id)).assigneeWorkerId).toBe(w.id);
 });
+
+it('batch match-now attempts items in list order after commit and marks failure without rolling back creation', async () => {
+  const w = await worker();
+  const tasks = await M.createAgentTasks({}, { appRef: app.id, tasks: [
+    { task: { title: 'First', match: true, requirements: { role: 'reviewer' } } },
+    { task: { title: 'Second', match: true, requirements: { role: 'reviewer' } } },
+  ] }, ctx);
+  expect(tasks).toHaveLength(2);
+  expect(tasks[0]).toMatchObject({ assigneeWorkerId: w.id, matchPending: false, matchFailedAt: null });
+  expect(tasks[1]).toMatchObject({ assigneeWorkerId: null, matchPending: false, matchFailedReason: 'NOBODY_FREE' });
+  expect(tasks[1].matchFailedAt).toBeInstanceOf(Date);
+  expect(tasks.map((t: any) => t.requirements)).toEqual([{ role: 'reviewer' }, { role: 'reviewer' }]);
+  expect(await db.agentTeamEvent.count({ where: { taskId: { in: tasks.map((t: any) => t.id) }, type: 'assignment.matched' } })).toBe(1);
+});
+
+it('batch match-now refuses a forward blocker after all links, rolling back every row and event', async () => {
+  await worker();
+  const before = await db.agentTask.count(), events = await db.agentTeamEvent.count();
+  await expect(M.createAgentTasks({}, { appRef: app.id, tasks: [
+    { task: { title: 'Blocked', match: true }, blockedByPositions: [2] },
+    { task: { title: 'Later blocker' } },
+  ] }, ctx)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT', position: 1 } });
+  expect(await db.agentTask.count()).toBe(before);
+  expect(await db.agentTeamEvent.count()).toBe(events);
+});
+
+it('batch match-now accepts an ended existing blocker and applies single-input refusals with position', async () => {
+  const w = await worker();
+  for (const bad of [{ status: 'BACKLOG' }, { assignee: { worker: w.id } }]) {
+    const before = await db.agentTask.count();
+    await expect(M.createAgentTasks({}, { appRef: app.id, tasks: [
+      { task: { title: 'Earlier' } }, { task: { title: 'Bad', match: true, ...bad } },
+    ] }, ctx)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT', position: 2 } });
+    expect(await db.agentTask.count()).toBe(before);
+  }
+  const ended = await create();
+  await M.cancelAgentTask({}, { taskId: ended.id }, ctx);
+  const tasks = await M.createAgentTasks({}, { appRef: app.id, tasks: [
+    { task: { title: 'Ready', match: true, blockedBy: [ended.id] } },
+  ] }, ctx);
+  expect(tasks[0].assigneeWorkerId).toBe(w.id);
+});
+
+it('no-match batch preserves ordinary queued results and events for omitted false and null', async () => {
+  const tasks = await M.createAgentTasks({}, { appRef: app.id, tasks: [
+    { task: { title: 'Ordinary' } }, { task: { title: 'Ordinary', match: false } }, { task: { title: 'Ordinary', match: null } },
+  ] }, ctx);
+  for (const t of tasks) {
+    expect(t).toMatchObject({ title: 'Ordinary', status: 'pending', assigneeWorkerId: null, matchPending: false, matchFailedAt: null, matchFailedReason: null });
+    const events = await db.agentTeamEvent.findMany({ where: { taskId: t.id }, orderBy: { createdAt: 'asc' } });
+    expect(events.map(e => e.type)).toEqual(['task.created', 'assignment.queued']);
+  }
+});
