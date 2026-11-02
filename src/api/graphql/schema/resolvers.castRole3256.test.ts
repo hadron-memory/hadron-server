@@ -77,6 +77,32 @@ describe('#3256 roleless cast', () => {
     });
   }
 
+  for (const surface of ['cast', 'preview'] as const) {
+    it(`${surface} selects a padded Agent by its canonical role`, async () => {
+      await db.agent.update({ where: { id: agent.id }, data: { personaRole: ' \tsecurity-engineer \n' } });
+      const before = await snapshot();
+      const args = { appRef: app.id, role: ' SECURITY-ENGINEER ', name: 'RolePin' };
+      const output = await (surface === 'cast' ? M.castWorker : (resolvers.Query as any).castWorkerPreview)({}, args, ctx());
+      if (surface === 'preview') {
+        expect(output).toMatchObject({ agentId: agent.id, role: 'security-engineer' });
+        expect(await snapshot()).toEqual(before);
+      } else {
+        expect(await db.worker.findUniqueOrThrow({ where: { id: output.id } })).toMatchObject({ agentId: agent.id, role: 'security-engineer' });
+      }
+    });
+
+    it(`${surface} refuses an ambiguous canonical role rather than ignoring its padded twin`, async () => {
+      const twin = await M.createAgent({}, { orgId: org.id, name: 'Padded twin', personaRole: 'security-engineer' }, ctx());
+      await db.appAgent.create({ data: { appId: app.id, agentId: twin.id } });
+      await db.agent.update({ where: { id: twin.id }, data: { personaRole: ' SECURITY-ENGINEER ' } });
+      const before = await snapshot();
+      await expect((surface === 'cast' ? M.castWorker : (resolvers.Query as any).castWorkerPreview)(
+        {}, { appRef: app.id, role: 'security-engineer', name: 'RolePin' }, ctx(),
+      )).rejects.toMatchObject({ extensions: { code: 'WORKER_AGENT_AMBIGUOUS' } });
+      expect(await snapshot()).toEqual(before);
+    });
+  }
+
   it('preview renders a padded Agent role trimmed even without an explicit role', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: ' \tsecurity-engineer \n' } });
     const before = await snapshot();
