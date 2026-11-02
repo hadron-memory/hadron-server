@@ -2042,9 +2042,18 @@ export const agentTaskMutations = {
     }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), taskGraph: 'exclusive' });
     // Each requested match gets its single attempt in list order after the complete commit.
     // Ordinary failures mark only that task; distinct/all-or-none matching is separate (#3243).
+    const matchErrors: unknown[] = [];
     for (const [i, m] of made.entries()) {
-      if (prepared[i]!.input.match) await matchTaskNow(ctx.db, m.id, new Date());
+      if (!prepared[i]!.input.match) continue;
+      try {
+        await matchTaskNow(ctx.db, m.id, new Date());
+      } catch (error) {
+        // A committed sibling still owns its one attempt even when an earlier attempt throws.
+        // Do not clear the throwing task's reservation: that could cause an automatic retry.
+        matchErrors.push(error);
+      }
     }
+    if (matchErrors.length) throw matchErrors[0];
     if (made.some((m, i) => m.queued && !prepared[i]!.input.match)) await matchAfterChange(ctx.db, inApp.app.id);
     const key = info?.path?.key;
     const created = [];
