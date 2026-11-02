@@ -7,7 +7,7 @@ import { GraphQLError } from 'graphql';
 
 export function clientReportedChatModel(value: unknown): string | null {
   if (value === undefined || value === null) return null;
-  if (typeof value !== 'string' || value.length > 256 || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) {
+  if (typeof value !== 'string' || value.length > 256 || /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(value)) {
     throw new GraphQLError('Invalid client-reported chat model.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   return value;
