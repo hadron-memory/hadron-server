@@ -144,6 +144,28 @@ describe('#3256 roleless cast', () => {
     });
   }
 
+  it('stores the transaction role when a different nonblank role commits after planning', async () => {
+    let injected = 0;
+    const client = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key !== '$transaction') return Reflect.get(target, key, receiver);
+        return async (fn: any, options: any) => {
+          // Successful cast also provisions memory in a later transaction; inject only before the deciding one.
+          if (injected === 0) {
+            injected++;
+            await db.agent.update({ where: { id: agent.id }, data: { personaRole: ' \trotated-engineer \n' } });
+          }
+          return target.$transaction(fn, options);
+        };
+      },
+    });
+    const worker = await cast({ ...ctx(), db: client });
+    expect(injected).toBe(1);
+    expect(await db.worker.findUniqueOrThrow({ where: { id: worker.id } }))
+      .toMatchObject({ agentId: agent.id, role: 'rotated-engineer' });
+    expect(await db.ticker.count({ where: { generatedForWorkerId: worker.id, deletedAt: null } })).toBe(1);
+  });
+
   it('preserves installation, role-override and licence refusals before the missing-role answer', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { personaRole: null } });
     const before = await snapshot();
