@@ -82,6 +82,8 @@ export type EventActor = {
   userId: string | null; workerId: string | null; agentId: string | null;
   /** #1756: the headless run that acted. Then the three above are null. */
   runId?: string | null;
+  /** #3132 (cor:agt:050:23): the App key that acted (its claim). Then every other actor id is null. */
+  appKeyId?: string | null;
 };
 
 /** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
@@ -183,9 +185,17 @@ function subjectWorkerId(e: TaskEventPayload): string | null {
  */
 export async function appendTaskEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date },
+  args: {
+    appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date;
+    /**
+     * #3132 (cor:agt:050:11, rulings:0009): whom the action was for, when the actor (a key or a run) cannot resolve
+     * it: recorded as the event's subject, never as its actor. A worker fills `subjectWorkerId` where the event
+     * names none of its own; a person fills `subjectUserId`.
+     */
+    forParty?: TaskParty | null;
+  },
 ): Promise<void> {
-  const subject = subjectWorkerId(args.event);
+  const subject = subjectWorkerId(args.event) ?? args.forParty?.workerId ?? null;
   // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
   // same transaction, and the count rides the event so the task wake returns it exactly once.
   const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
@@ -200,7 +210,9 @@ export async function appendTaskEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       actorRunId: args.actor.runId ?? null,
+      actorAppKeyId: args.actor.appKeyId ?? null,
       subjectWorkerId: subject,
+      subjectUserId: args.forParty?.userId ?? null,
       payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },

@@ -4,14 +4,16 @@
  *
  * One implementation behind two fields: a list cannot write in a GraphQL query, so the claim is its own mutation.
  *
- * Who may ask (V38, as split by Petra #63248). Listing: a participant of the App (a person, or a worker through its
- * session) or the App's own live key (`withReadableApp`, the agentTasks read gate). Claiming: a person or a worker;
- * the App's own key is refused TASK_CLAIM_PRINCIPAL_UNSUPPORTED before anything else is read, until the key/run claim
- * slice lands (V45 point 13). Anyone else, and another App's key, is answered APP_NOT_FOUND, the same whether or not
- * the App has an integration. The integration is looked up in the resolved App's own properties only.
+ * Who may ask (V38). Listing and claiming: a participant of the App (a person, or a worker through its session), the
+ * App's own live key (`withReadableApp`, the agentTasks read gate) and, through the run tool, a headless run of the App
+ * (`withRunTaskApp`). A person or a worker claims for themselves. #3132 (V41, V45 point 12): a key or a run names the
+ * assignee (TASK_ASSIGNEE_REQUIRED) and, unless a run acts for a person, the owner (TASK_OWNER_REQUIRED); its claim
+ * writes under the key or run as creator (`createStartedClaimFor`), the key's one task write (cor:agt:050:23). Anyone
+ * else, and another App's key, is answered APP_NOT_FOUND, the same whether or not the App has an integration. The
+ * integration is looked up in the resolved App's own properties only.
  *
- * Judged in this order, each before any GitHub call: the gate, the integration name, the repository, the team, the page
- * bounds. Any App may hold task integrations (rulings:0071 = B); one with no organization has no GitHub App installation
+ * Judged in this order, each before any GitHub call: the gate, the integration name, the repository, the team, a key's
+ * or run's assignee and owner, the page bounds. Any App may hold task integrations (rulings:0071 = B); one with no organization has no GitHub App installation
  * to read through, so it is GITHUB_NOT_INSTALLED after those checks, as an organization with none is. GitHub calls run OUTSIDE any database transaction; the read of the App's claimed external ids that
  * follows re-runs the gate, so a key revoked during the GitHub read is refused rather than answered.
  */
@@ -20,11 +22,20 @@ import type { Context } from './resolvers.helpers.js';
 import {
   TASK_TITLE_MAX,
   createStartedClaim,
+  createStartedClaimFor,
+  requireRunOwnApp,
   requireWritable,
+  resolveClaimParties,
   resolveParticipatedApp,
   resolveTaskWorkerId,
   taskError,
   withReadableApp,
+  withRunTaskApp,
+  type ClaimParties,
+  type ClaimPartiesInput,
+  type KeyCreator,
+  type RunCreator,
+  type TaskActor,
   type TaskApp,
 } from './resolvers.agentTask.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
@@ -94,8 +105,26 @@ function bounded(value: number | null | undefined, def: number, min: number, max
   return value;
 }
 
+/**
+ * Who is asking, and the read gate for them. `participant`: a person or a worker session; `appKey`: the App's own key
+ * (both through GraphQL, gated by `withReadableApp`); `run`: a headless run through its run tool, gated to its own App.
+ */
+export type UntrackedCaller =
+  | { kind: 'graphql' }
+  | { kind: 'run'; run: { id: string; appId: string } };
+
+type ReadGate = <T>(body: (c: Context, app: TaskApp) => Promise<T>) => Promise<T>;
+
+async function readGate(ctx: Context, caller: UntrackedCaller, appRef: string | null | undefined): Promise<ReadGate> {
+  if (caller.kind === 'run') {
+    await requireRunOwnApp(ctx, caller.run, appRef);
+    return (body) => withRunTaskApp(ctx, caller.run, body);
+  }
+  return (body) => withReadableApp(ctx, appRef as string, body);
+}
+
 /** The read itself: GitHub (outside any transaction), then the App's claimed ids under the re-run read gate. */
-async function readUntracked(ctx: Context, appRef: string, r: Resolved) {
+async function readUntracked(ctx: Context, gate: ReadGate, r: Resolved) {
   // No organization, no installation: the same code an organization without one gets, before any GitHub call.
   const organizationId = r.organizationId;
   if (!organizationId) {
@@ -106,7 +135,7 @@ async function readUntracked(ctx: Context, appRef: string, r: Resolved) {
       organizationId,
       integration: r.integration,
       filters: r.filters,
-      claimedIn: (urls) => withReadableApp(ctx, appRef, async (c, app) => {
+      claimedIn: (urls) => gate(async (c, app) => {
         const rows = await c.db.agentTask.findMany({ where: { appId: app.id, externalId: { in: urls } }, select: { externalId: true } });
         return new Set(rows.map((t) => t.externalId as string));
       }),
@@ -125,69 +154,113 @@ export function claimTitle(item: Pick<UntrackedItem, 'title' | 'repository' | 'n
   return clipped === '' ? `${item.repository}#${item.number}` : clipped;
 }
 
+/** A run names no App (its own is implied), so appRef is optional below. */
+type CallerArgs = Omit<Args, 'appRef'> & { appRef?: string | null };
+
+/** #3132: the list, for any caller the read gate admits (GraphQL's participant or key, or a run's tool). */
+export async function listUntracked(
+  ctx: Context,
+  caller: UntrackedCaller,
+  args: CallerArgs & { skip?: number | null; limit?: number | null },
+) {
+  const gate = await readGate(ctx, caller, args.appRef);
+  const resolved = await gate((c, app) => resolveIntegration(c, app, args as Args));
+  const skip = bounded(args.skip, 0, 0, Number.MAX_SAFE_INTEGER, 'skip');
+  const limit = bounded(args.limit, UNTRACKED_PAGE_DEFAULT, 1, UNTRACKED_PAGE_MAX, 'limit');
+  const list = await readUntracked(ctx, gate, resolved);
+  return {
+    items: list.items.slice(skip, skip + limit),
+    total: list.items.length,
+    complete: list.complete,
+    incompleteReason: list.incompleteReason,
+  };
+}
+
+type ClaimArgs = CallerArgs & ClaimPartiesInput & { limit?: number | null };
+
+/** Who writes each claim: the person or worker itself, or a key or run for the parties it named. */
+type Claimer =
+  | { kind: 'actor'; actor: TaskActor }
+  | { kind: 'creator'; creator: KeyCreator | RunCreator; parties: ClaimParties };
+
+/**
+ * #3125 S3 / #3132: the claim, for a person or worker (GraphQL), the App's own key (GraphQL) or a headless run (its
+ * tool). Every refusal named in the header is judged before any GitHub call.
+ */
+export async function claimUntracked(ctx: Context, caller: UntrackedCaller, args: ClaimArgs) {
+  const key = caller.kind === 'graphql' ? appKeyCaller(ctx) : null;
+  let app: TaskApp;
+  let resolved: Resolved;
+  let claimer: Claimer;
+  let gate: ReadGate;
+  if (caller.kind === 'graphql' && !key) {
+    const p = await resolveParticipatedApp(ctx, args.appRef as string);
+    app = p.app;
+    requireWritable(ctx, app);
+    // A person or a worker claims for themselves (cor:agt:120:03); naming parties is a key's or a run's.
+    if (args.owner || args.assignee) throw badInput('A person or a worker claims for themselves: assignee and owner are named only by an App key or a run.');
+    resolved = await resolveIntegration(ctx, app, args as Args);
+    claimer = { kind: 'actor', actor: p.actor };
+    gate = await readGate(ctx, caller, args.appRef);
+  } else {
+    gate = await readGate(ctx, caller, args.appRef);
+    const creator: KeyCreator | RunCreator = key ? { kind: 'appKey', appKeyId: key.appKeyId } : { kind: 'run', runId: (caller as { run: { id: string } }).run.id };
+    // A key acts for nobody; a run for the person it runs for, if any.
+    const actsFor = creator.kind === 'run' ? ctx.userId ?? null : null;
+    ({ app, resolved, claimer } = await gate(async (c, a) => {
+      requireWritable(c, a);
+      const r = await resolveIntegration(c, a, args as Args);
+      const parties = await resolveClaimParties(c, a, { owner: args.owner, assignee: args.assignee }, actsFor);
+      return { app: a, resolved: r, claimer: { kind: 'creator' as const, creator, parties } };
+    }));
+  }
+  const limit = bounded(args.limit, UNTRACKED_CLAIM_DEFAULT, 1, UNTRACKED_CLAIM_MAX, 'limit');
+  const list = await readUntracked(ctx, gate, resolved);
+
+  const tasks = [];
+  let incompleteReason: UntrackedIncompleteReason | 'claim_refused' | 'claim_failed' | null = list.incompleteReason;
+  let refusalCode: string | null = null;
+  for (const item of list.items) {
+    if (tasks.length === limit) break;
+    try {
+      const claimed = { title: claimTitle(item), url: item.url };
+      const task = claimer.kind === 'actor'
+        ? await createStartedClaim(ctx, app, claimer.actor, claimed)
+        : await createStartedClaimFor(ctx, app, claimer.creator, claimed, claimer.parties);
+      // null: another caller claimed it first; take the next (D5).
+      if (task) tasks.push(task);
+    } catch (e) {
+      // R4 / V42: each claim committed alone; a refusal stops the walk and is returned beside them, not thrown.
+      if (e instanceof GraphQLError && typeof e.extensions?.code === 'string') {
+        incompleteReason = 'claim_refused';
+        refusalCode = e.extensions.code;
+        break;
+      }
+      // An unexpected failure: with nothing claimed yet it surfaces as any error does; after a claim it is logged
+      // (ids only) and the claims already committed are still returned (cor:agt:120:03).
+      if (tasks.length === 0) throw e;
+      // The error's name only: its message may carry tracker text or row values.
+      const error = e instanceof Error ? e.name : typeof e;
+      console.error('untracked.claim_failed', { appId: app.id, integration: resolved.integration.name, claimed: tasks.length, error });
+      incompleteReason = 'claim_failed';
+      break;
+    }
+  }
+  return { tasks, complete: incompleteReason === null, incompleteReason, refusalCode };
+}
+
 export const untrackedTaskItemQueries = {
-  untrackedTaskItems: async (
+  untrackedTaskItems: (
     _: unknown,
     args: Args & { skip?: number | null; limit?: number | null },
     ctx: Context,
-  ) => {
-    const resolved = await withReadableApp(ctx, args.appRef, (c, app) => resolveIntegration(c, app, args));
-    const skip = bounded(args.skip, 0, 0, Number.MAX_SAFE_INTEGER, 'skip');
-    const limit = bounded(args.limit, UNTRACKED_PAGE_DEFAULT, 1, UNTRACKED_PAGE_MAX, 'limit');
-    const list = await readUntracked(ctx, args.appRef, resolved);
-    return {
-      items: list.items.slice(skip, skip + limit),
-      total: list.items.length,
-      complete: list.complete,
-      incompleteReason: list.incompleteReason,
-    };
-  },
+  ) => listUntracked(ctx, { kind: 'graphql' }, args),
 };
 
 export const untrackedTaskItemMutations = {
-  claimUntrackedTaskItems: async (
+  claimUntrackedTaskItems: (
     _: unknown,
-    args: Args & { limit?: number | null },
+    args: Args & ClaimPartiesInput & { limit?: number | null },
     ctx: Context,
-  ) => {
-    if (appKeyCaller(ctx)) {
-      // Another App's key, or a key that may not read, is APP_NOT_FOUND exactly as for a list; the App's own key is
-      // refused before its properties or GitHub are read (interim, until the key/run claim slice; V45 point 13).
-      await withReadableApp(ctx, args.appRef, async () => undefined);
-      throw taskError('TASK_CLAIM_PRINCIPAL_UNSUPPORTED', 'An App key cannot claim outside items yet; a person or a worker claims them.');
-    }
-    const { app, actor } = await resolveParticipatedApp(ctx, args.appRef);
-    requireWritable(ctx, app);
-    const resolved = await resolveIntegration(ctx, app, args);
-    const limit = bounded(args.limit, UNTRACKED_CLAIM_DEFAULT, 1, UNTRACKED_CLAIM_MAX, 'limit');
-    const list = await readUntracked(ctx, args.appRef, resolved);
-
-    const tasks = [];
-    let incompleteReason: UntrackedIncompleteReason | 'claim_refused' | 'claim_failed' | null = list.incompleteReason;
-    let refusalCode: string | null = null;
-    for (const item of list.items) {
-      if (tasks.length === limit) break;
-      try {
-        const task = await createStartedClaim(ctx, app, actor, { title: claimTitle(item), url: item.url });
-        // null: another caller claimed it first; take the next (D5).
-        if (task) tasks.push(task);
-      } catch (e) {
-        // R4 / V42: each claim committed alone; a refusal stops the walk and is returned beside them, not thrown.
-        if (e instanceof GraphQLError && typeof e.extensions?.code === 'string') {
-          incompleteReason = 'claim_refused';
-          refusalCode = e.extensions.code;
-          break;
-        }
-        // An unexpected failure: with nothing claimed yet it surfaces as any error does; after a claim it is logged
-        // (ids only) and the claims already committed are still returned (cor:agt:120:03).
-        if (tasks.length === 0) throw e;
-        // The error's name only: its message may carry tracker text or row values.
-        const error = e instanceof Error ? e.name : typeof e;
-        console.error('untracked.claim_failed', { appId: app.id, integration: resolved.integration.name, claimed: tasks.length, error });
-        incompleteReason = 'claim_failed';
-        break;
-      }
-    }
-    return { tasks, complete: incompleteReason === null, incompleteReason, refusalCode };
-  },
+  ) => claimUntracked(ctx, { kind: 'graphql' }, args),
 };
