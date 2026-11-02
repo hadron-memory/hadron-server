@@ -7,7 +7,7 @@
  *
  * Shape (D1a, the switch must be visible to the two manifest scrapers): hadron-cli's `scripts/gen-tools-manifest.sh`
  * greps `server.tool(` and hadron-portal's `scripts/refresh-hosted-mcp-tools.mjs` matches `tool(` / `registerTool(` /
- * `addTool(` followed by a quoted name. A disabled tool is written `off('hadron_x', …)`, which neither matches, so both
+ * `addTool(` followed by a quoted name. A disabled tool is written `off('<tool name>', …)`, which neither matches, so both
  * generators skip it with no change of their own. Keep that: never write `server.tool(` or `.tool('hadron_…` for a
  * disabled tool, and keep the quoted name on the line AFTER `off(` so the CLI's one-line-after grep cannot catch it.
  *
