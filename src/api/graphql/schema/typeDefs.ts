@@ -14107,10 +14107,21 @@ export const typeDefs = `#graphql
     modelGroupNotIn: [String!]
   }
 
+  "#2662: severity is shape only, never matcher, authorization or alarm input (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+  enum AgentTaskFindingSeverity { P1 P2 P3 note }
+  "#2662: immutable finding set at finish; text never enters the event stream."
+  type AgentTaskFinding { id: String!, severity: AgentTaskFindingSeverity!, text: String! }
+  "#2662: findings in supplied order, capped pages (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  type AgentTaskFindingPage { items: [AgentTaskFinding!]!, total: Int!, hasMore: Boolean! }
+  "#2662: give every id, or none for platform F1/F2/... ids in list order. Ids unique, 1–32 letters/digits/_/-. Text at most 2,000 Unicode code points; no trimming."
+  input AgentTaskFindingInput { id: String, severity: AgentTaskFindingSeverity!, text: String! }
+
   "A finished task's result (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
   type AgentTaskResult {
     "One word: succeeded, failed, or a word the team chooses."
     outcome: String!
+    "#2662: immutable result findings; default 20, max 200, limit 0 count-only; same readers as this result."
+    findings(limit: Int, offset: Int): AgentTaskFindingPage!
     summary: String
     "A URL or a node URN."
     evidence: String
@@ -14150,6 +14161,8 @@ export const typeDefs = `#graphql
     outcome: String!
     summary: String
     evidence: String
+    "#2662: optional immutable findings, at most 100 (hrn:node:hadronmemory.com:specs:cor:agt:050:30); omitted/null preserves legacy finish."
+    findings: [AgentTaskFindingInput!]
   }
 
   "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."

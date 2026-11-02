@@ -1,3 +1,4 @@
+import type { FindingCounts } from './findings.js';
 /**
  * #1705 — the application writer of `agent_team_events` (cor:agt:050:11).
  * #2644: SQL emits only the fixed empty platform task.released event when
@@ -100,7 +101,7 @@ export type TaskEventPayload =
   | { type: 'task.properties-changed'; from: PropertiesFingerprint | null; to: PropertiesFingerprint | null }
   | { type: 'task.started' }
   | { type: 'task.progress' }
-  | { type: 'task.finished'; outcome: string }
+  | { type: 'task.finished'; outcome: string; findingCounts?: FindingCounts }
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
   | { type: 'task.handed-back'; code: TaskHandBackCode }
@@ -156,7 +157,7 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'task.progress':
       return {};
     case 'task.finished':
-      return { outcome: e.outcome };
+      return { outcome: e.outcome, ...(e.findingCounts !== undefined ? { findingCounts: e.findingCounts } : {}) };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
     case 'task.handed-back':
