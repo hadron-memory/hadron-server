@@ -57,17 +57,18 @@ describe('#3255 late-stop report', () => {
     const markBefore = await mark();
     expect((await stopped(s, { lateStopMs: 13 })).replayed).toBe(true);
     expect(await events()).toHaveLength(1);
+    expect((await events())[0]?.payload).toMatchObject({ lateStopMs: 12 });
     expect((await reset(s.resetId)).agentStoppedAt).toEqual(before.agentStoppedAt);
     expect(await mark()).toEqual(markBefore);
   });
 
-  it('can attach the first late annotation to a repeated stopped report without changing its state', async () => {
+  it('an unannotated stopped report consumes the grant report, so a later annotation records nothing', async () => {
     const s = await granted();
     await stopped(s);
     const before = await reset(s.resetId);
     const markBefore = await mark();
     expect((await stopped(s, { lateStopMs: 15 })).replayed).toBe(true);
-    expect(await events()).toHaveLength(1);
+    expect(await events()).toEqual([]);
     expect(await reset(s.resetId)).toEqual(before);
     expect(await mark()).toEqual(markBefore);
   });
@@ -167,7 +168,7 @@ describe('#3255 late-stop report', () => {
     const s = await f.collectedReset();
     await f.step('claimContextReset', { resetId: s.resetId, epoch: 0, process: PROC });
     await M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
-    expect(await code(stopped(s, { lateStopMs: 5 }))).toBeDefined();
+    expect(await code(stopped(s, { lateStopMs: 5 }))).toBe('CONTEXT_RESET_WRONG_PHASE');
     expect(await events()).toEqual([]);
   });
 
@@ -183,6 +184,19 @@ describe('#3255 late-stop report', () => {
     expect(await events()).toHaveLength(1);
   });
 
+  it('a stopped report stays consumed after a later relaunch failure', async () => {
+    const s = await granted();
+    await stopped(s);
+    await f.step('reportContextResetRelaunchFailed', { resetId: s.resetId, epoch: 1, reason: 'RELAUNCH_BLOCKED' });
+    const before = await reset(s.resetId);
+    const markBefore = await mark();
+    expect(before).toMatchObject({ phase: 'failed', epoch: 2 });
+    await stopped(s, { lateStopMs: 9 });
+    expect(await events()).toEqual([]);
+    expect(await reset(s.resetId)).toEqual(before);
+    expect(await mark()).toEqual(markBefore);
+  });
+
   it('another host cannot annotate an ended grant', async () => {
     const s = await granted();
     await M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
@@ -192,7 +206,7 @@ describe('#3255 late-stop report', () => {
     expect(await events()).toEqual([]);
   });
 
-  it('a successful end retains its grant epoch and can receive only late telemetry afterward', async () => {
+  it('a successful end keeps its grant epoch but its earlier unannotated stopped report forbids a later event', async () => {
     const s = await granted();
     await stopped(s);
     await f.step('reportContextResetRelaunched', { resetId: s.resetId, epoch: 1, process: NEW_PROC });
@@ -202,7 +216,7 @@ describe('#3255 late-stop report', () => {
     const operationBefore = await db.hostOperation.findUniqueOrThrow({ where: { id: s.operationId } });
     expect(before).toMatchObject({ phase: 'done', epoch: 1 });
     await stopped(s, { lateStopMs: 7 });
-    expect(await events()).toHaveLength(1);
+    expect(await events()).toEqual([]);
     expect(await reset(s.resetId)).toEqual(before);
     expect(await mark()).toEqual(markBefore);
     expect(await db.hostOperation.findUniqueOrThrow({ where: { id: s.operationId } })).toEqual(operationBefore);
