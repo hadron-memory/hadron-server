@@ -196,6 +196,26 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     expect(await rows()).toHaveLength(1);
   });
 
+  it('#3157 equal-sequence failure settlement preserves the existing row, while a newer failure advances it', async () => {
+    await setup();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'PUSH_FAILED' }, 10n);
+    const before = await rows();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'LOCK_FAILED' }, 10n);
+    expect(await rows()).toEqual(before);
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'TREE_WRITE' }, 11n);
+    expect(await rows()).toEqual([expect.objectContaining({ attempts: 2, attemptSeq: 11n, errorClass: 'TREE_WRITE' })]);
+  });
+
+  it('#3157 equal-sequence success settlement preserves the existing row, while a newer success clears it', async () => {
+    await setup();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'PUSH_FAILED' }, 10n);
+    const before = await rows();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 10n);
+    expect(await rows()).toEqual(before);
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 11n);
+    expect(await rows()).toEqual([]);
+  });
+
   it('(b4) KNOWN LIMIT: a success delete keeps no high-water mark, so a lower-numbered failure arriving after it re-creates the row', async () => {
     await setup();
     await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 20n);
