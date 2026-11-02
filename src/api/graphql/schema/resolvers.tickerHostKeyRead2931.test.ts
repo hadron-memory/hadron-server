@@ -11,15 +11,11 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError, buildSchema, getNamedType, isLeafType, isObjectType, type GraphQLObjectType } from 'graphql';
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
-import { createMcpServerInstance } from '../../../mcp/server.js';
-import type { AuthContext } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { inHostKeyTickerReadTx } from './resolvers.agentTask.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
@@ -419,35 +415,19 @@ describe('#2931 the nested surface is no wider than today (executable schema)', 
 });
 
 describe('#2931 no MCP (R-e): an MCP connection authenticated by the host key is refused as today', () => {
-  it('G7: hadron_ticker_list over a host-key connection answers what an unscoped key\'s connection answers', async () => {
-    const call = async (k: { id: string }) => {
-      const server = createMcpServerInstance({ appId: appX.id, appKeyId: k.id, roles: [] } as unknown as AuthContext, () => undefined, { kind: 'multi-app' } as never);
-      const client = new Client({ name: 'hk2931', version: '1' });
-      const [local, remote] = InMemoryTransport.createLinkedPair();
-      await server.connect(remote); await client.connect(local);
-      try {
-        const r = await client.callTool({ name: 'hadron_ticker_list', arguments: { appRef: appX.id } });
-        return { isError: r.isError, text: (r.content as Array<{ text: string }>).map((i) => i.text).join('\n') };
-      } finally { await client.close(); await server.close(); }
-    };
-    const host = await call(hostKey);
-    expect(host.isError).toBe(true);
-    expect(host.text).toMatch(/app_not_found/i);
-    expect(host).toEqual(await call(plainKey));
+  // #3082: hadron_ticker_list is off over MCP (the tool is unregistered, so a host-key connection cannot reach it at all). The
+  // refusal it relayed is the resolver's, which reads the `transport: 'mcp'` context the MCP layer built: called directly.
+  const mcpCtx = (k: { id: string }) => keyCtx(k, { transport: 'mcp' } as Partial<Context>);
+
+  it('G7: Query.tickers over a host-key MCP context answers what an unscoped key\'s context answers', async () => {
+    const host = await refusal(tickers(mcpCtx(hostKey)));
+    expect(JSON.stringify(host)).toMatch(/app_not_found/i);
+    expect(host).toEqual(await refusal(tickers(mcpCtx(plainKey))));
   });
 
   it('G7: that refusal is a recorded use of the host key, with its code; an unscoped key records nothing', async () => {
     const recorded = (k: { id: string }) => db.hostKeyUse.findMany({ where: { appKeyId: k.id, id: { notIn: setupUses } }, select: { action: true, hostId: true, count: true, refusedCode: true } });
-    const server = (k: { id: string }) => createMcpServerInstance({ appId: appX.id, appKeyId: k.id, roles: [] } as unknown as AuthContext, () => undefined, { kind: 'multi-app' } as never);
-    for (const k of [hostKey, plainKey]) {
-      const s = server(k);
-      const client = new Client({ name: 'hk2931', version: '1' });
-      const [local, remote] = InMemoryTransport.createLinkedPair();
-      await s.connect(remote); await client.connect(local);
-      try {
-        expect((await client.callTool({ name: 'hadron_ticker_list', arguments: { appRef: appX.id } })).isError).toBe(true);
-      } finally { await client.close(); await s.close(); }
-    }
+    for (const k of [hostKey, plainKey]) await refusal(tickers(mcpCtx(k)));
     expect(await recorded(hostKey)).toEqual([{ action: 'read', hostId: 'orca1', count: null, refusedCode: 'APP_NOT_FOUND' }]);
     expect(await recorded(plainKey)).toEqual([]);
   });
