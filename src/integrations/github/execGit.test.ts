@@ -132,6 +132,8 @@ describe('execGit', () => {
     const { execFile } = await import('child_process');
     await execGit(['status', '--porcelain'], { cwd: '/repo' });
     expect((execFile as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('git');
+    // #2569: ordinary/network invocations retain their original options, with no implicit deadline.
+    expect((execFile as unknown as ReturnType<typeof vi.fn>).mock.lastCall?.[2]).toEqual({ cwd: '/repo' });
   });
 
   it('discards argv, URL userinfo, token shapes, and stderr on failure', async () => {
