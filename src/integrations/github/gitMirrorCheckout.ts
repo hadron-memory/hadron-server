@@ -163,6 +163,9 @@ export async function withMirrorCheckout(
   // Hold one cross-process lock through checkout, file mutation, commit,
   // push, and remote restoration. Node, Edge, and move mirrors all use this
   // primitive, so a process-local queue would leave a race between workers.
+  // #3156: retain a retry's fence for any throw escaping the locked callback.
+  // Before it takes a sequence, a retry records nothing (and never invents one in the catch).
+  let retryAttemptSeq: bigint | null = null;
   try {
     const resolvedMemoryId = memory.id;
     return await withMirrorCheckoutLock(resolvedMemoryId, async () => {
@@ -221,7 +224,7 @@ export async function withMirrorCheckout(
         obligations = rows.filter(r => r.lastAttemptAt.getTime() + Math.min(300_000 * 2 ** Math.min(r.attempts - 1, 7), 21_600_000) <= now)
           .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc }));
         if (!obligations.length) return 'skipped';
-        attemptSeq = await tryTakeAttemptSeq(db);
+        attemptSeq = retryAttemptSeq = await tryTakeAttemptSeq(db);
         if (attemptSeq === null) return 'skipped'; // a retry must not run without its settlement fence
       }
       if (opts.beforeGit && !await opts.beforeGit()) return 'no-changes';
@@ -357,9 +360,11 @@ export async function withMirrorCheckout(
     console.error(`${logPrefix} Checkout lock failed for ${commitSubject}`, mirrorFailureMetadata(err, 'lock', 'LOCK_FAILED'));
     // Outside the lock by definition (it could not be taken, or the attempt threw before settling), so this settle is not
     // lock-ordered: the sequence number still makes it a no-op against any newer row.
-    const lockFailedSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+    const lockFailedSeq = opts.retry
+      ? retryAttemptSeq
+      : obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
     if (lockFailedSeq !== null) {
-      await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
+      await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq, opts.retry?.maxAttempts);
     }
     return 'failed';
   }

@@ -531,6 +531,30 @@ export async function appendWorkerDeletedEvent(
   await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId } });
 }
 
+// ── #3125 S1 (V43): who changed the App's properties ─────────────────────
+
+/**
+ * `app.properties-changed` (cor:agt:050:11): appended in the `setAppProperties` write's own transaction, after every
+ * refusal and before commit, only when the object changed. The payload names the changed TOP-LEVEL keys, sorted;
+ * never a value and never a nested path (Holger, V43). Each key must be a string; nothing else can ride this event.
+ */
+export async function appendAppPropertiesChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; keys: string[] },
+): Promise<void> {
+  if (!args.keys.every((k) => typeof k === 'string')) throw new Error('Unsupported app.properties-changed payload');
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'app.properties-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { keys: [...args.keys] },
+    },
+  });
+}
+
 /**
  * Append one `worker.reports-to` event: a set, handover or clear. The Worker
  * row holds only the current value; these events are its history. Ids and a

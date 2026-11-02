@@ -125,7 +125,7 @@ function updatedStamp(ctx: Context) {
 }
 
 /** Run a write on an App under the shared transaction gate; a refusal is concealed as `refused()`. */
-async function writeInApp<T>(
+export async function writeInApp<T>(
   ctx: Context,
   app: TaskApp,
   actor: TaskActor,

@@ -13,7 +13,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSchema, parse, validate, GraphQLObjectType, GraphQLInputObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
@@ -67,16 +68,36 @@ describe('#2712 — the retired prompt fields are gone from the SDL', () => {
   });
 });
 
-/** Source files under `dir`, skipping tests, the diagnostics probes and generated output. */
+/** Source files under `dir`, skipping tests, installed third-party code (`node_modules`) and generated output. */
 function sources(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     const path = join(dir, entry);
-    if (statSync(path).isDirectory()) out.push(...sources(path));
+    if (statSync(path).isDirectory()) {
+      // #3163: an installed dependency (e.g. scripts/passkey-spike/node_modules) is untracked third-party text.
+      if (entry !== 'node_modules') out.push(...sources(path));
+    }
     else if (/\.(ts|mjs|js)$/.test(entry) && !/\.test\.ts$/.test(entry)) out.push(path);
   }
   return out;
 }
+
+describe('#3163 — the source scan reads the project own files only', () => {
+  it('sources() never returns a file under node_modules, at any depth', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sources3163-'));
+    try {
+      mkdirSync(join(root, 'spike', 'node_modules', 'pkg', 'lib'), { recursive: true });
+      mkdirSync(join(root, 'node_modules'), { recursive: true });
+      writeFileSync(join(root, 'own.ts'), 'export const a = 1;\n');
+      writeFileSync(join(root, 'spike', 'own.mjs'), 'export const b = 2;\n');
+      writeFileSync(join(root, 'spike', 'node_modules', 'pkg', 'lib', 'bundle.js'), 'const systemPrompt = 1; // BOOT_PROMPT_SERVE_ENABLED\n');
+      writeFileSync(join(root, 'node_modules', 'top.js'), 'const promptOverride = 1;\n');
+      expect(sources(root).map((f) => f.slice(root.length + 1)).sort()).toEqual(['own.ts', join('spike', 'own.mjs')]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('#2712 — no source reference remains outside the migrations and history', () => {
   it('src/, scripts/ and the Prisma schema never name the retired fields or columns', () => {

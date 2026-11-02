@@ -156,6 +156,7 @@ import {
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
 import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
@@ -4938,6 +4939,9 @@ export function createMcpServerInstance(
    * uniform-refusal rule, worn here as the same single not-found message the
    * node form serves. A globally-ambiguous historical entry address stays a
    * LOUD refusal (AmbiguousLegacyUrnError escapes), exactly as in the arm.
+   * An operational fault in either lookup is not a refusal and propagates to
+   * the tool's error boundary as the generic internal-fault envelope (#2975,
+   * cor:api:260:01); an ambiguous AGENT alias stays the uniform refusal.
    *
    * `agentGate: false` (#2718, Vera's ruling (a), cor:agt:110:04) drops the
    * `agent` arm's gate and keeps only the memory gates: the RUN surface applies
@@ -4958,9 +4962,12 @@ export function createMcpServerInstance(
         db,
         composeUrnV2('agent', parsed.root, parsed.segments[0]!),
       ));
-    } catch {
+    } catch (error) {
       // Malformed leaf (charset/length/arity) or an unknown/renamed-away agent
-      // — both name nothing (the arm's uniform refusal).
+      // — both name nothing (the arm's uniform refusal). A fault is not an
+      // absence and propagates (#2975, cor:api:260:01); an ambiguous agent
+      // alias stays concealed here, as in resolveUrn's arm (gate ruling (a)).
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
       return null;
     }
     const agent = await db.agent.findUnique({
@@ -4992,6 +4999,8 @@ export function createMcpServerInstance(
       ));
     } catch (error) {
       if (error instanceof AmbiguousLegacyUrnError) throw error;
+      // #2975: a fault in the entry lookup is not an absence (cor:api:260:01).
+      if (!refNamesNothing(error)) throw error;
       return null;
     }
     const entry = await db.node.findFirst({
@@ -11129,7 +11138,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, continuity, signature, trailer, renderedSignature, renderedTrailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -11140,6 +11149,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.continuity(worker, {}, ctx),
           resolvers.Worker.signature(worker, {}, ctx),
           resolvers.Worker.trailer(worker, {}, ctx),
+          // #2969: the filled lines, through the same field resolvers GraphQL serves.
+          resolvers.Worker.renderedSignature(worker, {}, ctx),
+          resolvers.Worker.renderedTrailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
@@ -11270,6 +11282,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // correct to be given back.
             (signature != null ? `\nSignature template:\n${signature}\n` : '') +
             (trailer != null ? `\nTrailer template:\n${trailer}\n` : '') +
+            (renderedSignature != null ? `\nRendered signature:\n${renderedSignature}\n` : '') +
+            (renderedTrailer != null ? `\nRendered trailer:\n${renderedTrailer}\n` : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:` +
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +

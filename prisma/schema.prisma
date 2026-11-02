@@ -2653,11 +2653,10 @@ model NodeRevision {
   /// column landed — revision history would otherwise silently drop
   /// abstract edits.
   abstract           String?
-  /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// revision capture. Restored verbatim by `restoreNodeRevision`;
-  /// legacy revisions (pre-spec) have NULL here, which short-circuits
-  /// the staleness check on the live row after restore (no false
-  /// positives).
+  /// Revision snapshot of `Node.abstractOriginHash` at capture time
+  /// (cor:dmo:020:03, cor:dmo:060:02). Restored verbatim by `restoreNodeRevision`.
+  /// A restored NULL on a node with both an abstract and content means the abstract is
+  /// unverified, neither stale nor fresh. A NULL on a node with no abstract or no content needs no check.
   abstractOriginHash String?             @map("abstract_origin_hash")
   content            String?
   tags               String[]
@@ -3315,6 +3314,13 @@ model App {
   tickerLiveCap                     Int                  @default(20) @map("ticker_live_cap")
   /// Null = derived (subscribed workers x (86400 / self-subscribe cadence) x 2).
   wakeDailyBudget                   Int?                 @map("wake_daily_budget")
+  /// #3125 S1 (cor:dmo:050:02, cor:dmo:050:20): the App's own JSON object, the App equivalent of `Node.properties`.
+  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform reads only the
+  /// reserved `taskIntegrations` key (cor:agt:120:01). NULL = no properties. CHECK: an object when set.
+  properties                        Json?                @map("properties")
+  /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
+  /// Its own column, not `updatedAt`, which every other App write moves.
+  propertiesRevision                Int                  @default(0) @map("properties_revision")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
   /// avoid spurious portal churn.
@@ -5718,6 +5724,10 @@ model AgentTask {
   description          String?
   /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
   source               String?
+  /// #3125 S2 (V29, V46; cor:agt:120:02): the claim on an outside item, set once at create. Unique within an App,
+  /// whatever the task's state, through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
+  /// agent-task-external-id-invariants.sql: Prisma cannot model a partial unique). Compared exactly as written.
+  externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).
   parentTaskId         String?   @map("parent_task_id")
   ownerWorkerId        String?   @map("owner_worker_id")

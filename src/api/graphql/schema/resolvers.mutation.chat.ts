@@ -293,17 +293,26 @@ export const chatMutations = {
           return d.isSetup !== true && d.isFallback !== true;
         });
         const chosen = nonSetup ?? topLevel[0];
-        if (!chosen) throw new Error('Agent has no conversations configured');
+        if (!chosen) {
+          throw new ChatScopeError('AGENT_HAS_NO_CONVERSATIONS', 'Agent has no conversations configured.');
+        }
         convName = chosen.loc.split(':')[1];
       }
 
       const convNode = await findSystemNode(`conversations:${convName}`);
-      if (!convNode) throw new Error(`Conversation "${convName}" not found in agent's system memory`);
+      if (!convNode) {
+        throw new ChatScopeError(
+          'CONVERSATION_NOT_FOUND',
+          `Conversation "${convName}" not found in agent's system memory.`,
+        );
+      }
 
       const convData = (convNode.data as Record<string, unknown>) ?? {};
       const stageOrder = (convData.stageOrder as string[]) ?? [];
       const firstStage = stageOrder[0];
-      if (!firstStage) throw new Error(`Conversation "${convName}" has no stages`);
+      if (!firstStage) {
+        throw new ChatScopeError('CONVERSATION_HAS_NO_STAGES', `Conversation "${convName}" has no stages.`);
+      }
 
       // Load the first stage
       const stageNode = await findSystemNode(`conversations:${convName}:${firstStage}`);

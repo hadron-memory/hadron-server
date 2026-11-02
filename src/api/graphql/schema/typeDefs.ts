@@ -3090,6 +3090,17 @@ export const typeDefs = `#graphql
     its own authority.
     """
     viewerManages: Boolean!
+    """
+    #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:02, hrn:node:hadronmemory.com:specs:cor:dmo:050:20): the App's
+    own JSON object, written whole by whoever manages it (setAppProperties). Readable by whoever may read the App by
+    app(ref:) (an org member, or the user-owner) and by whoever manages it; null for anyone else, an App key included,
+    whichever field reached the App. Never put a secret here. The platform reads only the taskIntegrations key
+    (hrn:node:hadronmemory.com:specs:cor:agt:120:01), where each team lead reads as its worker URN; every other key is
+    the team's, returned as written. Null = no properties.
+    """
+    properties: JSON
+    "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
+    propertiesRevision: Int
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
@@ -5015,8 +5026,9 @@ export const typeDefs = `#graphql
   """
   One page of a chat-history search (#2299, hrn:node:hadronmemory.com:specs:cor:agt:020:04). Newest first. A call stops at
   a full page or at the scan bound, whichever comes first: complete is true only when the search reached the start of the
-  history, and then there is no cursor. An empty page with complete false means the scan bound fired before any match: it
-  may continue with the cursor. No matches is only ever an empty page with complete true.
+  history, and then there is no cursor. A search found nothing only when every page it returned was empty and the last one
+  has complete true. A final empty page with complete true can follow pages that had matches. An empty page with complete
+  false means the scan bound fired; continue with the cursor.
   """
   type TeamChatSearchPage {
     items: [TeamChatSearchMatch!]!
@@ -5333,6 +5345,14 @@ export const typeDefs = `#graphql
     with the platform variables filled. Null when no prompt can be served.
     """
     prompt: String
+    """
+    #2969 (hrn:node:hadronmemory.com:specs:cor:agt:040:04): the worker's signature as the served boot prompt fills it, the platform
+    variables substituted (session.llmModel is the empty string when no model is recorded). Reaches exactly the callers
+    prompt reaches; null for anyone else, with no refusal.
+    """
+    renderedSignature: String
+    "#2969: the worker's trailer, filled as renderedSignature is, for the same callers."
+    renderedTrailer: String
     """
     #1029 — what a fresh binding of this worker inherits from the last one.
 
@@ -8067,6 +8087,8 @@ export const typeDefs = `#graphql
       tagsAll: [String!]
       "Exact opaque source value, without interpretation or prefix matching."
       source: String
+      "#3125 S2: the task with exactly this externalId (compared as written, 1 to 512 characters, else BAD_USER_INPUT). Runs inside the App read gate, so it only finds this App's task."
+      externalId: String
       "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
       reference: AgentTaskReferenceFilter
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
@@ -10102,6 +10124,20 @@ export const typeDefs = `#graphql
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
     setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
     """
+    #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
+    or an empty object clears them. Whoever manages the App only, as a person acting as themselves (a worker session,
+    an App key and an impersonation are refused). Never put a secret here. When expectedRevision is sent it must equal
+    App.propertiesRevision. A write that changes nothing changes no revision and records no event; a changing write
+    records app.properties-changed naming the changed top-level keys, never values. Bounds: 16 KiB of JSON, 64 levels.
+    The taskIntegrations key (hrn:node:hadronmemory.com:specs:cor:agt:120:01) is validated: a list of
+    { name, provider: "github", repositories: ["owner/name"], readyLabel?, excludeLabels?, teams?: [{ lead, label }] },
+    where lead is a worker of this App (URN, id or name). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
+    PROPERTIES_TOO_LARGE, PROPERTIES_KEY_RESERVED (a key named __proto__ at any depth, which cannot be stored; names the
+    path), TASK_INTEGRATION_INVALID (names the JSON path,
+    never the value), APP_PROPERTIES_CONFLICT.
+    """
+    setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int): App!
+    """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:01, :06) — set a stop signal. Whoever manages the App: any level and
     scope. A host key: a HALT on its own host only. Never replaces another signal. Refusals: APP_MANAGER_REQUIRED,
     HOST_SCOPE_REQUIRED, STOP_SIGNAL_SCOPE_FORBIDDEN, STOP_SIGNAL_NOT_FOUND (the target), BAD_USER_INPUT, APP_NOT_FOUND.
@@ -10863,7 +10899,7 @@ export const typeDefs = `#graphql
     owner role in its live, installed App for non-personal/non-private memories. Impersonation is refused. Refused
     in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
     system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
-    to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
+    to write the memory (DECISION_DECIDER_NOT_ELIGIBLE; hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
     """
     createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
     "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
@@ -14509,6 +14545,8 @@ export const typeDefs = `#graphql
     description: String
     "Opaque origin reference (an issue URL, a node URN). Not interpreted."
     source: String
+    "#3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims (an issue's canonical URL), set once at creation and never edited. Unique within the App, whatever the task's state. Null when none."
+    externalId: String
     "Null for a root task."
     parentTaskId: ID
     owner: AgentTaskParty!
@@ -15470,6 +15508,14 @@ export const typeDefs = `#graphql
     title: String!
     description: String
     source: String
+    """
+    #3125 S2 (hrn:node:hadronmemory.com:specs:cor:agt:120:02): the outside item this task claims, for example an issue's
+    canonical URL. Stored and compared exactly as written; 1 to 512 characters with no whitespace, control or invisible
+    format character and no user name or password (else BAD_USER_INPUT). Set only here: no edit takes it. A second
+    task with the same value in this App, whatever the first task's state, is refused TASK_EXTERNAL_ID_TAKEN, which
+    names no task (find it with agentTasks(externalId:)). Another App's tasks never conflict.
+    """
+    externalId: String
     """
     Defaults to the creator. A root task's creator may name any other
     participating worker or person as owner (#1757, hrn:node:hadronmemory.com:specs:cor:agt:050:01);

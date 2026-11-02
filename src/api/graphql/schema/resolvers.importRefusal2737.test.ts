@@ -15,6 +15,7 @@ import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 let ctx: Context, memoryId: string, appId: string, taskId: string, agentId: string;
 beforeEach(async () => {
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   await cleanDb(db);
   const org = await db.organization.create({data:{name:'Import refusal',urn:'import2737.test'}});
@@ -53,11 +54,14 @@ describe('#2737 importNode run refusal',()=>{
   });
   it('a refused re-import preserves existing content and revision history', async()=>{
     const prior=await db.node.create({data:{memoryId,loc:'clips:refused',name:'Curated',content:'Original'}});
-    const revisions=await db.nodeRevision.findMany({where:{nodeId:prior.id}});
+    // #2745: an empty history cannot prove rollback preserves existing snapshots.
+    await db.nodeRevision.create({data:{nodeId:prior.id,memoryId,loc:prior.loc,name:'Earlier',content:'Historical content',revNo:0,tags:[],changes:['initial import']}});
+    const revisions=await db.nodeRevision.findMany({where:{nodeId:prior.id},orderBy:{id:'asc'}});
+    expect(revisions).toHaveLength(1);
     await unserve();
     await expect(resolvers.Mutation.importNode({}, {input:input()},ctx)).rejects.toMatchObject({extensions:{code:'BOOT_PROMPT_NOT_SET'}});
     expect(await db.node.findUnique({where:{id:prior.id}})).toMatchObject({content:'Original',name:'Curated',revSeq:prior.revSeq});
-    expect(await db.nodeRevision.findMany({where:{nodeId:prior.id}})).toEqual(revisions);
+    expect(await db.nodeRevision.findMany({where:{nodeId:prior.id},orderBy:{id:'asc'}})).toEqual(revisions);
   });
   it('an unexpected mint error rolls back the imported node', async()=>{
     vi.spyOn(manualRun,'mintManualRun').mockRejectedValueOnce(new Error('injected mint outage'));
@@ -109,7 +113,9 @@ describe('#2737 importNode run refusal',()=>{
     expect(nodeWritten).toHaveBeenCalledTimes(1);
   });
   it('a node write refusal creates no run and preserves quota', async()=>{
-    await expect(resolvers.Mutation.importNode({}, {input:{...input(),name:'',nodeType:'comment'}},ctx)).rejects.toThrow();
+    await expect(resolvers.Mutation.importNode({}, {input:{...input(),name:'',nodeType:'comment'}},ctx)).rejects.toMatchObject({
+      extensions:{code:'ROLE_GOVERNED',kind:'comment',strength:'integrity',door:'createComment',op:'create',refusal:'produces'},
+    });
     expect(await db.appRun.count()).toBe(0);
     expect(await db.quotaCounter.count({where:{scopeId:appId}})).toBe(0);
   });
@@ -125,6 +131,23 @@ describe('#2737 importNode run refusal',()=>{
     vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish} as never);
     await resolvers.Mutation.importNode({}, {input:input()},ctx);
     expect(observed).toEqual([true]);
+  });
+
+  it('#2745: the node-written broker observes the committed node, run and nonempty revision history', async()=>{
+    const prior=await db.node.create({data:{memoryId,loc:'clips:refused',name:'Curated',content:'Original'}});
+    await db.nodeRevision.create({data:{nodeId:prior.id,memoryId,loc:prior.loc,name:'Earlier',content:'Historical content',revNo:0,tags:[],changes:[]}});
+    const observed:Array<{nodeId:string;content:string|null;runCount:number;historyCount:number}>=[];
+    vi.spyOn(busClient,'getBusClient').mockResolvedValue({publish:async(subject:string,event:unknown)=>{
+      if(subject!==nodeEvents.NODE_WRITTEN_SUBJECT) return;
+      const {nodeId}=event as {nodeId:string};
+      const node=await db.node.findUnique({where:{id:nodeId}});
+      observed.push({nodeId,content:node?.content??null,runCount:await db.appRun.count(),historyCount:await db.nodeRevision.count({where:{nodeId}})});
+    }} as never);
+    await resolvers.Mutation.importNode({}, {input:input()},ctx);
+    // Node dispatch is fire-and-forget: drain it without making a fixed sleep the assertion.
+    await vi.waitFor(()=>expect(observed).toHaveLength(1),{timeout:2000,interval:10});
+    expect(observed[0]).toMatchObject({nodeId:prior.id,content:'# Imported',runCount:1});
+    expect(observed[0]!.historyCount).toBeGreaterThan(1);
   });
 
   it('an error after a real mint rolls back its run and consumed quota', async()=>{
