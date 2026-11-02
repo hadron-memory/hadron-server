@@ -16,7 +16,6 @@ import { resolvers, type Context } from './resolvers.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { hadronTaskCreate } from '../../../lib/runner/tools/index.js';
 import { taskMatcherTick } from '../../../jobs/taskMatcher.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -75,13 +74,8 @@ describe('#2249 every create path defaults the flag to false', () => {
     expect(await stored(child.id)).toBe(false);
   });
 
-  it('the MCP hadron_task_create tool', async () => {
-    const session = await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id } });
-    const mcp = createTestableMcpServer({ userId: member.id, roles: ['READER'], clientId: `user:${member.id}` }, { sessionId: `cs-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const out = (await mcp.callTool('hadron_task_create', { appRef: app.id, title: 'via mcp', session: session.id })) as { content: Array<{ text: string }> };
-    const id = /\(id: ([0-9a-z]+)\)/.exec(out.content[0].text)![1];
-    expect(await stored(id)).toBe(false);
-  });
+  // #3082: 'the MCP hadron_task_create tool' removed with the disabled tool; the same MCP wrapper called M.createAgentTask,
+  // covered by 'a person creating a root task' above.
 
   it('the run tool hadron_task_create', async () => {
     const run = await db.appRun.create({

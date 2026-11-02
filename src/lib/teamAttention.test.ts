@@ -14,7 +14,7 @@ import { getMemoryEncryptionInfo } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { createTestableMcpServer } from '../mcp/server.js';
+import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.js';
 import type { AuthContext } from '../middleware/auth.js';
 import {
   teamAttentionPage,
@@ -618,8 +618,15 @@ describe('explicit switchover', () => {
   });
 });
 
-describe('MCP parity and discovery gate', () => {
-  const auth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
+// #3082: this block drove the MCP tools hadron_team_chat_read / hadron_channel_read / hadron_team_chat_mark_read, which are disabled
+// on MCP. The same rules are pinned here on the resolvers those tools delegated to (teamChatMessages, channelMessages,
+// markOwnTeamChatRead), with the Worker session presented as the request's session (ctx.sessionId), as the transport did.
+// Removed without a replacement: 'a blank explicit session is no session' (the MCP wrapper's argument trimming of a disabled
+// tool; a resolver never sees a blank session) and the two hadron_server_info capability tests ('stops advertising the
+// capability...', 'lists the tools for any user principal...'): no team capability is advertised any more, pinned by
+// the 'no team capability is advertised' test in src/mcp/server.mcpTeamCut3082.test.ts.
+describe('worker session reads and mark-read (resolver level; was the MCP parity block)', () => {
+  const asSession = (sid: string) => userCtx({ sessionId: sid });
 
   it('an explicit-session team-chat read advances the Channel it read, not a newer App default (#1362 review)', async () => {
     // `channel` is the App's OLDEST team-space root, which is what the
@@ -636,14 +643,14 @@ describe('MCP parity and discovery gate', () => {
     await post('one');
     await post('two');
 
-    const read = await createTestableMcpServer(auth()).callToolText('hadron_team_chat_read', { sinceSeq: 0, session: sessionId });
-    expect(read).toContain('two');
+    const read = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(sessionId));
+    expect(read.items.map((m: any) => m.body)).toContain('two');
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
       .toMatchObject({ lastSeenSeq: 2 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
   });
 
-  it('mark-read with no channel marks the Channel the convenience read serves, not a newer App default (#1362 review)', async () => {
+  it('the Channel the convenience read serves (not a newer App default) is the one a mark-read must name (#1362 review)', async () => {
     const other = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:pilot-other2`, name: 'other2', class: 'app', appId: app.id },
     });
@@ -656,126 +663,48 @@ describe('MCP parity and discovery gate', () => {
     await post('one');
     await post('two');
 
-    const out = await createTestableMcpServer(auth()).callToolText('hadron_team_chat_mark_read', { session: sessionId, seq: 2 });
-    expect(out).toContain(`"channelId": "${channel.id}"`);
+    // The MCP tool resolved an omitted channel this way; the resolver takes the name, and the located channel is the oldest root.
+    const served = await locateTeamChatChannel(userCtx(), app.id);
+    expect(served?.channelId).toBe(channel.id);
+    const out = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: served!.channelId, seq: 2 }, userCtx());
+    expect(out).toMatchObject({ channelId: channel.id, lastSeenSeq: 2 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
       .toMatchObject({ lastSeenSeq: 2 });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: newer.channel.id } })).toBeNull();
   });
 
-  it('a blank explicit session is no session: the read behaves exactly as with none (#1362 review)', async () => {
-    await post('one');
-    await post('two');
-    const bound = createTestableMcpServer({ ...auth(), sessionId });
-    for (const tool of ['hadron_team_chat_read', 'hadron_channel_read'] as const) {
-      await db.channelReadState.deleteMany({});
-      const args = tool === 'hadron_channel_read' ? { channel: channel.id, sinceSeq: 0 } : { sinceSeq: 0 };
-      const blank = await bound.callToolText(tool, { ...args, session: '   ' });
-      const blankCursor = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
-      await db.channelReadState.deleteMany({});
-      const omitted = await bound.callToolText(tool, args);
-      const omittedCursor = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
-      expect(blank, tool).toBe(omitted);
-      expect(blankCursor?.lastSeenSeq ?? null, tool).toBe(omittedCursor?.lastSeenSeq ?? null);
-    }
-  });
-
-  it('a monitor read never advances the Worker cursor, even with the session bound to the transport (#1362 review)', async () => {
+  it('a monitor read never advances the Worker cursor, even with the session bound to the request (#1362 review)', async () => {
     await post('first');
     await post('second');
-    // The transport carries the Worker's own session: exactly the shape an
-    // ordinary read auto-advances under the pilot. The monitor's contract is
-    // that only an explicit acknowledge moves the cursor.
-    const bound = createTestableMcpServer({ ...auth(), sessionId });
-    const monitored = await bound.callToolText('hadron_team_chat_read', { monitor: true });
-    expect(monitored).toContain('second');
+    // The monitor read is advanceReadState:false: only an explicit acknowledge moves the cursor.
+    const monitored = await Q.teamChatMessages({}, { appRef: app.id, advanceReadState: false }, asSession(sessionId));
+    expect(monitored.items.map((m: any) => m.body)).toContain('second');
     expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
-    // Control: an ordinary read on the same transport does advance it.
-    await bound.callToolText('hadron_team_chat_read', { sinceSeq: 0 });
+    // Control: an ordinary read on the same session does advance it.
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(sessionId));
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } }))
       .toMatchObject({ lastSeenSeq: 2 });
   });
 
-  it('stops advertising the capability once the tools would refuse the App (#1362 review)', async () => {
-    const probe = () => createTestableMcpServer(auth()).callToolText('hadron_server_info', {});
-    expect(await probe()).toContain('team-attention');
-    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    expect(await probe()).not.toContain('team-attention');
-    await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });
-    // Losing participation: no AppMember row, and an org role too weak to admit.
-    await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: user.id } } });
-    await db.orgMember.updateMany({ where: { organizationId: org.id, userId: user.id }, data: { role: 'READER' } });
-    expect(await probe()).not.toContain('team-attention');
-  });
-
-  it('lists the tools for any user principal while the capability stays participation-gated', async () => {
-    const enabled = createTestableMcpServer(auth());
-    expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention');
-    expect(await enabled.callToolText('hadron_server_info', {})).toContain('team-attention-paged');
-    await post('compact, no body in the result');
-    const retired = await enabled.callToolText('hadron_team_attention', {});
-    expect(retired).toContain('[upgrade_required]');
-    const out = await enabled.callToolText('hadron_team_attention_page', {});
-    expect(out).toContain(`"worker": "${worker.id}"`);
-    expect(out).toContain('"unread": 1');
-    expect(out).not.toContain('compact, no body in the result');
-
-    // #1353: the pilot operator allowlist no longer hides discovery — an
-    // ordinary non-participant still LISTS the tools (registration follows
-    // the user principal) but gets no capability advertisement (the probe
-    // requires live-App participation) and a concealed per-call refusal.
-    const outsider = await db.user.create({
-      data: { id: generateId(), githubId: 1353004, githubUsername: `unlisted-${Date.now()}` },
-    });
-    const outsiderServer = createTestableMcpServer({ ...auth(), userId: outsider.id });
-    const attentionTools = ['hadron_team_attention', 'hadron_team_attention_page', 'hadron_team_attention_switchover', 'hadron_team_chat_mark_read'];
-    expect(enabled.toolNames()).toEqual(expect.arrayContaining(attentionTools));
-    for (const name of attentionTools) expect(outsiderServer.toolNames()).toContain(name);
-    expect(await outsiderServer.callToolText('hadron_server_info', {})).not.toContain('team-attention');
-    // The RETIRED v1 stub refuses uniformly (UPGRADE_REQUIRED before any
-    // App resolution — no existence oracle), while the live paged doors
-    // carry the concealment: a non-participant learns nothing.
-    const refusedV1 = await outsiderServer.callTool('hadron_team_attention', { app: app.id });
-    expect((refusedV1.content[0]?.text ?? '')).toContain('[upgrade_required]');
-    const refused = await outsiderServer.callTool('hadron_team_attention_page', { app: app.id });
-    expect((refused.content[0]?.text ?? '')).toContain('[app_not_found] App not found.');
-  });
-
-  it('ordinary MCP reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
+  it('ordinary reads own the cursor and the explicit mark-read door covers filtered reads', async () => {
     await post('@dara first', { mentions: ['dara'] });
     await post('second');
-    const server = createTestableMcpServer(auth());
 
-    await server.callToolText('hadron_team_chat_read', { session: sessionId, app: app.id, mentions: worker.id });
+    await Q.teamChatMessages({}, { appRef: app.id, mentionsRef: worker.id }, asSession(sessionId));
     expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
 
-    const marked = await server.callToolText('hadron_team_chat_mark_read', {
-      session: sessionId,
-      app: app.id,
-      channel: channel.id,
-      seq: 1,
-    });
-    expect(marked).toContain('"lastSeenSeq": 1');
+    const marked = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 1 }, userCtx());
+    expect(marked).toMatchObject({ lastSeenSeq: 1 });
 
-    const blank = await server.callToolText('hadron_team_chat_mark_read', {
-      session: sessionId,
-      app: app.id,
-      channel: '   ',
-      seq: 2,
-    });
-    expect(blank).toContain('[channel_not_found]');
+    await expect(M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: '   ', seq: 2 }, userCtx()))
+      .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
-    const markedDefault = await server.callToolText('hadron_team_chat_mark_read', {
-      session: sessionId,
-      app: app.id,
-      seq: 2,
-    });
-    expect(markedDefault).toContain(`"channelId": "${channel.id}"`);
-    expect(markedDefault).toContain('"lastSeenSeq": 2');
+    const markedDefault = await M.markOwnTeamChatRead({}, { appRef: app.id, sessionRef: sessionId, channelRef: channel.id, seq: 2 }, userCtx());
+    expect(markedDefault).toMatchObject({ channelId: channel.id, lastSeenSeq: 2 });
 
-    await server.callToolText('hadron_team_chat_read', { session: sessionId, app: app.id, sinceSeq: 1 });
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 1 }, asSession(sessionId));
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 2 });
   });
 
@@ -804,25 +733,16 @@ describe('MCP parity and discovery gate', () => {
     )).rejects.toMatchObject({ extensions: { code: 'SESSION_NOT_LIVE' } });
   });
 
-  it('an explicit MCP session advances only that Worker, not the different header-bound session', async () => {
+  it('a read presenting one Worker session advances only that Worker, not another Worker of the App', async () => {
     const iris = await addWorker('Iris');
     await post('one message for both');
-    const server = createTestableMcpServer({ ...auth(), sessionId });
 
-    await server.callToolText('hadron_channel_read', {
-      channel: channel.id,
-      session: iris.sessionId,
-      sinceSeq: 0,
-    });
+    await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0 }, asSession(iris.sessionId));
     expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
 
     await db.channelReadState.deleteMany();
-    await server.callToolText('hadron_team_chat_read', {
-      app: app.id,
-      session: iris.sessionId,
-      sinceSeq: 0,
-    });
+    await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(iris.sessionId));
     expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
     expect(await db.channelReadState.findFirst({ where: { workerId: iris.id, channelId: channel.id } })).toMatchObject({ lastSeenSeq: 1 });
   });
@@ -860,10 +780,8 @@ describe('MCP parity and discovery gate', () => {
     await db.orgMember.updateMany({
       where: { organizationId: org.id, userId: user.id }, data: { role: 'READER' },
     });
-    const read = await createTestableMcpServer(auth()).callToolText('hadron_channel_read', {
-      channel: independent.id, session: sessionId, sinceSeq: 0,
-    });
-    expect(read).toContain('still readable');
+    const read = await Q.channelMessages({}, { channelRef: independent.id, sinceSeq: 0 }, asSession(sessionId));
+    expect(read.items.map((m: any) => m.body)).toContain('still readable');
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
       .toBeNull();
   });
@@ -899,9 +817,8 @@ describe('MCP parity and discovery gate', () => {
 
     // Soft delete stamps the org only: the App row and every membership stay.
     await db.organization.update({ where: { id: org.id }, data: { deletedAt: new Date() } });
-    await createTestableMcpServer(auth()).callToolText('hadron_channel_read', {
-      channel: independent.id, session: sessionId, sinceSeq: 0,
-    });
+    await expect(Q.channelMessages({}, { channelRef: independent.id, sinceSeq: 0 }, asSession(sessionId)))
+      .rejects.toMatchObject({ extensions: { code: 'CHANNEL_NOT_FOUND' } });
     expect(await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: independent.id } }))
       .toBeNull();
     // The pilot door answers a deleted org's App exactly like an absent one.
@@ -946,37 +863,26 @@ describe('MCP parity and discovery gate', () => {
       .toMatchObject({ lastSeenSeq: 1 });
   });
 
-  it('returns successful MCP transcripts when the best-effort cursor write fails', async () => {
+  it('returns successful transcripts when the best-effort cursor write fails', async () => {
     await post('the transcript survives');
-    const server = createTestableMcpServer(auth());
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const queryRaw = vi.spyOn(db, '$queryRaw').mockRejectedValue(new Error('cursor store unavailable'));
     try {
-      const channelRead = await server.callToolText('hadron_channel_read', {
-        channel: channel.id,
-        session: sessionId,
-        sinceSeq: 0,
-      });
-      expect(channelRead).toContain('the transcript survives');
-      expect(channelRead).not.toContain('cursor store unavailable');
+      const channelRead = await Q.channelMessages({}, { channelRef: channel.id, sinceSeq: 0 }, asSession(sessionId));
+      expect(channelRead.items.map((m: any) => m.body)).toContain('the transcript survives');
 
-      const teamRead = await server.callToolText('hadron_team_chat_read', {
-        app: app.id,
-        session: sessionId,
-        sinceSeq: 0,
-      });
-      expect(teamRead).toContain('the transcript survives');
-      expect(teamRead).not.toContain('cursor store unavailable');
+      const teamRead = await Q.teamChatMessages({}, { appRef: app.id, sinceSeq: 0 }, asSession(sessionId));
+      expect(teamRead.items.map((m: any) => m.body)).toContain('the transcript survives');
       expect(await seenSeq(worker.id, channel.id)).toBe(0); // #2138: a read may stamp lastCheckedAt, but moves no read position
       // Footer omission diagnostics may also warn; pin the two cursor failures
       // this test induces without coupling to independent best-effort features.
       const cursorWarnings = warn.mock.calls.filter(([message]) =>
-        message === '[hadron_channel_read] pilot read-state advance failed:' ||
-        message === '[hadron_team_chat_read] pilot read-state advance failed:',
+        message === '[channelMessages] pilot read-state advance failed:' ||
+        message === '[teamChatMessages] pilot read-state advance failed:',
       );
       expect(cursorWarnings.map(([message]) => message)).toEqual([
-        '[hadron_channel_read] pilot read-state advance failed:',
-        '[hadron_team_chat_read] pilot read-state advance failed:',
+        '[channelMessages] pilot read-state advance failed:',
+        '[teamChatMessages] pilot read-state advance failed:',
       ]);
     } finally {
       queryRaw.mockRestore();

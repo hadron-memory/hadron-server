@@ -1,10 +1,9 @@
-/** #2191: real GraphQL validation/auth + registered MCP handler dispatch, private DB only. */
+/** #2191: real GraphQL validation/auth, private DB only. */
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../../../server.js';
 import { mintUserApiKey } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
@@ -55,11 +54,9 @@ it('GraphQL refuses invalid syntax and both family lists without creating a task
   }
   expect(await db.agentTask.count()).toBe(0);
 });
-it('MCP task-create handler reaches the same canonical requirement storage', async () => {
-  const session = await db.session.create({ data: { id: generateId(), userId, appId } });
-  const mcp = createTestableMcpServer({ userId, roles: ['READER'], clientId: `user:${userId}` });
-  const text = await mcp.callToolText('hadron_task_create', { session: session.id, appRef: appId, title: 'SDK', requirements: { familyIn: [' OPENAI ', 'custom-7'] } });
-  expect(text).toContain('Created');
+it('GraphQL createAgentTask stores familyIn canonically (moved from the hadron_task_create MCP handler, #3082)', async () => {
+  const result = await post(CREATE, { i: { appRef: appId, title: 'SDK', requirements: { familyIn: [' OPENAI ', 'custom-7'] } } });
+  expect(result.errors).toBeUndefined();
   expect((await db.agentTask.findFirstOrThrow({ where: { title: 'SDK' } })).requirements).toEqual({ familyIn: ['codex', 'custom-7'] });
 });
 it('GraphQL session start, update and open resume share explicit alias normalization', async () => {

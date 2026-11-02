@@ -20,7 +20,6 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.
 let server: Server, base: string, appId: string, orgId: string, managerId: string;
 let hosted: string, unhosted: string, rawKey: string, bareId: string, hostKeyId: string;
 let hostRawKey: string;
-let rpc = 1;
 beforeAll(async () => {
   server = httpServer(await createServer());
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -74,19 +73,6 @@ async function gql(query: string, variables: Record<string, unknown>) {
   return response.json() as Promise<{ data: any; errors?: { extensions?: { code?: string } }[] }>;
 }
 const dueQuery = 'query($app:String!,$workers:[String!]) { dueWakes(appRef:$app,workerRefs:$workers) { wakes { worker { id name } proof } } }';
-async function openMcp() {
-  const send = async (body: unknown, session?: string) => fetch(`${base}/mcp`, { method: 'POST', headers: {
-    authorization: `Bearer ${rawKey}`, accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...(session ? { 'mcp-session-id': session } : {}),
-  }, body: JSON.stringify(body) });
-  const response = await send({ jsonrpc: '2.0', id: rpc++, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'r64-local', version: '1' } } });
-  expect(response.status).toBe(200); const session = response.headers.get('mcp-session-id')!; await response.text();
-  const initialized = await send({ jsonrpc: '2.0', method: 'notifications/initialized' }, session); await initialized.text();
-  return async (name: string, args: Record<string, unknown>) => {
-    const res = await send({ jsonrpc: '2.0', id: rpc++, method: 'tools/call', params: { name, arguments: args } }, session);
-    expect(res.status).toBe(200); const raw = await res.text(); const data = raw.split('\n').find(l => l.startsWith('data:'))?.slice(5) ?? raw;
-    const result = JSON.parse(data).result; return result?.content?.[0]?.text as string;
-  };
-}
 describe('R64 legacy wake scope', () => {
   it('GraphQL unhosted read and acknowledgement succeed as the positive control', async () => {
     const page = await gql(dueQuery, { app: appId, workers: [unhosted] });
@@ -95,29 +81,14 @@ describe('R64 legacy wake scope', () => {
     const result = await gql('mutation($p:[String!]!){ acknowledgeWakes(proofs:$p){ acknowledged unchanged } }', { p: [page.data.dueWakes.wakes[0].proof] });
     expect(result.errors).toBeUndefined(); expect(result.data.acknowledgeWakes.acknowledged).toBe(1);
   });
-  it('MCP unhosted read and acknowledgement succeed as the positive control', async () => {
-    const call = await openMcp();
-    const page = await call('hadron_due_wakes', { appRef: appId, workerRefs: [unhosted] });
-    expect(page).toContain('Unhosted'); expect(page).not.toMatch(/\bHosted\b/);
-    const proof = /proof: (\S+)/.exec(page)![1];
-    expect(await call('hadron_ack_wakes', { proofs: [proof] })).toBe('Acknowledged 1.');
-  });
   it('GraphQL batches already refuse the bare attention key', async () => {
     const result = await gql('query($app:String!){ deliveryBatches(appRef:$app){ batches { id text } } }', { app: appId });
     expect(result.errors?.[0]?.extensions?.code).toBe('APP_KEY_SCOPE_REQUIRED');
-  });
-  it('MCP inbox already refuses the bare attention key', async () => {
-    const call = await openMcp(); const text = await call('hadron_team_chat_inbox', { appRef: appId });
-    expect(text).toMatch(/scope|required|refus/i); expect(text).not.toContain('synthetic mention');
   });
   it('GraphQL due-wake read must return only the unhosted worker', async () => {
     const result = await gql(dueQuery, { app: appId });
     expect(result.errors).toBeUndefined();
     expect(result.data.dueWakes.wakes.map((w: { worker: { id: string } }) => w.worker.id)).toEqual([unhosted]);
-  });
-  it('MCP due-wake read must exclude the hosted worker', async () => {
-    const text = await (await openMcp())('hadron_due_wakes', { appRef: appId });
-    expect(text).toContain('Unhosted'); expect(text).not.toMatch(/\bHosted\b/);
   });
   it('GraphQL ack must refuse an issued proof once its worker becomes hosted', async () => {
     const page = await gql(dueQuery, { app: appId, workers: [unhosted] });
@@ -127,43 +98,22 @@ describe('R64 legacy wake scope', () => {
     expect(await db.workerWakeAck.count()).toBe(0);
     expect(result.errors?.length).toBeGreaterThan(0);
   });
-  it('MCP ack must refuse an issued proof once its worker becomes hosted', async () => {
-    const call = await openMcp();
-    const text = await call('hadron_due_wakes', { appRef: appId, workerRefs: [unhosted] });
-    const proof = /proof: (\S+)/.exec(text)![1];
-    await hostWorker(unhosted);
-    const result = await call('hadron_ack_wakes', { proofs: [proof] });
-    expect(await db.workerWakeAck.count()).toBe(0); expect(result).not.toBe('Acknowledged 1.');
-  });
-  it.each(['GraphQL', 'MCP'])('%s host key reads and acknowledges only its registered workers', async transport => {
+  it('GraphQL host key reads and acknowledges only its registered workers', async () => {
     rawKey = hostRawKey;
-    if (transport === 'GraphQL') {
-      const page = await gql(dueQuery, { app: appId });
-      expect(page.errors).toBeUndefined();
-      expect(page.data.dueWakes.wakes.map((w: { worker: { id: string } }) => w.worker.id)).toEqual([hosted]);
-      expect(JSON.stringify(page)).not.toContain('Unhosted');
-      const out = await gql('mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged}}', { p: [page.data.dueWakes.wakes[0].proof] });
-      expect(out.errors).toBeUndefined(); expect(out.data.acknowledgeWakes.acknowledged).toBe(1);
-    } else {
-      const call = await openMcp();
-      const text = await call('hadron_due_wakes', { appRef: appId });
-      expect(text).toMatch(/\bHosted\b/); expect(text).not.toContain('Unhosted');
-      expect(await call('hadron_ack_wakes', { proofs: [/proof: (\S+)/.exec(text)![1]] })).toBe('Acknowledged 1.');
-    }
+    const page = await gql(dueQuery, { app: appId });
+    expect(page.errors).toBeUndefined();
+    expect(page.data.dueWakes.wakes.map((w: { worker: { id: string } }) => w.worker.id)).toEqual([hosted]);
+    expect(JSON.stringify(page)).not.toContain('Unhosted');
+    const out = await gql('mutation($p:[String!]!){acknowledgeWakes(proofs:$p){acknowledged}}', { p: [page.data.dueWakes.wakes[0].proof] });
+    expect(out.errors).toBeUndefined(); expect(out.data.acknowledgeWakes.acknowledged).toBe(1);
   });
 
-  it.each(['GraphQL', 'MCP'])('%s formerly-host key fails closed after scope revocation', async transport => {
+  it('GraphQL formerly-host key fails closed after scope revocation', async () => {
     rawKey = hostRawKey;
     await resolvers.Mutation.revokeAppKeyScope({}, { id: hostKeyId, scope: 'host:operate' }, { db, userId: managerId, roles: ['READER'] });
-    if (transport === 'GraphQL') {
-      const out = await gql(dueQuery, { app: appId });
-      expect(out.errors?.[0]?.extensions?.code).toBe('APP_KEY_SCOPE_REQUIRED');
-      expect(out.data).toBeNull();
-    } else {
-      const text = await (await openMcp())('hadron_due_wakes', { appRef: appId });
-      expect(text).toMatch(/app_key_scope_required/i);
-      expect(text).not.toMatch(/Hosted|Unhosted/);
-    }
+    const out = await gql(dueQuery, { app: appId });
+    expect(out.errors?.[0]?.extensions?.code).toBe('APP_KEY_SCOPE_REQUIRED');
+    expect(out.data).toBeNull();
     expect(await db.appKeyWakeRead.count()).toBe(0);
   });
 

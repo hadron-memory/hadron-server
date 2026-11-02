@@ -1,26 +1,17 @@
 /** #1597: no-App name discovery is bounded by existing bind authority, never a fallback for ID/URN. */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer as httpServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
-import { createServer } from '../server.js';
-import { signJwt } from '../auth/jwt.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const M = resolvers.Mutation as any;
-let server: Server;
-let url: URL;
-const clients: Client[] = [];
 let user: { id: string; githubId: number | null; githubUsername: string | null };
 let other: { id: string };
 let appA: { id: string; urn: string; name: string };
@@ -39,16 +30,7 @@ async function worker(app: typeof appA, name = 'Iris', extra = {}) {
     slug: `w-${generateId().slice(-8)}`, role: 'server-engineer', ...extra } });
   return { ...w, urn: composeWorkerUrn(app.urn, w.slug) };
 }
-beforeAll(async () => {
-  server = httpServer(await createServer());
-  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
-  url = new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`);
-});
-afterAll(async () => {
-  server.closeAllConnections?.();
-  await new Promise<void>(r => server.close(() => r()));
-});
-afterEach(async () => { for (const c of clients.splice(0)) await c.close(); vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); });
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = generateId();
@@ -65,14 +47,6 @@ beforeEach(async () => {
   hiddenApp = await db.app.create({ data: { organizationId: foreign.id, name: 'Hidden app', urn: `${foreign.urn}:hidden` } });
   await db.appAgent.createMany({ data: [appA, appB, hiddenApp].map(a => ({ appId: a.id, agentId })) });
 });
-async function mcp() {
-  const token = await signJwt({ sub: user.id, githubId: user.githubId!, githubUsername: user.githubUsername!, roles: ['READER'] });
-  const c = new Client({ name: 'cross-app1597', version: '1' }); clients.push(c);
-  await c.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
-  return c;
-}
-function text(result: any): string { return result.content.filter((v: any) => v.type === 'text').map((v: any) => v.text).join('\n'); }
-
 describe('cross-App bare-name bind (#1597)', () => {
   it('binds the unique authorized match using DB case comparison', async () => {
     const w = await worker(appA, 'Iris_%');
@@ -165,9 +139,8 @@ describe('cross-App bare-name bind (#1597)', () => {
     expect(e.extensions.candidates).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: held.id }), expect.objectContaining({ id: a.id }),
     ]));
-    const c = await mcp();
-    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'held identity is not absent', workerRef: 'Iris' } }));
-    expect(out).toContain('ambiguous'); expect(out).toContain(held.urn); expect(out).toContain(a.urn);
+    // #3082: the MCP half (the transport answering this ambiguity) is gone: MCP refuses every worker bind, pinned in
+    // server.mcpTeamCut3082.test.ts. The held identity is still not claimed by the refused direct start:
     expect(await db.session.count()).toBe(0);
     expect((await db.worker.findUniqueOrThrow({ where: { id: held.id } })).heldByUserId).toBe(user.id);
     expect((await db.worker.findUniqueOrThrow({ where: { id: a.id } })).heldByUserId).toBeNull();
@@ -201,23 +174,6 @@ describe('cross-App bare-name bind (#1597)', () => {
     vi.spyOn(db.app, 'findMany').mockRejectedValueOnce(new Error('candidate db unavailable'));
     await expect(start('Iris')).rejects.toThrow('candidate db unavailable');
   });
-  it('actual MCP transport binds a unique name without selected App and returns briefing', async () => {
-    const w = await worker(appA); await worker(hiddenApp);
-    const c = await mcp();
-    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'build safely', workerRef: 'Iris', llmModel: 'test' } }));
-    expect(out).toContain('Session started:'); expect(out).toContain(w.urn); expect(out).toContain('Boot briefing');
-    expect(await db.session.count({ where: { workerId: w.id } })).toBe(1);
-    const workerRead = text(await c.callTool({ name: 'hadron_get_worker', arguments: { workerRef: 'Iris' } }));
-    expect(workerRead).toContain(w.id); // successful bind pins its App on this connection
-    await worker(appB); // the connection's selected App wins over new global ambiguity
-    const next = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'same App', workerRef: 'Iris', force: true } }));
-    expect(next).toContain('Session started:'); expect(next).toContain(w.urn);
-  });
-  it('actual MCP ambiguity lists both candidates and binds nothing', async () => {
-    const a = await worker(appA); const b = await worker(appB); const hidden = await worker(hiddenApp);
-    const c = await mcp();
-    const out = text(await c.callTool({ name: 'hadron_start_session', arguments: { description: 'no guess', workerRef: 'Iris' } }));
-    expect(out).toContain('ambiguous'); expect(out).toContain(a.urn); expect(out).toContain(b.urn);
-    expect(out).not.toContain(hidden.urn); expect(await db.session.count()).toBe(0);
-  });
+  // #3082: 'actual MCP transport binds a unique name' and 'actual MCP ambiguity lists both candidates' were deleted: MCP no longer
+  // binds a worker (server.mcpTeamCut3082.test.ts pins the refusal); the same name rules are pinned above through GraphQL startSession.
 });

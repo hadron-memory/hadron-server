@@ -4,10 +4,6 @@ import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
-import { createMcpServerInstance } from '../../../mcp/server.js';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { AuthContext } from '../../../middleware/auth.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let appId: string, userId: string, outsiderId: string;
 const day = (n: number) => new Date(`2026-01-${String(n).padStart(2, '0')}T00:00:00Z`);
@@ -77,25 +73,18 @@ it('retains default order and the 200 cap after filtering', async () => {
   expect(await list({ tagsAll: ['cap'] })).toHaveLength(20);
   expect(await list({ tagsAll: ['cap'], limit: 999, offset: 200 })).toHaveLength(5);
 });
-it('exposes the filters in executable GraphQL and real MCP argument parsing', async () => {
+it('exposes the filters in executable GraphQL and the resolver', async () => {
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
-  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
-  const client = new Client({ name: 'filters2647', version: '1' });
-  const [local, remote] = InMemoryTransport.createLinkedPair();
-  await server.connect(remote); await client.connect(local);
   try {
     const result = await api.executeOperation({ query: `query($app:ID!){agentTasks(appRef:$app,tagsAny:["red"],tagsAll:["blue"],source:"issue:exact",createdAfter:"2026-01-03T00:00:00Z",createdBefore:"2026-01-03T00:00:00Z"){title}}`, variables: { app: appId } }, { contextValue: ctx() });
     expect(result.body.kind).toBe('single');
     if (result.body.kind === 'single') { expect(result.body.singleResult.errors).toBeUndefined(); expect(result.body.singleResult.data).toEqual({ agentTasks: [{ title: 'both' }] }); }
-    const response = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, tagsAny: ['red'], tagsAll: ['blue'], source: 'issue:exact', createdAfter: day(3).toISOString(), createdBefore: day(3).toISOString() } });
-    const text = (response.content as any[]).map(item => item.text).join('\n');
-    const ids = (value: string) => [...value.matchAll(/\(id: ([0-9a-z]+)\)/g)].map(match => match[1]);
-    expect(ids(text)).toEqual((await list({ tagsAll: ['blue'] })).map((row: any) => row.id));
-    for (const args of [{ overdue: true }, { startedAfter: day(1).toISOString() }, { startedBefore: day(9).toISOString() }, { finishedAfter: day(1).toISOString() }, { finishedBefore: day(9).toISOString() }, { source: 'issue:' }]) {
-      const r = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, ...args } });
-      expect((r.content as any[])[0].text).toBe('No tasks match.');
+    // #3082: the hadron_task_list MCP leg is gone with the tool; the resolver answers the same filters.
+    expect(titles(await list({ tagsAny: ['red'], tagsAll: ['blue'], source: 'issue:exact', createdAfter: day(3), createdBefore: day(3) }))).toEqual(['both']);
+    for (const args of [{ overdue: true }, { startedAfter: day(1) }, { startedBefore: day(9) }, { finishedAfter: day(1) }, { finishedBefore: day(9) }, { source: 'issue:' }]) {
+      expect(await list(args)).toEqual([]);
     }
-  } finally { await client.close(); await server.close(); await api.stop(); }
+  } finally { await api.stop(); }
 });
 
 it('refuses invalid or reversed date ranges after the same read gate', async () => {
@@ -105,13 +94,9 @@ it('refuses invalid or reversed date ranges after the same read gate', async () 
   }
 });
 
-it('rejects lenient date strings on the resolver, GraphQL and MCP paths', async () => {
+it('rejects lenient date strings on the resolver and GraphQL paths', async () => {
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
-  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
-  const client = new Client({ name: 'strict-dates2647', version: '1' });
-  const [local, remote] = InMemoryTransport.createLinkedPair();
   await api.start();
-  await server.connect(remote); await client.connect(local);
   try {
     for (const field of ['createdAfter', 'createdBefore', 'startedAfter', 'startedBefore', 'finishedAfter', 'finishedBefore']) {
       for (const value of ['1', '2026', 'Jan 3 2026', '2026-01-03T00:00:00', '2026-02-30T00:00:00Z']) {
@@ -120,36 +105,22 @@ it('rejects lenient date strings on the resolver, GraphQL and MCP paths', async 
         const gql = await api.executeOperation({ query: `query($app:ID!,$date:DateTime!){agentTasks(appRef:$app,${field}:$date){id}}`, variables: { app: appId, date: value } }, { contextValue: ctx() });
         expect(gql.body.kind).toBe('single');
         if (gql.body.kind === 'single') expect(gql.body.singleResult.errors?.length).toBeGreaterThan(0);
-        // SDKs can report parameter validation as either an error result or a rejected call.
-        const mcp = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, [field]: value } }).catch(() => ({ isError: true }));
-        expect(mcp.isError).toBe(true);
       }
     }
     const equivalent = '2026-01-03T02:00:00+02:00';
     expect(titles(await list({ createdAfter: equivalent, createdBefore: equivalent }))).toEqual(['both']);
-    const mcp = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, createdAfter: equivalent, createdBefore: equivalent } });
-    expect(mcp.isError).not.toBe(true);
-    expect((mcp.content as any[])[0].text).toContain('both');
-  } finally { await client.close(); await server.close(); await api.stop(); }
+  } finally { await api.stop(); }
 });
 
 // #2696: tagsAny/tagsAll obey the same bounds a task's own tags do (32 elements, 64 characters each).
-it.each(['tagsAny', 'tagsAll'])('%s accepts 32 tags and a 64-character tag, refuses 33 and 65, on resolver, GraphQL and MCP', async field => {
+it.each(['tagsAny', 'tagsAll'])('%s accepts 32 tags and a 64-character tag, refuses 33 and 65, on resolver and GraphQL', async field => {
   const many = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`);
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
-  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
-  const client = new Client({ name: 'tag-caps2696', version: '1' });
-  const [local, remote] = InMemoryTransport.createLinkedPair();
   await api.start();
-  await server.connect(remote); await client.connect(local);
   const gql = async (value: string[]) => {
     const r = await api.executeOperation({ query: `query($app:ID!,$v:[String!]){agentTasks(appRef:$app,${field}:$v){id}}`, variables: { app: appId, v: value } }, { contextValue: ctx() });
     if (r.body.kind !== 'single') throw new Error('unexpected body');
     return r.body.singleResult.errors?.[0]?.extensions?.code;
-  };
-  const mcp = async (value: string[]) => {
-    const r = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, [field]: value } });
-    return { isError: r.isError, text: (r.content as any[])[0].text as string };
   };
   try {
     const ok = [many(32), ['x'.repeat(64)]];
@@ -157,17 +128,13 @@ it.each(['tagsAny', 'tagsAll'])('%s accepts 32 tags and a 64-character tag, refu
     for (const value of ok) {
       await expect(list({ [field]: value })).resolves.toBeDefined();
       expect(await gql(value)).toBeUndefined();
-      expect((await mcp(value)).isError).not.toBe(true);
     }
     for (const value of refused) {
       await expect(list({ [field]: value })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
       // After the read gate: an outsider is told the App is not found, never the bound.
       await expect(list({ [field]: value }, { db, userId: outsiderId, roles: ['READER'] })).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
       expect(await gql(value)).toBe('BAD_USER_INPUT');
-      const m = await mcp(value);
-      expect(m.isError).toBe(true);
-      expect(m.text).toMatch(/^\[bad_user_input\]/);
     }
     expect(await list({ [field]: [] })).toEqual(await list());
-  } finally { await client.close(); await server.close(); await api.stop(); }
+  } finally { await api.stop(); }
 });

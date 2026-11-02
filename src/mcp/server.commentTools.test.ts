@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { GraphQLError } from 'graphql';
+import { startWorkerSessionGql } from '../test/startWorkerSessionGql.js';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -336,7 +337,7 @@ describe('comment tools: parity with the GraphQL gate (no drift)', () => {
   });
 });
 
-describe('comment tools over HTTP: a worker bound with hadron_start_session authors its comments (DAC)', () => {
+describe('comment tools over HTTP: a worker session the CLI started (GraphQL), presented by header, authors its comments (DAC)', () => {
   let server: Server;
   let baseUrl: string;
 
@@ -360,7 +361,9 @@ describe('comment tools over HTTP: a worker bound with hadron_start_session auth
     const appTarget = await db.node.create({ data: { id: generateId(), memoryId: appMemory.id, loc: 'plan', name: 'Plan', content: 'p' } });
     const { rawKey } = await mintUserApiKey(db, { userId: writer.id, label: null, createdBy: writer.id, issuedVia: 'test' });
 
-    const headers = { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+    // #3082: MCP no longer binds a worker; start the session through GraphQL (as the CLI does) and present it.
+    const workerSessionId = await startWorkerSessionGql({ workerRef: iris.id, userId: writer.id, appId: app.id });
+    const headers = { 'x-hadron-session': workerSessionId, authorization: `Bearer ${rawKey}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
     const init = await fetch(`${baseUrl}/mcp`, {
       method: 'POST', headers,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: '1609', version: '1' } } }),
@@ -379,7 +382,6 @@ describe('comment tools over HTTP: a worker bound with hadron_start_session auth
       return text;
     };
 
-    await call('hadron_start_session', { description: '1609', workerRef: 'hrn:worker:cmtmcp.example:team:iris' });
     const created = await call('hadron_create_comment', { targetRef: `hrn:node:cmtmcp.example:team-shared:plan`, body: 'From Iris' });
     expect(created).toContain('worker Iris (hrn:worker:cmtmcp.example:team:iris) (you)');
 

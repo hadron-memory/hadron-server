@@ -77,18 +77,9 @@ describe('#2087 development diagnostic boundaries',()=>{
     vi.mocked(formatGraphQLError).mockImplementationOnce(formatted=>formatted);
     const result=await gql(query,absent); expect(result.errors[0].extensions.code).toBe('APP_NOT_FOUND'); noDiagnostics(result);
   });
-  it.each(['hadron_delivery_settings_get','hadron_delivery_settings_set'])('real MCP %s keeps concealment and state',async name=>{
-    const id=await mcpOpen(), before=await db.app.findMany({orderBy:{id:'asc'}});
-    const args=(appRef:string)=>({appRef,...(name.endsWith('_set')?{session:sid,input:{busyDelaySeconds:502}}:{})});
-    const a=await tool(id,name,args(foreign)),b=await tool(id,name,args(absent));
-    for(const result of [a,b]) { expect(result.isError).toBe(true); expect(result.content[0].text).toMatch(/^\[app_not_found\]/); noDiagnostics(result); }
-    expect(normalized(a,foreign)).toBe(normalized(b,absent));
-    expect(await db.app.findMany({orderBy:{id:'asc'}})).toEqual(before);
-    const success=await tool(id,name,args(appId)); expect(success.isError).not.toBe(true); expect(JSON.parse(success.content[0].text)).toMatchObject({busyDelaySeconds:name.endsWith('_set')?502:501,standbyEnabled:false});
-    if(name.endsWith('_set')) expect((await db.app.findUniqueOrThrow({where:{id:appId}})).deliveryBusyDelaySeconds).toBe(502);
-  });
+  // #3082: the real-MCP delivery-settings get/set concealment tests were removed with the tools (off over MCP). The same
+  // foreign/absent concealment, stable code and no state change is pinned at the GraphQL boundary above (it.each [query, mutation]).
   it.each([
-    ['hadron_task_list','agentTasks',{appRef:absent}],
     ['hadron_get_comment','comment',{commentRef:'hrn:node:diagnostics2087.example:kb:comment'}],
   ])('MCP %s also strips diagnostics without changing public fields',async(name,resolver,args)=>{
     const id=await mcpOpen();
@@ -99,8 +90,9 @@ describe('#2087 development diagnostic boundaries',()=>{
   });
   it('MCP typed-error mapping strips supplied diagnostic extensions, preserving public extras',async()=>{
     const id=await mcpOpen();
-    const spy=vi.spyOn(resolvers.Query as any,'appDeliverySettings').mockRejectedValueOnce(new GraphQLError('App not found.',{extensions:{code:'APP_NOT_FOUND',appRef:absent,...diagnostics}}));
-    const result=await tool(id,'hadron_delivery_settings_get',{appRef:absent});
+    const spy=vi.spyOn(resolvers.Query as any,'comment').mockRejectedValueOnce(new GraphQLError('App not found.',{extensions:{code:'APP_NOT_FOUND',appRef:absent,...diagnostics}}));
+    // #3082: hadron_delivery_settings_get is off over MCP; hadron_get_comment exercises the same typed-error mapping.
+    const result=await tool(id,'hadron_get_comment',{commentRef:'hrn:node:diagnostics2087.example:kb:comment'});
     spy.mockRestore(); expect(result.isError).toBe(true); expect(result.content[0].text).toContain(`appRef: ${absent}`); noDiagnostics(result);
   });
 });

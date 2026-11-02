@@ -4,7 +4,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
-import { createTestableMcpServer } from './server.js';
+import { resolvers } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -37,13 +37,20 @@ beforeEach(async () => {
 });
 afterEach(() => vi.unstubAllEnvs());
 
-/** Drive the registered production handler, including its real batched activity fold. */
-async function rosterLine() {
-  const output = await createTestableMcpServer(auth).callToolText('hadron_list_workers', {});
-  const line = output.split('\n').find(value => value.startsWith('- History '));
-  expect(line, output).toBeDefined();
-  return line!;
+/**
+ * #3082: hadron_list_workers no longer registers over MCP, so the roster's activity facts are read from the resolvers it
+ * folded (Worker.hasLiveSession, Worker.lastActiveAt), with the same expectations as the rendered roster line had.
+ */
+async function facts() {
+  const w = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+  const ctx = { db, userId, appId, roles: ['READER'] } as never;
+  const W = resolvers.Worker as any;
+  return {
+    live: await W.hasLiveSession(w, {}, ctx) as boolean | null,
+    last: await W.lastActiveAt(w, {}, ctx) as Date | null,
+  };
 }
+const ageMin = (d: Date) => Math.round((Date.now() - d.getTime()) / 60_000);
 
 async function session(endedAt: Date | null) {
   const row = await db.session.create({ data: {
@@ -56,36 +63,32 @@ async function session(endedAt: Date | null) {
   return row;
 }
 
-describe('#2103 registered list_workers historical activity', () => {
+describe('#2103 Worker.hasLiveSession / lastActiveAt historical activity', () => {
   it('held but idle OPEN session uses last activity, not start/update or current liveness', async () => {
     const row = await session(null);
-    const line = await rosterLine();
-    expect(line).toContain('held by YOU, no live session, last recorded activity 4h ago');
-    expect(line).not.toMatch(/last driven|never driven|ended/);
+    const f = await facts();
+    expect(f.live).toBe(false);
+    expect(ageMin(f.last!)).toBe(4 * 60 + 17);
     expect((await db.session.findUniqueOrThrow({ where: { id: row.id } })).endedAt).toBeNull();
   });
 
   it('ended session renders activity age even when its end is much more recent', async () => {
     const row = await session(ago(77));
-    const line = await rosterLine();
-    expect(line).toContain('held by YOU, no live session, last recorded activity 4h ago');
-    // #3077: the check status now names WHY it is NO_SESSION, as a closed reason with no time. #2103's rule is that
-    // the ACTIVITY part makes no end-time claim, so it is judged with the check segment removed.
-    expect(line).toMatch(/, check NO_SESSION \(ended\)$/);
-    expect(line.replace(/, check [^,]*$/, '')).not.toMatch(/last driven|never driven|ended|1h ago|2d ago|3d ago/);
+    const f = await facts();
+    expect(f.live).toBe(false);
+    // the ACTIVITY makes no end-time claim: it is the event's age, not the end (77m), start (3d) or update (2d)
+    expect(ageMin(f.last!)).toBe(4 * 60 + 17);
     expect((await db.session.findUniqueOrThrow({ where: { id: row.id } })).endedAt).not.toBeNull();
   });
 
   it('held never-driven worker retains the never and no-live states with no invented timestamp', async () => {
-    expect(await rosterLine()).toContain('held by YOU, no live session, never driven');
-    expect(await rosterLine()).not.toMatch(/last recorded activity|last driven|ended|ago/);
+    expect(await facts()).toEqual({ live: false, last: null });
   });
 
   it('currently live worker keeps live state without a historical age or end claim', async () => {
     const row = await session(null);
     await db.session.update({ where: { id: row.id }, data: { updatedAt: ago(7) } });
-    const line = await rosterLine();
-    expect(line).toContain('held by YOU, session live');
-    expect(line).not.toMatch(/no live session|never driven|last recorded activity|last driven|ended|ago/);
+    const f = await facts();
+    expect(f.live).toBe(true);
   });
 });
