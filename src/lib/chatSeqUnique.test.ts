@@ -307,6 +307,24 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     );
   });
 
+  // Ralion §10 P3-1: nextSiblingSeq reads LIVE rows only, so a seq-less create in
+  // an unchanneled chat whose top message is soft-deleted is handed that deleted
+  // seq; the index (soft-deleted rows count) must refuse it, typed, at GraphQL.
+  it('types the refusal for a seq-less create that is handed a soft-deleted top seq', async () => {
+    await seedMessage(legacyMem.id, 3);
+    await seedMessage(legacyMem.id, 4, { deleted: true }); // top seq is a tombstone: live max is 3, so next is 4
+    await expectCode(
+      M.createNode({}, {
+        input: {
+          memoryId: legacyMem.id,
+          loc: `${TEAM_CHAT_LOC}:messages:005-next`,
+          name: '005-next', nodeType: 'chat-message', content: 'next',
+        },
+      }, ctx(admin.id)),
+      'CHAT_MESSAGE_SEQ_CONFLICT',
+    );
+  });
+
   it('types the refusal for a clone that carries a colliding seq (the original repro)', async () => {
     const sourceId = await seedMessage(legacyMem.id, 3);
 

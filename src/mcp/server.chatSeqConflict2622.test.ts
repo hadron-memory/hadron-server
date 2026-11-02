@@ -152,4 +152,20 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
     }
     expect((await db.node.findUniqueOrThrow({ where: { id: victim } })).content).toBe('seeded');
   });
+
+  // Ralion §10 P3-1: the REACHABLE route into the MCP create catch — a seq-less
+  // chat-message create is given the soft-deleted top seq by nextSiblingSeq.
+  it('hadron_create_node refuses a seq-less create handed a soft-deleted top seq, as [chat_message_seq_conflict]', async () => {
+    await seedChatMessage('qa:messages:003-live', 3);
+    const id = await seedChatMessage('qa:messages:004-gone', 4);
+    await db.node.update({ where: { id }, data: { deletedAt: new Date() } });
+    const srv = createTestableMcpServer(adminAuth());
+    const text = await srv.callToolText('hadron_create_node', {
+      urn: `urn:node:${memory.urn}:qa:messages:006-next`,
+      name: '006-next', nodeType: 'chat-message', content: 'next',
+    });
+    expect(text).toContain('[chat_message_seq_conflict]');
+    expect(text).not.toMatch(/P2002|Unique constraint/i);
+    expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:006-next' } })).toBeNull();
+  });
 });
