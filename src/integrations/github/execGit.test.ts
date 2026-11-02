@@ -69,7 +69,7 @@ describe('GIT_TRANSPORT_GUARD', () => {
 });
 
 describe('execGit', () => {
-  it('never retains raw provider-code or signal strings on the wrapper (§10 canaries)', async () => {
+  it('drops non-allowlisted code, providerCode, signal and cause strings from the wrapper (synthetic-secret check)', async () => {
     const secret = 'synthetic-secret-3057';
     failure = Object.assign(new Error(secret), { code: secret, providerCode: secret, signal: secret, cause: secret });
     const error = await execGit(['fetch', 'origin']).catch(caught => caught);

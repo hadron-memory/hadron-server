@@ -24,6 +24,20 @@ vi.mock('../lib/resendToolClient.js', async (importOriginal) => {
   return { ...actual, sendResendEmail: vi.fn(async () => ({ id: 'email_670' })), isResendToolConfigured: vi.fn(() => true) };
 });
 
+// Observes the email.send counters at the moment the tool asks for its comm.outbound ticket, which is AFTER both
+// quota charges and BEFORE any refund: the one point where "charged, then refunded" is visible (#3148 item 4).
+const atTicket = vi.hoisted(() => ({ hook: null as null | (() => Promise<void>) }));
+vi.mock('./appRuns.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./appRuns.js')>();
+  return {
+    ...real,
+    consumeActionTicket: vi.fn(async (...args: Parameters<typeof real.consumeActionTicket>) => {
+      await atTicket.hook?.();
+      return real.consumeActionTicket(...args);
+    }),
+  };
+});
+
 import { sendResendEmail } from '../lib/resendToolClient.js';
 import { encryptResendApiKey } from '../lib/resendSenders.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
@@ -201,12 +215,24 @@ describe('script node (#670, cor:agt:010:04)', () => {
       expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).tokensSpent).toBe(0);
     });
 
-    it('with no comm.outbound ticket the send is skipped by the tool, as for a model call', async () => {
+    it('with no comm.outbound ticket the send is skipped by the tool, as for a model call: charged, then refunded', async () => {
       await makeNode('flow:s', emailScript({ to: 'person@example.net', subject: 'Alert', text: 'x' }));
       const run = await mint();
-      await executeAppRun(db, run.id, deps().d);
+      const seen: Array<{ app: number; org: number }> = [];
+      atTicket.hook = async () => { seen.push({ app: await quotaUsed('app'), org: await quotaUsed('org') }); };
+      try {
+        // The tool reports the skip as its result (not a throw), so the hop and the run complete.
+        expect(await executeAppRun(db, run.id, deps().d)).toBe('completed');
+      } finally {
+        atTicket.hook = null;
+      }
       expect(sendResendEmail).not.toHaveBeenCalled();
-      expect(await quotaUsed('app')).toBe(0); // refunded: nothing was sent
+      // Mechanism: both counters were charged when the ticket was asked for, and both are back to 0 afterwards.
+      expect(seen).toEqual([{ app: 1, org: 1 }]);
+      expect(await quotaUsed('app')).toBe(0);
+      expect(await quotaUsed('org')).toBe(0);
+      const hops = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).hops as Array<Record<string, unknown>>;
+      expect(hops[0]).toMatchObject({ tokensSpent: 0, toolCalls: [{ name: 'hadron_send_email', ok: true }] });
     });
 
     it('S4 for the send: {{alertEmail}} with no value sends nothing, consumes no quota and no ticket', async () => {
@@ -230,7 +256,10 @@ describe('script node (#670, cor:agt:010:04)', () => {
       await makeNode('flow:s', { data: { script: { call: { tool: 'hadron_log', args: {} } }, ...extra } as never });
       const run = await mint();
       expect(await executeAppRun(db, run.id, deps().d)).toBe('failed');
-      expect((await failureOf(run.id)).code).toBe('NODE_LOAD_FAILED');
+      const f = await failureOf(run.id);
+      expect(f.code).toBe('NODE_LOAD_FAILED');
+      // Refused for the exclusion itself, not for some unrelated load fault (#3148).
+      expect(f.message).toContain('data.script together with');
     }
   });
 

@@ -10929,7 +10929,7 @@ export const typeDefs = `#graphql
     owner role in its live, installed App for non-personal/non-private memories. Impersonation is refused. Refused
     in an encrypted memory (DECISION_LOG_ENCRYPTED), a git-mirrored one (DECISION_LOG_MIRRORED), a
     system memory (DECISION_LOG_SYSTEM_MEMORY), an anonymous one (DECISION_LOG_ANONYMOUS_MEMORY), at a loc occupied by a live or deleted node at or beneath it (DECISION_LOG_EXISTS), or inside a decision's subtree. Deciders are user ids, each able
-    to read the memory (DECISION_DECIDER_NOT_ELIGIBLE).
+    to write the memory (DECISION_DECIDER_NOT_ELIGIBLE; hrn:node:hadronmemory.com:specs:cor:dmo:130:09).
     """
     createDecisionLog(memoryRef: ID!, loc: String!, name: String, prefix: String, defaultDeciders: [ID!]!, eligibleDeciders: [ID!]): DecisionLog!
     "#1641 — replace a log's default (and, when given, other eligible) deciders, as an audited revision of the log. Existing decisions keep theirs. Needs management rights on the memory, or the owner role in its App."
