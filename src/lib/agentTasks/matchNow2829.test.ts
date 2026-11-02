@@ -37,7 +37,8 @@ it('one call assigns once, and no match flag leaves the original queued result u
   const t=await create({match:true,requirements:{roles:['engineer','reviewer']}});
   expect(t.assigneeWorkerId).toBe(w.id);
   expect(t.matchFailedAt).toBeNull();
-  expect(await db.agentTeamEvent.count({where:{taskId:t.id,type:{in:['task.assigned','assignment.matched']}}})).toBe(1);
+  expect(await db.agentTeamEvent.count({where:{taskId:t.id,type:'assignment.matched'}})).toBe(1);
+  expect(await db.agentTeamEvent.count({where:{taskId:t.id,type:'task.assigned'}})).toBe(0);
 });
 it('failed match is marked, filtered, skipped after availability changes, cleared on cancel, cleared on manual assign, with no unassignable alarm',async()=>{
   const t=await create({match:true,requirements:{role:'reviewer'}});
