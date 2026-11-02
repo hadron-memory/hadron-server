@@ -41,6 +41,8 @@ import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
+import { RESTORE_DEADLINE_MS } from './originRestoreDeadline.js';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
 import { lockMintedSpecsIn, lockMintedSpecUnmarks } from '../../lib/mintedSpecPermanence.js';
 import { recordUrnRename } from '../../lib/urnAlias.js';
@@ -1707,12 +1709,11 @@ const syncGraphFromGithubAsSystem = async (
 async function restoreReadRemote(localPath: string, source: string): Promise<void> {
   try {
     if (!existsSync(join(localPath, '.git'))) return;
-    await execGit(['remote', 'set-url', 'origin', source], { cwd: localPath });
+    await execGit(['remote', 'set-url', 'origin', source], { cwd: localPath, timeout: RESTORE_DEADLINE_MS });
   } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
     console.error(
-      `[syncGraphFromGithub] Failed to restore the origin URL at ${localPath}; the checkout may still hold an installation token until the next successful restore.`,
-      typeof code === 'string' ? code : 'unknown',
+      '[syncGraphFromGithub] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore.',
+      mirrorFailureMetadata(error, 'restore', 'REMOTE_RESTORE'),
     );
   }
 }

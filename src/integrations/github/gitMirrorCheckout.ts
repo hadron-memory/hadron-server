@@ -29,6 +29,7 @@ import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
+import { RESTORE_DEADLINE_MS } from './originRestoreDeadline.js';
 import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 import {
   settleMirrorObligations, tryTakeAttemptSeq,
@@ -381,9 +382,9 @@ export function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
 
 async function restoreRemote(localPath: string, originalUrl: string): Promise<void> {
   try {
-    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
+    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath, timeout: RESTORE_DEADLINE_MS });
   } catch (err) {
-    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}`, mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'));
+    console.error('[git-mirror] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore.', mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'));
   }
 }
 
