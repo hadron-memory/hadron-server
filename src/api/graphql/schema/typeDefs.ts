@@ -10133,7 +10133,7 @@ export const typeDefs = `#graphql
     { name, provider: "github", repositories: ["owner/name"], readyLabel?, excludeLabels?, teams?: [{ lead, label }] },
     where lead is a worker of this App (URN, id or name). Refusals: FORBIDDEN, PROPERTIES_NOT_AN_OBJECT,
     PROPERTIES_TOO_LARGE, PROPERTIES_KEY_RESERVED (a key named __proto__ at any depth, which cannot be stored; names the
-    path), TASK_INTEGRATION_ORG_REQUIRED (an App with no organization), TASK_INTEGRATION_INVALID (names the JSON path,
+    path), TASK_INTEGRATION_INVALID (names the JSON path,
     never the value), APP_PROPERTIES_CONFLICT.
     """
     setAppProperties(appRef: String!, properties: JSON, expectedRevision: Int): App!

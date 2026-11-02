@@ -8,8 +8,7 @@
  *   1. a JSON object (or null to clear)                         → PROPERTIES_NOT_AN_OBJECT
  *   2. at most 64 levels deep and 16 KiB of canonical JSON      → PROPERTIES_TOO_LARGE (names the path)
  *   2a. no key named `__proto__`, at any depth                  → PROPERTIES_KEY_RESERVED (names the path)
- *   3. `taskIntegrations` only on an App with an organization   → TASK_INTEGRATION_ORG_REQUIRED (#3125 Ask 5)
- *   4. `taskIntegrations` well-formed                           → TASK_INTEGRATION_INVALID (names the path)
+ *   3. `taskIntegrations` well-formed                           → TASK_INTEGRATION_INVALID (names the path)
  * A refusal names a JSON path, never a value (V47).
  *
  * Stored shape of a team map entry: `{ lead: <worker id>, label }`, so a rename never breaks it; the read projection

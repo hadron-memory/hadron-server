@@ -197,11 +197,26 @@ describe('#3125 S1 validation (V44, V47)', () => {
   });
 });
 
-describe('#3125 Ask 5: an App with no organization holds no task integration', () => {
-  it('its owner may write other keys, but taskIntegrations is refused with a typed code', async () => {
+describe('#3176 (rulings:0071 = B): an App with no organization holds task integrations like any other', () => {
+  const { teams: _teams, ...noTeams } = integration();
+
+  it('its owner writes taskIntegrations next to other keys; it is stored and the revision bumps', async () => {
     await set({ notes: 1 }, ctx(personalOwner.id), personalAppId);
-    await refused(set({ notes: 2, taskIntegrations: [] }, ctx(personalOwner.id), personalAppId), 'TASK_INTEGRATION_ORG_REQUIRED');
-    expect(await stored(personalAppId)).toEqual({ properties: { notes: 1 }, propertiesRevision: 1 });
+    await set({ notes: 2, taskIntegrations: [noTeams] }, ctx(personalOwner.id), personalAppId);
+    const row = await stored(personalAppId);
+    expect(row.propertiesRevision).toBe(2);
+    expect(row.properties).toMatchObject({ notes: 2, taskIntegrations: [{ name: 'github', provider: 'github' }] });
+  });
+
+  it('an invalid integration on an org-less App is still TASK_INTEGRATION_INVALID, naming the path', async () => {
+    await refused(set({ taskIntegrations: [{ ...noTeams, provider: 'gitlab' }] }, ctx(personalOwner.id), personalAppId), 'TASK_INTEGRATION_INVALID', 'taskIntegrations[0].provider');
+    expect(await stored(personalAppId)).toEqual({ properties: null, propertiesRevision: 0 });
+  });
+
+  it('a non-manager of an org-less App gets the gate refusal first, whatever the object holds', async () => {
+    await refused(set({ taskIntegrations: [noTeams] }, ctx(outsider.id), personalAppId), 'APP_NOT_FOUND');
+    await refused(set({ taskIntegrations: [{ bad: true }] }, ctx(outsider.id), personalAppId), 'APP_NOT_FOUND');
+    expect(await stored(personalAppId)).toEqual({ properties: null, propertiesRevision: 0 });
   });
 });
 
