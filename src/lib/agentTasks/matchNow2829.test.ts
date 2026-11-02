@@ -6,6 +6,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import * as matcherModule from './matcher.js';
 import { __matcherTesting, matchingTeamPool, matchQueuedTasks } from './matcher.js';
 import { evaluateStalls, effectiveWindows, loadStallInputs, stallCandidates } from './stall.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -262,4 +263,23 @@ it('a clone keeps normalized role/team requirements but starts without the sourc
   expect(cloned).toMatchObject({ clonedFromId: source.id, status: 'pending', assigneeWorkerId: null, matchPending: false, matchFailedAt: null, matchFailedReason: null });
   expect(cloned.requirements).toEqual(source.requirements);
   expect((await row(source.id)).matchFailedReason).toBe('NO_ROLE');
+});
+
+
+it('an unexpected batch match error does not prevent later reserved attempts and is still returned', async () => {
+  const original = matcherModule.matchTaskNow;
+  const sentinel = new Error('synthetic match transport failure');
+  const attempts = vi.spyOn(matcherModule, 'matchTaskNow')
+    .mockRejectedValueOnce(sentinel).mockImplementation(original);
+  try {
+    await expect(M.createAgentTasks({}, { appRef: app.id, tasks: [
+      { task: { title: 'Throwing match', match: true } },
+      { task: { title: 'Later match', match: true } },
+    ] }, ctx)).rejects.toBe(sentinel);
+    const first = await db.agentTask.findFirstOrThrow({ where: { appId: app.id, title: 'Throwing match' } });
+    const later = await db.agentTask.findFirstOrThrow({ where: { appId: app.id, title: 'Later match' } });
+    expect(attempts.mock.calls.map(call => call[1])).toEqual([first.id, later.id]);
+    expect(later).toMatchObject({ matchPending: false, matchFailedReason: 'NO_ROLE' });
+    expect(later.matchFailedAt).toBeInstanceOf(Date);
+  } finally { attempts.mockRestore(); }
 });
