@@ -1679,9 +1679,12 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
  * row and its events ({@link insertTask}), the priority authority and blocker links, and the finish-by check, in
  * that order. `withinCall` (#2653) names the tasks of the same createAgentTasks call that already exist (this one
  * and those before it in the list), given this task's new id, so they are linked here with its other blockers.
+ * `namesCallBlockers` (#2653) says the task names blockers by position at all: the authority to name them is judged
+ * here, in its own write, even when every position it names is later and its link waits for that task to exist.
  */
 async function applyTaskCreate(
-  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, withinCall: (selfId: string) => string[] = () => [],
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate,
+  withinCall: (selfId: string) => string[] = () => [], namesCallBlockers = false,
 ): Promise<{ id: string; queued: boolean; row: TaskRow }> {
   const { input, actor, parentRef, parentTaskId } = p;
   if (parentRef) {
@@ -1707,7 +1710,7 @@ async function applyTaskCreate(
     created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId),
   });
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-  await applyTaskCreateBlockers(tx, txCtx, app, p, row, withinCall(row.id));
+  await applyTaskCreateBlockers(tx, txCtx, app, p, row, withinCall(row.id), namesCallBlockers);
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
   return { ...made, row };
 }
@@ -1719,8 +1722,9 @@ async function applyTaskCreate(
  */
 async function applyTaskCreateBlockers(
   tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, row: TaskRow, withinCall: readonly string[],
+  namesCallBlockers: boolean,
 ): Promise<void> {
-  if (p.input.priority !== undefined || p.input.blockedBy !== undefined) {
+  if (p.input.priority !== undefined || p.input.blockedBy !== undefined || namesCallBlockers) {
     await requireTaskDirection(tx, txCtx, app, p.actor, row);
   }
   for (const ref of [...new Set([...(p.input.blockedBy ?? []), ...withinCall])]) {
@@ -1874,8 +1878,9 @@ export const agentTaskMutations = {
    * shared prepare/apply above); the first refusal refuses the call and carries `extensions.position`, the 1-based
    * position of the task that caused it. Positions are judged item-first, in list order: each task's checks before
    * the write and then, inside the transaction, its whole write (parties, row, priority authority, its existing
-   * blockers and its blockers earlier in the list), so a refusal at task k is raised only after tasks 1..k-1 were
-   * written without one; last come the links to tasks LATER in the list, in list order. A task names an
+   * blockers and its blockers earlier in the list, and its authority to name blockers by position at all), so a
+   * refusal at task k is raised only after tasks 1..k-1 were written without one; last come the links to tasks LATER
+   * in the list, in list order. A task names an
    * existing parent, never another task of the call; `blockedByPositions` names other tasks of the call as its
    * blockers (a self-block or a cycle is TASK_BLOCKER_CYCLE). Handles follow list order and a refused call spends none. Events are a single
    * create's, per task; matching, launches and warnings run only after the commit (warnings filed per task under
@@ -1929,7 +1934,8 @@ export const agentTaskMutations = {
       for (const [i, p] of prepared.entries()) {
         try {
           out.push(await applyTaskCreate(tx, txCtx, app, p,
-            (selfId) => withinCall[i]!.filter(n => n <= i + 1).map(n => (n === i + 1 ? selfId : out[n - 1]!.id))));
+            (selfId) => withinCall[i]!.filter(n => n <= i + 1).map(n => (n === i + 1 ? selfId : out[n - 1]!.id)),
+            withinCall[i]!.length > 0));
         } catch (e) {
           throw atPosition(e, i + 1);
         }

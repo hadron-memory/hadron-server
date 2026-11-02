@@ -193,8 +193,14 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     // A link to an EARLIER task is part of the task's own write; only a link to a later task is judged after them all.
     expect(await refusal(() => batch([item(), item({ owner: { user: ownerId } }, [1]), item({ assignee: { user: outsiderId } })], ctx(memberId))))
       .toEqual({ code: 'TASK_NOT_OWNER', position: 2 });
+    // LOCAL delta P2 at 64aa341f (Andi): the authority to name blockers by position is part of the task's own write,
+    // even when every position it names is later; only the link itself waits for the later task to exist.
+    expect(await refusal(() => batch([item({ owner: { user: ownerId } }, [2]), item()], ctx(memberId))))
+      .toEqual({ code: 'TASK_NOT_OWNER', position: 1 });
     expect(await refusal(() => batch([item({ owner: { user: ownerId } }, [2]), item({ assignee: { user: outsiderId } })], ctx(memberId))))
-      .toEqual({ code: 'TASK_ASSIGNEE_INVALID', position: 2 });
+      .toEqual({ code: 'TASK_NOT_OWNER', position: 1 });
+    expect(await refusal(() => batch([item({ owner: { user: ownerId } }, [2]), item({ title: '' })], ctx(memberId))))
+      .toEqual({ code: 'TASK_NOT_OWNER', position: 1 });
     expect(await realTasks()).toBe(0);
   });
 
