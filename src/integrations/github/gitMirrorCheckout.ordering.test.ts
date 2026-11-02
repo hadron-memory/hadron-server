@@ -53,8 +53,10 @@ describe('shared Git checkout', () => {
     const releaseRestore = deferred();
     let secondEntered = false;
     let restoreCount = 0;
-    vi.mocked(execGit).mockImplementation(async (args) => {
+    let restoreTimeout: number | undefined;
+    vi.mocked(execGit).mockImplementation(async (args, options) => {
       if (args[0] === 'remote' && args[1] === 'set-url' && ++restoreCount === 1) {
+        restoreTimeout = (options as { timeout?: number })?.timeout;
         restoreStarted.resolve();
         await releaseRestore.promise;
       }
@@ -85,5 +87,6 @@ describe('shared Git checkout', () => {
       await Promise.allSettled([first, second]);
     }
     expect(secondEntered).toBe(true);
+    expect(restoreTimeout).toBe(10_000);
   });
 });

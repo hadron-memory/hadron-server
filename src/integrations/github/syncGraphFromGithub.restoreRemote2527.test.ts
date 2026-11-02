@@ -18,6 +18,7 @@ const TOKEN_URL = SOURCE.replace('https://github.com/', `https://x-access-token:
 const GENERIC = 'Git command failed. Check the repository and branch, then retry.';
 type Fault = 'fetch' | 'checkout' | 'merge' | 'clone' | 'clone-early' | 'load' | null;
 const env = vi.hoisted(() => ({
+  restoreTimeouts: [] as Array<number | undefined>,
   root: '', bare: '', local: '', seed: '', fault: null as Fault,
   tokenInstalled: false, originAtFault: null as string | null,
   failRestore: false, restores: 0, insideLock: false, restoreInsideLock: false,
@@ -62,6 +63,7 @@ vi.mock('./execGit.js', async original => {
   const invoke = async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv }, restore: boolean) => {
     if (restore) {
       env.restores++;
+      env.restoreTimeouts.push((options as { timeout?: number }).timeout);
       env.restoreInsideLock = env.insideLock;
       // #2571: yield to timers before the restore settles. An unawaited restore
       // lets the lock release first; a queued next holder then runs before it.
@@ -158,7 +160,7 @@ beforeEach(async () => {
   env.bare = mkdtempSync(join(tmpdir(), 'hadron-2527-bare-'));
   env.seed = mkdtempSync(join(tmpdir(), 'hadron-2527-seed-'));
   Object.assign(env, {
-    local: '', fault: null, tokenInstalled: false, originAtFault: null, failRestore: false, restores: 0,
+    restoreTimeouts: [], local: '', fault: null, tokenInstalled: false, originAtFault: null, failRestore: false, restores: 0,
     insideLock: false, restoreInsideLock: false, restoreSettledInsideLock: false, settled: false,
     queueNextHolder: null, nextHolder: null,
   });
@@ -170,6 +172,7 @@ afterEach(async () => {
   await env.nextHolder?.catch(() => undefined);
   vi.restoreAllMocks(); vi.unstubAllEnvs();
   for (const dir of [env.root, env.bare, env.seed]) rmSync(dir, { recursive: true, force: true });
+  for (const timeout of env.restoreTimeouts) expect(timeout, 'restore-only fixed deadline').toBe(10_000);
 });
 
 function assertNoCredentialSurface(result: unknown) {
@@ -220,7 +223,8 @@ describe('#2527 read sync restores origin under the checkout lock', () => {
       expect(env.restoreSettledInsideLock).toBe(true);
       expect(logged.join(' ')).toMatch(/may still hold an installation token until the next successful restore/);
       // #2571: only the error's code reaches the log; its raw message never does.
-      expect(logged.join(' ')).toMatch(/until the next successful restore\. RESTORE_SENTINEL/);
+      expect(logged.join(' ')).not.toContain('RESTORE_SENTINEL');
+      expect(logged.join(' ')).not.toContain(env.local);
       assertNoCredentialSurface(result);
     });
   }
