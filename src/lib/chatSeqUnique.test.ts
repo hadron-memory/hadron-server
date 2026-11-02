@@ -286,12 +286,15 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     expect(rejected).toHaveLength(1);
   });
 
-  it('types the refusal at the generic node door for an unchanneled chat prefix', async () => {
+  it('refuses a colliding create at the generic node door for an unchanneled chat prefix (V13 SEQ_PROTECTED first)', async () => {
     await seedMessage(legacyMem.id, 3);
 
-    // A createNode at a colliding (root, seq): on main this SUCCEEDS; the
-    // constrained tree must answer a NAMED refusal, never a raw P2002
-    // leaking as INTERNAL_SERVER_ERROR.
+    // A createNode at a colliding (root, seq): before #992 this SUCCEEDED.
+    // Since #2987 (V13) the generic door refuses a message seq write first
+    // with SEQ_PROTECTED; either way the answer is a NAMED refusal that
+    // writes nothing, never a raw P2002 leaking as INTERNAL_SERVER_ERROR.
+    // The constraint's own typed code is pinned at the doors V13 leaves
+    // open (clone, move) below.
     await expectCode(
       M.createNode({}, {
         input: {
@@ -300,7 +303,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
           name: '003-dupe', nodeType: 'chat-message', seq: 3, content: 'dupe',
         },
       }, ctx(admin.id)),
-      'CHAT_MESSAGE_SEQ_CONFLICT',
+      'SEQ_PROTECTED',
     );
   });
 
@@ -316,13 +319,13 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     );
   });
 
-  it('types the refusal for an update that moves a message into collision', async () => {
+  it('refuses an update that moves a message into collision (V13 SEQ_PROTECTED first)', async () => {
     const a = await seedMessage(legacyMem.id, 3);
     const b = await seedMessage(legacyMem.id, 7);
 
     await expectCode(
       M.updateNode({}, { input: { id: b, seq: 3 } }, ctx(admin.id)),
-      'CHAT_MESSAGE_SEQ_CONFLICT',
+      'SEQ_PROTECTED',
     );
   });
 });

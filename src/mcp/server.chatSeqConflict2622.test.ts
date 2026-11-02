@@ -66,8 +66,12 @@ beforeEach(async () => {
   );
 });
 
+// Main's #2987 (V13) gate refuses a message seq write at these two doors BEFORE the
+// #992 constraint can fire, so the refusal here is [seq_protected]; the typed
+// CHAT_MESSAGE_SEQ_CONFLICT is pinned at the doors V13 leaves open (clone, move) in
+// src/lib/chatSeqUnique.test.ts. What this file still pins: no raw P2002 and no write.
 describe('MCP node tools — the #992 typed refusal reaches the real writers (#2622)', () => {
-  it('hadron_create_node refuses a colliding (chat, seq) as [chat_message_seq_conflict], writing nothing', async () => {
+  it('hadron_create_node refuses a colliding (chat, seq) as [seq_protected], writing nothing', async () => {
     await seedChatMessage('qa:messages:001-first', 1);
     const srv = createTestableMcpServer(adminAuth());
     const text = await srv.callToolText('hadron_create_node', {
@@ -78,7 +82,7 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
       content: 'duplicate seq',
     });
 
-    expect(text).toContain('[chat_message_seq_conflict]');
+    expect(text).toContain('[seq_protected]');
     // A refusal that still wrote the row would satisfy a message-only assert.
     expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:001-collide' } })).toBeNull();
   });
@@ -93,7 +97,7 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
       content: 'now colliding',
     });
 
-    expect(text).toContain('[chat_message_seq_conflict]');
+    expect(text).toContain('[seq_protected]');
     const row = await db.node.findUniqueOrThrow({ where: { id: victim } });
     expect(row.seq).toBe(2);
     expect(row.content).toBe('seeded');
