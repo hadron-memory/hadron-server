@@ -49,6 +49,7 @@ vi.mock('../integrations/github/execGit.js', () => ({
   }),
 }));
 
+import * as nodeLoader from '../integrations/github/nodeWrittenSubscriber.js';
 import { branchFitsTemplate, withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
 import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
 import { isValidGitBranch } from '../lib/gitRef.js';
@@ -412,4 +413,20 @@ it('captured-row fence is judged after an actual PostgreSQL row-lock wait',async
   release();await holder;await running;
   expect(await rows()).toEqual([expect.objectContaining({branch:'old',attemptSeq:30n,attempts:5,errorClass:'TREE_WRITE'})]);
  }finally{release();await holder;await running;}
+});
+
+
+it('first-refresh failure cannot exhaust a healthy same-branch sibling', async () => {
+ const bad=await makeNode('first-load-bad'), healthy=await makeNode('first-load-healthy');
+ await owe(bad.id,{branch:'hadron-updates',attempts:9,lastAttemptAt:new Date(old().getTime()-1000)});
+ await owe(healthy.id,{branch:'hadron-updates',attempts:9});
+ const load=nodeLoader.loadNodeForGit;
+ vi.spyOn(nodeLoader,'loadNodeForGit').mockImplementation(async (...args)=>{
+  if(args[1].nodeId===bad.id)throw new Error('synthetic row-local first refresh outage');
+  return load(...args);
+ });
+ await tick();
+ expect(await rows()).toEqual([expect.objectContaining({nodeId:bad.id,attempts:10,state:'EXHAUSTED',errorClass:'TREE_WRITE'})]);
+ expect(remoteFile('first-load-healthy')).toContain('current content');
+ expect(()=>remoteFile('first-load-bad')).toThrow();
 });
