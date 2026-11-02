@@ -103,11 +103,14 @@ describe('shared Git checkout', () => {
       env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     });
     let attempts = 0;
+    // #3228: recorded here and asserted after the public call. An expect inside
+    // the mock would throw into restoreRemote's catch and be logged, not reported.
+    const observedOptions: unknown[] = [];
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.mocked(execGit).mockImplementation(async (args, options) => {
       if (args[0] === 'remote' && args[1] === 'set-url') {
         attempts++;
-        expect(options).toEqual({ cwd: localPath, timeout: 10_000 });
+        observedOptions.push(options);
         // Match execGit's asynchronous failure envelope while using real local git.
         try { git(...args); } catch (error) {
           throw new GitCommandError({ code: (error as { status?: number }).status });
@@ -126,6 +129,7 @@ describe('shared Git checkout', () => {
       });
       expect(outcome).toBe('skipped');
       expect(attempts).toBe(1);
+      expect(observedOptions).toEqual([{ cwd: localPath, timeout: 10_000 }]);
       expect(existsSync(lockPath)).toBe(true);
       expect(readFileSync(lockPath, 'utf8')).toBe('synthetic-owner-2569');
       expect(git('remote', 'get-url', 'origin').trim()).toBe(tokenUrl);
