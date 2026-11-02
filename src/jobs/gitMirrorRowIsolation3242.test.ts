@@ -1,4 +1,4 @@
-/** #3156: throwing retry preparation must settle, back off and exhaust. Private DB and local Git only. */
+/** #3242: row-local mutation errors must not exhaust healthy siblings. Private DB and local Git only. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -25,9 +25,9 @@ vi.mock('../integrations/github/execGit.js', () => ({
  }),
 }));
 import * as files from '../integrations/github/writeNodeToGit.js';
+import { mirrorMutationMarker } from '../integrations/github/mirrorFileMutation.js';
+import { pushMemoryToGit } from '../integrations/github/pushMemoryToGit.js';
 import { withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
-import * as obligations from '../integrations/github/mirrorObligations.js';
-import { settleMirrorObligations, takeAttemptSeq } from '../integrations/github/mirrorObligations.js';
 import { gitMirrorSweepTick } from './sweepGitMirrorObligations.js';
 const SOURCE = 'https://github.com/synthetic/isolation3242.git';
 const IDENT = { GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@example.invalid' };
@@ -35,8 +35,6 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd,
 let memoryId: string;
 const tick = (now = new Date()) => gitMirrorSweepTick(db, now);
 const old = () => new Date(Date.now()-24*60*60*1000);
-const makeNode = () => db.node.create({data:{id:generateId(),memoryId,loc:'topic',name:'Topic',content:'current content',tags:[]}});
-const owe = (nodeId: string, extra: {kind?:'WRITE'|'REMOVE';removeLoc?:string} = {}) => db.gitMirrorObligation.create({data:{memoryId,nodeId,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:0n,lastAttemptAt:old(),...extra}});
 const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
 
 beforeEach(async () => {
@@ -137,4 +135,46 @@ describe('#3242 row-local file operation failures', () => {
   expect(existsSync(join(localPath(),'old-healthy.md'))).toBe(false);
   expect(git(localPath(),'status','--porcelain')).toBe('');
  });
+ it('REMOVE failures match the exact loc, not every obligation of the same node', async()=>{
+  const n=await node('moved');
+  baseline({'bad.md':'---\nid: '+n.id+'\n---\nbad','good.md':'---\nid: '+n.id+'\n---\ngood'});
+  await debt(n.id,'REMOVE','bad'); await debt(n.id,'REMOVE','good');
+  const real=files.removeNodeFile;
+  vi.spyOn(files,'removeNodeFile').mockImplementation((...args)=>{
+   if(args[1]==='bad')throw new Error('synthetic one-loc failure');
+   return real(...args);
+  });
+  await tick();
+  expect(await rows()).toEqual([expect.objectContaining({nodeId:n.id,removeLoc:'bad',attempts:10,errorClass:'TREE_WRITE'})]);
+  expect(remote('bad.md')).toContain('bad');
+  expect(()=>remote('good.md')).toThrow();
+ });
+
+ it('a failed new-file write leaves no partial bytes and an all-failed batch never pushes', async()=>{
+  const bad=await node('brand-new');await debt(bad.id,'WRITE');
+  vi.spyOn(files,'writeNodeFile').mockImplementation((path,n)=>{
+   writeFileSync(join(path,n.loc+'.md'),'partial failed bytes');throw new Error('synthetic write error');
+  });
+  await tick();
+  expect(await rows()).toEqual([expect.objectContaining({nodeId:bad.id,attempts:10,errorClass:'TREE_WRITE'})]);
+  expect(existsSync(join(localPath(),'brand-new.md'))).toBe(false);
+  expect(git(localPath(),'status','--porcelain')).toBe('');
+  expect(env.commands.filter(args=>args[0]==='push')).toEqual([]);
+ });
+
+ it('a checkout with an incomplete rollback cannot be published by a later ordinary writer or retry',async()=>{
+  const n=await node('healthy');await debt(n.id,'WRITE');const before=await rows();
+  writeFileSync(join(localPath(),'partial.md'),'must never publish');
+  writeFileSync(mirrorMutationMarker(localPath()),'repair required');
+  await tick();
+  expect(await rows()).toEqual(before);expect(env.commands).toEqual([]);
+  const mutate=vi.fn();
+  expect(await withMirrorCheckout({db,memoryId,obligations:[{nodeId:n.id,kind:'WRITE'}],
+   commitSubject:'ordinary write',logPrefix:'[3242]'},mutate)).toBe('failed');
+  expect(mutate).not.toHaveBeenCalled();expect(env.commands).toEqual([]);
+  expect(await pushMemoryToGit(memoryId)).toMatchObject({nodeCount:0,error:expect.stringContaining('needs repair')});
+  expect(env.commands).toEqual([]);
+  expect(()=>remote('partial.md')).toThrow();
+ });
+
 });
