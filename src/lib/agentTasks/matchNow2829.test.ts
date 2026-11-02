@@ -176,3 +176,25 @@ it('role and role-set together refuse before creating a task', async () => {
   await expect(create({ requirements: { role: 'reviewer', roles: ['reviewer'] } })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   expect(await db.agentTask.count()).toBe(before);
 });
+
+it('match now refuses an open blocker atomically but accepts ended blockers', async () => {
+  const w = await worker();
+  const blocker = await create();
+  const before = await db.agentTask.count();
+  await expect(create({ match: true, blockedBy: [blocker.id] })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  expect(await db.agentTask.count()).toBe(before);
+  await M.cancelAgentTask({}, { taskId: blocker.id }, ctx);
+  expect((await create({ match: true, blockedBy: [blocker.id] })).assigneeWorkerId).toBe(w.id);
+});
+
+it.each(['failed', 'held'])('park then ready clears %s matching state and restores regular matching', async (state) => {
+  const task = await create({ match: true, requirements: { role: 'reviewer' } });
+  if (state === 'held') await db.agentTask.update({ where: { id: task.id }, data: { matchPending: true, matchFailedAt: null, matchFailedReason: null } });
+  await M.parkAgentTask({}, { taskId: task.id }, ctx);
+  const w = await worker();
+  await M.makeAgentTaskReady({}, { taskId: task.id }, ctx);
+  expect(await row(task.id)).toMatchObject({ matchPending: false, matchFailedAt: null, matchFailedReason: null, assigneeWorkerId: null });
+  expect((await Q.agentTasks({}, { appRef: app.id, matchFailed: false }, ctx)).map((t: any) => t.id)).toContain(task.id);
+  await matchQueuedTasks(db, new Date(), { appId: app.id });
+  expect((await row(task.id)).assigneeWorkerId).toBe(w.id);
+});
