@@ -24,6 +24,7 @@ import { db as defaultDb } from '../db/client.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { getInstallationToken, toHttpsUrl } from './githubApp.js';
 import { prepareWriteBranch, unpublishedCommitCount } from './gitBranch.js';
+import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
 import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
@@ -51,6 +52,8 @@ export interface MirrorRepo {
 /** Row-local payload refusals in a retry batch; healthy siblings retain their own result. */
 export interface MirrorMutationResult {
   failedWrites: readonly string[];
+  /** Exact REMOVE keys (a node can owe several vacated locs). */
+  failedRemoves?: readonly MirrorObligationRef[];
 }
 
 /**
@@ -240,6 +243,11 @@ export async function withMirrorCheckout(
         if (!opts.retry) settlement = { result: 'failed', errorClass: 'NOT_CLONED' };
         return 'skipped';
       }
+      // A failed rollback/crash must never let a later writer publish partial bytes.
+      if (hasIncompleteMirrorMutation(localPath)) {
+        console.error(`${logPrefix} Checkout needs repair after an incomplete file mutation`);
+        return fail('TREE_WRITE');
+      }
       if (opts.retry) {
         // Exact captured branch key, re-read under the shared memory checkout lock.
         const rows = await db.gitMirrorObligation.findMany({ where: {
@@ -309,10 +317,21 @@ export async function withMirrorCheckout(
         if (typeof shouldCommit === 'object' && shouldCommit !== null) {
           if (!opts.retry || attemptSeq === null) throw new Error('Row-local outcomes require an admitted retry');
           const ids = new Set(shouldCommit.failedWrites);
-          const failed = obligations.filter(r => r.kind === 'WRITE' && ids.has(r.nodeId));
+          const removeKeys = new Set((shouldCommit.failedRemoves ?? []).map(r =>
+            JSON.stringify([r.nodeId, r.removeLoc ?? '', r.branch ?? ''])));
+          const isFailed = (r: MirrorObligationRef) => r.kind === 'WRITE' ? ids.has(r.nodeId) :
+            removeKeys.has(JSON.stringify([r.nodeId, r.removeLoc ?? '', r.branch ?? '']));
+          const failed = obligations.filter(isFailed);
           await settleMirrorObligations(db, resolvedMemoryId, failed, { result: 'failed', errorClass: 'TREE_WRITE' },
             attemptSeq, opts.retry.maxAttempts, { targetBranch: attemptedBranch });
-          obligations = obligations.filter(r => r.kind !== 'WRITE' || !ids.has(r.nodeId));
+          obligations = obligations.filter(r => !isFailed(r));
+          if (hasIncompleteMirrorMutation(localPath)) {
+            // Failed row charged, but an unrecoverable checkout must not charge or
+            // clear unattempted/healthy siblings and must never reach git add.
+            settlement = null;
+            await restoreRemote(localPath, memory.source);
+            return 'failed';
+          }
           if (!obligations.length) {
             settlement = null;
             await restoreRemote(localPath, memory.source);

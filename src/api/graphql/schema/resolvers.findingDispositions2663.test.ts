@@ -157,6 +157,15 @@ it('wide task rows read disposition pages in finding order without loading the i
  expect(Object.hasOwn(row,'resultFindings')).toBe(false);
  expect((await R.AgentTask.findingDispositions(row,{},ctx())).items.map((d:any)=>d.findingId)).toEqual(['F1','F2']);
 });
+it('cloning a finished task copies neither findings nor dispositions and leaves its source unchanged',async()=>{
+ await dispose('fixed','F1');const before=await stored();
+ const cloned=await M.cloneAgentTask({}, {taskId:task.id},ctx());
+ const row=await stored(cloned.id);
+ expect(row.clonedFromId).toBe(task.id);expect(row.status).toBe('pending');
+ expect(row.resultFindings).toBeNull();expect(row.findingDispositions).toEqual([]);expect(row.unresolvedFindingIds).toEqual([]);
+ expect(await stored()).toEqual(before);expect(await events()).toHaveLength(1);
+ expect(await db.agentTeamEvent.count({where:{taskId:cloned.id,type:'task.finding-disposed'}})).toBe(0);
+});
 it('post-push backfills pre-existing findings and preserves their current dispositions and result',async()=>{
  const {Client}=await import('pg');const {readFileSync}=await import('node:fs');
  // Static repository DDL on THIS test worker's private DB; never TEST_DATABASE_URL or a shared DB.

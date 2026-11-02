@@ -90,7 +90,7 @@ export type EventActor = {
 
 /** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
 export type TaskEventPayload =
-  | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean }
+  | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean; /** #2646: the task a clone was made from. */ clonedFromTaskId?: string | null }
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.warning'; code: RecordedTaskWarningCode }
@@ -146,7 +146,7 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'task.created':
       // The owner rides task.created (#1757, cor:agt:050:01): a creator-named
       // owner is visible to the event stream from creation.
-      return { parentTaskId: e.parentTaskId, owner: partyJson(e.owner), hasAssignee: e.hasAssignee };
+      return { parentTaskId: e.parentTaskId, owner: partyJson(e.owner), hasAssignee: e.hasAssignee, ...(e.clonedFromTaskId ? { clonedFromTaskId: e.clonedFromTaskId } : {}) };
     case 'task.assigned':
       return { assignee: partyJson(e.assignee), closeSessionWhenDone: e.closeSessionWhenDone };
     case 'task.reassigned':
