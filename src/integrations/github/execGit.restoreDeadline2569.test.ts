@@ -31,10 +31,12 @@ beforeEach(() => {
   writeFileSync(join(root, 'bin', 'git'), `#!${process.execPath}\n` +
     `const fs = require('node:fs');\n` +
     `if (!process.argv.includes('stall-2569')) { process.stdout.write('ordinary'); process.exit(0); }\n` +
+    `setTimeout(() => {\n` +
     `process.on('SIGTERM', () => {});\n` +
     `fs.writeFileSync(${JSON.stringify(join(root, 'pid'))}, String(process.pid));\n` +
     `process.stderr.write(${JSON.stringify(SECRET)});\n` +
-    `setInterval(() => {}, 1000);\n`, { mode: 0o700 });
+    `setInterval(() => {}, 1000);\n` +
+    `}, 2000);\n`, { mode: 0o700 });
 });
 afterEach(() => {
   if (watchdog) clearTimeout(watchdog);
