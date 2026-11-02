@@ -1676,11 +1676,12 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
 
 /**
  * The write of one prepared create inside its transaction: the parent gate on the locked parent, the parties, the
- * row and its events ({@link insertTask}), and the finish-by check. `blockers: false` (#2653) leaves the priority
- * authority and the blocker links to the caller, which adds them once every task of its call exists.
+ * row and its events ({@link insertTask}), the priority authority and blocker links, and the finish-by check, in
+ * that order. `withinCall` (#2653) names the tasks of the same createAgentTasks call that already exist (this one
+ * and those before it in the list), given this task's new id, so they are linked here with its other blockers.
  */
 async function applyTaskCreate(
-  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, opts: { blockers: boolean },
+  tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, withinCall: (selfId: string) => string[] = () => [],
 ): Promise<{ id: string; queued: boolean; row: TaskRow }> {
   const { input, actor, parentRef, parentTaskId } = p;
   if (parentRef) {
@@ -1706,7 +1707,7 @@ async function applyTaskCreate(
     created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId),
   });
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-  if (opts.blockers) await applyTaskCreateBlockers(tx, txCtx, app, p, row, []);
+  await applyTaskCreateBlockers(tx, txCtx, app, p, row, withinCall(row.id));
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
   return { ...made, row };
 }
@@ -1856,7 +1857,7 @@ export const agentTaskMutations = {
    */
   createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
     const p = await prepareTaskCreate(ctx, input);
-    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p, { blockers: true }),
+    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p),
       { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
@@ -1872,9 +1873,10 @@ export const agentTaskMutations = {
    * App `appRef`, all or none, in ONE transaction. Each task is judged exactly as createAgentTask judges it alone (the
    * shared prepare/apply above); the first refusal refuses the call and carries `extensions.position`, the 1-based
    * position of the task that caused it. Positions are judged in list order: first every task's checks before the
-   * write, then, inside it, each task's write. A task names an existing parent, never another task of the call;
-   * `blockedByPositions` names other tasks of the call as its blockers, added once all of them exist (a self-block
-   * or a cycle is TASK_BLOCKER_CYCLE). Handles follow list order and a refused call spends none. Events are a single
+   * write, then, inside it, each task's whole write (parties, row, priority authority, its existing blockers and its
+   * blockers earlier in the list), and last the links to tasks LATER in the list, in list order. A task names an
+   * existing parent, never another task of the call; `blockedByPositions` names other tasks of the call as its
+   * blockers (a self-block or a cycle is TASK_BLOCKER_CYCLE). Handles follow list order and a refused call spends none. Events are a single
    * create's, per task; matching, launches and warnings run only after the commit (warnings filed per task under
    * `<responseKey>.<position>`). Not idempotent.
    *
@@ -1916,18 +1918,23 @@ export const agentTaskMutations = {
     const made = await inTaskWriteTx(ctx, inApp.app, inApp.actor, () => appNotFound(appRef), async (tx, txCtx, app) => {
       for (const id of parents) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${id} FOR UPDATE`;
       const out: Array<{ id: string; queued: boolean; row: TaskRow }> = [];
+      // Each task's whole write, in list order, links the tasks of the call that already exist (itself and those
+      // before it); only a link to a LATER task waits for the second pass, once that task exists.
       for (const [i, p] of prepared.entries()) {
         try {
-          out.push(await applyTaskCreate(tx, txCtx, app, p, { blockers: false }));
+          out.push(await applyTaskCreate(tx, txCtx, app, p,
+            (selfId) => withinCall[i]!.filter(n => n <= i + 1).map(n => (n === i + 1 ? selfId : out[n - 1]!.id))));
         } catch (e) {
           throw atPosition(e, i + 1);
         }
       }
       for (const [i, p] of prepared.entries()) {
-        try {
-          await applyTaskCreateBlockers(tx, txCtx, app, p, out[i]!.row, withinCall[i]!.map(n => out[n - 1]!.id));
-        } catch (e) {
-          throw atPosition(e, i + 1);
+        for (const n of withinCall[i]!.filter(n => n > i + 1)) {
+          try {
+            await changeTaskBlockerInTx(tx, txCtx, app, p.actor, out[i]!.row, out[n - 1]!.id, 'add');
+          } catch (e) {
+            throw atPosition(e, i + 1);
+          }
         }
       }
       return out;

@@ -4,6 +4,7 @@
  * its position (1-based), handles and returns follow list order, events are a single create's, warnings are filed per
  * task after commit, blockers may name an existing task or another task of the call by position, and the cap is 25.
  */
+import { ApolloServer } from '@apollo/server';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -12,6 +13,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { shapeResponseWarnings } from './resolvers.taskWarnings.js';
+import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
 import { setStopSignal } from '../../../lib/stopSignals/lifecycle.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 
@@ -114,7 +116,9 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     expect(made[1]).toMatchObject({ blocked: true });
     const before = await realTasks();
     expect(await refusal(() => batch([item(), item({}, [2])]))).toEqual({ code: 'TASK_BLOCKER_CYCLE', position: 2 });
-    expect(await refusal(() => batch([item({}, [2]), item({}, [1])]))).toEqual({ code: 'TASK_BLOCKER_CYCLE', position: 2 });
+    // Task 2's link to the earlier task 1 is part of task 2's own write; task 1's link to the LATER task 2 is judged
+    // after every task's write, so it is the link that closes the cycle.
+    expect(await refusal(() => batch([item({}, [2]), item({}, [1])]))).toEqual({ code: 'TASK_BLOCKER_CYCLE', position: 1 });
     expect(await refusal(() => batch([item(), item({}, [3])]))).toEqual({ code: 'BAD_USER_INPUT', position: 2 });
     expect(await refusal(() => batch([item({}, [0])]))).toEqual({ code: 'BAD_USER_INPUT', position: 1 });
     expect(await realTasks()).toBe(before);
@@ -178,6 +182,40 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     const handles = (await db.agentTask.findMany({ where: { parentTaskId: p.id }, select: { handle: true } })).map(r => r.handle);
     expect(new Set(handles).size).toBe(9);
   }, 20000);
+
+  it('competing refusals: an earlier task\'s blocker or priority refusal wins over a later task\'s party refusal', async () => {
+    // BLIND P2 at 5c64cc3b: task 1's own write (its existing blockers and priority authority included) is judged
+    // before task 2's, as if each were created alone, in list order.
+    expect(await refusal(() => batch([item({ blockedBy: [generateId()] }), item({ assignee: { user: outsiderId } })])))
+      .toEqual({ code: 'TASK_NOT_FOUND', position: 1 });
+    expect(await refusal(() => batch([item({ owner: { user: ownerId }, priority: 2 }), item({ assignee: { user: outsiderId } })], ctx(memberId))))
+      .toEqual({ code: 'TASK_NOT_OWNER', position: 1 });
+    // A link to an EARLIER task is part of the task's own write; only a link to a later task is judged after them all.
+    expect(await refusal(() => batch([item(), item({ owner: { user: ownerId } }, [1]), item({ assignee: { user: outsiderId } })], ctx(memberId))))
+      .toEqual({ code: 'TASK_NOT_OWNER', position: 2 });
+    expect(await refusal(() => batch([item({ owner: { user: ownerId } }, [2]), item({ assignee: { user: outsiderId } })], ctx(memberId))))
+      .toEqual({ code: 'TASK_ASSIGNEE_INVALID', position: 2 });
+    expect(await realTasks()).toBe(0);
+  });
+
+  it('executes through GraphQL under an alias: list result, per-task warning paths, none when the call errors', async () => {
+    const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as never, plugins: [taskWarningsPlugin] });
+    const run = async (variables: Record<string, unknown>) => {
+      const r = await server.executeOperation({
+        query: 'mutation($a:ID!,$t:[CreateAgentTasksItemInput!]!){ seats: createAgentTasks(appRef:$a, tasks:$t){ id handle title blocked } }',
+        variables,
+      }, { contextValue: ctx() });
+      if (r.body.kind !== 'single') throw new Error('single expected');
+      return r.body.singleResult;
+    };
+    const ok = await run({ a: appId, t: [{ task: { title: 'One' } }, { task: { title: 'Two', source: 'https://example.test/2' }, blockedByPositions: [1] }] });
+    expect(ok.errors).toBeUndefined();
+    expect((ok.data as any).seats).toMatchObject([{ handle: 'AT0.1', title: 'One', blocked: false }, { handle: 'AT0.2', title: 'Two', blocked: true }]);
+    expect((ok.extensions as any)?.warnings).toEqual([expect.objectContaining({ path: 'seats.1', code: 'task.create.no-source' })]);
+    const bad = await run({ a: appId, t: [{ task: { title: 'One' } }, { task: { title: 'Two', assignee: { user: outsiderId } } }] });
+    expect(bad.errors?.[0]?.extensions).toMatchObject({ code: 'TASK_ASSIGNEE_INVALID', position: 2 });
+    expect((bad.extensions as any)?.warnings).toBeUndefined();
+  });
 
   it('is not idempotent: the same list sent twice makes two sets', async () => {
     await batch([item({ title: 'X' })]);
