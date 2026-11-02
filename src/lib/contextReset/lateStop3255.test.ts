@@ -42,7 +42,7 @@ describe('#3255 late-stop report', () => {
     expect(result).toMatchObject({ refused: null, replayed: false, reset: { phase: 'agent-stopped', epoch: 1 } });
     const rows = await events();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ taskId: s.taskId, subjectWorkerId: f.kit.id, severity: 'info', payload: { resetId: s.resetId, lateStopMs: 30_000 } });
+    expect(rows[0]).toMatchObject({ taskId: s.taskId, subjectWorkerId: f.kit.id, severity: null, payload: { resetId: s.resetId, lateStopMs: 30_000 } });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: s.taskId } })).toEqual(taskBefore);
     const Q = resolvers.Query as any;
     const visible = await f.asWorker(f.ada, () => Q.agentTeamEvents({}, { appRef: f.app.id, types: [EVENT] }, ctx(f.holder.id)));
@@ -140,6 +140,55 @@ describe('#3255 late-stop report', () => {
     const s = await f.collectedReset();
     await f.step('claimContextReset', { resetId: s.resetId, epoch: 0, process: PROC });
     expect(await code(stopped(s, { lateStopMs: 3 }))).toBe('CONTEXT_RESET_WRONG_PHASE');
+    expect(await events()).toEqual([]);
+  });
+
+  it('S8: an old granted epoch reports once after termination and leaves a newer reset and its mark untouched', async () => {
+    const old = await granted();
+    await M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
+    // The old stop window has passed and a later reset now owns the availability mark (#2255).
+    await db.contextReset.update({ where: { id: old.resetId }, data: { stopGrantedAt: new Date(Date.now() - 60_000) } });
+    await db.workerAvailability.update({ where: { workerId: f.kit.id }, data: { until: new Date(Date.now() - 1_000) } });
+    const next = await f.collectedReset();
+    await f.step('claimContextReset', { resetId: next.resetId, epoch: 0, process: PROC });
+    const before = { old: await reset(old.resetId), next: await reset(next.resetId), mark: await mark(), tasks: await db.agentTask.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }) };
+    expect(before.old).toMatchObject({ phase: 'failed', epoch: 2 });
+    expect(before.mark.contextResetId).toBe(next.resetId);
+    await Promise.all([stopped(old, { lateStopMs: 30_000 }), stopped(old, { lateStopMs: 30_000 })]);
+    expect(await events()).toHaveLength(1);
+    expect((await events())[0]?.payload).toMatchObject({ resetId: old.resetId, lateStopMs: 30_000 });
+    expect(await reset(old.resetId)).toEqual(before.old);
+    expect(await reset(next.resetId)).toEqual(before.next);
+    expect(await mark()).toEqual(before.mark);
+    expect(await db.agentTask.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } })).toEqual(before.tasks);
+  });
+
+  it('an ended reset without a granted stop cannot record late telemetry', async () => {
+    const s = await f.collectedReset();
+    await f.step('claimContextReset', { resetId: s.resetId, epoch: 0, process: PROC });
+    await M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
+    expect(await code(stopped(s, { lateStopMs: 5 }))).toBeDefined();
+    expect(await events()).toEqual([]);
+  });
+
+  it('an ended reset accepts only its granted epoch; other protocol steps and on-time old reports remain stale', async () => {
+    const s = await granted();
+    await M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
+    for (const epoch of [0, 2, 99]) expect(await code(stopped(s, { epoch, lateStopMs: 5 }))).toBe('STALE_EPOCH');
+    expect(await code(stopped(s))).toBe('STALE_EPOCH');
+    expect(await code(f.step('authorizeContextResetStop', { resetId: s.resetId, epoch: 1, process: PROC }))).toBe('STALE_EPOCH');
+    expect(await code(f.step('reportContextResetRelaunched', { resetId: s.resetId, epoch: 1, process: PROC }))).toBe('STALE_EPOCH');
+    expect(await events()).toEqual([]);
+    expect((await stopped(s, { lateStopMs: 5 })).reset.phase).toBe('failed');
+    expect(await events()).toHaveLength(1);
+  });
+
+  it('another host cannot annotate an ended grant', async () => {
+    const s = await granted();
+    await M.setWorkerAvailability({}, { input: { worker: f.kit.id, appRef: f.app.id, state: 'AVAILABLE' } }, ctx(f.manager.id));
+    const other = await f.hostKey('orca2');
+    await f.register(other);
+    expect(await code(f.step('reportContextResetAgentStopped', { resetId: s.resetId, epoch: 1, lateStopMs: 5 }, other))).toBe('CONTEXT_RESET_NOT_FOUND');
     expect(await events()).toEqual([]);
   });
 });
