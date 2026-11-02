@@ -447,11 +447,15 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     expect(await indexExists()).toBe(false);
 
     const memId = legacyMem.id;
-    await seedMessage(memId, 3);
-    await seedMessage(memId, 3); // the collision
+    const keepId = await seedMessage(memId, 3);
+    const dupId = await seedMessage(memId, 3); // the collision
 
     await expect(runSql()).rejects.toThrow(/chat seq uniqueness/i);
     expect(await indexExists()).toBe(false); // refused safely: nothing installed
+    // Atilla LOCAL P3-2: the preflight never renumbers or deletes.
+    const afterRefusal = await db.node.findMany({ where: { id: { in: [keepId, dupId] } }, select: { id: true, seq: true } });
+    expect(afterRefusal.map((r) => r.seq)).toEqual([3, 3]);
+    expect(afterRefusal).toHaveLength(2);
 
     // The synthetic-fixture repair (the authorized owner's selected repair —
     // here, the test): remove the duplicate, then installation succeeds.
