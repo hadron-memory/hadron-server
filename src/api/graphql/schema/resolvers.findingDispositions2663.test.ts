@@ -179,3 +179,37 @@ it('post-push backfills pre-existing findings and preserves their current dispos
   try {await client.query(sql);} finally {await client.end();}
  }
 });
+
+// #3252 ruling0086: use the existing normalizer through this new writer, never a parallel validator.
+it.each([0x115f,0x1160,0x3164,0xffa0,0x2800,0x034f])('disposition references reject ruled blank U+%s in target and label without writes',async cp=>{
+ const ch=String.fromCodePoint(cp);
+ for(const ref of [{kind:'URL',target:`https://example.test/a${ch}b`,label:'safe'},
+                   {kind:'URL',target:'https://example.test/safe',label:`a${ch}b`}]) {
+  const before=await stored();const error=await dispose('fixed','F1',ref).catch((e:any)=>e);
+  expect(error).toMatchObject(code('BAD_USER_INPUT'));
+  expect(error.message).not.toContain(ref.target);expect(error.message).not.toContain(ref.label);
+  expect(await stored()).toEqual(before);expect(await events()).toEqual([]);
+ }
+});
+it.each([0xfe00,0xfe0f,0xe0100,0xe01ef])('disposition references reject target selector U+%s but preserve label selectors',async cp=>{
+ const ch=String.fromCodePoint(cp),before=await stored();
+ const error=await dispose('fixed','F1',{kind:'URL',target:`https://example.test/a${ch}b`,label:'safe'}).catch((e:any)=>e);
+ expect(error).toMatchObject(code('BAD_USER_INPUT'));expect(error.message).not.toContain('https://example.test');
+ expect(await stored()).toEqual(before);expect(await events()).toEqual([]);
+ const reference={kind:'URL',target:'https://example.test/safe',label:`Review${ch}`};
+ await dispose('fixed','F1',reference);expect((await read()).items[0].reference).toEqual(reference);
+});
+
+// #3262: shared JSON-text guard inherited through normalizeTaskReferences.
+it.each([0,0xd800,0xdc00].flatMap(cp=>['target','label'].map(field=>({cp,field}))))('disposition reference rejects unstorable $field U+$cp before any write',async({cp,field})=>{
+ const ch=String.fromCharCode(cp);
+ const reference={kind:'URL',target:field==='target'?`https://example.test/a${ch}b`:'https://example.test/safe',label:field==='label'?`private${ch}label`:'Review'};
+ const before=await stored(),error=await dispose('fixed','F1',reference).catch((e:any)=>e);
+ expect(error).toMatchObject(code('BAD_USER_INPUT'));
+ expect(error.message).not.toContain(reference.target);expect(error.message).not.toContain(reference.label);
+ expect(await stored()).toEqual(before);expect(await events()).toEqual([]);
+});
+it('disposition reference preserves a valid paired-surrogate label',async()=>{
+ const reference={kind:'URL',target:'https://example.test/safe',label:'Review 😀'};
+ await dispose('fixed','F1',reference);expect((await read()).items[0].reference).toEqual(reference);
+});
