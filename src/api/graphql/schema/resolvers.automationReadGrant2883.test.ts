@@ -5,15 +5,16 @@
  * read, so every case that needs the grant fails there. Cases marked CONTROL are green on main by design: they pin
  * authority that must NOT change when the grant lands.
  *
- * The target used throughout is the system memory of the SECOND-installed Agent: the run fold reads only the
- * first-installed Agent's system memory (findings:run-fold-reads-only-first-installed-agent, #3233), so the second is
- * refused by the shared gate and only the grant can admit it.
+ * The read target is an org knowledge memory the App has no link to: the run fold (which, since #3233, reads every
+ * installed Agent's own system memory) refuses it, so only the grant can admit it. The system-memory cases
+ * (who may give, the live installed check) name the second Agent's system memory explicitly.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { runHoldsReadGrant } from '../../../lib/automationReadGrant.js';
 import { hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -25,9 +26,10 @@ const ENTRY = 'hrn:node:example.com:m:flows:entry';
 interface F {
   org: { id: string; urn: string }; app: { id: string }; otherApp: { id: string };
   admin: { id: string }; member: { id: string }; outsider: { id: string }; appOwner: { id: string };
-  first: { id: string; systemMemoryId: string }; second: { id: string; systemMemoryId: string };
+  know: { id: string }; first: { id: string; systemMemoryId: string }; second: { id: string; systemMemoryId: string };
   s1: { id: string }; s2: { id: string };
-  sysUrn: string; adminCtx: Context; memberCtx: Context; outsiderCtx: Context; appOwnerCtx: Context;
+  sysUrn: string; // the knowledge memory's urn
+  adminCtx: Context; memberCtx: Context; outsiderCtx: Context; appOwnerCtx: Context;
 }
 let f: F;
 
@@ -44,10 +46,11 @@ async function readAs(r: { id: string; appId: string; userId: string | null }, m
   return hadronReadNode.execute({ log: () => undefined, db, run: runRow, principal } as never, { urn: `hrn:node:${memoryUrn}:${loc}` });
 }
 const give = (c: Context = f.adminCtx, o: Partial<{ triggerId: string; triggerKind: string; memoryRef: string; prefix: string | null; appRef: string }> = {}) =>
-  M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.s1.id, memoryRef: f.second.systemMemoryId, prefix: 'tasks', ...o }, c);
+  M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.s1.id, memoryRef: f.know.id, prefix: 'tasks', ...o }, c);
 const readable = async (r: { id: string; appId: string; userId: string | null }, loc = 'tasks:report') => {
   try { await readAs(r, f.sysUrn, loc); return true; } catch (e) { if (/not readable/.test((e as Error).message)) return false; throw e; }
 };
+const SYS = () => ({ memoryRef: f.second.systemMemoryId });
 const forbidden = (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ message: 'Forbidden', extensions: { code: 'FORBIDDEN' } });
 
 beforeEach(async () => {
@@ -66,18 +69,18 @@ beforeEach(async () => {
   await new Promise((r) => setTimeout(r, 5));
   await createDbAppAgent(db, app.id, second.id);
   await db.appMember.create({ data: { appId: app.id, userId: appOwner.id, role: 'owner' } });
-  const sys = await db.memory.findUniqueOrThrow({ where: { id: second.systemMemoryId }, select: { urn: true } });
+  const know = await db.memory.create({ data: { id: generateId(), name: 'know', urn: `${org.urn}:know`, class: 'knowledge', organizationId: org.id, visibility: 'ORGANIZATION' } as never });
   const s1 = await schedule(app.id, org.id);
   const s2 = await schedule(app.id, org.id);
-  f = { org, app, otherApp, admin, member, outsider, appOwner, first, second, s1, s2, sysUrn: sys.urn,
+  f = { org, app, otherApp, admin, member, outsider, appOwner, know, first, second, s1, s2, sysUrn: know.urn,
     adminCtx, memberCtx: uctx(member.id), outsiderCtx: uctx(outsider.id), appOwnerCtx: uctx(appOwner.id) };
-  await node(second.systemMemoryId, 'tasks:report');
-  await node(second.systemMemoryId, 'tasks:reportX');
-  await node(second.systemMemoryId, 'other:x');
+  await node(know.id, 'tasks:report');
+  await node(know.id, 'tasks:reportX');
+  await node(know.id, 'other:x');
 });
 
 describe('give and revoke', () => {
-  it('CONTROL: before any grant the run is refused the second Agent\'s system memory', async () => {
+  it('CONTROL: before any grant the run is refused the unlinked knowledge memory', async () => {
     expect(await readable(await run('SCHEDULE', f.s1.id))).toBe(false);
   });
 
@@ -162,11 +165,13 @@ describe('what may be a target', () => {
     expect(await db.appAutomationReadGrant.count()).toBe(0);
   });
 
-  it('uninstalling the Agent after the grant stops the read (judged live)', async () => {
+  it('a system-memory grant is judged live: uninstalling the Agent stops it, whatever the fold reads', async () => {
     const r = await run('SCHEDULE', f.s1.id);
-    await give();
+    await give(f.adminCtx, { ...SYS(), prefix: null });
+    const holds = () => runHoldsReadGrant(db, { appId: f.app.id }, r.id, f.second.systemMemoryId, 'tasks:report');
+    expect(await holds()).toBe(true);
     await db.appAgent.deleteMany({ where: { appId: f.app.id, agentId: f.second.id } });
-    expect(await readable(r)).toBe(false);
+    expect(await holds()).toBe(false);
   });
 
   it('an uninstalled App stops the read (judged live)', async () => {
@@ -190,22 +195,23 @@ describe('what may be a target', () => {
     const runRow = await db.appRun.findUniqueOrThrow({ where: { id: r.id } });
     const principal = { db, appId: f.app.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
     const { hadronCreateNode } = await import('../../../lib/runner/tools/nodeTools.js');
-    const before = await db.node.count({ where: { memoryId: f.second.systemMemoryId } });
+    const before = await db.node.count({ where: { memoryId: f.know.id } });
     await expect(hadronCreateNode.execute({ log: () => undefined, db, run: runRow, principal } as never,
       { urn: `hrn:node:${f.sysUrn}:tasks:new`, name: 'n' })).rejects.toBeTruthy();
-    expect(await db.node.count({ where: { memoryId: f.second.systemMemoryId } })).toBe(before);
+    expect(await db.node.count({ where: { memoryId: f.know.id } })).toBe(before);
   });
 });
 
 describe('who may give, revoke and list', () => {
   it('only the Agent\'s manager gives a system-memory grant: a plain org member, an App owner who is not the Agent\'s manager, an outsider and a run are refused, byte-identically', async () => {
-    await forbidden(give(f.memberCtx));
-    await forbidden(give(f.outsiderCtx));
-    await forbidden(give(f.appOwnerCtx));
-    await forbidden(give({ ...f.adminCtx, clientId: `${RUN_CLIENT_PREFIX}x` } as Context));
-    await forbidden(give({ ...f.adminCtx, impersonation: { sessionId: 's', actorUserId: f.admin.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } } as unknown as Context));
-    await forbidden(give(f.adminCtx, { appRef: generateId() }));
+    await forbidden(give(f.memberCtx, SYS()));
+    await forbidden(give(f.outsiderCtx, SYS()));
+    await forbidden(give(f.appOwnerCtx, SYS()));
+    await forbidden(give({ ...f.adminCtx, clientId: `${RUN_CLIENT_PREFIX}x` } as Context, SYS()));
+    await forbidden(give({ ...f.adminCtx, impersonation: { sessionId: 's', actorUserId: f.admin.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } } as unknown as Context, SYS()));
+    await forbidden(give(f.adminCtx, { ...SYS(), appRef: generateId() }));
     expect(await db.appAutomationReadGrant.count()).toBe(0);
+    expect(await give(f.adminCtx, SYS())).toMatchObject({ prefix: 'tasks' }); // the Agent's manager does
   });
 
   it('another class: the memory\'s manager gives; a non-manager does not', async () => {
@@ -246,11 +252,11 @@ describe('who may give, revoke and list', () => {
     const g = await give();
     const byApp = await Q.automationReadGrants({}, { appRef: f.app.id }, f.appOwnerCtx);
     expect(byApp.map((x: any) => x.id)).toEqual([g.id]);
-    const byMemory = await Q.automationReadGrants({}, { memoryRef: f.second.systemMemoryId }, f.adminCtx);
+    const byMemory = await Q.automationReadGrants({}, { memoryRef: f.know.id }, f.adminCtx);
     expect(byMemory.map((x: any) => x.id)).toEqual([g.id]);
     expect(await Q.automationReadGrants({}, { appRef: f.app.id }, f.outsiderCtx)).toEqual([]);
     expect(await Q.automationReadGrants({}, { appRef: f.app.id }, f.memberCtx)).toEqual([]);
-    expect(await Q.automationReadGrants({}, { memoryRef: f.second.systemMemoryId }, f.outsiderCtx)).toEqual([]);
+    expect(await Q.automationReadGrants({}, { memoryRef: f.know.id }, f.outsiderCtx)).toEqual([]);
     await M.revokeAutomationReadGrant({}, { id: g.id }, f.adminCtx);
     expect(await Q.automationReadGrants({}, { appRef: f.app.id }, f.appOwnerCtx)).toEqual([]);
     expect((await Q.automationReadGrants({}, { appRef: f.app.id, includeRevoked: true }, f.appOwnerCtx))).toHaveLength(1);
@@ -264,7 +270,7 @@ describe('audit', () => {
     const ev = await db.appAutomationReadGrantEvent.findMany({ orderBy: { createdAt: 'asc' } });
     expect(ev.map((e) => e.action)).toEqual(['GRANT', 'REVOKE']);
     for (const e of ev) {
-      expect(e).toMatchObject({ appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.s1.id, memoryId: f.second.systemMemoryId, grantId: g.id, prefix: 'tasks', actorUserId: f.admin.id });
+      expect(e).toMatchObject({ appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.s1.id, memoryId: f.know.id, grantId: g.id, prefix: 'tasks', actorUserId: f.admin.id });
       expect(Object.keys(e).sort()).toEqual(['action', 'actorUserId', 'appId', 'createdAt', 'grantId', 'id', 'memoryId', 'prefix', 'triggerId', 'triggerKind']);
     }
   });
