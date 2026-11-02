@@ -57,6 +57,9 @@ on:
       # have inherited the same hole.
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
+      # #3221: the cross-parent manifest is data the check reads; a PR that
+      # edits only it must still run the check, so a glob, not a name.
+      - 'scripts/cross-parent-*'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
       - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
@@ -68,6 +71,7 @@ on:
       - 'src/**.ts'
       - 'scripts/check-*.mjs'
       - 'scripts/check-*.test.ts'
+      - 'scripts/cross-parent-*'
       - 'scripts/sdl-hash-descriptions-allowed.txt'
       - 'scripts/sdl-spec-citations-baseline.txt'
       - '.github/workflows/graphql-sdl-parse.yml'
