@@ -247,7 +247,9 @@ it('no-match batch preserves ordinary queued results and events for omitted fals
   ] }, ctx);
   for (const t of tasks) {
     expect(t).toMatchObject({ title: 'Ordinary', status: 'pending', assigneeWorkerId: null, matchPending: false, matchFailedAt: null, matchFailedReason: null });
+    // createdAt can tie and there is no insertion-sequence column; compare exact event
+    // multiplicities in a deliberate non-chronological order, not unspecified SQL tie order.
     const events = await db.agentTeamEvent.findMany({ where: { taskId: t.id }, orderBy: { type: 'asc' } });
-    expect(events.map(e => e.type)).toEqual(['task.created', 'assignment.queued']);
+    expect(events.map(e => e.type)).toEqual(['assignment.queued', 'task.created']);
   }
 });
