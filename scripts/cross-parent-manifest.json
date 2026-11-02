@@ -715,6 +715,12 @@
       "resolver": "src/api/graphql/schema/resolvers.channel.ts::readableMemoryWhere",
       "target": "Channel"
     },
+    "ChatPage.items": {
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.query.chat.ts::myChatsScope",
+      "gate": "myChatsScope",
+      "target": "Chat"
+    },
     "ClaimUntrackedTaskItemsResult.tasks": {
       "class": "parent-implies-child",
       "audience": "the claimer passed the App's task gate (participant or the App's live key via withReadableApp); task reads are App-wide for that audience",
