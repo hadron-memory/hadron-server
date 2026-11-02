@@ -55,6 +55,9 @@ describe('#2662 findings on finish', () => {
   ['wrong severity case',[{severity:'NOTE',text:'x'}]],
   ['too many',Array.from({length:101},()=>({severity:'note',text:'x'}))],
   ['text too long',[{severity:'P1',text:'a'.repeat(2001)}]],
+  ['NUL text',[{severity:'P1',text:'a\u0000b'}]],
+  ['lone high surrogate',[{severity:'P1',text:'a\ud800b'}]],
+  ['lone low surrogate',[{severity:'P1',text:'a\udc00b'}]],
   ['id too long',[{id:'x'.repeat(33),severity:'P1',text:'x'}]],
   ['blank id',[{id:'',severity:'P1',text:'x'}]],
   ['invalid id',[{id:'a.b',severity:'P1',text:'x'}]],
@@ -108,4 +111,15 @@ it('SQL NULL and JSON null both remain legacy no-findings, including row-copy se
  await db.$executeRaw`UPDATE agent_tasks SET result_findings = NULL WHERE id = ${task.id}`;
  expect(R.AgentTask.result(await stored())).toEqual({outcome:'succeeded',summary:'S',evidence:'E'});
  expect((await read()).items).toEqual([]);
+});
+
+it('wide list and tree loads omit findings unless the result is selected',async()=>{
+ await finish([{severity:'P1',text:'large private payload'}]);
+ const rows=await R.Query.agentTasks({}, {appRef:app.id},ctx());
+ expect(rows).toHaveLength(1);expect(Object.hasOwn(rows[0],'resultFindings')).toBe(false);
+ const result=await R.AgentTask.result(rows[0],{},ctx());
+ expect(R.AgentTaskResult.findings(result,{limit:1},ctx()).items).toEqual([{id:'F1',severity:'P1',text:'large private payload'}]);
+ const tree=await R.Query.agentTaskTree({}, {root:task.id},ctx());
+ expect(tree).toHaveLength(1);expect(Object.hasOwn(tree[0],'resultFindings')).toBe(false);
+ expect((await R.AgentTask.result(tree[0],{},ctx())).findings).toEqual(result.findings);
 });
