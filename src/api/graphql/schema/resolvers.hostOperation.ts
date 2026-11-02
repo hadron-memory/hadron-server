@@ -649,8 +649,8 @@ export const hostOperationMutations = {
     resetStep(ctx, input, (tx, host, now) => authorizeContextResetStop(tx, host, input.resetId, input.epoch, input.process, now)),
 
   /** The old agent stopped: the mark now waits for the relaunched agent's first activity. */
-  reportContextResetAgentStopped: (_: unknown, { input }: { input: ResetStepInput }, ctx: Context) =>
-    resetStep(ctx, input, (tx, host, now) => reportContextResetAgentStopped(tx, host, input.resetId, input.epoch, now)),
+  reportContextResetAgentStopped: (_: unknown, { input }: { input: ResetStepInput & { lateStopMs?: number | null } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetAgentStopped(tx, host, input.resetId, input.epoch, now, input.lateStopMs)),
 
   /** The agent was relaunched under its wrapper, with the new process. */
   reportContextResetRelaunched: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>

@@ -10494,7 +10494,7 @@ export const typeDefs = `#graphql
     the moment it SENT this request (CLOCK_BOOTTIME). Refused NO_RECOVERY_REF, CLAIM_LAPSED, PROCESS_CHANGED or NOT_IDLE.
     """
     authorizeContextResetStop(input: AuthorizeContextResetStopInput!): ContextResetStep!
-    "#2162 — the old agent stopped; its resetting mark now lasts until the relaunched agent's first activity."
+    "#2162 / #3255 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): the old agent stopped; its resetting mark now lasts until the relaunched agent's first activity. Optional lateStopMs records the host's late signal once. For an ended reset, a positive annotation from the collected host holding its stop-grant epoch records telemetry only and changes no reset, task, outcome, availability or alarm state."
     reportContextResetAgentStopped(input: ContextResetStepInput!): ContextResetStep!
     "#2162 — the agent was relaunched under its wrapper."
     reportContextResetRelaunched(input: ReportContextResetRelaunchedInput!): ContextResetStep!
@@ -15245,6 +15245,8 @@ export const typeDefs = `#graphql
     appRef: String!
     resetId: ID!
     epoch: Int!
+    "#3255 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 10): milliseconds the host's stop signal landed after its window, an integer from 0 to 86400000. Omitted, null or zero means no late-stop event. On the first stopped report, a positive value records one task.context-reset-late-stop event per reset for the worker's coordinator. Later reports record nothing, even if the first report had no annotation. After the reset ended, the same collected host may annotate its granted stop using that grant's epoch; this changes no reset, task, availability, outcome or alarm state. Other steps keep their epoch checks."
+    lateStopMs: Int
   }
 
   input ClaimContextResetInput {
