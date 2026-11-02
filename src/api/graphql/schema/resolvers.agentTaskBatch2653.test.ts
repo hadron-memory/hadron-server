@@ -198,6 +198,25 @@ describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () 
     expect(await realTasks()).toBe(0);
   });
 
+  it('competing refusals: an earlier task\'s write refusal wins over a later task\'s check before the write', async () => {
+    // LOCAL P2 at 5c64cc3b (Andi): judged item-first, not phase-first. Task 1's assignee (judged in its write) is
+    // refused before task 2's blank title (judged before any write), as if task 1 were created alone.
+    expect(await refusal(() => batch([item({ assignee: { user: outsiderId } }), item({ title: '  ' })])))
+      .toEqual({ code: 'TASK_ASSIGNEE_INVALID', position: 1 });
+    expect(await refusal(() => batch([item({}, [1]), item({ assignee: { user: outsiderId } })])))
+      .toEqual({ code: 'TASK_BLOCKER_CYCLE', position: 1 });
+    expect(await refusal(() => batch([item(), item({ blockedBy: [generateId()] }), item({ title: '' })])))
+      .toEqual({ code: 'TASK_NOT_FOUND', position: 2 });
+    expect(await refusal(() => batch([item(), item({}, [9]), item({ assignee: { user: outsiderId } })])))
+      .toEqual({ code: 'BAD_USER_INPUT', position: 2 });
+    // A later-position link is judged after every write, so a check before the write at a later position still
+    // comes first in list order of the writes: task 1's link to task 3 never runs when task 2 is refused.
+    expect(await refusal(() => batch([item({}, [3]), item({ title: '' }), item()])))
+      .toEqual({ code: 'BAD_USER_INPUT', position: 2 });
+    expect(await realTasks()).toBe(0);
+    expect((await single()).handle).toBe('AT0.1');
+  });
+
   it('executes through GraphQL under an alias: list result, per-task warning paths, none when the call errors', async () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers: resolvers as never, plugins: [taskWarningsPlugin] });
     const run = async (variables: Record<string, unknown>) => {

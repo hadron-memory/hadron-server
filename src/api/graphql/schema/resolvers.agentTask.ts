@@ -1872,9 +1872,10 @@ export const agentTaskMutations = {
    * #2653 (cor:agt:050:06 "Creating several at once", ruling 0011 A): create 1 to {@link TASK_BATCH_MAX} tasks in the
    * App `appRef`, all or none, in ONE transaction. Each task is judged exactly as createAgentTask judges it alone (the
    * shared prepare/apply above); the first refusal refuses the call and carries `extensions.position`, the 1-based
-   * position of the task that caused it. Positions are judged in list order: first every task's checks before the
-   * write, then, inside it, each task's whole write (parties, row, priority authority, its existing blockers and its
-   * blockers earlier in the list), and last the links to tasks LATER in the list, in list order. A task names an
+   * position of the task that caused it. Positions are judged item-first, in list order: each task's checks before
+   * the write and then, inside the transaction, its whole write (parties, row, priority authority, its existing
+   * blockers and its blockers earlier in the list), so a refusal at task k is raised only after tasks 1..k-1 were
+   * written without one; last come the links to tasks LATER in the list, in list order. A task names an
    * existing parent, never another task of the call; `blockedByPositions` names other tasks of the call as its
    * blockers (a self-block or a cycle is TASK_BLOCKER_CYCLE). Handles follow list order and a refused call spends none. Events are a single
    * create's, per task; matching, launches and warnings run only after the commit (warnings filed per task under
@@ -1899,6 +1900,9 @@ export const agentTaskMutations = {
     requireWritable(ctx, inApp.app);
     const prepared: PreparedCreate[] = [];
     const withinCall: number[][] = [];
+    // Item-first (LOCAL P2 at 5c64cc3b): the first task whose checks before the write refuse stops the preparing, and
+    // its refusal waits until every task before it has been written, so an earlier task's write refusal comes first.
+    let refusedBeforeWrite: unknown = null;
     for (const [i, t] of tasks.entries()) {
       try {
         if (!t || typeof t !== 'object' || !t.task) throw badInput('Each item names its task.');
@@ -1911,9 +1915,11 @@ export const agentTaskMutations = {
         prepared.push(await prepareTaskCreate(ctx, t.task, inApp));
         withinCall.push(positions);
       } catch (e) {
-        throw atPosition(e, i + 1);
+        refusedBeforeWrite = atPosition(e, i + 1);
+        break;
       }
     }
+    if (prepared.length === 0) throw refusedBeforeWrite;
     const parents = [...new Set(prepared.map(p => p.parentTaskId).filter((id): id is string => id !== null))].sort();
     const made = await inTaskWriteTx(ctx, inApp.app, inApp.actor, () => appNotFound(appRef), async (tx, txCtx, app) => {
       for (const id of parents) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${id} FOR UPDATE`;
@@ -1928,6 +1934,9 @@ export const agentTaskMutations = {
           throw atPosition(e, i + 1);
         }
       }
+      // Every task before the refused one is written without a refusal: the refused task's comes next, before any
+      // link to a later task (a link to the refused task or past it would name a task that does not exist).
+      if (refusedBeforeWrite) throw refusedBeforeWrite;
       for (const [i, p] of prepared.entries()) {
         for (const n of withinCall[i]!.filter(n => n > i + 1)) {
           try {
