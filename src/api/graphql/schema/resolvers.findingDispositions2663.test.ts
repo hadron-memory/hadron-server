@@ -132,3 +132,9 @@ it('migration uses the same disposition guards and backfills only the separate o
  const migration=readFileSync('prisma/migrations/20261102210000_agent_task_finding_dispositions/migration.sql','utf8');
  expect(migration).toContain(guard);expect(migration).toContain('SET finding_dispositions = finding_dispositions');
 });
+it('wide task rows read disposition pages in finding order without loading the immutable result',async()=>{
+ await dispose('fixed','F1');await dispose('accepted','F2');await dispose('deferred','F1');
+ const [row]=await Q.agentTasks({}, {appRef:app.id},ctx());
+ expect(Object.hasOwn(row,'resultFindings')).toBe(false);
+ expect((await R.AgentTask.findingDispositions(row,{},ctx())).items.map((d:any)=>d.findingId)).toEqual(['F1','F2']);
+});
