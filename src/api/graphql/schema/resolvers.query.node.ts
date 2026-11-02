@@ -161,6 +161,141 @@ export interface FindNodesArgs {
   offset?: number | null;
 }
 
+type AppNodesFilter = {
+    // Memory-scope fields — NOT supported by appNodes (the App's scope is
+    // authoritative). Present only so we can reject them explicitly.
+    memoryIds?: string[] | null;
+    memoryClasses?: string[] | null;
+    nodeType?: string | null;
+    /** #3113 */
+    nodeTypes?: string[] | null;
+    objectType?: string | null;
+    tags?: string[] | null;
+    isRunnable?: boolean | null;
+    role?: string | null;
+    locPrefix?: string | null;
+    createdBy?: string | null;
+    updatedAfter?: string | null;
+    updatedBefore?: string | null;
+    includeDeleted?: boolean | null;
+    /** #1591 */
+    approvalState?: NodeApprovalState | null;
+    /** #1591 */
+    minted?: boolean | null;
+};
+
+/**
+ * The admission, validation and `where` shared by `appNodes` and `appNodesPage` (#2212 A2): ONE
+ * computation, so the list and the page cannot disagree about who may read what. An unknown or malformed
+ * App ref and an unauthorized caller THROW from `resolveAppNodeScope`, exactly as `appNodes` always has;
+ * `null` is returned only for its existing empty arms (a soft-deleted organization, an empty accessible
+ * scope). The one `where` serves both the rows and `total`, so `total` counts exactly the rows the old
+ * field would return without a limit (cor:api:120:04).
+ */
+async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter | null | undefined) {
+  // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
+  // computation, shared with appMemoryScope: a second copy would drift.
+  // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
+  const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
+  const scope = await resolveAppNodeScope(ctx, appRef);
+  if (!scope) return null;
+  const { inheritance } = scope;
+  const memoryIds = inheritance.memoryIds;
+
+  // #525 — optional node-level NodeFilter, pushed server-side so callers
+  // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
+  // without fetching everything and filtering client-side. The App's memory
+  // scope stays authoritative, and unlike findNodes we do NOT impose the
+  // default `nodeType != 'system'` exclusion — appNodes deliberately
+  // surfaces the system memory (#524).
+  const f = filter ?? {};
+  const badInput = (msg: string) =>
+    new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+  // #526 review — NodeFilter carries memory-scope fields that appNodes can't
+  // honor (its scope is the App's memories). Reject rather than silently
+  // ignore them, so a caller who assumed they scoped fails fast instead of
+  // getting a surprising superset. Use findNodes for cross-memory scoping.
+  if (f.memoryIds?.length || f.memoryClasses?.length) {
+    throw badInput(
+      'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+        "the App's installed-agent memories are the authoritative scope. " +
+        'Use findNodes for cross-memory scoping.',
+    );
+  }
+  if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
+    throw badInput('appNodes filter.updatedAfter must be a valid date string.');
+  }
+  if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
+    throw badInput('appNodes filter.updatedBefore must be a valid date string.');
+  }
+
+  const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
+  const where: Prisma.NodeWhereInput = {
+    memoryId: { in: memoryIds },
+    ...(f.includeDeleted ? {} : { deletedAt: null }),
+    ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : {}),
+    ...(f.objectType ? { objectType: f.objectType } : {}),
+    ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+    ...(f.role != null
+      ? {
+          OR: [
+            { role: f.role },
+            { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+          ],
+        }
+      : {}),
+    ...(f.tags?.length ? tagsFilter(f.tags) : {}),
+    ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
+    ...(f.createdBy ? { createdBy: f.createdBy } : {}),
+    ...((f.updatedAfter || f.updatedBefore)
+      ? { updatedAt: {
+          ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
+          ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
+        } }
+      : {}),
+    ...approvalStatePrismaWhere(f.approvalState, ctx.db),
+    // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+    // #1607 + #1608 — no comments in status sets; content, comments or
+    // both by contentScope (CONTENT by default, cor:dmo:110:08).
+    AND: [
+      ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
+      ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
+      ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
+      ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
+      ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
+    ],
+  };
+  return { where, inheritance };
+}
+
+/** Everything a returned `appNodes` / `appNodesPage` row carries. */
+const APP_NODES_INCLUDE = {
+  outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+  incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
+  memory: { select: { id: true, urn: true, name: true, organizationId: true } },
+} satisfies Prisma.NodeInclude;
+
+/** A row as `appNodes` / `appNodesPage` read it: the node plus `APP_NODES_INCLUDE`. */
+type AppNodeRow = Prisma.NodeGetPayload<{ include: typeof APP_NODES_INCLUDE }>;
+
+/**
+ * Re-check what was read against the effective set now (P2-1), then decrypt, mark inherited and record
+ * the reads, for the rows RETURNED only. Splices the dropped rows out of `rows`.
+ */
+async function finishAppNodes(
+  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2],
+): Promise<AppNodeRow[]> {
+  // The exclusion list was a snapshot: re-check what was read (P2-1).
+  const kept = new Set((await retainEffective(ctx.db, rows, inheritance)).map((r) => r.id));
+  for (let i = rows.length - 1; i >= 0; i--) if (!kept.has(rows[i]!.id)) rows.splice(i, 1);
+  await decryptNodesBatch(ctx.db, rows);
+  markInherited(rows, inheritance.inheritedFrom);
+  // #1061 — the App-scoped node list returns full node projections, so each one is a read. Scope is the
+  // App's installed-agent memories, established by `appNodesRead`.
+  recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
+  return rows;
+}
+
 /**
  * The admission shared by `nodeRevisions` and `nodeRevisionsPage` (#2212 A1): READER, a node ref that
  * resolves for the caller (a genuine miss collapses to the empty answer; a malformed ref propagates), a
@@ -2487,125 +2622,55 @@ export const nodeQueries = {
 
     appNodes: async (
       _: unknown,
-      { appRef, filter, limit }: {
-        appRef: string;
-        filter?: {
-          // Memory-scope fields — NOT supported by appNodes (the App's scope is
-          // authoritative). Present only so we can reject them explicitly.
-          memoryIds?: string[] | null;
-          memoryClasses?: string[] | null;
-          nodeType?: string | null;
-          /** #3113 */
-          nodeTypes?: string[] | null;
-          objectType?: string | null;
-          tags?: string[] | null;
-          isRunnable?: boolean | null;
-          role?: string | null;
-          locPrefix?: string | null;
-          createdBy?: string | null;
-          updatedAfter?: string | null;
-          updatedBefore?: string | null;
-          includeDeleted?: boolean | null;
-          /** #1591 */
-          approvalState?: NodeApprovalState | null;
-          /** #1591 */
-          minted?: boolean | null;
-        } | null;
-        limit?: number;
-      },
+      { appRef, filter, limit }: { appRef: string; filter?: AppNodesFilter | null; limit?: number },
       ctx: Context,
     ) => {
-      // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
-      // computation, shared with appMemoryScope: a second copy would drift.
-      // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
-      const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
-      const scope = await resolveAppNodeScope(ctx, appRef);
-      if (!scope) return [];
-      const { inheritance } = scope;
-      const memoryIds = inheritance.memoryIds;
-
-      // #525 — optional node-level NodeFilter, pushed server-side so callers
-      // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
-      // without fetching everything and filtering client-side. The App's memory
-      // scope stays authoritative, and unlike findNodes we do NOT impose the
-      // default `nodeType != 'system'` exclusion — appNodes deliberately
-      // surfaces the system memory (#524).
-      const f = filter ?? {};
-      const badInput = (msg: string) =>
-        new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
-      // #526 review — NodeFilter carries memory-scope fields that appNodes can't
-      // honor (its scope is the App's memories). Reject rather than silently
-      // ignore them, so a caller who assumed they scoped fails fast instead of
-      // getting a surprising superset. Use findNodes for cross-memory scoping.
-      if (f.memoryIds?.length || f.memoryClasses?.length) {
-        throw badInput(
-          'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
-            "the App's installed-agent memories are the authoritative scope. " +
-            'Use findNodes for cross-memory scoping.',
-        );
-      }
-      if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
-        throw badInput('appNodes filter.updatedAfter must be a valid date string.');
-      }
-      if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
-        throw badInput('appNodes filter.updatedBefore must be a valid date string.');
-      }
-
-      const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
+      // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE computation, shared with
+      // appMemoryScope and (#2212 A2) appNodesPage: a second copy would drift.
+      const read = await appNodesRead(ctx, appRef, filter);
+      if (!read) return [];
       const results = await ctx.db.node.findMany({
-        where: {
-          memoryId: { in: memoryIds },
-          ...(f.includeDeleted ? {} : { deletedAt: null }),
-          ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : {}),
-          ...(f.objectType ? { objectType: f.objectType } : {}),
-          ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
-          ...(f.role != null
-            ? {
-                OR: [
-                  { role: f.role },
-                  { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
-                ],
-              }
-            : {}),
-          ...(f.tags?.length ? tagsFilter(f.tags) : {}),
-          ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
-          ...(f.createdBy ? { createdBy: f.createdBy } : {}),
-          ...((f.updatedAfter || f.updatedBefore)
-            ? { updatedAt: {
-                ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
-                ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
-              } }
-            : {}),
-          ...approvalStatePrismaWhere(f.approvalState, ctx.db),
-          // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
-          // #1607 + #1608 — no comments in status sets; content, comments or
-          // both by contentScope (CONTENT by default, cor:dmo:110:08).
-          AND: [
-            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
-            ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
-            ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
-            ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
-            ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
-          ],
-        },
+        where: read.where,
         orderBy: { loc: 'asc' },
         take: limit ?? 20,
-        include: {
-          outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
-          incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
-          memory: { select: { id: true, urn: true, name: true, organizationId: true } },
-        },
+        include: APP_NODES_INCLUDE,
       });
-      // The exclusion list was a snapshot: re-check what was read (P2-1).
-      const kept = new Set((await retainEffective(ctx.db, results, inheritance)).map((r) => r.id));
-      for (let i = results.length - 1; i >= 0; i--) if (!kept.has(results[i]!.id)) results.splice(i, 1);
-      await decryptNodesBatch(ctx.db, results);
-      markInherited(results, inheritance.inheritedFrom);
-      // #1061 — the App-scoped node list returns full node projections, so each
-      // one is a read. Scope is the App's installed-agent memories, established
-      // above.
-      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(results), ctx);
-      return results;
+      return finishAppNodes(ctx, results, read.inheritance);
+    },
+
+    /**
+     * #2212 A2 (cor:api:120:04) — `appNodes` as a page. The SAME admission, filter validation and `where`
+     * (`appNodesRead`), so every refusal is the old field's and `total` counts exactly the rows the old
+     * field would return without a limit. Order is `loc, id`: `loc` alone is not unique across the App's
+     * memories, so ties would repeat or skip rows between pages. `hasMore` comes from the RAW rows read,
+     * before the post-read `retainEffective` re-check, so a dropped row never ends paging early.
+     * Count-only (`limit: 0`) reads no rows, so it decrypts, marks and records nothing.
+     */
+    appNodesPage: async (
+      _: unknown,
+      args: { appRef: string; filter?: AppNodesFilter | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { take, skip } = pageArgs(args);
+      const read = await appNodesRead(ctx, args.appRef, args.filter);
+      if (!read) return { items: [], total: 0, hasMore: false };
+      if (take === 0) {
+        const total = await ctx.db.node.count({ where: read.where });
+        return { items: [], total, hasMore: skip < total };
+      }
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.node.count({ where: read.where }),
+        ctx.db.node.findMany({
+          where: read.where,
+          orderBy: [{ loc: 'asc' }, { id: 'asc' }],
+          take,
+          skip,
+          include: APP_NODES_INCLUDE,
+        }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      const rawRows = rows.length;
+      const items = await finishAppNodes(ctx, rows, read.inheritance);
+      return { items, total, hasMore: skip + rawRows < total };
     },
 
 };

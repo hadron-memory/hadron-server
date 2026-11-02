@@ -44,6 +44,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
+  "Query.appNodesPage",
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
