@@ -40,6 +40,7 @@ describe('#2662 findings on finish', () => {
  it('accepts the exact count, text and id bounds', async()=>{
   const f=Array.from({length:100},(_,i)=>({id:i===0?'x'.repeat(32):`n${i}`,severity:'P3',text:'💡'.repeat(2000)}));
   await finish(f);expect((await read({limit:100})).items).toEqual(f);
+  expect((await read({limit:2147483647})).items).toEqual(f);
   expect((await read({limit:0}))).toEqual({items:[],total:100,hasMore:true});
  });
  it('finish without findings preserves the old result and event byte shapes',async()=>{
