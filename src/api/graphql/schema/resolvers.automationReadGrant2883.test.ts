@@ -250,6 +250,15 @@ describe('who may give, revoke and list', () => {
     expect(await give(f.adminCtx, { memoryRef: know.id })).toMatchObject({ prefix: 'tasks' });
   });
 
+  it('revoke: only a person as themselves — a run principal or impersonation carrying an App manager\'s userId is refused (R28)', async () => {
+    const g = await give();
+    const imp = { sessionId: 's', actorUserId: f.appOwner.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') };
+    await forbidden(M.revokeAutomationReadGrant({}, { id: g.id }, { ...f.appOwnerCtx, clientId: `${RUN_CLIENT_PREFIX}x` } as Context));
+    await forbidden(M.revokeAutomationReadGrant({}, { id: g.id }, { ...f.appOwnerCtx, impersonation: imp } as unknown as Context));
+    expect(await db.appAutomationReadGrant.count({ where: { id: g.id, revokedAt: null } })).toBe(1);
+    expect(await db.appAutomationReadGrantEvent.count({ where: { action: 'REVOKE' } })).toBe(0);
+  });
+
   it('revoke: the App\'s manager or the target\'s manager; nobody else; unknown id is the same Forbidden', async () => {
     const g = await give();
     await forbidden(M.revokeAutomationReadGrant({}, { id: g.id }, f.outsiderCtx));
