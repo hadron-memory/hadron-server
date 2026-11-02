@@ -52,7 +52,7 @@ beforeEach(async () => {
   contributor = await db.user.create({ data: { id: generateId(), githubId: 58101, githubUsername: `cp-contrib-${t}` } });
   reader = await db.user.create({ data: { id: generateId(), githubId: 58102, githubUsername: `cp-reader-${t}` } });
   stranger = await db.user.create({ data: { id: generateId(), githubId: 58103, githubUsername: `cp-stranger-${t}` } });
-  admin = await db.user.create({ data: { id: generateId(), githubId: 58104, githubUsername: `cp-admin-${t}` } });
+  admin = await db.user.create({ data: { id: generateId(), githubId: 58104, githubUsername: `cp-admin-${t}`, roles: ['ADMIN'] } as any });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgA.id, userId: contributor.id, role: 'CONTRIBUTOR' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgA.id, userId: reader.id, role: 'READER' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: stranger.id, role: 'CONTRIBUTOR' } });
@@ -126,12 +126,18 @@ describe('#3238 scope lens: ScopeExplanation.memories, .winner and ScopeMemoryEn
     }
   });
 
-  it('a memory the caller cannot read is a count only: never a Memory object, and the tombstone is gone for everyone', async () => {
+  it('a memory the caller cannot read is a count only: never a Memory object, and the tombstone is gone for every principal', async () => {
     const reader = who('reader');
     const ex = await explain(reader, 'shared:loc');
     expect(ex.memories.map((m: any) => m.id)).toEqual(ids(['reader-private', 'org-knowledge']));
     expect(ex.droppedCount).toBe(6);
     expect(ex.memories.map((m: any) => m.id)).not.toContain(mems['deleted']!.id);
+    for (const p of principals) {
+      const e = await explain(p, 'shared:loc');
+      if (!e) continue;
+      expect(e.memories.map((m: any) => m.id), `${p.name} lens`).not.toContain(mems['deleted']!.id);
+      expect((await S.memories({ id: scopeId }, {}, p.ctx)).map((x: any) => x.memory.id), `${p.name} entries`).not.toContain(mems['deleted']!.id);
+    }
     expect(JSON.stringify(ex)).not.toContain(mems['foreign-org']!.urn);
     expect(JSON.stringify(ex)).not.toContain(mems['contrib-personal']!.urn);
   });
@@ -155,6 +161,15 @@ describe('#3238 scope lens: ScopeExplanation.memories, .winner and ScopeMemoryEn
     expect((await explain(reader, 'shared:loc')).winner.id).toBe(mems['reader-private']!.id);
     // The contributor reads its personal memory, which then wins by order.
     expect((await explain(who('contributor'), 'shared:loc')).winner.id).toBe(mems['contrib-personal']!.id);
+  });
+
+  it('with no loc asked, or a loc no memory holds, the winner is null for every principal', async () => {
+    for (const p of principals) {
+      const none = await explain(p);
+      if (none) expect(none.winner, `${p.name} no loc`).toBeNull();
+      const missing = await explain(p, 'no:such:loc');
+      if (missing) expect(missing.winner, `${p.name} missing loc`).toBeNull();
+    }
   });
 
   it('a principal with no read of the scope gets null, the same as a missing scope', async () => {
@@ -191,6 +206,8 @@ describe('#3238 CompiledBootPrompt.node is a node its compiling principal reads 
       expect(await directNode(p.ctx, out.node.id), `${p.name} compiled a node its direct read refuses`).toBe(true);
     }
     expect(compiled, 'the org admin manages the Agent, so the comparison is not vacuous').toContain('org admin');
+    // The platform admin must hold the persisted ADMIN role (compile refreshes roles from the row), or its comparison is skipped.
+    expect(compiled, 'the platform admin compiles, so its direct-read comparison runs').toContain('platform admin');
   });
 
   it('a principal who may not compile is refused, so no node is handed to a caller whose direct read would refuse it', async () => {
