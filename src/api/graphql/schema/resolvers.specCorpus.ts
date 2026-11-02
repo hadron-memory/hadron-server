@@ -7,6 +7,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 // #1450 — reserveSpecCitation. Contract:
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
+import { toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { inMintScope, inMintScopeSql } from '../../../lib/mintScope.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
@@ -1649,7 +1650,7 @@ async function mintMemoryNodes(
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
-        minted_at = COALESCE(minted_at, ${now}),
+        minted_at = COALESCE(minted_at, ${toNaiveUtc(now)}::timestamp),
         minted_by = CASE WHEN minted_at IS NULL THEN ${minter.userId ?? null}::text ELSE minted_by END,
         minted_by_info = CASE WHEN minted_at IS NULL THEN ${minter.userId ? null : minter.info ?? 'unknown'}::text ELSE minted_by_info END,
         minted_rev_no = rev_seq,
