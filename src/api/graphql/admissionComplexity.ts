@@ -24,7 +24,8 @@
  *     negative `take` pages from the end, so its magnitude is the work;
  *   - omitted or null: the field's own default when it is known to exceed the common one (`OMITTED_PAGE_SIZE`),
  *     otherwise `DEFAULT_OMITTED_PAGE_SIZE`, the largest default in common use;
- *   - caps a resolver applies to a large request are NOT modelled, so a clamped field is over-counted, never under-counted.
+ *   - caps a resolver applies to a large request are NOT modelled, so a clamped field is over-counted, never under-counted;
+ *     the one exception is a field listed in `PAGE_ARGS_FIELDS`, charged for the page its resolver really reads.
  * A list with no page-size argument is costed at `listFactor`: this model cannot bound a list whose length the request
  * does not state. It also does not model per-resolver cost, database cost, response bytes, or work done by directives.
  * Nor does it bound: `findNodes(expand:)`, which appends graph neighbours after the page with no cap of its own; or
@@ -54,6 +55,7 @@ import {
 } from 'graphql';
 import { getComplexity, simpleEstimator, type ComplexityEstimator } from 'graphql-query-complexity';
 import type { GraphqlAdmissionConfig } from './admission.js';
+import { pageTake } from './pageBounds.js';
 
 export const QUERY_TOO_COMPLEX = 'QUERY_TOO_COMPLEX';
 
@@ -69,6 +71,13 @@ export class QueryTooComplexError extends GraphQLError {
 
 const PAGE_ARG = /^(first|last|limit|top|take|pageSize|count)$/;
 /** The largest default page size in common use across this schema's resolvers (100 for chat lists, 50 elsewhere). */
+/**
+ * Fields whose resolver sizes its page with `pageArgs` (default 20, max 200, over the cap served as the cap), so a huge stated
+ * `limit` reads at most 200 rows and is costed as such. Every other field keeps the raw stated size; add a field here only
+ * with a pin that its resolver really clamps through `pageTake`.
+ */
+export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set(['Query.appNodesPage']);
+
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
 /** Fields whose resolver default, when the argument is omitted, exceeds the common one (reviewed against the resolvers). */
 export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
@@ -89,6 +98,9 @@ function pageSizeOf(
 ): number | null {
   if (declared === undefined) return null;
   const v = args[declared];
+  // A field whose resolver sizes its page with `pageArgs` is charged for the rows it actually reads (at least 1: count-only
+  // is not free), not for a stated size the resolver would clamp (#2212 A2, cor:api:120:04 S2).
+  if (PAGE_ARGS_FIELDS.has(fieldKey)) return Math.max(1, pageTake(typeof v === 'number' && Number.isSafeInteger(v) ? v : null));
   if (typeof v === 'number' && Number.isSafeInteger(v)) return Math.max(1, Math.abs(v));
   return OMITTED_PAGE_SIZE[fieldKey] ?? DEFAULT_OMITTED_PAGE_SIZE;
 }

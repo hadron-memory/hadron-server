@@ -37,7 +37,15 @@ vi.mock('../../../lib/effectiveSystemMemory.js', async (importOriginal) => {
 
 const Q = resolvers.Query as any;
 const ids = (rows: { id: string }[]) => rows.map((r) => r.id);
-const settle = () => new Promise((r) => setTimeout(r, 200));
+/** Usage writes are fire-and-forget: poll (bounded) until `n` rows exist, then return the count. */
+async function usageRowsReach(n: number): Promise<number> {
+  for (let i = 0; i < 100; i++) {
+    const c = await db.usageEvent.count();
+    if (c >= n) return c;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return db.usageEvent.count();
+}
 
 let org: { id: string; urn: string };
 let appId: string;
@@ -154,16 +162,17 @@ describe('appNodesPage — total and count-only (pin 2)', () => {
     const filter = { isRunnable: true };
     const old = await oldAll(c, filter);
     expect(old.length).toBe(5);
-    await settle();
+    expect(await usageRowsReach(5)).toBe(5); // the old field's own 5 reads, then start clean
+    await db.usageEvent.deleteMany({});
+    const page = await Q.appNodesPage({}, { appRef: appId, filter, limit: 2 }, c);
+    expect(page.total).toBe(5);
+    expect(await usageRowsReach(2)).toBe(2); // only the returned rows are reads; the barrier proves the recorder works
     await db.usageEvent.deleteMany({});
     const zero = await Q.appNodesPage({}, { appRef: appId, filter, limit: 0 }, c);
     expect([zero.items.length, zero.total, zero.hasMore]).toEqual([0, 5, true]);
-    await settle();
-    expect(await db.usageEvent.count()).toBe(0);
-    const page = await Q.appNodesPage({}, { appRef: appId, filter, limit: 2 }, c);
-    expect(page.total).toBe(5);
-    await settle();
-    expect(await db.usageEvent.count()).toBe(2); // only the returned rows are reads
+    // Barrier: a normal page after the count-only call. Count-only rows (if any) were issued first.
+    await Q.appNodesPage({}, { appRef: appId, filter, limit: 1 }, c);
+    expect(await usageRowsReach(1)).toBe(1); // exactly the barrier page's one row: count-only recorded none
   });
 });
 

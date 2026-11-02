@@ -275,21 +275,24 @@ const APP_NODES_INCLUDE = {
   memory: { select: { id: true, urn: true, name: true, organizationId: true } },
 } satisfies Prisma.NodeInclude;
 
+/** A row as `appNodes` / `appNodesPage` read it: the node plus `APP_NODES_INCLUDE`. */
+type AppNodeRow = Prisma.NodeGetPayload<{ include: typeof APP_NODES_INCLUDE }>;
+
 /**
  * Re-check what was read against the effective set now (P2-1), then decrypt, mark inherited and record
  * the reads, for the rows RETURNED only. Splices the dropped rows out of `rows`.
  */
-async function finishAppNodes<R extends { id: string }>(
-  ctx: Context, rows: R[], inheritance: Parameters<typeof retainEffective>[2],
-): Promise<R[]> {
+async function finishAppNodes(
+  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2],
+): Promise<AppNodeRow[]> {
   // The exclusion list was a snapshot: re-check what was read (P2-1).
-  const kept = new Set((await retainEffective(ctx.db, rows as never, inheritance)).map((r: { id: string }) => r.id));
+  const kept = new Set((await retainEffective(ctx.db, rows, inheritance)).map((r) => r.id));
   for (let i = rows.length - 1; i >= 0; i--) if (!kept.has(rows[i]!.id)) rows.splice(i, 1);
-  await decryptNodesBatch(ctx.db, rows as never);
-  markInherited(rows as never, inheritance.inheritedFrom);
+  await decryptNodesBatch(ctx.db, rows);
+  markInherited(rows, inheritance.inheritedFrom);
   // #1061 — the App-scoped node list returns full node projections, so each one is a read. Scope is the
   // App's installed-agent memories, established by `appNodesRead`.
-  recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows as never), ctx);
+  recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
   return rows;
 }
 
