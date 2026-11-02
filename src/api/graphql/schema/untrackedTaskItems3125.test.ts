@@ -327,18 +327,20 @@ describe('untrackedTaskItems: refusals, each before any GitHub call', () => {
     expect((await refusal(list())).code).toBe('GITHUB_NOT_INSTALLED');
   });
 
-  it('an App with no organization is TASK_INTEGRATION_ORG_REQUIRED for list and claim, before any GitHub call (Ask 5)', async () => {
-    // S1 refuses writing an integration on such an App; one stored by any other route is still never read.
+  it('an App with no organization may hold an integration; reading it is GITHUB_NOT_INSTALLED, before any GitHub call (ruling 0071 = B)', async () => {
+    // Any App may hold task integrations (Holger, rulings:0071 = B). An App with no organization has no GitHub App
+    // installation to read through, so a list or claim answers as an organization with none does.
     const mine = await db.app.create({
       data: { name: 'Mine', urn: `mine-${generateId()}:mine`, ownerUserId: member.id, properties: { taskIntegrations: [INTEGRATION()] } as never },
     });
     await db.appMember.create({ data: { appId: mine.id, userId: member.id, role: 'owner' } });
-    // Called one at a time: a promise started before the previous one settles would reject unhandled (Jane, P2-3).
+    // Called one at a time: a promise started before the previous one settles would reject unhandled.
     for (const call of [() => list({ appRef: mine.id }), () => claim({ appRef: mine.id })]) {
-      expect((await refusal(call())).code).toBe('TASK_INTEGRATION_ORG_REQUIRED');
+      expect((await refusal(call())).code).toBe('GITHUB_NOT_INSTALLED');
     }
-    // The same answer whether or not the integration name exists.
-    expect((await refusal(list({ appRef: mine.id, integration: 'nope' }))).code).toBe('TASK_INTEGRATION_ORG_REQUIRED');
+    // The integration checks still come first, as for any App.
+    expect((await refusal(list({ appRef: mine.id, integration: 'nope' }))).code).toBe('TASK_INTEGRATION_NOT_FOUND');
+    expect((await refusal(list({ appRef: mine.id, repository: 'acme/other' }))).code).toBe('TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED');
     expect(fake.calls).toBe(0);
     expect(await db.agentTask.count({ where: { appId: mine.id } })).toBe(0);
   });
