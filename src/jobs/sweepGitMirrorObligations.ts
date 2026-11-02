@@ -9,6 +9,7 @@ import { nodeFilePath, orphanedLegacyPaths } from '../integrations/github/nodeFr
 import { validateMemorySource } from '../lib/gitSource.js';
 import { mirrorFailureMetadata } from '../integrations/github/mirrorFailureMetadata.js';
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
+import { toNaiveUtc } from '../lib/sessionActivity.js';
 
 export const MAX_ATTEMPTS = 10;
 const INTERVAL_MS = 10 * 60_000;
@@ -29,6 +30,8 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
     let afterDue: Date | null = null;
     let afterId = '';
     while (handled < MAX_MEMORIES && remainingRows > 0) {
+      // #3174: bind naive UTC text, never a Date (a Date binds as timestamptz and shifts by the session zone).
+      const afterDueUtc = afterDue ? toNaiveUtc(afterDue) : null;
       const candidates: DueMemory[] = await db.$queryRaw<DueMemory[]>`
         WITH due AS (
         SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn", m.write_branch AS "writeBranch",
@@ -36,10 +39,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
         FROM git_mirror_obligations o JOIN memories m ON m.id = o.memory_id JOIN organizations org ON org.id = m.organization_id
         WHERE o.state IN ('FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
           AND NOT m.is_encrypted AND m.source IS NOT NULL AND m.organization_id IS NOT NULL AND m.deleted_at IS NULL
-          AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${now}
+          AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${toNaiveUtc(now)}::timestamp
         GROUP BY m.id, m.source, m.urn, org.urn, m.write_branch
         ) SELECT * FROM due
-        WHERE (${afterDue}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDue}::timestamp, ${afterId}::text))
+        WHERE (${afterDueUtc}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDueUtc}::timestamp, ${afterId}::text))
         ORDER BY "dueAt", "memoryId" LIMIT ${MAX_MEMORIES}`;
       for (const candidate of candidates) {
         try { validateMemorySource(candidate.source); } catch { continue; }
@@ -55,7 +58,7 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
           FROM git_mirror_obligations
           WHERE memory_id = ${candidate.memoryId} AND state IN ('FAILED', 'NOT_CLONED')
             AND attempts < ${MAX_ATTEMPTS}
-            AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${now}
+            AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${toNaiveUtc(now)}::timestamp
           ORDER BY last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72),
             node_id, kind, remove_loc
           LIMIT ${remainingRows}`;
