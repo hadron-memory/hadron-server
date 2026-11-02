@@ -5732,6 +5732,9 @@ model AgentTask {
   externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).
   parentTaskId         String?   @map("parent_task_id")
+  /// #2646 (cor:agt:050:02, What a clone does): the task this one was cloned from, set once at creation and never
+  /// changed. Always in the same App (the clone is made in the source's App). Null for every task not made by a clone.
+  clonedFromId         String?   @map("cloned_from_id")
   ownerWorkerId        String?   @map("owner_worker_id")
   ownerUserId          String?   @map("owner_user_id")
   /// Both null ⇒ queued while pending (cor:agt:050:03).
@@ -5796,6 +5799,8 @@ model AgentTask {
   app            App                 @relation(fields: [appId], references: [id], onDelete: Cascade)
   parent         AgentTask?          @relation("AgentTaskParent", fields: [parentTaskId], references: [id], onDelete: NoAction)
   children       AgentTask[]         @relation("AgentTaskParent")
+  clonedFrom     AgentTask?          @relation("AgentTaskClone", fields: [clonedFromId], references: [id], onDelete: SetNull)
+  clones         AgentTask[]         @relation("AgentTaskClone")
   /// #2553: the counter of the numbers issued under this task.
   childCounters  AgentTaskCounter[]
   blockerLinks AgentTaskBlocker[] @relation("TaskBlockedBy")
@@ -5811,6 +5816,7 @@ model AgentTask {
   @@unique([appId, handle])
   @@index([appId, status])
   @@index([parentTaskId])
+  @@index([clonedFromId])
   @@index([ownerWorkerId])
   @@index([ownerUserId])
   @@index([assigneeWorkerId])

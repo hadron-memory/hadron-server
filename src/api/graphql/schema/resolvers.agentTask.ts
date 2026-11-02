@@ -1108,6 +1108,9 @@ function refuseEnded(task: TaskRow): void {
 
 // ── Mutations ─────────────────────────────────────────────────────────────
 
+/** #2646: the overrides of a clone; every field is optional, and a field left out keeps the source's value. */
+type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'parentTaskId'>>;
+
 type CreateInput = {
   appRef?: string | null;
   parentTaskId?: string | null;
@@ -1155,6 +1158,8 @@ async function insertTask(
     status?: 'backlog' | 'pending';
     /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
     project?: boolean;
+    /** #2646: the task a clone was made from; set only here, at creation, and named in the one task.created event. */
+    clonedFromId?: string | null;
   },
 ): Promise<{ id: string; queued: boolean }> {
   // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
@@ -1210,6 +1215,7 @@ async function insertTask(
       priority: a.priority ?? 1,
       status: a.status ?? 'pending',
       parentTaskId: parentId,
+      clonedFromId: a.clonedFromId ?? null,
       requirements: a.requirements ?? Prisma.DbNull,
       properties: a.properties ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
@@ -1228,7 +1234,7 @@ async function insertTask(
     appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
     // The owner rides the event (#1757): a named owner is visible to the
     // event stream — and so to the alarm chain — from creation.
-    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null },
+    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null, clonedFromTaskId: a.clonedFromId ?? null },
   });
   if (a.properties) {
     await appendTaskEvent(tx, {
@@ -1521,6 +1527,178 @@ export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx:
   }
 }
 
+/**
+ * The one create path: a plain create, and a clone (#2646), which fills `input` from its source and says which values it
+ * only copied (a copied value is left out, never refused, when the caller may not set it).
+ */
+type CloneCopy = { sourceId: string; priorityCopied: boolean; propertiesCopied: boolean; requirements?: Prisma.JsonValue | null };
+
+async function createTask(input: CreateInput, ctx: Context, info?: GraphQLResolveInfo, clone?: CloneCopy): Promise<TaskRow> {
+  if (!input) throw badInput('input is required.');
+  let parentId = input.parentTaskId?.trim() || null;
+  if (input.project && parentId) throw badInput('A project is a top-level task: it takes no parentTaskId.');
+  // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentId` stays the caller's spelling for echoes.
+  let parentTaskId: string | null = null;
+  let app: TaskApp;
+  let actor: TaskActor;
+  if (parentId) {
+    const readable = await loadReadableTask(ctx, parentId);
+    if (!readable) throw notFound(parentId);
+    ({ app, actor } = readable);
+    parentTaskId = readable.task.id;
+    // #2553: AT0 is the implicit parent of a task with no project, never a parent a caller names: a plain create takes
+    // the ROOT gate and owner rules (this input names no parent), so naming AT0 would reach the child gate instead.
+    if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskId to make a task with no project.');
+    // A parent in another App reads as not-found: no cross-App oracle (#1705).
+    if (input.appRef) {
+      let namedAppId: string | null = null;
+      try {
+        namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
+      } catch (e) {
+        if (!(e instanceof AppNotFoundError)) throw e;
+      }
+      if (namedAppId !== app.id) throw notFound(input.parentTaskId!.trim());
+    }
+  } else {
+    if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
+    ({ app, actor } = await resolveParticipatedApp(ctx, input.appRef));
+  }
+  requireWritable(ctx, app);
+
+  const priority = taskPriority(input.priority);
+  const title = normalizeTitle(input.title);
+  const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
+  const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
+  const tags = normalizeTags(input.tags);
+  // #2649: judged with the other fields, before any transaction, so a refused list writes nothing.
+  const references = taskReferencesInput(input.references);
+  // #3125 S2 (V46): judged with the other fields after the App gate above, so a refused value writes nothing.
+  const externalId = externalIdInput(input.externalId);
+  const startBy = parseStartBy(input.startBy);
+  const finishBy = parseFinishBy(input.finishBy);
+  const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
+  // #1754: backlog or pending — and a backlog task carries no assignee.
+  const status = normalizeCreateStatus(input.status);
+  if (status === 'backlog' && input.assignee) {
+    throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
+  }
+  const now = new Date();
+  const evActor = eventActor(ctx.userId);
+
+  /**
+   * The inputs that name OTHER entities (owner, assignee, excluded
+   * workers). Resolved only after the caller is authorized — for a child
+   * task, under the parent's row lock — so a caller who may not create here
+   * learns nothing from which of them would be refused.
+   */
+  const resolveParties = async (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => {
+    // #2646: a clone's copied requirements were checked when the source was made; a worker or model group removed
+    // since must not refuse a clone for a value the caller never typed.
+    const requirements = clone && clone.requirements !== undefined
+      ? ((clone.requirements as Prisma.InputJsonObject | null) ?? null)
+      : await normalizeRequirements(txCtx, app, input.requirements);
+    let owner: TaskParty = actorParty(actor);
+    if (input.owner) {
+      // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
+      // creator — any participant, worker or person — may name its owner,
+      // so long as the named party participates in the App too. A ref that
+      // names nobody, a non-participant or another App's worker is
+      // TASK_OWNER_INVALID — the same refusal either way. A child task's
+      // owner is its parent's assignee, so naming anybody but yourself is
+      // TASK_CHILD_OWNER_MISMATCH, valid ref or not (no oracle).
+      let named: TaskParty | null = null;
+      try {
+        named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
+      } catch (e) {
+        if (!parentId || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
+      }
+      if (!named || !sameParty(named, owner)) {
+        if (parentId) {
+          throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
+        }
+        owner = named as TaskParty;
+      }
+    }
+    const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
+    // #2420 (cor:agt:050:28): a creator sets properties only when it is one of their writers for THIS new task (its
+    // owner, someone above the owner, a manager, or the assignee it names); any other creator gets the task made
+    // without them, never a refusal, and the value is not even judged (nothing to learn from its validation).
+    let properties: Prisma.InputJsonObject | null = null;
+    if (input.properties !== undefined && input.properties !== null
+      && await mayWriteProperties(tx, txCtx, app, actor, {
+        ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null,
+        assigneeWorkerId: assignee?.workerId ?? null, assigneeUserId: assignee?.userId ?? null,
+      })) {
+      if (clone?.propertiesCopied) {
+        // #2646: a clone only copies them, so a value the team's schema now refuses is left out, never a refusal.
+        try {
+          properties = normalizeTaskProperties(input.properties);
+          await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+        } catch (e) {
+          if (!(e instanceof GraphQLError)) throw e;
+          properties = null;
+        }
+      } else {
+        properties = normalizeTaskProperties(input.properties);
+        await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+      }
+    }
+    return { requirements, owner, assignee, properties };
+  };
+
+  const refused = parentId ? () => notFound(parentId) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
+  // #2198: advice decided inside the write transaction, filed after it commits.
+  const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
+  // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
+  const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
+  const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
+    if (parentId) {
+      // Lock the parent so its assignee and status can't move under us,
+      // then authorize against the locked row — the one assignee check.
+      const parent = await lockTask(tx, parentTaskId!);
+      if (!parent || parent.appId !== app.id) throw notFound(parentId);
+      if (!isAssignee(actor, parent)) {
+        throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentId });
+      }
+      refuseEnded(parent);
+    }
+    const { requirements, owner, assignee, properties } = await resolveParties(tx, txCtx, app);
+    if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
+      throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
+    }
+    await refuseResettingAssignee(tx, app.id, assignee?.workerId);
+    await assigneeAdvice(tx, app.id, assignee, null, warn);
+    // #2646: a copied priority is kept only for a caller who may set it (as the owner of this clone, or above); for
+    // anyone else it is left unset, never refused. A priority the caller NAMED is judged below, as on a plain create.
+    const keepPriority = !clone?.priorityCopied
+      || (await mayDirectTask(tx, txCtx, app, actor, { ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null }));
+    const made = await insertTask(tx, {
+      app, parentId: parentTaskId, project: input.project === true, title, description, source, externalId, tags, references, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status,
+      priority: keepPriority ? priority : undefined, clonedFromId: clone?.sourceId ?? null,
+      created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
+    });
+    const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+    if ((input.priority !== undefined && !clone?.priorityCopied) || input.blockedBy !== undefined) {
+      await requireTaskDirection(tx, txCtx, app, actor, row);
+    }
+    for (const ref of [...new Set(input.blockedBy ?? [])]) {
+      await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
+    }
+    await checkFinishByAtDbClock(tx, finishBy, startBy);
+    return made;
+  }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
+  // #1707 (cor:agt:060:06): a queued task is matched now, after its create
+  // committed; the returned task shows the assignee when one was free.
+  if (made.queued) await matchAfterChange(ctx.db, app.id);
+  const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
+  // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
+  await launchAssignee(ctx.db, created);
+  await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
+  // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
+  if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
+  return created;
+}
+
 export const agentTaskMutations = {
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
   updateAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input: Record<string, unknown> }, ctx: Context) =>
@@ -1630,150 +1808,60 @@ export const agentTaskMutations = {
    * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
    * interim).
    */
-  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
-    if (!input) throw badInput('input is required.');
-    let parentId = input.parentTaskId?.trim() || null;
-    if (input.project && parentId) throw badInput('A project is a top-level task: it takes no parentTaskId.');
-    // #2553: the parent's canonical id once it resolves (a handle is an alias); `parentId` stays the caller's spelling for echoes.
+  createAgentTask: (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => createTask(input, ctx, info),
+
+  /**
+   * #2646 (cor:agt:050:02, What a clone does; Decided, ruling 0010): a clone is a create in the source's App with its
+   * fields filled in from the source, linked to it. Whoever may read the source and create a task there may clone it,
+   * whatever its status. Every create gate applies to the copied values (the parent, the root gate, properties,
+   * priority); the source is never changed. An ended task never reopens: this makes a NEW task.
+   */
+  cloneAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const readable = await loadReadableTask(ctx, taskId);
+    // Unknown, unreadable and cross-App sources answer alike (#1577 posture): no existence oracle over task ids.
+    if (!readable) throw notFound(taskId);
+    const src = readable.task;
+    if (src.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project and cannot be cloned.');
+    const ov: CloneInput = input ?? {};
+    const named = <K extends keyof CloneInput>(k: K): boolean => ov[k] !== undefined;
+    // The parent: a parent the call names; else, when the call names none (parentTaskId: null), a root; else the
+    // source's own. A project stays a project, and a task under AT0 or under an ended parent goes under AT0.
     let parentTaskId: string | null = null;
-    let app: TaskApp;
-    let actor: TaskActor;
-    if (parentId) {
-      const readable = await loadReadableTask(ctx, parentId);
-      if (!readable) throw notFound(parentId);
-      ({ app, actor } = readable);
-      parentTaskId = readable.task.id;
-      // #2553: AT0 is the implicit parent of a task with no project, never a parent a caller names: a plain create takes
-      // the ROOT gate and owner rules (this input names no parent), so naming AT0 would reach the child gate instead.
-      if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskId to make a task with no project.');
-      // A parent in another App reads as not-found: no cross-App oracle (#1705).
-      if (input.appRef) {
-        let namedAppId: string | null = null;
-        try {
-          namedAppId = (await resolveAppRef(ctx.db, input.appRef)).id;
-        } catch (e) {
-          if (!(e instanceof AppNotFoundError)) throw e;
-        }
-        if (namedAppId !== app.id) throw notFound(input.parentTaskId!.trim());
-      }
+    let project = false;
+    if (ov.parentTaskId) {
+      parentTaskId = ov.parentTaskId;
+      project = ov.project === true;
+    } else if (ov.parentTaskId === null) {
+      project = ov.project === true;
+    } else if (!src.parentTaskId) {
+      project = ov.project ?? true;
     } else {
-      if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
-      ({ app, actor } = await resolveParticipatedApp(ctx, input.appRef));
+      const parent = await ctx.db.agentTask.findUnique({ where: { id: src.parentTaskId }, select: { id: true, handle: true, status: true } });
+      if (parent && parent.handle !== PROJECT_ZERO_HANDLE && !ENDED.includes(parent.status)) parentTaskId = parent.id;
+      project = ov.project === true && !parentTaskId;
     }
-    requireWritable(ctx, app);
-
-    const priority = taskPriority(input.priority);
-    const title = normalizeTitle(input.title);
-    const description = optionalText(input.description, TASK_DESCRIPTION_MAX, 'description');
-    const source = optionalText(input.source, TASK_SOURCE_MAX, 'source');
-    const tags = normalizeTags(input.tags);
-    // #2649: judged with the other fields, before any transaction, so a refused list writes nothing.
-    const references = taskReferencesInput(input.references);
-    // #3125 S2 (V46): judged with the other fields after the App gate above, so a refused value writes nothing.
-    const externalId = externalIdInput(input.externalId);
-    const startBy = parseStartBy(input.startBy);
-    const finishBy = parseFinishBy(input.finishBy);
-    const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
-    // #1754: backlog or pending — and a backlog task carries no assignee.
-    const status = normalizeCreateStatus(input.status);
-    if (status === 'backlog' && input.assignee) {
-      throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
-    }
-    const now = new Date();
-    const evActor = eventActor(ctx.userId);
-
-    /**
-     * The inputs that name OTHER entities (owner, assignee, excluded
-     * workers). Resolved only after the caller is authorized — for a child
-     * task, under the parent's row lock — so a caller who may not create here
-     * learns nothing from which of them would be refused.
-     */
-    const resolveParties = async (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => {
-      const requirements = await normalizeRequirements(txCtx, app, input.requirements);
-      let owner: TaskParty = actorParty(actor);
-      if (input.owner) {
-        // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
-        // creator — any participant, worker or person — may name its owner,
-        // so long as the named party participates in the App too. A ref that
-        // names nobody, a non-participant or another App's worker is
-        // TASK_OWNER_INVALID — the same refusal either way. A child task's
-        // owner is its parent's assignee, so naming anybody but yourself is
-        // TASK_CHILD_OWNER_MISMATCH, valid ref or not (no oracle).
-        let named: TaskParty | null = null;
-        try {
-          named = await resolveParty(txCtx, app, input.owner, 'TASK_OWNER_INVALID');
-        } catch (e) {
-          if (!parentId || !(e instanceof GraphQLError && e.extensions?.code === 'TASK_OWNER_INVALID')) throw e;
-        }
-        if (!named || !sameParty(named, owner)) {
-          if (parentId) {
-            throw taskError('TASK_CHILD_OWNER_MISMATCH', "A child task is owned by the parent's assignee who creates it; it cannot name another owner.");
-          }
-          owner = named as TaskParty;
-        }
-      }
-      const assignee = input.assignee ? await resolveParty(txCtx, app, input.assignee, 'TASK_ASSIGNEE_INVALID') : null;
-      // #2420 (cor:agt:050:28): a creator sets properties only when it is one of their writers for THIS new task (its
-      // owner, someone above the owner, a manager, or the assignee it names); any other creator gets the task made
-      // without them, never a refusal, and the value is not even judged (nothing to learn from its validation).
-      let properties: Prisma.InputJsonObject | null = null;
-      if (input.properties !== undefined && input.properties !== null
-        && await mayWriteProperties(tx, txCtx, app, actor, {
-          ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null,
-          assigneeWorkerId: assignee?.workerId ?? null, assigneeUserId: assignee?.userId ?? null,
-        })) {
-        properties = normalizeTaskProperties(input.properties);
-        await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
-      }
-      return { requirements, owner, assignee, properties };
+    const stored = storedTaskReferences(src.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null }));
+    const createInput: CreateInput = {
+      appRef: readable.app.id,
+      parentTaskId,
+      project,
+      title: ov.title ?? src.title,
+      description: named('description') ? ov.description : src.description,
+      source: named('source') ? ov.source : src.source,
+      tags: named('tags') ? ov.tags : src.tags,
+      references: named('references') ? ov.references : stored,
+      closeSessionWhenDone: ov.closeSessionWhenDone ?? src.closeSessionWhenDone,
+      priority: ov.priority ?? src.priority,
+      properties: named('properties') ? ov.properties : (src.properties ?? undefined),
+      requirements: named('requirements') ? ov.requirements : undefined,
+      owner: ov.owner, assignee: ov.assignee, status: ov.status, startBy: ov.startBy, finishBy: ov.finishBy,
     };
-
-    const refused = parentId ? () => notFound(parentId) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
-    // #2198: advice decided inside the write transaction, filed after it commits.
-    const warn: TaskWarningCode[] = source === null ? ['task.create.no-source'] : [];
-    // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
-    const lockedAssignee = await partyWorkerForLock(ctx, app.id, input.assignee);
-    const made = await inTaskWriteTx(ctx, app, actor, refused, async (tx, txCtx, app) => {
-      if (parentId) {
-        // Lock the parent so its assignee and status can't move under us,
-        // then authorize against the locked row — the one assignee check.
-        const parent = await lockTask(tx, parentTaskId!);
-        if (!parent || parent.appId !== app.id) throw notFound(parentId);
-        if (!isAssignee(actor, parent)) {
-          throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentId });
-        }
-        refuseEnded(parent);
-      }
-      const { requirements, owner, assignee, properties } = await resolveParties(tx, txCtx, app);
-      if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
-        throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
-      }
-      await refuseResettingAssignee(tx, app.id, assignee?.workerId);
-      await assigneeAdvice(tx, app.id, assignee, null, warn);
-      const made = await insertTask(tx, {
-        app, parentId: parentTaskId, project: input.project === true, title, description, source, externalId, tags, references, startBy, finishBy, closeSessionWhenDone, requirements, properties, owner, assignee, status, priority,
-        created: createdStamp(ctx), assigned: assignedStamp(ctx, now), evActor,
-      });
-      const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-      if (input.priority !== undefined || input.blockedBy !== undefined) {
-        await requireTaskDirection(tx, txCtx, app, actor, row);
-      }
-      for (const ref of [...new Set(input.blockedBy ?? [])]) {
-        await changeTaskBlockerInTx(tx, txCtx, app, actor, row, ref, 'add');
-      }
-      await checkFinishByAtDbClock(tx, finishBy, startBy);
-      return made;
-    }, { lockWorkerIds: [lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
-    // #1707 (cor:agt:060:06): a queued task is matched now, after its create
-    // committed; the returned task shows the assignee when one was free.
-    if (made.queued) await matchAfterChange(ctx.db, app.id);
-    const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
-    // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
-    await launchAssignee(ctx.db, created);
-    await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
-    // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
-    if (actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, actor.workerId);
-    return created;
+    return createTask(createInput, ctx, info, {
+      sourceId: src.id,
+      priorityCopied: ov.priority == null,
+      propertiesCopied: !named('properties'),
+      requirements: named('requirements') ? undefined : ((src.requirements as Prisma.JsonValue | null) ?? null),
+    });
   },
 
   /**
@@ -2448,7 +2536,7 @@ export async function partyView(ctx: Context, workerId: string | null, userId: s
   return null;
 }
 
-type RelationDirection = 'blockedBy' | 'blocks';
+type RelationDirection = 'blockedBy' | 'blocks' | 'clones';
 type RelationPage = { items: TaskRow[]; total: number; hasMore: boolean };
 type RelationRequest = {
   id: string;
@@ -2546,11 +2634,16 @@ async function relationPages(
   const totals = new Map<string, number>(); // `${direction}:${parent}` -> total
   const related = new Map<string, TaskRow>();
   const relatedIds = new Map<string, string[]>(); // `${direction}:${take}:${skip}:${parent}` -> related ids, in order
-  for (const direction of ['blockedBy', 'blocks'] as const) {
+  for (const direction of ['blockedBy', 'blocks', 'clones'] as const) {
     const ofDirection = mine.filter((r) => r.direction === direction);
     if (!ofDirection.length) continue;
     const parentIds = [...new Set(ofDirection.map((r) => r.id))];
-    const counts = direction === 'blockedBy'
+    const counts = direction === 'clones'
+      ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT c.cloned_from_id AS parent, count(*)::int AS n FROM agent_tasks c
+          JOIN agent_tasks p ON p.id = c.cloned_from_id AND p.app_id = c.app_id
+          WHERE c.cloned_from_id IN (${Prisma.join(parentIds)}) GROUP BY c.cloned_from_id`
+      : direction === 'blockedBy'
       ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
           SELECT l.task_id AS parent, count(*)::int AS n FROM agent_task_blockers l
           JOIN agent_tasks p ON p.id = l.task_id JOIN agent_tasks r ON r.id = l.blocker_task_id AND r.app_id = p.app_id
@@ -2570,7 +2663,16 @@ async function relationPages(
     }
     for (const s of shapes.values()) {
       const upper = s.skip + s.take;
-      const rows = direction === 'blockedBy'
+      const rows = direction === 'clones'
+        ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT c.cloned_from_id AS parent, c.id AS related,
+                     row_number() OVER (PARTITION BY c.cloned_from_id ORDER BY c.id) AS rn
+              FROM agent_tasks c
+              JOIN agent_tasks p ON p.id = c.cloned_from_id AND p.app_id = c.app_id
+              WHERE c.cloned_from_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`
+        : direction === 'blockedBy'
         ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
             SELECT parent, related FROM (
               SELECT l.task_id AS parent, l.blocker_task_id AS related,
@@ -2608,6 +2710,17 @@ export const agentTaskFieldResolvers = {
   AgentTask: {
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
+    /** #2646 (cor:agt:050:02): the clones made from this task, paged, in this task's own App; each as its own read answers. */
+    clones: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'clones', args),
+    /**
+     * #2646: the task this one was cloned from, as that task's OWN read answers (cor:acl:110:02): the gate is judged
+     * here, not inherited from the clone's, so a source the caller cannot read, a source in another App (the server
+     * never makes one) and a source since removed all read as null, never as an error.
+     */
+    clonedFrom: async (task: TaskRow, _: unknown, ctx: Context) => {
+      if (!task.clonedFromId) return null;
+      return withReadableTask(ctx, task.clonedFromId, async (c, r) => (r.task.appId === task.appId ? r.task : null));
+    },
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
     taskNumber: (t: TaskRow) => String(t.taskNumber),
