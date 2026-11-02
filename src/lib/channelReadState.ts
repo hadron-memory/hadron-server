@@ -39,6 +39,8 @@ import { TEAM_CHAT_LOC } from './teamChatLoc.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
+// #3194: these timestamp(3) columns store UTC; preserve the transaction clock while removing session-zone conversion.
+
 /** Message nodeTypes that occupy a seq — mirrors chatRoot.ts's allowlist. */
 const MESSAGE_NODE_TYPES = ['chat-message', 'record'];
 
@@ -57,21 +59,21 @@ export async function advanceReadState(db: Db, attendee: RegisterAttendee, chann
     'workerId' in attendee
       ? await db.$queryRaw<Array<{ last_seen_seq: number }>>`
           INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, channel_incarnation, updated_at)
-          VALUES (${generateId()}, ${attendee.workerId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), now())
+          VALUES (${generateId()}, ${attendee.workerId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), (now() AT TIME ZONE 'UTC'))
           ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
             DO UPDATE SET
               channel_incarnation = CASE WHEN EXCLUDED.last_seen_seq > channel_read_states.last_seen_seq
                 THEN EXCLUDED.channel_incarnation ELSE channel_read_states.channel_incarnation END,
-              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
+              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = (now() AT TIME ZONE 'UTC')
           RETURNING last_seen_seq`
       : await db.$queryRaw<Array<{ last_seen_seq: number }>>`
           INSERT INTO channel_read_states (id, agent_id, app_id, channel_id, last_seen_seq, channel_incarnation, updated_at)
-          VALUES (${generateId()}, ${attendee.agentId}, ${attendee.appId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), now())
+          VALUES (${generateId()}, ${attendee.agentId}, ${attendee.appId}, ${channelId}, ${target}, (SELECT incarnation FROM channels WHERE id = ${channelId}), (now() AT TIME ZONE 'UTC'))
           ON CONFLICT (agent_id, app_id, channel_id) WHERE agent_id IS NOT NULL
             DO UPDATE SET
               channel_incarnation = CASE WHEN EXCLUDED.last_seen_seq > channel_read_states.last_seen_seq
                 THEN EXCLUDED.channel_incarnation ELSE channel_read_states.channel_incarnation END,
-              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = now()
+              last_seen_seq = GREATEST(channel_read_states.last_seen_seq, EXCLUDED.last_seen_seq), updated_at = (now() AT TIME ZONE 'UTC')
           RETURNING last_seen_seq`;
   return rows[0]?.last_seen_seq ?? target;
 }
@@ -110,13 +112,13 @@ export async function readStateIncarnations(
 export async function stampChannelCheck(db: Db, workerId: string, channelId: string): Promise<boolean> {
   const rows = await db.$queryRaw<Array<{ ok: number }>>`
     INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
-    SELECT ${generateId()}, w.id, c.id, 0, now(), now()
+    SELECT ${generateId()}, w.id, c.id, 0, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
     FROM workers w
     JOIN channels c ON c.id = ${channelId} AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
     JOIN memories m ON m.id = c.memory_id AND m.app_id = w.app_id
     WHERE w.id = ${workerId} AND w.retired_at IS NULL
     ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
-      DO UPDATE SET last_checked_at = now()
+      DO UPDATE SET last_checked_at = (now() AT TIME ZONE 'UTC')
     RETURNING 1 AS ok`;
   return rows.length > 0;
 }
@@ -128,13 +130,13 @@ export async function stampChannelCheck(db: Db, workerId: string, channelId: str
 export async function stampTeamChannelChecks(db: Db, workerId: string): Promise<number> {
   const rows = await db.$queryRaw<Array<{ ok: number }>>`
     INSERT INTO channel_read_states (id, worker_id, channel_id, last_seen_seq, last_checked_at, updated_at)
-    SELECT gen_random_uuid()::text, w.id, c.id, 0, now(), now()
+    SELECT gen_random_uuid()::text, w.id, c.id, 0, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')
     FROM workers w
     JOIN memories m ON m.app_id = w.app_id
     JOIN channels c ON c.memory_id = m.id AND c.deleted_at IS NULL AND c.loc = ${TEAM_CHAT_LOC}
     WHERE w.id = ${workerId} AND w.retired_at IS NULL
     ON CONFLICT (worker_id, channel_id) WHERE worker_id IS NOT NULL
-      DO UPDATE SET last_checked_at = now()
+      DO UPDATE SET last_checked_at = (now() AT TIME ZONE 'UTC')
     RETURNING 1 AS ok`;
   return rows.length;
 }
