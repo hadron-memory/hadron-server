@@ -1,5 +1,6 @@
 {
   "nonEntityTypes": {
+    "AgentTaskMatchFailure": "value",
     "NodeVectorMeta": "value",
     "NodeHit": "value",
     "FindNodesResult": "envelope",

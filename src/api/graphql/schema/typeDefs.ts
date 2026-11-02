@@ -8196,6 +8196,8 @@ export const typeDefs = `#graphql
       parentTaskId: ID
       rootsOnly: Boolean
       queued: Boolean
+      "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."
+      matchFailed: Boolean
       limit: Int
       offset: Int
     ): [AgentTask!]!
@@ -14065,6 +14067,10 @@ export const typeDefs = `#graphql
 
   "What the platform's matcher must respect when it chooses an assignee (plan design:agent-tasks section 3.1; consumed by T3)."
   type AgentTaskRequirements {
+    "Any one listed role suffices; null retains the single-role requirement."
+    roles: [String!]
+    "Optional matching team lead; never an authorization grant."
+    teamWorkerId: ID
     role: String
     familyIn: [String!]
     familyNotIn: [String!]
@@ -14078,6 +14084,10 @@ export const typeDefs = `#graphql
   }
 
   input AgentTaskRequirementsInput {
+    "Any one listed role suffices. Empty sets are refused. Give role or roles, not both."
+    roles: [String!]
+    "Lead worker (id, URN or name) of this App. Pool: lead, descendants and workers reporting to nobody."
+    team: String
     role: String
     "Model families the assignee must run as. Give this or familyNotIn, not both."
     familyIn: [String!]
@@ -14793,6 +14803,12 @@ export const typeDefs = `#graphql
 
   type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
 
+  "Single-shot failure (cor:agt:050:01): assigning clears it; cancellation clears it."
+  type AgentTaskMatchFailure {
+    reason: String!
+    failedAt: DateTime!
+  }
+
   """
   One piece of work a team App has assigned, or wants assigned
   (hrn:node:hadronmemory.com:specs:cor:agt:050:01). The platform records who holds it, since when and how it
@@ -14800,6 +14816,8 @@ export const typeDefs = `#graphql
   workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
   type AgentTask {
+    "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
+    matchFailure: AgentTaskMatchFailure
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
     priority: Int!
     "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
@@ -15781,6 +15799,8 @@ export const typeDefs = `#graphql
   parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
   """
   input CreateAgentTaskInput {
+    "Run one blocking match. Failure is marked and never retried automatically; assignment clears it. Only for pending tasks without an assignee."
+    match: Boolean
     "#2644 — naming priority or blockers requires the task assigner authority; otherwise creation refuses atomically."
     priority: Int
     blockedBy: [ID!]
