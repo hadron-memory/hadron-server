@@ -122,4 +122,16 @@ it('wide list and tree loads omit findings unless the result is selected',async(
  const tree=await R.Query.agentTaskTree({}, {root:task.id},ctx());
  expect(tree).toHaveLength(1);expect(Object.hasOwn(tree[0],'resultFindings')).toBe(false);
  expect((await R.AgentTask.result(tree[0],{},ctx())).findings).toEqual(result.findings);
+ const other=await M.createAgentTask({}, {input:{appRef:app.id,title:'Blocked',assignee:{user:assignee.id}}},ctx(owner.id));
+ await db.agentTaskBlocker.create({data:{taskId:other.id,blockerTaskId:task.id}});
+ const related=await R.AgentTask.blockedBy(other,{},ctx());
+ expect(related.items).toHaveLength(1);expect(Object.hasOwn(related.items[0],'resultFindings')).toBe(false);
+ expect((await R.AgentTask.result(related.items[0],{},ctx())).findings).toEqual(result.findings);
+});
+
+it('lazy result read rechecks revoked membership instead of trusting a previously read list row',async()=>{
+ await finish([{severity:'note',text:'private'}]);
+ const c=ctx();const [row]=await R.Query.agentTasks({}, {appRef:app.id},c);
+ await db.appMember.delete({where:{appId_userId:{appId:app.id,userId:assignee.id}}});
+ expect(await R.AgentTask.result(row,{},c)).toBeNull();
 });
