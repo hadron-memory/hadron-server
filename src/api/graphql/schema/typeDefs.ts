@@ -14803,7 +14803,7 @@ export const typeDefs = `#graphql
 
   type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
 
-  "Single-shot failure (cor:agt:050:01): assigning clears it; cancellation clears it."
+  "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
   type AgentTaskMatchFailure {
     reason: String!
     failedAt: DateTime!
