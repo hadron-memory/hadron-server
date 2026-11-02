@@ -174,6 +174,22 @@ describe('the check: it fails and names the field', () => {
     const noGate = run({ ...completeEntries(), 'Memory.agent': { ...E.self, gate: 'requireNothing' } });
     expect(noGate.problems.join('\n')).toMatch(/Memory\.agent.*requireNothing/);
   });
+  it('fails a malformed path::name reference (no separator, or an empty name)', () => {
+    const noSep = run({ ...completeEntries(), 'Memory.agent': { ...E.self, resolver: 'src/resolvers.ts' } });
+    expect(noSep.problems.join('\n')).toMatch(/Memory\.agent.*path::name/);
+    const emptyName = run({ ...completeEntries(), 'Memory.agent': { ...E.self, resolver: 'src/resolvers.ts::' } });
+    expect(emptyName.problems.join('\n')).toMatch(/Memory\.agent/);
+  });
+  it('fails a null entry, naming the field', () => {
+    // Not through run(): withTargets would spread the null into an object and hide it.
+    const entries = { ...withTargets(completeEntries()), 'Memory.agent': null };
+    const r = checkManifest({ sdl: FIXTURE_SDL, manifest: { nonEntityTypes: NON_ENTITY, entries }, root });
+    expect(r.problems).toEqual([expect.stringMatching(/Memory\.agent: entry has no class/)]);
+  });
+  it('fails a self-gated entry with a blank gate', () => {
+    const r = run({ ...completeEntries(), 'Memory.agent': { ...E.self, gate: '   ' } });
+    expect(r.problems).toEqual([expect.stringMatching(/Memory\.agent: self-gated needs the shared gate it calls/)]);
+  });
   it('fails a child-gated entry that names no test, or a test title the file does not contain', () => {
     expect(run({ ...completeEntries(), 'Memory.members': { class: 'child-gated' } }).problems.join('\n')).toMatch(/Memory\.members.*test/);
     const wrong = run({ ...completeEntries(), 'Memory.members': { class: 'child-gated', test: 'src/gate.test.ts::a title that is not there' } });
