@@ -8,15 +8,63 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { readableNestedAgent } from './resolvers.types.js';
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import {
   type Context,
   clampListTake,
+  pageArgs,
+  pageEnvelope,
   requireOrgRole,
   requireOwnerOrOrgRole,
   resolveOrgScope,
   APP_INCLUDE,
 } from './resolvers.helpers.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+
+/**
+ * #2213 S2 — the admission and row scope of `appKeys`, built once so `appKeys`
+ * and `appKeysPage` can never disagree about who sees which keys
+ * (hrn:node:hadronmemory.com:specs:cor:api:120:04). Refuses before returning a
+ * scope (#1744: whoever manages the App, as themselves; never an App key, a
+ * bound worker or an impersonated request), so neither a count nor a page is
+ * ever read for a refused caller. Live keys only, newest first; the id
+ * tiebreak puts keys minted in the same instant in one order on every read.
+ */
+export async function appKeyInventoryScope(ctx: Context, appRef: string) {
+  // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
+  await requireAppKeyManager(ctx, app);
+  return {
+    where: { appId, revokedAt: null } satisfies Prisma.AppKeyWhereInput,
+    orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
+  };
+}
+
+/**
+ * #2213 S2 — the admission and row scope of `myUserApiKeys`, shared with
+ * `myUserApiKeysPage` so both refuse the same callers with the same error and
+ * count the same rows. Active AND revoked keys (025 FR-004: the owner's audit
+ * log); keys the owner hid only with `includeHidden` (#2298).
+ */
+export function userApiKeyInventoryScope(ctx: Context, includeHidden: boolean | null | undefined) {
+  if (!ctx.userId) {
+    throw new GraphQLError(
+      'myUserApiKeys requires a user-scoped credential.',
+      { extensions: { code: 'UNAUTHENTICATED' } },
+    );
+  }
+  // #876 class sweep: the target's personal API-credential inventory
+  // (previews, labels, last-used stamps, active AND revoked) is
+  // identity-scoped — never part of a shared-org support view.
+  if (ctx.impersonation) throw forbiddenError();
+  return {
+    where: { userId: ctx.userId, ...(includeHidden ? {} : { hiddenAt: null }) } satisfies Prisma.UserApiKeyWhereInput,
+    // `id desc` tiebreaker on createdAt ties: deterministic ordering
+    // regardless of millisecond ties.
+    orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],
+  };
+}
 
 export const appQueries = {
     serverInfo: async (_: unknown, __: unknown, ___: Context) => getDeploymentInfo(),
@@ -179,15 +227,23 @@ export const appQueries = {
     },
 
     appKeys: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
-      const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // #1744: inventory is manager-only, including under impersonation.
-      await requireAppKeyManager(ctx, app);
-      return ctx.db.appKey.findMany({
-        where: { appId: resolvedAppId, revokedAt: null },
-        orderBy: { createdAt: 'desc' },
-      });
+      return ctx.db.appKey.findMany(await appKeyInventoryScope(ctx, appRef));
+    },
+
+    // #2213 S2: `appKeys` as a page — the same gate, rows and order, with the real total.
+    appKeysPage: async (
+      _: unknown,
+      args: { appRef: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { where, orderBy } = await appKeyInventoryScope(ctx, args.appRef);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.appKey.count({ where }),
+        ctx.db.appKey.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
     // 025-oauth-for-mcp FR-004: list caller's own user-scoped API keys
@@ -201,20 +257,21 @@ export const appQueries = {
     // this is effectively a fingerprint); guarantees deterministic
     // ordering regardless of millisecond ties.
     myUserApiKeys: async (_: unknown, { includeHidden }: { includeHidden?: boolean } = {}, ctx: Context) => {
-      if (!ctx.userId) {
-        throw new GraphQLError(
-          'myUserApiKeys requires a user-scoped credential.',
-          { extensions: { code: 'UNAUTHENTICATED' } },
-        );
-      }
-      // #876 class sweep: the target's personal API-credential inventory
-      // (previews, labels, last-used stamps, active AND revoked) is
-      // identity-scoped — never part of a shared-org support view.
-      if (ctx.impersonation) throw forbiddenError();
-      return ctx.db.userApiKey.findMany({
-        // #2298: keys the owner hid stay out of the default list.
-        where: { userId: ctx.userId, ...(includeHidden ? {} : { hiddenAt: null }) },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      });
+      return ctx.db.userApiKey.findMany(userApiKeyInventoryScope(ctx, includeHidden));
+    },
+
+    // #2213 S2: `myUserApiKeys` as a page — the same refusals, rows and order, with the real total.
+    myUserApiKeysPage: async (
+      _: unknown,
+      args: { includeHidden?: boolean | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { where, orderBy } = userApiKeyInventoryScope(ctx, args.includeHidden);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.userApiKey.count({ where }),
+        ctx.db.userApiKey.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 };

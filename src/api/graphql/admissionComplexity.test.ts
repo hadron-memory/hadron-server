@@ -33,6 +33,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
+  "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
@@ -40,6 +41,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
   "Query.appRuns",
@@ -80,7 +82,9 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryConfigTemplates",
   "Query.memoryEdges",
   "Query.memoryNodes",
+  "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
+  "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
