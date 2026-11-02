@@ -184,6 +184,15 @@ it('post-push backfills pre-existing findings and preserves their current dispos
   expect((await stored(legacy.id) as any).unresolvedFindingIds).toEqual(['F1']);
   expect(JSON.stringify(await result())).toBe(original);
   expect((await read()).items).toEqual([{findingId:'F1',disposition:'fixed',reference:null}]);
+  // A second post-push must not rewrite either open, fully disposed, or empty-result rows.
+  await dispose('rejected','F2');
+  const empty=await M.createAgentTask({}, {input:{appRef:app.id,title:'No findings',assignee:{user:assignee.id}}},ctx());
+  await M.startAgentTask({}, {taskId:empty.id},ctx(assignee.id));
+  await M.finishAgentTask({}, {taskId:empty.id,result:{outcome:'done',findings:[]}},ctx(assignee.id));
+  const snapshot=()=>client.query('SELECT id, ctid::text AS tuple, finding_dispositions, unresolved_finding_ids, result_findings FROM agent_tasks ORDER BY id');
+  const before=(await snapshot()).rows;
+  await client.query(sql);
+  expect((await snapshot()).rows).toEqual(before);
  } finally {
   try {await client.query(sql);} finally {await client.end();}
  }
