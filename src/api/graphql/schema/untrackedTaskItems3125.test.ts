@@ -614,6 +614,12 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
     const line = logs.find((l) => l[0] === 'untracked.claim_failed');
     expect(line?.[1]).toMatchObject({ appId: app.id, integration: 'gh', claimed: 1, error: 'TypeError' });
     expect(JSON.stringify(line)).not.toContain('issues/2');
+    // Retry (Marco, #64364): nothing was left claimed and hidden. The rolled-back item is untracked again, and a
+    // retry takes it next.
+    expect(urls(await list({ repository: 'acme/widgets' }))).toEqual([2, 3].map((n) => `https://github.com/acme/widgets/issues/${n}`));
+    const again: any = await claim({ repository: 'acme/widgets' });
+    expect(again.tasks.map((t: any) => t.externalId)).toEqual(['https://github.com/acme/widgets/issues/2']);
+    expect(await claimedIds()).toEqual([1, 2].map((n) => `https://github.com/acme/widgets/issues/${n}`));
   });
 
   it('a refusal mid-walk stops it and is returned beside the claims already made, which stay committed', async () => {
