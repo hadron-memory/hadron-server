@@ -1,5 +1,7 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
+import { isDeepStrictEqual } from 'node:util';
+import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -120,17 +122,21 @@ export async function serveChatPrompt(
   db: Context['db'],
   agent: { id: string; name: string; urn: string; personaRole: string | null },
   appId: string | null,
+  llmModel: string | null = null,
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
-  const variables = agentPlatformValues(agent);
-  return { text: applyPlatformVariables(served.content, variables), served, variables: { ...variables } };
+  const variables = { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
+  // #3096 / cor:dmo:150:08: provenance label is record metadata, never another prompt variable.
+  return { text: applyPlatformVariables(served.content, variables), served, variables: {
+    ...variables, 'session.llmModel.source': llmModel === null ? 'unspecified' : 'client-reported',
+  } };
 }
 
 /**
- * #2047 (R37) — a chat records what it was served again only when the served revision CHANGED. (chat, ordinal) is unique, so
+ * #2047 (R37) — a chat records what it was served again only when the served revision or its filled variable values CHANGED (#3096). (chat, ordinal) is unique, so
  * two concurrent turns can race for one ordinal; the loser must not assume the winner recorded ITS revision (the two may
  * have resolved different revisions around an approval). It re-reads the latest record and retries at the next ordinal
- * until the latest record matches what this turn served, so a served revision is never missing from the audit history.
+ * until the latest record matches what this turn served, so a served revision or filled value set is never missing from the audit history.
  */
 export async function recordChatServedIfChanged(
   db: Context['db'],
@@ -140,8 +146,8 @@ export async function recordChatServedIfChanged(
   chatServed: { served: ServedBootPrompt; variables: Record<string, string> },
 ): Promise<void> {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const last = await db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true } });
-    if (last && last.compiledNodeId === chatServed.served.compiledNodeId && last.servedRevSeq === chatServed.served.servedRevSeq) return;
+    const last = await db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true, variables: true } });
+    if (last && last.compiledNodeId === chatServed.served.compiledNodeId && last.servedRevSeq === chatServed.served.servedRevSeq && isDeepStrictEqual(last.variables, chatServed.variables)) return;
     try {
       await recordServedPrompt(db, { kind: 'CHAT', chatId, appId, agentId, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
       return;
@@ -161,6 +167,7 @@ export const chatMutations = {
         conversationName,
         scope,
         isTestRun,
+        llmModel,
       }: {
         agentId: string;
         userId?: string;
@@ -171,6 +178,7 @@ export const chatMutations = {
         // from the Tester. Defaults to false; see typeDefs for the
         // full rationale.
         isTestRun?: boolean;
+        llmModel?: string | null;
       },
       ctx: Context,
     ) => {
@@ -179,6 +187,8 @@ export const chatMutations = {
       // not by a role, so the role check applies to user principals only.
       const pureAppKey = Boolean(ctx.appId && !ctx.userId);
       if (!pureAppKey) requireRole(ctx, 'READER');
+      // Validate before provisioning memory, nodes or a subscription. This input grants nothing.
+      const reportedModel = clientReportedChatModel(llmModel);
 
       // Spec 017: default per FR-003. The GraphQL schema also defaults
       // scope to `private`; the resolver default is a defensive belt.
@@ -554,7 +564,7 @@ export const chatMutations = {
       // in the holding memory without weakening the chat's authority gate.
       // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
       const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
-      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId);
+      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -779,10 +789,12 @@ export const chatMutations = {
 
     sendChatMessage: async (
       _: unknown,
-      { chatId, userMessage }: { chatId: string; userMessage: string },
+      { chatId, userMessage, llmModel }: { chatId: string; userMessage: string; llmModel?: string | null },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+      // Each turn reports independently: omission/null means empty, never an inferred model.
+      const reportedModel = clientReportedChatModel(llmModel);
 
       // Find the chat node
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
@@ -1118,8 +1130,8 @@ export const chatMutations = {
 
         // Re-served on each chat turn so a newly approved revision takes effect.
         if (agent) {
-          // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
-          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
+          // #2047: the same refusal as a bind; and a chat records again only when its revision or filled values CHANGED (R37, #3096), never per unchanged message.
+          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
         }
