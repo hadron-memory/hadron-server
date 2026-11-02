@@ -212,6 +212,61 @@ function orgAppCredentials(org: {
     : undefined;
 }
 
+/**
+ * #2485, shared with #3125 S3: mint a token from the org's GitHub App installation, narrowed to ONE repository and
+ * exactly `permissions` (all read), or throw a typed `GithubReadError`. The token is the caller's to use for this call
+ * only: never cached, logged, returned or put in a URL. Messages are fixed text plus the repository name.
+ */
+export async function mintRepositoryReadToken(
+  db: Pick<PrismaClient, 'organization'>,
+  organizationId: string,
+  repository: { owner: string; name: string },
+  permissions: Readonly<Record<string, 'read'>>,
+): Promise<string> {
+  const org = await db.organization.findUnique({
+    where: { id: organizationId },
+    select: { githubInstallationId: true, githubAppId: true, githubAppPrivateKeyEncrypted: true },
+  });
+  if (!org?.githubInstallationId) {
+    throw new GithubReadError('GITHUB_NOT_INSTALLED', 'the organization has no GitHub App installation.');
+  }
+
+  let credentials: GithubAppCredentials | undefined;
+  try {
+    credentials = orgAppCredentials(org);
+  } catch {
+    // The per-org key did not decrypt; its error says nothing a caller needs.
+    throw new GithubReadError('GITHUB_NOT_INSTALLED', 'the GitHub App credentials could not be read.');
+  }
+
+  const others = Object.keys(permissions).filter((k) => k !== 'metadata').map((k) => `${k}:read`).join(' + ');
+  try {
+    return await mintScopedInstallationToken(org.githubInstallationId, credentials, {
+      repository,
+      permissions: { ...permissions },
+    });
+  } catch (err) {
+    if (!(err instanceof ScopedMintError)) throw err;
+    switch (err.reason) {
+      case 'NOT_CONFIGURED':
+        throw new GithubReadError('GITHUB_NOT_INSTALLED', 'the GitHub App credentials are not configured.');
+      case 'REFUSED':
+        throw new GithubReadError(
+          'GITHUB_PERMISSION_MISSING',
+          `the GitHub installation cannot grant ${others} on "${repository.owner}/${repository.name}" ` +
+            `(HTTP ${err.status}); an organization owner may need to accept the App's ${others === 'issues:read' ? 'Issues permission' : 'permissions'}.`,
+        );
+      case 'SCOPE_MISMATCH':
+        throw new GithubReadError(
+          'GITHUB_TOKEN_SCOPE_MISMATCH',
+          `GitHub granted a token other than ${others} + metadata:read on this one repository; it was discarded unused.`,
+        );
+      default:
+        throw new GithubReadError('GITHUB_UNAVAILABLE', 'GitHub did not issue a token.');
+    }
+  }
+}
+
 export interface SnapshotIssue {
   number: number;
   title: string;
@@ -304,7 +359,7 @@ interface RawIssue {
 
 // GitHub's JSON is checked before it is used, so an unexpected shape is a
 // github_error that keeps the pages already read, never a thrown TypeError.
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+export const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const isOptStr = (v: unknown): boolean => v === null || v === undefined || typeof v === 'string';
 const isLabel = (v: unknown): boolean => isObj(v) && typeof v.name === 'string';
 const isRepoRef = (v: unknown): boolean =>
@@ -347,9 +402,9 @@ function isRawIssue(v: unknown): v is RawIssue {
   );
 }
 
-type Failure = { ok: false; reason: 'rate_limited' | 'github_error' };
+export type Failure = { ok: false; reason: 'rate_limited' | 'github_error' };
 
-async function postGraphql(
+export async function postGraphql(
   token: string,
   query: string,
   variables: Record<string, unknown>,
@@ -520,48 +575,7 @@ export async function takeGithubIssueSnapshot(
     );
   }
 
-  const org = await db.organization.findUnique({
-    where: { id: input.organizationId },
-    select: { githubInstallationId: true, githubAppId: true, githubAppPrivateKeyEncrypted: true },
-  });
-  if (!org?.githubInstallationId) {
-    throw new GithubReadError('GITHUB_NOT_INSTALLED', 'the organization has no GitHub App installation.');
-  }
-
-  let credentials: GithubAppCredentials | undefined;
-  try {
-    credentials = orgAppCredentials(org);
-  } catch {
-    // The per-org key did not decrypt; its error says nothing a run needs.
-    throw new GithubReadError('GITHUB_NOT_INSTALLED', 'the GitHub App credentials could not be read.');
-  }
-
-  let token: string;
-  try {
-    token = await mintScopedInstallationToken(org.githubInstallationId, credentials, {
-      repository: { owner: args.owner, name: args.name },
-      permissions: { ...RUN_GITHUB_PERMISSIONS },
-    });
-  } catch (err) {
-    if (!(err instanceof ScopedMintError)) throw err;
-    switch (err.reason) {
-      case 'NOT_CONFIGURED':
-        throw new GithubReadError('GITHUB_NOT_INSTALLED', 'the GitHub App credentials are not configured.');
-      case 'REFUSED':
-        throw new GithubReadError(
-          'GITHUB_PERMISSION_MISSING',
-          `the GitHub installation cannot grant issues:read on "${args.owner}/${args.name}" ` +
-            `(HTTP ${err.status}); an organization owner may need to accept the App's Issues permission.`,
-        );
-      case 'SCOPE_MISMATCH':
-        throw new GithubReadError(
-          'GITHUB_TOKEN_SCOPE_MISMATCH',
-          'GitHub granted a token other than issues:read + metadata:read on this one repository; it was discarded unused.',
-        );
-      default:
-        throw new GithubReadError('GITHUB_UNAVAILABLE', 'GitHub did not issue a token.');
-    }
-  }
+  const token = await mintRepositoryReadToken(db, input.organizationId, { owner: args.owner, name: args.name }, RUN_GITHUB_PERMISSIONS);
 
   const acquiredAt = now.toISOString();
   const issues: SnapshotIssue[] = [];
