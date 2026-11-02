@@ -210,10 +210,27 @@ describe('parent, root and project', () => {
       expect((await stored(c.id)).parentTaskId).toBe(at0.id);
     });
 
+    it('an explicit project override makes a top-level project, not a child', async () => {
+      const c = await clone(child.id, { project: true }, sibling.id);
+      const row = await stored(c.id);
+      expect(row.parentTaskId).toBeNull();
+      expect(row.handle).toMatch(/^AT[1-9]\d*$/);
+    });
+
     it('a parent named from another App reads as not found', async () => {
       const foreign = await M.createAgentTask({}, { input: { appRef: other.id, title: 'Foreign' } }, ctx(outsider.id));
       await expect(clone(child.id, { parentTaskId: foreign.id }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_FOUND'));
     });
+  });
+});
+
+describe('copied requirements still pass the create gates', () => {
+  it('a model group removed since the source was made refuses the clone, as a plain create does; nothing is created', async () => {
+    await db.agentTask.update({ where: { id: source.id }, data: { requirements: { role: 'reviewer', modelGroupIn: ['gone'] } } });
+    await expect(clone(source.id)).rejects.toMatchObject(code('MODEL_GROUP_NOT_FOUND'));
+    expect(await db.agentTask.count({ where: { clonedFromId: source.id } })).toBe(0);
+    const c = await clone(source.id, { requirements: { role: 'reviewer' } });
+    expect((await stored(c.id)).requirements).toMatchObject({ role: 'reviewer' });
   });
 });
 

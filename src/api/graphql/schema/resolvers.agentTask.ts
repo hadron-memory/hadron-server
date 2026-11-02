@@ -784,6 +784,15 @@ type RequirementsInput = {
   modelGroupNotIn?: string[] | null;
 };
 
+/** #2831 S2 (cor:agt:060:12): a model group name no effective group of this App carries is refused, naming it. */
+async function refuseUnknownModelGroups(ctx: Context, app: TaskApp, names: string[]): Promise<void> {
+  if (!names.length) return;
+  const known = new Set((await loadAppModelGroups(ctx.db, app.id, { strict: true })).map((g) => g.name));
+  for (const name of names) {
+    if (!known.has(name)) throw taskError('MODEL_GROUP_NOT_FOUND', `No model group named "${name}" is declared for this App.`, { name });
+  }
+}
+
 /** The matcher's requirements (plan §3.1). Stored for T3; validated here. */
 async function normalizeRequirements(
   ctx: Context,
@@ -845,10 +854,7 @@ async function normalizeRequirements(
   const modelGroupIn = groupNames(input.modelGroupIn, 'requirements.modelGroupIn');
   const modelGroupNotIn = groupNames(input.modelGroupNotIn, 'requirements.modelGroupNotIn');
   if (modelGroupIn || modelGroupNotIn) {
-    const known = new Set((await loadAppModelGroups(ctx.db, app.id, { strict: true })).map((g) => g.name));
-    for (const name of [...(modelGroupIn ?? []), ...(modelGroupNotIn ?? [])]) {
-      if (!known.has(name)) throw taskError('MODEL_GROUP_NOT_FOUND', `No model group named "${name}" is declared for this App.`, { name });
-    }
+    await refuseUnknownModelGroups(ctx, app, [...(modelGroupIn ?? []), ...(modelGroupNotIn ?? [])]);
   }
   const out: Prisma.InputJsonObject = {
     ...(role ? { role } : {}),
@@ -1594,9 +1600,16 @@ async function createTask(input: CreateInput, ctx: Context, info?: GraphQLResolv
   const resolveParties = async (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => {
     // #2646: a clone's copied requirements were checked when the source was made; a worker or model group removed
     // since must not refuse a clone for a value the caller never typed.
-    const requirements = clone && clone.requirements !== undefined
-      ? ((clone.requirements as Prisma.InputJsonObject | null) ?? null)
-      : await normalizeRequirements(txCtx, app, input.requirements);
+    let requirements: Prisma.InputJsonObject | null;
+    if (clone && clone.requirements !== undefined) {
+      requirements = (clone.requirements as Prisma.InputJsonObject | null) ?? null;
+      // Copied values still pass the create gates (cor:agt:050:02): a model group removed since the source was made is
+      // refused as a plain create refuses it. A removed excluded worker is held by the database reference fence.
+      const groups = (k: string) => (Array.isArray(requirements?.[k]) ? (requirements![k] as string[]) : []);
+      await refuseUnknownModelGroups(txCtx, app, [...groups('modelGroupIn'), ...groups('modelGroupNotIn')]);
+    } else {
+      requirements = await normalizeRequirements(txCtx, app, input.requirements);
+    }
     let owner: TaskParty = actorParty(actor);
     if (input.owner) {
       // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
@@ -1661,6 +1674,11 @@ async function createTask(input: CreateInput, ctx: Context, info?: GraphQLResolv
         throw taskError('TASK_NOT_ASSIGNEE', "Only the parent task's assignee creates its child tasks.", { taskId: parentId });
       }
       refuseEnded(parent);
+    }
+    if (clone) {
+      // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.
+      const src = await tx.agentTask.findUnique({ where: { id: clone.sourceId }, select: { appId: true } });
+      if (!src || src.appId !== app.id) throw notFound(clone.sourceId);
     }
     const { requirements, owner, assignee, properties } = await resolveParties(tx, txCtx, app);
     if (assignee?.workerId && assignee.workerId !== lockedAssignee) {
@@ -1835,10 +1853,13 @@ export const agentTaskMutations = {
       project = ov.project === true;
     } else if (!src.parentTaskId) {
       project = ov.project ?? true;
+    } else if (ov.project === true) {
+      // An explicit project override on a child source makes a top-level project, as on a plain create.
+      project = true;
     } else {
       const parent = await ctx.db.agentTask.findUnique({ where: { id: src.parentTaskId }, select: { id: true, handle: true, status: true } });
       if (parent && parent.handle !== PROJECT_ZERO_HANDLE && !ENDED.includes(parent.status)) parentTaskId = parent.id;
-      project = ov.project === true && !parentTaskId;
+      project = false;
     }
     const stored = storedTaskReferences(src.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null }));
     const createInput: CreateInput = {
