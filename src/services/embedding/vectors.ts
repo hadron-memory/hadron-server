@@ -107,7 +107,7 @@ export async function upsertAbstractVector(
   // null after a move into an unindexed memory, but the source is no longer valid.
   const written = await db.$executeRaw(Prisma.sql`
     INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, embedding, created_at)
-    SELECT ${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, now()
+    SELECT ${generateId()}, ${row.nodeId}, ${row.memoryId}, 'abstract', ${row.provider}, ${row.model}, ${row.dim}, ${toVectorLiteral(row.embedding)}::vector, (now() AT TIME ZONE 'UTC')::timestamp(3)
     FROM nodes n
     WHERE n.id = ${row.nodeId} AND n.memory_id = ${row.memoryId} AND ${pendingGuard(expectedPendingAt)}
     FOR NO KEY UPDATE OF n
@@ -118,7 +118,7 @@ export async function upsertAbstractVector(
       model      = EXCLUDED.model,
       dim        = EXCLUDED.dim,
       embedding  = EXCLUDED.embedding,
-      created_at = now()
+      created_at = (now() AT TIME ZONE 'UTC')::timestamp(3)
   `);
   return written > 0;
 }
@@ -267,7 +267,7 @@ export async function upsertChunkVectors(
       // a 100k-char document with the 512-token default that's ~50 inserts.
       await tx.$executeRaw`
         INSERT INTO node_embeddings (id, node_id, memory_id, kind, provider, model, dim, chunk_index, char_start, char_end, chunk_text, embedding, created_at)
-        VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'chunk', ${row.provider}, ${row.model}, ${row.dim}, ${row.chunkIndex}, ${row.charStart}, ${row.charEnd}, ${row.chunkText}, ${toVectorLiteral(row.embedding)}::vector, now())
+        VALUES (${generateId()}, ${row.nodeId}, ${row.memoryId}, 'chunk', ${row.provider}, ${row.model}, ${row.dim}, ${row.chunkIndex}, ${row.charStart}, ${row.charEnd}, ${row.chunkText}, ${toVectorLiteral(row.embedding)}::vector, (now() AT TIME ZONE 'UTC')::timestamp(3))
       `;
     }
     await tx.$executeRaw`UPDATE nodes SET embedding_truncated_chunks = ${rows.length ? omittedChunks : null} WHERE id = ${nodeId}`;
