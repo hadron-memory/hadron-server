@@ -117,14 +117,14 @@ describe('#3096 client-reported chat model', () => {
 
   it('accepts exactly 256 characters and labels empty explicit reports as client-reported', async () => {
     await compiled('Model={{session.llmModel}}.');
-    for (const llmModel of ['x'.repeat(256), '']) {
+    for (const llmModel of ['x'.repeat(256), '\u{1F600}'.repeat(128), '']) {
       const start = await M.startChat({}, { agentId: agent.id, llmModel }, ctx());
       expect(start.systemMessage).toContain(`Model=${llmModel}.`);
       expect(report((await records(start.chatId))[0]!)['session.llmModel.source']).toBe('client-reported');
     }
   });
 
-  it.each(['x'.repeat(257), 'bad\nmodel', 'bad\0model', 'bad\u007fmodel', 'bad\u0085model', 'bad\u202emodel', 'bad\u2028model'])(
+  it.each(['x'.repeat(257), 'bad\nmodel', 'bad\0model', 'bad\u007fmodel', 'bad\u0085model', 'bad\u202emodel', 'bad\u2028model', 'bad\ud800model', 'bad\udfffmodel'])(
     'refuses a malformed report before start/send writes and never echoes the input (%#)', async llmModel => {
       await compiled('Model={{session.llmModel}}.');
       const before = await db.node.count();
