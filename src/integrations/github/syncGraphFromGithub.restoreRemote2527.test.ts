@@ -222,7 +222,7 @@ describe('#2527 read sync restores origin under the checkout lock', () => {
       expect(env.restoreInsideLock).toBe(true);
       expect(env.restoreSettledInsideLock).toBe(true);
       expect(logged.join(' ')).toMatch(/may still hold an installation token until the next successful restore/);
-      // #2571: only the error's code reaches the log; its raw message never does.
+      // #2569: only allowlisted diagnostic fields reach the log; arbitrary code/path text never does.
       expect(logged.join(' ')).not.toContain('RESTORE_SENTINEL');
       expect(logged.join(' ')).not.toContain(env.local);
       assertNoCredentialSurface(result);

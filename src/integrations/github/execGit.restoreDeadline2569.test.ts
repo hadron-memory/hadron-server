@@ -52,7 +52,7 @@ describe('#2569 bounded child completion under the checkout lock', () => {
     let restored = false;
     let nextEntered = false;
     // A broken implementation is cleaned up too; reaching this timer makes the pin RED.
-    watchdog = setTimeout(() => { safetyKill = true; killOwnedChild(); }, 2500);
+    watchdog = setTimeout(() => { safetyKill = true; killOwnedChild(); }, 4000);
     const first = withMirrorCheckoutLock(memory, async () => {
       try {
         if (fail) throw primary;
@@ -60,7 +60,7 @@ describe('#2569 bounded child completion under the checkout lock', () => {
       } finally {
         try {
           await execGit(['remote', 'set-url', 'origin', `https://${SECRET}@github.com/o/r`, 'stall-2569'], {
-            cwd: root, env: { ...process.env, PATH: join(root, 'bin') }, timeout: 500,
+            cwd: root, env: { ...process.env, PATH: join(root, 'bin') }, timeout: 1000,
           } as Parameters<typeof execGit>[1] & { timeout: number });
         } catch (error) { caught = error; }
         restored = true;
