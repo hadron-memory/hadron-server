@@ -250,9 +250,30 @@ export const automationPinQueries = {
         catch (e) { if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) state = 'CHANGED'; else throw e; }
       }
     }
-    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin) };
+    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin), readGrants: await liveReadGrants(ctx, input.triggerKind, row) };
   },
 };
+
+/**
+ * #2883 (ruling 0081 A): the live read grants this trigger holds, shown to the adopter, who is approving what the
+ * automation may read. Revoked rows are not shown (they read nothing). The target's URN is named only when the adopter
+ * can read that memory; otherwise it is null, as on every other grant projection. A MANUAL run holds none.
+ */
+async function liveReadGrants(ctx: Context, kind: AutomationTriggerRef['triggerKind'], row: { id: string; appId: string }) {
+  if (kind !== 'SCHEDULE' && kind !== 'WEBHOOK') return [];
+  const rows = await ctx.db.appAutomationReadGrant.findMany({
+    where: { appId: row.appId, triggerKind: kind, triggerId: row.id, revokedAt: null },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const out = [];
+  for (const g of rows) {
+    const memory = await canReadMemory(ctx.db, ctx as never, g.memoryId)
+      ? await ctx.db.memory.findFirst({ where: { id: g.memoryId, deletedAt: null }, select: { urn: true } }) : null;
+    out.push({ id: g.id, appId: g.appId, triggerKind: g.triggerKind, triggerId: g.triggerId, memoryUrn: memory?.urn ?? null,
+      prefix: g.prefix, grantedBy: g.grantedBy, createdAt: g.createdAt, revokedAt: null, revokedBy: null });
+  }
+  return out;
+}
 
 type Row = Awaited<ReturnType<typeof load>>;
 /**

@@ -7936,6 +7936,8 @@ export const typeDefs = `#graphql
     hash: String!
     summary: AutomationSummary!
     depth: JSON!
+    "#2883: the live read grants this automation holds (memory and loc prefix), so the adopter approves what it may read. memoryUrn is null when the adopter cannot read that memory."
+    readGrants: [AutomationReadGrant!]!
   }
 
   type AutomationApprovalRow {

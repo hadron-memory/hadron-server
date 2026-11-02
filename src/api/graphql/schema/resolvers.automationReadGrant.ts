@@ -45,7 +45,9 @@ function parseKind(raw: string): ReadGrantTriggerKind {
 
 /** The prefix is optional: absent or blank is the whole memory; otherwise a loc. Validated before any lookup. */
 function parsePrefix(raw: string | null | undefined): string | null {
-  if (raw == null || raw.trim() === '') return null;
+  if (raw == null) return null;
+  // A blank string is a mistake, not the maximum grant: only an absent prefix means the whole memory.
+  if (raw.trim() === '') throw badInput('prefix must be a loc, or omitted for the whole memory.');
   const prefix = raw.trim();
   try { validateLoc(prefix); } catch (e) {
     if (e instanceof InvalidLocError) throw badInput(`prefix is not a valid loc: ${e.message}`);
@@ -91,10 +93,10 @@ export async function managesReadGrantTarget(ctx: Context, memory: TargetRow): P
   }
 }
 
-function project(row: GrantRow, memory: { urn: string } | null, canSeeMemory: boolean) {
+function project(row: GrantRow, memory: { urn: string } | null) {
   return {
     id: row.id, appId: row.appId, triggerKind: row.triggerKind, triggerId: row.triggerId,
-    memoryUrn: canSeeMemory && memory ? safeCanonicalUrn('memory', memory.urn) : null,
+    memoryUrn: memory ? safeCanonicalUrn('memory', memory.urn) : null,
     prefix: row.prefix, grantedBy: row.grantedBy,
     createdAt: row.createdAt, revokedAt: row.revokedAt, revokedBy: row.revokedBy,
   };
@@ -151,7 +153,7 @@ export const automationReadGrantMutations = {
       row = live;
     }
     const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { urn: true } });
-    return project(row, memory, true);
+    return project(row, memory);
   },
 
   revokeAutomationReadGrant: async (_: unknown, { id }: { id: string }, ctx: Context) => {
@@ -182,7 +184,7 @@ export const automationReadGrantMutations = {
     );
     const row = await ctx.db.appAutomationReadGrant.findUniqueOrThrow({ where: { id } });
     const memory = await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } });
-    return project(row, memory, true);
+    return project(row, memory);
   },
 };
 
@@ -190,8 +192,17 @@ export const automationReadGrantQueries = {
   automationReadGrants: async (_: unknown, input: { appRef?: string | null; memoryRef?: string | null; includeRevoked?: boolean | null }, ctx: Context) => {
     await requirePersonAsThemselves(ctx, denied);
     if (!input.appRef && !input.memoryRef) throw badInput('appRef or memoryRef is required.');
-    const appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : undefined;
-    const memoryId = input.memoryRef ? (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id : undefined;
+    // An unknown ref and a ref the caller cannot see are the one answer, the empty list (as the rows below are filtered
+    // by what the caller manages), so the list is no existence oracle for an App or a memory.
+    let appId: string | undefined;
+    let memoryId: string | undefined;
+    try {
+      appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : undefined;
+      memoryId = input.memoryRef ? (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id : undefined;
+    } catch (e) {
+      if ((e as { extensions?: { code?: string } }).extensions?.code === 'FORBIDDEN') return [];
+      throw e;
+    }
     const rows = await ctx.db.appAutomationReadGrant.findMany({
       where: { ...(appId ? { appId } : {}), ...(memoryId ? { memoryId } : {}), ...(input.includeRevoked ? {} : { revokedAt: null }) },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -200,6 +211,7 @@ export const automationReadGrantQueries = {
     // A reader sees a row when they manage its App or manage its target; decided once per App and per memory.
     const appManaged = new Map<string, boolean>();
     const targetManaged = new Map<string, TargetRow | null>();
+    const urnOf = new Map<string, { urn: string } | null>();
     const out: ReturnType<typeof project>[] = [];
     for (const row of rows) {
       let viaApp = appManaged.get(row.appId);
@@ -211,8 +223,13 @@ export const automationReadGrantQueries = {
         targetManaged.set(row.memoryId, target);
       }
       if (!viaApp && !target) continue;
-      const memory = target ?? (await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } }));
-      out.push(project(row, memory, true));
+      let memory: { urn: string } | null = target;
+      if (!memory) {
+        // Cached per memory: a page of grants on one target costs one lookup, not one per row.
+        if (!urnOf.has(row.memoryId)) urnOf.set(row.memoryId, await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } }));
+        memory = urnOf.get(row.memoryId) ?? null;
+      }
+      out.push(project(row, memory));
     }
     return out;
   },

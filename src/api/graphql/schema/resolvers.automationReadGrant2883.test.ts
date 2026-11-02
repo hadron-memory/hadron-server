@@ -121,6 +121,27 @@ describe('give and revoke', () => {
     expect(await readable(r, 'other:x')).toBe(true);
   });
 
+  it('door-level prefix shapes the DB CHECK also refuses are BAD_USER_INPUT, never a raw constraint error', async () => {
+    for (const prefix of ['-a', 'a-', 'a b', 'a::b', ':a', 'a:']) {
+      await expect(give(f.adminCtx, { prefix })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    }
+  });
+
+  it('a WEBHOOK grant works end to end: given on the webhook, read by its run and its SPAWN child, not by a schedule run', async () => {
+    const wh = await db.agentWebhook.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, name: 'W2', secret: generateId(), entryNodeUrn: ENTRY } });
+    await give(f.adminCtx, { triggerKind: 'WEBHOOK', triggerId: wh.id });
+    const wr = await run('WEBHOOK', wh.id);
+    expect(await readable(wr)).toBe(true);
+    expect(await readable(await run('SPAWN', null, wr.id))).toBe(true);
+    expect(await readable(await run('SCHEDULE', f.s1.id))).toBe(false);
+  });
+
+  it('a blank prefix is BAD_USER_INPUT, never the whole-memory grant; only an absent prefix is the whole memory', async () => {
+    await expect(give(f.adminCtx, { prefix: '  ' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(give(f.adminCtx, { prefix: '' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    expect((await give(f.adminCtx, { prefix: null })).prefix).toBeNull();
+  });
+
   it('a malformed prefix is BAD_USER_INPUT before any lookup', async () => {
     await expect(give(f.adminCtx, { prefix: 'a::b', appRef: generateId() })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     await expect(give(f.adminCtx, { triggerKind: 'NOPE' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
@@ -148,6 +169,15 @@ describe('scope: only the granted automation', () => {
   it('a user-backed run still needs the user layer: a run on behalf of a user who cannot read the memory is refused', async () => {
     await give();
     expect(await readable(await run('SCHEDULE', f.s1.id, null, f.outsider.id))).toBe(false);
+  });
+  it('runHoldsReadGrant, user-backed branch (positive pin): the on-behalf-of user can read the memory, so a covering grant is true; outside the prefix and after revoke it is false', async () => {
+    const g = await give();
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    const holds = (loc: string) => runHoldsReadGrant(db, { userId: f.member.id, appId: f.app.id } as never, r.id, f.know.id, loc);
+    expect(await holds('tasks:report')).toBe(true);
+    expect(await holds('other:x')).toBe(false);
+    await M.revokeAutomationReadGrant({}, { id: g.id }, f.adminCtx);
+    expect(await holds('tasks:report')).toBe(false);
   });
 });
 
@@ -246,6 +276,33 @@ describe('who may give, revoke and list', () => {
     expect(other.id).not.toBe(g.id);
     await forbidden(M.revokeAutomationReadGrant({}, { id: g.id }, f.memberCtx));
     expect((await M.revokeAutomationReadGrant({}, { id: g.id }, bCtx)).revokedBy).toBe(bAdmin.id);
+  });
+
+  it('a foreign installed Agent\'s system memory, granted by its manager, is actually READ by the run (the read arm sees past the run\'s org)', async () => {
+    const orgB = await db.organization.create({ data: { id: generateId(), name: 'B2', urn: `b2-${generateId().toLowerCase()}.example` } });
+    const bAdmin = await db.user.create({ data: { id: generateId(), name: 'b2admin', handle: `b2-${generateId().slice(-6).toLowerCase()}`, roles: ['READER'] } });
+    await db.orgMember.create({ data: { organizationId: orgB.id, userId: bAdmin.id, role: 'ADMIN' } });
+    const bAgent = await M.createAgent({}, { orgId: orgB.id, name: 'B2 agent' }, uctx(bAdmin.id));
+    await createDbAppAgent(db, f.app.id, bAgent.id);
+    const bMem = await db.memory.findUniqueOrThrow({ where: { id: bAgent.systemMemoryId } });
+    await node(bMem.id, 'tasks:report');
+    const r = await run('SCHEDULE', f.s1.id);
+    // CONTROL: before the grant the run is refused.
+    await expect(readAs(r, bMem.urn, 'tasks:report')).rejects.toThrow();
+    await give(uctx(bAdmin.id), { memoryRef: bAgent.systemMemoryId, prefix: null });
+    expect((await readAs(r, bMem.urn, 'tasks:report') as { content: string }).content).toBe('body of tasks:report');
+    // Another memory of that org, with no grant, stays refused with the same answer as a missing one.
+    const msg = async (urn: string) => readAs(r, urn, 'x').then(() => 'ok', (e: Error) => e.message.replace(urn, '<urn>'));
+    const plain = await db.memory.create({ data: { id: generateId(), name: 'plain', urn: `${orgB.urn}:plain`, class: 'knowledge', organizationId: orgB.id, visibility: 'ORGANIZATION' } as never });
+    expect(await msg(plain.urn)).toBe(await msg(`${orgB.urn}:nonexistent`));
+  });
+
+  it('list conceals an unknown ref and a ref the caller cannot see alike: both are the empty list', async () => {
+    await give();
+    expect(await Q.automationReadGrants({}, { memoryRef: f.know.id }, f.outsiderCtx)).toEqual([]);
+    expect(await Q.automationReadGrants({}, { memoryRef: `${f.org.urn}:no-such-memory` }, f.outsiderCtx)).toEqual([]);
+    expect(await Q.automationReadGrants({}, { appRef: generateId() }, f.outsiderCtx)).toEqual([]);
+    expect(await Q.automationReadGrants({}, { appRef: f.app.id }, f.outsiderCtx)).toEqual([]);
   });
 
   it('list: App managers see the App\'s grants; the target\'s manager sees the grants on what they manage; no one else sees any', async () => {
