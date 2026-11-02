@@ -6,7 +6,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
-import { matchingTeamPool, matchQueuedTasks } from './matcher.js';
+import { __matcherTesting, matchingTeamPool, matchQueuedTasks } from './matcher.js';
 import { evaluateStalls, effectiveWindows, loadStallInputs, stallCandidates } from './stall.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any;
@@ -159,4 +159,20 @@ it('executable GraphQL exposes the failure and team requirements under the same 
     expect(list.body.singleResult.errors).toBeUndefined();
     expect((list.body.singleResult.data as any).agentTasks).toEqual([{id:task.id,matchFailure:{reason:'NO_ROLE'}}]);
   } finally {await api.stop();}
+});
+
+it('the final assignment transaction rejects a worker outside the current reporting-team pool', async () => {
+  const lead = await worker('Lead', 'manager');
+  const other = await worker('Other', 'manager');
+  const outsider = await worker('Outside', 'reviewer', other.id);
+  const task = await create({ requirements: { team: lead.id, role: 'reviewer' } });
+  expect(await __matcherTesting.tryAssign(db, task, outsider.id, 'claude', new Date(), {})).toBe('worker-not-free');
+  expect((await row(task.id)).assigneeWorkerId).toBeNull();
+  expect(await db.agentTeamEvent.count({ where: { taskId: task.id, type: 'assignment.matched' } })).toBe(0);
+});
+
+it('role and role-set together refuse before creating a task', async () => {
+  const before = await db.agentTask.count();
+  await expect(create({ requirements: { role: 'reviewer', roles: ['reviewer'] } })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  expect(await db.agentTask.count()).toBe(before);
 });
