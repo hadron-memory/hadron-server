@@ -10,7 +10,6 @@ import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../../../test/hel
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -105,18 +104,18 @@ describe('#2766 a successful act records one event, with its actor', () => {
     expect(rows[0]!.payload).toEqual({ userId: target.id, role: 'member' });
   });
 
-  it('worker.cast by a worker session, and the MCP hadron_cast_worker door writes the same shape', async () => {
+  it('worker.cast by a worker session writes the event (the MCP hadron_cast_worker half was removed with the tool, #3082)', async () => {
     const viaGraphql = await asWorker(() => cast(ctxOf(admin.id), 'Iris'));
-    const srv = createTestableMcpServer({ userId: admin.id, appId: app.id, roles: ['READER'], clientId: `user:${admin.id}` });
-    const out = await srv.callToolText('hadron_cast_worker', { agent: roleAgent.id, name: 'Henry' });
-    expect(out).toContain('Henry');
     const rows = await events('worker.cast');
-    expect(rows).toHaveLength(2);
-    const henry = await db.worker.findFirstOrThrow({ where: { appId: app.id, name: 'Henry' } });
+    expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ appId: app.id, actorUserId: admin.id, actorWorkerId: caster.id, actorAgentId: agentId, subjectWorkerId: viaGraphql.id });
     expect(rows[0]!.payload).toEqual({ workerId: viaGraphql.id, agentId: roleAgent.id, role: 'backend-engineer', reportsToWorkerId: null });
-    expect(rows[1]).toMatchObject({ appId: app.id, actorUserId: admin.id, subjectWorkerId: henry.id });
-    expect(rows[1]!.payload).toEqual({ workerId: henry.id, agentId: roleAgent.id, role: 'backend-engineer', reportsToWorkerId: null });
+    // The person path (what the MCP door wrote, as a user with no worker session) has the same shape with a null actor worker.
+    const henry = await cast(ctxOf(admin.id), 'Henry');
+    const rows2 = await events('worker.cast');
+    expect(rows2).toHaveLength(2);
+    expect(rows2[1]).toMatchObject({ appId: app.id, actorUserId: admin.id, subjectWorkerId: henry.id });
+    expect(rows2[1]!.payload).toEqual({ workerId: henry.id, agentId: roleAgent.id, role: 'backend-engineer', reportsToWorkerId: null });
   });
 
   it('worker.cast names the reports-to worker when one is named at cast', async () => {
@@ -298,13 +297,12 @@ describe('#2766 payloads hold ids and role words only', () => {
   });
 });
 
-describe('#2766 read surface: the new events ride hadron_team_events for the readers it has today', () => {
+describe('#2766 read surface: the new events ride the agentTeamEvents read for the readers it has today', () => {
   it('a participant reads them; an outsider does not', async () => {
     await ensure(ctxOf(admin.id), target.id, 'member');
-    const read = (userId: string) => createTestableMcpServer({ userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` })
-      .callToolText('hadron_team_events', { appRef: app.id, types: ['member.added'] });
-    const seen = await read(target.id);
-    expect(seen).toContain('member.added');
-    expect(await read(outsider.id)).not.toContain('member.added');
+    const seen = await (resolvers.Query as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(target.id));
+    expect(seen.map((e: any) => e.type)).toContain('member.added');
+    await expect((resolvers.Query as any).agentTeamEvents({}, { appRef: app.id, types: ['member.added'] }, ctxOf(outsider.id)))
+      .rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
   });
 });

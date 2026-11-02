@@ -24,7 +24,7 @@ LOG="$STATE_DIR/auto-shed.log"
 # so it can be printed (--print-prompt) without any of the hook's side effects,
 # and so the emitted text and the QA'd text are the same code path.
 # Ladder (#1958): bound-open -> whoami --check and carry on; unbound only ->
-# `session start` with NO --as (MCP: hadron_resume_session()); CHOOSE asks the
+# `session start` with NO --as; CHOOSE asks the
 # HUMAN; exit 5 is still-bound OR RESUME_REFUSED; a transport error is not
 # NOTHING_TO_RESUME; never --as, never a post as the human.
 emit_prompt() {
@@ -42,12 +42,11 @@ Rebuild your state from the durable record, then continue your assigned work:
    No binding (a fresh or lost worktree), and ONLY then: run
    \`~/.local/bin/worker-auto-shed --resume-unbound --tool <actual-tool>\`.
    This helper runs \`hadron team session start\` with NO --as (CLI v0.24.0+).
-   MCP-only: call \`hadron_resume_session()\` with no arguments. By exit code:
+   By exit code:
    - 0 RESUMED/STARTED: adopt the returned briefing; a shed should RESUME the
      same session id — report an unexpected STARTED.
    - 2 CHOOSE: several candidates. STOP and ask the human which one, then retry
-     the helper with --session <their chosen id> (MCP: hadron_resume_session
-     with session set to that id). Never select automatically.
+     the helper with --session <their chosen id>. Never select automatically.
    - 4 NOTHING_TO_RESUME: STOP and ask the human. This is terminal for recovery,
      INCLUDING after CHOOSE when the human's chosen claim expired. The helper
      prints whoami for evidence only: no binding means no authority to continue.

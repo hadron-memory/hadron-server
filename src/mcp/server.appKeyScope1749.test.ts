@@ -95,62 +95,17 @@ async function call(mcpSession: string, key: string, name: string, args: Record<
   const data = raw.split('\n').find((l) => l.startsWith('data:'))?.slice(5) ?? raw;
   return { status: 200, text: (JSON.parse(data).result?.content?.[0]?.text ?? '') as string };
 }
-const due = (m: string, key: string, hs?: string) => call(m, key, 'hadron_due_wakes', { appRef: appId }, hs);
+const whoami = (m: string, key: string) => call(m, key, 'hadron_whoami', {});
 
+// #3082: the wake tools (hadron_due_wakes / hadron_ack_wakes) are disabled on MCP, so the wake-scope, proof-requester
+// and N5 assertions that rode them here are pinned at the lib/resolver level instead (src/lib/appKeyScopes/appKeyScopes.test.ts,
+// src/lib/tickers/dueWakes.test.ts, src/lib/tickers/batchAck.test.ts). What is transport-level survives on a core tool.
 describe('the exact key: a transport belongs to the key that initialized it', () => {
-  it('a same-App scopeless key B cannot borrow the scope, proof identity or audit of key A on A\'s transport', async () => {
+  it('a same-App scopeless key B cannot borrow A\'s transport', async () => {
     const m = await open(keyA.raw);
-    const mine = await due(m, keyA.raw);
-    expect(mine.text).toContain('1 due');
-    const audited = await db.appKeyWakeRead.findMany();
-    expect(audited.map((r) => r.appKeyId)).toEqual([keyA.id]);
-    // B, live and of the same App, on A's transport: the transport does not exist for it.
-    const borrowed = await due(m, keyB.raw);
+    expect((await whoami(m, keyA.raw)).status).toBe(200);
+    const borrowed = await whoami(m, keyB.raw);
     expect(borrowed.status).toBe(404);
-    const proof = /proof: (\S+)/.exec(mine.text)![1]!;
-    expect((await call(m, keyB.raw, 'hadron_ack_wakes', { proofs: [proof] })).status).toBe(404);
-    expect(await db.appKeyWakeRead.count()).toBe(1);
-    expect(await db.workerWakeAck.count()).toBe(0);
-    // A itself still can, and the wake's receipt names A (#2072, R53: it moves no message mark).
-    expect((await call(m, keyA.raw, 'hadron_ack_wakes', { proofs: [proof] })).text).toBe('Acknowledged 1.');
-    expect((await db.workerWakeAck.findFirstOrThrow()).ackedByAppKeyId).toBe(keyA.id);
-    expect(await db.workerDeliveryChannel.count()).toBe(0);
-  });
-
-  it('B on its own transport is the scopeless key it is; proofs stay separate per key', async () => {
-    const mb = await open(keyB.raw);
-    expect((await due(mb, keyB.raw)).text).toMatch(/^\[app_key_scope_required\]/);
-    expect(await db.appKeyWakeRead.count()).toBe(0);
-    await db.appKeyScope.create({ data: { id: generateId(), appKeyId: keyB.id, scope: 'attention:deliver', grantedByUserId: (await db.user.findFirstOrThrow()).id } });
-    const ma = await open(keyA.raw);
-    const proofA = /proof: (\S+)/.exec((await due(ma, keyA.raw)).text)![1]!;
-    expect((await call(mb, keyB.raw, 'hadron_ack_wakes', { proofs: [proofA] })).text).toMatch(/^\[wake_proof_requester_mismatch\]/);
-    expect(await db.workerWakeAck.count()).toBe(0);
-  });
-});
-
-describe('N5 on the returning request: this request\'s session header decides', () => {
-  it('unbound succeeds; a valid header refuses; an invalid header refuses; omitting it succeeds again — on due and ack', async () => {
-    const m = await open(keyA.raw);
-    const first = await due(m, keyA.raw);
-    expect(first.text).toContain('1 due');
-    const proof = /proof: (\S+)/.exec(first.text)![1]!;
-    const reads = await db.appKeyWakeRead.count();
-    for (const hs of [sessionId, generateId()]) {
-      expect((await due(m, keyA.raw, hs)).text).toMatch(/^\[app_key_session_bound\]/);
-      expect((await call(m, keyA.raw, 'hadron_ack_wakes', { proofs: [proof] }, hs)).text).toMatch(/^\[app_key_session_bound\]/);
-    }
-    // Refusals leave nothing behind.
-    expect(await db.appKeyWakeRead.count()).toBe(reads);
-    expect(await db.workerWakeAck.count()).toBe(0);
-    // The header omitted again: the same transport works.
-    expect((await due(m, keyA.raw)).text).toContain('1 due');
-    expect((await call(m, keyA.raw, 'hadron_ack_wakes', { proofs: [proof] })).text).toBe('Acknowledged 1.');
-  });
-
-  it('a transport initialized with a session header is not stuck refused when later requests carry none', async () => {
-    const m = await open(keyA.raw, sessionId);
-    expect((await due(m, keyA.raw, sessionId)).text).toMatch(/^\[app_key_session_bound\]/);
-    expect((await due(m, keyA.raw)).text).toContain('1 due');
+    expect((await whoami(m, keyA.raw)).status).toBe(200);
   });
 });

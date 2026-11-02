@@ -12,7 +12,7 @@ import { collectRegisterRows } from '../../../lib/resolveRegister.js';
 import { loadWorkerWorkStates, matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { openSessionPlacement } from '../../../lib/sessionPlacement.js';
 import { setUpResetFixture, M as ResetM, ctx as resetCtx } from '../../../test/contextResetFixture.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
+import { validateSessionBinding } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
@@ -144,9 +144,17 @@ describe('#2493 context reset reads the open session\'s agent (c)', () => {
   });
 });
 
-describe('#2493 hadron_get_worker recovery: the explicit session argument selects the placement', () => {
-  const asUser = (u: { id: string }) => createTestableMcpServer({ userId: u.id, appId: app.id, roles: ['READER'], clientId: `user:${u.id}` } as any);
-  const read = (u: { id: string }, session: string) => asUser(u).callToolText('hadron_get_worker', { workerRef: worker.id, session });
+describe('#2493 worker recovery read: the presented session selects the placement', () => {
+  // #3082: hadron_get_worker is off over MCP. The session binding rule it applied (the one check behind X-Hadron-Session,
+  // `validateSessionBinding`) and the briefing composition (`composeWorkerPrompt`, what the resolver served) are called directly.
+  const asAuth = (u: { id: string }) => ({ userId: u.id, appId: app.id, roles: ['READER'], clientId: `user:${u.id}` } as any);
+  const readAs = async (auth: any, session: string) => {
+    const bound = await validateSessionBinding(db, auth, session);
+    const live = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
+    const c = ctx({ userId: auth.userId, appId: auth.appId, sessionId: bound?.sessionId });
+    return (await composeWorkerPrompt(c, live)).text ?? '';
+  };
+  const read = (u: { id: string }, session: string) => readAs(asAuth(u), session);
 
   it('the owner of the open session, reconnected with no session id, gets A\'s briefing and register', async () => {
     const open = await bind();
@@ -184,11 +192,10 @@ describe('#2493 hadron_get_worker recovery: the explicit session argument select
   it('impersonation never names a session; an App key of ANOTHER App does not own it (each pinned on its own)', async () => {
     const open = await bind();
     await change();
-    const imp = createTestableMcpServer({ userId: admin.id, appId: app.id, roles: [], clientId: `user:${admin.id}`, impersonation: { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as any);
-    expect(await imp.callToolText('hadron_get_worker', { workerRef: worker.id, session: open.id })).not.toContain('A-PROMPT');
+    const imp = { userId: admin.id, appId: app.id, roles: [], clientId: `user:${admin.id}`, impersonation: { sessionId: generateId(), actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) } } as any;
+    expect(await readAs(imp, open.id)).not.toContain('A-PROMPT');
     const other = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
-    const foreign = createTestableMcpServer({ appId: other.id, roles: [] } as any);
-    expect(await foreign.callToolText('hadron_get_worker', { workerRef: worker.id, session: open.id })).not.toContain('A-PROMPT');
+    expect(await readAs({ appId: other.id, roles: [] } as any, open.id)).not.toContain('A-PROMPT');
   });
 
   it('a user who owns the session but is no longer a participant of its App reads the live row (callerStillDrives, on its own)', async () => {

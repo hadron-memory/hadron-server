@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { lockAgentTemplates } from '../../../lib/tickers/agentTickerTemplates.js';
@@ -352,34 +351,9 @@ describe('#2024 repair carve-out stays narrow', () => {
   });
 });
 
-describe('#2024 MCP parity', () => {
-  const server = () => createTestableMcpServer({ userId: ctx.userId, roles: ['READER'] });
-  it('create, list, update (stale refused) and delete go through the same resolvers', async () => {
-    const created = await server().callToolText('hadron_agent_ticker_template_create', {
-      agentRef: agentId, name: 'Heartbeat', cadenceSeconds: 3600, reasons: ['every-tick'],
-    });
-    expect(created).toMatch(/^Created\./);
-    const row = await db.agentTickerTemplate.findFirstOrThrow({ where: { agentId } });
-    expect(row).toMatchObject({ reasons: ['every-tick'], cadenceSeconds: 3600, revision: 1 });
-    const listed = await server().callToolText('hadron_agent_ticker_template_list', { agentRef: agentId });
-    expect(listed).toContain(row.id);
-    expect(listed).toContain('revision 1');
-    expect(listed).toContain('reasons every-tick');
-    expect(await server().callToolText('hadron_agent_ticker_template_update', { id: row.id, expectedRevision: 1, cadenceSeconds: 1800 })).toMatch(/^Updated\./);
-    const stale = await server().callToolText('hadron_agent_ticker_template_update', { id: row.id, expectedRevision: 1, cadenceSeconds: 900 });
-    expect(stale).toMatch(/ticker_template_revision_mismatch/);
-    expect((await db.agentTickerTemplate.findUniqueOrThrow({ where: { id: row.id } })).cadenceSeconds).toBe(1800);
-    expect(await server().callToolText('hadron_agent_ticker_template_delete', { id: row.id, expectedRevision: 2 })).toBe('Deleted.');
-  });
-
-  it('an unauthorized MCP caller is refused the same way', async () => {
-    const text = await createTestableMcpServer({ userId: managerOnly.userId, roles: ['READER'] }).callToolText('hadron_agent_ticker_template_create', {
-      agentRef: agentId, name: 'Nope', cadenceSeconds: 600,
-    });
-    expect(text).toMatch(/\[(forbidden|agent_not_found)\]/);
-    expect(await db.agentTickerTemplate.count()).toBe(0);
-  });
-});
+// #3082: the 'MCP parity' describe (hadron_agent_ticker_template_create/list/update/delete) is removed with the disabled
+// tools. The same rules stay pinned above through the resolvers: create/list/update (revision mismatch)/delete
+// (this file, lines ~48-86) and the unauthorized caller refusals (FORBIDDEN / TICKER_TEMPLATE_NOT_FOUND, ~140-153).
 
 describe('#2024 concurrency', () => {
   const settle = (...ps: Array<Promise<unknown>>) => Promise.allSettled(ps);

@@ -179,7 +179,7 @@ describe('delivery settings #2025', () => {
     const overflow = { oldestPostedAt: new Date('2026-10-18T10:01:00Z'), lastDueMessageAt: new Date('2026-10-18T10:09:00Z') };
     expect(batchTiming(settings, overflow).deliverAfter).toEqual(new Date('2026-10-18T10:03:00Z'));
   });
-  it('GraphQL and MCP select and return the same contract; MCP requires a named plain session', async () => {
+  it('GraphQL and the resolver select and return the same contract', async () => {
     const { ApolloServer } = await import('@apollo/server');
     const { typeDefs } = await import('./typeDefs.js');
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
@@ -189,14 +189,10 @@ describe('delivery settings #2025', () => {
       if (r.body.kind !== 'single') throw new Error('unexpected multipart result');
       expect(r.body.singleResult.errors).toBeUndefined();
       expect(r.body.singleResult.data?.setAppDeliverySettings).toEqual({ ...defaults, busyDelaySeconds: 500 });
-      const { createTestableMcpServer } = await import('../../../mcp/server.js');
-      const mcp = createTestableMcpServer({ userId: manager.id, roles: ['READER'], clientId: `user:${manager.id}` } as never, { sessionId: generateId(), cachedAppResolution: { kind: 'multi-app' } });
-      const plain = await db.session.create({ data: { id: generateId(), userId: manager.id } });
-      const text = (r: any) => r.content[0].text;
-      expect(text(await mcp.callTool('hadron_delivery_settings_get', { appRef: appId }))).toContain('"busyDelaySeconds":500');
-      expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, input: { busyDelaySeconds: 450 } }))).toMatch(/^\[session_required\]/);
-      expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: 450 } }))).toContain('"busyDelaySeconds":450');
-      expect(text(await mcp.callTool('hadron_delivery_settings_set', { appRef: appId, session: plain.id, input: { busyDelaySeconds: null } }))).toMatch(/^\[bad_user_input\]/);
+      // #3082: the hadron_delivery_settings_get/_set MCP legs are gone with the tools; the resolver keeps the same rules.
+      expect(await get()).toMatchObject({ busyDelaySeconds: 500 });
+      expect(await set({ busyDelaySeconds: 450 })).toMatchObject({ busyDelaySeconds: 450 });
+      await expect(set({ busyDelaySeconds: null })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     } finally { await server.stop(); }
   });
 });
@@ -279,12 +275,10 @@ describe('#2138 §3.6 — the team pause', () => {
     expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId } })).pausedUntil).toEqual(until);
   });
 
-  it('is exposed on the App and has an MCP twin', async () => {
+  it('is exposed on the App (its MCP twin hadron_set_team_pause is disabled, #3082)', async () => {
     await pause(true);
     const { typeDefs } = await import('./typeDefs.js');
     expect(typeDefs).toContain('teamPausedAt: DateTime');
-    const { TICKER_WRITE_TOOLS } = await import('../../../mcp/tickerTools.js');
-    expect(TICKER_WRITE_TOOLS).toContain('hadron_set_team_pause');
   });
 });
 

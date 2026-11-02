@@ -19,7 +19,6 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -266,12 +265,12 @@ describe('controls', () => {
     }
   });
 
-  it('MCP hadron_resume_session refreshes through the same resolver and keeps the stored tool', async () => {
+  it('resumeSession refreshes through the resolver and keeps the stored tool (the former MCP hadron_resume_session pin, #3082)', async () => {
     const s = await start(holder, ada);
-    const srv = createTestableMcpServer({ userId: holder, roles: ['READER'], clientId: `user:${holder}` }, { sessionId: generateId() });
-    await srv.callToolText('hadron_create_resume_claim', { session: s.id });
-    const text = await srv.callToolText('hadron_resume_session', { llmModel: 'claude-opus-5-5' });
-    expect(text).toContain(`Session resumed: ${s.id}`);
+    await M.createResumeClaim({}, { sessionId: s.id }, ctx(holder));
+    const r = await resume(ctx(holder), { llmModel: 'claude-opus-5-5' });
+    expect(r.outcome).toBe('RESUMED');
+    expect(r.session.id).toBe(s.id);
     expect(await row(s.id)).toMatchObject({ tool: 'claude-code', llmModel: 'claude-opus-5-5', family: 'claude' });
   });
 });

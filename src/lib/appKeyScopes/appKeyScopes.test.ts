@@ -15,7 +15,6 @@ import { getMemoryEncryptionInfo } from '../nodeCrypto.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { teamChatMutations } from '../../api/graphql/schema/resolvers.teamChat.js';
 import { APP_KEY_PREFIX, hashAppKey, resolveAuthContext } from '../../middleware/auth.js';
-import { createTestableMcpServer } from '../../mcp/server.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { emptyActor, requestActorStorage } from '../requestActor.js';
 import { randomBytes } from 'node:crypto';
@@ -357,29 +356,22 @@ describe('N4 — the scope is read from the database at every call', () => {
     expect(await code(due(c))).toBe('APP_KEY_SCOPE_REQUIRED');
   });
 
-  it('over one long-lived MCP session: a key reads due wakes, the scope is revoked, the next call is refused', async () => {
-    const auth = { appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as AuthContext;
-    const server = createTestableMcpServer(auth, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const text = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
-    const first = text(await server.callTool('hadron_due_wakes', { appRef: app.id }));
-    expect(first).toContain('1 due');
-    const proof = /proof: (\S+)/.exec(first)![1]!;
+  it('over one long-lived key context: a key reads due wakes, the scope is revoked, the next call is refused (resolver; #3082 moved from MCP)', async () => {
+    const c = keyCtx(key, app.id);
+    const first = await due(c);
+    expect(first.wakes).toHaveLength(1);
+    const proof = first.wakes[0].proof;
     await M.revokeAppKeyScope({}, { id: key.id, scope: 'attention:deliver' }, userCtx(manager.id));
-    expect(text(await server.callTool('hadron_due_wakes', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
-    expect(text(await server.callTool('hadron_ack_wakes', { proofs: [proof] }))).toMatch(/^\[app_key_scope_required\]/);
-    // Granted again, the same open session works again, and acknowledges its own proof.
+    expect(await code(due(c))).toBe('APP_KEY_SCOPE_REQUIRED');
+    expect(await code(ack(c, [proof]))).toBe('APP_KEY_SCOPE_REQUIRED');
+    // Granted again, the same open context works again, and acknowledges its own proof.
     await M.grantAppKeyScope({}, { id: key.id, scope: 'attention:deliver' }, userCtx(manager.id));
-    expect(text(await server.callTool('hadron_ack_wakes', { proofs: [proof] }))).toBe('Acknowledged 1.');
+    expect(await ack(c, [proof])).toEqual({ acknowledged: 1, unchanged: 0 });
   });
 
-  it('an MCP key that names a session is refused, never narrowed', async () => {
-    const session = await db.session.create({ data: { id: generateId(), appId: app.id }, select: { id: true } });
-    const auth = { appId: app.id, appKeyId: key.id, organizationId: org.id, roles: [] } as AuthContext;
-    const server = createTestableMcpServer(auth, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const t = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
-    expect(t(await server.callTool('hadron_due_wakes', { appRef: app.id, session: session.id }))).toMatch(/^\[app_key_session_bound\]/);
-    expect(t(await server.callTool('hadron_ack_wakes', { proofs: ['x'], session: session.id }))).toMatch(/^\[app_key_session_bound\]/);
-  });
+  // #3082: 'an MCP key that names a session is refused, never narrowed' is removed: hadron_due_wakes / hadron_ack_wakes are disabled
+  // on MCP. The rule (APP_KEY_SESSION_BOUND for a named or failed-to-bind session) is pinned on the resolvers by the N5 test above
+  // (`keyCtx(key, app.id, { sessionId })` and `{ sessionBindingRefused: true }`, due and ack, nothing written).
 
   it('a revocation in flight is waited for: the read that starts behind it is refused, not served', async () => {
     const h = holdOpen(async (tx) => {

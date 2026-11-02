@@ -561,8 +561,8 @@ export const typeDefs = `#graphql
   hosted in ONE memory at ONE reserved address, server-ordered and
   server-attributed — a platform entity, created one-to-one with its chat root.
   Creating it RESERVES and PROTECTS the address: generic node writes under it
-  are refused (LOC_PROTECTED); its own operations (createTeamChatMessage,
-  hadron_team_chat_post) are the only writers. The audience is the host
+  are refused (LOC_PROTECTED); its own operations (createTeamChatMessage, which
+  the CLI reaches as hadron team chat post) are the only writers. The audience is the host
   memory's (cor:acl:030:01) — a Channel has no access layer of its own.
   \`lastSeq\` / \`lastMessageAt\` are the platform-maintained watermark.
   """

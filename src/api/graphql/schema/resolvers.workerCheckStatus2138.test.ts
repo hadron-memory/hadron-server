@@ -18,7 +18,6 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { loadPendingReasons } from '../../../lib/tickers/checkPending.js';
 import { resolvers, type Context } from './resolvers.js';
 import type { AuthContext } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -227,34 +226,5 @@ describe('who may read it', () => {
   });
 });
 
-describe('MCP renderings', () => {
-  const authOf = (userId: string) => ({ userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` }) as AuthContext;
-  const mcp = () => createTestableMcpServer(authOf(member.id), { sessionId: `cs-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-
-  beforeEach(async () => {
-    await bind('Kit', 300);
-    await assign('Kit', 200);
-    await checked('Kit', teamChannel.id, 40);
-    await bind('Rook');
-  });
-
-  it('hadron_team_roster shows each worker\'s check status', async () => {
-    const out = (await mcp().callTool('hadron_team_roster', { appRef: app.id })).content[0].text;
-    expect(out).toMatch(/Kit — [A-Z_]+: [^\n]*check OVERDUE/);
-    expect(out).toMatch(/Rook — [A-Z_]+: [^\n]*check PENDING \(no task\)/);
-    expect(out).toMatch(/Anne — [A-Z_]+: [^\n]*check NO_SESSION/);
-  });
-
-  it('hadron_list_workers shows it as a flag', async () => {
-    const out = await mcp().callToolText('hadron_list_workers', { app: app.id });
-    expect(out).toMatch(/Kit[^\n]*check OVERDUE/);
-    expect(out).toMatch(/Rook[^\n]*check PENDING \(no task\)/);
-  });
-
-  it('hadron_get_worker shows it with the last check', async () => {
-    const out = await mcp().callToolText('hadron_get_worker', { workerRef: w.Kit.id });
-    expect(out).toMatch(/Check status: OVERDUE \(last checked \d{4}-\d\d-\d\dT[\d:.]+Z\)/);
-    const rook = await mcp().callToolText('hadron_get_worker', { workerRef: w.Rook.id });
-    expect(rook).toMatch(/Check status: PENDING \(no task; never checked\)/);
-  });
-});
+// #3082: the 'MCP renderings' block (hadron_team_roster / hadron_list_workers / hadron_get_worker text) is removed: those tools are
+// disabled on MCP. The status values themselves stay pinned above through Worker.checkStatus / the roster resolvers.

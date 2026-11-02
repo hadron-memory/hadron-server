@@ -203,24 +203,8 @@ describe('acknowledging a batch', () => {
   });
 });
 
-describe('the MCP twin carries the same text and the same gates', () => {
-  it('hadron_team_chat_inbox returns the GraphQL text byte for byte; hadron_team_chat_inbox_ack acknowledges it; a bare key is refused', async () => {
-    const { createTestableMcpServer } = await import('../../../mcp/server.js');
-    const mk = (k: { id: string }) =>
-      createTestableMcpServer({ appId: app.id, appKeyId: k.id, organizationId: org.id, roles: [] } as never, { sessionId: `ak-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-    const text = (r: { content: Array<{ text: string }> }) => r.content[0]!.text;
-    await postForBoth();
-    const gql = (await read(hostKey)).batches[0];
-    const server = mk(hostKey);
-    const mcp = JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id })));
-    expect(mcp.batches).toHaveLength(1);
-    expect(mcp.batches[0].text).toBe(gql.text);
-    expect(mcp.batches[0].worker).toBe('Kit');
-    expect(text(await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [mcp.batches[0].id] }))).toBe('Acknowledged 1.');
-    expect(JSON.parse(text(await server.callTool('hadron_team_chat_inbox', { appRef: app.id }))).batches).toEqual([]);
-    expect(text(await mk(bareKey).callTool('hadron_team_chat_inbox', { appRef: app.id }))).toMatch(/^\[app_key_scope_required\]/);
-  });
-});
+// #3082: 'the MCP twin' (hadron_team_chat_inbox / _ack) is removed with the disabled tools. Its rules stay pinned through the
+// resolver above: the batch text (read), acknowledgement, and the bare key refusal (line ~117, APP_KEY_SCOPE_REQUIRED).
 
 // #2102 review regressions: commit the revocation just before the deciding
 // transaction starts. The hook changes real rows/registrations, never the answer.
@@ -376,19 +360,16 @@ describe('#2102 refused host uses are recorded once apart', () => {
         expect(r.body.kind).toBe('single'); if (r.body.kind === 'single') return r.body.singleResult.errors?.[0]?.extensions?.code;
       } finally { await server.stop(); }
     }
-    const { createTestableMcpServer } = await import('../../../mcp/server.js');
-    const server = createTestableMcpServer({ ...caller, clientId: `app:${app.id}` } as never);
-    const r = await server.callTool('hadron_team_chat_inbox', { appRef: app.id });
-    expect((r as any).isError).toBe(true); return undefined;
+    return undefined;
   }
 
-  it.each(['resolver', 'graphql', 'mcp'])('host-only read refusal is recorded once through %s', async surface => {
+  it.each(['resolver', 'graphql'])('host-only read refusal is recorded once through %s', async surface => {
     await callRead(opOnlyKey, surface);
     const rows = await db.hostKeyUse.findMany({ where: { appKeyId: opOnlyKey.id, action: 'deliver', refusedCode: 'APP_KEY_SCOPE_REQUIRED' } });
     expect(rows).toHaveLength(1);
   });
 
-  it.each(['resolver', 'graphql', 'mcp'])('receiver ack after attention scope revocation records once through %s', async surface => {
+  it.each(['resolver', 'graphql'])('receiver ack after attention scope revocation records once through %s', async surface => {
     await postForBoth(); const [b] = (await read(hostKey)).batches;
     await M.revokeAppKeyScope({}, { id: hostKey.id, scope: 'attention:deliver' }, ctx(manager.id));
     if (surface === 'resolver') expect(await code(ack(hostKey, [b.id]))).toBe('APP_KEY_SCOPE_REQUIRED');
@@ -400,10 +381,6 @@ describe('#2102 refused host uses are recorded once apart', () => {
         expect(r.body.kind).toBe('single');
         if (r.body.kind === 'single') expect(r.body.singleResult.errors?.[0]?.extensions?.code).toBe('APP_KEY_SCOPE_REQUIRED');
       } finally { await server.stop(); }
-    } else {
-      const { createTestableMcpServer } = await import('../../../mcp/server.js');
-      const server = createTestableMcpServer({ ...keyCtx(hostKey), clientId: `app:${app.id}` } as never);
-      expect((await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [b.id] }) as any).isError).toBe(true);
     }
     expect(await db.hostKeyUse.count({ where: { appKeyId: hostKey.id, action: 'deliver', refusedCode: 'APP_KEY_SCOPE_REQUIRED' } })).toBe(1);
     expect(await db.workerDeliveryChannel.count()).toBe(0);
@@ -421,7 +398,7 @@ describe('#2102 refused host uses are recorded once apart', () => {
 });
 
 describe('#2102 empty host acknowledgement is an audited no-op', () => {
-  it.each(['resolver', 'graphql', 'mcp'])('records one zero-count accepted use through %s', async surface => {
+  it.each(['resolver', 'graphql'])('records one zero-count accepted use through %s', async surface => {
     if (surface === 'resolver') expect(await ack(hostKey, [])).toEqual({ acknowledged: 0, unchanged: 0 });
     else if (surface === 'graphql') {
       const { ApolloServer } = await import('@apollo/server'); const { typeDefs } = await import('./typeDefs.js');
@@ -431,11 +408,6 @@ describe('#2102 empty host acknowledgement is an audited no-op', () => {
         expect(r.body.kind).toBe('single');
         if (r.body.kind === 'single') { expect(r.body.singleResult.errors).toBeUndefined(); expect(r.body.singleResult.data?.acknowledgeDeliveryBatches).toEqual({ acknowledged: 0, unchanged: 0 }); }
       } finally { await server.stop(); }
-    } else {
-      const { createTestableMcpServer } = await import('../../../mcp/server.js');
-      const server = createTestableMcpServer({ ...keyCtx(hostKey), clientId: `app:${app.id}` } as never);
-      const r = await server.callTool('hadron_team_chat_inbox_ack', { batchIds: [] });
-      expect(r.content[0].text).toBe('Acknowledged 0.');
     }
     const uses = await db.hostKeyUse.findMany({ where: { appKeyId: hostKey.id, action: 'deliver' } });
     expect(uses).toHaveLength(1); expect(uses[0]).toMatchObject({ count: 0, refusedCode: null, hostId: 'orca1' });

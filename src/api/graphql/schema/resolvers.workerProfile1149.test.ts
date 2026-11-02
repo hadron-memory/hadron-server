@@ -21,7 +21,6 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
@@ -290,39 +289,20 @@ describe('#1149 the profile never widens a list', () => {
   });
 });
 
-describe('#1149 hadron_get_worker delegates to the profile read and keeps working state masked', () => {
-  const auth = (userId: string) => ({ userId, roles: ['READER' as const] });
-
-  it('the stranger reads the name and URN, with no liveness flag, override or briefing', async () => {
-    const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(text).toContain('**Dan** (server-engineer)');
-    expect(text).toContain(`Worker URN: ${danUrn()}`);
-    expect(text).not.toMatch(/\b(taken|free)\b/);
-    expect(text).not.toContain('secret override');
-    expect(text).not.toContain('Boot briefing');
-  });
-
-  it('does not claim the worker has no template or override when the reader cannot see them (#2918)', async () => {
-    const text = await createTestableMcpServer(auth(stranger.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-        expect(text).not.toContain('No boot briefing');
-  });
-
-  it('a departed participant gets no recovery line for its own still-open session', async () => {
-    const own = await db.session.create({
-      data: { id: generateId(), appId: appA.id, userId: contributor.id, agentId: orgAgent.id, workerId: teamDan.id, role: 'server-engineer' },
-    });
-    const before = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(before).toContain(`Your active session: ${own.id}`);
+// #3082: the 'hadron_get_worker delegates' block is removed (the tool is disabled on MCP; its text lines were MCP-only). The
+// masking it proved is the resolver's: strangers are pinned above ('every working-state field masks', 'prompt masks...') and
+// participants in 'Working state'. The departed-participant case is moved to a resolver read here.
+describe('#1149 a departed participant reads like a stranger (moved from the MCP hadron_get_worker pin, #3082)', () => {
+  it('working state masks once the participant loses its org membership', async () => {
+    const fields = 'name hasLiveSession signature heldByUserId';
+    const before = await readWorker(teamDan.id, ctx(contributor.id), fields);
+    expect(before.errors).toBeUndefined();
+    expect(before.data?.worker).toMatchObject({ name: 'Dan', signature: 'secret signature', heldByUserId: contributor.id });
     await db.orgMember.updateMany({ where: { organizationId: orgA.id, userId: contributor.id }, data: { deletedAt: new Date() } });
-    const after = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(after).toContain('**Dan** (server-engineer)');
-    expect(after).not.toContain(own.id);
-    expect(after).not.toContain('Your active session');
-  });
-
-  it('a participant still sees the liveness flag', async () => {
-    const text = await createTestableMcpServer(auth(contributor.id)).callToolText('hadron_get_worker', { workerRef: danUrn() });
-    expect(text).toContain('**Dan** (server-engineer) — free');
+    await db.appMember.deleteMany({ where: { appId: appA.id, userId: contributor.id } });
+    const after = await readWorker(teamDan.id, ctx(contributor.id), fields);
+    expect(after.errors).toBeUndefined();
+    expect(after.data?.worker).toEqual({ name: 'Dan', hasLiveSession: null, signature: null, heldByUserId: null });
   });
 });
 

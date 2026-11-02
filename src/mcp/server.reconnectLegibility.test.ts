@@ -28,6 +28,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
+import { startWorkerSessionGql } from '../test/startWorkerSessionGql.js';
 import { createTestableMcpServer } from './server.js';
 import { MCP_SURFACE_CAPABILITIES } from './deploymentInfo.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -106,14 +107,12 @@ describe('#1006 — the surface states its capabilities', () => {
     }
   });
 
-  it('advertises worker-model — the capability whose silent absence caused #1006', async () => {
-    // The reporter had to diff the served tool list against main to discover
-    // the deployed build could not bind workers. This token is the answer to
-    // that question, and a client is meant to test for it rather than compare
-    // version numbers.
+  it('#3082 — no longer advertises worker-model: MCP carries agents, not workers', async () => {
+    // The #1006 token answered "can this deployment bind a worker over MCP?". Since the team cut it cannot
+    // (hadron_start_session refuses workerRef), so the honest answer is the token's absence.
     const out = await server().callToolText('hadron_server_info', {});
-    expect(out).toContain('worker-model');
-    expect(MCP_SURFACE_CAPABILITIES).toContain('worker-model');
+    expect(out).not.toContain('worker-model');
+    expect(MCP_SURFACE_CAPABILITIES).not.toContain('worker-model');
   });
 
   it('still reports server and version (the #190 dual-namespace signal)', async () => {
@@ -124,11 +123,8 @@ describe('#1006 — the surface states its capabilities', () => {
 
   it('#1246 — hadron_whoami renders liveness and a human hold as independent state', async () => {
     const client = server();
-    await client.callToolText('hadron_start_session', {
-      description: 'exercise the whoami footer',
-      workerRef: worker.id,
-    });
-    const out = await client.callToolText('hadron_whoami', {});
+    const sessionId = await startWorkerSessionGql({ workerRef: worker.id, userId: user.id, appId: app.id });
+    const out = await client.callToolText('hadron_whoami', { session: sessionId });
 
     expect(out).toMatch(/recently active inside its idle window/);
     expect(out).toMatch(/session block falls away/);
@@ -154,8 +150,8 @@ describe('#1009 — a reconnect is legible instead of inferred', () => {
   });
 
   it('the App-scope refusal explains itself after a reconnect', async () => {
-    const out = await server({ isReconnect: true }).callToolText('hadron_team_chat_read', {
-      sinceSeq: 0,
+    const out = await server({ isReconnect: true }).callToolText('hadron_start_session', {
+      description: 'x',
     });
     expect(out).toContain('multiple_apps_resolved');
     expect(out).toContain('re-established');
@@ -166,7 +162,7 @@ describe('#1009 — a reconnect is legible instead of inferred', () => {
   });
 
   it('the same refusal on a fresh session carries no reconnect note', async () => {
-    const out = await server().callToolText('hadron_team_chat_read', { sinceSeq: 0 });
+    const out = await server().callToolText('hadron_start_session', { description: 'x' });
     expect(out).toContain('multiple_apps_resolved');
     expect(out).not.toContain('re-established');
   });
@@ -176,22 +172,16 @@ describe('#1009 — a reconnect is legible instead of inferred', () => {
     // switching which of the two refusals fires. Both must carry the note.
     const srv = server({ isReconnect: true });
     await srv.callToolText('hadron_list_apps', {});
-    const out = await srv.callToolText('hadron_team_chat_read', { sinceSeq: 0 });
+    const out = await srv.callToolText('hadron_start_session', { description: 'x' });
     expect(out).toContain('no_active_app');
     expect(out).toContain('re-established');
   });
 });
 
 describe('#1009 — App scope recovery reaches the rest of the worker flow', () => {
-  /** Start a session, then discard that MCP session — the reconnect. */
+  /** Start a worker session the way the CLI does (GraphQL; MCP no longer binds workers, #3082). The MCP session is then a new one — the reconnect. */
   async function startThenReconnect(): Promise<string> {
-    const out = await server().callToolText('hadron_start_session', {
-      description: 'work',
-      workerRef: worker.id,
-    });
-    const sessionId = out.match(/Session started: (\S+)/)?.[1];
-    expect(sessionId).toBeTruthy();
-    return sessionId!;
+    return startWorkerSessionGql({ workerRef: worker.id, userId: user.id, appId: app.id });
   }
 
   it('hadron_end_session recovers from its own id — no new argument needed', async () => {
@@ -211,37 +201,12 @@ describe('#1009 — App scope recovery reaches the rest of the worker flow', () 
     expect(row.endedAt).not.toBeNull();
   });
 
-  it('hadron_list_workers recovers from a session hint', async () => {
-    // The roster read is what an agent reaches for first after losing its
-    // bearings, so it has to be reachable without a prior selection.
-    const sessionId = await startThenReconnect();
-    const after = server({ isReconnect: true });
-
-    expect(await after.callToolText('hadron_list_workers', {})).toContain(
-      'multiple_apps_resolved',
-    );
-    const recovered = await after.callToolText('hadron_list_workers', { session: sessionId });
-    expect(recovered).not.toContain('multiple_apps_resolved');
-    expect(recovered).toContain('Iris');
-  });
-
-  it('hadron_cast_worker recovers from a session hint', async () => {
-    const sessionId = await startThenReconnect();
-    const after = server({ isReconnect: true });
-
-    const out = await after.callToolText('hadron_cast_worker', {
-      role: 'backend-engineer',
-      name: 'Nadia',
-      agent: agent.id,
-      session: sessionId,
-    });
-    expect(out).not.toContain('multiple_apps_resolved');
-    expect(out).not.toContain('No App context');
-  });
+  // #3082: the list_workers and cast_worker recovery tests were deleted with their tools (disabled). The recovery
+  // gate they leaned on is the one hadron_end_session's test above and the stranger test below still pin.
 
   it("still refuses another user's session as an App hint", async () => {
     // The recovery gate is unchanged by this issue — re-pinned here because
-    // three more tools now depend on it.
+    // the end_session recovery depends on it.
     const sessionId = await startThenReconnect();
     const stranger = await db.user.create({
       data: { id: generateId(), githubId: 97711, githubUsername: `mcp-rc-x-${generateId().slice(-6)}`, roles: ['READER'] },
@@ -250,7 +215,7 @@ describe('#1009 — App scope recovery reaches the rest of the worker flow', () 
       { userId: stranger.id, roles: ['READER'], clientId: `user:${stranger.id}` } as AuthContext,
       { sessionId: `mcp-rc-x-${generateId()}`, ...MULTI_APP },
     );
-    expect(await srv.callToolText('hadron_list_workers', { session: sessionId })).toContain(
+    expect(await srv.callToolText('hadron_end_session', { id: sessionId, summary: 'x' })).toContain(
       'multiple_apps_resolved',
     );
   });

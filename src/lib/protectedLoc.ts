@@ -102,7 +102,7 @@ export async function protectedLocsIn(db: ChannelReader, memoryId: string): Prom
     source: 'channel',
     channelId: r.id,
     live: r.deletedAt === null,
-    owner: 'createTeamChatMessage / hadron_team_chat_post',
+    owner: 'createTeamChatMessage / `hadron team chat post`',
   }));
 }
 
@@ -227,7 +227,7 @@ function protectedRemedy(op: string, live: boolean): string {
     return `The Channel is DELETED, so none of its operations can be reached — the address stays reserved so it cannot be occupied and then restored over. Recreate the Channel (createChannel) to write here, or delete what it orphaned.`;
   }
   return CHANNEL_BACKED_OPS.has(op)
-    ? `Post with createTeamChatMessage / hadron_team_chat_post; the generic node surface does not reach it.`
+    ? `Post with createTeamChatMessage / \`hadron team chat post\`; the generic node surface does not reach it.`
     : `There is no operation that may ${op} here — the Channel's own operation posts messages, so this operation has no bypass.`;
 }
 

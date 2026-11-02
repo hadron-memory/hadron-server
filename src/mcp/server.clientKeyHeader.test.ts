@@ -44,6 +44,7 @@ afterAll(async () => {
 let org: { id: string; urn: string };
 let user: { id: string };
 let appA: { id: string; urn: string };
+let appB: { id: string; urn: string };
 let rawKey: string;
 
 beforeEach(async () => {
@@ -65,7 +66,7 @@ beforeEach(async () => {
   // multi-App (`resolveUserApps` counts AppMember rows, not Apps), and only
   // then is App scope genuinely ambiguous without a selection — which is what
   // makes a restore observable at all.
-  const appB = await db.app.create({
+  appB = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'App B', urn: `${org.urn}:app-b` },
   });
   await db.appMember.create({ data: { appId: appA.id, userId: user.id, role: 'owner' } });
@@ -179,11 +180,12 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
     const read = await mcpFetch({
       sessionId: second,
       clientId,
-      body: callBody('hadron_team_chat_read', { sinceSeq: 0 }),
+      body: callBody('hadron_list_memories'),
     });
     const text = await read.text();
-    expect(text).not.toContain('multiple_apps_resolved');
-    expect(text).not.toContain('No App context');
+    expect(text).toContain(`active App`);
+    expect(text).toContain(appA.urn);
+    expect(text).not.toContain('no active App');
   });
 
   it('a connection sending NO header gets none of it back', async () => {
@@ -199,9 +201,9 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
     const anon = await connect();
     const read = await mcpFetch({
       sessionId: anon,
-      body: callBody('hadron_team_chat_read', { sinceSeq: 0 }),
+      body: callBody('hadron_list_memories'),
     });
-    expect(await read.text()).toContain('multiple_apps_resolved');
+    expect(await read.text()).toContain('no active App');
   });
 
   it("a DIFFERENT client instance does not inherit the selection", async () => {
@@ -218,9 +220,9 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
     const read = await mcpFetch({
       sessionId: other,
       clientId: 'cursor-instance-1',
-      body: callBody('hadron_team_chat_read', { sinceSeq: 0 }),
+      body: callBody('hadron_list_memories'),
     });
-    expect(await read.text()).toContain('multiple_apps_resolved');
+    expect(await read.text()).toContain('no active App');
   });
 
   it('an explicit selection OUTRANKS the single-App default (Codex P1 on PR #1013)', async () => {
@@ -249,13 +251,14 @@ describe('#1012 — X-Hadron-Client-Id over the real boundary', () => {
     const info = await mcpFetch({
       sessionId: second,
       clientId,
-      body: callBody('hadron_list_workers', {}),
+      body: callBody('hadron_list_memories'),
     });
     const text = await info.text();
-    // Each App has one distinctly-named worker, so the roster names which App
-    // actually resolved — no inference required.
-    expect(text).toContain('WorkerInAppA');
-    expect(text).not.toContain('WorkerInAppB');
+    // #3082: the roster tools are disabled; hadron_list_memories names the active App in its Scope line, which is
+    // the same observable (which App actually resolved).
+    expect(text).toContain(`active App`);
+    expect(text).toContain(appA.urn);
+    expect(text).not.toContain(appB.urn);
   });
 
   it('advertises the capability so a client can tell whether to send the header', async () => {
