@@ -44,9 +44,9 @@ describe('#2663 disposition write',()=>{
  });
  it('latest wins, including identical repeats, with one content-free event per call',async()=>{
   const ref={kind:'ISSUE',target:'https://example.test/private-followup',label:'private label'};
-  await dispose('deferred','F1',ref);await dispose('fixed');await dispose('fixed');
+  await dispose('deferred','F1',ref);await dispose('fixed');await dispose('fixed');await dispose('fixed','F1',null);
   expect((await read()).items).toEqual([{findingId:'F1',disposition:'fixed',reference:null}]);
-  expect((await events()).map(e=>e.payload)).toEqual([{findingId:'F1',disposition:'deferred'},{findingId:'F1',disposition:'fixed'},{findingId:'F1',disposition:'fixed'}]);
+  expect((await events()).map(e=>e.payload)).toEqual([{findingId:'F1',disposition:'deferred'},{findingId:'F1',disposition:'fixed'},{findingId:'F1',disposition:'fixed'},{findingId:'F1',disposition:'fixed'}]);
   const text=JSON.stringify(await events());for(const value of ['secret one','private-followup','private label']) expect(text).not.toContain(value);
   expect((await events()).every(e=>e.severity===null)).toBe(true);
  });
@@ -98,10 +98,29 @@ describe('#2663 disposition write',()=>{
   await expect(dispose('fixed','F1',undefined,ctx(),t.id)).rejects.toMatchObject(code('TASK_NOT_FINISHED'));
  });
  it('serializes concurrent dispositions without losing either finding or event',async()=>{
-  await Promise.all([dispose('fixed','F1'),dispose('deferred','F2')]);
+  const {Client}=await import('pg');
+  const holder=new Client({connectionString:process.env.DATABASE_URL});await holder.connect();
+  await holder.query('BEGIN');
+  await holder.query('SELECT id FROM agent_tasks WHERE id = $1 FOR UPDATE',[task.id]);
+  let completed=false;
+  const writes=Promise.allSettled([dispose('fixed','F1'),dispose('deferred','F2')]).then(rows=>{completed=true;return rows;});
+  try {
+   const deadline=Date.now()+4000;let waiting=0;
+   do {
+    const [row]=await db.$queryRaw<{n:bigint}[]>`SELECT count(*) AS n FROM pg_stat_activity
+     WHERE datname=current_database() AND wait_event_type='Lock'
+       AND query ILIKE '%FROM agent_tasks%FOR UPDATE%'`;
+    waiting=Number(row.n);
+    if(waiting<2) await new Promise(resolve=>setTimeout(resolve,10));
+   } while(waiting<2 && Date.now()<deadline);
+   expect(waiting).toBe(2);expect(completed).toBe(false); // both real writers reached the held task lock
+  } finally {
+   try {await holder.query('ROLLBACK');} finally {await holder.end();await writes;}
+  }
+  expect((await writes).map(row=>row.status)).toEqual(['fulfilled','fulfilled']);
   expect((await read()).items.map((d:any)=>d.findingId).sort()).toEqual(['F1','F2']);
   expect(await events()).toHaveLength(2);expect(await list()).toEqual([]);
- });
+ },15000);
 });
 it('unresolved filter runs before paging, composes other filters and keeps App read scope',async()=>{
  const other=await M.createAgentTask({}, {input:{appRef:app.id,title:'Newer no findings',assignee:{user:assignee.id}}},ctx());

@@ -38,5 +38,6 @@ DROP TRIGGER IF EXISTS agent_task_dispositions ON agent_tasks;
 CREATE TRIGGER agent_task_dispositions BEFORE INSERT OR UPDATE OF status, result_findings, finding_dispositions, unresolved_finding_ids ON agent_tasks
 FOR EACH ROW EXECUTE FUNCTION maintain_agent_task_dispositions();
 
--- Backfill only the derived projection for findings finished before this migration.
+-- Rebuild the projection for rows that predate these columns on BOTH deploy and post-push paths.
+-- Results and current dispositions stay byte-identical; repeating this is safe and writes no history event.
 UPDATE agent_tasks SET finding_dispositions = finding_dispositions WHERE jsonb_typeof(result_findings) = 'array';

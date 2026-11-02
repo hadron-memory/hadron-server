@@ -10524,7 +10524,7 @@ export const typeDefs = `#graphql
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
 
-    "#2663: task assigners only, including after finish; never an App key or impersonation. Replaces one finding disposition, never clears it. Unknown finding TASK_FINDING_NOT_FOUND; open task TASK_NOT_FINISHED; result unchanged (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+    "#2663: task assigners only, including after finish; never an App key or impersonation. Records a new disposition value, never clears it; omitted/null reference means no reference on the new value. Unknown finding TASK_FINDING_NOT_FOUND; open task TASK_NOT_FINISHED; result unchanged (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
     disposeAgentTaskFinding(taskRef: ID!, findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReferenceInput): AgentTask!
 
     """
@@ -14102,12 +14102,13 @@ export const typeDefs = `#graphql
   enum AgentTaskFindingSeverity { P1 P2 P3 note }
   "#2662: immutable finding set at finish; text never enters the event stream."
   type AgentTaskFinding { id: String!, severity: AgentTaskFindingSeverity!, text: String! }
-  "#2662: findings in supplied order, capped pages (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  "#2663: every code resolves the finding, including deferred (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
   enum AgentTaskFindingDispositionCode { fixed accepted deferred rejected }
   "#2663: latest disposition, separate from immutable findings. Every code, including deferred, resolves the finding."
   type AgentTaskFindingDisposition { findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReference }
   "#2663: current dispositions, ordered by finding order, capped pages."
   type AgentTaskFindingDispositionPage { items: [AgentTaskFindingDisposition!]!, total: Int!, hasMore: Boolean! }
+  "#2662: findings in supplied order, capped pages (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
   type AgentTaskFindingPage { items: [AgentTaskFinding!]!, total: Int!, hasMore: Boolean! }
   "#2662: give every id, or none for platform F1/F2/... ids in list order. Ids unique, 1–32 letters/digits/_/-. Text at most 2,000 Unicode code points; no trimming."
   input AgentTaskFindingInput { id: String, severity: AgentTaskFindingSeverity!, text: String! }
