@@ -110,6 +110,8 @@ ALTER TABLE memories
 -- (app_id NULL) is exempt. (We deliberately do NOT couple app_id ⇔ agent: a
 -- legacy pre-008 row may have app_id NULL with an agent set, and the MCP gate
 -- has explicit handling + a regression test for that shape.)
+-- #422: supported account erasure deletes Apps (cascading to owned App-scoped
+-- memories) before Agents; relaxing Agent sharing must revisit this SET NULL/CHECK ordering.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories
@@ -178,6 +180,14 @@ ALTER TABLE ai_service_configs
 ALTER TABLE ai_service_configs
   ADD CONSTRAINT chk_ai_service_config_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, app_id, agent_id) = 1);
+
+-- ─── #2831 S1: a model group belongs to exactly one owner (Agent or App) ──
+-- Synced with the 20261031230000 migration.
+ALTER TABLE model_groups
+  DROP CONSTRAINT IF EXISTS chk_model_group_owner;
+ALTER TABLE model_groups
+  ADD CONSTRAINT chk_model_group_owner
+  CHECK (num_nonnulls(agent_id, app_id) = 1);
 
 -- ─── #696: secrets are ORG/USER-owned only ───────────────────────────────
 -- D-2026-07-15-006 narrows the #679 secret store to org/user owners (the flat
@@ -685,6 +695,22 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
 
+-- #2651: a task's latest hand-back (code, optional text, time). One source, shared verbatim with migration
+-- 20261101090000_agent_task_hand_back (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-hand-back-invariants.sql
+
+-- #2649: a task's references are one JSON array of at most 20 items. One source, shared verbatim with migration
+-- 20261101120000_agent_task_references (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-references-invariants.sql
+
+-- #3125 S1: an App's properties are a JSON object when set. One source, shared verbatim with migration
+-- 20261101150000_app_properties (pinned by src/api/graphql/schema/appProperties3125.test.ts).
+\ir app-properties-invariants.sql
+
+-- #3125 S2: a task's external id (1..512) and its per-App partial unique index. One source, shared verbatim with
+-- migration 20261101160000_agent_task_external_id (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-external-id-invariants.sql
+
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
 -- 20261024100200_context_reset_availability (the newest to carry it) (pinned by src/lib/agentTasks/invariants.test.ts).
@@ -815,5 +841,14 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
+-- #2014: the team-chat post limit's episodes and their worker fence.
+\ir post-limit-invariants.sql
+
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql
+
+-- #451: delete-path FK columns need a leading index (the same statements as the four 20261031110x migrations).
+CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");
+CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
+CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
+CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");

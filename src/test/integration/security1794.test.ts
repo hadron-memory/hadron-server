@@ -73,6 +73,7 @@ describe('restricted #1794 HTTP regression', () => {
   it('keeps app-provisioned and verified identities separate at the HTTP boundary', async () => {
     const owner = await db.user.create({ data: { handle: 'security1794-app-owner', roles: ['READER'] } });
     const app = await db.app.create({ data: { name: 'Security fixture', urn: 'security1794-app-owner:fixture', ownerUserId: owner.id } });
+    // SYNTHETIC: a made-up App key, shaped like a real one so the key-hash path is exercised. Not a credential.
     const key = 'hdr_app_security1794syntheticfixture';
     await db.appKey.create({ data: { appId: app.id, keyHash: hashAppKey(key), keyPreview: key.slice(-4) } });
     const email = 'app-fresh@security1794.test';

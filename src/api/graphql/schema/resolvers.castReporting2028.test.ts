@@ -4,6 +4,7 @@ import { setS7AvailableForTest } from '../../../lib/tickers/s7Availability.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -21,6 +22,7 @@ beforeEach(async () => {
   agent = await M.createAgent({}, { orgId: org.id, name: 'S12 agent' }, ctx());
   app = await db.app.create({ data: { organizationId: org.id, name: 'S12 app', urn: `s12-${generateId()}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveEveryAgent(db); // #2712: binds need a served prompt
 });
 afterEach(() => { vi.unstubAllEnvs(); setS7AvailableForTest(false); });
 

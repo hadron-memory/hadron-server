@@ -24,6 +24,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
@@ -59,13 +60,14 @@ beforeEach(async () => {
     data: {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:server`,
       name: 'Server Engineer', visibility: 'ORGANIZATION',
-      personaRole: 'server-engineer', systemPrompt: 'You are {{name}}, a {{role}}.',
+      personaRole: 'server-engineer',
     },
   });
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
   });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 afterEach(() => {
@@ -95,7 +97,9 @@ function urlLines(text: string): string[] {
 function workerUrns(text: string): string[] {
   return text
     .split('\n')
-    .filter((line) => !/^\s*URL:/.test(line))
+    // #2969: the rendered signature/trailer lines carry the worker's link inside them (`](<origin>/app/u/<urn>)`), by
+    // design; they are not identifiers, like the `URL:` lines.
+    .filter((line) => !/^\s*URL:/.test(line) && !line.includes('/app/u/hrn:worker:'))
     .flatMap((line) => [...line.matchAll(/hrn:worker:[^\s)]+/g)].map((m) => m[0]));
 }
 

@@ -1,34 +1,10 @@
 /**
- * #2047 (S10, cor:agt:040:10) — the gate, the closed refusal code list, and the one refusal helper.
+ * #2047 (S10, cor:agt:040:10) — the closed refusal code list, and the one refusal helper.
  */
 
 import { describe, it, expect } from 'vitest';
 import { GraphQLError } from 'graphql';
-import { bootPromptServingEnabled } from './gate.js';
 import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal } from './refusal.js';
-
-describe('bootPromptServingEnabled', () => {
-  it('is off unless the flag is exactly "true"', () => {
-    expect(bootPromptServingEnabled({})).toBe(false);
-    expect(bootPromptServingEnabled({ BOOT_PROMPT_SERVE_ENABLED: '' })).toBe(false);
-    expect(bootPromptServingEnabled({ BOOT_PROMPT_SERVE_ENABLED: '1' })).toBe(false);
-    expect(bootPromptServingEnabled({ BOOT_PROMPT_SERVE_ENABLED: 'TRUE' })).toBe(false);
-    expect(bootPromptServingEnabled({ BOOT_PROMPT_SERVE_ENABLED: 'true' })).toBe(true);
-  });
-
-  it('reads the process environment per call, so toggling it needs no redeploy of the module', () => {
-    const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
-    try {
-      delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-      expect(bootPromptServingEnabled()).toBe(false);
-      process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
-      expect(bootPromptServingEnabled()).toBe(true);
-    } finally {
-      if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-      else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-    }
-  });
-});
 
 describe('bootPromptRefusal', () => {
   it('has exactly the one agreed code list (#2045 / #2047), NOT_SET canonical', () => {

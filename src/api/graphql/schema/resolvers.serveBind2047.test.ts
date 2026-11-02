@@ -1,7 +1,7 @@
 /**
  * #2047 (S10, cor:agt:040:03/:07/:09/:10) — the BIND surface: an unserveable boot prompt refuses the bind and rolls it
  * back whole, an approved one is served as-is and recorded in the bind's transaction, the retired columns are not read,
- * and an open session finishes under the revision it was bound with. With serving OFF nothing changes.
+ * and an open session finishes under the revision it was bound with. #2712 retired the serving switch.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -16,7 +16,6 @@ import { composeWorkerPrompt, describeServedWorker } from './resolvers.worker.js
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any;
 let org: any, app: any, agent: any, admin: any, worker: any, memoryId: string;
-const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 const ctx = (extra: Partial<Context> = {}): Context => ({ db, userId: admin.id, roles: ['READER'], ...extra });
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 const bind = () => M.startSession({}, { input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: worker.id, force: true, llmModel: 'm-1' } }, ctx());
@@ -46,33 +45,20 @@ async function recompileApproved(nodeId: string, content: string) {
 const pointAgent = (id: string) => db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: id, bootPromptUrn: `u:${id}` } });
 
 beforeEach(async () => {
-  process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
   await cleanDb(db);
   const n = generateId().toLowerCase();
   org = await db.organization.create({ data: { name: 'Serve', urn: `serve-${n}.example` } });
   admin = await db.user.create({ data: { githubId: 92047000, githubUsername: `serve-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'tester', systemPrompt: 'LEGACY {{worker.name}}' }, ctx());
+  agent = await M.createAgent({}, { orgId: org.id, name: 'Role', personaRole: 'tester', description: 'LEGACY {{worker.name}}' }, ctx());
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
-  const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Iris', promptOverride: 'LEGACY OVERRIDE' }, ctx());
+  const made = await M.castWorker({}, { appRef: app.id, agentRef: agent.id, name: 'Iris' }, ctx());
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
   memoryId = (await db.memory.create({ data: { id: generateId(), class: 'system', name: 'sys', urn: `${org.urn}:sys`, organizationId: org.id } })).id;
 });
-afterEach(() => {
-  if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-  else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
-});
 
 describe('#2047 bind', () => {
-  it('serving OFF: the bind needs no pointer, writes no record and still reads the legacy prompt', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    expect(await code(bind())).toBe('RESOLVED');
-    expect(await records()).toEqual([]);
-    const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect((await composeWorkerPrompt(ctx(), w as never)).text).toContain('LEGACY Iris');
-  });
-
   it('no pointer: the bind is refused BOOT_PROMPT_NOT_SET and rolled back whole (no session, no record)', async () => {
     const sessions = await db.session.count();
     expect(await code(bind())).toBe('BOOT_PROMPT_NOT_SET');
@@ -133,8 +119,6 @@ describe('#2047 bind', () => {
     await pointAgent(node);
     const line = await describeServedWorker(ctx(), w as never);
     expect(line).toContain(`AGENT pointer, compiled node ${node}, revision 1`);
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    expect(await describeServedWorker(ctx(), w as never)).toBe('');
   });
 
   it('a recorded session keeps the variables its bind filled: a rename after the bind does not rewrite its briefing', async () => {
@@ -147,9 +131,8 @@ describe('#2047 bind', () => {
   });
 
   it('an open session with no record (bound before serving was on) is not silently upgraded: no prompt, SESSION_UNRECORDED', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    const first = await bind();
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
+    // A session row bound before the switch existed carries no record; #2712 retired the switch, so make the row directly.
+    const first = await db.session.create({ data: { id: generateId(), workerId: worker.id, appId: app.id, userId: admin.id } });
     const node = await compiled('current text');
     await pointAgent(node);
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
@@ -159,26 +142,25 @@ describe('#2047 bind', () => {
   });
 });
 
-// #2702: the converted prompts keep the legacy {{name}} / {{role}} tokens until the live-node token audit (#1772), so the
-// served path binds them in the same pass as the platform variables, from the values the bind filled.
-describe('#2702 served text binds the legacy {{name}} / {{role}} tokens', () => {
-  const LEGACY = 'You are {{name}}, filling the {{role}} role. Sign as {{name}}.';
+// #1772 step 3: the legacy {{name}} / {{role}} binding is deleted (G3: no live served text holds one). A token left in served
+// text renders as written, like any text outside the closed set; {{worker.name}} / {{worker.role}} are the only binders.
+describe('#1772 step 3: LIVE served text leaves legacy {{name}} / {{role}} tokens as written', () => {
+  const LEGACY = 'You are {{name}}, filling the {{role}} role. Sign as {{name}}. ({{worker.name}}/{{worker.role}})';
 
-  it('a read with no record (what a bind would be served now) binds the worker name and role', async () => {
+  it('a read with no record leaves the legacy tokens and binds the closed-set ones', async () => {
     await pointAgent(await compiled(LEGACY));
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const text = (await composeWorkerPrompt(ctx(), w as never)).text!;
-    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris.');
-    expect(text).not.toMatch(/\{\{(name|role)\}\}/);
+    expect(text).toContain('You are {{name}}, filling the {{role}} role. Sign as {{name}}. (Iris/tester)');
   });
 
-  it("a recorded session's replay binds the recorded name and role, not today's", async () => {
+  it("a recorded session's replay still binds them from the RECORDED values: a record is reconstructed as it was served (#1772 review P2)", async () => {
     await pointAgent(await compiled(LEGACY));
     const session = await bind();
     await db.worker.update({ where: { id: worker.id }, data: { name: 'Renamed', role: 'renamed-role' } });
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const text = (await composeWorkerPrompt(ctx({ sessionId: session.id }), w as never)).text!;
-    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris.');
+    expect(text).toContain('You are Iris, filling the tester role. Sign as Iris. (Iris/tester)');
     expect(text).not.toMatch(/\{\{(name|role)\}\}/);
   });
 });

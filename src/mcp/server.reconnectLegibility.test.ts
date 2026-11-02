@@ -26,6 +26,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { MCP_SURFACE_CAPABILITIES } from './deploymentInfo.js';
@@ -78,6 +79,7 @@ beforeEach(async () => {
   worker = await db.worker.create({
     data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 const MULTI_APP = { cachedAppResolution: { kind: 'multi-app' as const } };

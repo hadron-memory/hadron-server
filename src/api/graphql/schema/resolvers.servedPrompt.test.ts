@@ -1,9 +1,8 @@
 /**
  * #2047 (S10, cor:agt:040:03) — reading the served-prompt record: who may read each owner's record, that a non-reader
- * gets an empty page or null (no existence oracle), that lists are paginated, that provenance is ids only and paged,
- * and that every field is empty while serving is off.
+ * gets an empty page or null (no existence oracle), that lists are paginated, and that provenance is ids only and paged.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -24,13 +23,11 @@ describe('served-prompt record reads (#2047)', () => {
   let chatNodeId: string;
   let compiledNodeId: string;
   let orgId: string;
-  const before = process.env.BOOT_PROMPT_SERVE_ENABLED;
 
   const user = async (tag: string) =>
     (await db.user.create({ data: { id: generateId(), githubId: Math.floor(Math.random() * 1e9), githubUsername: `sp-${tag}-${generateId().slice(0, 6)}`, roles: ['READER'] } })).id;
 
   beforeEach(async () => {
-    process.env.BOOT_PROMPT_SERVE_ENABLED = 'true';
     await cleanDb(db);
     const { org, graph } = await createDbOrgAndGraph(db, { orgName: `spr-${generateId().slice(0, 8)}` });
     orgId = org.id;
@@ -57,11 +54,6 @@ describe('served-prompt record reads (#2047)', () => {
     for (const ordinal of [1, 2, 3]) {
       await db.servedPrompt.create({ data: { ...base, kind: 'CHAT', chatId: chatNodeId, ordinal } as never });
     }
-  });
-
-  afterEach(() => {
-    if (before === undefined) delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    else process.env.BOOT_PROMPT_SERVE_ENABLED = before;
   });
 
   const bindPage = (userId: string) => R.Session.servedPrompts({ id: sessionId, appId }, {}, ctxFor(userId));
@@ -135,14 +127,6 @@ describe('served-prompt record reads (#2047)', () => {
     expect(pageOf({ limit: 99_999 })).toEqual({ take: 200, skip: 0 });
     expect(pageOf({ limit: -5, offset: -9 })).toEqual({ take: 0, skip: 0 });
     expect(pageOf({ limit: 10, offset: 30 })).toEqual({ take: 10, skip: 30 });
-  });
-
-  it('every field is empty while serving is off', async () => {
-    delete process.env.BOOT_PROMPT_SERVE_ENABLED;
-    expect(await bindPage(ownerU)).toEqual({ items: [], total: 0 });
-    expect(await workerRec(ownerU)).toBeNull();
-    expect(await runRec(ownerU)).toBeNull();
-    expect(await chatPage(ownerU)).toEqual({ items: [], total: 0 });
   });
 
   describe('the record itself', () => {

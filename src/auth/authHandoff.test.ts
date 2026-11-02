@@ -129,9 +129,33 @@ describe('exchange-start nonces', () => {
       userId,
       orgId: 'org_123',
       redirect: '/app/orgs/org_123/integrations',
+      origin: 'portal',
     });
     // Single use.
     expect(await redeemExchangeStartNonce(nonce)).toBeNull();
+  });
+
+  it('a GraphQL-started nonce redeems once as origin graphql, and only at its own provider (#2897)', async () => {
+    const nonce = await issueExchangeStartNonce({
+      userId,
+      orgId: 'org_123',
+      redirect: '/',
+      provider: 'gmail',
+      origin: 'graphql',
+    });
+    expect(await redeemExchangeStartNonce(nonce, 'ms-exchange')).toBeNull();
+    expect(await redeemExchangeStartNonce(nonce, 'gmail')).toEqual({
+      userId,
+      orgId: 'org_123',
+      redirect: '/',
+      origin: 'graphql',
+    });
+    expect(await redeemExchangeStartNonce(nonce, 'gmail')).toBeNull();
+  });
+
+  it('a portal-started nonce keeps origin portal when it is provider-bound (#2897)', async () => {
+    const nonce = await issueExchangeStartNonce({ userId, orgId: 'org_123', redirect: '/', provider: 'gmail' });
+    expect((await redeemExchangeStartNonce(nonce, 'gmail'))?.origin).toBe('portal');
   });
 
   it('a login code is not redeemable as an exchange nonce (kind-scoped)', async () => {

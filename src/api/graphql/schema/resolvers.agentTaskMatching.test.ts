@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -59,6 +60,7 @@ beforeEach(async () => {
       select: { id: true },
     });
   }
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 /** Bind a worker in a session of `family`, driven `minutesAgo` minutes ago. */

@@ -150,6 +150,7 @@ async function attendeeColumns(
 async function attendeeAccessActor(
   db: Context['db'],
   columns: NonNullable<Awaited<ReturnType<typeof attendeeColumns>>>,
+  share?: RegisterPageShare,
 ): Promise<{ actor: Context; unavailableReason: null } | { actor: null; unavailableReason: RegisterDisclosure }> {
   if (!columns.workerId) return { actor: { db, appId: columns.appId }, unavailableReason: null };
   if (!columns.heldByUserId) return { actor: null, unavailableReason: 'UNKNOWN_ACTOR' };
@@ -166,7 +167,8 @@ async function attendeeAccessActor(
     where: { id: columns.appId, deletedAt: null, uninstalledAt: null },
     select: { id: true, organizationId: true, ownerUserId: true },
   });
-  if (!app || !(await isAppParticipant(actor, app))) {
+  const holderKey = `holder:${holder.id}:${[...holder.roles].sort().join(',')}`;
+  if (!app || !(await sharedParticipant(share, `${holderKey}:app:${app.id}`, () => isAppParticipant(actor, app)))) {
     // The holder is no longer an eligible Worker driver. No actor can be
     // supplied for this projection; HOST/DRIVER_NOT_PARTICIPANT would claim
     // something about the Channel's host App that may be false.
@@ -221,6 +223,32 @@ export interface ResolveRegisterArgs {
   accessActor?: Context | null | 'ATTENDEE';
   /** Rows already collected (a run's snapshot) — otherwise collected live. */
   rows?: EntryRow[];
+  /**
+   * #2971 — accessible-memory sets shared by the registers of ONE `workers` page. Only the two INPUTS of the gates are
+   * shared, never a register view: the viewer's set (every worker of the page is read by the same caller) and a
+   * holder's set (workers held by one person are judged as that person). Each register is still resolved for its own
+   * worker, and the sets live and die with the page's memo (cor:agt:020:01: nothing here outlives the page).
+   */
+  shared?: RegisterPageShare;
+}
+
+/** The accessible-memory sets of one page; `viewer` is the page's caller, shared only when `actor` is that same object. */
+export interface RegisterPageShare {
+  viewer: Context;
+  sets: Map<string, Promise<string[] | null>>;
+  /** Gate answers for one (principal, App) or (principal, host memory): the same question asked of the same principal for each worker. */
+  participant: Map<string, Promise<boolean>>;
+}
+
+function sharedParticipant(share: RegisterPageShare | undefined, key: string | null, ask: () => Promise<boolean>): Promise<boolean> {
+  if (!share || !key) return ask();
+  let held = share.participant.get(key);
+  if (!held) {
+    held = ask();
+    share.participant.set(key, held);
+    held.catch(() => share.participant.delete(key));
+  }
+  return held;
 }
 
 /**
@@ -239,7 +267,7 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   const { columns, rows } = collected;
   const viewer = args.actor ?? null;
   const attendeeAccess = args.accessActor === 'ATTENDEE'
-    ? await attendeeAccessActor(db, columns)
+    ? await attendeeAccessActor(db, columns, args.shared)
     : null;
   const actor: Context | null = args.accessActor === 'ATTENDEE'
     ? attendeeAccess!.actor
@@ -256,8 +284,24 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
       })
     ).map((c) => [c.id, c]),
   );
-  const viewerAccessible = viewer ? await getAccessibleMemoryIds(viewer) : null;
-  const accessible = actor === viewer ? viewerAccessible : actor ? await getAccessibleMemoryIds(actor) : null;
+  const setOf = (key: string, who: Context): Promise<string[] | null> => {
+    const share = args.shared;
+    if (!share) return getAccessibleMemoryIds(who);
+    let held = share.sets.get(key);
+    if (!held) {
+      held = getAccessibleMemoryIds(who);
+      share.sets.set(key, held);
+    }
+    return held;
+  };
+  const viewerAccessible = viewer ? await (args.shared && viewer === args.shared.viewer ? setOf('viewer', viewer) : getAccessibleMemoryIds(viewer)) : null;
+  // The attendee actor is built from the holder's id and roles alone (`attendeeAccessActor`), so those two ARE the key.
+  const holderKey = args.accessActor === 'ATTENDEE' && actor?.userId && !actor.impersonation
+    ? `holder:${actor.userId}:${[...(actor.roles ?? [])].sort().join(',')}`
+    : null;
+  const accessible = actor === viewer
+    ? viewerAccessible
+    : actor ? await (holderKey ? setOf(holderKey, actor) : getAccessibleMemoryIds(actor)) : null;
   // The two post-side gates, decided ONCE per host App and per host memory:
   // a register is unbounded and this runs on every briefing render, so the
   // N rows of one App must not cost N gate round trips (Copilot on PR #1167).
@@ -265,7 +309,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   const participantOf = (app: { id: string; organizationId: string | null; ownerUserId: string | null }) => {
     let p = participantByApp.get(app.id);
     if (!p) {
-      p = isAppParticipant(actor!, app);
+      const who = holderKey ?? (args.shared && actor === args.shared.viewer ? 'viewer' : null);
+      p = sharedParticipant(args.shared, who ? `${who}:app:${app.id}` : null, () => isAppParticipant(actor!, app));
       participantByApp.set(app.id, p);
     }
     return p;
@@ -274,7 +319,8 @@ export async function resolveRegister(db: Context['db'], args: ResolveRegisterAr
   const writableMemory = (memoryId: string) => {
     let p = writableByMemory.get(memoryId);
     if (!p) {
-      p = requireMemoryWriteAccess(actor!, memoryId).then(() => true, () => false);
+      const who = holderKey ?? (args.shared && actor === args.shared.viewer ? 'viewer' : null);
+      p = sharedParticipant(args.shared, who ? `${who}:write:${memoryId}` : null, () => requireMemoryWriteAccess(actor!, memoryId).then(() => true, () => false));
       writableByMemory.set(memoryId, p);
     }
     return p;

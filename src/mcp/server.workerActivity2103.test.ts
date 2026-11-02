@@ -69,7 +69,10 @@ describe('#2103 registered list_workers historical activity', () => {
     const row = await session(ago(77));
     const line = await rosterLine();
     expect(line).toContain('held by YOU, no live session, last recorded activity 4h ago');
-    expect(line).not.toMatch(/last driven|never driven|ended|1h ago|2d ago|3d ago/);
+    // #3077: the check status now names WHY it is NO_SESSION, as a closed reason with no time. #2103's rule is that
+    // the ACTIVITY part makes no end-time claim, so it is judged with the check segment removed.
+    expect(line).toMatch(/, check NO_SESSION \(ended\)$/);
+    expect(line.replace(/, check [^,]*$/, '')).not.toMatch(/last driven|never driven|ended|1h ago|2d ago|3d ago/);
     expect((await db.session.findUniqueOrThrow({ where: { id: row.id } })).endedAt).not.toBeNull();
   });
 

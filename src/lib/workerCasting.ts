@@ -10,18 +10,19 @@
  * stands in for the grant (Holger, 2026-10-12, team chat #9789).
  *
  * Read-only: it returns the grants a caller must provision and never writes, so the preview can run it too. A caller
- * that writes runs it again inside its deciding transaction.
+ * that writes runs it again inside its deciding transaction and provisions with `provisionCastGrants`.
  */
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { ensureAgentOrgGrant } from '../controller/operations/ensureAgentOrgGrant.js';
 import { classifyOrgAgentLicense } from './auth/orgAgentInstallLicense.js';
 import { parseCompiledProvenance } from './bootCompile/provenance.js';
 
 type Db = Pick<PrismaClient, 'agent' | 'agentOrgGrant' | 'agentSubscription' | 'appAgent' | 'compiledPromptRevision' | 'node'> | Prisma.TransactionClient;
 
 export type CastingApp = { id: string; organizationId: string | null; ownerUserId: string | null; uninstalledAt: Date | null };
-export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null; systemPrompt: string | null };
+export type CastingAgent = { id: string; name: string; urn: string; personaRole: string | null };
 
 const refusal = (code: string, message: string, extensions: Record<string, unknown> = {}) =>
   new GraphQLError(message, { extensions: { code, ...extensions } });
@@ -115,7 +116,7 @@ export async function assertCastable(
   }
   const row = await db.appAgent.findUnique({
     where: { appId_agentId: { appId: app.id, agentId } },
-    select: { agent: { select: { id: true, name: true, urn: true, personaRole: true, systemPrompt: true, deletedAt: true } } },
+    select: { agent: { select: { id: true, name: true, urn: true, personaRole: true, deletedAt: true } } },
   });
   if (!row || row.agent.deletedAt) throw workerAgentNotInstalled(app.id);
   const provisionGrantsFor: string[] = [];
@@ -125,4 +126,25 @@ export async function assertCastable(
   }
   const { deletedAt: _deleted, ...agent } = row.agent;
   return { agent, provisionGrantsFor };
+}
+
+/**
+ * #2906 / cor:agt:040:08: write the same-organisation grants `assertCastable` planned, in the caller's deciding
+ * transaction, then judge the licence again. The plan is a read made BEFORE the write, and `ensureAgentOrgGrant`
+ * is ON CONFLICT DO NOTHING: a concurrent writer's row (even a REVOKED one, committed while this INSERT waited on it)
+ * leaves the plan stale and the write a no-op. The second `assertCastable` reads that row and refuses it with the
+ * licence's own code, so a stale plan can never become a success on a revoked grant. Never reactivates; the caller
+ * must call this only once every refusal it can return as a value (a taken name) has been judged, because a
+ * returned value commits the transaction.
+ */
+export async function provisionCastGrants(
+  tx: Prisma.TransactionClient,
+  app: CastingApp,
+  agentId: string,
+  plan: string[],
+  createdBy: string | null,
+): Promise<void> {
+  if (plan.length === 0 || !app.organizationId) return;
+  for (const grantAgentId of plan) await ensureAgentOrgGrant(tx, app.organizationId, grantAgentId, { createdBy });
+  await assertCastable(tx, app, agentId);
 }

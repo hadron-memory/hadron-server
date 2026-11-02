@@ -1,5 +1,6 @@
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
+import { authorizedTriggerLabel } from './resolvers.appRun.js';
 import { plainRunFailure } from '../../../lib/automation/plainReason.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
@@ -29,6 +30,8 @@ import {
   emitNodeUrnV2,
   emitEdgeUrnV2,
   emitAssetUrnV2,
+  emitActionUrnV2,
+  registerEntryCode,
   emitInstalledAgentUrnV2,
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
@@ -185,6 +188,46 @@ export async function resolveNodeUrnField(
     // on the same malformed value, defeating the serve-and-log posture of
     // this non-null field.
     return bestEffortFlatNodeUrn('node', memUrn, n.loc);
+  }
+}
+
+/**
+ * #2610 — `Node.actionUrn`: the register entry's action address
+ * (`hrn:action:<root>:<agent-slug>:<code>`), computed on read. Non-null only
+ * for a `register:<code>` node in a LIVE Agent's system memory — the memory the
+ * action URN keys on is the holding Agent's own (`Node.memoryId` here), so a
+ * `register:` loc anywhere else names no entry. Null, never a throw, on an
+ * unemittable stored code atom (charset/length): one bad row must not fail the
+ * query, and a wrong action URN is worse than none.
+ *
+ * #2972 — entry-hood is `registerEntryCode`'s call: a NESTED `register:a:b`
+ * loc is a writable namespace loc, not an entry, and nulls QUIETLY (no repair
+ * warn); the null-and-log below is reachable only for a single-atom code the
+ * emitter refuses — a real entry that needs repair.
+ */
+export async function resolveNodeActionUrnField(
+  n: { loc: string; memoryId: string },
+  ctx: Context,
+): Promise<string | null> {
+  const code = registerEntryCode(n.loc);
+  if (code === null) return null;
+  const agent = await ctx.db.agent.findFirst({
+    where: { systemMemoryId: n.memoryId, deletedAt: null },
+    select: { urn: true },
+  });
+  // No live Agent keys this memory (a plain memory, or a deleted Agent whose
+  // URN can no longer resolve): no action address exists for this node.
+  if (!agent) return null;
+  try {
+    return emitActionUrnV2(agent.urn, code);
+  } catch (err) {
+    console.warn(
+      `[Node.actionUrn] register code ${JSON.stringify(code)} in memory ${n.memoryId} is not ` +
+        'emittable as an action URN; serving null. The STORED loc needs repair — this is not a ' +
+        'malformed caller request:',
+      err,
+    );
+    return null;
   }
 }
 
@@ -603,8 +646,12 @@ async function resolveAuthorship(state: AuthoredState, ctx: Context) {
  * #2715 — at most this many per-parent reconcile transactions in flight per request. GraphQL resolves a list's
  * `Node.revision` fields concurrently; unbounded, a 200-node `nodeBatch` asks the pool for 200 interactive
  * transactions at once, and those queued past `maxWait` (2 s) fail with Prisma P2028. Production's default pool is 5
- * (Prisma 6.19.2, physical CPUs x 2 + 1); 4 leaves one connection for the rest of the server. The rest wait here,
- * app-side, where no start deadline applies.
+ * (Prisma 6.19.2, physical CPUs x 2 + 1). The rest wait here, app-side, where no start deadline applies.
+ *
+ * #2721 — the bound is per request, not a reservation of pool capacity: two concurrent requests may request 8 of these
+ * transactions against that 5-connection pool, and nothing here caps the process. What was tested is up to 20
+ * concurrent 200-node batches at pool 5 with no P2028 (the #2720 QA receipt); other request concurrency, pool sizes
+ * and deployments are untested. Reserving capacity for the rest of the server would need a process-wide limiter.
  */
 export const NODE_RECONCILE_CONCURRENCY = 4;
 
@@ -962,6 +1009,11 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
+      const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
+        : (await ctx.db.node.findUnique({ where: { id: n.id }, select: { embeddingTruncatedChunks: true } }))?.embeddingTruncatedChunks;
+      return count != null && count > 0 ? { omittedChunks: count } : null;
+    },
     outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),
     incomingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'in'),
     /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */
@@ -1130,6 +1182,11 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    // #2610 — the action-register address for a register:<code> entry in an
+    // Agent system memory; null for every other node. A second address beside
+    // `urn` (which keeps resolving), computed from the holding Agent's own urn.
+    actionUrn: (n: { loc: string; memoryId: string }, _: unknown, ctx: Context) =>
+      resolveNodeActionUrnField(n, ctx),
     // #1885 — stamped by the effective-system-memory reads (markInherited);
     // absent everywhere else, which reads as not inherited.
     inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
@@ -1259,7 +1316,16 @@ export const typeResolvers = {
     servedPrompt: servedPromptOwnerFields.runServedPrompt,
     // #2439: BigInt over the wire as a string, like UsageEvent.costMicroCents; NULL = unknown.
     costMicroCents: (r: { costMicroCents?: bigint | null }) => r.costMicroCents != null ? r.costMicroCents.toString() : null,
-    failureReason: (r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null }) => plainRunFailure(r),
+    failureReason: async (
+      r: { status: string; failure: unknown; budgetTokens: number | null; budgetActions: number | null; appId?: string | null; triggerKind?: string | null; triggerId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      const f = r.failure as { code?: unknown; reason?: unknown } | null;
+      // Only a CHANGED reason can carry a name; look it up only then (#2642).
+      const changed = !!f && typeof f === 'object' && f.code === 'AUTOMATION_CHANGED' && f.reason !== 'MEMORY_UNREADABLE';
+      return plainRunFailure(r, changed ? { automationLabel: await authorizedTriggerLabel(ctx, r) } : undefined);
+    },
     /**
      * Spec 049 Phase 3b — the run's scope as the CALLER may read it: the mint
      * snapshot ∩ the caller's current access (a lens never grants), or null
@@ -2043,13 +2109,18 @@ export const typeResolvers = {
     // case (pre-merge duplicate triage) is a platform admin or the user
     // themselves, both of which this gate admits, so nothing is lost.
     //
-    // Legacy `githubId`/`githubUsername` and `avatarUrl` remain ungated.
     // `externalId` and other account metadata use the #384 gate as of #1522.
-    // Changing the legacy fields needs a separate consumer/contract audit.
     googleId: async (u: { id: string; googleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.googleId ?? null) : null,
     appleId: async (u: { id: string; appleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.appleId ?? null) : null,
+    // #2574 (Holger V28, hrn:node:hadronmemory.com:specs:cor:acl:070:01): the
+    // numeric GitHub id sits with name and email behind the SAME #384 gate;
+    // only admin duplicate triage uses it. `githubUsername` and `avatarUrl`
+    // are identity, so they stay default-resolved for any signed-in viewer
+    // and the username stays the public search key of cor:acl:070:02.
+    githubId: async (u: { id: string; githubId?: number | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.githubId ?? null) : null,
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).
@@ -2390,14 +2461,14 @@ export const typeResolvers = {
     // #757 — `importedBy` surfaces the agents that import THIS one, i.e. OTHER
     // tenants' parent agents. On a PUBLIC agent (readable by anyone,
     // including anonymous) that handed out foreign orgs' private parent-agent
-    // definitions — `systemPrompt`, description, linked-memory metadata — the
+    // definitions — description, linked-memory metadata — the
     // exact #552 class. `publishAgentImport` puts no visibility constraint on
     // the parent, so this is the intended marketplace flow, not a rare shape.
     //
     // The row list retains the established App-key installed-parent audience
     // (an adoption signal, not an Agent definition grant). Its parentAgent
     // object resolver now applies Query.agent's own read gate, so a visible
-    // import row cannot reveal an unreadable parent's systemPrompt.
+    // import row cannot reveal an unreadable parent's definition.
     importedBy: async (a: { id: string }, _: unknown, ctx: Context) => {
       const parentAgent = await callerReadableAgentFilter(ctx);
       return ctx.db.agentImport.findMany({
@@ -2405,7 +2476,7 @@ export const typeResolvers = {
         orderBy: { position: 'asc' },
       });
     },
-    // #551 — the Agent's OWN definition (systemPrompt / systemMemoryId /
+    // #551 — the Agent's OWN definition (systemMemoryId /
     // memoryItems / imports, above) is public on a PUBLIC agent: reaching the
     // Agent object means the object-level read gate already admitted the
     // caller (PUBLIC → anyone; non-public → members), and the agent's own
@@ -2414,7 +2485,7 @@ export const typeResolvers = {
     //
     // The "who USES this agent" fields below are different: they surface OTHER
     // tenants' data, so they are NOT public. `apps` / `appAgents` return full
-    // `App` objects, including scalars such as systemPrompt. Returning a
+    // `App` objects, including scalars such as description. Returning a
     // foreign App here leaks data even though keys and members re-check.
     // Scope them to
     // Apps in orgs the CALLER belongs to, then apply each App's own read

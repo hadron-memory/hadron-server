@@ -1,5 +1,7 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
+import { isDeepStrictEqual } from 'node:util';
+import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
 import { generateId } from '../../../lib/id.js';
 import { lockAncestorsForCreateMany, lockLocForWrite } from '../../../lib/nodeSubtreeLock.js';
 import {
@@ -26,9 +28,8 @@ import {
   agentSlugFromUrn,
 } from '../../../lib/urn.js';
 import { compileTemplate } from '../../../lib/template.js';
-import { applyPlatformVariables, legacyFromValues } from '../../../lib/personaDescription.js';
+import { applyPlatformVariables } from '../../../lib/personaDescription.js';
 import { agentPlatformValues } from '../../../lib/bootPrompt/variables.js';
-import { bootPromptServingEnabled } from '../../../lib/bootPrompt/gate.js';
 import { recordServedPrompt, resolveServedBootPrompt, type ServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import {
   evaluateEdgeCondition,
@@ -71,6 +72,8 @@ import { assertBatchMutable } from '../../../lib/bulkMutationGate.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -110,17 +113,7 @@ async function chatWriteTx(
 }
 
 /**
- * The Agent's own identity bound into its template on the chat path (#2042, cor:dmo:150:08): a chat binds no worker,
- * so `worker.name` falls back to the Agent's name, `worker.role` to its persona role, `worker.url` is the Agent's
- * portal URL, and reports-to / signature / trailer are empty. The server calls no model in a chat (the client does),
- * so `session.llmModel` has no value here and is empty.
- */
-export function bindAgentPrompt(agent: { systemPrompt: string | null; name: string; urn: string; personaRole: string | null }): string {
-  return applyPlatformVariables(agent.systemPrompt ?? '', agentPlatformValues(agent), { name: agent.name, role: agent.personaRole ?? '' });
-}
-
-/**
- * #2047 (S10) — what a chat is served with serving ON: the compiled boot prompt (approved revision, as-is), its platform
+ * #2047 (S10) — what a chat is served: the compiled boot prompt (approved revision, as-is), its platform
  * variables bound to the Agent (a chat binds no worker). Resolved BEFORE the chat is created or answered, so a refusal
  * is the same typed refusal a bind gives and leaves no chat behind. The App is the one the chat's holding memory belongs
  * to; a chat held in a memory with no App serves the Agent's own pointer and has no App to record under.
@@ -129,17 +122,21 @@ export async function serveChatPrompt(
   db: Context['db'],
   agent: { id: string; name: string; urn: string; personaRole: string | null },
   appId: string | null,
+  llmModel: string | null = null,
 ): Promise<{ text: string; served: ServedBootPrompt; variables: Record<string, string> }> {
   const served = await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agent.id, name: agent.name } });
-  const variables = agentPlatformValues(agent);
-  return { text: applyPlatformVariables(served.content, variables, legacyFromValues(variables)), served, variables: { ...variables } };
+  const variables = { ...agentPlatformValues(agent), 'session.llmModel': llmModel ?? '' };
+  // #3096 / cor:dmo:150:08: provenance label is record metadata, never another prompt variable.
+  return { text: applyPlatformVariables(served.content, variables), served, variables: {
+    ...variables, 'session.llmModel.source': llmModel === null ? 'unspecified' : 'client-reported',
+  } };
 }
 
 /**
- * #2047 (R37) — a chat records what it was served again only when the served revision CHANGED. (chat, ordinal) is unique, so
+ * #2047 (R37) — a chat records what it was served again only when the served revision or its filled variable values CHANGED (#3096). (chat, ordinal) is unique, so
  * two concurrent turns can race for one ordinal; the loser must not assume the winner recorded ITS revision (the two may
  * have resolved different revisions around an approval). It re-reads the latest record and retries at the next ordinal
- * until the latest record matches what this turn served, so a served revision is never missing from the audit history.
+ * until the latest record matches what this turn served, so a served revision or filled value set is never missing from the audit history.
  */
 export async function recordChatServedIfChanged(
   db: Context['db'],
@@ -149,8 +146,8 @@ export async function recordChatServedIfChanged(
   chatServed: { served: ServedBootPrompt; variables: Record<string, string> },
 ): Promise<void> {
   for (let attempt = 0; attempt < 5; attempt++) {
-    const last = await db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true } });
-    if (last && last.compiledNodeId === chatServed.served.compiledNodeId && last.servedRevSeq === chatServed.served.servedRevSeq) return;
+    const last = await db.servedPrompt.findFirst({ where: { chatId }, orderBy: { ordinal: 'desc' }, select: { compiledNodeId: true, servedRevSeq: true, ordinal: true, variables: true } });
+    if (last && last.compiledNodeId === chatServed.served.compiledNodeId && last.servedRevSeq === chatServed.served.servedRevSeq && isDeepStrictEqual(last.variables, chatServed.variables)) return;
     try {
       await recordServedPrompt(db, { kind: 'CHAT', chatId, appId, agentId, ordinal: (last?.ordinal ?? 0) + 1 }, chatServed.served, chatServed.variables);
       return;
@@ -170,6 +167,7 @@ export const chatMutations = {
         conversationName,
         scope,
         isTestRun,
+        llmModel,
       }: {
         agentId: string;
         userId?: string;
@@ -180,6 +178,7 @@ export const chatMutations = {
         // from the Tester. Defaults to false; see typeDefs for the
         // full rationale.
         isTestRun?: boolean;
+        llmModel?: string | null;
       },
       ctx: Context,
     ) => {
@@ -188,6 +187,8 @@ export const chatMutations = {
       // not by a role, so the role check applies to user principals only.
       const pureAppKey = Boolean(ctx.appId && !ctx.userId);
       if (!pureAppKey) requireRole(ctx, 'READER');
+      // Validate before provisioning memory, nodes or a subscription. This input grants nothing.
+      const reportedModel = clientReportedChatModel(llmModel);
 
       // Spec 017: default per FR-003. The GraphQL schema also defaults
       // scope to `private`; the resolver default is a defensive belt.
@@ -302,17 +303,26 @@ export const chatMutations = {
           return d.isSetup !== true && d.isFallback !== true;
         });
         const chosen = nonSetup ?? topLevel[0];
-        if (!chosen) throw new Error('Agent has no conversations configured');
+        if (!chosen) {
+          throw new ChatScopeError('AGENT_HAS_NO_CONVERSATIONS', 'Agent has no conversations configured.');
+        }
         convName = chosen.loc.split(':')[1];
       }
 
       const convNode = await findSystemNode(`conversations:${convName}`);
-      if (!convNode) throw new Error(`Conversation "${convName}" not found in agent's system memory`);
+      if (!convNode) {
+        throw new ChatScopeError(
+          'CONVERSATION_NOT_FOUND',
+          `Conversation "${convName}" not found in agent's system memory.`,
+        );
+      }
 
       const convData = (convNode.data as Record<string, unknown>) ?? {};
       const stageOrder = (convData.stageOrder as string[]) ?? [];
       const firstStage = stageOrder[0];
-      if (!firstStage) throw new Error(`Conversation "${convName}" has no stages`);
+      if (!firstStage) {
+        throw new ChatScopeError('CONVERSATION_HAS_NO_STAGES', `Conversation "${convName}" has no stages.`);
+      }
 
       // Load the first stage
       const stageNode = await findSystemNode(`conversations:${convName}:${firstStage}`);
@@ -428,7 +438,12 @@ export const chatMutations = {
           where: { id: ctx.sessionId },
           select: { memoryId: true },
         });
-        targetMemoryId = session?.memoryId ?? null;
+        // #1376: the bound session's memory is a target only inside the session's verified reach
+        // (an item-linked org memory in Session.memoryId is not; Diego P1). The same set the read paths use,
+        // so a user's personal/private session memory (read-only in the access map) stays a chat target.
+        targetMemoryId = session?.memoryId &&
+          (await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId)).includes(session.memoryId)
+          ? session.memoryId : null;
       } else if (ctx.userId) {
         const existing = await ctx.db.memory.findFirst({
           where: {
@@ -533,7 +548,8 @@ export const chatMutations = {
           orderBy: { createdAt: 'asc' },
           select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
         });
-        targetMemoryId = writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        // #1376: an item is never a grant to a userless non-run key (cor:dmo:050:09).
+        targetMemoryId = !ctx.userId && !isRunPrincipal(ctx) ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
       }
 
       if (!targetMemoryId) {
@@ -546,11 +562,9 @@ export const chatMutations = {
       // personal memories); private chats retain the caller's read filter.
       // #1835 intersects either filter with targetMemoryId, so bare refs stay
       // in the holding memory without weakening the chat's authority gate.
-      // #2047 (S10): with serving ON the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
-      const chatAppId = bootPromptServingEnabled()
-        ? ((await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null)
-        : null;
-      const chatServed = bootPromptServingEnabled() ? await serveChatPrompt(ctx.db, agent, chatAppId) : null;
+      // #2047 (S10): the boot prompt is resolved first, so an unserveable one refuses before any chat exists.
+      const chatAppId = (await ctx.db.memory.findUnique({ where: { id: targetMemoryId }, select: { appId: true } }))?.appId ?? null;
+      const chatServed = await serveChatPrompt(ctx.db, agent, chatAppId, reportedModel);
       let systemMessage = promptContent;
       if (promptContent.includes('{{')) {
         const access =
@@ -767,23 +781,20 @@ export const chatMutations = {
       // messages parent), so it is two writes.
       recordNodeUsage(ctx.db, 'write', startedNodes, ctx);
 
-      // Bind the Agent's own identity on the chat path. Worker briefings bind
-      // the same template to the Worker's name and role instead.
-      if (chatServed) {
-        systemMessage = chatServed.text + '\n\n' + systemMessage;
-      } else if (agent.systemPrompt) {
-        systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
-      }
+      // The served boot prompt leads the system message (#2047).
+      systemMessage = chatServed.text + '\n\n' + systemMessage;
 
       return { chatId: chatLoc, systemMessage, tools, conversationName: convName, stageName: firstStage };
     },
 
     sendChatMessage: async (
       _: unknown,
-      { chatId, userMessage }: { chatId: string; userMessage: string },
+      { chatId, userMessage, llmModel }: { chatId: string; userMessage: string; llmModel?: string | null },
       ctx: Context,
     ) => {
       requireRole(ctx, 'READER');
+      // Each turn reports independently: omission/null means empty, never an inferred model.
+      const reportedModel = clientReportedChatModel(llmModel);
 
       // Find the chat node
       // #829: narrow to chats this caller is entitled to BEFORE picking one.
@@ -1117,14 +1128,12 @@ export const chatMutations = {
           systemMessage = promptContent;
         }
 
-        // Rebind on each chat turn so edits to the Agent's prompt take effect.
-        if (agent && bootPromptServingEnabled()) {
-          // #2047: the same refusal as a bind; and a chat records again only when its served revision CHANGED (R37), never per message.
-          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null);
+        // Re-served on each chat turn so a newly approved revision takes effect.
+        if (agent) {
+          // #2047: the same refusal as a bind; and a chat records again only when its revision or filled values CHANGED (R37, #3096), never per unchanged message.
+          const chatServed = await serveChatPrompt(ctx.db, agent, memory?.appId ?? null, reportedModel);
           await recordChatServedIfChanged(ctx.db, chatNode.id, agent.id, memory?.appId ?? null, chatServed);
           systemMessage = chatServed.text + '\n\n' + systemMessage;
-        } else if (agent?.systemPrompt) {
-          systemMessage = bindAgentPrompt(agent) + '\n\n' + systemMessage;
         }
 
         // Build tools from hierarchical extraction spec

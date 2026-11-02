@@ -10,6 +10,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLocOrThrow } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 
@@ -81,6 +82,8 @@ beforeEach(async () => {
       },
     });
   }
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 async function startShared(userId: string) {

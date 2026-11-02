@@ -148,6 +148,30 @@ async function requireScheduleAdmin(ctx: Context, appRef: string) {
   return { id: app.id, organizationId: app.organizationId };
 }
 
+/**
+ * #2642: the automation's name for a failed run's plain reason, only when the
+ * CALLER passes the same gate that lists schedules and webhooks
+ * (`requireScheduleAdmin`). Any miss or failure — denied, user-owned App,
+ * deleted or foreign trigger, other trigger kind — is null, so the caller sees
+ * the generic wording with the same shape; the lookup is pinned to the run's
+ * own App.
+ */
+export async function authorizedTriggerLabel(
+  ctx: Context,
+  run: { appId?: string | null; triggerKind?: string | null; triggerId?: string | null },
+): Promise<string | null> {
+  try {
+    if (!run.appId || !run.triggerId) return null;
+    const app = await requireScheduleAdmin(ctx, run.appId);
+    const where = { id: run.triggerId, appId: app.id, organizationId: app.organizationId, deletedAt: null };
+    if (run.triggerKind === 'SCHEDULE') return (await ctx.db.agentSchedule.findFirst({ where, select: { name: true } }))?.name ?? null;
+    if (run.triggerKind === 'WEBHOOK') return (await ctx.db.agentWebhook.findFirst({ where, select: { name: true } }))?.name ?? null;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Next occurrence for a cron+timezone pair, as a typed BAD_USER_INPUT on invalid input. */
 function validatedCronNext(cron: string, timezone: string): Date {
   try {

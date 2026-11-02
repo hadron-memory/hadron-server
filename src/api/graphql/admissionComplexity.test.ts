@@ -25,6 +25,7 @@ const REVIEWED_PAGED_FIELDS = [
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
+  "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
   "Node.lintWarnings",
   "Node.signingRequests",
@@ -32,6 +33,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
+  "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
   "Query.agentTasks",
   "Query.agentTeamEvents",
@@ -39,16 +41,20 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agents",
   "Query.aiModelPrices",
   "Query.aiServiceConfigs",
+  "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
+  "Query.appNodesPage",
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
   "Query.automationApprovals",
   "Query.calendarEvents",
+  "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",
   "Query.channels",
   "Query.chatHistory",
+  "Query.chatServedPrompts", // #2862: default 50, cap 200 (the field's own paging); under the shared 100 default.
   "Query.commentThreads",
   "Query.compiledPromptProvenance",
   "Query.connectionGrants",
@@ -77,7 +83,10 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryConfigTemplates",
   "Query.memoryEdges",
   "Query.memoryNodes",
+  "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
+  "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
+  "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
   "Query.nodeRevisionsPage",
@@ -95,13 +104,17 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.sessions",
   "Query.sessionsPage",
   "Query.slackConnections",
+  "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
+  "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
   "Query.teamAttentionPage",
   "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
+  "Query.teamChatSearch", // #2299: as channelMessageSearch.
   "Query.teamRoles",
   "Query.teamStopSignals",
   "Query.teamWorkItems",
   "Query.tickersPage",
+  "Query.untrackedTaskItems", // #3125 S3: limit default 20, cap 100.
   "Query.usageEvents",
   "Query.usageEventsPage",
   "Query.users",

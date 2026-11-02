@@ -3,6 +3,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
+import { assertRateReadiness, RateConfigurationError } from '../lib/rateLimit/index.js';
+import { readRateKeys } from '../lib/rateLimit/config.js';
 import { signJwt } from '../auth/jwt.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -22,8 +24,15 @@ let userId: string;
 let agentId: string;
 const opened: Array<{ id: string; token: string }> = [];
 
+// The suite and retained-state regression must exercise the same fixture path.
+async function startRequestSessionFixture() {
+  // A worker clone can retain a previous file's manifest after its env is restored.
+  await cleanDb(db);
+  return createServer();
+}
+
 beforeAll(async () => {
-  server = createHttpServer(await createServer());
+  server = createHttpServer(await startRequestSessionFixture());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
@@ -36,6 +45,8 @@ afterEach(async () => {
   }
 });
 afterAll(async () => {
+  // Preserve the primary startup error when beforeAll never created a server.
+  if (!server) return;
   server.closeAllConnections?.();
   await new Promise<void>(resolve => server.close(() => resolve()));
 });
@@ -85,7 +96,7 @@ async function call(transport: string, name: string, args: Record<string, unknow
   return { status: response.status, result: body.result, text: body.result?.content?.[0]?.text ?? '' };
 }
 const edit = (transport: string, signature: string, session?: string, namedSession?: string) =>
-  call(transport, 'hadron_update_worker', { workerRef: workerId, signature, promptOverride: signature, ...(namedSession ? { session: namedSession } : {}) }, session);
+  call(transport, 'hadron_update_worker', { workerRef: workerId, signature, ...(namedSession ? { session: namedSession } : {}) }, session);
 
 
 describe('#2123 request-local session refusal', () => {
@@ -93,10 +104,10 @@ describe('#2123 request-local session refusal', () => {
     const transport = await open();
     const allowed = await edit(transport, 'human manager control');
     expect(allowed.result?.isError).not.toBe(true);
-    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control', promptOverride: 'human manager control' });
+    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control' });
     const denied = await edit(transport, 'must not commit', generateId());
     expect(denied.status).toBe(200);
-    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control', promptOverride: 'human manager control' });
+    expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'human manager control' });
     expect(denied.text).toBe('Error: You are not authorized to manage workers in this App.');
   });
 
@@ -113,7 +124,7 @@ describe('#2123 request-local session refusal', () => {
       expect(denied.status).toBe(200);
       expect(denied.text).toBe('Error: You are not authorized to manage workers in this App.');
       expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({
-        signature: before.signature, promptOverride: before.promptOverride, trailer: before.trailer,
+        signature: before.signature, trailer: before.trailer,
       });
     },
   );
@@ -165,7 +176,7 @@ describe('#2123 request-local session refusal', () => {
     expect(await db.agentTask.count()).toBe(0);
     expect(await db.ticker.count()).toBe(0);
     expect((await db.teamStopSignal.findUniqueOrThrow({ where: { id: signal.id } })).endedAt).toBeNull();
-    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).promptOverride).toBeNull();
+    expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).signature).not.toBe('denied');
   });
 
   it('App-key N5 stays request-local after an initially refused header across task and ticker reads', async () => {
@@ -295,7 +306,7 @@ describe('#2123 request-local session refusal', () => {
       expect((await first).text).toMatch(/^Updated/);
       expect((await second).text).toBe('Error: You are not authorized to manage workers in this App.');
       expect((await foreign).status).toBe(404);
-      expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'first own request', promptOverride: 'first own request' });
+      expect(await db.worker.findUniqueOrThrow({ where: { id: workerId } })).toMatchObject({ signature: 'first own request' });
       // A late invalid request is not an INITIAL refusal and cannot poison
       // the following clean request on this same authenticated transport.
       expect((await edit(transport, 'clean next request')).text).toMatch(/^Updated/);
@@ -307,4 +318,34 @@ describe('#2123 request-local session refusal', () => {
     }
   });
 
+});
+
+describe('startup fixture ownership (#3107)', () => {
+  it('cleans a retained missing-key manifest before boot while raw startup refuses it', async () => {
+    const savedRing = process.env.RATE_LIMIT_KEYRING;
+    const restoreRing = () => {
+      if (savedRing === undefined) delete process.env.RATE_LIMIT_KEYRING;
+      else process.env.RATE_LIMIT_KEYRING = savedRing;
+    };
+    try {
+      // Simulate an earlier file restoring its environment but leaving persisted state.
+      try {
+        process.env.RATE_LIMIT_KEYRING = JSON.stringify({ current: 'previous-file-3107', keys: { 'previous-file-3107': '3'.repeat(64) } });
+        await assertRateReadiness(db);
+      } finally {
+        restoreRing();
+      }
+      const before = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(before.keyIds).toEqual(['previous-file-3107']);
+      expect(before.keyIds.filter(id => readRateKeys().keys.has(id))).toEqual([]);
+      await expect(createServer()).rejects.toBeInstanceOf(RateConfigurationError);
+      const after = await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } });
+      expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+      await expect(startRequestSessionFixture()).resolves.toBeDefined();
+      expect((await db.rateLimitManifest.findUniqueOrThrow({ where: { id: 'global' } })).keyIds).toEqual([readRateKeys().current]);
+    } finally {
+      restoreRing();
+      await cleanDb(db);
+    }
+  });
 });

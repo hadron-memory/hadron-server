@@ -290,6 +290,8 @@ async function resetReusedChannel(
   },
 ): Promise<void> {
   const now = new Date();
+  // #3193: raw Date binds are timestamptz; these columns store UTC-naive timestamps.
+  const nowUtc = now.toISOString();
   const root = await tx.node.findUniqueOrThrow({
     where: { id: args.rootId },
     select: { abstract: true, content: true, data: true, embeddingPendingAt: true, embeddingWorkToken: true, nodeType: true, loc: true },
@@ -328,6 +330,7 @@ async function resetReusedChannel(
   // can retain the previous incarnation's plaintext in `chunk_text`, so they
   // must leave atomically with the payload reset.
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: args.rootId } });
+  await tx.node.updateMany({ where: { id: args.rootId }, data: { embeddingTruncatedChunks: null } });
   // #1468 (Codex on #1475) — a node under `:messages:` is an ordinary node
   // until this reset tombstones it, and one can carry the spec marker in a
   // minted corpus (written before the Channel existed, or before the mint).
@@ -344,7 +347,7 @@ async function resetReusedChannel(
   // deleted endpoints by stable id and expose the old message payload.
   await tx.$executeRaw`
     UPDATE edges AS e
-    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    SET deleted_at = ${nowUtc}::timestamp, deleted_by = ${args.deletedBy}, updated_at = ${nowUtc}::timestamp
     WHERE e.deleted_at IS NULL
       AND (
         e.source_id IN (
@@ -361,7 +364,7 @@ async function resetReusedChannel(
   `;
   await tx.$executeRaw`
     UPDATE nodes
-    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    SET deleted_at = ${nowUtc}::timestamp, deleted_by = ${args.deletedBy}, updated_at = ${nowUtc}::timestamp, embedding_truncated_chunks = NULL
     WHERE memory_id = ${args.memoryId}
       AND deleted_at IS NULL
       AND id = ANY(${doomed}::text[])
@@ -391,6 +394,7 @@ async function archiveChannelStructuralRow(
     data: { loc: archivedTombstoneLoc(row.loc, row.id), embeddingPendingAt: null, embeddingWorkToken: null },
   });
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  await tx.node.updateMany({ where: { id: row.id }, data: { embeddingTruncatedChunks: null } });
   // Derived include edges (#2040) are re-derivable from content, and the
   // governed-edge trigger refuses to soft-delete them: drop them outright.
   await tx.edge.deleteMany({ where: { governedKind: 'INCLUDE', OR: [{ sourceId: row.id }, { targetId: row.id }] } });
@@ -510,6 +514,7 @@ export async function ensureChannelWithRoot(
           // Channel creation may also revive tombstoned ancestor and
           // :messages nodes; their vectors belong to the old incarnation.
           await tx.nodeEmbedding.deleteMany({ where: { nodeId: existing.id } });
+          await tx.node.updateMany({ where: { id: existing.id }, data: { embeddingTruncatedChunks: null } });
           await tx.node.update({
             where: { id: existing.id },
             data: {

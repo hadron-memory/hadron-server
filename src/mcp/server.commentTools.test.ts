@@ -15,6 +15,7 @@ import { GraphQLError } from 'graphql';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey, type AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -352,6 +353,7 @@ describe('comment tools over HTTP: a worker bound with hadron_start_session auth
     const appMemory = await db.memory.create({ data: {
       id: generateId(), urn: 'cmtmcp.example:team-shared', name: 'team-shared', class: 'app', appId: app.id, organizationId: org.id,
     } });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.'); // #2712: the bind is served the Agent's boot prompt
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     await db.appMember.create({ data: { appId: app.id, userId: writer.id, role: 'owner' } });
     const iris = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });

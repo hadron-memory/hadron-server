@@ -12,6 +12,7 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -52,6 +53,8 @@ beforeEach(async () => {
       },
     });
   }
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 function known(code: string, target?: unknown): Prisma.PrismaClientKnownRequestError {

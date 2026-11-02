@@ -13,6 +13,8 @@ import { nodeMutations } from '../api/graphql/schema/resolvers.mutation.node.js'
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { captureAutomationPin, storedAutomationPin } from '../lib/automation/pins.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { generateId } from '../lib/id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => { await cleanDb(db); });
@@ -27,9 +29,13 @@ async function fixture() {
   const entry = await db.node.create({ data: { memoryId: memory.id, loc: 'entry', name: 'Entry', isRunnable: true, content: 'approved' } });
   const next = await db.node.create({ data: { memoryId: memory.id, loc: 'next', name: 'Next', isRunnable: true, content: 'approved next' } });
   const edge = await db.edge.create({ data: { memoryId: memory.id, sourceId: entry.id, targetId: next.id, name: 'next', loc: 'entry:next:next' } });
+  // #2712: a run needs an installed Agent with a served boot prompt (R74).
+  const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, urn: 'pin.test:runner', name: 'runner' } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   const ctx = { db, userId: user.id, roles: [] };
-  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Mover', cron: '* * * * *', entryNodeUrn: 'hrn:node:pin.test:flow:entry', runAsSelf: true } }, ctx);
-  const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
+  const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Mover', cron: '* * * * *', entryNodeUrn: 'hrn:node:pin.test:flow:entry', runAsSelf: true, agentRef: agent.id } }, ctx);
+  const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, userId: user.id, agentId: agent.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
   return { user, org, app, memory, entry, next, edge, ctx, schedule, run, deps, llm };

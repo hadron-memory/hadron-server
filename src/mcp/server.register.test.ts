@@ -13,6 +13,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { ensureChannelWithRoot } from '../lib/channels.js';
 import { createTestableMcpServer } from './server.js';
@@ -58,6 +59,7 @@ beforeEach(async () => {
   worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
   channel = (await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id })).channel;
   channel2 = (await ensureChannelWithRoot(db, { memoryId: mem2.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app2.id })).channel;
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 function server(userId: string, activeAppId: string = app.id) {

@@ -7,6 +7,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, chatNodeByLoc } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -52,6 +53,8 @@ beforeEach(async () => {
   systemMemory = await db.memory.findUniqueOrThrow({
     where: { id: created.systemMemoryId! },
   });
+  // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
+  await serveEveryAgent(db);
 });
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -69,6 +70,7 @@ beforeEach(async () => {
   const w = (name: string) => db.worker.create({ data: { appId: app.id, agentId, name, slug: name.toLowerCase(), signature: '', trailer: '' }, select: { id: true } }).then((r) => r.id);
   ada = await w('Ada');
   bea = await w('Bea');
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 describe('refresh on each open-session path', () => {

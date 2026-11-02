@@ -1,7 +1,7 @@
-import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 /** #2608 — independent real-Postgres pins for register role picking. */
 
 import { buildSchema, parse, validate } from 'graphql';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { agentBaseChain, agentBaseChains } from '../../../lib/agentBase.js';
 import { typeDefs } from './typeDefs.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -191,6 +191,8 @@ describe('#2608 register role candidates', () => {
   // Axel P3 (#2724 LOCAL): depth counts Agent links, and the walk (agentBaseChain[s])
   // deliberately does NOT filter deleted rows — only memory contribution does. A
   // soft-deleted intermediate therefore still carries depth; pinned as intended behavior.
+  // #2713 item 2: the reading recorded here is the RECORDED chain (deleted members count),
+  // not the live chain; the contribution of a deleted member's memory is the separate rule below.
   it('counts depth through a soft-deleted intermediate Agent', async () => {
     await mapTask(); const base = await roleAgent('Base'); await node(base.memoryId, 'tasks:finish', { isRunnable: true });
     const middle = await roleAgent('Middle', base.id); const child = await roleAgent('Child', middle.id);
@@ -397,6 +399,53 @@ describe('#2608 register role candidates', () => {
     expect(live.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
   });
 
+  // #2713 item 1: the taskUrn of an INHERITED task names the base's memory (the node's own address),
+  // and Query.node resolves that same address AND the child-side effective address to the same node.
+  it('an inherited taskUrn is the base memory address and Query.node resolves it to the same node as the effective read', async () => {
+    await mapTask();
+    const base = await roleAgent('Parity base'); const task = await node(base.memoryId, 'tasks:finish', { isRunnable: true });
+    const child = await roleAgent('Parity child', base.id);
+    const w = await worker('Parity worker', child.id);
+    const baseMemory = await db.memory.findUniqueOrThrow({ where: { id: base.memoryId } });
+    const childMemory = await db.memory.findUniqueOrThrow({ where: { id: child.memoryId } });
+    const r = await pick();
+    expect(r.candidates.map((x: any) => x.worker.id)).toEqual([w.id]);
+    expect(r.candidates[0].depth).toBe(1);
+    const taskUrn: string = r.candidates[0].taskUrn;
+    expect(taskUrn).toBe(`hrn:node:${baseMemory.urn}:tasks:finish`);
+    const q = (resolvers.Query as any).node;
+    const byUrn = await q({}, { ref: taskUrn }, ctx(admin.id));
+    const viaChild = await q({}, { ref: 'tasks:finish', memoryRef: childMemory.urn }, ctx(admin.id));
+    expect(byUrn?.id).toBe(task.id);
+    expect(viaChild?.id).toBe(task.id);
+    expect(viaChild?.memoryId).toBe(base.memoryId);
+  });
+  // #2713 item 3b: paging edges. The minimum depth and the total are computed before the page is cut.
+  it('an offset past the total is an empty page with the real total and depth, not an error', async () => {
+    await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    const past = await pick(admin.id, undefined, { offset: 3, limit: 20 });
+    expect(past.candidates).toEqual([]); expect(past.total).toBe(3); expect(past.depth).toBe(0);
+    const far = await pick(admin.id, undefined, { offset: 10_000 });
+    expect(far.candidates).toEqual([]); expect(far.total).toBe(3);
+    const negative = await pick(admin.id, undefined, { offset: -1, limit: 20 });
+    expect(negative.candidates.map((x: any) => x.worker.id)).toEqual((await pick()).candidates.map((x: any) => x.worker.id));
+    const none = await pick(admin.id, undefined, { limit: 0 });
+    expect(none.candidates).toEqual([]); expect(none.total).toBe(3);
+  });
+  it('the limit cap: 200 serves 200, 201 is served as 200 and never refused, the default page is 20', async () => {
+    await mapTask(); await node(teamMemoryId, 'tasks:finish', { isRunnable: true });
+    await db.worker.createMany({ data: Array.from({ length: 202 }, (_, i) => ({
+      ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: teamAgentId, name: `Bulk ${String(i).padStart(3, '0')}`, slug: `bulk-${i}`,
+    })) });
+    const atCap = await pick(admin.id, undefined, { limit: 200 });
+    expect(atCap.total).toBe(205); expect(atCap.candidates).toHaveLength(200);
+    const overCap = await pick(admin.id, undefined, { limit: 201 });
+    expect(overCap.candidates).toHaveLength(200); expect(overCap.total).toBe(205);
+    expect(overCap.candidates.map((x: any) => x.worker.id)).toEqual(atCap.candidates.map((x: any) => x.worker.id));
+    expect((await pick()).candidates).toHaveLength(20);
+    const tail = await pick(admin.id, undefined, { offset: 200, limit: 201 });
+    expect(tail.candidates).toHaveLength(5);
+  });
   it('exposes only the closed paginated projection in the GraphQL schema', () => {
     const query = parse('{ registerRoleCandidates(appRef: "app", code: "code", limit: 20, offset: 0) { appId code taskLoc depth total candidates { role depth taskUrn worker { id kind name urn } } } }');
     expect(validate(buildSchema(typeDefs), query)).toEqual([]);

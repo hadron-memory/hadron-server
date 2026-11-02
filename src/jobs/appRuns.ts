@@ -1,3 +1,4 @@
+import { renderScriptArgs, ScriptVariableMissingError } from '../lib/runner/scriptArgs.js';
 import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
 import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../lib/automation/pins.js';
@@ -24,6 +25,7 @@ import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../li
 import { runAsActor } from '../lib/requestActor.js';
 import type { PrismaClient, Prisma, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
+import { toNaiveUtc } from '../lib/sessionActivity.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
@@ -48,11 +50,10 @@ import {
 } from '../lib/llm/index.js';
 import { AuthorFailError } from '../lib/runner/tools/types.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
-import { bootPromptServingEnabled } from '../lib/bootPrompt/gate.js';
 import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../lib/bootPrompt/serve.js';
 import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
-import { applyPlatformVariables, legacyFromValues } from '../lib/personaDescription.js';
+import { applyPlatformVariables, applyRecordedVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
@@ -133,12 +134,16 @@ async function ensureQuotaRow(
   // Native conflict handling is race-safe AND transaction-safe. Catching a
   // Prisma P2002 works in autocommit mode, but PostgreSQL marks an interactive
   // transaction aborted before JavaScript can catch the error (#667 review).
+  // reset_at is a `timestamp` (no zone) holding UTC. A raw JS Date bind
+  // arrives as timestamptz and is converted through the SESSION zone on
+  // assignment, so under a non-UTC session the window would end early or
+  // late by the offset (#3192, #3187 audit). Bind the naive UTC text instead.
   await db.$executeRaw`
     INSERT INTO quota_counters
       (id, scope_kind, scope_id, action, "window", used, "limit", reset_at)
     VALUES
       (${generateId()}, ${scopeKind}, ${scopeId}, ${action}, ${QUOTA_WINDOW}, 0,
-       ${defaultLimit}::int, ${nextUtcMidnight()})
+       ${defaultLimit}::int, ${toNaiveUtc(nextUtcMidnight())}::timestamp(3))
     ON CONFLICT (scope_kind, scope_id, action, "window") DO NOTHING`;
   await db.quotaCounter.updateMany({
     where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: now } },
@@ -604,8 +609,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // #2047 (S10): a run that names an Agent is served that Agent's boot prompt, and an unserveable one refuses the launch
   // with the same typed refusal a bind and a chat get. Resolved before the run exists; the record is written with it.
   // cor:agt:040:07 (R74): a headless run with NO Agent has no boot prompt to serve and is refused the same way.
-  if (bootPromptServingEnabled() && !args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
-  const runServing = bootPromptServingEnabled() && args.agentId
+  if (!args.agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  const runServing = args.agentId
     ? await (async () => {
         const agent = await db.agent.findUniqueOrThrow({ where: { id: args.agentId! }, select: { id: true, name: true, urn: true, personaRole: true } });
         return { agent, served: await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: agent.id, name: agent.name } }) };
@@ -714,6 +719,9 @@ export interface RunNodeSpec {
   /** `data.tools` names → the hop runs the tool loop (plan-tools D-TL-1).
    *  Mutually exclusive with extractionSpec (D-TL-5, enforced at load). */
   tools?: string[] | null;
+  /** `data.script.call` (#670, cor:agt:010:04): the hop makes this one run-tool call itself, with no model.
+   *  Excludes `tools` and `extractionSpec` (enforced at load). */
+  script?: { tool: string; args: Record<string, unknown> } | null;
 }
 
 /** Injected in tests; production uses the real resolvers + LLM. */
@@ -748,6 +756,17 @@ export interface RunExecutionDeps {
       nodeUrn?: string;
     },
   ) => Promise<LlmToolLoopResult>;
+  /** Script node (#670): make the declared call through the shared admission function, no model. `args` are
+   *  already rendered. `onToolCall` is the same activation gate the tool loop gets. */
+  callScript?: (
+    run: AppRun,
+    call: { tool: string; args: Record<string, unknown> },
+    opts: {
+      onToolCall: (action: `tool.${string}`, cost: 0 | 1) => Promise<boolean>;
+      log: (message: string) => void;
+      nodeUrn?: string;
+    },
+  ) => Promise<{ result: unknown; toolCalls: LlmToolLoopResult['toolCalls'] }>;
   writeOutput: (run: AppRun, nodeUrn: string, text: string) => Promise<string | null>; // returns written node id/urn
   /** Next routing edge from this node, or null = flow ends (D7). */
   selectNext: (run: AppRun, nodeUrn: string, view: Record<string, unknown>) => Promise<NextEdgeSelection | null>;
@@ -882,28 +901,20 @@ async function executeAppRunInner(
       ? [...(run.hops as Array<Record<string, unknown>>)]
       : [];
 
-    // AI config is per-run in v1 (trigger override or registry walk) —
-    // resolve once, not per hop.
-    let resolved: ResolvedAiConfig;
-    try {
-      resolved = await deps.resolveConfig(run);
-    } catch (err) {
-      if (err instanceof NoAiConfigAvailableError) {
-        return fail('NO_AI_CONFIG', err.message);
-      }
-      throw err;
-    }
+    // AI config is per-run in v1 (trigger override or registry walk), resolved ONCE but LAZILY: at the first hop
+    // that needs a model (#670, cor:agt:010:04 rule 5), so an all-script path runs with none.
+    let resolved: ResolvedAiConfig | null = null;
 
     // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
     // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
     let servedText: string | null = null;
-    if (bootPromptServingEnabled() && run.agentId) {
+    if (run.agentId) {
       const record = await db.servedPrompt.findFirst({ where: { runId } });
       if (record) {
         const content = await readRecordedRevisionContent(db, record.compiledNodeId, record.servedRevSeq);
         if (content === null) return fail('BOOT_PROMPT_RECORDED_REVISION_DELETED', 'The boot prompt revision this run was given has been deleted.');
         const values = record.variables as unknown as Parameters<typeof applyPlatformVariables>[1];
-        servedText = applyPlatformVariables(content, values, legacyFromValues(values));
+        servedText = applyRecordedVariables(content, values);
       }
     }
     const serve = (system: string) => (servedText === null ? system : `${servedText}\n\n${system}`);
@@ -922,19 +933,6 @@ async function executeAppRunInner(
         return 'failed';
       }
 
-      // 4. EXECUTE — every action re-checks the activation row + policy +
-      // budget (the kill-switch contract). Entering an ADDITIONAL hop
-      // consumes one action (D-MN-3: budgetActions is the LLM-hop ceiling);
-      // the first hop is covered by run.execute at mint — today's behavior.
-      const entryDenial = await activationVerdict(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 });
-      if (entryDenial) {
-        return fail(
-          'ACTIVATION_DENIED',
-          'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
-          `DENIED_${entryDenial}`,
-        );
-      }
-
       const view = mergedView(run.eventData, envelope);
 
       let spec: RunNodeSpec;
@@ -948,12 +946,49 @@ async function executeAppRunInner(
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
 
-      let instructions: string;
-      try {
-        instructions = await deps.assemble(run, cur, view);
-      } catch (err) {
-        // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
-        return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
+      // Lazy AI config (#670): resolved at the first model hop. A script hop never needs one.
+      if (!spec.script && resolved === null) {
+        try {
+          resolved = await deps.resolveConfig(run);
+        } catch (err) {
+          if (err instanceof NoAiConfigAvailableError) {
+            return fail('NO_AI_CONFIG', err.message);
+          }
+          throw err;
+        }
+      }
+
+      // 4. EXECUTE — every action re-checks the activation row + policy +
+      // budget (the kill-switch contract). Entering an ADDITIONAL hop
+      // consumes one action (D-MN-3: budgetActions is the LLM-hop ceiling; a script hop pays only its call's own cost, #670);
+      // the first hop is covered by run.execute at mint — today's behavior.
+      // A script hop makes no model call, so `llm.invoke` and the LLM-hop action do not apply: its call is admitted
+      // below as `tool.<name>` at the tool's own cost (cor:agt:010:04 rule 2).
+      const entryDenial = spec.script ? null : await activationVerdict(db, runId, 'llm.invoke', hop === 0 ? {} : { actionCost: 1 });
+      if (entryDenial) {
+        return fail(
+          'ACTIVATION_DENIED',
+          'Run cancelled, expired, action budget exhausted, or llm.invoke denied by policy.',
+          `DENIED_${entryDenial}`,
+        );
+      }
+
+      // The resolved AI config, for model hops only (resolved just above). Loud, not a cast: a script hop has none,
+      // so reading it there is a bug, not a null to launder (#3143 blind P3).
+      const modelConfig = (): ResolvedAiConfig => {
+        if (resolved === null) throw new Error('Internal: the AI config was read on a hop that resolved none.');
+        return resolved;
+      };
+
+      // A script hop has no prompt: no assembly, no attention section, no model budget (#670).
+      let instructions = '';
+      if (!spec.script) {
+        try {
+          instructions = await deps.assemble(run, cur, view);
+        } catch (err) {
+          // Entry lookup/assembly failures are OBSERVABLE failed runs (D20/D15).
+          return fail('ASSEMBLY_FAILED', String((err as Error)?.message ?? err));
+        }
       }
       await checkConsent();
       // Spec 049 Phase 7 (D-2026-09-13-009, plan §4.4): the attention section —
@@ -961,12 +996,12 @@ async function executeAppRunInner(
       // read-state, CPU-computed, no message content. Empty for a run with no
       // Agent (no attendee). The watermarks captured HERE are what this hop's
       // checkpoint advances, so a message landing in between is never skipped.
-      const attention = await renderAttentionSection(db, run);
+      const attention = spec.script ? { text: '', captured: new Map<string, number>() } : await renderAttentionSection(db, run);
       if (attention.text) instructions = `${instructions}\n\n${attention.text}`;
       // #2047: the derived blocks this hop saw, appended to the run's log only when they differ from the last entry (an
       // empty list is an entry too, so a block going away is recorded). Guarded on RUNNING, before the hop's LLM call, so
       // a hop that fails or is aborted still shows what it saw.
-      if (servedText !== null) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
+      if (servedText !== null && !spec.script) await logDerivedBlocks(db, runId, hop, attention.text ? [attention.text] : []);
 
       const budget = (await db.appRun.findUniqueOrThrow({ where: { id: runId }, select: { budgetTokens: true } }))
         .budgetTokens;
@@ -1005,22 +1040,56 @@ async function executeAppRunInner(
           model,
           tokensIn,
           tokensOut,
-          keyOwnerType: resolved.ownerType,
+          keyOwnerType: modelConfig().ownerType,
           createdBy: run.userId ?? null,
           appRunId: runId,
         });
       };
+      // A runner without the script dependency is a configuration fault, not a tool failure.
+      if (spec.script && !deps.callScript) return fail('RUNNER_NOT_CONFIGURED', 'This runner cannot execute a script node (no script-call dependency).');
       let result: LlmResult;
       let extracted: Record<string, unknown> | null = null;
       let toolCalls: LlmToolLoopResult['toolCalls'] | null = null;
       const hopLogs: string[] = []; // hadron_log sink → this hop's trail element
       try {
-        if (spec.tools && spec.tools.length > 0) {
+        if (spec.script) {
+          // #670 (cor:agt:010:04): the declared call, no model. Args render BEFORE any admission (a missing
+          // variable uses no action and sends nothing); the call is then admitted and executed through the same
+          // function a model's tool call uses, with the same gate (`tool.<name>`, the tool's own cost).
+          let renderedArgs: Record<string, unknown>;
+          try {
+            renderedArgs = renderScriptArgs(spec.script.args, view);
+          } catch (err) {
+            if (err instanceof ScriptVariableMissingError) return fail('SCRIPT_VARIABLE_MISSING', err.message);
+            throw err;
+          }
+          const scripted = await deps.callScript!(
+            run,
+            { tool: spec.script.tool, args: renderedArgs },
+            {
+              onToolCall: async (action, cost) => {
+                await checkConsent();
+                lastToolDenial = await activationVerdict(db, runId, action, cost > 0 ? { actionCost: cost } : {});
+                return lastToolDenial === null;
+              },
+              log: (message) => hopLogs.push(message),
+              nodeUrn: cur,
+            },
+          );
+          toolCalls = scripted.toolCalls;
+          result = {
+            text: typeof scripted.result === 'string' ? scripted.result : JSON.stringify(scripted.result ?? null),
+            tokensIn: 0,
+            tokensOut: 0,
+            provider: '',
+            model: '',
+          };
+        } else if (spec.tools && spec.tools.length > 0) {
           // plan-tools phase 2: the bounded tool loop. Every call passes the
           // activation gate (D-TL-3) — the kill switch bites MID-hop.
           const loopResult = await deps.llmTools(
             run,
-            resolved,
+            modelConfig(),
             {
               system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
@@ -1051,7 +1120,7 @@ async function executeAppRunInner(
         } else if (spec.extractionSpec && spec.extractionSpec.length > 0) {
           // D-MN-2(a): one structured call — the object IS this hop's result.
           const objectResult = await deps.llmObject(
-            resolved,
+            modelConfig(),
             {
               system: serve(
                 'You are executing one step of a Hadron automation flow. ' +
@@ -1070,7 +1139,7 @@ async function executeAppRunInner(
             model: objectResult.model,
           };
         } else {
-          result = await deps.llm(resolved, {
+          result = await deps.llm(modelConfig(), {
             system: serve(
               'You are executing a scheduled Hadron task. Follow the task instructions below. ' +
               'Produce ONLY the requested output document — no preamble, no meta-commentary.'),
@@ -1091,7 +1160,7 @@ async function executeAppRunInner(
           // (terminal code, transient reset): log it and carry on. A charge is never
           // retried here, so what was persisted is not counted twice.
           try {
-            await chargeUsage(partial.tokensIn, partial.tokensOut, resolved.config.provider, resolved.config.model);
+            await chargeUsage(partial.tokensIn, partial.tokensOut, modelConfig().config.provider, modelConfig().config.model);
           } catch (chargeErr) {
             console.error(`[appRuns] run ${runId}: usage of the completed steps was not fully recorded:`, chargeErr instanceof Error ? chargeErr.message : chargeErr);
           }
@@ -1123,13 +1192,16 @@ async function executeAppRunInner(
         if (err instanceof NoToolSupportError) {
           return fail('NO_TOOL_SUPPORT', err.message); // unverified provider (D-TL-8)
         }
+        // A script hop made no model call: an unexpected failure there is the call's, not the model's.
+        if (spec.script) return fail('TOOL_FAILED', String((err as Error)?.message ?? err));
         return fail('LLM_FAILED', String((err as Error)?.message ?? err));
       }
 
       // Live decrement: run budget + daily token counters, per hop — the
       // kill switch stays truthful across a multi-call flow.
       const spent = result.tokensIn + result.tokensOut;
-      await chargeUsage(result.tokensIn, result.tokensOut, result.provider, result.model);
+      // A script hop used no `llm.tokens`: no counters, no usage event (cor:agt:010:04).
+      if (!spec.script) await chargeUsage(result.tokensIn, result.tokensOut, result.provider, result.model);
 
       if (Date.now() >= deadline) {
         await db.appRun.updateMany({

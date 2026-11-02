@@ -69,7 +69,6 @@ import { isId } from '../../../lib/entityRef/shape.js';
 import { normalizeAvailability, type AvailabilityInput } from './resolvers.agentTaskAlarms.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { buildWorkerTerminal, validateTerminalBatch, type StoredWorkerTerminal, type TerminalReportInput } from '../../../lib/workerTerminal.js';
-import { loadPendingReasons, type PendingReason } from '../../../lib/tickers/checkPending.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import {
   authorizeContextResetStop,
@@ -189,47 +188,6 @@ export async function recordingRefusal<T>(ctx: Context, action: HostKeyAction, o
     }
     throw e;
   }
-}
-
-/** The pause sources that excuse a coordinator from the alarm verdict (cor:agt:100:02): its own pause, a stop, a team pause. */
-const VERDICT_EXCUSES: ReadonlySet<PendingReason | null> = new Set<PendingReason | null>(['PAUSED', 'STOPPED', 'TEAM_PAUSED']);
-
-/**
- * #2771 — the alarm verdict, computed from the rows just written and returned, never stored: the App's coordinators
- * (role `coordinator`, case-insensitive, not retired) that THIS host's registration lists and whose stored terminal is
- * `locked` or `dark`, leaving out a worker paused or stopped and a team paused or halted (`loadPendingReasons`, the
- * same sources the ticker uses). `noCoordinator` is App-wide and names no one. A coordinator registered on no reporting
- * host is in no verdict: that is the server-side alarm's (#2763), not this call's.
- */
-async function terminalAlarmVerdict(
-  tx: Prisma.TransactionClient,
-  app: TaskApp,
-  registrationId: string | null,
-  now: Date,
-): Promise<{ alarm: { worker: { id: string; urn: string }; status: string; reason: string | null }[]; noCoordinator: boolean }> {
-  const coordinators = await tx.worker.findMany({
-    where: { appId: app.id, retiredAt: null, role: { equals: 'coordinator', mode: 'insensitive' } },
-    select: { id: true, slug: true, terminal: true },
-    orderBy: { id: 'asc' },
-  });
-  if (!registrationId || coordinators.length === 0) return { alarm: [], noCoordinator: coordinators.length === 0 };
-  const listed = new Set(
-    (await tx.hostRegistrationWorker.findMany({ where: { registrationId, workerId: { in: coordinators.map((c) => c.id) } }, select: { workerId: true } })).map((l) => l.workerId),
-  );
-  const down = coordinators.filter((c) => listed.has(c.id) && ['locked', 'dark'].includes((c.terminal as StoredWorkerTerminal | null)?.status ?? ''));
-  const pending = await loadPendingReasons(tx, app.id, down.map((c) => c.id), now);
-  return {
-    noCoordinator: false,
-    alarm: down
-      .filter((c) => {
-        const reason = pending.get(c.id) ?? null;
-        return !VERDICT_EXCUSES.has(reason);
-      })
-      .map((c) => {
-        const t = c.terminal as unknown as StoredWorkerTerminal;
-        return { worker: { id: c.id, urn: composeWorkerUrn(app.urn, c.slug) }, status: t.status, reason: t.reason };
-      }),
-  };
 }
 
 export const hostOperationMutations = {
@@ -570,9 +528,8 @@ export const hostOperationMutations = {
         await tx.worker.update({ where: { id }, data: { terminal: terminal as unknown as Prisma.InputJsonObject } });
         stored.push({ id, urn: composeWorkerUrn(app.urn, w.slug) });
       }
-      const verdict = await terminalAlarmVerdict(tx, app, reg?.id ?? null, now);
       await recordHostKeyUse(tx, host, 'terminal', { count: stored.length });
-      return { stored, refused, alarm: verdict.alarm, noCoordinator: verdict.noCoordinator };
+      return { stored, refused };
     });
   }),
 

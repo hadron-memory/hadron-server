@@ -167,7 +167,8 @@ it('bounds total edge rows before concurrent sibling fields and aliases material
   expect(response.errors?.some(e => e.extensions?.code === 'BAD_USER_INPUT')).toBe(true);
   expect(response.errors?.[0]?.message).toContain('more than 2000');
   expect(response.errors?.[0]?.message).toContain('edges(filter, limit, offset)');
-  expect(materializedRows).toBeLessThanOrEqual(2001);
+  expect(reads.length).toBeGreaterThan(0);
+  expect(materializedRows).toBe(2001);
 }, 60_000);
 
 it('explicit inherited refs preserve child-only admission without loading unselected endpoint bodies', async () => {

@@ -24,6 +24,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { runAsActor } from '../../../lib/requestActor.js';
@@ -259,12 +260,13 @@ describe('what a userless run of the App may write', () => {
     const agent = await db.agent.create({ data: { name: 'flow-agent', urn: 'grant2484.test:flow-agent', organizationId: f.org.id } as never });
     await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: flow.id, role: 'read-write' } });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.'); // #2712: a run is served its Agent's prompt
     const entry = (writeTo: string) => db.node.upsert({
       where: { loc_memoryId: { loc: 'flow:report', memoryId: flow.id } },
       create: { memoryId: flow.id, loc: 'flow:report', name: 'report', content: 'Produce.', data: { output: { writeTo, mode: 'replace' } } as never },
       update: { data: { output: { writeTo, mode: 'replace' } } as never },
     });
-    const run = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:flow:flow:report', eventData: {} });
+    const run = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:flow:flow:report', eventData: {} });
     const deps = makeProdRunDeps(db);
     await entry(`hrn:node:grant2484.test:dest:${PREFIX}:{runId}`);
     const id = await deps.writeOutput(run, 'hrn:node:grant2484.test:flow:flow:report', 'the report');
@@ -335,7 +337,11 @@ describe('what a userless run of the App may write', () => {
     await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [] } as never, run as never, 'create'));
     expect(await db.node.findUnique({ where: { loc_memoryId: { loc: `${PREFIX}:b`, memoryId: f.dest.id } } })).toBeNull();
     const { STORE_TOOLS } = await import('../../../lib/runner/tools/storeTools.js');
-    const row = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:dest:x', eventData: {} });
+    // #2712 (R74): a run is minted for an Agent, served its prompt.
+    const agent = await db.agent.create({ data: { name: 'store-agent', urn: 'grant2484.test:store-agent', organizationId: f.org.id } as never });
+    await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
+    const row = await mintAppRun(db, { organizationId: f.org.id, appId: f.app.id, agentId: agent.id, triggerKind: 'MANUAL', entryNodeUrn: 'hrn:node:grant2484.test:dest:x', eventData: {} });
     await expect(STORE_TOOLS[0].execute({ db, run: row, principal: run, log: () => {} } as never, { urn: `hrn:node:grant2484.test:dest:${PREFIX}:file`, filename: 'a.md', content: 'x' })).rejects.toThrow(/not writable/i);
     expect(await db.node.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ deletedAt: null });
     expect((await db.memory.findUniqueOrThrow({ where: { id: f.dest.id } })).name).toBe('dest');

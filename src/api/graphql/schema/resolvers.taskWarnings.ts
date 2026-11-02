@@ -232,16 +232,32 @@ export type TaskWarningHistory = { appId: string; taskId: string; path: string; 
 
 /**
  * Consume once after field errors are known (GraphQL), or after the MCP result has been built. One bounded
- * post-commit transaction: statement_timeout 300ms, 1000ms cooperative work deadline, 1500ms transaction timeout,
- * 500ms pool wait. No retries, no detached write, and no response mutation. Partial history is allowed; a missing
- * event is never proof that no warning fired. This independent write budget cannot truncate the fired population
- * merely because optional response enrichment or its size cap was exhausted.
+ * post-commit transaction. No retries, no detached write, and no response mutation. Partial history is allowed; a
+ * missing event is never proof that no warning fired. This independent write budget cannot truncate the fired
+ * population merely because optional response enrichment or its size cap was exhausted.
+ *
+ * Where each limit is enforced: all of them come from {@link boundedRead}, the one helper the privacy gate and the
+ * register use too, so history adds no tunable option of its own.
+ * - 300 ms statement timeout: {@link REGISTER_STATEMENT_TIMEOUT_MS}, applied as `SET LOCAL statement_timeout`
+ *   inside the transaction, per statement.
+ * - 1000 ms cooperative deadline: {@link REGISTER_TOTAL_BUDGET_MS}; `boundedRead` hands `Date.now() + total` to its
+ *   callback, and the loop below checks it between events (it cannot interrupt a statement already running).
+ * - 1500 ms transaction timeout: `REGISTER_TOTAL_BUDGET_MS + 500`, the literal `timeout` option of the
+ *   `$transaction` call in `boundedRead` (no named constant).
+ * - 500 ms pool wait: the literal `maxWait` option of that same call, the time allowed to get a connection before
+ *   the transaction starts.
+ * These are per-limit bounds, not a wall-clock service SLA, and their sum is not a promised total.
+ *
+ * Its read budget is not shared with optional enrichment: `TaskWarningState.spentMs` and
+ * {@link REQUEST_READ_BUDGET_MS} meter the gate and register reads, whereas this flush neither reads nor charges
+ * them: it runs its own `boundedRead` invocation whatever those have spent.
  */
 export async function flushTaskWarningHistory(ctx: Context, erroredPaths: ReadonlySet<string> = new Set()): Promise<void> {
   const pending = ctx.taskWarningHistory?.splice(0) ?? [];
   const successful = pending.filter(h => !erroredPaths.has(h.path));
   if (successful.length === 0) return;
   try {
+    // Budgets (statement, deadline, transaction, pool wait) all come from boundedRead; see the JSDoc above.
     await boundedRead(ctx, async (tx, deadline) => {
       for (const h of successful) {
         if (Date.now() >= deadline) break;

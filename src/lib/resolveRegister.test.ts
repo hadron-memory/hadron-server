@@ -23,6 +23,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { ensureChannelWithRoot } from './channels.js';
 import { parseRunRegisterSnapshot, renderDerivedBlocks, resolveRegister } from './resolveRegister.js';
 import { mintAppRun } from '../jobs/appRuns.js';
+import { serveAgentBootPrompt, serveEveryAgent } from '../test/servedBootPrompt.js';
 
 const Q = resolvers.Query as any;
 const M = resolvers.Mutation as any;
@@ -55,7 +56,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: reader.id, role: 'READER' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: stranger.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'agent', urn: `${org.urn}:agent`, visibility: 'ORGANIZATION', systemPrompt: 'You are {{name}}, the {{role}}.', personaRole: 'engineer' } });
+  agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'agent', urn: `${org.urn}:agent`, visibility: 'ORGANIZATION', personaRole: 'engineer' } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'admin' } });
   appMem = await db.memory.create({
@@ -65,6 +66,7 @@ beforeEach(async () => {
   channel = (await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id })).channel;
   const node = await db.node.create({ data: { id: generateId(), memoryId: appMem.id, loc: 'tasks:go', name: 'go', nodeType: 'task', content: 'go', isRunnable: true } });
   entry = `hrn:node:${appMem.urn}:${node.loc}`;
+  await serveEveryAgent(db); // #2712: binds and runs need a served prompt
 });
 
 describe('resolveRegister', () => {
@@ -134,6 +136,7 @@ describe('resolveRegister', () => {
   });
 
   it('Worker.prompt appends the register block through renderDerivedBlocks; none for an attendee without rows', async () => {
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}, the {{worker.role}}.');
     const w = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
     const prompt = await W.prompt(w, {}, ctx(admin.id));
     expect(prompt).toContain('You are Iris, the engineer.');
@@ -203,9 +206,9 @@ describe('resolveRegister', () => {
       canRead: true, canPost: false, disclosure: 'HOST_MEMORY_NOT_WRITABLE',
       channel: expect.objectContaining({ hostMemoryId: null, hostMemoryUrn: null }),
     })]);
-    const bare = await mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false });
-    expect(bare.registerSnapshot).toBeNull();
-    expect(await R.register(bare, {}, ctx(admin.id))).toEqual([]);
+    // #2712 (R74): a run with no Agent has no attendee, and is now refused before it exists.
+    await expect(mintAppRun(db, { organizationId: org.id, appId: app.id, userId: admin.id, triggerKind: 'MANUAL', entryNodeUrn: entry, publish: false }))
+      .rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_NOT_SET' } });
   });
 
   it('attendeeRegister is gated on App participation', async () => {

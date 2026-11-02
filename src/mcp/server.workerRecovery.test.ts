@@ -25,6 +25,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import type { AuthContext } from '../middleware/auth.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -40,7 +41,7 @@ let outsider: { id: string };
 let app: { id: string; urn: string };
 let agent: { id: string };
 
-const PERSONA_TEMPLATE = 'You are {{name}}, the {{role}} on this team.';
+const PERSONA_TEMPLATE = 'You are {{worker.name}}, the {{worker.role}} on this team.';
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -61,9 +62,10 @@ beforeEach(async () => {
     data: {
       id: generateId(), organizationId: org.id, urn: `${org.urn}:backend`,
       name: 'Backend', visibility: 'ORGANIZATION',
-      personaRole: 'backend-engineer', systemPrompt: PERSONA_TEMPLATE,
+      personaRole: 'backend-engineer',
     },
   });
+  await serveAgentBootPrompt(db, agent.id, PERSONA_TEMPLATE);
   app = await db.app.create({
     data: { id: generateId(), organizationId: org.id, name: 'Team App', urn: `${org.urn}:team` },
   });
@@ -116,10 +118,10 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
     expect(out).toContain('Boot briefing');
     // #1090: the receipt stamps THIS rendering — composition time plus the
     // role Agent's generic updatedAt, both from the one agent read that
-    // supplied the template. No per-override mtime exists, so it says so.
+    // supplied the briefing.
     expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-    expect(out).toContain('no per-override mtime is tracked');
+    expect(out).toContain('(generic Agent row update)');
   });
 
   it('reports a null role-Agent updatedAt honestly instead of inventing a stamp (#1090)', async () => {
@@ -127,10 +129,11 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:null-stamp`,
         name: 'Null stamp', visibility: 'ORGANIZATION',
-        personaRole: 'archivist', systemPrompt: 'You are {{name}}, the {{role}}.',
-        updatedAt: null,
+        personaRole: 'archivist',
       },
     });
+    await serveAgentBootPrompt(db, nullStampAgent.id, 'You are {{worker.name}}, the {{worker.role}}.');
+    await db.agent.update({ where: { id: nullStampAgent.id }, data: { updatedAt: null } });
     await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: nullStampAgent.id, name: 'Stale', slug: 'stale', role: 'archivist' },
     });
@@ -180,7 +183,9 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
       workerRef: 'Iris',
       session: session.id,
     });
-    expect(out).toContain('You are Iris');
+    expect(out).toContain(`hrn:worker:${org.urn}:team:iris`);
+    // The hand-made session has no served-prompt record, so its own read gets the typed notice, never a newer revision.
+    expect(out).toContain('SESSION_UNRECORDED');
   });
 
   it('refuses a bare NAME with no App context, and says what to do', async () => {
@@ -196,18 +201,15 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
 
   it('renders the briefing LIVE, so a changed template is picked up', async () => {
     // The contract says never to cache the briefing precisely because it is
-    // rendered from the role agent's template. If this read were a snapshot it
-    // would reintroduce the staleness the contract forbids.
+    // rendered from what the role agent is served now. If this read were a
+    // snapshot it would reintroduce the staleness the contract forbids.
     await worker('Iris', 'iris');
     const srv = createTestableMcpServer(hybridAuth());
     expect(await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' })).toContain(
       'the backend-engineer on this team',
     );
 
-    await db.agent.update({
-      where: { id: agent.id },
-      data: { systemPrompt: 'You are {{name}}. The team ships on Fridays.' },
-    });
+    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}. The team ships on Fridays.');
 
     const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
     expect(after).toContain('The team ships on Fridays.');
@@ -314,42 +316,12 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
     expect(out).not.toContain('Your active session');
   });
 
-  it('composes promptOverride into the briefing', async () => {
-    await worker('Iris', 'iris', { promptOverride: 'You authored the Academy history.' });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(out).toContain('You are Iris, the backend-engineer on this team.');
-    expect(out).toContain('You authored the Academy history.');
-  });
-
-  it('surfaces the RAW override separately, so an edit can round-trip', async () => {
-    // PR review (Codex): hadron_update_worker REPLACES the override, so a
-    // caller extending one needs the override ALONE. Returning only the
-    // composed briefing would have them paste template+override back into the
-    // override field, after which rendering prepends the template again — and
-    // every subsequent edit compounds the duplication.
-    await worker('Iris', 'iris', { promptOverride: 'You authored the Academy history.' });
-    const srv = createTestableMcpServer(hybridAuth());
-    const out = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
-    expect(out).toMatch(/Prompt override/);
-
-    // Round-trip it verbatim: the resolved briefing must be unchanged, i.e. the
-    // template appears exactly once and is not folded into the override.
-    await srv.callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: 'You authored the Academy history.',
-    });
-    const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
-    expect(after.match(/You are Iris, the backend-engineer on this team\./g)).toHaveLength(1);
-  });
-
-  it('masks the raw override from a caller who may not see worker internals', async () => {
-    await worker('Iris', 'iris', { promptOverride: 'private individuality' });
+  it('masks the briefing from a caller who may not see worker internals', async () => {
+    await worker('Iris', 'iris');
     const out = await createTestableMcpServer({
       userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
     }).callToolText('hadron_get_worker', { workerRef: `hrn:worker:${org.urn}:team:iris` });
-    expect(out).not.toContain('private individuality');
+    expect(out).not.toContain('on this team');
   });
 
   it('reports whether the worker is currently taken', async () => {
@@ -406,7 +378,7 @@ describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
   });
 
   it('says so plainly when there is no briefing to give', async () => {
-    await db.agent.update({ where: { id: agent.id }, data: { systemPrompt: null } });
+    await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: null, bootPromptUrn: null } });
     await worker('Bare', 'bare');
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
       workerRef: 'Bare',
@@ -578,168 +550,40 @@ describe('#1016 — hadron_whoami recovers the session id', () => {
 // #1010 — updateWorker
 // ---------------------------------------------------------------------------
 
-describe('#1010 — a casting\'s individuality is amendable', () => {
-  it('sets an override, and it reaches the resolved briefing', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: 'You authored the Academy history.',
-    });
-
-    expect(out).toContain('Updated');
-    // The echo shows what the worker will actually be told at its next bind —
-    // template plus override, composed.
-    expect(out).toContain('You are Iris, the backend-engineer on this team.');
-    expect(out).toContain('You authored the Academy history.');
-
-    const row = await db.worker.findFirstOrThrow({ where: { name: 'Iris' } });
-    expect(row.promptOverride).toBe('You authored the Academy history.');
-  });
-
-  it('amends a worker that has already done work — the case that motivated it', async () => {
-    // deleteWorker + re-cast refuses WORKER_IN_USE once a session was bound, so
-    // exactly the workers with an identity to record were the ones that could
-    // not be re-cast. This is the path that has to work.
+describe('#1010 — hadron_update_worker and the worker read', () => {
+  // #2712 removed the per-worker prompt override this tool was written for; it now edits signature and trailer.
+  it('omitting every editable field changes nothing and says so', async () => {
     const iris = await worker('Iris', 'iris');
-    await db.session.create({
-      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id },
-    });
-
-    await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: 'Discovered through the work.',
-    });
-    expect((await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).promptOverride).toBe(
-      'Discovered through the work.',
-    );
-  });
-
-  it('does not touch a sibling casting of the same role agent', async () => {
-    // The whole reason the role agent's shared systemPrompt cannot hold this.
-    await worker('Iris', 'iris');
-    const fred = await worker('Fred', 'fred');
-    await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: 'Iris authored the Academy history.',
-    });
-    expect((await db.worker.findUniqueOrThrow({ where: { id: fred.id } })).promptOverride).toBeNull();
-  });
-
-  it('an empty string clears the override', async () => {
-    await worker('Iris', 'iris', { promptOverride: 'stale' });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: '',
-    });
-    expect(out).toMatch(/cleared/i);
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBeNull();
-  });
-
-  it('a whitespace-only override is absent, matching castWorker', async () => {
-    await worker('Iris', 'iris', { promptOverride: 'stale' });
-    await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: '   ',
-    });
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBeNull();
-  });
-
-  it('omitting promptOverride preserves it rather than clearing it', async () => {
-    // PR review (Copilot): the tool description promised omission preserves,
-    // but the zod arg was REQUIRED — so a model that read the contract and
-    // followed it hit a hard validation error. Making the arg optional without
-    // fixing the forwarding would have been worse still: the resolver
-    // distinguishes omitted from null by PRESENCE, so an unconditionally
-    // forwarded `undefined` lands in the clear branch and wipes the override.
-    await worker('Iris', 'iris', { promptOverride: 'keep me' });
+    const before = await db.worker.findUniqueOrThrow({ where: { id: iris.id } });
     const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
       workerRef: 'Iris',
     });
     expect(out).toMatch(/no change requested/);
-    expect(out).toContain('keep me');
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBe(
-      'keep me',
-    );
-  });
-
-  it('leaves the permanent facts of the casting alone', async () => {
-    const iris = await worker('Iris', 'iris');
-    await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      promptOverride: 'new text',
-    });
-    const after = await db.worker.findUniqueOrThrow({ where: { id: iris.id } });
-    expect(after.name).toBe('Iris');
-    expect(after.slug).toBe('iris');
-    expect(after.role).toBe('backend-engineer');
-    expect(after.agentId).toBe(agent.id);
-  });
-
-  it('refuses for a RETIRED worker, and says why', async () => {
-    await worker('Gone', 'gone', { retiredAt: new Date(), promptOverride: 'old' });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Gone',
-      promptOverride: 'never delivered',
-    });
-    expect(out).toMatch(/retired/i);
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Gone' } })).promptOverride).toBe('old');
+    expect(out).not.toContain('Prompt override');
+    expect(await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).toEqual(before);
   });
 
   it('refuses a caller who may not staff the App', async () => {
     await worker('Iris', 'iris');
     const out = await createTestableMcpServer({
       userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
-    }).callToolText('hadron_update_worker', { workerRef: 'Iris', promptOverride: 'mine now' });
+    }).callToolText('hadron_update_worker', { workerRef: 'Iris', signature: 'mine now' });
 
     expect(out).not.toMatch(/^Updated/m);
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBeNull();
+    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).signature).not.toBe('mine now');
   });
 
   it('refuses a PURE App-key principal — staffing is a human act', async () => {
     await worker('Iris', 'iris');
     const out = await createTestableMcpServer(appKeyAuth()).callToolText('hadron_update_worker', {
       workerRef: 'Iris',
-      promptOverride: 'by a robot',
+      signature: 'by a robot',
     });
     expect(out).not.toMatch(/^Updated/m);
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).promptOverride).toBeNull();
+    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).signature).not.toBe('by a robot');
   });
 
   describe('the GraphQL surface', () => {
-    it('preserves the override when promptOverride is OMITTED', async () => {
-      // Omitted-preserves / null-clears is the partial-update convention every
-      // other surface follows; collapsing them would make clearing impossible.
-      const iris = await worker('Iris', 'iris', { promptOverride: 'keep me' });
-      await resolvers.Mutation.updateWorker({}, { workerRef: iris.id }, ctxFor());
-      expect((await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).promptOverride).toBe(
-        'keep me',
-      );
-    });
-
-    it('clears the override on an explicit null', async () => {
-      const iris = await worker('Iris', 'iris', { promptOverride: 'drop me' });
-      await resolvers.Mutation.updateWorker(
-        {},
-        { workerRef: iris.id, promptOverride: null },
-        ctxFor(),
-      );
-      expect(
-        (await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).promptOverride,
-      ).toBeNull();
-    });
-
-    it('stores a non-blank override RAW, without trimming the author\'s whitespace', async () => {
-      const iris = await worker('Iris', 'iris');
-      await resolvers.Mutation.updateWorker(
-        {},
-        { workerRef: iris.id, promptOverride: '  indented prose\n' },
-        ctxFor(),
-      );
-      expect((await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).promptOverride).toBe(
-        '  indented prose\n',
-      );
-    });
-
     it('reads a worker by NAME through Query.worker with appRef', async () => {
       await worker('Iris', 'iris');
       const found = await resolvers.Query.worker({}, { ref: 'Iris', appRef: app.id }, ctxFor());
@@ -795,63 +639,6 @@ describe('#1010 — a casting\'s individuality is amendable', () => {
         await expect(
           resolvers.Query.worker({}, { ref: 'Iris', appRef: app.id }, ctxFor()),
         ).rejects.toThrow(/connection terminated/);
-      } finally {
-        spy.mockRestore();
-      }
-    });
-
-    it('refuses when the worker is retired between the check and the write', async () => {
-      // PR review (Copilot): the refusal read retiredAt from a row resolved
-      // earlier, so a retireWorker landing in between let the write through and
-      // amended a retired casting the contract says it refuses. The write is now
-      // guarded on the state the check consumed.
-      const iris = await worker('Iris', 'iris');
-      const ctx = ctxFor();
-      // Simulate the race precisely: the resolver's own resolve step returns a
-      // live row, and retirement commits before the write.
-      const original = db.app.findUniqueOrThrow.bind(db.app);
-      const spy = vi.spyOn(db.app, 'findUniqueOrThrow').mockImplementationOnce((async (a: never) => {
-        const row = await original(a);
-        await db.worker.update({ where: { id: iris.id }, data: { retiredAt: new Date() } });
-        return row;
-      }) as never);
-      try {
-        await expect(
-          resolvers.Mutation.updateWorker(
-            {},
-            { workerRef: iris.id, promptOverride: 'slipped through' },
-            ctx,
-          ),
-        ).rejects.toMatchObject({ extensions: { code: 'WORKER_RETIRED' } });
-      } finally {
-        spy.mockRestore();
-      }
-      expect(
-        (await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).promptOverride,
-      ).toBeNull();
-    });
-
-    it('reports NOT_FOUND, not RETIRED, when the worker is deleted mid-flight', async () => {
-      // PR review (Codex): a concurrent deleteWorker also yields zero rows, and
-      // it is permitted to — its "never used" test is about bound sessions and
-      // working-memory content, and setting an override makes a worker neither.
-      // The two answers point opposite ways for the caller: deletion FREES the
-      // name to be cast again, retirement reserves it forever.
-      const iris = await worker('Iris', 'iris');
-      const original = db.app.findUniqueOrThrow.bind(db.app);
-      const spy = vi.spyOn(db.app, 'findUniqueOrThrow').mockImplementationOnce((async (a: never) => {
-        const row = await original(a);
-        await db.worker.delete({ where: { id: iris.id } });
-        return row;
-      }) as never);
-      try {
-        await expect(
-          resolvers.Mutation.updateWorker(
-            {},
-            { workerRef: iris.id, promptOverride: 'too late' },
-            ctxFor(),
-          ),
-        ).rejects.toMatchObject({ extensions: { code: 'WORKER_NOT_FOUND' } });
       } finally {
         spy.mockRestore();
       }

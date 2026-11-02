@@ -1,4 +1,5 @@
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
+import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -103,13 +104,14 @@ import { unauthenticatedError } from '../../../lib/refusals.js';
 export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
+  limiterIdentity?: Readonly<import('../../../lib/rateLimit/identity.js').RateIdentity>;
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
   /**
    * #2044: set ONLY by a door that re-runs its write gate on a transaction client holding the
-   * install memory's authority fence (writeNodeCore). On the pooled client an install memory's
+   * install memory's authority fence (writeNodeCore and the #2734 node-write doors). On the pooled client an install memory's
    * write gate otherwise answers NO: a writer that never rechecks in its own transaction
-   * (restoreNodeRevision, moveNode, deleteNode, ...) cannot hold the fence, so it fails closed.
+   * cannot hold the fence, so it fails closed.
    */
   installWritePreflight?: boolean;
   /**
@@ -2046,15 +2048,10 @@ export function clampListTake(limit?: number | null): number {
  * real total); a negative limit is 0; a limit over 200 is served as 200, never a
  * refusal. A negative or omitted offset is 0. Same default as `clampListTake` since #2211.
  */
-export const PAGE_ARGS_DEFAULT = 20;
-export const PAGE_ARGS_MAX = 200;
+export { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX };
 
 export function pageArgs(args: { limit?: number | null; offset?: number | null }): { take: number; skip: number } {
-  const limit = args.limit ?? PAGE_ARGS_DEFAULT;
-  return {
-    take: Math.min(PAGE_ARGS_MAX, Math.max(0, limit)),
-    skip: Math.max(0, args.offset ?? 0),
-  };
+  return { take: pageTake(args.limit), skip: Math.max(0, args.offset ?? 0) };
 }
 
 /** `{ items, total, hasMore }`: hasMore is whether rows remain past this page. */
@@ -3211,7 +3208,7 @@ export async function installAgentIntoAppCore(
   // Agent, and installing is itself a read grant. An installed Agent's system
   // memory becomes READ_ONLY in every App-context access map
   // (`foldAgentIntoAccessMap`), and the mutation payload returns the Agent
-  // object, whose own definition fields (systemPrompt / systemMemoryId /
+  // object, whose own definition fields (systemMemoryId /
   // memoryItems) are NOT field-gated — they rely on this object-level gate
   // (#551). An AppMember who is not an org member cannot read a non-PUBLIC org
   // Agent today (`Query.agent` requires org READER), so admitting them here
@@ -3230,7 +3227,7 @@ export async function installAgentIntoAppCore(
   // `organizationId` columns are null for a user-owned App + a user-owned
   // Agent, so a bare `agent.organizationId !== app.organizationId` reads
   // `null !== null` ⇒ false and waves through another USER's non-PUBLIC agent
-  // (leaking its systemPrompt via the returned AGENT_INCLUDE). Branch on the
+  // (leaking its definition via the returned AGENT_INCLUDE). Branch on the
   // App's ownership class instead, mirroring createApp's personal path.
   if (app.organizationId === null) {
     // spec 047 personal install: no org ⇒ no AgentOrgGrant. A user-owned App
@@ -3448,13 +3445,15 @@ export async function orgExchangeConnectionScope(ctx: Context, orgId: string) {
 }
 
 /**
- * `requireEmailConnection`'s answer for a missing or deleted connection. The
- * message is unchanged for the operation surfaces; a caller that must answer
- * absence like denial (hadron-internal#18) can tell it apart by type.
+ * `requireEmailConnection`'s answer for a missing, deleted or malformed connection id. On the wire it is byte-identical
+ * to the gate's denial (`authorizationDenied()`: `Forbidden`, typed `FORBIDDEN`), so absence and another user's
+ * connection answer alike and the gate is no existence oracle (#2782, ruling A in team chat #55219, as
+ * hadron-internal#18 ruled for `testExchangeConnection`). It used to be a plain `Error`, which the formatter redacts to
+ * INTERNAL_SERVER_ERROR (cor:api:260:01). A caller that must still tell absence from denial matches the class.
  */
-export class ConnectionNotFoundError extends Error {
+export class ConnectionNotFoundError extends GraphQLError {
   constructor() {
-    super('Connection not found');
+    super('Forbidden', { extensions: { code: 'FORBIDDEN' } });
     this.name = 'ConnectionNotFoundError';
   }
 }

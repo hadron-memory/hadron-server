@@ -1,0 +1,12 @@
+-- #451: a node hard delete nulls usage_events.node_id (ON DELETE SET NULL):
+-- without an index led by it, every node delete scans the append-only firehose.
+--
+-- CONCURRENTLY cannot run inside a transaction block, and `prisma migrate
+-- deploy` sends a file as one simple query: one statement runs outside a
+-- transaction, several run as one implicit transaction (SQLSTATE 25001). Keep
+-- this file a single statement.
+--
+-- A failed CONCURRENTLY build leaves an INVALID index under this name, which
+-- IF NOT EXISTS would then skip. If it is ever INVALID, drop it and re-run
+-- this statement by hand.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");

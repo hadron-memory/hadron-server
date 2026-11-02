@@ -150,6 +150,11 @@ describe('tickers — create, read, URN, slug', () => {
 
   it('refuses an App key (a bare key is no participant)', async () => {
     await expectCode(createTicker(ctx(undefined, { appId: app.id } as Partial<Context>)), 'APP_NOT_FOUND');
+    // #2931: the line above has no appKeyId, so it is "no user", not a key. A real key, holding host:operate (which
+    // now READS its host's tickers), still creates none.
+    const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
+    await expectCode(createTicker({ db, appId: app.id, appKeyId: key.id, roles: [] }), 'APP_NOT_FOUND');
   });
 
   it('a duplicate live name is refused ignoring case; the name is reusable after delete, the slug is not', async () => {

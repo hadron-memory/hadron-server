@@ -112,11 +112,12 @@ describe('hadron_set_active_scope — rung 2, persisted, re-authorized', () => {
     expect(out).toMatch(/\[(no_vector_index|embedding_unavailable)\]/);
   });
 
-  it("a pure App key's `global` is its credential's organization (Codex/Copilot on #1161)", async () => {
+  it("a pure App key's `global` is its credential's organization, and reads no org knowledge (Codex/Copilot on #1161, #1376)", async () => {
     const srv = createTestableMcpServer({ appId: app.id, roles: [] } as AuthContext, { sessionId: `sl-${generateId()}` });
     const out = await srv.callToolText('hadron_find_nodes', { query: '*', scope: 'global' });
     expect(out).toContain(`scope: global — organization hrn:org:${org.urn}`);
-    expect(out).toContain(`hrn:node:${attached.urn}:alpha`);
+    // #1376: a bare key reaches no org-owned ORGANIZATION knowledge, even through its Agent's item.
+    expect(out).not.toContain(`hrn:node:${attached.urn}:alpha`);
   });
 
   it('hadron_search carries the same scope line', async () => {

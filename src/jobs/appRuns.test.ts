@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 
 vi.mock('../lib/bus/index.js', () => ({
   getBusClient: vi.fn(async () => null), // sweep/standalone mode in tests
@@ -46,6 +47,7 @@ import { schedulerTick } from './scheduler.js';
 let orgId: string;
 let appId: string;
 let userId: string;
+let agentId: string;
 
 function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
   return {
@@ -87,6 +89,7 @@ async function mint(extra: Record<string, unknown> = {}) {
   return mintAppRun(db, {
     organizationId: orgId,
     appId,
+    agentId, // #2712: a run needs an Agent with a served boot prompt (R74)
     triggerKind: 'MANUAL',
     entryNodeUrn: 'run-org::runmem::tasks:briefing',
     ...extra,
@@ -108,6 +111,9 @@ beforeEach(async () => {
     data: { githubId: 9991, githubUsername: 'run-user', roles: ['READER'] },
   });
   userId = user.id;
+  agentId = (await db.agent.create({ data: { id: generateId(), organizationId: orgId, urn: 'run-org:runner', name: 'runner' } })).id;
+  await db.appAgent.create({ data: { appId, agentId } });
+  await serveAgentBootPrompt(db, agentId, 'Test boot prompt.');
 });
 
 // ───── launch gate ──────────────────────────────────────────────────────────
@@ -148,6 +154,7 @@ describe('mintAppRun — launch gate (cor:acl:050:01)', () => {
       code: 'AGENT_NOT_INSTALLED',
     });
     await db.appAgent.create({ data: { appId, agentId: foreignAgent.id } });
+    await serveAgentBootPrompt(db, foreignAgent.id, 'Foreign boot prompt.');
     const run = await mint({ agentId: foreignAgent.id });
     expect(run.agentId).toBe(foreignAgent.id);
   });
@@ -883,6 +890,7 @@ describe('schedulerTick (plan §7)', () => {
         name: 'morning briefing',
         cron: '0 7 * * *',
         timezone: 'UTC',
+        agentId,
         entryNodeUrn: 'run-org::runmem::tasks:briefing',
         enabled: true,
         nextRunAt: new Date(Date.now() - 60_000), // due
@@ -1041,6 +1049,7 @@ describe('a headless run writes as its agent (#1610)', () => {
     const { currentActor } = await import('../lib/requestActor.js');
     const agent = await db.agent.create({ data: { id: generateId(), urn: 'run-org::run-agent', name: 'run-agent', organizationId: orgId } });
     await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    await serveAgentBootPrompt(db, agent.id, 'Run agent boot prompt.');
     const seen: Array<{ workerId: string | null; agentId: string | null }> = [];
     const capture = deps({
       llm: vi.fn(async () => {
@@ -1050,7 +1059,13 @@ describe('a headless run writes as its agent (#1610)', () => {
     });
     const withAgent = await mint({ agentId: agent.id });
     expect(await executeAppRun(db, withAgent.id, capture)).toBe('completed');
-    const without = await mint();
+    // #2712: R74 refuses minting a run with no Agent; a legacy row without one still runs as nobody.
+    const without = await db.appRun.create({ data: {
+      id: generateId(), organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: withAgent.entryNodeUrn,
+      budgetTokens: withAgent.budgetTokensInitial, budgetActions: withAgent.budgetActionsInitial,
+      budgetTokensInitial: withAgent.budgetTokensInitial, budgetActionsInitial: withAgent.budgetActionsInitial,
+      costMicroCents: 0n, timeoutMs: withAgent.timeoutMs,
+    } });
     expect(await executeAppRun(db, without.id, capture)).toBe('completed');
     expect(seen).toEqual([{ workerId: null, agentId: agent.id }, { workerId: null, agentId: null }]);
     // Outside the run nothing leaks.

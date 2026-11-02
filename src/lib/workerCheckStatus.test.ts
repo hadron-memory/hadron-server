@@ -51,6 +51,7 @@ describe('NO_SESSION', () => {
     expect(derive({ liveSessionStartedAt: null, lastCheckedAt: ago(10 * 60 * MIN) })).toEqual({
       status: 'NO_SESSION',
       pendingReason: null,
+      noSessionReason: null, // #3077: the pure derivation passes through what the loader classified; none given here
       lastCheckedAt: ago(10 * 60 * MIN),
       resumedAt: null,
     });

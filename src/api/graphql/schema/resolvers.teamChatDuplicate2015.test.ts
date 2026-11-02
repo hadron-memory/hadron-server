@@ -2,8 +2,8 @@
  * #2015 — a worker's identical post to the same Channel within ten minutes is refused, and the refusal writes nothing.
  *
  * The rule: the SAME worker (identity survives its session changes), the SAME Channel, exactly the same body and the
- * same reply identity (a `replies-to` edge to the same target, or none on both sides), earlier than ten minutes by the
- * admission clock. Refused as TEAM_CHAT_DUPLICATE, carrying the earlier seq in the message text and in the typed
+ * same reply identity (a `replies-to` edge to the same target, or none on both sides), within the preceding ten minutes
+ * by the admission clock. Refused as TEAM_CHAT_DUPLICATE, carrying the earlier seq in the message text and in the typed
  * fields (MCP renders only the code and the text), with no message, no seq, no edge, no root or Channel counter moved.
  *
  * Out of the rule: a genuine human post (no worker), a different worker, another Channel, a changed body or reply, an

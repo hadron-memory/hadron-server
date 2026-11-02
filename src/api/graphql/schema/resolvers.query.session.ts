@@ -289,7 +289,7 @@ export const sessionQueries = {
       const where = await usageEventsWhere(ctx, args);
       return ctx.db.usageEvent.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: args.limit ?? 20,
         skip: args.offset ?? 0,
       });

@@ -81,6 +81,17 @@ const definitionHash = (format: AutomationPinFormat, state: Record<string, unkno
   return hash(json(content));
 };
 
+/**
+ * Every run tool a flow node can call: the `data.tools` it hands a model, plus the one tool a script node declares
+ * (#670, cor:agt:010:04), so a script call's registration identity is pinned and approved like a model-called tool's.
+ */
+export function flowToolNames(data: unknown): string[] {
+  const d = (data && typeof data === 'object' ? data : {}) as { tools?: unknown; script?: { call?: { tool?: unknown } } };
+  const declared = Array.isArray(d.tools) ? d.tools.filter((name): name is string => typeof name === 'string') : [];
+  const scripted = d.script?.call?.tool;
+  return typeof scripted === 'string' ? [...declared, scripted] : declared;
+}
+
 /** Capture routed flow definitions and instruction partials. Documents, data
  * references and output destinations remain mutable, read-gated data (#7894). */
 export interface AutomationPreview extends PinBase {
@@ -181,7 +192,7 @@ export async function captureAutomationPin(db: PrismaClient, appId: string, user
     }
   }
   if (Object.keys(edges).length > 1000) throw new AutomationPinError('AUTOMATION_CHANGED', 'Automation graph exceeds 1000 edges');
-  const tools = [...flows].flatMap(id => { const node = nodes[id]; const data = node.state.data as { tools?: unknown } | null; return Array.isArray(data?.tools) ? data.tools.filter((name): name is string => typeof name === 'string') : []; });
+    const tools = [...flows].flatMap(id => flowToolNames(nodes[id].state.data));
   const resources = await executionIdentities(db, appId, organizationId, tools, selection);
   const value = { resources, format, appId, userId, entry, entryId, nodes, edges, flows: [...flows].sort(), absentPartials: [...absentPartials.values()].sort((a, b) => a.urn.localeCompare(b.urn)) };
   const result: AutomationPreview = { ...value, hash: storedAutomationPin({ ...value, hash: '' }).hash };

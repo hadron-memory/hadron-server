@@ -36,7 +36,7 @@ async function sourceAgent(o: { id: string; urn: string }, visibility: 'PUBLIC' 
   const memId = generateId();
   await db.memory.create({ data: { id: memId, organizationId: o.id, urn: `${o.urn}:${slug}-system`, name: `${slug} System`, class: 'system', acceptsUploads: false } as never });
   const id = generateId();
-  await db.agent.create({ data: { id, organizationId: o.id, urn: `${o.urn}:${slug}`, name: slug, description: 'd', systemPrompt: 'hello {{name}}', systemMemoryId: memId, visibility, surfaces: ['mcp'], personaRole: 'tester' } });
+  await db.agent.create({ data: { id, organizationId: o.id, urn: `${o.urn}:${slug}`, name: slug, description: 'd', systemMemoryId: memId, visibility, surfaces: ['mcp'], personaRole: 'tester' } });
   const nid = (loc: string) => db.node.create({ data: { id: generateId(), memoryId: memId, loc, name: loc, nodeType: 'page', content: `see ${o.urn}:${slug}-system:${loc}` } as never });
   const a = await nid('a');
   const b = await nid('b');

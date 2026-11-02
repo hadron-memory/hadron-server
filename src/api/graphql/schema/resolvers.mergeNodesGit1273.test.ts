@@ -220,7 +220,7 @@ describe('#1273 encrypted node Git mirror', () => {
     });
     await mirror.writeNodeToGit(await payload(), '', null, memoryId);
     expect(flipped).toBe(true);
-    expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath });
+    expect(execGit).toHaveBeenCalledWith(['remote', 'set-url', 'origin', 'https://github.com/andi1273/fixture'], { cwd: localPath, timeout: 10_000 });
     expect(readFileSync(join(localPath, 'target.md'))).toEqual(originalFile);
     expect(vi.mocked(execGit).mock.calls.some(([args]) => ['add', 'commit', 'push'].includes(args[0]))).toBe(false);
     expect(warning).toHaveBeenCalledWith(expect.stringMatching(/ENCRYPTED_GIT_SYNC_UNAVAILABLE/));

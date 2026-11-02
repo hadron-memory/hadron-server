@@ -22,14 +22,23 @@ export interface ViewerManagesCache {
   actor: Promise<{ roles: string[] } | null> | null;
 }
 
+/**
+ * Is this request a principal other than the user acting for themself, setting a
+ * worker session aside (cor:dmo:050:12)? An impersonation, a run principal, an
+ * ambiguous actor or a refused session binding. Worker-session admission is its own
+ * question (#2483), so a door that must not decide it reads this arm alone (#2448).
+ */
+export function isRefusedPrincipal(ctx: Context): boolean {
+  return !ctx.userId
+    || !!ctx.impersonation
+    || isRunPrincipal(ctx)
+    || currentActorAmbiguity() !== null
+    || !!ctx.sessionBindingRefused;
+}
+
 /** Is this request the direct user acting for themself (cor:dmo:050:12)? */
 function isDirectUser(ctx: Context): boolean {
-  return !!ctx.userId
-    && !ctx.impersonation
-    && !isRunPrincipal(ctx)
-    && currentActor().workerId === null
-    && currentActorAmbiguity() === null
-    && !ctx.sessionBindingRefused;
+  return !isRefusedPrincipal(ctx) && currentActor().workerId === null;
 }
 
 async function evaluate(ctx: Context, cache: ViewerManagesCache, ids: string[]): Promise<Map<string, boolean>> {

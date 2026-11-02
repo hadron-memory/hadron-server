@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../helpers.js';
+import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { canWriteToMemory } from '../../mcp/access-control.js';
@@ -40,8 +40,12 @@ describe('AppAgent post-subscription_type-drop parity (SC-005)', () => {
     for (const role of ['OPERATE', 'DEVELOP'] as const) {
       const { app } = await createDbAppWithKey(db, `pd-app-${role}`, org.id);
       await createDbAppAgent(db, app.id, agent.id, { role });
+      // #1376: the item caps a write for a request with a user behind it; a bare App key never writes through it.
       const ctx: AuthContext = { appId: app.id, organizationId: org.id };
-      expect(await canWriteToMemory(db, ctx, memory.id)).toBe(true);
+      expect(await canWriteToMemory(db, ctx, memory.id)).toBe(false);
+      const user = await db.user.create({ data: { id: generateId(), handle: `pd-${generateId()}`, githubUsername: `pd-${generateId()}` } });
+      await createDbAppMember(db, app.id, user.id, 'member');
+      expect(await canWriteToMemory(db, { ...ctx, userId: user.id }, memory.id)).toBe(true);
     }
   });
 

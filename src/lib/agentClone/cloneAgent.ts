@@ -119,7 +119,7 @@ async function fingerprint(tx: Prisma.TransactionClient, plan: Plan) {
       (SELECT md5(coalesce(string_agg(jsonb_build_array(p.id, p.source_id, p.target_id, p.loc, p.name, p.description, p.data, p.xmin::text)::text, ',' ORDER BY p.id), ''))
          FROM pending_edges p JOIN nodes n ON n.id = p.source_id
          WHERE n.memory_id = ${plan.systemMemoryId} AND p.deleted_at IS NULL) AS pending,
-      (SELECT md5(jsonb_build_array(a.name, a.description, a.system_prompt, a.type, a.surfaces, a.uses_tasks, a.register_defaults,
+      (SELECT md5(jsonb_build_array(a.name, a.description, a.type, a.surfaces, a.uses_tasks, a.register_defaults,
           a.installation_policy, a.memory_provisioning, a.persona_role, a.tasks_index_ref, a.processes_index_ref, a.extends_agent_id,
           a.system_memory_id, a.visibility, a.deleted_at, a.urn, a.xmin::text)::text) FROM agents a WHERE a.id = ${plan.sourceId}) AS agent,
       (SELECT md5(coalesce(string_agg(jsonb_build_array(i.imported_agent_id, i.position, i.required, i.xmin::text)::text, ',' ORDER BY i.position), ''))
@@ -288,7 +288,6 @@ async function writeClone(
       urn,
       name,
       description: source.description,
-      systemPrompt: source.systemPrompt,
       systemMemoryId: memoryCopy.memoryId,
       // R146: the Agent-create default, a creator-only draft; never the source's visibility.
       visibility: 'PERSONAL',

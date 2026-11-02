@@ -4,7 +4,7 @@ import { isAppParticipant } from '../../api/graphql/schema/resolvers.helpers.js'
 import { withoutRequestCaches } from '../../api/graphql/schema/resolvers.helpers.js';
 import { liveTxContext } from '../../api/graphql/schema/authorizedTx.js';
 import { boundedRead } from '../../api/graphql/schema/resolvers.taskWarnings.js';
-import { RegisterLookup } from '../actionRegister/lookup.js';
+import { RegisterData, RegisterLookup } from '../actionRegister/lookup.js';
 import type { WorkerWake } from './wakeRule.js';
 
 export type PublicTickAction = { code: string; state: 'MAPPED' | 'UNMAPPED' | 'UNRESOLVED' | 'WITHHELD'; taskLoc?: string; taskUrn?: string };
@@ -37,9 +37,19 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
       const workers = new Map((await tx.worker.findMany({ where: { appId: app.id, id: { in: items.map(i => i.workerId) } }, select: { id: true, heldByUserId: true, agent: { select: { systemMemoryId: true, deletedAt: true } } } })).map(w => [w.id, w]));
       const txCtx = await liveTxContext(withoutRequestCaches(ctx, tx), tx);
       const lookups = new Map<string, RegisterLookup>();
-      const readerLookup = new RegisterLookup(tx, txCtx, app.id, deadline);
+      // #2950: one set of register rows for the whole read. Answers and readability stay per principal (one
+      // lookup each); only the rows are shared, so a code's reads no longer repeat per holder or per chain link.
+      const codes = new Set<string>();
+      for (const item of items) for (const r of item.wake.reasons) if (r.kind === 'TICK') codes.add(names.get(r.tickerId)?.tickCode ?? r.action?.code ?? 'tick.unknown');
+      const data = new RegisterData(tx, codes);
+      const readerLookup = new RegisterLookup(tx, txCtx, app.id, deadline, false, undefined, data);
       const teamMemoryId = await readerLookup.teamMemory();
       const teamChain = teamMemoryId ? await readerLookup.chain(teamMemoryId) : [];
+      // #3048: every memory this call asks readability about lies on the Team Agent's chain or a woken worker's agent
+      // chain. Declare them once, so each principal answers all of them in ONE batched read (its own, never shared).
+      const workerChains = new Set<string>();
+      for (const w of workers.values()) if (w.agent?.systemMemoryId && !w.agent.deletedAt) for (const id of await readerLookup.chain(w.agent.systemMemoryId)) workerChains.add(id);
+      data.readability.cover([...teamChain, ...workerChains]);
       const holders = new Map<string, Promise<Context | null>>();
       const holder = (id: string): Promise<Context | null> => {
         let found = holders.get(id);
@@ -59,7 +69,7 @@ export async function enrichTickWakes(ctx: Context, app: App, items: Item[], ref
         const auth = worker?.heldByUserId ? await holder(worker.heldByUserId) : txCtx;
         const principal = worker?.heldByUserId ?? 'unheld';
         let lookup = lookups.get(principal);
-        if (!lookup && auth) { lookup = new RegisterLookup(tx, auth, app.id, deadline, !worker?.heldByUserId, teamMemoryId); lookups.set(principal, lookup); }
+        if (!lookup && auth) { lookup = new RegisterLookup(tx, auth, app.id, deadline, !worker?.heldByUserId, teamMemoryId, data); lookups.set(principal, lookup); }
         for (const reason of item.wake.reasons) {
           if (reason.kind !== 'TICK') continue;
           readerLookup.checkDeadline();

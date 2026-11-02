@@ -1,3 +1,4 @@
+import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
 import { ownsSession } from '../lib/sessionOwnership.js';
 import { createHash, randomBytes } from 'crypto';
 import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
@@ -12,6 +13,8 @@ import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { publishActor, publishUser } from '../lib/requestActor.js';
 
 export interface AuthContext {
+  /** Server-owned, captured before active-App/session selection; never read from request arguments. */
+  limiterIdentity?: Readonly<RateIdentity>;
   login?: HadronJwtPayload['login'];
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
@@ -182,7 +185,13 @@ export function hashUserApiKey(rawKey: string): string {
 // requests; bearer tokens require explicit attachment). Any future
 // "cookie auth" feature MUST be scoped to a separate middleware
 // mounted only on the consent-screen routes.
-export async function resolveAuthContext(
+export async function resolveAuthContext(req: Request, db: PrismaClient): Promise<AuthContext> {
+  const auth = await resolveAuthContextInner(req, db);
+  const identity = transportRateIdentity(auth, req.ip);
+  return identity.principal || identity.ip ? { ...auth, limiterIdentity: identity } : auth;
+}
+
+async function resolveAuthContextInner(
   req: Request,
   db: PrismaClient,
 ): Promise<AuthContext> {

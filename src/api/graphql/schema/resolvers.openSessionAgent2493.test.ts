@@ -15,6 +15,7 @@ import { setUpResetFixture, M as ResetM, ctx as resetCtx } from '../../../test/c
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { resolvers, type Context } from './resolvers.js';
 import { composeWorkerPrompt } from './resolvers.worker.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -35,8 +36,10 @@ beforeEach(async () => {
   admin = await db.user.create({ data: { githubId: 93_000_000 + Math.floor(Math.random() * 1_000_000), githubUsername: `open-${n}`, roles: ['READER'] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   app = await db.app.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
-  agentA = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer', systemPrompt: 'A-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}' }, ctx());
-  agentB = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer', systemPrompt: 'B-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}' }, ctx());
+  agentA = await M.createAgent({}, { orgId: org.id, name: 'Security', personaRole: 'security-engineer' }, ctx());
+  agentB = await M.createAgent({}, { orgId: org.id, name: 'Specs', personaRole: 'specs-engineer' }, ctx());
+  await serveAgentBootPrompt(db, agentA.id, 'A-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}');
+  await serveAgentBootPrompt(db, agentB.id, 'B-PROMPT {{worker.name}} {{worker.role}} {{agent.name}}');
   for (const a of [agentA, agentB]) await db.appAgent.create({ data: { appId: app.id, agentId: a.id } });
   const made = await M.castWorker({}, { appRef: app.id, agentRef: agentA.id, name: 'Ruin' }, ctx());
   worker = await db.worker.findUniqueOrThrow({ where: { id: made.id } });
@@ -85,7 +88,10 @@ describe('#2493 an open session finishes under its own agent and role', () => {
     expect(await openSessionPlacement(db, worker.id, open.id)).toBeNull();
     expect(await channelsOf(open.id)).toEqual([chanB]);
     const live = await db.worker.findUniqueOrThrow({ where: { id: worker.id } });
-    expect((await composeWorkerPrompt(ctx({ sessionId: open.id }), live)).text).toContain('B-PROMPT');
+    // #2712: the text is the served record, which holds the open session to the revision it was bound with (#2047),
+    // whatever the placement; a read with no session renders the live row.
+    expect((await composeWorkerPrompt(ctx({ sessionId: open.id }), live)).text).toContain('A-PROMPT');
+    expect((await composeWorkerPrompt(ctx(), live)).text).toContain('B-PROMPT');
   });
 
   it('(c) matcher: role and uses_tasks come from the open session\'s agent; a new bind uses the new agent', async () => {

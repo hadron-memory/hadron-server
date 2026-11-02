@@ -281,3 +281,29 @@ describe('nodeUsage ≡ usageEvents(loc: <loc>) — the #802 deprecation promise
     ).rejects.toThrow('Provide either nodeId or loc, not both');
   });
 });
+
+// #2957: `nodeUsage` and `usageEvents` ordered by createdAt alone, so events
+// sharing one created_at (a createMany, a coarse clock) came back in whatever
+// order the plan picked, and two limit-1 reads could return different rows.
+// Both now break ties on id desc, as the paged readers already do.
+describe('tied created_at ordering (#2957)', () => {
+  it('limit 1 returns the greatest id on both reads, whatever the insert order', async () => {
+    const node = await db.node.create({ data: { id: generateId(), memoryId: memA.id, loc: 'tied-loc', name: 'tied' } });
+    const at = new Date('2026-01-01T00:00:00.000Z');
+    // Fixed ids, inserted in non-sorted order, so heap order is not id order.
+    const idsInOrder = ['tie-b', 'tie-d', 'tie-a', 'tie-c'].map((s) => `${s}-${generateId()}`);
+    for (const id of idsInOrder) {
+      await db.usageEvent.create({
+        data: { id, type: 'read', nodeLoc: 'tied-loc', nodeId: node.id, memoryId: memA.id, createdAt: at },
+      });
+    }
+    const greatest = [...idsInOrder].sort().at(-1)!;
+    const viaDeprecated = await resolvers.Query.nodeUsage(null, { loc: 'tied-loc', limit: 1 }, asMember());
+    const viaTarget = await resolvers.Query.usageEvents(null, { loc: 'tied-loc', limit: 1 }, asMember());
+    expect(viaDeprecated.map((r) => r.id)).toEqual([greatest]);
+    expect(viaTarget.map((r) => r.id)).toEqual([greatest]);
+    // Full order is id desc as well.
+    const all = await resolvers.Query.nodeUsage(null, { loc: 'tied-loc' }, asMember());
+    expect(all.map((r) => r.id)).toEqual([...idsInOrder].sort().reverse());
+  });
+});

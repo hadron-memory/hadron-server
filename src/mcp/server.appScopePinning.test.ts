@@ -30,6 +30,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { serveEveryAgent } from '../test/servedBootPrompt.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
@@ -87,6 +88,7 @@ beforeEach(async () => {
   worker = await db.worker.create({
     data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' },
   });
+  await serveEveryAgent(db); // #2712: binds are served the Agent's boot prompt
 });
 
 /**
@@ -349,6 +351,7 @@ describe('#1005 — App scope is recoverable from the session after a reconnect'
       data: { id: generateId(), ownerUserId: owner.id, name: 'Solo App', urn: `solo-app-${generateId().slice(-8)}` },
     });
     await db.appAgent.create({ data: { appId: soloApp.id, agentId: soloAgent.id } });
+    await serveEveryAgent(db);
     const soloWorker = await db.worker.create({
       data: { ...WORKER_SIGNATURE_DEFAULTS, appId: soloApp.id, agentId: soloAgent.id, name: 'Solo Worker', slug: 'solo-worker' },
     });

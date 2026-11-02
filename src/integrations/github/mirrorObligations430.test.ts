@@ -6,6 +6,7 @@
  * Rows are read straight from `git_mirror_obligations`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { inspect } from 'node:util';
 import { execFileSync } from 'child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -15,7 +16,7 @@ import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 
 const env = vi.hoisted(() => ({
-  tokenFails: false, root: '', bare: '', failOn: null as null | ((args: string[]) => boolean),
+  failure: null as unknown, tokenFails: false, root: '', bare: '', failOn: null as null | ((args: string[]) => boolean),
   stdoutFor: null as null | ((args: string[]) => string | null),
 }));
 const TOKEN = 'tok-430-secret';
@@ -26,7 +27,7 @@ vi.mock('./githubApp.js', async (importOriginal) => ({
 vi.mock('../../config.js', () => ({ get GRAPHS_PATH() { return env.root; } }));
 vi.mock('./execGit.js', () => ({
   execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
-    if (env.failOn?.(args)) throw new Error('Git command failed. Check the repository and branch, then retry.');
+    if (env.failOn?.(args)) throw env.failure ?? new Error('Git command failed. Check the repository and branch, then retry.');
     const forged = env.stdoutFor?.(args);
     if (forged != null) return { stdout: forged, stderr: '' };
     try {
@@ -111,6 +112,7 @@ beforeEach(async () => {
   env.root = mkdtempSync(join(tmpdir(), 'hadron-430-'));
   env.bare = mkdtempSync(join(tmpdir(), 'hadron-430-bare-'));
   env.failOn = null;
+  env.failure = null;
   env.stdoutFor = null;
   env.tokenFails = false;
   errors = [];
@@ -131,6 +133,22 @@ const row = (extra: Partial<MirrorObligationRef> = {}) => ({
 });
 
 describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
+  it('fetch failure logs only bounded metadata and stores only the fixed branch class (#3057)', async () => {
+    await setup({ token: true });
+    const secret = `https://x-access-token:${TOKEN}@github.com/private/repo Bearer synthetic-3057`;
+    env.failure = Object.assign(new Error(secret), { stack: secret, cause: { nested: secret }, token: secret, exitCode: 128, toString: () => secret });
+    env.failOn = args => args[0] === 'fetch';
+    const captured: unknown[][] = [];
+    for (const channel of ['log', 'warn', 'error'] as const) vi.spyOn(console, channel).mockImplementation((...args) => { captured.push(args); });
+    expect(await run(['a.txt', 'one'])).toBe('failed');
+    const found = await rows();
+    expect(found).toEqual([expect.objectContaining({ errorClass: 'BRANCH_SETUP', attempts: 1 })]);
+    const text = inspect({ captured, found }, { depth: null });
+    for (const fragment of [TOKEN, 'x-access-token', 'synthetic-3057', secret]) expect(text).not.toContain(fragment);
+    expect(text).toContain('exitCode: 128');
+    expect(text).toContain("phase: 'branch'");
+  });
+
   it('(a) a rejected push records ONE WRITE row with the fixed class, and no token, URL or git text in any column', async () => {
     await setup({ token: true });
     rejectPushes();
@@ -176,6 +194,26 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     expect(await rows()).toEqual([]);
     await settleMirrorObligations(db, memoryId, ref, { result: 'failed', errorClass: 'PUSH_FAILED' }, 12n);
     expect(await rows()).toHaveLength(1);
+  });
+
+  it('#3157 equal-sequence failure settlement preserves the existing row, while a newer failure advances it', async () => {
+    await setup();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'PUSH_FAILED' }, 10n);
+    const before = await rows();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'LOCK_FAILED' }, 10n);
+    expect(await rows()).toEqual(before);
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'TREE_WRITE' }, 11n);
+    expect(await rows()).toEqual([expect.objectContaining({ attempts: 2, attemptSeq: 11n, errorClass: 'TREE_WRITE' })]);
+  });
+
+  it('#3157 equal-sequence success settlement preserves the existing row, while a newer success clears it', async () => {
+    await setup();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'failed', errorClass: 'PUSH_FAILED' }, 10n);
+    const before = await rows();
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 10n);
+    expect(await rows()).toEqual(before);
+    await settleMirrorObligations(db, memoryId, [WRITE], { result: 'cleared' }, 11n);
+    expect(await rows()).toEqual([]);
   });
 
   it('(b4) KNOWN LIMIT: a success delete keeps no high-water mark, so a lower-numbered failure arriving after it re-creates the row', async () => {
@@ -339,7 +377,7 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
 
   it('(k) the migration carries a byte-identical copy of the invariants file', () => {
     const sql = readFileSync(new URL('../../../prisma/git-mirror-obligation-invariants.sql', import.meta.url), 'utf8');
-    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_obligations'));
+    const dir = readdirSync(new URL('../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_git_mirror_retry_exhausted'));
     expect(dir).toBeDefined();
     const migration = readFileSync(new URL(`../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8');
     expect(migration.endsWith(sql)).toBe(true);

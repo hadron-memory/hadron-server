@@ -678,6 +678,7 @@ async function deleteLockedComment(
   // chunk_text) go in the same transaction that conceals it, never by
   // eventual cleanup (#1674 review, Jane P2-4). A deleted comment's too.
   await tx.nodeEmbedding.deleteMany({ where: { nodeId: row.id } });
+  await tx.node.updateMany({ where: { id: row.id }, data: { embeddingTruncatedChunks: null } });
   if (!hasReplies) {
     await tx.commentMeta.update({ where: { nodeId: row.id }, data: deleted });
     await vanishComment(tx, txCtx, row, actorKey, cause);

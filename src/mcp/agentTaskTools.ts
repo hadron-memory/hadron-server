@@ -21,8 +21,8 @@ import { mcpRequestSessionContext } from './requestSession.js';
  * refused here. Reads take an optional `session` for the same purpose: a
  * worker on an App key reads as itself through it.
  */
+import { rosterModelGroups } from '../api/graphql/schema/resolvers.agentTaskMatching.js';
 import { renderCheckStatusShort } from '../lib/workerCheckStatus.js';
-import { renderTerminal } from '../lib/workerTerminal.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
@@ -62,14 +62,14 @@ const QA = resolvers.Query as unknown as {
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
 type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  appId: string;
+  modelGroups?: string[] | null;
   teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
   pausedUntil?: Date | null;
   heldBy?: { id: string; handle: string | null; name: string | null } | null;
   checkStatus?: import('../lib/workerCheckStatus.js').WorkerCheckStatus | null;
-  /** #2771 — the host's latest terminal report, already behind the working-state gate. */
-  terminal?: import('../lib/workerTerminal.js').StoredWorkerTerminal | null;
 };
 /** The seven values of an App's stall schedule (cor:agt:050:14–:17, :10, 070:01, :02), in the order the tools render them. */
 const STALL_SCHEDULE_KEYS = [
@@ -144,10 +144,9 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.lastActiveAt ? `last active ${r.lastActiveAt.toISOString()}` : null,
     // #2138 §3.4
     r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
-    // #2771: read only; the age is the reader's to judge.
-    r.terminal ? renderTerminal(r.terminal, asOf) : null,
     // #2223: already behind the working-state and name gates by the time it reaches a row.
     r.heldBy ? `held by ${r.heldBy.handle ? `@${r.heldBy.handle} (hrn:user:${r.heldBy.handle})` : `user ${r.heldBy.id}`}${r.heldBy.name ? ` ${r.heldBy.name}` : ''}` : null,
+    r.modelGroups === null ? 'model groups unavailable' : r.modelGroups ? `model groups ${r.modelGroups.length ? r.modelGroups.join('/') : 'none'}` : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
@@ -180,6 +179,8 @@ export async function renderTask(t: TaskRow, ctx: Context, dependencies: { limit
   if (t.source) lines.push(`  source: ${t.source}`);
   if (t.tags?.length) lines.push(`  tags: ${t.tags.join(', ')}`);
   if (t.requirements) lines.push(`  requirements: ${JSON.stringify(t.requirements)}`);
+  // #2420: the task's own properties (cor:agt:050:28); a reader of the task reads them, and nothing is inherited.
+  if (t.properties) lines.push(`  properties: ${JSON.stringify(t.properties)}`);
   const times = [
     t.startBy ? `start by ${t.startBy.toISOString()}` : null,
     t.assignedAt ? `assigned ${t.assignedAt.toISOString()}` : null,
@@ -397,6 +398,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'hadron_task_update',
     'Edit descriptive task fields using assignment authority (Proposed cor:agt:050:09 Editing). ' +
       'Omitted fields stay unchanged; optional empty values clear; tags and requirements replace whole. ' +
+      'properties (#2420) is the task\'s own JSON object and replaces whole; the assignee may write it, and only it. ' +
       'Source and lifecycle fields are fixed. Ended tasks refuse edits; edits are not progress and clear no wake.',
     SHAPE_HADRON_TASK_UPDATE,
     async ({ session, taskId, input }) =>
@@ -505,7 +507,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
 
   server.tool(
     'hadron_team_events',
-    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning and task.edited are passive history (never wake, suppress a wake or count as activity); payload is {code} or changed field names only.',
+    'Read a team App\'s event stream (cor:agt:050:11), oldest first. To read the next page, pass after: the id of the last event you read (events sharing a timestamp are never skipped). Events carry ids, counts and outcome words, never message text. task.warning, task.edited and task.properties-changed are passive history (never wake, suppress a wake or count as activity); payload is {code}, changed field names only, or (task.properties-changed) the size and SHA-256 of the canonical JSON of the old and new properties, never their content.',
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
@@ -612,6 +614,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         const { workers, asOf } = await QA.teamRoster({}, { appRef }, ctx);
         if (!workers.length) return textResult('This App has no workers that are not retired.');
+        // read() supplies a fresh context per call, so recovered configuration is visible next time.
+        await Promise.all(workers.map(async (row) => {
+          try { row.modelGroups = await rosterModelGroups(row, ctx, true); }
+          catch { row.modelGroups = null; } // Explicit unavailable, never a fabricated empty membership.
+        }));
         return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map((r) => renderRosterEntry(r, asOf))].join('\n'));
       }),
   );
@@ -629,11 +636,22 @@ const availabilityFields = {
   until: z.string().optional().describe('ISO date-time when an UNAVAILABLE record lapses; in the future.'),
 };
 
+/**
+ * #2420 (cor:agt:050:28): any JSON here, so a non-object reaches the resolver's typed PROPERTIES_NOT_AN_OBJECT
+ * instead of a generic schema error. An object replaces the whole value; null clears it; omit to leave it.
+ */
+const PROPERTIES_ARG = z.unknown().optional().describe(
+  'The task\'s own properties: a JSON object the team organises into namespaces (at most 16 KiB; validated against the ' +
+    'Team Agent\'s schema:task-properties when it has one). An object replaces the whole value, null clears it, omit leaves it. ' +
+    'Writable by the owner, whoever the owner reports to, App managers and the task\'s assignee (the assignee may name no other field).',
+);
+
 const SHAPE_HADRON_TASK_UPDATE = { taskId, input: z.object({
       title: z.string().nullable().optional(), description: z.string().nullable().optional(),
       tags: z.array(z.string()).nullable().optional(),
-      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
+      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional(),minTier:z.enum(['low','mid','high']).nullable().optional(),modelGroupIn:z.array(z.string()).nullable().optional(),modelGroupNotIn:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
       startBy: z.string().nullable().optional(), closeSessionWhenDone: z.boolean().nullable().optional(),
+      properties: PROPERTIES_ARG,
     }).strict().optional(), session: SESSION_WRITE };
 
 const SHAPE_HADRON_TASK_CREATE = {
@@ -652,9 +670,13 @@ const SHAPE_HADRON_TASK_CREATE = {
     familyIn: z.array(z.string()).optional(),
     familyNotIn: z.array(z.string()).optional(),
     excludeWorkers: z.array(z.string()).optional(),
-  }).optional().describe('For the platform\'s matcher.'),
+    minTier: z.enum(['low', 'mid', 'high']).optional().describe('#2252: the lowest model tier the assignee may run at (low < mid < high). A worker below it, or of unknown tier, is never matched; the lowest sufficient tier wins. There is no maximum.'),
+    modelGroupIn: z.array(z.string()).optional().describe('#2831: names of the App\'s model groups the assignee\'s model must be in at least one of. An unknown name is refused; a worker with no model never matches.'),
+    modelGroupNotIn: z.array(z.string()).optional().describe('#2831: names of the App\'s model groups the assignee\'s model must be in none of. An unknown name is refused; a worker with no model passes.'),
+  }).strict().optional().describe('For the platform\'s matcher.'),
   startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
   tags: z.array(z.string()).optional(),
+  properties: PROPERTIES_ARG,
   closeSessionWhenDone: z.boolean().optional().describe('Default false: the assignee\'s session ends only when you ask (cor:agt:050:10).'),
   status: z.enum(['PENDING', 'BACKLOG']).optional().describe(
     '#1754 (cor:agt:050:02): PENDING (default) or BACKLOG — parked, unassigned, never queued. A BACKLOG task takes no assignee.',

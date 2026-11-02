@@ -17,7 +17,7 @@ describe('#1522 nested Agent read parity', () => {
         organizationId: owner.org.id,
         urn: 'nested-key-owner:private-agent',
         name: 'Owner Agent',
-        systemPrompt: 'synthetic-owner-private-prompt',
+        description: 'synthetic-owner-private-prompt',
         visibility: 'ORGANIZATION',
       },
     });
@@ -25,7 +25,7 @@ describe('#1522 nested Agent read parity', () => {
     const { app: otherApp } = await createDbAppWithKey(db, 'nested-key-other', owner.org.id);
     await createDbAppAgent(db, app.id, agent.id);
 
-    const query = '{ myApp { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }';
+    const query = '{ myApp { agent { id description } agents { id } appAgents { agent { id } } } }';
     const own = await server.executeOperation(
       { query },
       { contextValue: { db, appId: app.id, roles: [] } as Context },
@@ -34,7 +34,7 @@ describe('#1522 nested Agent read parity', () => {
     if (own.body.kind !== 'single') return;
     expect(own.body.singleResult.errors).toBeUndefined();
     expect(own.body.singleResult.data?.myApp).toMatchObject({
-      agent: { id: agent.id, systemPrompt: 'synthetic-owner-private-prompt' },
+      agent: { id: agent.id, description: 'synthetic-owner-private-prompt' },
       agents: [{ id: agent.id }],
       appAgents: [{ agent: { id: agent.id } }],
     });
@@ -69,7 +69,7 @@ describe('#1522 nested Agent read parity', () => {
         organizationId: vendor.org.id,
         urn: 'nested-agent-vendor:private-agent',
         name: 'Private vendor Agent',
-        systemPrompt: 'synthetic-vendor-private-prompt',
+        description: 'synthetic-vendor-private-prompt',
         visibility: 'ORGANIZATION',
       },
     });
@@ -101,7 +101,7 @@ describe('#1522 nested Agent read parity', () => {
 
     const contextValue = { db, userId: customerUser.id, roles: ['READER'] } as Context;
     const direct = await server.executeOperation(
-      { query: 'query ($ref: ID!) { agent(ref: $ref) { id systemPrompt } }', variables: { ref: agent.id } },
+      { query: 'query ($ref: ID!) { agent(ref: $ref) { id description } }', variables: { ref: agent.id } },
       { contextValue },
     );
     expect(direct.body.kind).toBe('single');
@@ -112,7 +112,7 @@ describe('#1522 nested Agent read parity', () => {
 
     const nested = await server.executeOperation(
       {
-        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id systemPrompt } agents { id systemPrompt } appAgents { agent { id systemPrompt } } } }',
+        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id description } agents { id description } appAgents { agent { id description } } } }',
         variables: { ref: app.id },
       },
       { contextValue },
@@ -128,23 +128,23 @@ describe('#1522 nested Agent read parity', () => {
       { agentId: agent.id },
       {},
       { db, appId: app.id, roles: [] } as Context,
-    )).toMatchObject({ id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' });
+    )).toMatchObject({ id: agent.id, description: 'synthetic-vendor-private-prompt' });
 
     // An App credential executes its installed Agent, including a licensed
     // vendor Agent. That authority does not extend to customer-org users.
     const appKey = await server.executeOperation(
-      { query: '{ myApp { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }' },
+      { query: '{ myApp { agent { id description } agents { id } appAgents { agent { id } } } }' },
       { contextValue: { db, appId: app.id, roles: [] } as Context },
     );
     expect(appKey.body.kind).toBe('single');
     if (appKey.body.kind !== 'single') return;
     expect(appKey.body.singleResult.errors).toBeUndefined();
     expect(appKey.body.singleResult.data?.myApp).toMatchObject({
-      agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
+      agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' },
       agents: [{ id: agent.id }],
       appAgents: [{ agent: { id: agent.id } }],
     });
-    const importQuery = 'query ($ref: ID!) { agent(ref: $ref) { importedBy { parentAgent { systemPrompt } } } }';
+    const importQuery = 'query ($ref: ID!) { agent(ref: $ref) { importedBy { parentAgent { description } } } }';
     const licensedImport = await server.executeOperation(
       { query: importQuery, variables: { ref: publicChild.id } },
       { contextValue: { db, appId: app.id, roles: [] } as Context },
@@ -152,7 +152,7 @@ describe('#1522 nested Agent read parity', () => {
     expect(licensedImport.body.kind).toBe('single');
     if (licensedImport.body.kind !== 'single') return;
     expect(licensedImport.body.singleResult.data?.agent).toMatchObject({
-      importedBy: [{ parentAgent: { systemPrompt: 'synthetic-vendor-private-prompt' } }],
+      importedBy: [{ parentAgent: { description: 'synthetic-vendor-private-prompt' } }],
     });
 
     // The install row survives grant revocation; it is no longer authority
@@ -162,7 +162,7 @@ describe('#1522 nested Agent read parity', () => {
       data: { revokedAt: new Date() },
     });
     const revokedKey = await server.executeOperation(
-      { query: '{ myApp { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }' },
+      { query: '{ myApp { agent { id description } agents { id } appAgents { agent { id } } } }' },
       { contextValue: { db, appId: app.id, roles: [] } as Context },
     );
     expect(revokedKey.body.kind).toBe('single');
@@ -188,7 +188,7 @@ describe('#1522 nested Agent read parity', () => {
 
     const authorized = await server.executeOperation(
       {
-        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id systemPrompt } agents { id systemPrompt } appAgents { agent { id systemPrompt } } } }',
+        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id description } agents { id description } appAgents { agent { id description } } } }',
         variables: { ref: app.id },
       },
       { contextValue: { db, userId: vendorCustomerUser.id, roles: ['READER'] } as Context },
@@ -196,15 +196,15 @@ describe('#1522 nested Agent read parity', () => {
     expect(authorized.body.kind).toBe('single');
     if (authorized.body.kind !== 'single') return;
     expect(authorized.body.singleResult.data?.app).toMatchObject({
-      agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
-      agents: [{ id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' }],
-      appAgents: [{ agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' } }],
+      agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' },
+      agents: [{ id: agent.id, description: 'synthetic-vendor-private-prompt' }],
+      appAgents: [{ agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' } }],
     });
 
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
     const publicResult = await server.executeOperation(
       {
-        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id systemPrompt } agents { id } appAgents { agent { id } } } }',
+        query: 'query ($ref: ID!) { app(ref: $ref) { agent { id description } agents { id } appAgents { agent { id } } } }',
         variables: { ref: app.id },
       },
       { contextValue },
@@ -212,7 +212,7 @@ describe('#1522 nested Agent read parity', () => {
     expect(publicResult.body.kind).toBe('single');
     if (publicResult.body.kind !== 'single') return;
     expect(publicResult.body.singleResult.data?.app).toMatchObject({
-      agent: { id: agent.id, systemPrompt: 'synthetic-vendor-private-prompt' },
+      agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' },
       agents: [{ id: agent.id }],
       appAgents: [{ agent: { id: agent.id } }],
     });
@@ -232,7 +232,7 @@ describe('#1522 nested Agent read parity', () => {
         organizationId: vendor.org.id,
         urn: 'nested-license-vendor:private-agent',
         name: 'Private vendor Agent',
-        systemPrompt: 'synthetic-license-private-prompt',
+        description: 'synthetic-license-private-prompt',
         visibility: 'ORGANIZATION',
       },
     });
@@ -263,9 +263,9 @@ describe('#1522 nested Agent read parity', () => {
     const result = await server.executeOperation(
       {
         query: `query ($org: ID!, $parent: ID!) {
-          organization(ref: $org) { agentOrgGrants { agentId agent { id systemPrompt } } }
-          myAgentSubscriptions { agentId agent { id systemPrompt } }
-          agent(ref: $parent) { imports { importedAgentId importedAgent { id systemPrompt } } }
+          organization(ref: $org) { agentOrgGrants { agentId agent { id description } } }
+          myAgentSubscriptions { agentId agent { id description } }
+          agent(ref: $parent) { imports { importedAgentId importedAgent { id description } } }
         }`,
         variables: { org: customer.org.id, parent: publicParent.id },
       },
@@ -296,7 +296,7 @@ describe('#1522 nested Agent read parity', () => {
         ownerUserId: owner.id,
         urn: 'nested-agent-owner:private-agent',
         name: 'Owner-only Agent',
-        systemPrompt: 'synthetic-owner-only-prompt',
+        description: 'synthetic-owner-only-prompt',
       },
     });
     const adminCtx = { db, userId: admin.id, roles: ['ADMIN'] } as Context;
@@ -306,19 +306,19 @@ describe('#1522 nested Agent read parity', () => {
     // file polices (an unrelated READER riding an App's license) stay closed
     // in the tests above.
     const direct = await server.executeOperation(
-      { query: 'query ($ref: ID!) { agent(ref: $ref) { systemPrompt } }', variables: { ref: agent.id } },
+      { query: 'query ($ref: ID!) { agent(ref: $ref) { description } }', variables: { ref: agent.id } },
       { contextValue: adminCtx },
     );
     expect(direct.body.kind).toBe('single');
     if (direct.body.kind !== 'single') return;
     expect(direct.body.singleResult.errors).toBeUndefined();
-    expect(direct.body.singleResult.data?.agent).toMatchObject({ systemPrompt: 'synthetic-owner-only-prompt' });
+    expect(direct.body.singleResult.data?.agent).toMatchObject({ description: 'synthetic-owner-only-prompt' });
     expect(await resolvers.AppRun.agent({ agentId: agent.id }, {}, adminCtx))
-      .toMatchObject({ id: agent.id, systemPrompt: 'synthetic-owner-only-prompt' });
+      .toMatchObject({ id: agent.id, description: 'synthetic-owner-only-prompt' });
     expect(await resolvers.AppRun.agent(
       { agentId: agent.id },
       {},
       { db, userId: owner.id, roles: ['READER'] } as Context,
-    )).toMatchObject({ id: agent.id, systemPrompt: 'synthetic-owner-only-prompt' });
+    )).toMatchObject({ id: agent.id, description: 'synthetic-owner-only-prompt' });
   });
 });
