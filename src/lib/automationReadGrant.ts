@@ -11,6 +11,8 @@
  * any change) waits on ruling 0081 and is not built here.
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { isAgentInstalled } from './appAgent.js';
+import { LINK_CAP_MEMORY_SELECT, independentReach, type LinkCapMemory } from './auth/agentMemoryLinkCap.js';
 
 export type ReadGrantTriggerKind = 'SCHEDULE' | 'WEBHOOK';
 export interface RootTrigger { kind: ReadGrantTriggerKind; id: string }
@@ -51,4 +53,73 @@ export async function rootTriggerOfRun(
     id = run.parentRunId;
   }
   return null;
+}
+
+/** The App side of a target check: the run's (or the grant's) App. */
+export interface ReadGrantApp { id: string; organizationId: string | null; ownerUserId: string | null }
+
+/** Prisma `select` for {@link readGrantTargetRefusal}: the class rules plus what the cap reads. */
+export const READ_GRANT_MEMORY_SELECT = {
+  ...LINK_CAP_MEMORY_SELECT,
+  id: true,
+  isEncrypted: true,
+  isInstallMemory: true,
+  deletedAt: true,
+  workerOf: { select: { id: true } },
+} as const;
+
+export type ReadGrantMemory = LinkCapMemory & {
+  id: string;
+  isEncrypted: boolean;
+  isInstallMemory: boolean;
+  deletedAt: Date | null;
+  workerOf: Array<{ id: string }>;
+};
+
+export type ReadGrantTargetRefusal =
+  | 'deleted' | 'encrypted' | 'install-memory' | 'strict-owner' | 'system-not-installed'
+  | 'worker-memory' | 'session-memory' | 'other-app-team-space' | 'cap';
+
+/**
+ * May this App's automation hold a read grant on this memory at all, whoever gives it? Returns the refusal, or null.
+ * Judged when a grant is given and again, live, at every read, so a memory that stops qualifying (its Agent
+ * uninstalled, the memory encrypted or deleted) stops being read through the grant. Every branch can only refuse.
+ *
+ *  - personal / private: never (cor:agt:010:01, the class rules hold).
+ *  - encrypted: never (Vera Q7a, team chat #66572; a userless run holds no session key, and the write grant refuses it too).
+ *  - an install memory (class system, `isInstallMemory`): never (Q7b); it is not an Agent's system memory.
+ *  - system: only the system memory of a live Agent INSTALLED in this App now (cor:acl:010:01 system row; no licence
+ *    check, Vera Q5 #66533).
+ *  - app: a Worker's working memory and a session memory never (Q7c, their own owner rules); another App's team space
+ *    never, a v1 narrowing the spec does not require (Q7c: the PR states it; Built line "except another App's team
+ *    space"). This App's own team space is allowed (redundant: the run already reads it).
+ *  - any other class: never past the cap (cor:dmo:050:09), the App's tenant's independent reach
+ *    ({@link independentReach}, Q7e): a group memory, or a knowledge memory outside the tenant's reach, is refused.
+ */
+export async function readGrantTargetRefusal(
+  db: Pick<PrismaClient, 'agent' | 'appAgent'>,
+  app: ReadGrantApp,
+  memory: ReadGrantMemory,
+): Promise<ReadGrantTargetRefusal | null> {
+  if (memory.deletedAt) return 'deleted';
+  if (memory.class === 'personal' || memory.class === 'private') return 'strict-owner';
+  if (memory.isEncrypted) return 'encrypted';
+  if (memory.isInstallMemory) return 'install-memory';
+  if (memory.class === 'system') {
+    // The memory must be a live Agent's OWN definition: an Agent whose pointer names it AND whose exact tenant owns it
+    // (the #2233 invariant, participantSystemMemoryFolds). A retained pointer at another tenant's row admits nothing.
+    const agents = await db.agent.findMany({
+      where: { systemMemoryId: memory.id, deletedAt: null, organizationId: memory.organizationId, ownerUserId: memory.ownerUserId },
+      select: { id: true },
+    });
+    for (const agent of agents) if (await isAgentInstalled(db, app.id, agent.id)) return null;
+    return 'system-not-installed';
+  }
+  if (memory.class === 'app') {
+    if (memory.workerOf.length > 0) return 'worker-memory';
+    if (memory.userMemoryOfAgentId !== null) return 'session-memory';
+    return memory.appId === app.id ? null : 'other-app-team-space';
+  }
+  const reach = independentReach({ organizationId: app.organizationId, ownerUserId: app.ownerUserId, appId: app.id }, memory);
+  return reach === null ? 'cap' : null;
 }

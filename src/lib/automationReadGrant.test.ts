@@ -48,6 +48,20 @@ describe('#2883 rootTriggerOfRun', () => {
     expect(await rootTriggerOfRun(db, child.id)).toBeNull();
   });
 
+  it('a MANUAL run is its own trigger even when it records a parent: it never inherits a schedule\'s grant', async () => {
+    const s = await schedule();
+    const root = await run('SCHEDULE', s.id);
+    const manual = await run('MANUAL', null, root.id);
+    expect(await rootTriggerOfRun(db, manual.id)).toBeNull();
+  });
+
+  it('an ancestor run of another App never lends this App\'s trigger, even when its trigger id names one', async () => {
+    const mine = await schedule();
+    const foreignRoot = await run('SCHEDULE', mine.id, null, otherApp.id);
+    const child = await run('SPAWN', foreignRoot.id, foreignRoot.id);
+    expect(await rootTriggerOfRun(db, child.id)).toBeNull();
+  });
+
   it('a deleted trigger, a missing trigger id, a missing run, or a trigger of another App resolves to null', async () => {
     const s = await schedule();
     const r = await run('SCHEDULE', s.id);
