@@ -10259,9 +10259,10 @@ export const typeDefs = `#graphql
     #2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06, creating several at once; ruling 0011 A): create 1 to 25
     tasks in the App appRef, all or none, in one transaction. Each task is judged exactly as createAgentTask judges it
     alone (the same gates, owner rules, refusals and warnings); the first refusal refuses the whole call, creates and
-    records nothing, and carries extensions.position, the 1-based position of the task that caused it (positions are
-    judged in list order: every task's checks before the write first, then each task's whole write, its blockers named
-    by an existing task or by an earlier position included, and last the links to later positions). An empty list is
+    records nothing, and carries extensions.position, the 1-based position of the task that caused it (tasks are
+    judged one at a time in list order, each wholly before the next: its checks before the write, then its whole write,
+    its blockers named by an existing task or by an earlier position included; last come the links to later
+    positions, in list order). An empty list is
     BAD_USER_INPUT and more than 25 is TASK_BATCH_TOO_LARGE, before anything is created. A task names an existing
     parent, never another task of the call; a root task naming an App other than appRef is APP_NOT_FOUND, and a parent
     in another App TASK_NOT_FOUND. blockedByPositions names other tasks of the call as blockers (a self-block or a
