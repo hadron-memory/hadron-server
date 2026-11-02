@@ -93,6 +93,33 @@ describe('the walk: what counts as a cross-parent object field', () => {
   });
 });
 
+describe('the walk: interfaces, unions and extensions are walked, not skipped', () => {
+  const SDL = `
+    type Query { n: Node }
+    interface Node { id: ID! owner: Owner }
+    type Owner { id: ID! }
+    type Doc implements Node { id: ID! owner: Owner pinned: Doc2 }
+    type Doc2 { id: ID! }
+    union Hit = Doc | Doc2
+    type Search { hits: [Hit!]! }
+    extend type Owner { doc: Doc }
+    extend interface Node { extra: Owner }
+  `;
+  const got = walkCrossParentFields(SDL, []).map((f: { coord: string }) => f.coord).sort();
+  it('finds a field on an interface, on an object extension and on an interface extension', () => {
+    expect(got).toContain('Node.owner');
+    expect(got).toContain('Owner.doc');
+    expect(got).toContain('Node.extra');
+  });
+  it('treats a union return type as an entity target', () => {
+    expect(got).toContain('Search.hits');
+  });
+  it('a type added to the non-entity table is excluded as a target even when it is a union', () => {
+    const skipped = walkCrossParentFields(SDL, ['Hit']).map((f: { coord: string }) => f.coord);
+    expect(skipped).not.toContain('Search.hits');
+  });
+});
+
 describe('the check: a complete manifest passes', () => {
   it('accepts one entry of every class', () => {
     expect(run(completeEntries()).problems).toEqual([]);

@@ -798,9 +798,8 @@
     },
     "CompiledBootPrompt.node": {
       "target": "Node",
-      "class": "parent-implies-child",
-      "audience": "Only the compile mutations produce it, after assertMayWriteBootPromptPointer; the node is the revision that caller just wrote. Not proved a manager can always read it directly.",
-      "resolver": "src/lib/bootPromptPointer.ts::assertMayWriteBootPromptPointer"
+      "class": "open",
+      "evidence": "issue: the compiling manager's direct read of the returned node is not shown; needs a differential test against the direct node read"
     },
     "ConnectionGrantsPage.items": {
       "class": "parent-implies-child",
@@ -1016,7 +1015,7 @@
     },
     "DueChannel.channel": {
       "class": "child-gated",
-      "test": "src/lib/tickers/dueWakes.test.ts::a worker whose only unread is in its holder\\'s personal memory: a wake for the holder, nothing \u2014 and no trace \u2014 for a manager",
+      "test": "src/lib/tickers/dueWakes.test.ts::a worker whose only unread is in its holder\\'s personal memory: a wake for the holder, nothing — and no trace — for a manager",
       "target": "Channel"
     },
     "DueWake.worker": {
