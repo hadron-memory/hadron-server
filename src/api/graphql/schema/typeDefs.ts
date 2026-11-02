@@ -5714,6 +5714,36 @@ export const typeDefs = `#graphql
   }
 
   """
+  A page-monitor watch (#1562): the hadrontool-webfetch job behind a run's
+  web_poll_start, as the org's admins see it outside a run. \`url\` is the
+  query- and fragment-free ledger URL, never the one the sidecar fetches, and no
+  credential material is returned.
+  """
+  type WebPoll {
+    jobId: ID!
+    "The sidecar's job state, such as active or cancelled."
+    status: String!
+    url: String!
+    appId: ID!
+    "The run that started the watch."
+    sourceRunId: ID!
+    createdAt: DateTime!
+    nextRunAt: DateTime
+    expiresAt: DateTime!
+    lastCheckedAt: DateTime
+    lastTriggeredAt: DateTime
+    triggerCount: Int!
+    consecutiveFailures: Int!
+  }
+
+  "Result of cancelWebPoll. alreadyCancelled is true when the watch had been stopped before this call."
+  type CancelWebPollPayload {
+    jobId: ID!
+    cancelled: Boolean!
+    alreadyCancelled: Boolean!
+  }
+
+  """
   One tool an external MCP server advertises, as admitted by the
   registry row (allowlist + name grammar + length cap applied) — what
   this query returns IS what a run can declare in data.tools.
@@ -8874,6 +8904,14 @@ export const typeDefs = `#graphql
     mcpServers(orgId: ID, limit: Int, offset: Int): McpServersPage!
 
     """
+    The organization's active page-monitor watches (#1562): what web_poll_list
+    returns inside a run, for org ADMIN/OWNER outside one. Refused with
+    POLICY_DENIED when the org, user or App policy omits tool.web_poll. Jobs
+    with no routing binding in this org are not listed.
+    """
+    webPolls(orgRef: ID!): [WebPoll!]!
+
+    """
     Live tools/list passthrough for one registered server (org member) —
     what authors browse to pick data.tools entries. Applies the same
     admissibility filter as run-tool materialization, so what it returns
@@ -12017,6 +12055,13 @@ export const typeDefs = `#graphql
 
     "Hard-delete a registered MCP server (org ADMIN/OWNER); runs referencing its tools fail loud afterwards."
     deleteMcpServer(ref: ID!): Boolean!
+
+    """
+    Stop one of the organization's page-monitor watches (#1562; org ADMIN/OWNER,
+    tool.web_poll policy). A job id from another organization, or none, answers
+    NOT_FOUND. Cancelling a stopped watch succeeds with alreadyCancelled.
+    """
+    cancelWebPoll(orgRef: ID!, jobId: ID!): CancelWebPollPayload!
 
     """
     Create a named, owner-scoped secret (#677). Gate per owner scope:
