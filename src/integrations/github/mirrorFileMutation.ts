@@ -1,23 +1,25 @@
 /** #3242: a failed row must not leave partial files for a sibling's git add -A. */
 import { cpSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
-import { tmpdir } from 'os';
+import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
+
+export const mirrorMutationMarker = (localPath: string) => join(localPath, '.git', 'hadron-incomplete-row');
 
 export function hasIncompleteMirrorMutation(localPath: string): boolean {
   try { lstatSync(mirrorMutationMarker(localPath)); return true; }
   catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw err;
+    // Unreadable metadata is never permission to publish; ordinary and sweep callers refuse.
+    return true;
   }
 }
-
-export const mirrorMutationMarker = (localPath: string) => join(localPath, '.git', 'hadron-incomplete-row');
 
 /**
  * Checkpoint only this operation's file and legacy paths, after preceding healthy
  * operations. Never reset HEAD or the whole tree: that would discard those siblings.
  * A crash or failed rollback leaves a marker that blocks ALL mirror commits on this
- * checkout until it is repaired/recloned. The backup stays available for repair.
+ * checkout until operator repair. Backup and marker share checkout storage lifetime;
+ * see docs/runbooks/git-mirror-checkout-recovery.md (no automatic reset/re-clone).
  */
 export function mutateMirrorFiles(localPath: string, paths: readonly string[], mutate: () => void): void {
   const marker = mirrorMutationMarker(localPath);
@@ -29,7 +31,7 @@ export function mutateMirrorFiles(localPath: string, paths: readonly string[], m
     }
     return { path, index: String(i), exists };
   });
-  const backup = mkdtempSync(join(tmpdir(), 'hadron-mirror-row-'));
+  const backup = mkdtempSync(join(localPath, '.git', 'hadron-mirror-row-'));
   try {
     for (const entry of entries) if (entry.exists) cpSync(entry.path, join(backup, entry.index), { recursive: true, verbatimSymlinks: true });
     writeFileSync(join(backup, 'manifest.json'), JSON.stringify(entries));
@@ -39,11 +41,13 @@ export function mutateMirrorFiles(localPath: string, paths: readonly string[], m
     try {
       mutate();
     } catch (err) {
+      // Capture bounded original diagnostics before a rollback fault can replace the error.
+      console.error('[git-mirror] Row mutation failed; rolling back', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
       for (const entry of entries) {
         rmSync(entry.path, { recursive: true, force: true });
         if (entry.exists) {
           mkdirSync(dirname(entry.path), { recursive: true });
-          // Backup and checkout can be on different filesystems.
+          // Restore only this row, preserving preceding healthy edits.
           cpSync(join(backup, entry.index), entry.path, { recursive: true, verbatimSymlinks: true });
         }
       }
