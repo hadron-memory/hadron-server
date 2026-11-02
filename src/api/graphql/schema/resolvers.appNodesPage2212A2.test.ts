@@ -14,7 +14,7 @@
  *   (5) `includeDeleted` without recovery authority adds nothing to `total`; with it, the page agrees
  *   (6) `memoryIds` / `memoryClasses` in the filter are still BAD_USER_INPUT
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -126,6 +126,27 @@ describe('appNodesPage — paging (pin 1)', () => {
   });
 });
 
+describe('appNodesPage — query shape (pin 1b, 2b)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('the page query orders by loc then id with take and skip', async () => {
+    await seed25();
+    const spy = vi.spyOn(db.node, 'findMany');
+    await Q.appNodesPage({}, { appRef: appId, limit: 7, offset: 7 }, asUser(member));
+    const page = spy.mock.calls.map((c) => c[0] as any).find((a) => a?.take === 7)!;
+    expect(page.orderBy).toEqual([{ loc: 'asc' }, { id: 'asc' }]);
+    expect(page.skip).toBe(7);
+  });
+
+  it('limit 0 reads no rows at all', async () => {
+    await seed25();
+    const spy = vi.spyOn(db.node, 'findMany');
+    const zero = await Q.appNodesPage({}, { appRef: appId, limit: 0 }, asUser(member));
+    expect(zero.total).toBe(25);
+    expect(spy.mock.calls.filter((c) => (c[0] as any)?.include)).toHaveLength(0);
+  });
+});
+
 describe('appNodesPage — total and count-only (pin 2)', () => {
   it('total equals the old field count for the same filter; limit 0 is count-only and records no reads', async () => {
     await seed25();
@@ -161,9 +182,10 @@ describe('appNodesPage — admission parity (pin 3)', () => {
     ['unknown app ref', () => asUser(member), () => generateId()],
     ['malformed app ref', () => asUser(member), () => 'not a ref ::: !!'],
   ])('%s gets the SAME refusal on both fields', async (_n, who, ref) => {
-    const oldErr = await Q.appNodes({}, { appRef: ref() }, who()).then(() => null, (e: any) => e);
+    const appRef = ref(); // one ref for both fields: the refusal text names it
+    const oldErr = await Q.appNodes({}, { appRef }, who()).then(() => null, (e: any) => e);
     expect(oldErr).not.toBeNull();
-    const pageErr = await Q.appNodesPage({}, { appRef: ref() }, who()).then(() => null, (e: any) => e);
+    const pageErr = await Q.appNodesPage({}, { appRef }, who()).then(() => null, (e: any) => e);
     expect(pageErr).not.toBeNull();
     expect(pageErr.message).toBe(oldErr.message);
     expect(pageErr.extensions?.code).toBe(oldErr.extensions?.code);
@@ -202,13 +224,16 @@ describe('appNodesPage — inheritance (pin 4)', () => {
     expect(ids(all.items)).toEqual(expect.arrayContaining([keep.id, lateBase.id, shipOverride.id]));
     expect(all.total).toBe(all.items.length);
 
-    // Drop `lateBase` AFTER the snapshot (a concurrent override): retainEffective removes it from the page.
-    hooks.afterScope = async () => { await nodeIn(childMem, 'tasks:c-late'); };
-    const first = await Q.appNodesPage({}, { appRef: appId, limit: 2, offset: 0, filter: { locPrefix: 'tasks:' } }, c);
-    expect(ids(first.items)).not.toContain(lateBase.id);
-    // raw rows (2) were read: more remain by total, so paging must continue even though items < raw rows.
-    expect(first.hasMore).toBe(2 < first.total);
-    expect(first.hasMore).toBe(true);
+    // Turn `lateBase` into a boot prompt AFTER the snapshot (a concurrent writer): the post-read
+    // retainEffective re-check drops it from the page while `total` (same where) still counts it.
+    hooks.afterScope = async () => { await db.node.update({ where: { id: lateBase.id }, data: { role: 'boot-prompt' } }); };
+    const last = await Q.appNodesPage({}, { appRef: appId, limit: 3, offset: 0, filter: { locPrefix: 'tasks:' } }, c);
+    expect(ids(last.items)).toEqual(expect.not.arrayContaining([lateBase.id]));
+    expect(last.items).toHaveLength(2);
+    expect(last.total).toBe(3);
+    // Raw rows read (3) reach the total (3): this is the LAST page. hasMore from the filtered items (2 < 3)
+    // would say more remain and send the caller to an empty next page.
+    expect(last.hasMore).toBe(false);
   });
 });
 

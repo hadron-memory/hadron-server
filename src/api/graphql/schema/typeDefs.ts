@@ -9160,6 +9160,19 @@ export const typeDefs = `#graphql
     appNodes(appRef: ID!, filter: NodeFilter, limit: Int): [Node!]!
 
     """
+    #2212 A2 (hrn:node:hadronmemory.com:specs:cor:api:120:04): appNodes as a page. Same admission,
+    filter rules and refusals as appNodes (an unknown or malformed App and a caller who may not read it
+    are refused exactly as there; a soft-deleted organization and an empty scope are the empty page),
+    but total counts every node appNodes would return for the filter and hasMore says whether rows
+    remain past this page. Ordered by loc, then id, so the order is stable across the App's memories.
+    Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200,
+    a negative offset is 0. The filter's memoryIds and memoryClasses are refused, as on appNodes.
+
+    Accepts the App's ID or URN.
+    """
+    appNodesPage(appRef: ID!, filter: NodeFilter, limit: Int, offset: Int): NodePage!
+
+    """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes
     reads for this caller, one row per memory with every reason it is in scope,
     ordered by memoryUrn and paged (default 20, cap 200; over the cap returns a
@@ -14285,6 +14298,13 @@ export const typeDefs = `#graphql
   "#2213 — one page of tickers; hasMore is whether rows remain past it."
   type TickerPage {
     items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 A2 — one page of the nodes in an App's scope, counted over the same filter and scope."
+  type NodePage {
+    items: [Node!]!
     total: Int!
     hasMore: Boolean!
   }
