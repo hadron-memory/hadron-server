@@ -66,7 +66,7 @@ import {
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
-import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
+import { preserveHeartbeatIfLapsed, touchSessionIfLive } from '../../../lib/sessionActivity.js';
 
 /** Canonical loc of the worklog collection root in a team App's shared memory. */
 export const WORKLOG_LOC = 'worklog';
@@ -461,7 +461,7 @@ async function resolveWorkSession(
   ctx: Context,
   app: AppRow,
   sessionRef: string,
-): Promise<{ sessionId: string; workerName: string; workerId: string | null; llmModel: string | null }> {
+): Promise<{ sessionId: string; workerName: string; workerId: string | null; llmModel: string | null; sessionUserId: string | null }> {
   const session = await ctx.db.session.findUnique({
     where: { id: sessionRef },
     select: { id: true, appId: true, userId: true, workerId: true, deletedAt: true, llmModel: true, launchOperationId: true, memoryId: true },
@@ -522,16 +522,16 @@ async function resolveWorkSession(
         { extensions: { code: 'WORKER_RETIRED', workerId: worker.id } },
       );
     }
-    return { sessionId: session.id, workerName: worker.name, workerId: worker.id, llmModel: session.llmModel };
+    return { sessionId: session.id, workerName: worker.name, workerId: worker.id, llmModel: session.llmModel, sessionUserId: session.userId };
   }
   if (session.userId) {
     const user = await ctx.db.user.findUnique({
       where: { id: session.userId },
       select: { handle: true },
     });
-    if (user?.handle) return { sessionId: session.id, workerName: user.handle, workerId: null, llmModel: session.llmModel };
+    if (user?.handle) return { sessionId: session.id, workerName: user.handle, workerId: null, llmModel: session.llmModel, sessionUserId: session.userId };
   }
-  return { sessionId: session.id, workerName: app.name, workerId: null, llmModel: session.llmModel };
+  return { sessionId: session.id, workerName: app.name, workerId: null, llmModel: session.llmModel, sessionUserId: session.userId };
 }
 
 /** GraphQL shape of one worklog record. (Exported — TS4023: a resolver map
@@ -753,7 +753,7 @@ export const teamWorkMutations = {
       });
     }
     await requireTeamWorkAccess(ctx, app, 'record');
-    const { sessionId, workerName, workerId, llmModel } = await resolveWorkSession(ctx, app, sessionRef);
+    const { sessionId, workerName, workerId, llmModel, sessionUserId } = await resolveWorkSession(ctx, app, sessionRef);
     // Computed ONCE and used by both the stored row and the returned item —
     // two independent `??` expressions let a mutant swap precedence in the
     // stored row alone and survive every receipt-only assertion (Ella, #1401).
@@ -848,6 +848,18 @@ export const teamWorkMutations = {
     // #1061 — a worklog record IS a node, so appending one is a write. Like
     // team-chat posts, this was a high-volume creator that counted for nothing.
     recordNodeWrite(ctx.db, { id: recordId, loc, memoryId: root.memoryId }, ctx);
+
+    // #3078 (cor:agt:020:11 r1, cor:api:240): an accepted record of ANY kind is the worker driving its session, as MCP
+    // hadron_record_work's heartbeatSession already counts it. Only AFTER the record committed, so every refusal above
+    // (impersonation and a removed caller in requireTeamWorkAccess, the session write gate in resolveWorkSession) has
+    // already stopped the act. Only when the caller IS the session's attributed user: the write gate's platform-admin
+    // branch admits recording against another user's worker session, and that is not driving it (MCP scopes its touch to
+    // `userId: auth.userId` for the same reason). Only a worker-bound session, and only while live: touchSessionIfLive
+    // never revives a lapsed or ended one (#1543, cor:agt:020:05 late attribution) and swallows its own errors, so the
+    // heartbeat can never fail a committed record.
+    if (workerId != null && sessionUserId != null && sessionUserId === ctx.userId) {
+      await touchSessionIfLive(ctx.db as never, sessionId, workerId);
+    }
 
     return {
       nodeId: recordId,
