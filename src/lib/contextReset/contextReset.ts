@@ -61,6 +61,9 @@ export const CONTEXT_RESET_REQUESTED_EVENT = 'task.context-reset-requested';
 // Task-scoped, like the request: chk_agent_team_events_shape allows no hyphen in an event type's first segment.
 export const CONTEXT_RESET_FAILED_EVENT = 'task.context-reset-failed';
 export const CONTEXT_RESET_DONE_EVENT = 'task.context-reset-done';
+export const CONTEXT_RESET_LATE_STOP_EVENT = 'task.context-reset-late-stop';
+/** #3255: transport bound for the host's reported lateness, in integer milliseconds (at most one day). */
+export const CONTEXT_RESET_LATE_STOP_MAX_MS = 86_400_000;
 
 /** A host step refused for a reason that changes nothing (a wrong id, a stale epoch, a step out of order). */
 export class ContextResetError extends Error {
@@ -71,6 +74,7 @@ export class ContextResetError extends Error {
       | 'CONTEXT_RESET_WRONG_PHASE'
       | 'RECOVERY_REF_INVALID'
       | 'HOST_OPERATION_NOT_COLLECTED'
+      | 'BAD_USER_INPUT'
       | 'BAD_CONTEXT_RESET_INPUT',
     message: string,
   ) {
@@ -571,20 +575,67 @@ export async function authorizeContextResetStop(
   return step(granted);
 }
 
+/** #3255: validate the host's bounded millisecond annotation; old clients and on-time reports mean zero. */
+function lateStopMilliseconds(value: unknown): number {
+  if (value == null) return 0;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > CONTEXT_RESET_LATE_STOP_MAX_MS) {
+    throw new ContextResetError('BAD_USER_INPUT', `lateStopMs is an integer from 0 to ${CONTEXT_RESET_LATE_STOP_MAX_MS} milliseconds.`);
+  }
+  return value;
+}
+
+/**
+ * #3255 (cor:agt:050:27 part 10): host-reported telemetry only. The reset row is already locked by lockForHost,
+ * serializing re-reports, and the event is inserted in the report's transaction. A later re-report never replaces
+ * the first lateness, and zero adds nothing. No reset, availability, task or alarm state moves.
+ */
+async function recordLateStop(tx: Prisma.TransactionClient, r: ContextResetRow, value: number, now: Date): Promise<void> {
+  if (value === 0) return;
+  const previous = await tx.agentTeamEvent.findFirst({
+    where: { appId: r.appId, taskId: r.taskId, type: CONTEXT_RESET_LATE_STOP_EVENT, payload: { path: ['resetId'], equals: r.id } },
+    select: { id: true },
+  });
+  if (previous) return;
+  await appendResetEvent(tx, {
+    appId: r.appId, taskId: r.taskId, workerId: r.workerId, type: CONTEXT_RESET_LATE_STOP_EVENT, now,
+    payload: { resetId: r.id, workerId: r.workerId, lateStopMs: value },
+  });
+}
+
 /**
  * The host reports the old agent stopped. From here the mark lasts until the relaunched agent's first activity
  * (§4, R6), a `relaunchFailed`, or the operation's report deadline. A mark that already lapsed with the lease is not
- * raised again: the worker may have been given work since, and the recovery prompt reads its task list.
+ * raised again: the worker may have been given work since, and the recovery prompt reads its task list. #3255 adds
+ * an optional lateness annotation without changing this transition or mark behavior.
  */
 export async function reportContextResetAgentStopped(
-  tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown, now: Date,
+  tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown, now: Date, lateStopMs?: unknown,
 ): Promise<ContextResetStep> {
   const r = await lockForHost(tx, host, resetId);
+  const lateness = lateStopMilliseconds(lateStopMs);
+  // #3255 S8 / ruling 0087: a stalled host may signal after cancellation advanced the epoch. It may still annotate
+  // the stop grant it held, but cannot re-open this reset, move the current mark, or act at the cancelled epoch.
+  // A claim advances the epoch once; a failed/refused end advances it once more. A successful end keeps it.
+  if (r.endedAt && lateness > 0) {
+    if (!r.stopGrantedAt || !r.stopLeaseMs) {
+      throw new ContextResetError('CONTEXT_RESET_WRONG_PHASE', 'A late stop is reported only for a granted stop.');
+    }
+    const grantedEpoch = r.phase === 'failed' || r.phase === 'refused' ? r.epoch - 1 : r.epoch;
+    if (!Number.isInteger(epoch) || epoch !== grantedEpoch) {
+      throw new ContextResetError('STALE_EPOCH', 'A late stop names the epoch of the stop grant the host held.');
+    }
+    await recordLateStop(tx, r, lateness, now);
+    return step(r, null, true);
+  }
   requireEpoch(r, epoch);
-  if (r.agentStoppedAt && !r.endedAt) return step(r, null, true);
+  if (r.agentStoppedAt && !r.endedAt) {
+    await recordLateStop(tx, r, lateness, now);
+    return step(r, null, true);
+  }
   if (r.phase !== 'stop-granted') {
     throw new ContextResetError('CONTEXT_RESET_WRONG_PHASE', `This reset is ${r.phase}; the agent is reported stopped after a granted stop.`);
   }
+  await recordLateStop(tx, r, lateness, now);
   const stopped = await tx.contextReset.update({ where: { id: r.id }, data: { phase: 'agent-stopped', agentStoppedAt: now } });
   const mark = await lockMark(tx, r.workerId);
   if (ownsMark(mark, r) && recordInEffect(mark, now)) {

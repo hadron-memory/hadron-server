@@ -1,7 +1,7 @@
 /** #3255 (cor:agt:050:27 part 10): a late stop is recorded once, never a new reset transition or alarm. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { code, ctx, M, PROC, setUpResetFixture, type ResetFixture } from '../../test/contextResetFixture.js';
+import { code, ctx, M, NEW_PROC, PROC, setUpResetFixture, type ResetFixture } from '../../test/contextResetFixture.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { reportContextResetAgentStopped } from './contextReset.js';
@@ -45,7 +45,7 @@ describe('#3255 late-stop report', () => {
     expect(rows[0]).toMatchObject({ taskId: s.taskId, subjectWorkerId: f.kit.id, severity: null, payload: { resetId: s.resetId, lateStopMs: 30_000 } });
     expect(await db.agentTask.findUniqueOrThrow({ where: { id: s.taskId } })).toEqual(taskBefore);
     const Q = resolvers.Query as any;
-    const visible = await f.asWorker(f.ada, () => Q.agentTeamEvents({}, { appRef: f.app.id, types: [EVENT] }, ctx(f.holder.id)));
+    const visible = await f.asWorker<Array<{ id: string }>>(f.ada, () => Q.agentTeamEvents({}, { appRef: f.app.id, types: [EVENT] }, ctx(f.holder.id)));
     expect(visible.map((e: { id: string }) => e.id)).toEqual([rows[0]!.id]);
     expect(await db.agentTeamEvent.count({ where: { appId: f.app.id, severity: 'alarm' } })).toBe(0);
   });
@@ -190,5 +190,31 @@ describe('#3255 late-stop report', () => {
     await f.register(other);
     expect(await code(f.step('reportContextResetAgentStopped', { resetId: s.resetId, epoch: 1, lateStopMs: 5 }, other))).toBe('CONTEXT_RESET_NOT_FOUND');
     expect(await events()).toEqual([]);
+  });
+
+  it('a successful end retains its grant epoch and can receive only late telemetry afterward', async () => {
+    const s = await granted();
+    await stopped(s);
+    await f.step('reportContextResetRelaunched', { resetId: s.resetId, epoch: 1, process: NEW_PROC });
+    await M.reportHostOperation({}, { input: { appRef: f.app.id, id: s.operationId, outcome: 'SUCCEEDED' } }, f.keyCtx());
+    const before = await reset(s.resetId);
+    const markBefore = await mark();
+    const operationBefore = await db.hostOperation.findUniqueOrThrow({ where: { id: s.operationId } });
+    expect(before).toMatchObject({ phase: 'done', epoch: 1 });
+    await stopped(s, { lateStopMs: 7 });
+    expect(await events()).toHaveLength(1);
+    expect(await reset(s.resetId)).toEqual(before);
+    expect(await mark()).toEqual(markBefore);
+    expect(await db.hostOperation.findUniqueOrThrow({ where: { id: s.operationId } })).toEqual(operationBefore);
+  });
+
+  it('a refused end also retains the epoch of the earlier granted stop for telemetry', async () => {
+    const s = await granted();
+    await M.reportHostOperation({}, { input: { appRef: f.app.id, id: s.operationId, outcome: 'FAILED', failureReason: 'DIRTY_TREE: host refused' } }, f.keyCtx());
+    const before = await reset(s.resetId);
+    expect(before).toMatchObject({ phase: 'refused', epoch: 2 });
+    await stopped(s, { lateStopMs: 8 });
+    expect(await events()).toHaveLength(1);
+    expect(await reset(s.resetId)).toEqual(before);
   });
 });
