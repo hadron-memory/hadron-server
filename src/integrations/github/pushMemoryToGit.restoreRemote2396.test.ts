@@ -20,7 +20,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { db } from '../db/client.js';
@@ -47,6 +47,8 @@ const env = vi.hoisted(() => ({
   /** A git call carried the tokenized URL (clone or `remote set-url`): the token was installed. */
   tokenInstalled: false,
   readOrigin: (() => '') as () => string,
+  /** #3228: runs once right after the real `git push` succeeds, before restoreRemote starts (a concurrent writer's lock). */
+  plantLock: null as null | (() => void),
 }));
 
 vi.mock('./githubApp.js', async (importOriginal) => ({
@@ -78,6 +80,7 @@ vi.mock('./execGit.js', () => ({
         '-c', `url.${env.bare}.insteadOf=https://x-access-token:ghs_SYNTHETIC_INSTALLATION_TOKEN_2396@github.com/acme/repo.git`,
         ...args,
       ], { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (args[0] === 'push') { const plant = env.plantLock; env.plantLock = null; plant?.(); }
       return { stdout, stderr: '' };
     } catch {
       throw new Error(GENERIC);
@@ -183,6 +186,7 @@ beforeEach(async () => {
   env.restoreAttempts = 0;
   env.restoreTimeouts = [];
   env.tokenInstalled = false;
+  env.plantLock = null;
   logged = [];
   vi.spyOn(console, 'error').mockImplementation((...a) => { logged.push(a.map(String).join(' ')); });
   vi.spyOn(console, 'warn').mockImplementation((...a) => { logged.push(a.map(String).join(' ')); });
@@ -357,5 +361,70 @@ describe('pushMemoryToGit — controls keep their contracts (#2396)', () => {
     expect(env.restoreAttempts).toBe(0);
     expect(originUrl()).toBe(SOURCE);
     expect(existsSync(join(env.local, 'README.md'))).toBe(false);
+  });
+});
+
+/** #3228: the raw console.error calls, metadata objects included (`logged` flattens them to text). */
+const errorCalls = () => vi.mocked(console.error).mock.calls;
+/** #3228: the restore-failure log is fixed copy plus allowlisted metadata: no checkout path, no token. */
+function assertPathFreeRestoreLog() {
+  const restoreLogs = errorCalls().filter(([message]) => String(message).includes('Failed to restore the origin URL'));
+  expect(restoreLogs).toHaveLength(1);
+  const [message, metadata] = restoreLogs[0];
+  expect(message).toBe('[pushMemoryToGit] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore. A config.lock can block future restores; safe recovery requires proven ownership.');
+  expect(metadata).toMatchObject({ phase: 'restore', class: 'REMOTE_RESTORE' });
+  const raw = JSON.stringify(errorCalls());
+  expect(raw).not.toContain(env.local);
+  expect(raw).not.toContain(env.root);
+  expect(raw).not.toContain(TOKEN);
+}
+
+describe('pushMemoryToGit — restore-failure log is path-free (#3228)', () => {
+  it('a primary fault plus a failed restore logs fixed copy and REMOTE_RESTORE, never the checkout path', async () => {
+    await setup('existing', { site: 'render' });
+    await arm('render');
+    env.failRestore = true;
+    const result = await pushMemoryToGit(memoryId);
+    expect(result.error).toContain(FAULT_MESSAGE);
+    expect(env.restoreAttempts).toBe(1);
+    assertPathFreeRestoreLog();
+  });
+
+  it('a successful publish plus a failed restore logs the same, never the checkout path', async () => {
+    await setup('existing');
+    await makeNode('topic:leaf');
+    env.failRestore = true;
+    expect(await pushMemoryToGit(memoryId)).toEqual({ nodeCount: 1 });
+    assertPathFreeRestoreLog();
+  });
+});
+
+describe('pushMemoryToGit — a config.lock blocking the restore is preserved (#3228)', () => {
+  it.each([0, 20_000])('a config.lock aged %dms survives byte for byte; the publish result stands', async (ageMs) => {
+    await setup('existing');
+    await makeNode('topic:leaf');
+    const lockPath = join(env.local, '.git', 'config.lock');
+    let originWhenPlanted: string | null = null;
+    env.plantLock = () => {
+      originWhenPlanted = originUrl();
+      writeFileSync(lockPath, 'synthetic-owner-3228');
+      const stamp = new Date(Date.now() - ageMs);
+      utimesSync(lockPath, stamp, stamp);
+    };
+
+    const result = await pushMemoryToGit(memoryId);
+
+    // The lock was planted after the publish and before the restore, with the token installed.
+    expect(originWhenPlanted).toBe(TOKEN_URL);
+    // The primary outcome is the publish, not the restore failure.
+    expect(result).toEqual({ nodeCount: 1 });
+    expect(git(env.bare, 'log', '--oneline', 'main')).toContain('Push 1 nodes');
+    // One restore, refused by the real lock: the lock is untouched and origin still carries the token.
+    expect(env.restoreAttempts).toBe(1);
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe('synthetic-owner-3228');
+    expect(originUrl()).toBe(TOKEN_URL);
+    expect(surface(result)).not.toContain(TOKEN);
+    assertPathFreeRestoreLog();
   });
 });
