@@ -2020,6 +2020,7 @@ export const agentTaskMutations = {
     const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
     const next = dispositions.filter(d => d.findingId !== args.findingId);
     next.push({ findingId: args.findingId, disposition: args.disposition as string, reference });
+    next.sort((a, b) => findings.findIndex(f => f.id === a.findingId) - findings.findIndex(f => f.id === b.findingId));
     // mutateTask holds the task row: two dispositions cannot overwrite each other. The trigger derives the open IDs.
     await tx.agentTask.update({ where: { id: task.id }, data: { findingDispositions: next, ...updatedStamp(ctx) } });
     await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
@@ -2647,9 +2648,8 @@ export const agentTaskFieldResolvers = {
     /** #2663: current dispositions, in immutable finding order, separate from the finished result. */
     findingDispositions: (t: TaskRow, args: { limit?: number | null; offset?: number | null }) => {
       const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
-      const ids = ((t.resultFindings ?? []) as TaskFinding[]).map(f => f.id);
-      const items = [...rows].sort((a, b) => ids.indexOf(a.findingId) - ids.indexOf(b.findingId))
-        .map(d => ({ ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null }));
+      // The locked writer stores finding order; broad reads need not load the immutable findings payload.
+      const items = rows.map(d => ({ ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null }));
       const { take, skip } = pageArgs(args);
       return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
     },
