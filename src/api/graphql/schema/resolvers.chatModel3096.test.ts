@@ -142,6 +142,13 @@ describe('#3096 client-reported chat model', () => {
     },
   );
 
+  it.each([123, true, {}, []])('refuses non-string reports even for a direct resolver caller (%#)', async llmModel => {
+    await compiled('Model={{session.llmModel}}.');
+    const before = await db.node.count();
+    expect(await code(M.startChat({}, { agentId: agent.id, llmModel }, ctx()))).toBe('BAD_USER_INPUT');
+    expect(await db.node.count()).toBe(before);
+  });
+
   it('a fabricated model grants no authority, and an accepted report touches no quota or credit ledger', async () => {
     await compiled('Model={{session.llmModel}}.');
     const beforeQuota = await db.quotaCounter.findMany();

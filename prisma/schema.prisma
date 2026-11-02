@@ -6895,7 +6895,7 @@ model ServedPrompt {
   sessionId           String?                  @map("session_id")
   chatId              String?                  @map("chat_id")
   runId               String?                  @map("run_id")
-  /// 1 for a bind or a run; a chat records again when its served revision changes (R37), counting up.
+  /// 1 for a bind or a run; a chat records again when its served revision or filled variables change (R37, #3096), counting up.
   ordinal             Int                      @default(1)
   /// Null only for a chat held in a memory no App owns (chk_served_prompts_app, prisma/served-prompt-app-invariants.sql).
   appId               String?                  @map("app_id")
