@@ -9562,6 +9562,19 @@ export const typeDefs = `#graphql
     myChats(agentRef: ID!, limit: Int, offset: Int): [Chat!]!
 
     """
+    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): myChats as a page. Same gate and refusals as
+    myChats (unauthenticated and impersonated callers are refused; an unknown Agent and a caller with no
+    readable memory get the empty page), and the same chats: the caller's own for the Agent plus the shared
+    chats of Apps the caller is a member of. total counts exactly those chats and hasMore says whether rows
+    remain past this page. Newest first by last update, then by id, so the order is stable across pages.
+    Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200, a
+    negative offset is 0.
+
+    Accepts the Agent's ID or URN.
+    """
+    myChatsPage(agentRef: ID!, limit: Int, offset: Int): ChatPage!
+
+    """
     Message history for a saved chat. Returns plain role/content pairs
     suitable for feeding back into an LLM.
 
@@ -14358,6 +14371,13 @@ export const typeDefs = `#graphql
   "#2213 — one page of tickers; hasMore is whether rows remain past it."
   type TickerPage {
     items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 A3 — one page of the caller's chats with an Agent, counted over the same chats."
+  type ChatPage {
+    items: [Chat!]!
     total: Int!
     hasMore: Boolean!
   }
