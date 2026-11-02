@@ -1711,7 +1711,7 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
  */
 async function applyTaskCreate(
   tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate,
-  withinCall: (selfId: string) => string[] = () => [], namesCallBlockers = false,
+  withinCall: (selfId: string) => string[] = () => [], namesCallBlockers = false, deferMatchBlockerCheck = false,
 ): Promise<{ id: string; queued: boolean; row: TaskRow }> {
   const { input, actor, parentRef, parentTaskId } = p;
   if (parentRef) {
@@ -1739,7 +1739,7 @@ async function applyTaskCreate(
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
   await applyTaskCreateBlockers(tx, txCtx, app, p, row, withinCall(row.id), namesCallBlockers);
   // A match-now create refuses actual open blockers inside the same transaction.
-  if (input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } })).blocked) {
+  if (!deferMatchBlockerCheck && input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } })).blocked) {
     throw badInput('A blocked task cannot be matched now.');
   }
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
@@ -1967,7 +1967,7 @@ export const agentTaskMutations = {
         try {
           out.push(await applyTaskCreate(tx, txCtx, app, p,
             (selfId) => withinCall[i]!.filter(n => n <= i + 1).map(n => (n === i + 1 ? selfId : out[n - 1]!.id)),
-            withinCall[i]!.length > 0));
+            withinCall[i]!.length > 0, true));
         } catch (e) {
           throw atPosition(e, i + 1);
         }
@@ -1984,9 +1984,21 @@ export const agentTaskMutations = {
           }
         }
       }
+      // Match-now judges the final derived blocker state, including forward-position links.
+      // A refusal rolls back the whole batch before any post-commit attempt or wake can run.
+      for (const [i, p] of prepared.entries()) {
+        if (p.input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: out[i]!.id } })).blocked) {
+          throw atPosition(badInput('A blocked task cannot be matched now.'), i + 1);
+        }
+      }
       return out;
     }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), taskGraph: 'exclusive' });
-    if (made.some(m => m.queued)) await matchAfterChange(ctx.db, inApp.app.id);
+    // Each requested match gets its single attempt in list order after the complete commit.
+    // Ordinary failures mark only that task; distinct/all-or-none matching is separate (#3243).
+    for (const [i, m] of made.entries()) {
+      if (prepared[i]!.input.match) await matchTaskNow(ctx.db, m.id, new Date());
+    }
+    if (made.some((m, i) => m.queued && !prepared[i]!.input.match)) await matchAfterChange(ctx.db, inApp.app.id);
     const key = info?.path?.key;
     const created = [];
     for (const [i, m] of made.entries()) {
