@@ -82,3 +82,34 @@ describe('thrown mail-SDK errors are rethrown name-only (#3047)', () => {
     await expect(sendAccountDeletionNotice(RECIPIENT)).rejects.toThrow('mail provider did not acknowledge: validation_error');
   });
 });
+
+/**
+ * #3166 (residual of #3047): when the provider resolves with no error NAME (nothing, no data, or an error carrying only
+ * free text), the fallback reads `unknown`, the word the thrown-error path already uses, not `no data`, which reads like a
+ * provider error name. A named error still carries its name, and the provider's free-text message is never carried.
+ */
+describe('assertProviderAck fallback (#3166)', () => {
+  it.each([
+    ['no result at all', null],
+    ['an undefined result', undefined],
+    ['neither error nor data', { data: null, error: null }],
+    ['an empty object', {}],
+    ['an error with no name, only free text naming the recipient', { data: null, error: { message: `bad address ${RECIPIENT}` } }],
+  ])('%s: says unknown, never the free text', async (_label, result) => {
+    const { assertProviderAck } = await import('./email.js');
+    let thrown: Error | null = null;
+    try { assertProviderAck(result as never); } catch (e) { thrown = e as Error; }
+    expect(thrown?.message).toBe('mail provider did not acknowledge: unknown');
+  });
+
+  it('a named provider error still carries its name', async () => {
+    const { assertProviderAck } = await import('./email.js');
+    expect(() => assertProviderAck({ data: null, error: { name: 'validation_error', message: `bad ${RECIPIENT}` } }))
+      .toThrow('mail provider did not acknowledge: validation_error');
+  });
+
+  it('an acknowledgement carrying data does not throw', async () => {
+    const { assertProviderAck } = await import('./email.js');
+    expect(() => assertProviderAck({ data: { id: 'em_1' }, error: null })).not.toThrow();
+  });
+});
