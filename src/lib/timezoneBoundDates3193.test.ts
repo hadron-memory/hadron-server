@@ -31,7 +31,7 @@ beforeEach(async () => {
 afterAll(async () => { await Promise.all([...clients.values()].map(c => c.$disconnect())); });
 
 async function reuseFixture(client: PrismaClient) {
-  const args = { memoryId, loc: 'chats:room', name: 'room' };
+  const args = { memoryId, loc: 'chats:room', name: 'room', createdBy: null };
   const first = await ensureChannelWithRoot(db, args);
   const old = await db.node.create({ data: {
     id: generateId(), memoryId, loc: 'chats:room:messages:old', name: 'old', nodeType: 'record',
