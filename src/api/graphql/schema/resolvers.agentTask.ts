@@ -1319,18 +1319,19 @@ export async function createStartedClaim(
   const lockedWorker = actor.kind === 'worker' ? actor.workerId : null;
   const now = new Date();
   try {
-    const id = await inTaskWriteTx(ctx, app, actor, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
+    // The row the answer carries is read inside the claim's transaction: nothing can fail between the commit and the
+    // answer, so a committed claim is never left out of it (Jane, #3150 delta P2).
+    return await inTaskWriteTx(ctx, app, actor, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
       await refuseResettingAssignee(tx, fresh.id, owner.workerId);
       const made = await insertTask(tx, {
         app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
         startBy: null, closeSessionWhenDone: false, requirements: null, owner, assignee: owner, status: 'pending',
         created: createdStamp(txCtx), assigned: assignedStamp(txCtx, now), evActor: eventActor(txCtx.userId),
       });
-      await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
+      const started = await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
       await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
-      return made.id;
+      return started;
     }, { lockWorkerIds: [lockedWorker] });
-    return ctx.db.agentTask.findUniqueOrThrow({ where: { id } });
   } catch (e) {
     if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
     throw e;
