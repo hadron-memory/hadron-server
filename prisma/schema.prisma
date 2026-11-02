@@ -1021,6 +1021,8 @@ model Memory {
   config              MemoryConfig?
   /// #2484 — Apps holding a prefix-scoped write grant on this memory for their userless runs.
   appWriteGrants      AppMemoryWriteGrant[]
+  /// #2883 — automation read grants on this memory.
+  automationReadGrants AppAutomationReadGrant[]
   gitMirrorObligations GitMirrorObligation[]
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
@@ -3408,6 +3410,9 @@ model App {
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
   memoryWriteGrantEvents  AppMemoryWriteGrantEvent[]
+  /// #2883 — this App's automation read grants and their append-only history.
+  automationReadGrants    AppAutomationReadGrant[]
+  automationReadGrantEvents AppAutomationReadGrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -5624,6 +5629,60 @@ model AppMemoryWriteGrantEvent {
   @@index([appId, createdAt])
   @@index([grantId])
   @@map("app_memory_write_grant_events")
+}
+
+/// #2883 (ruling 0081 = A; cor:agt:010:01 read-grant rule) — an automation's READ grant on ONE memory, optionally under
+/// one loc prefix (a NULL prefix is the whole memory). "The automation" is the TRIGGER ROW a run executes
+/// (`AgentSchedule` / `AgentWebhook`, keyed `(appId, triggerKind, triggerId)`); the key carries across an edit and a
+/// re-adoption, and the grant ends on revoke or when the trigger is soft-deleted (judged live at the read: no FK, the
+/// trigger is polymorphic). Read-only, consulted only by the run `hadron_read_node` read (`src/lib/automationReadGrant.ts`).
+/// A row is never edited: it ends with a terminal `revokedAt` (trigger + CHECKs in app-automation-read-grant-invariants.sql,
+/// where the partial unique index also lives). `grantedBy` / `revokedBy` carry no FK: sealed history that survives
+/// user erasure.
+model AppAutomationReadGrant {
+  id          String    @id @default(cuid())
+  appId       String    @map("app_id")
+  /// SCHEDULE | WEBHOOK (CHECK in app-automation-read-grant-invariants.sql).
+  triggerKind String    @map("trigger_kind")
+  triggerId   String    @map("trigger_id")
+  memoryId    String    @map("memory_id")
+  /// NULL = the whole memory; otherwise a loc prefix covering itself and its `:`-boundary descendants.
+  prefix      String?
+  grantedBy   String    @map("granted_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([memoryId])
+  @@index([appId, triggerKind, triggerId])
+  @@map("app_automation_read_grants")
+}
+
+/// #2883 — append-only record of every automation read grant and revocation: who, which App, trigger, memory and
+/// prefix, and nothing of any node's content. Written in the SAME transaction as the row change and nowhere else.
+/// Memory, grant and actor carry no FK on purpose; the App FK cascades so a hard delete still works.
+model AppAutomationReadGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  triggerKind String   @map("trigger_kind")
+  triggerId   String   @map("trigger_id")
+  memoryId    String   @map("memory_id")
+  grantId     String   @map("grant_id")
+  prefix      String?
+  /// GRANT | REVOKE (CHECK in app-automation-read-grant-invariants.sql).
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt])
+  @@index([grantId])
+  @@map("app_automation_read_grant_events")
 }
 
 /// #430 (first slice) — a Git-mirror attempt that did NOT land, recorded so the divergence is no longer silent.

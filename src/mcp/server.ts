@@ -82,6 +82,7 @@ import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
 import { registerAssetTools } from './assetTools.js';
+import { registerAutomationReadGrantTools } from './automationReadGrantTools.js';
 import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
@@ -3735,6 +3736,7 @@ export function createMcpServerInstance(
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
   registerAssetTools(server, { db, auth });
+  registerAutomationReadGrantTools(server, { db, auth });
 
   // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
   registerSigningTools(server, { db, auth });

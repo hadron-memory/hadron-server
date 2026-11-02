@@ -7914,6 +7914,24 @@ export const typeDefs = `#graphql
     revokedBy: String
   }
 
+  "#2883: an automation's READ grant on one memory (the whole memory, or one loc prefix), held on the trigger row (a schedule or webhook) a run executes. Read-only: consulted only by the run's own node read, live at each read, never for writes, listing or search, and only for the memory's own run. It carries over an edit and a re-adoption and ends on revoke or when the trigger is deleted. Runs the trigger starts carry it; a manual run does not. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+  type AutomationReadGrant {
+    id: ID!
+    appId: ID!
+    "SCHEDULE or WEBHOOK."
+    triggerKind: String!
+    "The AgentSchedule or AgentWebhook id."
+    triggerId: ID!
+    memoryUrn: String
+    "The loc prefix (the loc itself and its colon-boundary descendants), or null for the whole memory."
+    prefix: String
+    "The person who gave it."
+    grantedBy: String!
+    createdAt: DateTime!
+    revokedAt: DateTime
+    revokedBy: String
+  }
+
   "Effective include selection settings recorded by the compiler (hrn:node:hadronmemory.com:specs:cor:agt:040:12)."
   type CompiledPromptSelection {
     rev: Int
@@ -8010,6 +8028,8 @@ export const typeDefs = `#graphql
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
     "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App, acting as themselves, may list them; a grant on a personal or private memory is listed to its owner alone. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false): [AppMemoryWriteGrant!]!
+    "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of."
+    automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false): [AutomationReadGrant!]!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -10166,6 +10186,10 @@ export const typeDefs = `#graphql
     setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
     "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, acting as themselves. The row stays with its end time; revoking a revoked grant changes nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     revokeAppMemoryWriteGrant(id: ID!): AppMemoryWriteGrant!
+    "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise. A refusal is the same Forbidden as an unknown App, trigger or memory."
+    setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
+    "#2883: end an automation read grant. The App's managers or the target's manager. Terminal."
+    revokeAutomationReadGrant(id: ID!): AutomationReadGrant!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes

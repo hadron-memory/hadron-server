@@ -7,11 +7,18 @@
  * it. Runs that descend from a trigger (SPAWN children, routed runs, INTEGRATION runs) carry their root trigger's
  * grant, as they are held to its adoption; a MANUAL run has no trigger and so no grant (Q2).
  *
- * This file is the key-independent half. How a grant row is keyed to the trigger (carry over a re-adoption, or end at
- * any change) waits on ruling 0081 and is not built here.
+ * Ruling 0081 = A: the grant is keyed `(appId, triggerKind, triggerId)` on that trigger row, so it carries over an
+ * edit and a re-adoption (re-adoption rewrites the pin on the same row) and ends only on revoke or when the trigger is
+ * soft-deleted ({@link rootTriggerOfRun} returns null for a deleted trigger, so a stale row admits nothing).
+ *
+ * {@link runHoldsReadGrant} is the ONE read arm. It is consulted only by the run `hadron_read_node` read, after the
+ * shared gate has refused, and only ever adds: every check below can only refuse.
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
+import type { AuthContext } from '../middleware/auth.js';
+import { canReadMemory } from '../mcp/access-control.js';
 import { isAgentInstalled } from './appAgent.js';
+import { grantCoversLoc } from './appWriteGrant.js';
 import { LINK_CAP_MEMORY_SELECT, independentReach, type LinkCapMemory } from './auth/agentMemoryLinkCap.js';
 
 export type ReadGrantTriggerKind = 'SCHEDULE' | 'WEBHOOK';
@@ -122,4 +129,44 @@ export async function readGrantTargetRefusal(
   }
   const reach = independentReach({ organizationId: app.organizationId, ownerUserId: app.ownerUserId, appId: app.id }, memory);
   return reach === null ? 'cap' : null;
+}
+
+/**
+ * May the run `runId` read `loc` of `memoryId` through its root trigger's read grant? True only when ALL hold:
+ *  1. the run descends from a live trigger of its own App ({@link rootTriggerOfRun}; a MANUAL run, a deleted trigger
+ *     or a foreign ancestor is false);
+ *  2. a live (unrevoked) row of THAT trigger covers the memory and the loc (a NULL prefix is the whole memory, else
+ *     the prefix matches the loc and its `:`-boundary descendants, {@link grantCoversLoc});
+ *  3. the App is live and the target still qualifies ({@link readGrantTargetRefusal}, judged now, not when given);
+ *  4. a user-backed run ALSO passes the user layer: the grant widens the App layer only, so the on-behalf-of user must
+ *     be able to read the memory acting as themselves (no App fold, no run principal).
+ * Read only. A caller with no run principal, no App, or a run of another App is false.
+ */
+export async function runHoldsReadGrant(
+  db: PrismaClient,
+  principal: Pick<AuthContext, 'userId' | 'appId'>,
+  runId: string,
+  memoryId: string,
+  loc: string,
+): Promise<boolean> {
+  const appId = principal.appId;
+  if (!appId) return false;
+  const root = await rootTriggerOfRun(db, runId);
+  if (!root) return false;
+  const rows = await db.appAutomationReadGrant.findMany({
+    where: { appId, triggerKind: root.kind, triggerId: root.id, memoryId, revokedAt: null },
+    select: { prefix: true },
+  });
+  if (!rows.some((row) => row.prefix === null || grantCoversLoc(row.prefix, loc))) return false;
+  const app = await db.app.findFirst({
+    where: { id: appId, deletedAt: null, uninstalledAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) return false;
+  const memory = await db.memory.findFirst({ where: { id: memoryId }, select: READ_GRANT_MEMORY_SELECT });
+  if (!memory || (await readGrantTargetRefusal(db, app, memory)) !== null) return false;
+  if (!principal.userId) return true;
+  const user = await db.user.findFirst({ where: { id: principal.userId, deletedAt: null }, select: { id: true, roles: true } });
+  if (!user) return false;
+  return canReadMemory(db, { userId: user.id, roles: user.roles } as AuthContext, memoryId);
 }

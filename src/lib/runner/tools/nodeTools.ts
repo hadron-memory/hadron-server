@@ -15,6 +15,7 @@
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import type { AuthContext } from '../../../middleware/auth.js';
+import { runHoldsReadGrant } from '../../automationReadGrant.js';
 import { splitNodeUrn } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
 import type { RunToolDef, RunToolContext } from './types.js';
@@ -83,7 +84,9 @@ export const hadronReadNode: RunToolDef = {
     // Copilot). Memory resolution leaks nothing beyond org scoping.
     const { memoryUrn, loc } = splitNodeUrn(urn);
     const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
-    if (!(await canReadMemory(ctx.db, principalAuth(ctx), memory.id))) {
+    if (!(await canReadMemory(ctx.db, principalAuth(ctx), memory.id)) &&
+        // #2883: the automation's read grant, consulted here only (the run data read), after the shared gate refused.
+        !(await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, memory.id, loc))) {
       throw new Error(`Memory not readable for "${urn}" under the run principal.`);
     }
     const node = await ctx.db.node.findUnique({
