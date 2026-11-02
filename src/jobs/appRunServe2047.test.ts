@@ -154,6 +154,25 @@ describe('#2047 run', () => {
     expect(JSON.stringify(rec)).not.toContain('ATTENTION BLOCK');
   });
 
+  it('a script hop writes no derived-blocks entry: the block from the model hop before it stays the last (#3148, cor:agt:010:04)', async () => {
+    await compiledPointer('x');
+    attention.text = 'ATTENTION BLOCK';
+    const run = await mint({ userId, agentId });
+    const { deps: d } = deps();
+    // hop 0: a model hop that sees the attention block; hop 1: a script hop, which reads no memory and derives nothing.
+    (d.loadNodeSpec as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ extractionSpec: null, hasOutput: false })
+      .mockResolvedValueOnce({ extractionSpec: null, hasOutput: false, script: { tool: 'hadron_log', args: {} } });
+    (d.selectNext as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ edgeId: 'e1', edgeName: 'next', targetUrn: 'hrn:node:run-org:runmem:tasks:script' })
+      .mockResolvedValueOnce(null);
+    d.callScript = vi.fn(async () => ({ result: 'ok', toolCalls: [] }));
+    expect(await executeAppRun(db, run.id, d)).toBe('completed');
+    expect(d.callScript).toHaveBeenCalledTimes(1);
+    // Without the guard the script hop would append { hop: 1, blocks: [] } ("the block went away"): a false record.
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).derivedLog).toEqual([{ hop: 0, blocks: ['ATTENTION BLOCK'] }]);
+  });
+
   it('session.llmModel is the model the run resolves: recorded at the mint and substituted into the served text', async () => {
     await db.aiServiceConfig.create({ data: { id: generateId(), name: 'default', organizationId: orgId, provider: 'anthropic', model: 'run-model-7' } });
     await compiledPointer('Model={{session.llmModel}}.');

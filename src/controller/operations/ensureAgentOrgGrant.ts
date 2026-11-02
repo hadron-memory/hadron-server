@@ -36,9 +36,11 @@ export async function ensureAgentOrgGrant(
   // unique constraint still raises. An existing row (including a REVOKED
   // grant) is left untouched. v1 default: activate immediately on creation,
   // since billing is out of scope (mirrors the AgentSubscription pattern).
-  // activated_at is timestamp(3) WITHOUT time zone here, so write UTC.
+  // activated_at and created_at are timestamp(3) WITHOUT time zone here, so
+  // write both as UTC; created_at's column DEFAULT would be session wall time
+  // (#3196).
   await db.$executeRaw`
-    INSERT INTO agent_org_grants (org_id, agent_id, activated_at, created_by)
-    VALUES (${orgId}, ${agentId}, (now() AT TIME ZONE 'UTC'), ${opts.createdBy ?? null})
+    INSERT INTO agent_org_grants (org_id, agent_id, activated_at, created_by, created_at)
+    VALUES (${orgId}, ${agentId}, (now() AT TIME ZONE 'UTC'), ${opts.createdBy ?? null}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3))
     ON CONFLICT (org_id, agent_id) DO NOTHING`;
 }

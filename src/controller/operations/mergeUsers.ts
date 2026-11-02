@@ -225,7 +225,7 @@ async function mergeUserOwnedTemplates(
     taken.add(name);
     try {
       await tx.$executeRaw`UPDATE memory_config_templates
-        SET owner_user_id = ${targetUserId}, name = ${name}, revision = revision + 1, updated_at = now()
+        SET owner_user_id = ${targetUserId}, name = ${name}, revision = revision + 1, updated_at = (now() AT TIME ZONE 'UTC')
         WHERE id = ${t.id}`;
     } catch (e) {
       // The plan was built from this transaction's snapshot; a unique hit
@@ -235,7 +235,7 @@ async function mergeUserOwnedTemplates(
     }
   }
   await tx.$executeRaw`UPDATE memory_config_templates
-    SET owner_user_id = ${targetUserId}, revision = revision + 1, updated_at = now()
+    SET owner_user_id = ${targetUserId}, revision = revision + 1, updated_at = (now() AT TIME ZONE 'UTC')
     WHERE owner_user_id = ${sourceUserId} AND deleted_at IS NOT NULL`;
 }
 
@@ -531,7 +531,7 @@ async function runMergeTxn(
           WHEN t.deleted_at IS NULL OR s.deleted_at IS NULL THEN NULL
           ELSE t.deleted_by
         END,
-        updated_at = now()
+        updated_at = (now() AT TIME ZONE 'UTC')
       FROM org_members s
       WHERE t.user_id = ${targetUserId} AND s.user_id = ${sourceUserId}
         AND t.organization_id = s.organization_id`;
@@ -598,7 +598,7 @@ async function runMergeTxn(
     // MemoryMemberRole is declared reader < writer < owner, so GREATEST
     // preserves owner and therefore the last-owner invariant.
     await tx.$executeRaw`UPDATE memory_members t SET
-        role = GREATEST(t.role, s.role), updated_at = now()
+        role = GREATEST(t.role, s.role), updated_at = (now() AT TIME ZONE 'UTC')
       FROM memory_members s
       WHERE t.user_id = ${targetUserId} AND s.user_id = ${sourceUserId} AND t.memory_id = s.memory_id`;
     await tx.$executeRaw`DELETE FROM memory_members s USING memory_members t
@@ -606,7 +606,7 @@ async function runMergeTxn(
     await tx.$executeRaw`UPDATE memory_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
     await tx.$executeRaw`UPDATE memory_shares t SET
-        role = GREATEST(t.role, s.role), updated_at = now()
+        role = GREATEST(t.role, s.role), updated_at = (now() AT TIME ZONE 'UTC')
       FROM memory_shares s
       WHERE t.grantee_id = ${targetUserId} AND s.grantee_id = ${sourceUserId} AND t.memory_id = s.memory_id`;
     await tx.$executeRaw`DELETE FROM memory_shares s USING memory_shares t
@@ -655,9 +655,9 @@ async function runMergeTxn(
     // soft-deleted source, dead: the source's sign-ins end, its lineage keys
     // are revoked and its unspent lineage codes are dropped. Rows with no
     // lineage (legacy, direct issuance) are retargeted below as before.
-    await tx.$executeRaw`UPDATE sign_ins SET ended_at = CURRENT_TIMESTAMP, end_reason = 'user-merged'
+    await tx.$executeRaw`UPDATE sign_ins SET ended_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'), end_reason = 'user-merged'
       WHERE user_id = ${sourceUserId} AND ended_at IS NULL`;
-    await tx.$executeRaw`UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP
+    await tx.$executeRaw`UPDATE user_api_keys SET revoked_at = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
       WHERE user_id = ${sourceUserId} AND origin_sign_in_id IS NOT NULL AND revoked_at IS NULL`;
     await tx.$executeRaw`DELETE FROM auth_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
     await tx.$executeRaw`DELETE FROM auth_handoff_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;

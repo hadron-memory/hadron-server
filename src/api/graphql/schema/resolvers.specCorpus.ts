@@ -7,6 +7,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 // #1450 — reserveSpecCitation. Contract:
 // https://github.com/hadron-memory/hadron-server/issues/1447#issuecomment-5895948862 §4.
 import { GraphQLError } from 'graphql';
+import { toNaiveUtc } from '../../../lib/sessionActivity.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { inMintScope, inMintScopeSql } from '../../../lib/mintScope.js';
 import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/github/mirrorNodeMove.js';
@@ -15,6 +16,8 @@ import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
   concealUnreadableDenial,
   isMemoryReadableCached,
+  pageArgs,
+  pageEnvelope,
   requireMemoryWriteAccess,
   withoutRequestCaches,
 } from './resolvers.helpers.js';
@@ -839,26 +842,18 @@ export const specCorpusQueries = {
    * its descendants. The spec need not exist: a reference to a missing spec is
    * still a backlink.
    */
-  specBacklinks: async (_: unknown, { memoryRef, loc }: { memoryRef: string; loc: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
-    const corpus = await loadScannableCorpus(ctx, memoryRef);
-    const nodes = await loadCorpusNodes(ctx.db, corpus.id);
-    const scanned = scanReferences(nodes, corpus.pattern);
-    const accept = await referenceAcceptor(ctx, corpus, scanned);
-    const text = scanned.filter((r) => accept(r) === loc).map(fromScan);
-    const target = nodes.find((n) => n.loc === loc)
-      ?? await ctx.db.node.findFirst({
-        where: { memoryId: corpus.id, loc, deletedAt: { not: null } }, select: { id: true },
-      });
-    // A live edge into a deleted spec still names its old citation. It is a
-    // backlink, even though the mint/unresolved scan calls it MISSING.
-    const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
-    return [
-      ...text,
-      ...edges.map((e): SpecReferenceOut => ({
-        kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge', targetLoc: e.target.loc, text: e.name,
-      })),
-    ];
-  },
+  specBacklinks: async (_: unknown, { memoryRef, loc }: { memoryRef: string; loc: string }, ctx: Context): Promise<SpecReferenceOut[]> =>
+    specBacklinksOf(ctx, memoryRef, loc),
+
+  /**
+   * #3222 (#2213 S3, cor:api:120:04) — `specBacklinks` one page at a time. The same
+   * list, gate and refusals (it calls `specBacklinksOf`); see `pageOfReferences`.
+   */
+  specBacklinksPage: async (
+    _: unknown,
+    args: { memoryRef: string; loc: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => pageOfReferences(await specBacklinksOf(ctx, args.memoryRef, args.loc), args),
 
   /**
    * #1449 — references in a draft corpus that do not reach a written spec: a
@@ -866,11 +861,72 @@ export const specCorpusQueries = {
    * real edges pointing at a placeholder (PLACEHOLDER). This is the mint
    * report's "unresolved" block.
    */
-  specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> => {
-    const corpus = await loadScannableCorpus(ctx, memoryRef);
-    return unresolvedReferencesIn(ctx, corpus, await loadCorpusNodes(ctx.db, corpus.id));
-  },
+  specUnresolvedReferences: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context): Promise<SpecReferenceOut[]> =>
+    specUnresolvedReferencesOf(ctx, memoryRef),
+
+  /**
+   * #3222 (#2213 S3, cor:api:120:04) — `specUnresolvedReferences` one page at a time.
+   * The same list, gate and refusals (it calls `specUnresolvedReferencesOf`).
+   */
+  specUnresolvedReferencesPage: async (
+    _: unknown,
+    args: { memoryRef: string; limit?: number | null; offset?: number | null },
+    ctx: Context,
+  ) => pageOfReferences(await specUnresolvedReferencesOf(ctx, args.memoryRef), args),
 };
+
+/**
+ * #1449 — the specBacklinks list, shared by the field and its page (#3222). Gated
+ * by `loadScannableCorpus`, which refuses before anything is read.
+ */
+async function specBacklinksOf(ctx: Context, memoryRef: string, loc: string): Promise<SpecReferenceOut[]> {
+  const corpus = await loadScannableCorpus(ctx, memoryRef);
+  const nodes = await loadCorpusNodes(ctx.db, corpus.id);
+  const scanned = scanReferences(nodes, corpus.pattern);
+  const accept = await referenceAcceptor(ctx, corpus, scanned);
+  const text = scanned.filter((r) => accept(r) === loc).map(fromScan);
+  const target = nodes.find((n) => n.loc === loc)
+    ?? await ctx.db.node.findFirst({
+      where: { memoryId: corpus.id, loc, deletedAt: { not: null } }, select: { id: true },
+    });
+  // A live edge into a deleted spec still names its old citation. It is a
+  // backlink, even though the mint/unresolved scan calls it MISSING.
+  const edges = target ? await corpusEdgesTo(ctx.db, corpus.id, [target.id]) : [];
+  return [
+    ...text,
+    ...edges.map((e): SpecReferenceOut => ({
+      kind: 'EDGE', sourceNodeId: e.source.id, sourceLoc: e.source.loc, field: 'edge', targetLoc: e.target.loc, text: e.name,
+    })),
+  ];
+}
+
+/**
+ * #1449 — the specUnresolvedReferences list, shared by the field and its page
+ * (#3222). Gated by `loadScannableCorpus`, which refuses before anything is read.
+ */
+async function specUnresolvedReferencesOf(ctx: Context, memoryRef: string): Promise<SpecReferenceOut[]> {
+  const corpus = await loadScannableCorpus(ctx, memoryRef);
+  return unresolvedReferencesIn(ctx, corpus, await loadCorpusNodes(ctx.db, corpus.id));
+}
+
+/**
+ * #3222 (#2213 S3, cor:api:120:04) — one page of a reference list, sized by
+ * `pageArgs` (default 20, max 200, over the cap served as the cap).
+ *
+ * The list is the old field's own, in its own order, which is a deterministic
+ * total order by construction: text references walk the corpus nodes by id
+ * (`loadCorpusNodes`), then `SCANNED_FIELDS` in order, then position in the
+ * text; each edge section that follows is read `orderBy: { id: 'asc' }`. So the
+ * pages concatenate to exactly the old field's list, and rows identical in every
+ * output field (one URN cited twice in a field) keep their places.
+ *
+ * Paging bounds the RESPONSE, not the work: every page still scans the whole
+ * corpus, and `total` is the full count.
+ */
+function pageOfReferences(all: SpecReferenceOut[], args: { limit?: number | null; offset?: number | null }) {
+  const { take, skip } = pageArgs(args);
+  return pageEnvelope(all.slice(skip, skip + take), all.length, skip);
+}
 
 /**
  * The references in a corpus that do not reach a written spec (MISSING or
@@ -1649,7 +1705,7 @@ async function mintMemoryNodes(
     const ids = [...inScopeIds];
     const mintedCount = await tx.$executeRaw`
       UPDATE nodes SET
-        minted_at = COALESCE(minted_at, ${now}),
+        minted_at = COALESCE(minted_at, ${toNaiveUtc(now)}::timestamp),
         minted_by = CASE WHEN minted_at IS NULL THEN ${minter.userId ?? null}::text ELSE minted_by END,
         minted_by_info = CASE WHEN minted_at IS NULL THEN ${minter.userId ? null : minter.info ?? 'unknown'}::text ELSE minted_by_info END,
         minted_rev_no = rev_seq,

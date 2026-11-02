@@ -36,6 +36,8 @@ export const TASK_EVENT_TYPES = [
   'task.edited',
   // #2420 (cor:agt:050:28): a change to the task's own properties, sizes and hashes only.
   'task.properties-changed',
+  // #2651 (cor:agt:050:29): a started task handed back by its assignee; the reason code only, never its text.
+  'task.handed-back',
 ] as const;
 export type TaskEventType = (typeof TASK_EVENT_TYPES)[number];
 
@@ -61,8 +63,16 @@ export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.propert
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
 
-export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone'] as const;
+export const TASK_EDIT_FIELDS = ['title', 'description', 'tags', 'requirements', 'startBy', 'finishBy', 'closeSessionWhenDone', 'references'] as const;
 export type TaskEditField = typeof TASK_EDIT_FIELDS[number];
+
+/**
+ * #2651 (cor:agt:050:29, Proposed details): the closed set of reasons an assignee hands a started task back for, as
+ * stored on the task and carried by `task.handed-back`. A code outside it is refused (the resolver, and
+ * chk_agent_tasks_hand_back in the database).
+ */
+export const TASK_HAND_BACK_CODES = ['missing_input', 'cannot_do', 'refused', 'out_of_scope', 'duplicate'] as const;
+export type TaskHandBackCode = (typeof TASK_HAND_BACK_CODES)[number];
 
 /** A party to a task: exactly one of a Worker or a User. */
 export type TaskParty = { workerId: string; userId?: never; via?: never } | { userId: string; workerId?: never; via?: 'manager' };
@@ -72,6 +82,8 @@ export type EventActor = {
   userId: string | null; workerId: string | null; agentId: string | null;
   /** #1756: the headless run that acted. Then the three above are null. */
   runId?: string | null;
+  /** #3132 (cor:agt:050:23): the App key that acted (its claim). Then every other actor id is null. */
+  appKeyId?: string | null;
 };
 
 /** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
@@ -90,6 +102,8 @@ export type TaskEventPayload =
   | { type: 'task.progress' }
   | { type: 'task.finished'; outcome: string }
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
+  /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
+  | { type: 'task.handed-back'; code: TaskHandBackCode }
   | { type: 'task.parked' }
   | { type: 'task.ready' }
   | { type: 'assignment.queued' }
@@ -145,6 +159,9 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
       return { outcome: e.outcome };
     case 'task.cancelled':
       return { fromStatus: e.fromStatus, openChildCount: e.openChildCount };
+    case 'task.handed-back':
+      if (!(TASK_HAND_BACK_CODES as readonly string[]).includes(e.code)) throw new Error('Unsupported task hand-back code');
+      return { code: e.code };
     case 'task.parked':
     case 'task.ready':
     case 'assignment.queued':
@@ -168,9 +185,17 @@ function subjectWorkerId(e: TaskEventPayload): string | null {
  */
 export async function appendTaskEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date },
+  args: {
+    appId: string; taskId: string; actor: EventActor; event: TaskEventPayload; createdAt?: Date;
+    /**
+     * #3132 (cor:agt:050:11, rulings:0009): whom the action was for, when the actor (a key or a run) cannot resolve
+     * it: recorded as the event's subject, never as its actor. A worker fills `subjectWorkerId` where the event
+     * names none of its own; a person fills `subjectUserId`.
+     */
+    forParty?: TaskParty | null;
+  },
 ): Promise<void> {
-  const subject = subjectWorkerId(args.event);
+  const subject = subjectWorkerId(args.event) ?? args.forParty?.workerId ?? null;
   // S7 (#2023, R90): an assignment to a worker that was on standby raises its delivered mark past the held messages, in this
   // same transaction, and the count rides the event so the task wake returns it exactly once.
   const standbyHeld = subject && (ASSIGNED_EVENT_TYPES as readonly string[]).includes(args.event.type)
@@ -185,7 +210,9 @@ export async function appendTaskEvent(
       actorWorkerId: args.actor.workerId,
       actorAgentId: args.actor.agentId,
       actorRunId: args.actor.runId ?? null,
+      actorAppKeyId: args.actor.appKeyId ?? null,
       subjectWorkerId: subject,
+      subjectUserId: args.forParty?.userId ?? null,
       payload: standbyHeld > 0 ? { ...payloadJson(args.event), standbyHeld } : payloadJson(args.event),
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
     },
@@ -514,6 +541,30 @@ export async function appendWorkerDeletedEvent(
   // The id rides the payload only: a `subject_worker_id` naming a worker that no longer exists is refused by the
   // worker-reference fence (#1162), and this event is written after the row is gone.
   await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId } });
+}
+
+// ── #3125 S1 (V43): who changed the App's properties ─────────────────────
+
+/**
+ * `app.properties-changed` (cor:agt:050:11): appended in the `setAppProperties` write's own transaction, after every
+ * refusal and before commit, only when the object changed. The payload names the changed TOP-LEVEL keys, sorted;
+ * never a value and never a nested path (Holger, V43). Each key must be a string; nothing else can ride this event.
+ */
+export async function appendAppPropertiesChangedEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; actor: EventActor; keys: string[] },
+): Promise<void> {
+  if (!args.keys.every((k) => typeof k === 'string')) throw new Error('Unsupported app.properties-changed payload');
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: 'app.properties-changed',
+      actorUserId: args.actor.userId,
+      actorWorkerId: args.actor.workerId,
+      actorAgentId: args.actor.agentId,
+      payload: { keys: [...args.keys] },
+    },
+  });
 }
 
 /**

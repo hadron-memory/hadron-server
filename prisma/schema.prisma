@@ -2653,11 +2653,10 @@ model NodeRevision {
   /// column landed — revision history would otherwise silently drop
   /// abstract edits.
   abstract           String?
-  /// Spec 032 — snapshot of `Node.abstractOriginHash` at the time of
-  /// revision capture. Restored verbatim by `restoreNodeRevision`;
-  /// legacy revisions (pre-spec) have NULL here, which short-circuits
-  /// the staleness check on the live row after restore (no false
-  /// positives).
+  /// Revision snapshot of `Node.abstractOriginHash` at capture time
+  /// (cor:dmo:020:03, cor:dmo:060:02). Restored verbatim by `restoreNodeRevision`.
+  /// A restored NULL on a node with both an abstract and content means the abstract is
+  /// unverified, neither stale nor fresh. A NULL on a node with no abstract or no content needs no check.
   abstractOriginHash String?             @map("abstract_origin_hash")
   content            String?
   tags               String[]
@@ -3315,6 +3314,13 @@ model App {
   tickerLiveCap                     Int                  @default(20) @map("ticker_live_cap")
   /// Null = derived (subscribed workers x (86400 / self-subscribe cadence) x 2).
   wakeDailyBudget                   Int?                 @map("wake_daily_budget")
+  /// #3125 S1 (cor:dmo:050:02, cor:dmo:050:20): the App's own JSON object, the App equivalent of `Node.properties`.
+  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform reads only the
+  /// reserved `taskIntegrations` key (cor:agt:120:01). NULL = no properties. CHECK: an object when set.
+  properties                        Json?                @map("properties")
+  /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
+  /// Its own column, not `updatedAt`, which every other App write moves.
+  propertiesRevision                Int                  @default(0) @map("properties_revision")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
   /// avoid spurious portal churn.
@@ -5720,6 +5726,10 @@ model AgentTask {
   description          String?
   /// Opaque origin reference (an issue URL, a node URN). Not interpreted.
   source               String?
+  /// #3125 S2 (V29, V46; cor:agt:120:02): the claim on an outside item, set once at create. Unique within an App,
+  /// whatever the task's state, through the partial unique index agent_tasks_app_external_id_uniq (raw SQL in
+  /// agent-task-external-id-invariants.sql: Prisma cannot model a partial unique). Compared exactly as written.
+  externalId           String?   @map("external_id")
   /// Null for a root task. Always in the same App (cor:agt:050:01).
   parentTaskId         String?   @map("parent_task_id")
   ownerWorkerId        String?   @map("owner_worker_id")
@@ -5752,7 +5762,16 @@ model AgentTask {
   resultOutcome        String?   @map("result_outcome")
   resultSummary        String?   @map("result_summary")
   resultEvidence       String?   @map("result_evidence")
+  /// #2651 (cor:agt:050:29, :01): the latest hand-back — its code (closed set, chk_agent_tasks_hand_back), optional
+  /// text (<= 2,000 characters; never put into an event) and time. A later hand-back replaces all three.
+  handBackReasonCode   String?   @map("hand_back_reason_code")
+  handBackReasonText   String?   @map("hand_back_reason_text")
+  handedBackAt         DateTime? @map("handed_back_at")
   tags                 String[]  @default([])
+  /// #2649 (cor:agt:050:01 References, :09): the task's ordered typed references, a JSON array of
+  /// {kind, target, label} (at most 20, chk_agent_tasks_references). Targets are stored as given and never resolved.
+  /// Column named task_references: REFERENCES is reserved in SQL.
+  references           Json      @default("[]") @map("task_references")
   /// Set by whoever assigns; T6 acts on it (cor:agt:050:10). False unless the assigner asks (R182, #2249): the
   /// default only reaches a raw insert, since every create path writes the resolved value.
   closeSessionWhenDone Boolean   @default(false) @map("close_session_when_done")
@@ -5852,8 +5871,14 @@ model AgentTeamEvent {
   actorAgentId           String?   @map("actor_agent_id")
   /// #1756: the headless run that acted, when one did; the other actor columns are then null.
   actorRunId             String?   @map("actor_run_id")
+  /// #3132 (cor:agt:050:11, :23): the App key that acted, when one did (its one task write is a claim); the other
+  /// actor columns are then null. No FK: like the other actor ids, a sealed record of who acted at the time.
+  actorAppKeyId          String?   @map("actor_app_key_id")
   /// The worker the event concerns, if any (e.g. the new assignee).
   subjectWorkerId        String?   @map("subject_worker_id")
+  /// #3132 (rulings:0009): the PERSON the event concerns, when a key or run acted for one it cannot itself resolve
+  /// (the assignee its claim named). Never the actor. No FK, sealed like the actor ids (not rewritten by a merge).
+  subjectUserId          String?   @map("subject_user_id")
   /// null for an ordinary event, 'alarm' for an alarm.
   severity               String?
   /// Alarms only: the owner chain when raised, nearest first.
@@ -6878,7 +6903,7 @@ model ServedPrompt {
   sessionId           String?                  @map("session_id")
   chatId              String?                  @map("chat_id")
   runId               String?                  @map("run_id")
-  /// 1 for a bind or a run; a chat records again when its served revision changes (R37), counting up.
+  /// 1 for a bind or a run; a chat records again when its served revision or filled variables change (R37, #3096), counting up.
   ordinal             Int                      @default(1)
   /// Null only for a chat held in a memory no App owns (chk_served_prompts_app, prisma/served-prompt-app-invariants.sql).
   appId               String?                  @map("app_id")

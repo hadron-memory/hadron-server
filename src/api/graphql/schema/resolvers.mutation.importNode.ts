@@ -109,7 +109,16 @@ export const importNodeMutations = {
     // unauthorized caller must not be able to use importNode as an egress /
     // resource-consumption primitive (a full 30s fetch with redirects) just
     // to be denied at the write (PR-486 review, Codex P1).
-    await requireMemoryWriteAccess(ctx, memoryId);
+    //
+    // #3101: opt into the install-memory pre-flight like every other node-write door.
+    // On the pooled client `fencedInstallAudience` answers write:false for an install
+    // memory unless the door rechecks inside its own fenced transaction; this one does,
+    // because both store paths below go through `writeNodeCore`, which re-runs the gate
+    // under the install authority locks (and the composed path takes them first,
+    // `lockInstallAuthorityFirst`). Without the flag an App manager was refused here
+    // (cor:api:130:00 (1): an import admits exactly the direct-write audience;
+    // cor:agt:040:06). A reader who doesn't manage the App is still refused pre-fetch.
+    await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
 
     // ── #528 — validate the post-import task-run preconditions BEFORE the
     // fetch/write, so a bad taskRef / missing App / non-runnable task fails

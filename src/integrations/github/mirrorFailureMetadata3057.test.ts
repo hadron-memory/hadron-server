@@ -63,6 +63,8 @@ describe('mirror failure metadata at each real call site', () => {
     if (site === 'sequence') await tryTakeAttemptSeq(client);
     else await settleMirrorObligations(client, memory.id, [{ nodeId: 'node', kind: 'WRITE' }], { result: 'failed', errorClass: 'TREE_WRITE' }, 1n);
     assertSafe(); expect(output.join('\n')).toContain("providerCode: 'P1001'");
+    // #3093: both fields from the same real error must reach the SAME log call, not just the helper.
+    expect(output.some(entry => entry.includes("providerCode: 'P1001'") && entry.includes("errorType: 'PrismaClientInitializationError'"))).toBe(true);
   });
 
   it.each(['sequence', 'settle'])('%s keeps a closed code-less Prisma type without hostile text', async site => {

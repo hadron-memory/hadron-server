@@ -43,7 +43,9 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
     parts.push(`(deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[])))`);
   }
   // Explicit nodeType wins; otherwise exclude system-type nodes (node_type is NOT NULL, default 'info').
-  if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
+  // #3113 — an explicit list is also explicit: it narrows to the named types and replaces the default.
+  if (flt.nodeTypes) parts.push(`node_type = ANY(${bind(flt.nodeTypes)}::text[])`);
+  else if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
   else parts.push(`node_type <> 'system'`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
@@ -55,8 +57,10 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
-  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
-  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);
+  // #3193: use the same Date parse as the ORM path (including date-only inputs and caller offsets), then bind UTC-naive.
+  // Keep the column bare for indexes; PostgreSQL must not interpret an offset-less bound in the session's zone.
+  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(new Date(flt.updatedAfter).toISOString())}::timestamp`);
+  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(new Date(flt.updatedBefore).toISOString())}::timestamp`);
   // #719 — structured predicate over properties/data JSONB, compiled to a
   // parameterized boolean expr sharing this query's `bind` accumulator.
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);

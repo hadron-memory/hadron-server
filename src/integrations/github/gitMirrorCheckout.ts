@@ -29,6 +29,7 @@ import { execGit } from './execGit.js';
 import { sourceNamesRepo, validateMemorySource, GitSourceError } from '../../lib/gitSource.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
+import { RESTORE_DEADLINE_MS } from './originRestoreDeadline.js';
 import { logEncryptedGitSyncRefusal } from './encryptedGitSync.js';
 import {
   settleMirrorObligations, tryTakeAttemptSeq,
@@ -170,6 +171,10 @@ export async function withMirrorCheckout(
   // Hold one cross-process lock through checkout, file mutation, commit,
   // push, and remote restoration. Node, Edge, and move mirrors all use this
   // primitive, so a process-local queue would leave a race between workers.
+  // #3156: retain a retry's fence for any throw escaping the locked callback.
+  // Before it takes a sequence, a retry records nothing (and never invents one in the catch).
+  let retryAttemptSeq: bigint | null = null;
+  let retryAttemptBranch: string | undefined;
   try {
     const resolvedMemoryId = memory.id;
     return await withMirrorCheckoutLock(resolvedMemoryId, async () => {
@@ -246,7 +251,8 @@ export async function withMirrorCheckout(
         obligations = rows.filter(r => r.lastAttemptAt.getTime() + Math.min(300_000 * 2 ** Math.min(r.attempts - 1, 7), 21_600_000) <= now)
           .map(r => ({ nodeId: r.nodeId, kind: r.kind, removeLoc: r.removeLoc, branch: r.branch }));
         if (!obligations.length) return 'skipped';
-        attemptSeq = await tryTakeAttemptSeq(db);
+        attemptSeq = retryAttemptSeq = await tryTakeAttemptSeq(db);
+        retryAttemptBranch = attemptedBranch;
         if (attemptSeq === null) return 'skipped';
       }
       if (opts.beforeGit && !await opts.beforeGit(obligations)) return 'no-changes';
@@ -385,13 +391,22 @@ export async function withMirrorCheckout(
     console.error(`${logPrefix} Checkout lock failed for ${commitSubject}`, mirrorFailureMetadata(err, 'lock', 'LOCK_FAILED'));
     // Outside the lock by definition (it could not be taken, or the attempt threw before settling), so this settle is not
     // lock-ordered: the sequence number still makes it a no-op against any newer row.
-    const lockFailedSeq = !opts.retry && obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
+    const lockFailedSeq = opts.retry
+      ? retryAttemptSeq
+      : obligations.length > 0 ? await tryTakeAttemptSeq(db) : null;
     if (lockFailedSeq !== null) {
-      // The one capture outside the lock: validate the pre-lock snapshot, never a caller's raw branch.
-      const branch = (memory.writeBranch ?? 'hadron-updates').replace('{client}', clientId ?? 'unknown');
-      try { validateGitBranch(branch, 'writeBranch'); }
-      catch { console.warn(`${logPrefix} Refusing invalid mirror branch`); return 'failed'; }
-      await settleMirrorObligations(db, foundMemoryId, obligations.map(r => ({ ...r, branch })), { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
+      if (opts.retry) {
+        // Keep the admitted captured keys and the attempted fixed-branch destination, on the SAME fence.
+        await settleMirrorObligations(db, foundMemoryId, obligations, { result: 'failed', errorClass: 'LOCK_FAILED' },
+          lockFailedSeq, opts.retry.maxAttempts, { targetBranch: retryAttemptBranch });
+      } else {
+        // The one capture outside the lock: validate the pre-lock snapshot, never a caller's raw branch.
+        const branch = (memory.writeBranch ?? 'hadron-updates').replace('{client}', clientId ?? 'unknown');
+        try { validateGitBranch(branch, 'writeBranch'); }
+        catch { console.warn(`${logPrefix} Refusing invalid mirror branch`); return 'failed'; }
+        await settleMirrorObligations(db, foundMemoryId, obligations.map(r => ({ ...r, branch })),
+          { result: 'failed', errorClass: 'LOCK_FAILED' }, lockFailedSeq);
+      }
     }
     return 'failed';
   }
@@ -408,9 +423,9 @@ export function memoryLocalPath(orgUrn: string, memoryUrn: string): string {
 
 async function restoreRemote(localPath: string, originalUrl: string): Promise<void> {
   try {
-    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath });
+    await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath, timeout: RESTORE_DEADLINE_MS });
   } catch (err) {
-    console.error(`[git-mirror] Failed to restore remote URL at ${localPath}`, mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'));
+    console.error('[git-mirror] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore. A config.lock can block future restores; safe recovery requires proven ownership.', mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'));
   }
 }
 

@@ -97,6 +97,8 @@ const urn = z.string().refine(v => { try { assertFullyQualifiedUrn(v, 'node'); r
 const extraction = z.strictObject({ field: nonempty, description: z.string().optional(), shape: z.string().optional() });
 const flow = z.strictObject({
   tools: z.array(nonempty).optional(), extractionSpec: z.array(extraction).optional(),
+  // #670 (cor:agt:010:04): a script node's one declared call; excludes tools and extractionSpec.
+  script: z.strictObject({ call: z.strictObject({ tool: nonempty, args: z.record(z.string(), z.unknown()).optional() }) }).optional(),
   output: z.strictObject({ writeTo: urn, mode: z.enum(['replace', 'append']) }).optional(),
   runTargets: z.array(localKey).optional(), credentials: z.array(nonempty).optional(),
 });
@@ -161,6 +163,7 @@ export function validateCompiledAutomation(input: unknown, options: {
     cap(Buffer.byteLength(node.content ?? '', 'utf8'), 'CONTENT_BYTES', `${path}.content`);
     cap(node.flow.tools?.length ?? 0, 'TOOLS_PER_NODE', `${path}.flow.tools`);
     if (node.flow.tools !== undefined && node.flow.extractionSpec !== undefined) fail(`${path}.flow`, 'TOOLS_AND_EXTRACTION');
+    if (node.flow.script !== undefined && (node.flow.tools !== undefined || node.flow.extractionSpec !== undefined)) fail(`${path}.flow`, 'SCRIPT_AND_TOOLS_OR_EXTRACTION');
     if (node.flow.extractionSpec) {
       const check = validateExtractionSpec(node.flow.extractionSpec);
       if (!check.ok || node.flow.extractionSpec.some(e => e.field.startsWith('__'))) fail(`${path}.flow.extractionSpec`, 'RESERVED_NAME');
@@ -170,6 +173,12 @@ export function validateCompiledAutomation(input: unknown, options: {
     }
     for (const target of node.flow.runTargets ?? []) {
       if (!Object.hasOwn(obj.nodes, target)) fail(`${path}.flow.runTargets`, 'MISSING_NODE');
+    }
+    // A script node's tool is held to the same name and registration checks as a declared tool.
+    const scriptTool = node.flow.script?.call.tool;
+    if (scriptTool !== undefined) {
+      if (!options.resolvesTool(scriptTool)) fail(`${path}.flow.script`, 'UNKNOWN_TOOL');
+      if (/^(mcp__|ha__)/.test(scriptTool) && !registrations.has(scriptTool)) fail(`${path}.flow.script`, 'MISSING_REGISTRATION');
     }
     for (const tool of node.flow.tools ?? []) {
       if (!options.resolvesTool(tool)) fail(`${path}.flow.tools`, 'UNKNOWN_TOOL');

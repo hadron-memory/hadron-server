@@ -2,9 +2,9 @@
 
 The migration adds `branch text NOT NULL DEFAULT ''` and widens the obligation primary key to `(memory_id, node_id, kind, remove_loc, branch)`. Empty means a legacy unknown branch. There is no guessed backfill and no database branch-shape CHECK; the final branch passes the existing TypeScript validator before any Git command.
 
-Old writers must be drained **before** the migration applies. An old failure upsert no longer has a matching conflict target, but an old success DELETE still runs and can erase another client's branch debt. This is unsafe coexistence, not compatibility. Migration-before-new-process-start does not demonstrate that old writers have stopped.
+**One-deploy exception — Holger ruling 0076, 2026-11-02:** the old-writers-drained precondition is waived for the one automatic deploy shipping #3102; Holger accepts its old/new code swap window. See [rulings:0076](https://hadronmemory.com/app/u/hrn:node:hadronmemory.com:hadron-dev-team-shared:rulings:0076). Every merge to main deploys automatically; there is no separate named deploy-owner step.
 
-The authorized deploy owner must establish and record drainage under their own grant. This code change, issue gate and PR authorize no production operation. Coordinate the normal merge-to-auto-deploy path with that owner before landing; do not infer that a single configured container proves stop/start order.
+The risk remains real: an old failure upsert no longer has a matching conflict target, and an old success DELETE can erase another client's branch debt. Migration-before-new-process-start, zero rows at one instant, or pausing only the sweep do not prove all-writer exclusion. The ruling accepts that window for this one deploy; it does not claim safe coexistence or authorize manual production operations.
 
 Forward fixes are the supported recovery path. Do not collapse the new primary key or run old code against it. A destructive old-code rollback requires a separate explicit authorized decision at that time.
 

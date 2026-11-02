@@ -267,6 +267,8 @@ async function resetReusedChannel(
   },
 ): Promise<void> {
   const now = new Date();
+  // #3193: raw Date binds are timestamptz; these columns store UTC-naive timestamps.
+  const nowUtc = now.toISOString();
   const root = await tx.node.findUniqueOrThrow({
     where: { id: args.rootId },
     select: { abstract: true, content: true, data: true, embeddingPendingAt: true, embeddingWorkToken: true, nodeType: true, loc: true },
@@ -322,7 +324,7 @@ async function resetReusedChannel(
   // deleted endpoints by stable id and expose the old message payload.
   await tx.$executeRaw`
     UPDATE edges AS e
-    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}
+    SET deleted_at = ${nowUtc}::timestamp, deleted_by = ${args.deletedBy}, updated_at = ${nowUtc}::timestamp
     WHERE e.deleted_at IS NULL
       AND (
         e.source_id IN (
@@ -339,7 +341,7 @@ async function resetReusedChannel(
   `;
   await tx.$executeRaw`
     UPDATE nodes
-    SET deleted_at = ${now}, deleted_by = ${args.deletedBy}, updated_at = ${now}, embedding_truncated_chunks = NULL
+    SET deleted_at = ${nowUtc}::timestamp, deleted_by = ${args.deletedBy}, updated_at = ${nowUtc}::timestamp, embedding_truncated_chunks = NULL
     WHERE memory_id = ${args.memoryId}
       AND deleted_at IS NULL
       AND id = ANY(${doomed}::text[])

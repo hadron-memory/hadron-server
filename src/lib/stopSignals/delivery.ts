@@ -25,7 +25,7 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import type { StopLevel } from './state.js';
-import type { StopNoticeKind } from './notices.js';
+import { STOP_NOTICE_WITHDRAWN_EVENT, type StopNoticeKind } from './notices.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -62,6 +62,10 @@ export async function pendingStopNotices(db: Db, appId: string, workerIds: strin
              (e.payload ->> 'level' = ${COORDINATOR_LEVEL}) AS coordinator
       FROM agent_team_events e
       WHERE e.app_id = ${appId} AND e.type = 'stop.notice' AND e.subject_worker_id IN (${Prisma.join(workerIds)})
+        -- #3045 (V20): a coordinator notice the worker left behind (another live pause-dispatch still named it) no longer applies.
+        AND NOT EXISTS (SELECT 1 FROM agent_team_events w
+                        WHERE w.app_id = e.app_id AND w.type = ${STOP_NOTICE_WITHDRAWN_EVENT} AND w.subject_worker_id = e.subject_worker_id
+                          AND w.payload ->> 'noticeEventId' = e.id)
     ), newest AS (
       SELECT DISTINCT ON ("workerId", coordinator, CASE WHEN coordinator THEN "signalId" ELSE '' END) *
       FROM ev

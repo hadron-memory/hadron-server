@@ -12,6 +12,7 @@ import { type MirrorObligationRef } from '../integrations/github/mirrorObligatio
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
+import { toNaiveUtc } from '../lib/sessionActivity.js';
 
 export const MAX_ATTEMPTS = 10;
 const INTERVAL_MS = 10 * 60_000;
@@ -32,6 +33,8 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
     let afterDue: Date | null = null;
     let afterId = '';
     while (handled < MAX_MEMORIES && remainingRows > 0) {
+      // #3174: bind naive UTC text, never a Date (a Date binds as timestamptz and shifts by the session zone).
+      const afterDueUtc = afterDue ? toNaiveUtc(afterDue) : null;
       const candidates: DueMemory[] = await db.$queryRaw<DueMemory[]>`
         WITH due AS (
         SELECT m.id AS "memoryId", m.source, m.urn AS "memoryUrn", org.urn AS "orgUrn", m.write_branch AS "writeBranch",
@@ -40,10 +43,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
         WHERE o.state IN ('FAILED', 'NOT_CLONED') AND o.attempts < ${MAX_ATTEMPTS}
           AND ${mirrorRetryBranchEligibleSql(Prisma.sql`o.branch`, Prisma.sql`m.write_branch`)}
           AND NOT m.is_encrypted AND m.source IS NOT NULL AND m.organization_id IS NOT NULL AND m.deleted_at IS NULL
-          AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${now}
+          AND o.last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(o.attempts - 1, 7)), 72) <= ${toNaiveUtc(now)}::timestamp
         GROUP BY m.id, m.source, m.urn, org.urn, m.write_branch
         ) SELECT * FROM due
-        WHERE (${afterDue}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDue}::timestamp, ${afterId}::text))
+        WHERE (${afterDueUtc}::timestamp IS NULL OR ("dueAt", "memoryId") > (${afterDueUtc}::timestamp, ${afterId}::text))
         ORDER BY "dueAt", "memoryId" LIMIT ${MAX_MEMORIES}`;
       for (const candidate of candidates) {
         try { validateMemorySource(candidate.source); } catch { continue; }
@@ -58,7 +61,7 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
           WHERE memory_id = ${candidate.memoryId} AND state IN ('FAILED', 'NOT_CLONED')
             AND ${mirrorRetryBranchEligibleSql(Prisma.sql`branch`, Prisma.sql`${candidate.writeBranch}`)}
             AND attempts < ${MAX_ATTEMPTS}
-            AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${now}
+            AND last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72) <= ${toNaiveUtc(now)}::timestamp
           ORDER BY last_attempt_at + interval '5 minutes' * LEAST(power(2, LEAST(attempts - 1, 7)), 72),
             node_id, kind, remove_loc, branch
           LIMIT ${remainingRows}`;
@@ -97,8 +100,21 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
           }, async ({ localPath, memoryUrn, obligations = [] }) => {
             // Refresh after preparation. Refuse each unavailable payload before any path mutation;
             // a row-local failure must not exhaust healthy siblings sharing the checkout.
-            const writes = await loadWrites(obligations);
-            const failedWrites = writes.filter(nodePayloadHasCiphertext).map(node => node.id);
+            const writes: NodeForGit[] = [];
+            const failedWrites: string[] = [];
+            for (const ref of obligations) if (ref.kind === 'WRITE') {
+              try {
+                const node = await loadNodeForGit(db, { nodeId: ref.nodeId, memoryId });
+                if (node) {
+                  if (nodePayloadHasCiphertext(node)) failedWrites.push(node.id);
+                  else writes.push(node);
+                }
+              } catch (err) {
+                // #3151: one second-refresh outage must not consume a healthy sibling's attempt.
+                failedWrites.push(ref.nodeId);
+                console.error('[git-mirror-sweep] Payload refresh failed', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
+              }
+            }
             const rejected = new Set(failedWrites);
             for (const node of writes) if (!rejected.has(node.id)) writeNodeFile(localPath, node, memoryUrn);
             for (const ref of obligations) if (ref.kind === 'REMOVE' && !await liveOwner(ref.removeLoc ?? '')) {

@@ -93,7 +93,7 @@
  *        tsx ticker-wake.ts loop [--interval <seconds>=120] [--budget <seconds>=interval]
  */
 import { spawn } from 'node:child_process';
-import { linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -222,6 +222,68 @@ type Receipts = Record<string, Receipt>; // by worker id
 /** Old requests displaced by NEW tick work, retained for a person; never treated as delivered evidence. */
 type NeedsPerson = Record<string, Ambiguous & { workerId: string }>;
 const NEEDS_PERSON_FILE = 'needs-person.json';
+
+/**
+ * #2746: the per-pass hold reasons, readable by the host's non-privileged user (stdout goes to a journal it cannot read).
+ * One line per held worker per pass: `<iso time> <worker name> <worker id> <code>`. The code comes from this closed
+ * list and nothing else is written: no wake text, tick line, proof, request detail or server message ever reaches it.
+ */
+const HOLDS_FILE = 'holds.log';
+const HOLDS_MAX_LINES = 200;
+const HOLD_CODES = [
+  'carries-other-reasons', 'no-receiver-on-host', 'proof-coverage-unreadable', 'no-server-timing', 'terminal-unresolved',
+  'terminal-send-in-flight', 'unreconciled-earlier-send', 'unreconciled-other-receiver', 'stranded-draft', 'uncovered-work-unidentified',
+  'alarm-unreadable', 'alarm-rule-unestablished', 'alarm-acknowledged', 'not-safe-to-type', 'check-status-unreadable', 'terminal-changed',
+  'state-write-failed', 'send-failed-will-retry', 'send-unconfirmed', 'ack-failed', 'pass-budget-spent', 'other',
+] as const;
+type HoldCode = (typeof HOLD_CODES)[number];
+/** A name or id is written only in its plain shape, so a hostile one cannot forge a second field or line. */
+const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,40}$/;
+const PLAIN_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** What a per-worker log body means for the hold file: a closed code, 'ok' (delivered, clears an earlier hold) or 'info' (not a hold). */
+export function holdOf(body: string): HoldCode | 'ok' | 'info' {
+  const rules: Array<[RegExp, HoldCode | 'ok' | 'info']> = [
+    [/^left alone \(/, 'carries-other-reasons'],
+    [/^held \(.* on this host\)$/, 'no-receiver-on-host'],
+    [/^held \(the proof's tick coverage/, 'proof-coverage-unreadable'],
+    [/^held \(the wake carries no server timing/, 'no-server-timing'],
+    [/^held \(another send to this terminal/, 'terminal-send-in-flight'],
+    [/^an earlier send is unreconciled for another receiver/, 'unreconciled-other-receiver'],
+    [/^an earlier send is unreconciled/, 'unreconciled-earlier-send'],
+    [/^(unreconciled request not reissued|earlier request still unreconciled)/, 'unreconciled-earlier-send'],
+    [/^our nudge is in the composer/, 'stranded-draft'],
+    [/^held \(the uncovered tick work/, 'uncovered-work-unidentified'],
+    [/^held \(the alarm cannot be read/, 'alarm-unreadable'],
+    [/^held \(the alarm's rule/, 'alarm-rule-unestablished'],
+    [/^held \(the alarm was acknowledged/, 'alarm-acknowledged'],
+    [/^held \(the worker's check status/, 'check-status-unreadable'],
+    [/^held \((the terminal incarnation changed|receiver replacement)/, 'terminal-changed'],
+    [/^held \((the old request could not be retained|the send intent could not be recorded)/, 'state-write-failed'],
+    [/^(could not withdraw the send intent|could not update the send record)/, 'state-write-failed'],
+    [/^nudged .* but the receipt could not be written/, 'state-write-failed'],
+    [/^send not confirmed/, 'send-unconfirmed'],
+    [/; will retry$/, 'send-failed-will-retry'],
+    [/^nudged .*ack FAILED/, 'ack-failed'],
+    [/^ack-only recovery FAILED/, 'ack-failed'],
+    [/^(nudged .*; acked|ack-only recovery acked|WOULD )/, 'ok'],
+    [/^(earlier request needs a person .*newer ticks are a fresh request|earlier request (reconciled|resolved)|open-task count unknown|tick line not typeable|retired ambiguity)/, 'info'],
+    [/^held \(/, 'other'],
+  ];
+  for (const [re, code] of rules) if (re.test(body)) return code;
+  return 'other';
+}
+
+/** Append this pass's hold lines and keep only the newest HOLDS_MAX_LINES; the file is mode 0644 and replaced atomically. */
+function writeHolds(dir: string, lines: string[]): void {
+  const path = join(dir, HOLDS_FILE);
+  let old: string[] = [];
+  try { old = readFileSync(path, 'utf8').split('\n').filter((l) => l !== ''); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, [...old, ...lines].slice(-HOLDS_MAX_LINES).join('\n') + '\n', { mode: 0o644 });
+  chmodSync(tmp, 0o644);
+  renameSync(tmp, path);
+}
 
 /** A strictly newer tick is new work; an old tick or task in an unresolved request is never named again. */
 function tickParts(key: string): { ticker: string; k: number } | null {
@@ -743,10 +805,21 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
     .sort(([a], [b]) => a.localeCompare(b));
   if (unreachable.length) log(`${ts} unreachable on this host (${unreachable.length}): ${unreachable.map(([n, r]) => `${n} (${r})`).join(', ')}`);
   const inFlight = new Set<string>(); // terminal handles with a send in flight
+  const baseLog = log;
+  /** #2746: each held worker's closed reason this pass (the last hold line of its delivery wins; a delivery clears it). */
+  const holds = new Map<string, { name: string; code: HoldCode }>();
   /** Deliver one due wake. Only a submit awaits; everything else is synchronous, so a receipt update never interleaves. */
   const deliver = async (w: any): Promise<void> => {
       const name = w.worker.name;
       const id: string = w.worker.id;
+      // #2746: every per-worker line also feeds the hold file, as a closed code (an explicit code wins over the line's text).
+      const log = (m: string, code?: HoldCode): void => {
+        baseLog(m);
+        const prefix = `${ts} ${name}: `;
+        const c = code ?? (m.startsWith(prefix) ? holdOf(m.slice(prefix.length)) : 'info');
+        if (c === 'ok') holds.delete(id);
+        else if (c !== 'info') holds.set(id, { name, code: c });
+      };
       const other = [...kinds(w)].filter((x) => x !== 'TICK' && x !== 'MENTION' && x !== 'TASK');
       // A task reason is delivered only for an event this script names (DELIVERED_EVENTS) and the caller can see; its id
       // is typed, and so is an alarm's event id (the ack command), so both must be plain ids.
@@ -772,7 +845,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
       if (!Number.isFinite(deliverAfter) || !Number.isFinite(busyDeadline) || !Number.isFinite(at(w.anchorAt))) { log(`${ts} ${name}: held (the wake carries no server timing)`); return; }
 
       const [handle, detail] = resolveTerminal(entry, terminals, cfg, run);
-      if (!handle) { log(`${ts} ${name}: held (${detail})`); return; }
+      if (!handle) { log(`${ts} ${name}: held (${detail})`, 'terminal-unresolved'); return; }
       const term0 = terminals.find((t) => t.handle === handle) as any;
       const receiver = `${handle}#${term0?.incarnationId ?? ''}`;
       const unresolved = Object.values(needsPerson).filter((p) => p.workerId === id && p.receiver === receiver).flatMap((p) => p.coverage);
@@ -872,7 +945,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
             if (why === null) resolved = 'resolved as delivered on evidence (accepted, composer empty, channel checked after the send)';
             else {
               const s = why === 'composer not provably empty' ? strandedDraft(prior) : null;
-              if (s) { log(`${ts} ${name}: ${s}`); return; }
+              if (s) { log(`${ts} ${name}: ${s}`, 'stranded-draft'); return; } // every wording (first, later, not recorded) is the one reason
               const held = unsafe ? `unreconciled request not reissued (held: ${unsafe})` : `earlier request still unreconciled (${safeDetail(r?.detail ?? prior.detail)})`;
               const person = now - prior.at >= NEEDS_PERSON_AFTER_MS ? 'needs a person' : 'not retyped, not acked';
               log(`${ts} ${name}: ${held}; no delivery evidence yet (${why}); ${person}`);
@@ -933,7 +1006,7 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
         // composer proof and the send (#2613 LOCAL P2-1). Unknown or zero is no line.
         const openLine = dry ? '' : openTaskLine(run, cfg.hadronCli, cfg.app, id, undefined, clock, deadline, (why) => log(`${ts} ${name}: open-task count unknown (${why}); the wake goes without the line`));
         const unsafe = safeToType();
-        if (unsafe) { log(`${ts} ${name}: held (${unsafe})`); return; }
+        if (unsafe) { log(`${ts} ${name}: held (${unsafe})`, 'not-safe-to-type'); return; }
         // #2754: the server's tick line leads, unchanged (hrn:node:hadronmemory.com:specs:cor:agt:080:23, :26); one that
         // can't be typed as a line is dropped and today's nudge goes out, logging the worker and a closed reason, never the text.
         const tickLine = typeableTickText(w.tickText);
@@ -1050,11 +1123,16 @@ export async function pass(cfg: Config, run: Runner, opts: Opts = {}, log: Log =
   const lane = async (): Promise<void> => {
     while (next < due.length && !failed) {
       const w = due[next++];
-      if (clock() >= deadline) { left++; continue; }
+      if (clock() >= deadline) { left++; holds.set(w.worker.id, { name: w.worker.name, code: 'pass-budget-spent' }); continue; }
       try { await deliver(w); } catch (e) { failed ??= { e }; }
     }
   };
   await Promise.all(Array.from({ length: Math.min(DELIVERY_POOL, due.length) }, lane));
+  if (!dry && holds.size) {
+    const plain = (v: unknown, re: RegExp): string => (typeof v === 'string' && re.test(v) ? v : '-');
+    const out = [...holds].map(([wid, h]) => `${ts} ${plain(h.name, PLAIN_NAME)} ${plain(wid, PLAIN_ID)} ${h.code}`);
+    try { writeHolds(stateDir, out); } catch (e) { if (!(e instanceof Error)) throw e; log(`${ts} hold reasons not written (${errno(e)})`); }
+  }
   if (failed) throw (failed as { e: unknown }).e;
   if (left) log(`${ts} pass budget spent; ${left} due wake(s) left for the next pass`);
   if (!due.length) log(`${ts} no ticker wakes due (${wakes.length} other wakes ignored)`);
