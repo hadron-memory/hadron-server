@@ -51,7 +51,7 @@ async function gql(k: string, query: string, variables: Record<string, unknown>)
 
 const code = (r: Gql) => r.errors?.[0]?.extensions?.code;
 
-async function mkUser(label: string, roles?: string[]) {
+async function mkUser(label: string, roles?: Array<'ADMIN' | 'OWNER'>) {
   const user = await db.user.create({
     data: { id: generateId(), handle: `${label}-${suffix}`, githubUsername: `${label}-${suffix}`, ...(roles ? { roles } : {}) },
   });
@@ -198,40 +198,63 @@ describe('#3254 — parity: everyone the old App gate admitted is still admitted
   });
 });
 
+/**
+ * Hold the deciding row FOR UPDATE (the removal's shape: removeAppMember holds the member row, then deletes it),
+ * start the link, wait until it is blocked on `table ... FOR SHARE`, then apply `revoke` and commit.
+ */
+async function linkRacingRevocation(callerKey: string, agentId: string, table: 'app_members' | 'org_members', hold: (tx: any) => Promise<unknown>, revoke: (tx: any) => Promise<unknown>) {
+  let release!: () => void; let ready!: () => void;
+  const held = new Promise<void>((r) => { release = r; });
+  const started = new Promise<void>((r) => { ready = r; });
+  const removing = db.$transaction(async (tx) => {
+    await hold(tx);
+    ready();
+    await held;
+    await revoke(tx);
+  }, { timeout: 30000 });
+  await started;
+  let finished = false;
+  const linking = gql(callerKey, ATTACH, { g: agentId, m: groupMem.urn, r: 'read' }).finally(() => { finished = true; });
+  const pattern = `${table}.*FOR SHARE`;
+  try {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const rows = await db.$queryRaw<Array<{ n: bigint }>>`
+        SELECT count(*) AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ~ ${pattern}`;
+      if (Number(rows[0]?.n ?? 0) > 0) break;
+      if (finished) throw new Error(`the link decided without waiting on the held ${table} row`);
+      if (Date.now() > deadline) throw new Error(`the link never waited on the ${table} row`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  } finally {
+    release();
+    await removing;
+  }
+  return linking;
+}
+
 describe('#3254 — the deciding membership is held through the link', () => {
+  it('org ADMIN demoted while the link is in flight: the link waits, then sees the demotion', async () => {
+    const admin = await mkUser('race-org');
+    await db.orgMember.create({ data: { organizationId: orgId, userId: admin.id, role: 'ADMIN' } });
+    const agentId = await orgAgentIn(appX.id, 'race-org-agent');
+    const r = await linkRacingRevocation(admin.key, agentId, 'org_members',
+      (tx) => tx.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${orgId} AND user_id = ${admin.id} FOR UPDATE`,
+      (tx) => tx.orgMember.updateMany({ where: { organizationId: orgId, userId: admin.id }, data: { role: 'READER' } }));
+    // Demoted to READER, the caller no longer manages the App. The Agent gate (org ADMIN) refuses too,
+    // but it decided before the wait; what must not happen is a stored link.
+    expect(r.errors).toBeDefined();
+    expect(await linked(agentId, groupMem.id)).toBeNull();
+  });
+
   it('a removal holding the member row makes the link wait, and the link then sees the removal', async () => {
     const owner = await mkUser('race');
     await createDbAppMember(db, appX.id, owner.id, 'owner');
     const agentId = await ownAgentIn(appX.id, owner.id, 'race');
-    let release!: () => void; let ready!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    const started = new Promise<void>((r) => { ready = r; });
-    // The removal's shape (removeAppMember holds the row FOR UPDATE, then deletes it).
-    const removing = db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appX.id} AND user_id = ${owner.id} FOR UPDATE`;
-      ready();
-      await held;
-      await tx.appMember.delete({ where: { appId_userId: { appId: appX.id, userId: owner.id } } });
-    }, { timeout: 30000 });
-    await started;
-    let finished = false;
-    const linking = gql(owner.key, ATTACH, { g: agentId, m: groupMem.urn, r: 'read' }).finally(() => { finished = true; });
-    try {
-      const deadline = Date.now() + 5000;
-      for (;;) {
-        const rows = await db.$queryRaw<Array<{ n: bigint }>>`
-          SELECT count(*) AS n FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ~ 'app_members.*FOR SHARE'`;
-        if (Number(rows[0]?.n ?? 0) > 0) break;
-        if (finished) throw new Error('the link decided without waiting on the held membership row');
-        if (Date.now() > deadline) throw new Error('the link never waited on the membership row');
-        await new Promise((r) => setTimeout(r, 10));
-      }
-    } finally {
-      release();
-      await removing;
-    }
-    const r = await linking;
+    const r = await linkRacingRevocation(owner.key, agentId, 'app_members',
+      (tx) => tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${appX.id} AND user_id = ${owner.id} FOR UPDATE`,
+      (tx) => tx.appMember.delete({ where: { appId_userId: { appId: appX.id, userId: owner.id } } }));
     expect(code(r)).toBe('MEMORY_NOT_FOUND');
     expect(await linked(agentId, groupMem.id)).toBeNull();
   });

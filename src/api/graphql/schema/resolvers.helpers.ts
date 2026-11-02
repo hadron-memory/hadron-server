@@ -91,6 +91,7 @@ import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -688,9 +689,13 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
  *    happens to reach it through. That is the "no cross-App shortcut";
  *  - **the target agent is installed in that App**, which is live (not deleted,
  *    not uninstalled, its org not soft-deleted);
- *  - **the caller is authorized for that App** by the gate `createMemoryInApp`
- *    uses to provision App knowledge (`requireOwnerOrOrgRole(app, 'ADMIN')`), so
- *    "appropriately authorized" means what it already means;
+ *  - **the caller manages that App** (#3254; ruling 0063 A, point 4;
+ *    hrn:node:hadronmemory.com:specs:cor:dmo:050:09 and :12): the shared
+ *    `managesApp` predicate, so an owner-role App member counts exactly as the
+ *    org's ADMINs/OWNERs and platform admins do. It is identity-scoped, so an
+ *    impersonated session never manages (cor:dmo:050:12), where the earlier
+ *    `requireOwnerOrOrgRole(app, 'ADMIN')` admitted an impersonated org admin
+ *    inside the shared org;
  *  - **knowledge / group only**, and never a user-owned row — never a
  *    strict-owner shape;
  *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
@@ -774,14 +779,19 @@ async function sameAppAttachAdmitted(
     if (!license[0] || !isLifecycleActive(license[0])) return false;
   }
   // A licensed foreign Agent is permitted below for this App's read audience,
-  // so the caller must explicitly administer this App as well as the Agent.
-  try {
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-  } catch (error) {
-    if (!isAuthorizationDenial(error)) throw error;
-    return false;
+  // so the caller must explicitly manage this App as well as the Agent (#3254,
+  // hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Hold the deciding
+  // memberships first, then judge on this transaction: a removal or demotion
+  // that committed first is seen, and one arriving later waits for the grant
+  // (removeAppMember holds the member row FOR UPDATE). These are the last locks
+  // this gate takes; the attach's anchors are already held, as the removal's are.
+  if (ctx.userId && !ctx.impersonation) {
+    await ctx.db.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
+    if (app.organizationId != null) {
+      await ctx.db.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+    }
   }
-  return true;
+  return managesApp(ctx, app);
 }
 
 /**
