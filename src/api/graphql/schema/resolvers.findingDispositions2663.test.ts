@@ -138,3 +138,25 @@ it('wide task rows read disposition pages in finding order without loading the i
  expect(Object.hasOwn(row,'resultFindings')).toBe(false);
  expect((await R.AgentTask.findingDispositions(row,{},ctx())).items.map((d:any)=>d.findingId)).toEqual(['F1','F2']);
 });
+it('post-push backfills pre-existing findings and preserves their current dispositions and result',async()=>{
+ const {Client}=await import('pg');const {readFileSync}=await import('node:fs');
+ // Static repository DDL on THIS test worker's private DB; never TEST_DATABASE_URL or a shared DB.
+ const sql=readFileSync('prisma/agent-task-dispositions-invariants.sql','utf8');
+ const client=new Client({connectionString:process.env.DATABASE_URL});await client.connect();
+ try {
+  await dispose('fixed','F1');const original=JSON.stringify(await result());
+  await client.query('DROP TRIGGER agent_task_dispositions ON agent_tasks');
+  await db.agentTask.update({where:{id:task.id},data:{unresolvedFindingIds:[]}});
+  const legacy=await M.createAgentTask({}, {input:{appRef:app.id,title:'Before post-push',assignee:{user:assignee.id}}},ctx());
+  await M.startAgentTask({}, {taskId:legacy.id},ctx(assignee.id));
+  await M.finishAgentTask({}, {taskId:legacy.id,result:{outcome:'done',findings:[{severity:'note',text:'legacy finding'}]}},ctx(assignee.id));
+  expect((await stored(legacy.id) as any).unresolvedFindingIds).toEqual([]); // establish the old-row state
+  await client.query(sql);
+  expect((await stored() as any).unresolvedFindingIds).toEqual(['F2']);
+  expect((await stored(legacy.id) as any).unresolvedFindingIds).toEqual(['F1']);
+  expect(JSON.stringify(await result())).toBe(original);
+  expect((await read()).items).toEqual([{findingId:'F1',disposition:'fixed',reference:null}]);
+ } finally {
+  try {await client.query(sql);} finally {await client.end();}
+ }
+});
