@@ -100,3 +100,11 @@ it('migration carries the exact post-push findings guards',()=>{
  const sql=readFileSync('prisma/agent-task-findings-invariants.sql','utf8');
  expect(readFileSync('prisma/migrations/20261102193000_agent_task_findings/migration.sql','utf8').endsWith(sql)).toBe(true);
 });
+it('SQL NULL and JSON null both remain legacy no-findings, including row-copy semantics',async()=>{
+ await db.$executeRaw`UPDATE agent_tasks SET result_findings = 'null'::jsonb WHERE id = ${task.id}`;
+ await finish();
+ expect(R.AgentTask.result(await stored())).toEqual({outcome:'succeeded',summary:'S',evidence:'E'});
+ await db.$executeRaw`UPDATE agent_tasks SET result_findings = NULL WHERE id = ${task.id}`;
+ expect(R.AgentTask.result(await stored())).toEqual({outcome:'succeeded',summary:'S',evidence:'E'});
+ expect((await read()).items).toEqual([]);
+});
