@@ -127,6 +127,17 @@ describe('#2975 hadron_get_node by action URN: an operational fault is a fault, 
     expect(probe.fired, 'the fault was injected').toBe(true);
     expectFaultEnvelope(r, urn);
   });
+
+  // #3130 (carried from #3134, blind P3): the register-entry catch through
+  // hadron_run_action too, so that tool's boundary is pinned on both lookups.
+  it('hadron_run_action: a DB fault in the register-entry lookup is a fault there too', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const probe = faultEntryLookup();
+    const urn = actionUrn(agent.urn);
+    const r = await runAction(owner.id, urn);
+    expect(probe.fired, 'the fault was injected').toBe(true);
+    expectFaultEnvelope(r, urn);
+  });
 });
 
 describe('#2975 hadron_get_node by action URN: refusals stay byte-identical', () => {
