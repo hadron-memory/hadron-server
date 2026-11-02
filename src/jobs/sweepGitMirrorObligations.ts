@@ -11,6 +11,8 @@ import { mirrorFailureMetadata } from '../integrations/github/mirrorFailureMetad
 import { gitMirrorSweepRowBudget } from './gitMirrorSweepBudget.js';
 import { Prisma } from '../generated/prisma/index.js';
 import { mirrorRetryBranchEligibleSql } from '../integrations/github/mirrorBranchEligibility.js';
+import { mutateMirrorFiles, hasIncompleteMirrorMutation } from '../integrations/github/mirrorFileMutation.js';
+import type { MirrorObligationRef } from '../integrations/github/mirrorObligations.js';
 import { toNaiveUtc } from '../lib/sessionActivity.js';
 
 export const MAX_ATTEMPTS = 10;
@@ -84,7 +86,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
                   if (await loadNodeForGit(db, { nodeId: ref.nodeId, memoryId })) return true;
                 } catch { return true; }
               }
-              for (const ref of refs) if (ref.kind === 'REMOVE' && !await liveOwner(ref.removeLoc ?? '')) return true;
+              for (const ref of refs) if (ref.kind === 'REMOVE') {
+                try { if (!await liveOwner(ref.removeLoc ?? '')) return true; }
+                catch { return true; } // classify at the row-local mutation boundary
+              }
               return false;
             },
             verify: async ({ localPath, memoryUrn, obligations = [] }) => {
@@ -112,12 +117,38 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
                 console.error('[git-mirror-sweep] Payload refresh failed', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
               }
             }
+            const failedRemoves: MirrorObligationRef[] = [];
+            const paths = (loc: string) => {
+              const file = nodeFilePath(localPath, loc, memoryUrn);
+              // Root README must never snapshot/delete its entire checkout as a legacy path.
+              if (!loc) return [file];
+              const legacy = orphanedLegacyPaths(localPath, loc);
+              return [file, legacy.readme, legacy.sidecar];
+            };
+            const failedOperation = (err: unknown) => {
+              console.error('[git-mirror-sweep] File mutation failed', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
+            };
             const rejected = new Set(failedWrites);
-            for (const node of writes) if (!rejected.has(node.id)) writeNodeFile(localPath, node, memoryUrn);
-            for (const ref of obligations) if (ref.kind === 'REMOVE' && !await liveOwner(ref.removeLoc ?? '')) {
-              removeNodeFile(localPath, ref.removeLoc ?? '', ref.nodeId, memoryUrn);
+            for (const node of writes) if (!rejected.has(node.id)) {
+              try { mutateMirrorFiles(localPath, paths(node.loc), () => { writeNodeFile(localPath, node, memoryUrn); }); }
+              catch (err) {
+                failedOperation(err); failedWrites.push(node.id);
+                if (hasIncompleteMirrorMutation(localPath)) return { failedWrites, failedRemoves };
+              }
             }
-            return { failedWrites };
+            for (const ref of obligations) if (ref.kind === 'REMOVE') {
+              try {
+                if (!await liveOwner(ref.removeLoc ?? '')) {
+                  mutateMirrorFiles(localPath, paths(ref.removeLoc ?? ''), () => {
+                    removeNodeFile(localPath, ref.removeLoc ?? '', ref.nodeId, memoryUrn);
+                  });
+                }
+              } catch (err) {
+                failedOperation(err); failedRemoves.push(ref);
+                if (hasIncompleteMirrorMutation(localPath)) return { failedWrites, failedRemoves };
+              }
+            }
+            return { failedWrites, failedRemoves };
           });
         }
       }

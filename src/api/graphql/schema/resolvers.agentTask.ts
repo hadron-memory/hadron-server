@@ -787,6 +787,15 @@ type RequirementsInput = {
   modelGroupNotIn?: string[] | null;
 };
 
+/** #2831 S2 (cor:agt:060:12): a model group name no effective group of this App carries is refused, naming it. */
+async function refuseUnknownModelGroups(ctx: Context, app: TaskApp, names: string[]): Promise<void> {
+  if (!names.length) return;
+  const known = new Set((await loadAppModelGroups(ctx.db, app.id, { strict: true })).map((g) => g.name));
+  for (const name of names) {
+    if (!known.has(name)) throw taskError('MODEL_GROUP_NOT_FOUND', `No model group named "${name}" is declared for this App.`, { name });
+  }
+}
+
 /** The matcher's requirements (plan §3.1). Stored for T3; validated here. */
 async function normalizeRequirements(
   ctx: Context,
@@ -865,10 +874,7 @@ async function normalizeRequirements(
   const modelGroupIn = groupNames(input.modelGroupIn, 'requirements.modelGroupIn');
   const modelGroupNotIn = groupNames(input.modelGroupNotIn, 'requirements.modelGroupNotIn');
   if (modelGroupIn || modelGroupNotIn) {
-    const known = new Set((await loadAppModelGroups(ctx.db, app.id, { strict: true })).map((g) => g.name));
-    for (const name of [...(modelGroupIn ?? []), ...(modelGroupNotIn ?? [])]) {
-      if (!known.has(name)) throw taskError('MODEL_GROUP_NOT_FOUND', `No model group named "${name}" is declared for this App.`, { name });
-    }
+    await refuseUnknownModelGroups(ctx, app, [...(modelGroupIn ?? []), ...(modelGroupNotIn ?? [])]);
   }
   const out: Prisma.InputJsonObject = {
     ...(role ? { role } : {}),
@@ -1130,6 +1136,9 @@ function refuseEnded(task: TaskRow): void {
 
 // ── Mutations ─────────────────────────────────────────────────────────────
 
+/** #2646: the overrides of a clone; every field is optional, and a field left out keeps the source's value. */
+type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'parentTaskId'>>;
+
 type CreateInput = {
   match?: boolean | null;
   appRef?: string | null;
@@ -1179,6 +1188,8 @@ async function insertTask(
     /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
     project?: boolean;
     matchPending?: boolean;
+    /** #2646: the task a clone was made from; set only here, at creation, and named in the one task.created event. */
+    clonedFromId?: string | null;
   },
 ): Promise<{ id: string; queued: boolean }> {
   // #2022 (cor:agt:090:03): a stop signal refuses making a covered worker the assignee, at creation too.
@@ -1234,6 +1245,7 @@ async function insertTask(
       priority: a.priority ?? 1,
       status: a.status ?? 'pending',
       parentTaskId: parentId,
+      clonedFromId: a.clonedFromId ?? null,
       requirements: a.requirements ?? Prisma.DbNull,
       matchPending: a.matchPending ?? false,
       properties: a.properties ?? Prisma.DbNull,
@@ -1253,7 +1265,7 @@ async function insertTask(
     appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
     // The owner rides the event (#1757): a named owner is visible to the
     // event stream — and so to the alarm chain — from creation.
-    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null },
+    event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null, clonedFromTaskId: a.clonedFromId ?? null },
   });
   if (a.properties) {
     await appendTaskEvent(tx, {
@@ -1555,8 +1567,13 @@ export const TASK_BATCH_MAX = 25;
  * A create judged before its transaction: the App and actor it resolved to, its parent, its normalized fields and
  * the advice decided so far. Built by {@link prepareTaskCreate}; written by {@link applyTaskCreate}.
  */
+/** #2646: what a clone only copied (a copied value is left out, never refused, when the caller may not set it). */
+type CloneCopy = { sourceId: string; priorityCopied: boolean; propertiesCopied: boolean; requirements?: Prisma.JsonValue | null };
+
 type PreparedCreate = {
   input: CreateInput;
+  /** #2646: set only by cloneAgentTask, after the create is prepared. */
+  clone?: CloneCopy;
   /** The caller's spelling of the parent (an id or a handle), echoed in refusals; null for a root task. */
   parentRef: string | null;
   /** The parent's canonical id once it resolved. */
@@ -1662,7 +1679,17 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
  */
 async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate) {
   const { input, actor, parentRef } = p;
-  const requirements = await normalizeRequirements(txCtx, app, input.requirements);
+  const { clone } = p;
+  let requirements: Prisma.InputJsonObject | null;
+  if (clone && clone.requirements !== undefined) {
+    // #2646: copied values still pass the create gates (cor:agt:050:02): a model group removed since the source was made
+    // is refused as a plain create refuses it. A removed excluded worker is held by the database reference fence.
+    requirements = (clone.requirements as Prisma.InputJsonObject | null) ?? null;
+    const groups = (k: string) => (Array.isArray(requirements?.[k]) ? (requirements![k] as string[]) : []);
+    await refuseUnknownModelGroups(txCtx, app, [...groups('modelGroupIn'), ...groups('modelGroupNotIn')]);
+  } else {
+    requirements = await normalizeRequirements(txCtx, app, input.requirements);
+  }
   let owner: TaskParty = actorParty(actor);
   if (input.owner) {
     // #1757 (cor:agt:050:01, Holger team chat #8183): a root task's
@@ -1695,8 +1722,19 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
       ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null,
       assigneeWorkerId: assignee?.workerId ?? null, assigneeUserId: assignee?.userId ?? null,
     })) {
-    properties = normalizeTaskProperties(input.properties);
-    await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+    if (clone?.propertiesCopied) {
+      // #2646: a clone only copies them, so a value the team's schema now refuses is left out, never a refusal.
+      try {
+        properties = normalizeTaskProperties(input.properties);
+        await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+      } catch (e) {
+        if (!(e instanceof GraphQLError)) throw e;
+        properties = null;
+      }
+    } else {
+      properties = normalizeTaskProperties(input.properties);
+      await checkAgainstTeamSchema(tx, txCtx, app.id, properties);
+    }
   }
   return { requirements, owner, assignee, properties };
 }
@@ -1724,16 +1762,25 @@ async function applyTaskCreate(
     }
     refuseEnded(parent);
   }
+  if (p.clone) {
+    // The source is revalidated under the write: one that is gone refuses like an unknown task, never a foreign-key error.
+    const src = await tx.agentTask.findUnique({ where: { id: p.clone.sourceId }, select: { appId: true } });
+    if (!src || src.appId !== app.id) throw notFound(p.clone.sourceId);
+  }
   const { requirements, owner, assignee, properties } = await resolveCreateParties(tx, txCtx, app, p);
   if (assignee?.workerId && assignee.workerId !== p.lockedAssignee) {
     throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
   }
   await refuseResettingAssignee(tx, app.id, assignee?.workerId);
   await assigneeAdvice(tx, app.id, assignee, null, p.warn);
+  // #2646: a copied priority is kept only for a caller who may set it (as the owner of this clone, or above); for anyone
+  // else it is left unset, never refused. A priority the caller NAMED is judged in applyTaskCreateBlockers, as on a create.
+  const keepPriority = !p.clone?.priorityCopied
+    || (await mayDirectTask(tx, txCtx, app, actor, { ownerWorkerId: owner.workerId ?? null, ownerUserId: owner.userId ?? null }));
   const made = await insertTask(tx, {
     app, parentId: parentTaskId, project: input.project === true, title: p.title, description: p.description, source: p.source,
     externalId: p.externalId, tags: p.tags, references: p.references, startBy: p.startBy, finishBy: p.finishBy,
-    closeSessionWhenDone: p.closeSessionWhenDone, requirements, properties, owner, assignee, status: p.status, priority: p.priority,
+    closeSessionWhenDone: p.closeSessionWhenDone, requirements, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
     created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId), matchPending: input.match === true,
   });
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
@@ -1755,7 +1802,7 @@ async function applyTaskCreateBlockers(
   tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate, row: TaskRow, withinCall: readonly string[],
   namesCallBlockers: boolean,
 ): Promise<void> {
-  if (p.input.priority !== undefined || p.input.blockedBy !== undefined || namesCallBlockers) {
+  if ((p.input.priority !== undefined && !p.clone?.priorityCopied) || p.input.blockedBy !== undefined || namesCallBlockers) {
     await requireTaskDirection(tx, txCtx, app, p.actor, row);
   }
   for (const ref of [...new Set([...(p.input.blockedBy ?? []), ...withinCall])]) {
@@ -2006,6 +2053,70 @@ export const agentTaskMutations = {
       created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn));
     }
     if (inApp.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, inApp.actor.workerId);
+    return created;
+  },
+
+  /**
+   * #2646 (cor:agt:050:02, What a clone does; Decided, ruling 0010): a clone is a create in the source's App with its
+   * fields filled in from the source, linked to it. Whoever may read the source and create a task there may clone it,
+   * whatever its status. Every create gate applies to the copied values (the parent, the root gate, properties,
+   * priority); the source is never changed. An ended task never reopens: this makes a NEW task.
+   */
+  cloneAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input?: CloneInput | null }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const readable = await loadReadableTask(ctx, taskId);
+    // Unknown, unreadable and cross-App sources answer alike (#1577 posture): no existence oracle over task ids.
+    if (!readable) throw notFound(taskId);
+    const src = readable.task;
+    if (src.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project and cannot be cloned.');
+    const ov: CloneInput = input ?? {};
+    const named = <K extends keyof CloneInput>(k: K): boolean => ov[k] !== undefined;
+    // The parent: a parent the call names; else, when the call names none (parentTaskId: null), a root; else the
+    // source's own. A project stays a project, and a task under AT0 or under an ended parent goes under AT0.
+    let parentTaskId: string | null = null;
+    let project = false;
+    if (ov.parentTaskId) {
+      parentTaskId = ov.parentTaskId;
+      project = ov.project === true;
+    } else if (ov.parentTaskId === null) {
+      project = ov.project === true;
+    } else if (!src.parentTaskId) {
+      project = ov.project ?? true;
+    } else if (ov.project === true) {
+      // An explicit project override on a child source makes a top-level project, as on a plain create.
+      project = true;
+    } else {
+      const parent = await ctx.db.agentTask.findUnique({ where: { id: src.parentTaskId }, select: { id: true, handle: true, status: true } });
+      if (parent && parent.handle !== PROJECT_ZERO_HANDLE && !ENDED.includes(parent.status)) parentTaskId = parent.id;
+      project = false;
+    }
+    const stored = storedTaskReferences(src.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null }));
+    const createInput: CreateInput = {
+      appRef: readable.app.id,
+      parentTaskId,
+      project,
+      title: ov.title ?? src.title,
+      description: named('description') ? ov.description : src.description,
+      source: named('source') ? ov.source : src.source,
+      tags: named('tags') ? ov.tags : src.tags,
+      references: named('references') ? ov.references : stored,
+      closeSessionWhenDone: ov.closeSessionWhenDone ?? src.closeSessionWhenDone,
+      priority: ov.priority ?? src.priority,
+      properties: named('properties') ? ov.properties : (src.properties ?? undefined),
+      requirements: named('requirements') ? ov.requirements : undefined,
+      owner: ov.owner, assignee: ov.assignee, status: ov.status, startBy: ov.startBy, finishBy: ov.finishBy,
+    };
+    const p = await prepareTaskCreate(ctx, createInput);
+    p.clone = {
+      sourceId: src.id,
+      priorityCopied: ov.priority == null,
+      propertiesCopied: !named('properties'),
+      requirements: named('requirements') ? undefined : ((src.requirements as Prisma.JsonValue | null) ?? null),
+    };
+    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p),
+      { lockWorkerIds: [p.lockedAssignee], taskGraph: 'shared' });
+    if (made.queued) await matchAfterChange(ctx.db, p.app.id);
+    const created = await afterTaskCreate(ctx, info, made.id, p.warn);
+    if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
     return created;
   },
 
@@ -2688,7 +2799,7 @@ export async function partyView(ctx: Context, workerId: string | null, userId: s
   return null;
 }
 
-type RelationDirection = 'blockedBy' | 'blocks';
+type RelationDirection = 'blockedBy' | 'blocks' | 'clones';
 type RelationPage = { items: TaskRow[]; total: number; hasMore: boolean };
 type RelationRequest = {
   id: string;
@@ -2786,11 +2897,16 @@ async function relationPages(
   const totals = new Map<string, number>(); // `${direction}:${parent}` -> total
   const related = new Map<string, TaskRow>();
   const relatedIds = new Map<string, string[]>(); // `${direction}:${take}:${skip}:${parent}` -> related ids, in order
-  for (const direction of ['blockedBy', 'blocks'] as const) {
+  for (const direction of ['blockedBy', 'blocks', 'clones'] as const) {
     const ofDirection = mine.filter((r) => r.direction === direction);
     if (!ofDirection.length) continue;
     const parentIds = [...new Set(ofDirection.map((r) => r.id))];
-    const counts = direction === 'blockedBy'
+    const counts = direction === 'clones'
+      ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
+          SELECT c.cloned_from_id AS parent, count(*)::int AS n FROM agent_tasks c
+          JOIN agent_tasks p ON p.id = c.cloned_from_id AND p.app_id = c.app_id
+          WHERE c.cloned_from_id IN (${Prisma.join(parentIds)}) GROUP BY c.cloned_from_id`
+      : direction === 'blockedBy'
       ? await db.$queryRaw<Array<{ parent: string; n: number }>>`
           SELECT l.task_id AS parent, count(*)::int AS n FROM agent_task_blockers l
           JOIN agent_tasks p ON p.id = l.task_id JOIN agent_tasks r ON r.id = l.blocker_task_id AND r.app_id = p.app_id
@@ -2810,7 +2926,16 @@ async function relationPages(
     }
     for (const s of shapes.values()) {
       const upper = s.skip + s.take;
-      const rows = direction === 'blockedBy'
+      const rows = direction === 'clones'
+        ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
+            SELECT parent, related FROM (
+              SELECT c.cloned_from_id AS parent, c.id AS related,
+                     row_number() OVER (PARTITION BY c.cloned_from_id ORDER BY c.id) AS rn
+              FROM agent_tasks c
+              JOIN agent_tasks p ON p.id = c.cloned_from_id AND p.app_id = c.app_id
+              WHERE c.cloned_from_id IN (${Prisma.join(s.parentIds)})) w
+            WHERE rn > ${s.skip} AND rn <= ${upper} ORDER BY parent, related`
+        : direction === 'blockedBy'
         ? await db.$queryRaw<Array<{ parent: string; related: string }>>`
             SELECT parent, related FROM (
               SELECT l.task_id AS parent, l.blocker_task_id AS related,
@@ -2857,6 +2982,17 @@ export const agentTaskFieldResolvers = {
     matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
+    /** #2646 (cor:agt:050:02): the clones made from this task, paged, in this task's own App; each as its own read answers. */
+    clones: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'clones', args),
+    /**
+     * #2646: the task this one was cloned from, as that task's OWN read answers (cor:acl:110:02): the gate is judged
+     * here, not inherited from the clone's, so a source the caller cannot read, a source in another App (the server
+     * never makes one) and a source since removed all read as null, never as an error.
+     */
+    clonedFrom: async (task: TaskRow, _: unknown, ctx: Context) => {
+      if (!task.clonedFromId) return null;
+      return withReadableTask(ctx, task.clonedFromId, async (c, r) => (r.task.appId === task.appId ? r.task : null));
+    },
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
     taskNumber: (t: TaskRow) => String(t.taskNumber),

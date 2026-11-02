@@ -253,3 +253,13 @@ it('no-match batch preserves ordinary queued results and events for omitted fals
     expect(events.map(e => e.type)).toEqual(['assignment.queued', 'task.created']);
   }
 });
+
+it('a clone keeps normalized role/team requirements but starts without the source match-failure state', async () => {
+  const lead = await worker('Lead', 'manager');
+  const source = await create({ match: true, requirements: { roles: ['missing'], team: lead.id } });
+  expect(source.matchFailedReason).toBe('NO_ROLE');
+  const cloned = await M.cloneAgentTask({}, { taskId: source.id, input: {} }, ctx);
+  expect(cloned).toMatchObject({ clonedFromId: source.id, status: 'pending', assigneeWorkerId: null, matchPending: false, matchFailedAt: null, matchFailedReason: null });
+  expect(cloned.requirements).toEqual(source.requirements);
+  expect((await row(source.id)).matchFailedReason).toBe('NO_ROLE');
+});

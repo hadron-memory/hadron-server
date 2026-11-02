@@ -10548,7 +10548,14 @@ export const typeDefs = `#graphql
     """
     #1705 — finish a started task with its result: its assignee only
     (hrn:node:hadronmemory.com:specs:cor:agt:050:08). A pending task is refused: start it first. Refusals as
-    startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word.
+    startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word. #2652 (outcome set,
+    hrn:node:hadronmemory.com:specs:cor:agt:050:30): a team may close the outcomes its tasks finish with, as the
+    node schema:task-outcomes in the Team Agent's system memory, found through its base chain, with data
+    {"outcomes": [...]} holding 1 to 100 one-word outcomes. With a set, an outcome outside it (matched exactly,
+    case-sensitive) is TASK_OUTCOME_NOT_IN_SET, and the refusal does not list the set. A set that exists but is
+    malformed, or two installed Team Agents when either carries the node, is TASK_OUTCOME_SET_UNUSABLE, refusing
+    every finish. Both are judged after the assignee and status checks and before any write or event: the task
+    stays started. With no set, any one word is accepted. The set is read only at finish.
     """
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
 
@@ -10587,6 +10594,21 @@ export const typeDefs = `#graphql
     SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
     parkAgentTask(taskId: ID!): AgentTask!
+
+    """
+    #2646 (hrn:node:hadronmemory.com:specs:cor:agt:050:02, What a clone does): make a NEW task from an existing one, in
+    its App, linked to it (clonedFrom / clones). A clone is a create: whoever may read the source and create a task there
+    may clone it, in any status; the source is never changed and an ended task is never reopened. Copied: title,
+    description, source, tags, requirements, references, closeSessionWhenDone, priority, properties and the parent. Not
+    copied: assignee, status, result, handle, blockers, startBy, finishBy, externalId. The clone is PENDING (or BACKLOG, as
+    input.status asks). The parent is kept only for someone who may create a child of it (else TASK_NOT_ASSIGNEE, nothing
+    created, unless input.parentTaskId names another parent or null for none); a root is cloned as a root of the same
+    kind, through the root create gate; under an ended parent it goes under the project AT0. The properties and priority
+    are copied only for a caller who may set them and are otherwise left out, with no refusal. Refusals: TASK_NOT_FOUND
+    (an unknown, unreadable or cross-App source or parent), BAD_USER_INPUT (AT0 cannot be cloned), TASK_NOT_ASSIGNEE,
+    TASK_NOT_OWNER (a priority you name and may not set), TASK_ENDED (a named parent that has ended).
+    """
+    cloneAgentTask(taskId: ID!, input: CloneAgentTaskInput): AgentTask!
 
     """
     #1754 — make a backlog task ready to be worked
@@ -14173,7 +14195,7 @@ export const typeDefs = `#graphql
   }
 
   input AgentTaskResultInput {
-    "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text."
+    "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text. When the team has an outcome set (#2652, schema:task-outcomes; hrn:node:hadronmemory.com:specs:cor:agt:050:30) it must be one of the set (TASK_OUTCOME_NOT_IN_SET); an unusable set refuses every finish (TASK_OUTCOME_SET_UNUSABLE)."
     outcome: String!
     summary: String
     evidence: String
@@ -14860,6 +14882,14 @@ export const typeDefs = `#graphql
     blockedBy(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
     "Same-App tasks that name this task as a blocker."
     blocks(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
+    """
+    #2646 (hrn:node:hadronmemory.com:specs:cor:agt:050:02): the task this one was cloned from, or null when it was not
+    made by a clone or the source is not readable to you. Read it as "replaces" when the source's status is FINISHED or
+    CANCELLED, and "cloned from" otherwise.
+    """
+    clonedFrom: AgentTask
+    "#2646: the clones made from this task, in its own App, paged (hrn:node:hadronmemory.com:specs:cor:agt:050:02); a clone you cannot read is left out."
+    clones(limit: Int = 20, offset: Int = 0): AgentTaskDependencyPage!
     id: ID!
     appId: ID!
     """
@@ -15833,6 +15863,31 @@ export const typeDefs = `#graphql
     task: CreateAgentTaskInput!
     "Other tasks of the same call that block this one, by their 1-based position in the list."
     blockedByPositions: [Int!]
+  }
+
+  """
+  #2646: the overrides of a clone. Every field is optional; a field left out keeps the source's value (a copied field)
+  or stays unset (a field a clone does not copy). An optional field is cleared by naming it empty.
+  """
+  input CloneAgentTaskInput {
+    title: String
+    description: String
+    source: String
+    tags: [String!]
+    references: [AgentTaskReferenceInput!]
+    closeSessionWhenDone: Boolean
+    "A priority you name and may not set is refused, as on a create; a copied one you may not set is left out."
+    priority: Int
+    properties: JSON
+    requirements: AgentTaskRequirementsInput
+    "Another parent in the same App, or null for none (a root under AT0, or a project with project: true)."
+    parentTaskId: ID
+    project: Boolean
+    owner: AgentTaskPartyInput
+    assignee: AgentTaskPartyInput
+    status: AgentTaskCreateStatus
+    startBy: DateTime
+    finishBy: DateTime
   }
 
   """

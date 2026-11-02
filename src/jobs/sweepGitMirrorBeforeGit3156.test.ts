@@ -73,13 +73,12 @@ describe('#3156 retry throws', () => {
   }
   expect(snapshots.map(r => r.attempts)).toEqual([2,3,4,5,6,7,8,9,10,10,10,10]);
   expect(snapshots[0].lastAttemptAt.getTime()).toBeGreaterThan(initial.lastAttemptAt.getTime());
-  expect(snapshots.slice(0,9).every(r => r.errorClass === (kind === 'WRITE' ? 'TREE_WRITE' : 'LOCK_FAILED'))).toBe(true);
+  expect(snapshots.slice(0,9).every(r => r.errorClass === 'TREE_WRITE')).toBe(true);
   expect(snapshots[8]).toMatchObject({ state: 'EXHAUSTED', attempts: 10 });
   expect(snapshots.slice(9)).toEqual([snapshots[8],snapshots[8],snapshots[8]]);
-  expect(hook).toHaveBeenCalledTimes(kind === 'WRITE' ? 18 : 9); // WRITE retries the payload at the row-local mutation boundary
+  expect(hook).toHaveBeenCalledTimes(18); // Both readiness errors defer to the per-row mutation boundary
   expect(sequences).toHaveBeenCalledTimes(9); // reuse the taken fence, never allocate in the retry catch
-  if (kind === 'REMOVE') expect(env.commands).toEqual([]);
-  else {
+  {
    // First-refresh outage requests preparation so the second, per-row load can classify it.
    expect(env.commands.filter(args=>args[0]==='fetch')).toHaveLength(9);
    expect(env.commands.filter(args=>args[0]==='push')).toEqual([]);
@@ -92,12 +91,12 @@ describe('#3156 retry throws', () => {
   await db.gitMirrorObligation.updateMany({ where: { memoryId }, data: { kind: 'REMOVE', removeLoc: 'old' } });
   await tick();
   const after = (await rows())[0];
-  expect(after).toMatchObject({attempts:2,errorClass:'LOCK_FAILED',state:'FAILED'});
+  expect(after).toMatchObject({attempts:2,errorClass:'TREE_WRITE',state:'FAILED'});
   await tick(new Date(after.lastAttemptAt.getTime() + 10 * 60_000 - 1));
-  expect(await rows()).toEqual([after]); expect(hook).toHaveBeenCalledTimes(1);
+  expect(await rows()).toEqual([after]); expect(hook).toHaveBeenCalledTimes(2);
   await tick(new Date(after.lastAttemptAt.getTime() + 10 * 60_000));
-  expect((await rows())[0]).toMatchObject({attempts:3,errorClass:'LOCK_FAILED'});
-  expect(hook).toHaveBeenCalledTimes(2);
+  expect((await rows())[0]).toMatchObject({attempts:3,errorClass:'TREE_WRITE'});
+  expect(hook).toHaveBeenCalledTimes(4);
  });
 
  it('a throw with a taken retry sequence cannot overwrite a newer row', async () => {
