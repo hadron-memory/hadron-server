@@ -62,25 +62,34 @@ function completeEntries() {
     'Memory.owner': E.proj,
     'Agent.memory': E.parent,
     'Member.user': E.open,
+    'AgentsPage.items': E.self,
+    'MakeAgentPayload.agent': E.parent,
   };
 }
+const TARGETS: Record<string, string> = {
+  'Memory.agent': 'Agent', 'Memory.members': 'Member', 'Memory.owner': 'Owner', 'Agent.memory': 'Memory', 'Member.user': 'Owner',
+  'AgentsPage.items': 'Agent', 'MakeAgentPayload.agent': 'Agent', 'Memory.gone': 'Memory', 'Query.memory': 'Memory', 'Owner.synthetic': 'Memory',
+};
+/** The fixtures state what is under test; the target each entry must record is filled in here. */
+const withTargets = (entries: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(entries).map(([c, e]) => [c, { target: TARGETS[c], ...(e as object) }]));
 const run = (entries: Record<string, unknown>, sdl = FIXTURE_SDL) =>
-  checkManifest({ sdl, manifest: { nonEntityTypes: NON_ENTITY, entries }, root });
+  checkManifest({ sdl, manifest: { nonEntityTypes: NON_ENTITY, entries: withTargets(entries) }, root });
 
 describe('the walk: what counts as a cross-parent object field', () => {
   const coords = walkCrossParentFields(FIXTURE_SDL, Object.keys(NON_ENTITY)).map((f: { coord: string }) => f.coord);
   it('finds every field that returns a different entity object, through list and non-null wrappers', () => {
-    expect(coords.sort()).toEqual(['Agent.memory', 'Member.user', 'Memory.agent', 'Memory.members', 'Memory.owner']);
+    expect(coords.sort()).toEqual(['Agent.memory', 'AgentsPage.items', 'MakeAgentPayload.agent', 'Member.user', 'Memory.agent', 'Memory.members', 'Memory.owner']);
   });
-  it('skips the root operation types, scalars, enums, self-typed fields and non-entity targets', () => {
-    for (const skipped of ['Query.memory', 'Mutation.makeAgent', 'Memory.self', 'Memory.name', 'Agent.stats', 'AgentsPage.items', 'MakeAgentPayload.agent']) {
+  it('skips the root operation types, scalars, self-typed fields and non-entity targets (an envelope is excluded as a TARGET, its entity-returning fields stay in)', () => {
+    for (const skipped of ['Query.memory', 'Mutation.makeAgent', 'Memory.self', 'Memory.name', 'Agent.stats', 'AgentsPage.total']) {
       expect(coords).not.toContain(skipped);
     }
   });
   it('treats a type missing from the non-entity table as in scope (fail closed)', () => {
     const open = walkCrossParentFields(FIXTURE_SDL, []).map((f: { coord: string }) => f.coord);
     expect(open).toContain('Agent.stats');
-    expect(open).toContain('AgentsPage.items');
+    expect(open).toContain('Memory.agent');
   });
 });
 
@@ -120,6 +129,14 @@ describe('the check: it fails and names the field', () => {
     const r = run({ ...completeEntries(), 'Query.memory': E.self });
     expect(r.problems.join('\n')).toContain('Query.memory');
   });
+  it('fails an entry whose recorded target is not the type the schema now returns', () => {
+    const r = run({ ...completeEntries(), 'Memory.agent': { ...E.self, target: 'Owner' } });
+    expect(r.problems.join('\n')).toMatch(/Memory\.agent.*Agent/);
+  });
+  it('fails an entry with no recorded target', () => {
+    const r = checkManifest({ sdl: FIXTURE_SDL, manifest: { nonEntityTypes: NON_ENTITY, entries: completeEntries() }, root });
+    expect(r.problems.join('\n')).toMatch(/Memory\.agent.*target/);
+  });
   it('fails an entry with no class, or an unknown class', () => {
     expect(run({ ...completeEntries(), 'Memory.agent': {} }).problems.join('\n')).toMatch(/Memory\.agent.*class/);
     expect(run({ ...completeEntries(), 'Memory.agent': { class: 'trusted' } }).problems.join('\n')).toMatch(/Memory\.agent.*class/);
@@ -150,11 +167,11 @@ describe('the check: it fails and names the field', () => {
     expect(run({ ...completeEntries(), 'Member.user': { class: 'open', evidence: 'later' } }).problems.join('\n')).toMatch(/Member\.user.*(#|issue)/);
   });
   it('fails a stale non-entity table row (the type is gone)', () => {
-    const r = checkManifest({ sdl: FIXTURE_SDL, manifest: { nonEntityTypes: { ...NON_ENTITY, Ghost: 'value' }, entries: completeEntries() }, root });
+    const r = checkManifest({ sdl: FIXTURE_SDL, manifest: { nonEntityTypes: { ...NON_ENTITY, Ghost: 'value' }, entries: withTargets(completeEntries()) }, root });
     expect(r.problems.join('\n')).toContain('Ghost');
   });
   it('fails a non-entity row with no kind', () => {
-    const r = checkManifest({ sdl: FIXTURE_SDL, manifest: { nonEntityTypes: { ...NON_ENTITY, Stats: 'whatever' }, entries: completeEntries() }, root });
+    const r = checkManifest({ sdl: FIXTURE_SDL, manifest: { nonEntityTypes: { ...NON_ENTITY, Stats: 'whatever' }, entries: withTargets(completeEntries()) }, root });
     expect(r.problems.join('\n')).toMatch(/Stats.*(envelope|value)/);
   });
 });
