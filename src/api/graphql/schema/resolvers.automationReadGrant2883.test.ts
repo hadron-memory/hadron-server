@@ -85,7 +85,7 @@ describe('give and revoke', () => {
     const r = await run('SCHEDULE', f.s1.id);
     const g = await give();
     expect(g).toMatchObject({ triggerKind: 'SCHEDULE', triggerId: f.s1.id, prefix: 'tasks', revokedAt: null });
-    expect((await readAs(r, f.sysUrn, 'tasks:report')).content).toBe('body of tasks:report');
+    expect(((await readAs(r, f.sysUrn, 'tasks:report')) as { content: string }).content).toBe('body of tasks:report');
     await M.revokeAutomationReadGrant({}, { id: g.id }, f.adminCtx);
     expect(await readable(r)).toBe(false);
   });
@@ -129,7 +129,6 @@ describe('scope: only the granted automation', () => {
     await give();
     expect(await readable(await run('SCHEDULE', f.s2.id))).toBe(false);
     expect(await readable(await run('MANUAL', null))).toBe(false);
-    const { rawKey: _k } = { rawKey: '' };
     const key = { appId: f.app.id, appKeyId: generateId(), organizationId: f.org.id, roles: [] } as never;
     expect(await canReadMemory(db, key, f.second.systemMemoryId)).toBe(false);
   });
