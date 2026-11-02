@@ -82,7 +82,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
-import { assertCastable, provisionCastGrants, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
+import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import {
@@ -881,7 +881,7 @@ type CastTarget = {
   appId: string;
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null };
-  workerRole: string | null;
+  workerRole: string;
   /** The role the caller passed (trimmed), or null: the cast re-checks it against the agent read in its transaction. */
   requestedRole: string | null;
   requestedName: string | null;
@@ -1001,7 +1001,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
     const matches = installed
       .map((r) => r.agent)
       .filter(
-        (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
+        (a) => a && !a.deletedAt && (a.personaRole ?? '').trim().toLowerCase() === roleNorm.toLowerCase(),
       );
     if (matches.length === 0) {
       throw new GraphQLError(
@@ -1030,11 +1030,11 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   // newly selected Agent's licence. The transaction was planned for the original.
   if (expectedAgentId !== undefined && agent.id !== expectedAgentId) throw castTargetChanged();
   // #2458 / R222: a cast takes its Agent's role; role selects, never overrides.
-  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
+  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').trim().toLowerCase()) {
     throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
   }
-  await assertCastable(ctx.db, app, agent.id);
-  const workerRole = agent.personaRole ?? null;
+  const { agent: castAgent } = await assertCastable(ctx.db, app, agent.id);
+  const workerRole = requireWorkerAgentRole(castAgent);
   return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
 }
 
@@ -1153,9 +1153,10 @@ export const workerMutations = {
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
             // #2458's deciding licence/role check, on the transaction. It only PLANS the missing same-org grants
             // (#2906); they are written below, once nothing that returns a value can still end the cast.
-            const { agent: castAgent, provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
-            const castRole = castAgent.personaRole ?? null;
-            if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
+            const { provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
+            // #3256: resolveCastTarget just rechecked the role on this locked Agent, never the preflight role.
+            const castRole = freshTarget.workerRole;
+            if (requestedRole !== null && requestedRole.toLowerCase() !== castRole.toLowerCase()) {
               throw roleOverrideRefused(appId, castRole, requestedRole);
             }
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
@@ -1842,14 +1843,7 @@ export const workerMutations = {
       }
       const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
       const { agent, provisionGrantsFor } = await assertCastable(tx, freshApp, toAgentId);
-      // "The role is the new agent's own role" (cor:dmo:050:11): an agent with none has no role to change TO, and a
-      // worker left role-less would silently lose its role tasks. Refused, not stored as null (Vera, #36796).
-      const toRole = (agent.personaRole ?? '').trim();
-      if (toRole === '') {
-        throw new GraphQLError('That agent has no role of its own, so a worker cannot change to it; give the agent a personaRole first.', {
-          extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE', workerId: worker.id },
-        });
-      }
+      const toRole = requireWorkerAgentRole(agent, worker.id);
       // #2917: the plan above is a read made before this write, and the write is ON CONFLICT DO NOTHING, so a
       // concurrent revoked row would leave it stale; provisionCastGrants judges the licence again (as the cast does).
       await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
@@ -2151,7 +2145,7 @@ export const workerQueries = {
       );
     }
 
-    const previewRole = workerRole ?? agent.personaRole ?? '';
+    const previewRole = workerRole;
     // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
     const values = withWorkerSignatures({
       'worker.name': name,
