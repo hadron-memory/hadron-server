@@ -111,6 +111,10 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     }
     if (label != null && typeof label !== 'string') throw new TaskReferenceError(`${at}: a label is text.`);
     if (typeof label === 'string' && label.length > TASK_REFERENCE_LABEL_MAX) throw new TaskReferenceError(`${at}: a label is at most ${TASK_REFERENCE_LABEL_MAX} characters.`);
+    // #3262: a label PostgreSQL cannot store is refused here, not left to fail at the jsonb write as an internal error.
+    if (typeof label === 'string' && hasUnstorableText(label)) {
+      throw new TaskReferenceError(`${at}: a label may not contain U+0000 or an unpaired surrogate.`);
+    }
     return { kind, target, label: label ? label : null };
   });
 }
@@ -122,6 +126,16 @@ const KIND_FORM: Record<TaskReferenceKind, string> = {
   task: 'an agent-task URN (hrn:agenttask:…)',
   url: 'an absolute http or https URL',
 };
+
+/**
+ * #3262 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): text PostgreSQL text and jsonb cannot represent, U+0000 or
+ * an unpaired UTF-16 surrogate (a well-formed pair, such as an emoji, is one code point and passes). Checked before a
+ * write so the caller gets BAD_USER_INPUT, not the driver's error as INTERNAL_SERVER_ERROR. The one shared check for
+ * free text bound for a jsonb or text column on agent tasks.
+ */
+export function hasUnstorableText(s: string): boolean {
+  return /\u0000|\p{Cs}/u.test(s);
+}
 
 /** The stored column read back as the list (anything else reads as none; the CHECK keeps it an array). */
 export function storedTaskReferences(value: unknown): TaskReference[] {
