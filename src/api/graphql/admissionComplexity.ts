@@ -77,6 +77,8 @@ const PAGE_ARG = /^(first|last|limit|top|take|pageSize|count)$/;
  * with a pin that its resolver really clamps through `pageTake`.
  */
 export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
+  // #2662: pageArgs (default20, cap200); immutable result is bounded at100 findings.
+  'AgentTaskResult.findings',
   'Query.appNodesPage',
   // #3223 (#2212 A3): pinned in admissionMyChatsPage2212A3.test.ts.
   'Query.myChatsPage',
