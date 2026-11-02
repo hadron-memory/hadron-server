@@ -2412,6 +2412,9 @@ export const memoryMutations = {
           // supplied a different key. Claim the flag and verifier together;
           // if another writer won, roll back every Node rewrite, reconcile,
           // and alias in this transaction.
+          // #3191: `memories.updated_at` / `anonymous_expires_at` are zone-less UTC columns, so the claim's clock is
+          // `clock_timestamp() AT TIME ZONE 'UTC'` (precedent: passkeys/registration.ts); a bare clock_timestamp()
+          // is read in the session zone. Same for the plaintext claim below.
           // Evaluate expiry in the claim statement, not against an application
           // clock or the transaction's start time (a lock wait can outlive it).
           // R206: this flip is serialized against an in-flight Git mirror's KEY SHARE
@@ -2420,10 +2423,10 @@ export const memoryMutations = {
             UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
               anonymous_expires_at = NULL, is_encrypted = true,
               key_verifier = ${makeKeyVerifier(key)}, class = 'private', user_id = ${user.id},
-              updated_by = ${ctx.appId}, updated_at = clock_timestamp()
+              updated_by = ${ctx.appId}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
             WHERE id = ${resolvedMemoryId} AND is_encrypted = false AND key_verifier IS NULL
               AND urn = ${memory.urn} AND user_id IS NULL
-              AND anonymous_expires_at > clock_timestamp()
+              AND anonymous_expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
               AND user_memory_of_agent_id IS NOT NULL
               AND app_id = ${ctx.appId} AND organization_id = ${app.organizationId}
               AND class = 'app' AND deleted_at IS NULL
@@ -2468,10 +2471,10 @@ export const memoryMutations = {
         });
         const claimed = await tx.$executeRaw`
           UPDATE memories SET urn = ${newUrn}, created_by = ${user.id},
-            anonymous_expires_at = NULL, updated_by = ${ctx.appId}, updated_at = clock_timestamp()
+            anonymous_expires_at = NULL, updated_by = ${ctx.appId}, updated_at = (clock_timestamp() AT TIME ZONE 'UTC')
           WHERE id = ${resolvedMemoryId} AND urn = ${memory.urn} AND user_id IS NULL
             AND class = 'app' AND app_id = ${ctx.appId} AND organization_id = ${app.organizationId}
-            AND deleted_at IS NULL AND anonymous_expires_at > clock_timestamp()
+            AND deleted_at IS NULL AND anonymous_expires_at > (clock_timestamp() AT TIME ZONE 'UTC')
             AND user_memory_of_agent_id IS NOT NULL AND is_encrypted = false AND key_verifier IS NULL
         `;
         if (claimed !== 1) {
