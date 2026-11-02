@@ -68,6 +68,11 @@ describe('startImpersonation is person-only', () => {
     expect(real).toMatch(/Forbidden/);
   });
 
+  it('still refuses a run principal carrying a user id', async () => {
+    await expect(start(ctxOf(holder.id, { clientId: 'run:test' }))).rejects.toThrow(/Forbidden/);
+    expect(await db.impersonationSession.count()).toBe(0);
+  });
+
   it('still refuses an impersonated context and a context with no user', async () => {
     await expect(start(ctxOf(holder.id, { impersonation: { sessionId: generateId(), actorUserId: holder.id, orgId: org.id } }))).rejects.toThrow(/Forbidden/);
     await expect(start(ctxOf(undefined))).rejects.toThrow(/Forbidden/);

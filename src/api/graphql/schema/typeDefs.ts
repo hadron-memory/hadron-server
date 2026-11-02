@@ -10441,7 +10441,8 @@ export const typeDefs = `#graphql
     Start impersonating another member of orgRef (admin support/diagnostics).
     Caller must be a live ADMIN/OWNER of the org (platform ADMIN/OWNER is
     OWNER-equivalent), the target a live member, PEER-OR-BELOW (an org ADMIN
-    may not impersonate an org OWNER), never self. Returns the audit session
+    may not impersonate an org OWNER), never self. A signed-in person only: a worker-bound
+    session, a run principal and an impersonated context are refused. Returns the audit session
     and a short-TTL token (returned exactly once) whose requests run
     READ-ONLY as the target. Org-scoped reads are restricted to this one org;
     personal/private memories and identity-based owner grants are excluded. Public-resource
