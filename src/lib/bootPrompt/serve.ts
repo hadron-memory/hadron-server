@@ -176,8 +176,9 @@ const SERVE_REFUSALS: ReadonlySet<string> = new Set(
 
 /**
  * #2708 (cor:agt:040:10) — what a serve to `t` would decide NOW, as a value: the decision, or the typed code the serve
- * would be refused with. It IS `resolveServedBootPrompt`, the resolver a bind, a chat and a run use, so this read and a
- * real serve cannot disagree, and it never substitutes a fallback. Only the typed serve refusals are caught; anything
+ * would be refused with. It IS `resolveServedBootPrompt`, the resolver a bind, a chat and a run use, so it applies the
+ * same resolution rules and never substitutes a fallback. It is a preview of the CURRENT state: a later serve agrees
+ * with it only while that state is unchanged (a pointer edit or an approval in between can change the answer). Only the typed serve refusals are caught; anything
  * else (a dropped connection) still throws. Reads only and records nothing. The CALLER gates: run it only for a caller
  * who may see the target's pointer, so a masked caller learns nothing (not even NOT_SET).
  */

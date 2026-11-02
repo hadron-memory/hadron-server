@@ -4954,7 +4954,9 @@ export const typeDefs = `#graphql
 
   """
   #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: what a serve would decide now, from the resolver the serve
-  itself uses. Exactly one of served and refusal is set; nothing is ever substituted for a refused serve.
+  itself uses, so the same resolution rules apply. A preview of the current state: a later serve gives the same answer
+  only while that state is unchanged (a pointer edit or an approval in between can change it). Exactly one of served
+  and refusal is set; nothing is ever substituted for a refused serve.
   """
   type BootPromptServeOutcome {
     "The revision that would be served; null exactly when refusal is set."
