@@ -372,6 +372,7 @@ describe('castWorker — agent resolution', () => {
   it('agentRef without a name → WORKER_NAME_REQUIRED (#1050)', async () => {
     // Previously BAD_USER_INPUT, because with no role there was no register to
     // name. The missing thing was always the NAME, and now the error says so.
+    await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'test-worker' } });
     await expectCode(cast({ agentRef: teamAgent.id }), 'WORKER_NAME_REQUIRED');
   });
 
@@ -1348,6 +1349,7 @@ describe('Worker field resolvers', () => {
   });
 
   it('null when the agent serves no prompt', async () => {
+    await db.agent.update({ where: { id: teamAgent.id }, data: { personaRole: 'test-worker' } });
     const worker = await cast({ agentRef: teamAgent.id, name: 'Zoe' });
     const prompt = await W.prompt(worker, {}, ctx(admin.id));
     expect(prompt).toBeNull();
