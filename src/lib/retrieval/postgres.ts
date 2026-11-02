@@ -57,8 +57,9 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
-  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
-  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);
+  // #3193: normalize the caller's offset to UTC wall time, matching the naive column; keep the column bare for indexes.
+  if (flt.updatedAfter) parts.push(`updated_at >= (${bind(flt.updatedAfter)}::timestamptz AT TIME ZONE 'UTC')`);
+  if (flt.updatedBefore) parts.push(`updated_at <= (${bind(flt.updatedBefore)}::timestamptz AT TIME ZONE 'UTC')`);
   // #719 — structured predicate over properties/data JSONB, compiled to a
   // parameterized boolean expr sharing this query's `bind` accumulator.
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);
