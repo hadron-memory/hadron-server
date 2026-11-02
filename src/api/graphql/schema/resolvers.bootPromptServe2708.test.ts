@@ -205,6 +205,22 @@ describe('#2708 gates: each field behind its target\'s pointer gate, judged befo
     expect(seen.admin).toEqual([true, true]);
     expect(seen.stranger).toEqual([false, false]);
   });
+  // §10 P3-1 (Rico): the differential above has only an IN-scope impersonation, and parity with bootPromptRef cannot
+  // catch a regression in the predicate both share. An impersonation scoped to ANOTHER org must see nothing on any
+  // target, even when its target user is an App member and an org admin who sees every field without impersonation.
+  it.each(TARGETS)('%s: an impersonation scoped to another org sees null, whoever the target user is', async (t) => {
+    const a = await compiled('agent'); const i = await compiled('install'); const w = await compiled('worker');
+    await pointAgent(a); await pointInstall(i); await pointWorker(w);
+    const n = generateId().toLowerCase();
+    const elsewhere = await db.organization.create({ data: { name: 'Elsewhere', urn: `elsewhere-${n}.example` } });
+    const row = (await rows())[t];
+    for (const target of [admin, member]) {
+      const plain = ctxOf(target.id);
+      const outOfScope = ctxOf(target.id, { impersonation: { orgId: elsewhere.id } } as Partial<Context>);
+      if (t !== 'Agent' || target === admin) expect(await R[t].bootPromptServe(row, {}, plain)).not.toBeNull(); // positive control
+      expect(await R[t].bootPromptServe(row, {}, outOfScope)).toBeNull();
+    }
+  });
 });
 
 describe('#2708 the public SDL', () => {
