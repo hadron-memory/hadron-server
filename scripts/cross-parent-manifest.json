@@ -55,6 +55,8 @@
     "RecoveryNodesPage": "envelope",
     "RecoveryEdgesPage": "envelope",
     "CompiledBootPrompt": "value",
+    "BootPromptServeOutcome": "value",
+    "BootPromptServeDecision": "value",
     "ResumeSessionResult": "envelope",
     "ResumeClaimReceipt": "envelope",
     "NodeContentValidationReport": "envelope",
