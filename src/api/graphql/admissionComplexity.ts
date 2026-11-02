@@ -76,7 +76,12 @@ const PAGE_ARG = /^(first|last|limit|top|take|pageSize|count)$/;
  * `limit` reads at most 200 rows and is costed as such. Every other field keeps the raw stated size; add a field here only
  * with a pin that its resolver really clamps through `pageTake`.
  */
-export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set(['Query.appNodesPage']);
+export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
+  'Query.appNodesPage',
+  // #3222 (#2213 S3): pinned in admissionSpecReferencePages2213S3.test.ts.
+  'Query.specBacklinksPage',
+  'Query.specUnresolvedReferencesPage',
+]);
 
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
 /** Fields whose resolver default, when the argument is omitted, exceeds the common one (reviewed against the resolvers). */

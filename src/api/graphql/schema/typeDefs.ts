@@ -7715,8 +7715,15 @@ export const typeDefs = `#graphql
     "The cited loc; for an edge into another memory, the target's node URN; for a pendingEdge not yet resolved to a node, its target as recorded (a loc, file id or URN)."
     targetLoc: String!
     text: String
-    "Set only by specUnresolvedReferences."
+    "Set only by specUnresolvedReferences and specUnresolvedReferencesPage."
     reason: SpecReferenceProblem
+  }
+
+  "#3222 (#2213 S3) — one page of a spec-reference list, counted over the whole list."
+  type SpecReferencePage {
+    items: [SpecReference!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   """#1449 — one spec a renumber moves (the spec or a descendant)."""
@@ -10017,12 +10024,33 @@ export const typeDefs = `#graphql
     specBacklinks(memoryRef: ID!, loc: String!): [SpecReference!]!
 
     """
+    #3222 (#2213 S3, hrn:node:hadronmemory.com:specs:cor:api:120:04): specBacklinks as a page. Same
+    read gate and refusals as specBacklinks, and the same list in the same order, so the pages
+    concatenate to exactly what specBacklinks returns. total counts that whole list and hasMore says
+    whether rows remain past this page. Default page 20, limit: 0 is count-only, a negative limit is
+    0, a limit over 200 is served as 200, a negative offset is 0. Paging bounds the response, not the
+    work: each page still scans the whole corpus. memoryRef accepts the memory's ID or URN.
+    """
+    specBacklinksPage(memoryRef: ID!, loc: String!, limit: Int, offset: Int): SpecReferencePage!
+
+    """
     #1449 — references in a spec corpus (any memory since #1591) that do not reach a written
     spec: URNs citing a missing loc or a placeholder, edges to a
     placeholder or to a deleted spec of the corpus, and pending edges (field pendingEdge) whose target is not
     a written node yet. Minting refuses while any remain.
     """
     specUnresolvedReferences(memoryRef: ID!): [SpecReference!]!
+
+    """
+    #3222 (#2213 S3, hrn:node:hadronmemory.com:specs:cor:api:120:04): specUnresolvedReferences as a
+    page. Same read gate and refusals as specUnresolvedReferences, and the same list in the same
+    order, so the pages concatenate to exactly what specUnresolvedReferences returns. total counts
+    that whole list and hasMore says whether rows remain past this page. Default page 20, limit: 0 is
+    count-only, a negative limit is 0, a limit over 200 is served as 200, a negative offset is 0.
+    Paging bounds the response, not the work: each page still scans the whole corpus. memoryRef
+    accepts the memory's ID or URN.
+    """
+    specUnresolvedReferencesPage(memoryRef: ID!, limit: Int, offset: Int): SpecReferencePage!
 
     """
     One run (cor:agt:010:02). ref is an AppRun ID or an
