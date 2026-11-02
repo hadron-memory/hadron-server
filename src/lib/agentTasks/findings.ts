@@ -17,6 +17,8 @@ export function finishFindings(input: unknown): TaskFinding[] | undefined {
     const id = hasIds ? f.id : `F${i + 1}`;
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,32}$/.test(id) || ids.has(id)) throw invalid();
     if (!(FINDING_SEVERITIES as readonly unknown[]).includes(f.severity) || typeof f.text !== 'string') throw invalid();
+    // PostgreSQL JSON text cannot represent NUL or an unpaired UTF-16 surrogate. Refuse before the write.
+    if (/\u0000|\p{Cs}/u.test(f.text)) throw invalid();
     // The UTF-16 bound limits counting work; a Unicode code point occupies at most two code units.
     if (f.text.length > 4000 || Array.from(f.text).length > 2000) throw invalid();
     ids.add(id);
