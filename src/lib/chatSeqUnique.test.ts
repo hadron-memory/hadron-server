@@ -445,4 +445,38 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     await runSql();
     expect(await indexExists()).toBe(true);
   });
+
+  // Diego BLIND P2: a Channel that was legal before the reservation (a
+  // `messages` segment in its address) must not slip past the install and
+  // then fail every post forever. The preflight reports and refuses, and
+  // installs once the owner's repair has relocated it.
+  it('refuses to install while an EXISTING Channel address carries a messages segment, then installs after relocation', async () => {
+    await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${INDEX_NAME}"`);
+    const rootId = generateId();
+    await db.node.create({
+      data: { id: rootId, memoryId: legacyMem.id, loc: 'ops:messages:alerts', name: 'alerts', nodeType: 'chat', createdBy: admin.id },
+    });
+    await db.channel.create({
+      data: { id: generateId(), memoryId: legacyMem.id, loc: 'ops:messages:alerts', name: 'alerts', kind: 'CHAT', chatRootNodeId: rootId, createdBy: admin.id },
+    });
+
+    await expect(runSql()).rejects.toThrow(/reserved "messages" loc segment/);
+    expect(await indexExists()).toBe(false);
+
+    // The approved repair, played by the test: relocate the address.
+    await db.channel.updateMany({ where: { chatRootNodeId: rootId }, data: { loc: 'ops:alerts' } });
+    await db.node.update({ where: { id: rootId }, data: { loc: 'ops:alerts' } });
+    await runSql();
+    expect(await indexExists()).toBe(true);
+  });
+
+  it('refuses to install while a transcript is nested under a messages-bearing chat root, with no Channel row', async () => {
+    await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${INDEX_NAME}"`);
+    const nested = await seedMessage(legacyMem.id, 1, { loc: 'ops:messages:alerts:messages:001-x' });
+    await expect(runSql()).rejects.toThrow(/reserved "messages" loc segment/);
+    expect(await indexExists()).toBe(false);
+    await db.node.delete({ where: { id: nested } });
+    await runSql();
+    expect(await indexExists()).toBe(true);
+  });
 });

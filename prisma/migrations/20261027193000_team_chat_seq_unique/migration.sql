@@ -66,6 +66,43 @@ BEGIN
   END IF;
 END $$;
 
+-- Reserved-segment preflight (#992, Diego BLIND P2): a chat ROOT whose own
+-- address carries a `messages` segment (`ops:messages:alerts`) is folded by the
+-- index into an ANCESTOR's identity (`ops`), while the allocator scans the
+-- root's own prefix, so its posts would be refused permanently once the index
+-- exists. Report such existing Channels and nested transcripts and refuse to
+-- install; the repair (relocating the address) is the owner's choice — this
+-- file never renames, deletes or exempts. New Channels are refused at the
+-- address boundary (LOC_RESERVED_SEGMENT), so after this check none can appear.
+DO $$
+DECLARE
+  offender record;
+  total bigint;
+BEGIN
+  FOR offender IN
+    SELECT 'channel' AS kind, memory_id, loc AS chat_root, 1::bigint AS rows
+    FROM channels
+    WHERE 'messages' = ANY (string_to_array(loc, ':'))
+    UNION ALL
+    SELECT 'nested-transcript', memory_id, split_part(loc, ':messages:', 1), count(*)
+    FROM nodes
+    WHERE node_type = 'chat-message' AND loc ~ ':messages:(.*:)?messages:'
+    GROUP BY memory_id, split_part(loc, ':messages:', 1)
+    LIMIT 10
+  LOOP
+    RAISE WARNING 'chat seq uniqueness preflight: % in memory % at % uses the reserved "messages" loc segment (% row(s))',
+      offender.kind, offender.memory_id, offender.chat_root, offender.rows;
+  END LOOP;
+
+  SELECT (SELECT count(*) FROM channels WHERE 'messages' = ANY (string_to_array(loc, ':')))
+       + (SELECT count(*) FROM nodes WHERE node_type = 'chat-message' AND loc ~ ':messages:(.*:)?messages:')
+    INTO total;
+  IF total > 0 THEN
+    RAISE EXCEPTION 'chat seq uniqueness preflight: % Channel/transcript row(s) use the reserved "messages" loc segment — relocate them under an approved repair first; refusing to create the unique index', total
+      USING HINT = 'The warnings above list up to 10 offenders. This migration never renames, deletes, exempts or chooses a repair.';
+  END IF;
+END $$;
+
 CREATE UNIQUE INDEX IF NOT EXISTS "nodes_chat_message_seq_unique_idx"
   ON nodes (memory_id, split_part(loc, ':messages:', 1), seq)
   WHERE node_type = 'chat-message' AND seq IS NOT NULL AND loc LIKE '%:messages:%';

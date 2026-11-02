@@ -102,4 +102,54 @@ describe('MCP node tools — the #992 typed refusal reaches the real writers (#2
     expect(row.seq).toBe(2);
     expect(row.content).toBe('seeded');
   });
+
+  // Diego BLIND P3: the two tests above stop at the V13 gate, so neither runs the
+  // inline catch branches. Provoke the REAL constraint error (a raw colliding
+  // insert with the index live), then raise exactly that error at the write
+  // boundary of each tool and assert the named refusal, no raw diagnostics.
+  async function realConstraintError(): Promise<unknown> {
+    await seedChatMessage('qa:messages:001-first', 1);
+    try {
+      await seedChatMessage('qa:messages:001-dupe', 1);
+    } catch (e) {
+      await db.node.deleteMany({ where: { memoryId: memory.id, loc: 'qa:messages:001-dupe' } });
+      return e;
+    }
+    throw new Error('the #992 constraint did not fire');
+  }
+
+  it('hadron_create_node maps the real constraint error to [chat_message_seq_conflict] (catch branch)', async () => {
+    const err = await realConstraintError();
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(err as Error);
+    try {
+      const srv = createTestableMcpServer(adminAuth());
+      const text = await srv.callToolText('hadron_create_node', {
+        urn: `urn:node:${memory.urn}:qa:messages:003-x`,
+        name: 'x', nodeType: 'note', content: 'c',
+      });
+      expect(text).toContain('[chat_message_seq_conflict]');
+      expect(text).not.toMatch(/P2002|nodes_chat_message_seq_unique_idx|Unique constraint/i);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await db.node.findFirst({ where: { memoryId: memory.id, loc: 'qa:messages:003-x' } })).toBeNull();
+  });
+
+  it('hadron_update_node maps the real constraint error to [chat_message_seq_conflict] (catch branch), row untouched', async () => {
+    const err = await realConstraintError();
+    const victim = await seedChatMessage('qa:messages:002-second', 2);
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(err as Error);
+    try {
+      const srv = createTestableMcpServer(adminAuth());
+      const text = await srv.callToolText('hadron_update_node', {
+        urn: `urn:node:${memory.urn}:qa:messages:002-second`,
+        content: 'edited',
+      });
+      expect(text).toContain('[chat_message_seq_conflict]');
+      expect(text).not.toMatch(/P2002|nodes_chat_message_seq_unique_idx|Unique constraint/i);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await db.node.findUniqueOrThrow({ where: { id: victim } })).content).toBe('seeded');
+  });
 });
