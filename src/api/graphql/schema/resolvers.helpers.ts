@@ -2885,7 +2885,10 @@ export const ORG_INCLUDE = {
     },
     orderBy: { name: 'asc' as const },
   },
-  subscriptions: { where: { deletedAt: null }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
+  // #2566: a memory soft-delete does not tombstone its subscriptions, and the platform-admin
+  // read shortcut leaves the memory tombstone to callers, so exclude deleted memories here
+  // (the lazy Organization.subscriptions path reuses this where).
+  subscriptions: { where: { deletedAt: null, memory: { deletedAt: null } }, include: { memory: true, organization: true }, orderBy: { createdAt: 'asc' as const } },
   // No exchangeConnections here: Organization.exchangeConnections resolves
   // through listOrgExchangeConnections, never from an eager row (hadron-internal#18).
 };
