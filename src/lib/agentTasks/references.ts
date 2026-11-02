@@ -111,9 +111,10 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     }
     if (label != null && typeof label !== 'string') throw new TaskReferenceError(`${at}: a label is text.`);
     if (typeof label === 'string' && label.length > TASK_REFERENCE_LABEL_MAX) throw new TaskReferenceError(`${at}: a label is at most ${TASK_REFERENCE_LABEL_MAX} characters.`);
-    // #3262: a label PostgreSQL cannot store is refused here, not left to fail at the jsonb write as an internal error.
-    if (typeof label === 'string' && hasUnstorableText(label)) {
-      throw new TaskReferenceError(`${at}: a label may not contain U+0000 or an unpaired surrogate.`);
+    // #3262: a target or label PostgreSQL cannot store is refused here, not left to fail at the jsonb write as an
+    // internal error. (NUL in a target is already refused above; a lone surrogate passed every http(s) target check.)
+    if (hasUnstorableJsonText(target) || (typeof label === 'string' && hasUnstorableJsonText(label))) {
+      throw new TaskReferenceError(`${at}: a target or label may not contain U+0000 or an unpaired surrogate.`);
     }
     return { kind, target, label: label ? label : null };
   });
@@ -131,9 +132,10 @@ const KIND_FORM: Record<TaskReferenceKind, string> = {
  * #3262 (hrn:node:hadronmemory.com:specs:cor:agt:050:01): text PostgreSQL text and jsonb cannot represent, U+0000 or
  * an unpaired UTF-16 surrogate (a well-formed pair, such as an emoji, is one code point and passes). Checked before a
  * write so the caller gets BAD_USER_INPUT, not the driver's error as INTERNAL_SERVER_ERROR. The one shared check for
- * free text bound for a jsonb or text column on agent tasks.
+ * free text bound for a jsonb or text column on agent tasks (the second of #3258/#3262 to merge switches the other call
+ * site to it, Ada #67922).
  */
-export function hasUnstorableText(s: string): boolean {
+export function hasUnstorableJsonText(s: string): boolean {
   return /\u0000|\p{Cs}/u.test(s);
 }
 
