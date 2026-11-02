@@ -323,7 +323,7 @@ async function restoreRemote(localPath: string, originalUrl: string): Promise<vo
     await execGit(['remote', 'set-url', 'origin', originalUrl], { cwd: localPath, timeout: RESTORE_DEADLINE_MS });
   } catch (err) {
     console.error(
-      '[pushMemoryToGit] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore.',
+      '[pushMemoryToGit] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore. A config.lock can block future restores; safe recovery requires proven ownership.',
       mirrorFailureMetadata(err, 'restore', 'REMOTE_RESTORE'),
     );
   }

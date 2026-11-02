@@ -1712,7 +1712,7 @@ async function restoreReadRemote(localPath: string, source: string): Promise<voi
     await execGit(['remote', 'set-url', 'origin', source], { cwd: localPath, timeout: RESTORE_DEADLINE_MS });
   } catch (error) {
     console.error(
-      '[syncGraphFromGithub] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore.',
+      '[syncGraphFromGithub] Failed to restore the origin URL; the checkout may still hold an installation token until the next successful restore. A config.lock can block future restores; safe recovery requires proven ownership.',
       mirrorFailureMetadata(error, 'restore', 'REMOTE_RESTORE'),
     );
   }
