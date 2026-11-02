@@ -108,7 +108,7 @@ const TOKENS_REMOVED = [
   'worker-model', 'worker-boot-briefing', 'team-chat', 'team-worklog', 'session-app-recovery', 'channels',
   'team-chat-monitor', 'worklog-model', 'transcript-backward-cursor', 'team-attention',
 ];
-const GOLDEN = new URL('./__golden__/toolSurface2260.json', import.meta.url);
+const BEFORE_NAMES = new URL('./__golden__/toolNamesBefore3082.json', import.meta.url);
 
 let org: { id: string; urn: string };
 let user: { id: string };
@@ -166,13 +166,14 @@ describe('#3082 R1: the 71 team tools are disabled', () => {
     it(`tools/list for ${label} lists none of the 71 and every other tool the surface listed before`, async () => {
       const listed = await listNames(auth());
       expect(listed.filter((n) => DISABLED_SET.has(n)), 'a disabled tool is still registered').toEqual([]);
-      for (const k of KEPT_SAMPLE) {
-        if (label === 'app-key' && ['hadron_create_task', 'hadron_update_task'].includes(k) === false) expect(listed, k).toContain(k);
-        else if (label !== 'app-key') expect(listed, k).toContain(k);
-      }
       const variant = { user: 'userWithApp', 'app-key': 'appKeyOnly', impersonation: 'impersonation' }[label]!;
-      const golden = JSON.parse(fs.readFileSync(GOLDEN, 'utf8')) as Record<string, Array<[string, string]>>;
-      expect(listed.length, 'the kept tools did not shrink').toBeGreaterThanOrEqual(golden[variant].filter(([n]) => !DISABLED_SET.has(n)).length - 5);
+      // The complete pre-#3082 name set for this principal (frozen from main at the cut), minus exactly the 71 retired names.
+      const before = JSON.parse(fs.readFileSync(BEFORE_NAMES, 'utf8')) as Record<string, string[]>;
+      expect([...listed].sort(), 'the kept tool set is exactly the pre-change set minus the 71').toEqual(before[variant].filter((n) => !DISABLED_SET.has(n)).sort());
+      for (const k of KEPT_SAMPLE) {
+        if (label === 'app-key' && ['hadron_create_task', 'hadron_update_task'].includes(k)) continue;
+        expect(listed, k).toContain(k);
+      }
     });
   }
 
@@ -312,5 +313,63 @@ describe('#3082 GREEN by design: GraphQL still serves each team family (the reso
       if (hit.length === 0) missing.push(family);
     }
     expect(missing).toEqual([]);
+  });
+});
+
+// #3082 / Rodolfo P3-1: adoptAppFromSession is still reached by the kept hadron_end_session. Its negative pins lived in the
+// deleted appScopePinning / ambientAppPrecedence suites, so they are ported here against hadron_end_session.
+describe('#3082 hadron_end_session still recovers App scope from the session id, behind the same gates (#475, #1009)', () => {
+  const MULTI = { cachedAppResolution: { kind: 'multi-app' as const } };
+  async function fixture() {
+    const sfx = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+    const o = await db.organization.create({ data: { id: generateId(), name: 'end-3082', urn: `end3082-${sfx}.com` } });
+    const mk = (n: string) => db.user.create({ data: { id: generateId(), githubId: 308_300 + Math.floor(Math.random() * 90_000), githubUsername: `end3082-${n}-${sfx}`, roles: ['READER'] } });
+    const owner = await mk('o');
+    const stranger = await mk('s');
+    await db.orgMember.create({ data: { id: generateId(), organizationId: o.id, userId: owner.id, role: 'CONTRIBUTOR' } });
+    const apps = [] as Array<{ id: string }>;
+    for (const n of ['a', 'b']) {
+      const a = await db.app.create({ data: { id: generateId(), organizationId: o.id, name: `End ${n}`, urn: `${o.urn}:end-${n}` } });
+      await db.appMember.create({ data: { appId: a.id, userId: owner.id, role: 'owner' } });
+      apps.push(a);
+    }
+    const session = await db.session.create({ data: { id: generateId(), userId: owner.id, appId: apps[0].id } });
+    const as = (u: { id: string }) =>
+      createTestableMcpServer({ userId: u.id, roles: ['READER'], clientId: `user:${u.id}` } as AuthContext, { sessionId: `mcp-end-${generateId()}`, ...MULTI });
+    const ended = async () => (await db.session.findUniqueOrThrow({ where: { id: session.id } })).endedAt !== null;
+    return { o, owner, stranger, apps, session, as, ended };
+  }
+
+  it('control: the owner, unpinned in a multi-App connection, ends their own session from the id alone', async () => {
+    const f = await fixture();
+    const out = await f.as(f.owner).callToolText('hadron_end_session', { id: f.session.id });
+    expect(out).not.toContain('multiple_apps_resolved');
+    expect(await f.ended()).toBe(true);
+  });
+
+  it("does NOT adopt another user's session", async () => {
+    const f = await fixture();
+    // A co-participant of the App, so only the session-owner check stands between them and its scope.
+    await db.appMember.create({ data: { appId: f.apps[0].id, userId: f.stranger.id, role: 'member' } });
+    const out = await f.as(f.stranger).callToolText('hadron_end_session', { id: f.session.id });
+    expect(out).toContain('multiple_apps_resolved');
+    expect(await f.ended()).toBe(false);
+  });
+
+  it('does NOT adopt an App the caller has lost PARTICIPATION in (#475)', async () => {
+    const f = await fixture();
+    await db.appMember.deleteMany({ where: { userId: f.owner.id } });
+    await db.orgMember.deleteMany({ where: { organizationId: f.o.id, userId: f.owner.id } });
+    const out = await f.as(f.owner).callToolText('hadron_end_session', { id: f.session.id });
+    expect(out).toContain('multiple_apps_resolved');
+    expect(await f.ended()).toBe(false);
+  });
+
+  it('does NOT adopt an uninstalled App', async () => {
+    const f = await fixture();
+    await db.app.update({ where: { id: f.apps[0].id }, data: { uninstalledAt: new Date() } });
+    const out = await f.as(f.owner).callToolText('hadron_end_session', { id: f.session.id });
+    expect(out).toContain('multiple_apps_resolved');
+    expect(await f.ended()).toBe(false);
   });
 });

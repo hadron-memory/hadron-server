@@ -9919,7 +9919,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // worker" advice contradicts the "working as: nobody" row directly
           // above it, and promises a call that cannot succeed.
           'Pass a row that is BOUND and still OPEN as `session` on a core write to attribute it to that worker; ' +
-          'an unbound row attributes nothing and an [ENDED] one is refused. Any session id works for ' +
+          'an unbound row attributes nothing and an [ENDED] one is refused when passed as the `session` argument ' +
+          '(an ended id in the X-Hadron-Session header is not refused: the write succeeds and is attributed to nobody). Any session id works for ' +
           'hadron_end_session. Re-fetch a worker\'s boot briefing with `hadron team worker get <name>`. ' +
           'A bound row is a worker session. One created by hadron_start_session has no hard expiry and ' +
           'stays open until hadron_end_session, no matter what happened to the chat session that started ' +
