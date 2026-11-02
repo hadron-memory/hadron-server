@@ -246,7 +246,9 @@ export async function readTeamSchemaNode(
     if (options.ambiguousOnlyIfAnyHasNode) {
       const ids = ((e as { extensions?: { candidates?: Array<{ id: string }> } }).extensions?.candidates ?? []).map((c) => c.id);
       const agents = await tx.agent.findMany({ where: { id: { in: ids } }, select: { systemMemoryId: true } });
-      // Fail closed on a candidate list we cannot read: an empty one is not proof that no candidate has the node.
+      // An empty candidate list is not proof that no candidate has the node, so it counts as having one (refused).
+      // A candidate missing from this read is an Agent hard-deleted since the ambiguity was found: with no system
+      // memory it cannot hold a node, so counting it as having none is exact, not a gap (#3094).
       let anyHas = ids.length === 0;
       for (const a of agents) if (a.systemMemoryId && await findEffectiveNodeIdByLoc(tx, a.systemMemoryId, loc)) anyHas = true;
       if (!anyHas) return undefined;

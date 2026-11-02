@@ -25,7 +25,7 @@ beforeEach(async () => {
   const user = await db.user.create({ data: { id: generateId(), githubId: 116200, githubUsername: 'repair1162' } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   ctx = { db, userId: user.id, roles: ['READER'] };
-  const agent = await M.createAgent({}, { orgId: org.id, name: 'Repair role' }, ctx);
+  const agent = await M.createAgent({}, { orgId: org.id, name: 'Repair role', personaRole: 'test-worker' }, ctx);
   agentId = agent.id;
   otherMemoryId = agent.systemMemoryId;
   const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Repair team', urn: `${org.urn}:team` } });

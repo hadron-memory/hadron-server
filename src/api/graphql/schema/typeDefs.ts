@@ -10258,6 +10258,24 @@ export const typeDefs = `#graphql
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
     """
+    #2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06, creating several at once; ruling 0011 A): create 1 to 25
+    tasks in the App appRef, all or none, in one transaction. Each task is judged exactly as createAgentTask judges it
+    alone (the same gates, owner rules, refusals and warnings); the first refusal refuses the whole call, creates and
+    records nothing, and carries extensions.position, the 1-based position of the task that caused it (tasks are
+    judged one at a time in list order, each wholly before the next: its checks before the write, then its whole write,
+    its blockers named by an existing task or by an earlier position included; last come the links to later
+    positions, in list order). An empty list is
+    BAD_USER_INPUT and more than 25 is TASK_BATCH_TOO_LARGE, before anything is created. A task names an existing
+    parent, never another task of the call; a root task naming an App other than appRef is APP_NOT_FOUND, and a parent
+    in another App TASK_NOT_FOUND. blockedByPositions names other tasks of the call as blockers (a self-block or a
+    cycle is TASK_BLOCKER_CYCLE, a position outside the list BAD_USER_INPUT), and needs the same assigner authority as
+    blockedBy. Handles follow list order and a refused call spends none. Each task records the events a single create
+    records; matching and launches run only after the commit, and each task's warnings are filed under
+    "<response key>.<position>". The result is every task, in list order. Not idempotent: nothing is deduplicated, so a
+    caller that lost the answer lists the App's tasks before trying again.
+    """
+    createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!): [AgentTask!]!
+    """
     #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
     untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
     to the caller, created STARTED with startedAt set, externalId and source the item's URL, an ISSUE reference to it,
@@ -10530,7 +10548,14 @@ export const typeDefs = `#graphql
     """
     #1705 — finish a started task with its result: its assignee only
     (hrn:node:hadronmemory.com:specs:cor:agt:050:08). A pending task is refused: start it first. Refusals as
-    startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word.
+    startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word. #2652 (outcome set,
+    hrn:node:hadronmemory.com:specs:cor:agt:050:30): a team may close the outcomes its tasks finish with, as the
+    node schema:task-outcomes in the Team Agent's system memory, found through its base chain, with data
+    {"outcomes": [...]} holding 1 to 100 one-word outcomes. With a set, an outcome outside it (matched exactly,
+    case-sensitive) is TASK_OUTCOME_NOT_IN_SET, and the refusal does not list the set. A set that exists but is
+    malformed, or two installed Team Agents when either carries the node, is TASK_OUTCOME_SET_UNUSABLE, refusing
+    every finish. Both are judged after the assignee and status checks and before any write or event: the task
+    stays started. With no set, any one word is accepted. The set is read only at finish.
     """
 
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
@@ -14154,7 +14179,7 @@ export const typeDefs = `#graphql
   }
 
   input AgentTaskResultInput {
-    "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text."
+    "One word (letters, digits, underscore, hyphen or dot; up to 64 characters), e.g. succeeded or failed. It is copied into the event stream, which never holds free text. When the team has an outcome set (#2652, schema:task-outcomes; hrn:node:hadronmemory.com:specs:cor:agt:050:30) it must be one of the set (TASK_OUTCOME_NOT_IN_SET); an unusable set refuses every finish (TASK_OUTCOME_SET_UNUSABLE)."
     outcome: String!
     summary: String
     evidence: String
@@ -15800,6 +15825,14 @@ export const typeDefs = `#graphql
     closeSessionWhenDone: Boolean
     "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:09): a list replaces the whole list, order kept; null or an empty list clears it; omission leaves it. The task.edited event names references, never the values."
     references: [AgentTaskReferenceInput!]
+  }
+
+  "#2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06): one task of a createAgentTasks call."
+  input CreateAgentTasksItemInput {
+    "The task, exactly as createAgentTask takes it. appRef may be left out; if given it must be the call's App."
+    task: CreateAgentTaskInput!
+    "Other tasks of the same call that block this one, by their 1-based position in the list."
+    blockedByPositions: [Int!]
   }
 
   """

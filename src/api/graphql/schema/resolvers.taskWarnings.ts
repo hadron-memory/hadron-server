@@ -93,6 +93,15 @@ export function warningPath(info?: Pick<GraphQLResolveInfo, 'path'> | null): str
   return typeof key === 'string' ? key : 'mcp';
 }
 
+/**
+ * Whether a warning's path belongs to a mutation that errored. #2653: a createAgentTasks call files each task's
+ * warnings under `<response key>.<position>`, and an error names the response key alone, so the key before the first
+ * dot decides (a GraphQL response key never contains one).
+ */
+function erroredPath(path: string, erroredPaths: ReadonlySet<string>): boolean {
+  return erroredPaths.has(path) || erroredPaths.has(path.split('.')[0]!);
+}
+
 /** Order by the fixed code order and cap; drops duplicates. */
 function normalise(codes: readonly TaskWarningCode[]): TaskWarningCode[] {
   return TASK_WARNING_CODES.filter((c) => codes.includes(c)).slice(0, MAX_WARNINGS_PER_OPERATION);
@@ -254,7 +263,7 @@ export type TaskWarningHistory = { appId: string; taskId: string; path: string; 
  */
 export async function flushTaskWarningHistory(ctx: Context, erroredPaths: ReadonlySet<string> = new Set()): Promise<void> {
   const pending = ctx.taskWarningHistory?.splice(0) ?? [];
-  const successful = pending.filter(h => !erroredPaths.has(h.path));
+  const successful = pending.filter(h => !erroredPath(h.path, erroredPaths));
   if (successful.length === 0) return;
   try {
     // Budgets (statement, deadline, transaction, pool wait) all come from boundedRead; see the JSDoc above.
@@ -348,7 +357,7 @@ export function shapeResponseWarnings(
   const perPath = new Map<string, number>();
   const out: { path: string; code: TaskWarningCode; text: string; register?: TaskWarningRegister }[] = [];
   for (const { path, warning } of collected) {
-    if (erroredPaths.has(path)) continue;
+    if (erroredPath(path, erroredPaths)) continue;
     const n = perPath.get(path) ?? 0;
     if (n >= MAX_WARNINGS_PER_OPERATION || out.length >= MAX_WARNINGS_PER_RESPONSE) continue;
     perPath.set(path, n + 1);
