@@ -137,6 +137,48 @@ describe('#3223 myChatsPage keeps the myChats gate, branch by branch', () => {
     expect(locs(p.items).sort()).toEqual(['chats:session', 'chats:shared']);
   });
 
+  // §10 P3-1 on a543c20e6: the shared gate's soft-delete and Agent guards, pinned on both fields, items AND total.
+  // Each row below is one the gate must drop; the counts would disclose them even if the items did not.
+  it('drops a soft-deleted chat root, a soft-deleted App, an App without the Agent and a deleted personal memory', async () => {
+    const gone = new Date('2026-01-01T00:00:00Z');
+    const deletedRoot = await chat(ownerPersonal.id, 'chats:deleted');
+    await db.node.update({ where: { id: deletedRoot.id }, data: { deletedAt: gone } });
+
+    // Two more Apps the owner belongs to, each with a team space holding one chat: the first has the Agent but is
+    // soft-deleted, the second is live but never installed the Agent.
+    const teamSpace = async (tag: string, opts: { agent: boolean; deletedAt?: Date }) => {
+      const a = await db.app.create({
+        data: { id: generateId(), organizationId: org.id, name: tag, urn: `${org.urn}:${tag}`, deletedAt: opts.deletedAt },
+      });
+      if (opts.agent) await db.appAgent.create({ data: { appId: a.id, agentId: agent.id } });
+      await db.appMember.create({ data: { appId: a.id, userId: owner.id, role: 'admin' } });
+      const m = await db.memory.create({
+        data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:${tag}-shared`, name: tag, class: 'app', appId: a.id },
+      });
+      await chat(m.id, `chats:${tag}`);
+    };
+    await teamSpace('gone-app', { agent: true, deletedAt: gone });
+    await teamSpace('other-agent', { agent: false });
+
+    // The outsider's ONLY personal memory for the agent is soft-deleted, so it must still list nothing.
+    const deadPersonal = await db.memory.create({
+      data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:dead-p`, name: 'dead-p', class: 'knowledge',
+        visibility: 'ORGANIZATION', userMemoryOfAgentId: agent.id, createdBy: outsider.id, deletedAt: gone,
+      },
+    });
+    await chat(deadPersonal.id, 'chats:dead-personal');
+
+    const page = await Q.myChatsPage({}, { agentRef: agent.id }, ctx(owner.id));
+    expect(locs(page.items).sort()).toEqual(['chats:mine', 'chats:shared']);
+    expect(page).toMatchObject({ total: 2, hasMore: false });
+    expect((await Q.myChatsPage({}, { agentRef: agent.id, limit: 0 }, ctx(owner.id))).total).toBe(2);
+    expect(locs(await Q.myChats({}, { agentRef: agent.id }, ctx(owner.id))).sort()).toEqual(['chats:mine', 'chats:shared']);
+
+    expect(await Q.myChatsPage({}, { agentRef: agent.id }, ctx(outsider.id))).toEqual(EMPTY_PAGE);
+    expect(await Q.myChats({}, { agentRef: agent.id }, ctx(outsider.id))).toEqual([]);
+  });
+
   it('accepts the Agent URN as myChats does', async () => {
     const page = await Q.myChatsPage({}, { agentRef: agent.urn }, ctx(owner.id));
     expect(locs(page.items).sort()).toEqual(['chats:mine', 'chats:shared']);

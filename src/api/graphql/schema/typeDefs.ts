@@ -9566,7 +9566,8 @@ export const typeDefs = `#graphql
     myChats (unauthenticated and impersonated callers are refused; an unknown Agent and a caller with no
     readable memory get the empty page), and the same chats: the caller's own for the Agent plus the shared
     chats of Apps the caller is a member of. total counts exactly those chats and hasMore says whether rows
-    remain past this page. Newest first by last update, then by id, so the order is stable across pages.
+    remain past this page. Newest first by last update, then by id, so the order is stable across pages while
+    the chats do not change; a chat updated between requests can move pages.
     Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200, a
     negative offset is 0.
 

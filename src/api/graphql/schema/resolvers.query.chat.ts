@@ -219,7 +219,8 @@ export const chatQueries = {
     /**
      * #3223 (#2212 A3, cor:api:120:04): `myChats` as a page. Same gate and scope (`myChatsScope`); total counts the
      * same `where`, so it discloses nothing the items would not. Ordered by updatedAt, then id, so equal updatedAt
-     * cannot duplicate or skip a chat across pages. Sized by `pageArgs` (default 20, over 200 served as 200).
+     * cannot duplicate or skip a chat across pages of unchanged data (offset paging promises no more: a chat updated
+     * between requests can move pages). Sized by `pageArgs` (default 20, over 200 served as 200).
      */
     myChatsPage: async (
       _: unknown,
