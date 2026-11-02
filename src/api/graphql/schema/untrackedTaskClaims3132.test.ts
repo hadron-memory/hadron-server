@@ -263,13 +263,16 @@ describe("the key's claim write is judged under the App's anchors (held locks, n
     const fresh = (await loadApp(ctx(), app.id))!;
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => { locked = r; });
     const revoker = db.$transaction(async (tx) => {
       await lockAuthorityAnchors(tx, anchors(), 'exclusive');
       await tx.appKey.update({ where: { id: keyX.id }, data: { revokedAt: new Date() } });
+      locked();
       await held;
     }, { timeout: 20_000 });
-    // The revoker holds the anchors before the claim asks for them.
-    await new Promise((r) => setTimeout(r, 50));
+    // The revoker holds the anchors before the claim asks for them (signalled, not timed).
+    await holding;
     const p = refusal(createStartedClaimFor(keyCtx(app.id, keyX.id), fresh, { kind: 'appKey', appKeyId: keyX.id }, item, parties()));
     await waitForLockWaitersOfType(db, 'advisory', 1);
     release();
@@ -283,8 +286,10 @@ describe("the key's claim write is judged under the App's anchors (held locks, n
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
     // Hold the assignee's per-worker lock: the claim takes the anchors SHARED, then waits here.
-    const holder = db.$transaction(async (tx) => { await lockWorkersForAssignment(tx, [anne.id]); await held; }, { timeout: 20_000 });
-    await new Promise((r) => setTimeout(r, 50));
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => { await lockWorkersForAssignment(tx, [anne.id]); locked(); await held; }, { timeout: 20_000 });
+    await holding;
     const claiming = createStartedClaimFor(keyCtx(app.id, keyX.id), fresh, { kind: 'appKey', appKeyId: keyX.id }, item, parties());
     await waitForLockWaitersOfType(db, 'advisory', 1);
     let revokedAt: Date | null = null;
@@ -301,6 +306,46 @@ describe("the key's claim write is judged under the App's anchors (held locks, n
     expect(task).toMatchObject({ status: 'started', assigneeWorkerId: anne.id });
     expect(revokedAt).not.toBeNull();
     expect((await db.agentTeamEvent.findMany({ where: { taskId: task!.id } })).every((e) => e.actorAppKeyId === keyX.id)).toBe(true);
+  });
+});
+
+// --- parties and the run re-judged inside the claim's write ------------------------------------
+
+describe("the claim's write re-judges what changed during the tracker read (Rodolfo P3-1, Gizelle P3)", () => {
+  // Fires once, on the tracker read itself: after the gate judged the parties and the run, before the claim's write.
+  const duringTrackerRead = (change: () => Promise<unknown>) => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL, init?: RequestInit) => {
+      if (String(url) === 'https://api.github.com/graphql') await change();
+      return fakeFetch(url, init);
+    }));
+  };
+
+  it.each(['assignee', 'owner'] as const)('a %s who leaves the App during the tracker read is refused, nothing written', async (which) => {
+    duringTrackerRead(() => db.appMember.deleteMany({ where: { appId: app.id, userId: member2.id } }));
+    const args = which === 'assignee' ? { assignee: { user: member2.id }, owner: OWNER() } : { assignee: ANNE(), owner: { user: member2.id } };
+    const r = await claim(args, keyCtx(app.id, keyX.id));
+    expect(r).toMatchObject({ tasks: [], incompleteReason: 'claim_refused', refusalCode: which === 'assignee' ? 'TASK_ASSIGNEE_INVALID' : 'TASK_OWNER_INVALID' });
+    await noWrites();
+  });
+
+  it("a run that finished before the claim's write is refused there: APP_NOT_FOUND, nothing written", async () => {
+    const run = await mintRun({ userId: member.id });
+    const fresh = (await loadApp(ctx(), app.id))!;
+    const parties = { owner: { userId: member.id }, assignee: { workerId: anne.id } };
+    await db.appRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } });
+    const r = await refusal(createStartedClaimFor(runContext(db, run), fresh, { kind: 'run', runId: run.id }, { title: 't', url: 'https://github.com/acme/widgets/issues/9' }, parties as never));
+    expect(r.code).toBe('APP_NOT_FOUND');
+    expect(await claimedTasks()).toEqual([]);
+    expect(await db.agentTeamEvent.count({ where: { actorRunId: run.id } })).toBe(0);
+  });
+
+  it('a run that finishes during the tracker read claims nothing: refused, nothing written', async () => {
+    const run = await mintRun({ userId: member.id });
+    duringTrackerRead(() => db.appRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } }));
+    const r = await refusal(tool('hadron_task_untracked_claim').execute(toolCtx(run), { integration: 'gh', assignee: ANNE() }));
+    expect(r.code).toBe('APP_NOT_FOUND');
+    expect(await claimedTasks()).toEqual([]);
+    expect(await db.agentTeamEvent.count({ where: { actorRunId: run.id } })).toBe(0);
   });
 });
 
