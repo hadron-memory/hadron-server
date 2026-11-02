@@ -78,6 +78,8 @@ const PAGE_ARG = /^(first|last|limit|top|take|pageSize|count)$/;
  */
 export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'Query.appNodesPage',
+  // #3223 (#2212 A3): pinned in admissionMyChatsPage2212A3.test.ts.
+  'Query.myChatsPage',
   // #3222 (#2213 S3): pinned in admissionSpecReferencePages2213S3.test.ts.
   'Query.specBacklinksPage',
   'Query.specUnresolvedReferencesPage',
