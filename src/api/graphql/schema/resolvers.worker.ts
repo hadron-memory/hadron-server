@@ -1001,7 +1001,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
     const matches = installed
       .map((r) => r.agent)
       .filter(
-        (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
+        (a) => a && !a.deletedAt && (a.personaRole ?? '').trim().toLowerCase() === roleNorm.toLowerCase(),
       );
     if (matches.length === 0) {
       throw new GraphQLError(
@@ -1030,7 +1030,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   // newly selected Agent's licence. The transaction was planned for the original.
   if (expectedAgentId !== undefined && agent.id !== expectedAgentId) throw castTargetChanged();
   // #2458 / R222: a cast takes its Agent's role; role selects, never overrides.
-  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
+  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').trim().toLowerCase()) {
     throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
   }
   const { agent: castAgent } = await assertCastable(ctx.db, app, agent.id);
@@ -1156,7 +1156,7 @@ export const workerMutations = {
             const { provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
             // #3256: resolveCastTarget just rechecked the role on this locked Agent, never the preflight role.
             const castRole = freshTarget.workerRole;
-            if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
+            if (requestedRole !== null && requestedRole.toLowerCase() !== castRole.toLowerCase()) {
               throw roleOverrideRefused(appId, castRole, requestedRole);
             }
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
