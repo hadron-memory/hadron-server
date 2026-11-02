@@ -16,7 +16,7 @@ import { newestApprovedRevisionOf } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
-import { bootPromptRefusal, type BootPromptSurface } from './refusal.js';
+import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal, type BootPromptRefusalCode, type BootPromptSurface } from './refusal.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -160,6 +160,35 @@ async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise
     provenance: revision.provenance.occurrences.map((o) => ({ nodeId: o.nodeId, revSeq: o.revNo, hash: o.hash })),
     content,
   };
+}
+
+/** The refusals a fresh serve can return (a recorded-revision refusal belongs to an open session, never to a new serve). */
+export type BootPromptServeRefusalCode = Exclude<BootPromptRefusalCode, 'BOOT_PROMPT_RECORDED_REVISION_DELETED'>;
+
+/** Exactly one of `served` and `refusal` is set. */
+export type BootPromptServeOutcome =
+  | { served: ServedBootPrompt; refusal: null }
+  | { served: null; refusal: BootPromptServeRefusalCode };
+
+const SERVE_REFUSALS: ReadonlySet<string> = new Set(
+  BOOT_PROMPT_REFUSAL_CODES.filter((c) => c !== 'BOOT_PROMPT_RECORDED_REVISION_DELETED'),
+);
+
+/**
+ * #2708 (cor:agt:040:10) — what a serve to `t` would decide NOW, as a value: the decision, or the typed code the serve
+ * would be refused with. It IS `resolveServedBootPrompt`, the resolver a bind, a chat and a run use, so this read and a
+ * real serve cannot disagree, and it never substitutes a fallback. Only the typed serve refusals are caught; anything
+ * else (a dropped connection) still throws. Reads only and records nothing. The CALLER gates: run it only for a caller
+ * who may see the target's pointer, so a masked caller learns nothing (not even NOT_SET).
+ */
+export async function previewServedBootPrompt(db: Db, t: ServeTarget): Promise<BootPromptServeOutcome> {
+  try {
+    return { served: await resolveServedBootPrompt(db, t), refusal: null };
+  } catch (err) {
+    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+    if (typeof code === 'string' && SERVE_REFUSALS.has(code)) return { served: null, refusal: code as BootPromptServeRefusalCode };
+    throw err;
+  }
 }
 
 /** How many times the approved revision is re-selected when a concurrent edit moves it between selection and read. */

@@ -18,7 +18,7 @@ import { effectiveModelGroups, matchingModelGroupNames, type EffectiveModelGroup
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
-import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo } from '../../../lib/bootPrompt/serve.js';
+import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -2641,13 +2641,21 @@ async function readServedWorkerText(
       const own = await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: worker.id, endedAt: null }, select: { id: true } });
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
-    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id }, page);
+    const served = await resolveServedBootPrompt(ctx.db, workerServeTarget(worker, agentName), page);
     return { text: applyPlatformVariables(served.content, platform), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
     throw err;
   }
+}
+
+/**
+ * #2708 — the serve target of a worker's NEXT bind: exactly what `serveBindInTransaction` passes for that worker (surface
+ * `bind`, its App, its Agent, its own pointer first). Shared by `describeServedWorker` and `Worker.bootPromptServe`.
+ */
+export function workerServeTarget(worker: { id: string; appId: string; agentId: string }, agentName: string): ServeTarget {
+  return { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id };
 }
 
 /**
@@ -2664,14 +2672,14 @@ export async function describeServedWorker(
   const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId }, select: { name: true } });
   const agentName = agent?.name ?? '';
   let line: string;
-  try {
-    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
+  // #2708: the same decision Worker.bootPromptServe returns, through the one seam (the bind's own resolver).
+  const outcome = await previewServedBootPrompt(ctx.db, workerServeTarget(worker, agentName));
+  if (outcome.served) {
+    const served = outcome.served;
     line = `\nServed boot prompt: ${served.pointerLevel} pointer, compiled node ${served.compiledNodeId}, revision ${served.servedRevSeq} (provenance from compile revision ${served.provenanceRevSeq}).`;
     line += '\nCurrent prompt lint (compile revision ' + served.provenanceRevSeq + '):' + (renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, served.compiledNodeId, served.provenanceRevSeq)) || '\nNo lint warnings.');
-  } catch (err) {
-    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
-    if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
-    line = `\nServed boot prompt: NOT SERVEABLE — ${code}. A bind would be refused.`;
+  } else {
+    line = `\nServed boot prompt: NOT SERVEABLE — ${outcome.refusal}. A bind would be refused.`;
   }
   const recorded = await servedPromptOwnerFields.workerServedPrompt(worker, {}, ctx);
   if (recorded) {
@@ -2695,7 +2703,7 @@ export async function serveBindInTransaction(
     tx.worker.findUniqueOrThrow({ where: { id: bind.workerId } }),
     tx.agent.findUniqueOrThrow({ where: { id: bind.agentId }, select: { name: true, urn: true, personaRole: true } }),
   ]);
-  const served = await resolveServedBootPrompt(tx, { surface: 'bind', appId: bind.appId, agent: { id: bind.agentId, name: agent.name }, workerId: bind.workerId });
+  const served = await resolveServedBootPrompt(tx, workerServeTarget({ id: bind.workerId, appId: bind.appId, agentId: bind.agentId }, agent.name));
   const role = worker.role ?? agent.personaRole ?? '';
   const variables = await workerPlatformValues({ ...ctx, db: tx as never }, worker, agent, role, bind.llmModel);
   await recordServedPrompt(tx, { kind: 'BIND', sessionId: bind.sessionId, appId: bind.appId, agentId: bind.agentId, workerId: bind.workerId }, served, { ...variables });

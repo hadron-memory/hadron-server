@@ -246,3 +246,17 @@ describe('#2708 the public SDL', () => {
     expect(refused.data).toEqual({ worker: { bootPromptServe: { refusal: 'BOOT_PROMPT_NOT_APPROVED', served: null } } });
   });
 });
+
+describe('#2708 the seam catches only the typed serve refusals', () => {
+  it('a fault that is not a serve refusal (a dropped connection) propagates; it is never reported as a refusal', async () => {
+    const { previewServedBootPrompt } = await import('../../../lib/bootPrompt/serve.js');
+    const failing = new Proxy(db, {
+      get(target, prop) {
+        if (prop === 'agent') return { findUnique: async () => { throw new Error('connection terminated'); } };
+        return (target as any)[prop];
+      },
+    }) as typeof db;
+    await expect(previewServedBootPrompt(failing, { surface: 'bind', appId: null, agent: { id: agent.id, name: 'Role' }, workerId: null }))
+      .rejects.toThrow('connection terminated');
+  });
+});
