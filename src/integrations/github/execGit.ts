@@ -105,6 +105,8 @@ export const GIT_TRANSPORT_GUARD: readonly string[] = Object.freeze([
 export interface ExecGitOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** #2569: opt-in local-command deadline in milliseconds; network callers leave this unset. */
+  timeout?: number;
 }
 
 /**
@@ -143,7 +145,11 @@ export async function execGit(
   options: ExecGitOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], options);
+    // #2569: a bounded child must not ignore the timeout's default SIGTERM and
+    // outlive the checkout lock. execFile's callback settles after child close;
+    // await it (including reap), never race a timer against a live process.
+    const bounded = options.timeout === undefined ? options : { ...options, killSignal: 'SIGKILL' as const };
+    return await execFile('git', [...GIT_TRANSPORT_GUARD, ...args], bounded);
   } catch (error) {
     throw new GitCommandError(error);
   }

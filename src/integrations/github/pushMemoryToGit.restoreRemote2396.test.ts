@@ -36,6 +36,7 @@ const GENERIC = 'Git command failed. Check the repository and branch, then retry
 type Site = 'transaction' | 'path' | 'render' | 'write' | 'rootSerialize' | 'rootWrite';
 
 const env = vi.hoisted(() => ({
+  restoreTimeouts: [] as Array<number | undefined>,
   root: '', bare: '', local: '',
   fault: null as string | null,
   /** `origin` as read at the instant a fault fired (proves the token was installed). */
@@ -62,6 +63,7 @@ vi.mock('./execGit.js', () => ({
     const isRestore = args[0] === 'remote' && args[1] === 'set-url' && args[3] === 'https://github.com/acme/repo.git';
     if (isRestore) {
       env.restoreAttempts++;
+      env.restoreTimeouts.push((options as { timeout?: number }).timeout);
       if (env.failRestore) {
         // Carries the token the way a raw execFile rejection would: a raw-error log leaks it.
         throw Object.assign(new Error(`raw ${TOKEN_URL}`), { code: 'RESTORE_SENTINEL' });
@@ -179,6 +181,7 @@ beforeEach(async () => {
   env.originAtFault = null;
   env.failRestore = false;
   env.restoreAttempts = 0;
+  env.restoreTimeouts = [];
   env.tokenInstalled = false;
   logged = [];
   vi.spyOn(console, 'error').mockImplementation((...a) => { logged.push(a.map(String).join(' ')); });
@@ -191,6 +194,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   rmSync(env.root, { recursive: true, force: true });
   rmSync(env.bare, { recursive: true, force: true });
+  for (const timeout of env.restoreTimeouts) expect(timeout, 'restore-only fixed deadline').toBe(10_000);
 });
 
 /** The origin as git stores it, read from the config FILE (not through any rewrite). */

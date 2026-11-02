@@ -85,6 +85,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryNodes",
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
+  "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
@@ -103,6 +104,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.sessions",
   "Query.sessionsPage",
   "Query.slackConnections",
+  "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
+  "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
   "Query.teamAttentionPage",
   "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",

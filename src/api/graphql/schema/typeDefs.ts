@@ -7715,8 +7715,15 @@ export const typeDefs = `#graphql
     "The cited loc; for an edge into another memory, the target's node URN; for a pendingEdge not yet resolved to a node, its target as recorded (a loc, file id or URN)."
     targetLoc: String!
     text: String
-    "Set only by specUnresolvedReferences."
+    "Set only by specUnresolvedReferences and specUnresolvedReferencesPage."
     reason: SpecReferenceProblem
+  }
+
+  "#3222 (#2213 S3) — one page of a spec-reference list, counted over the whole list."
+  type SpecReferencePage {
+    items: [SpecReference!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   """#1449 — one spec a renumber moves (the spec or a descendant)."""
@@ -9562,6 +9569,20 @@ export const typeDefs = `#graphql
     myChats(agentRef: ID!, limit: Int, offset: Int): [Chat!]!
 
     """
+    #2212 A3 (hrn:node:hadronmemory.com:specs:cor:api:120:04): myChats as a page. Same gate and refusals as
+    myChats (unauthenticated and impersonated callers are refused; an unknown Agent and a caller with no
+    readable memory get the empty page), and the same chats: the caller's own for the Agent plus the shared
+    chats of Apps the caller is a member of. total counts exactly those chats and hasMore says whether rows
+    remain past this page. Newest first by last update, then by id, so the order is stable across pages while
+    the chats do not change; a chat updated between requests can move pages.
+    Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200, a
+    negative offset is 0.
+
+    Accepts the Agent's ID or URN.
+    """
+    myChatsPage(agentRef: ID!, limit: Int, offset: Int): ChatPage!
+
+    """
     Message history for a saved chat. Returns plain role/content pairs
     suitable for feeding back into an LLM.
 
@@ -10017,12 +10038,33 @@ export const typeDefs = `#graphql
     specBacklinks(memoryRef: ID!, loc: String!): [SpecReference!]!
 
     """
+    #3222 (#2213 S3, hrn:node:hadronmemory.com:specs:cor:api:120:04): specBacklinks as a page. Same
+    read gate and refusals as specBacklinks, and the same list in the same order, so the pages
+    concatenate to exactly what specBacklinks returns. total counts that whole list and hasMore says
+    whether rows remain past this page. Default page 20, limit: 0 is count-only, a negative limit is
+    0, a limit over 200 is served as 200, a negative offset is 0. Paging bounds the response, not the
+    work: each page still scans the whole corpus. memoryRef accepts the memory's ID or URN.
+    """
+    specBacklinksPage(memoryRef: ID!, loc: String!, limit: Int, offset: Int): SpecReferencePage!
+
+    """
     #1449 — references in a spec corpus (any memory since #1591) that do not reach a written
     spec: URNs citing a missing loc or a placeholder, edges to a
     placeholder or to a deleted spec of the corpus, and pending edges (field pendingEdge) whose target is not
     a written node yet. Minting refuses while any remain.
     """
     specUnresolvedReferences(memoryRef: ID!): [SpecReference!]!
+
+    """
+    #3222 (#2213 S3, hrn:node:hadronmemory.com:specs:cor:api:120:04): specUnresolvedReferences as a
+    page. Same read gate and refusals as specUnresolvedReferences, and the same list in the same
+    order, so the pages concatenate to exactly what specUnresolvedReferences returns. total counts
+    that whole list and hasMore says whether rows remain past this page. Default page 20, limit: 0 is
+    count-only, a negative limit is 0, a limit over 200 is served as 200, a negative offset is 0.
+    Paging bounds the response, not the work: each page still scans the whole corpus. memoryRef
+    accepts the memory's ID or URN.
+    """
+    specUnresolvedReferencesPage(memoryRef: ID!, limit: Int, offset: Int): SpecReferencePage!
 
     """
     One run (cor:agt:010:02). ref is an AppRun ID or an
@@ -14358,6 +14400,13 @@ export const typeDefs = `#graphql
   "#2213 — one page of tickers; hasMore is whether rows remain past it."
   type TickerPage {
     items: [Ticker!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2212 A3 — one page of the caller's chats with an Agent, counted over the same chats."
+  type ChatPage {
+    items: [Chat!]!
     total: Int!
     hasMore: Boolean!
   }
