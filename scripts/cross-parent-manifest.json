@@ -225,6 +225,8 @@
     "ClaimUntrackedTaskItemsResult": "envelope",
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
+    "AgentTaskFinding": "value",
+    "AgentTaskFindingPage": "envelope",
     "AgentTaskHandBack": "value",
     "DueTaskReason": "value",
     "DueWakePage": "envelope",

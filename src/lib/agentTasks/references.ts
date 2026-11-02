@@ -26,6 +26,15 @@ export const REFERENCE_KIND_TO_GQL: Record<TaskReferenceKind, string> = {
 
 export class TaskReferenceError extends Error {}
 
+/**
+ * Ruling 0086 A (hrn:node:hadronmemory.com:specs:cor:agt:050:01, References → Refusals): the Hangul fillers U+115F,
+ * U+1160, U+3164 and U+FFA0, U+2800 BRAILLE PATTERN BLANK and U+034F COMBINING GRAPHEME JOINER. None is Cf or `\s`,
+ * so neither the V27 check nor the whitespace check catches them. Exactly this set; nothing beside it.
+ */
+export const BLANK_LOOKING = /[\u115F\u1160\u3164\uFFA0\u2800\u034F]/u;
+/** Ruling 0086 A: U+FE00–U+FE0F and U+E0100–U+E01EF (the supplement is not Cf either). Refused in targets only. */
+export const VARIATION_SELECTOR = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+
 /** The kind as stored: accepts the GraphQL enum value or the stored word; anything else is refused. */
 export function referenceKind(raw: unknown): TaskReferenceKind {
   if (typeof raw === 'string') {
@@ -97,6 +106,14 @@ export function normalizeTaskReferences(input: unknown): TaskReference[] {
     // stored reference show one link and lead to another. Check every kind and label before generic form checks.
     if (/\p{Cf}/u.test(target) || (typeof label === 'string' && /\p{Cf}/u.test(label))) {
       throw new TaskReferenceError(`${at}: a target or label may not contain an invisible format character.`);
+    }
+    // #3252 / hrn:node:hadronmemory.com:specs:cor:agt:050:01 (ruling 0086 A): characters that render blank but are
+    // not Cf, refused in targets and labels; variation selectors in targets only (emoji labels need U+FE0F).
+    if (BLANK_LOOKING.test(target) || (typeof label === 'string' && BLANK_LOOKING.test(label))) {
+      throw new TaskReferenceError(`${at}: a target or label may not contain a blank-looking character.`);
+    }
+    if (VARIATION_SELECTOR.test(target)) {
+      throw new TaskReferenceError(`${at}: a target may not contain a variation selector.`);
     }
     // Judge userinfo in the written authority, not URL.username/password: https://@host has empty parsed fields.
     // @ in the path, query or fragment is ordinary target data and stays accepted. Never echo either input.
