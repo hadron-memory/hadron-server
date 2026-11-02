@@ -251,11 +251,17 @@ describe('the real schema and the committed manifest', () => {
   it('S2 row 11: Organization.agents is open', () => {
     expect(manifest().entries['Organization.agents'].class).toBe('open');
   });
-  it('S2 rows 12-14: the scope-lens fields are open until the differential test exists, citing cor:acl:120:01', () => {
-    for (const c of ['ScopeMemoryEntry.memory', 'ScopeExplanation.memories', 'ScopeExplanation.winner']) {
-      const e = manifest().entries[c];
-      expect(e.class, c).toBe('open');
-      expect(e.evidence, c).toContain('cor:acl:120:01');
+  it('#3238: the scope-lens rows and CompiledBootPrompt.node are child-gated, each naming a differential test that exists', () => {
+    const rows: Array<[string, string]> = [
+      ['ScopeMemoryEntry.memory', 'for an ordinary member the lens is exactly the direct read, in scope order'],
+      ['ScopeExplanation.memories', 'every Memory the lens returns is one the same principal reads directly (cor:acl:120:01)'],
+      ['ScopeExplanation.winner', 'the winner skips an unreadable memory that holds the loc earlier in the order'],
+      ['CompiledBootPrompt.node', 'every principal whose compile succeeds reads the returned node directly, and it is the node in the compile memory'],
+    ];
+    for (const [coord, title] of rows) {
+      const e = manifest().entries[coord];
+      expect(e.class, coord).toBe('child-gated');
+      expect(e.test, coord).toBe(`src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::${title}`);
     }
   });
   it('S2 row 8: Session.worker is parent-implies-child for the identity fields, citing cor:acl:090:02, with a named masking test', () => {
