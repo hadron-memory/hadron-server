@@ -8177,6 +8177,8 @@ export const typeDefs = `#graphql
       externalId: String
       "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
       reference: AgentTaskReferenceFilter
+      "#2663: true narrows to finished tasks with at least one undisposed finding; false/omitted do not narrow. Existing App read scope, before paging (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+      unresolvedFindings: Boolean
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
       text: String
       "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
@@ -10522,11 +10524,15 @@ export const typeDefs = `#graphql
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
 
+    "#2663: task assigners only, including after finish; never an App key or impersonation. Replaces one finding disposition, never clears it. Unknown finding TASK_FINDING_NOT_FOUND; open task TASK_NOT_FINISHED; result unchanged (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+    disposeAgentTaskFinding(taskRef: ID!, findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReferenceInput): AgentTask!
+
     """
     #1705 — finish a started task with its result: its assignee only
     (hrn:node:hadronmemory.com:specs:cor:agt:050:08). A pending task is refused: start it first. Refusals as
     startAgentTask, plus BAD_USER_INPUT for an outcome that is not one word.
     """
+
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
 
     """
@@ -14097,6 +14103,11 @@ export const typeDefs = `#graphql
   "#2662: immutable finding set at finish; text never enters the event stream."
   type AgentTaskFinding { id: String!, severity: AgentTaskFindingSeverity!, text: String! }
   "#2662: findings in supplied order, capped pages (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  enum AgentTaskFindingDispositionCode { fixed accepted deferred rejected }
+  "#2663: latest disposition, separate from immutable findings. Every code, including deferred, resolves the finding."
+  type AgentTaskFindingDisposition { findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReference }
+  "#2663: current dispositions, ordered by finding order, capped pages."
+  type AgentTaskFindingDispositionPage { items: [AgentTaskFindingDisposition!]!, total: Int!, hasMore: Boolean! }
   type AgentTaskFindingPage { items: [AgentTaskFinding!]!, total: Int!, hasMore: Boolean! }
   "#2662: give every id, or none for platform F1/F2/... ids in list order. Ids unique, 1–32 letters/digits/_/-. Text at most 2,000 Unicode code points; no trimming."
   input AgentTaskFindingInput { id: String, severity: AgentTaskFindingSeverity!, text: String! }
@@ -14866,6 +14877,8 @@ export const typeDefs = `#graphql
     cancelledAt: DateTime
     "Set only on a finished task."
     result: AgentTaskResult
+    "#2663: dispositions beside the result, same readers; default20/max200/limit0 count-only (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+    findingDispositions(limit: Int, offset: Int): AgentTaskFindingDispositionPage!
     "#2651: the task's latest hand-back by its assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:29); null when it was never handed back. A later hand-back replaces it; every earlier code stays in the task.handed-back events."
     handBack: AgentTaskHandBack
     tags: [String!]!

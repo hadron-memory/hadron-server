@@ -92,7 +92,9 @@ describe('#2663 disposition write',()=>{
   expect(hidden.message.replace(task.id,'ID')).toBe(absent.message.replace(absent.extensions.taskId,'ID'));
  });
  it.each(['pending','started','cancelled'])('refuses %s tasks',async status=>{
-  const t=await db.agentTask.create({data:{appId:app.id,title:'No result',status,ownerUserId:owner.id}});
+  const t=await M.createAgentTask({}, {input:{appRef:app.id,title:'No result',assignee:{user:assignee.id}}},ctx());
+  if(status==='started') await M.startAgentTask({}, {taskId:t.id},ctx(assignee.id));
+  if(status==='cancelled') await M.cancelAgentTask({}, {taskId:t.id},ctx());
   await expect(dispose('fixed','F1',undefined,ctx(),t.id)).rejects.toMatchObject(code('TASK_NOT_FINISHED'));
  });
  it('serializes concurrent dispositions without losing either finding or event',async()=>{
@@ -115,4 +117,18 @@ it('GraphQL exposes the mutation, separate paged disposition read and unresolved
  const schema=buildSchema(typeDefs);const fieldResolver=(p:any,a:any,c:any,i:any)=>typeof R[i.parentType.name]?.[i.fieldName]==='function'?R[i.parentType.name][i.fieldName](p,a,c,i):defaultFieldResolver(p,a,c,i);
  const out=await graphql({schema,source:'mutation($id:ID!){disposeAgentTaskFinding(taskRef:$id,findingId:"F1",disposition:fixed){id findingDispositions(limit:1){total hasMore items{findingId disposition reference{kind target label}}}}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
  expect(out.errors).toBeUndefined();expect(out.data).toEqual({disposeAgentTaskFinding:{id:task.id,findingDispositions:{total:1,hasMore:false,items:[{findingId:'F1',disposition:'fixed',reference:null}]}}});
+});
+it('database derives open ids, rejects clearing a disposition and rejects an unknown target',async()=>{
+ expect((await stored() as any).unresolvedFindingIds).toEqual(['F1','F2']);
+ await db.$executeRaw`UPDATE agent_tasks SET unresolved_finding_ids = ARRAY[]::text[] WHERE id = ${task.id}`;
+ expect((await stored() as any).unresolvedFindingIds).toEqual(['F1','F2']);
+ await dispose();const before=await stored();
+ await expect(db.agentTask.update({where:{id:task.id},data:{findingDispositions:[]}})).rejects.toThrow();
+ await expect(db.agentTask.update({where:{id:task.id},data:{findingDispositions:[{findingId:'missing',disposition:'fixed',reference:null}]}})).rejects.toThrow();
+ expect(await stored()).toEqual(before);
+});
+it('migration uses the same disposition guards and backfills only the separate open-id projection',async()=>{
+ const {readFileSync}=await import('node:fs');const guard=readFileSync('prisma/agent-task-dispositions-invariants.sql','utf8');
+ const migration=readFileSync('prisma/migrations/20261102210000_agent_task_finding_dispositions/migration.sql','utf8');
+ expect(migration).toContain(guard);expect(migration).toContain('SET finding_dispositions = finding_dispositions');
 });

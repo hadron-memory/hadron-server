@@ -847,3 +847,5 @@ CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
+
+\ir agent-task-dispositions-invariants.sql

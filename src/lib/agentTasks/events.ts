@@ -28,6 +28,7 @@ export const TASK_EVENT_TYPES = [
   'task.started',
   'task.progress',
   'task.finished',
+  'task.finding-disposed',
   'task.cancelled',
   // #1754 — the backlog moves (cor:agt:050:02).
   'task.parked',
@@ -101,6 +102,7 @@ export type TaskEventPayload =
   | { type: 'task.properties-changed'; from: PropertiesFingerprint | null; to: PropertiesFingerprint | null }
   | { type: 'task.started' }
   | { type: 'task.progress' }
+  | { type: 'task.finding-disposed'; findingId: string; disposition: 'fixed' | 'accepted' | 'deferred' | 'rejected' }
   | { type: 'task.finished'; outcome: string; findingCounts?: FindingCounts }
   | { type: 'task.cancelled'; fromStatus: 'backlog' | 'pending' | 'started'; openChildCount: number }
   /** #2651: the code only. The optional reason text is on the task row, never here (cor:agt:050:29). */
@@ -156,6 +158,7 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'task.started':
     case 'task.progress':
       return {};
+    case 'task.finding-disposed': return { findingId: e.findingId, disposition: e.disposition };
     case 'task.finished':
       return { outcome: e.outcome, ...(e.findingCounts !== undefined ? { findingCounts: e.findingCounts } : {}) };
     case 'task.cancelled':

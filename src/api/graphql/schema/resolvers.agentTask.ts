@@ -2003,6 +2003,29 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.progress' } });
     }),
 
+  /** #2663 / hrn:node:hadronmemory.com:specs:cor:agt:050:30: assigners dispose a finished finding, never its result. */
+  disposeAgentTaskFinding: async (
+    _: unknown,
+    args: { taskRef: string; findingId: string; disposition: unknown; reference?: unknown },
+    ctx: Context,
+  ) => mutateTask(ctx, args.taskRef, async (tx, task, actor, app, txCtx) => {
+    if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
+      throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task disposes its findings.', { taskId: args.taskRef });
+    }
+    if (task.status !== 'finished') throw taskError('TASK_NOT_FINISHED', 'Only a finished task has findings to dispose.', { taskId: args.taskRef });
+    if (!['fixed', 'accepted', 'deferred', 'rejected'].includes(args.disposition as string)) throw badInput('A disposition is fixed, accepted, deferred or rejected; it cannot be cleared.');
+    const findings = (task.resultFindings ?? []) as TaskFinding[];
+    if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: args.taskRef });
+    const reference = args.reference == null ? null : taskReferencesInput([args.reference])[0];
+    const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+    const next = dispositions.filter(d => d.findingId !== args.findingId);
+    next.push({ findingId: args.findingId, disposition: args.disposition as string, reference });
+    // mutateTask holds the task row: two dispositions cannot overwrite each other. The trigger derives the open IDs.
+    await tx.agentTask.update({ where: { id: task.id }, data: { findingDispositions: next, ...updatedStamp(ctx) } });
+    await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
+      event: { type: 'task.finding-disposed', findingId: args.findingId, disposition: args.disposition as 'fixed' | 'accepted' | 'deferred' | 'rejected' } });
+  }),
+
   /**
    * Finish a started task with its result: the assignee only (cor:agt:050:08).
    * Finishing without starting is refused (050:02 Proposed; #1705 interim).
@@ -2226,6 +2249,7 @@ type ListArgs = {
   reference?: { kind?: string | null; target: string } | null;
   text?: string | null;
   overdue?: boolean | null;
+  unresolvedFindings?: boolean | null;
   createdAfter?: unknown;
   createdBefore?: unknown;
   startedAfter?: unknown;
@@ -2297,6 +2321,7 @@ export const agentTaskQueries = {
       if (args.reference.kind != null) element.kind = refKind(args.reference.kind);
       filters.push({ references: { array_contains: [element] } });
     }
+    if (args.unresolvedFindings === true) filters.push({ status: 'finished', unresolvedFindingIds: { isEmpty: false } });
     if (args.text != null) {
       // #2664: a case-insensitive substring over title and description. Trimmed, 1..TASK_TEXT_FILTER_MAX; the refusal
       // is fixed text (never the pattern) and comes after the App read gate, like the tag bounds above. Prisma's
@@ -2617,6 +2642,15 @@ export const agentTaskFieldResolvers = {
     },
   },
   AgentTask: {
+    /** #2663: current dispositions, in immutable finding order, separate from the finished result. */
+    findingDispositions: (t: TaskRow, args: { limit?: number | null; offset?: number | null }) => {
+      const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+      const ids = ((t.resultFindings ?? []) as TaskFinding[]).map(f => f.id);
+      const items = [...rows].sort((a, b) => ids.indexOf(a.findingId) - ids.indexOf(b.findingId))
+        .map(d => ({ ...d, reference: d.reference ? { ...d.reference, kind: REFERENCE_KIND_TO_GQL[d.reference.kind] } : null }));
+      const { take, skip } = pageArgs(args);
+      return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
+    },
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
