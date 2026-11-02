@@ -214,4 +214,80 @@ describe('#3242 row-local file operation failures', () => {
   rmSync(backup,{recursive:true,force:true});
  });
 
+ it('root-loc failure checkpoints only README and preserves unrelated files', async () => {
+  const healthy = await node('healthy');
+  const root = await node('');
+  const original = '---\nid: '+root.id+'\n---\noriginal root';
+  baseline({'README.md': original, 'docs/keep.md': 'unrelated child'});
+  await debt(healthy.id, 'WRITE');
+  await debt(root.id, 'WRITE');
+  let checkpointPaths: string[] = [];
+  const write = files.writeNodeFile;
+  vi.spyOn(files, 'writeNodeFile').mockImplementation((...args) => {
+   const result = write(...args);
+   if (args[1].id === root.id) {
+    const backup = readFileSync(mirrorMutationMarker(localPath()), 'utf8');
+    checkpointPaths = JSON.parse(readFileSync(join(backup,'manifest.json'),'utf8')).map((r: {path:string}) => r.path);
+    throw new Error('synthetic root mutation failure');
+   }
+   return result;
+  });
+  await tick();
+  expect(checkpointPaths).toEqual([join(localPath(),'README.md')]);
+  expect(remote('README.md')).toBe(original);
+  expect(remote('docs/keep.md')).toBe('unrelated child');
+  expect(remote('healthy.md')).toContain('fresh healthy');
+  expect(await rows()).toEqual([expect.objectContaining({nodeId:root.id,attempts:10,errorClass:'TREE_WRITE'})]);
+  expect(git(localPath(),'status','--porcelain')).toBe('');
+ });
+
+ it('operator snapshot restore resumes mirroring without discarding unpublished history', async () => {
+  const healthy = await node('healthy'), bad = await node('bad');
+  baseline({'bad.md':'original bad'});
+  writeFileSync(join(localPath(),'unpublished.txt'),'must survive repair');
+  git(localPath(),'add','-A'); git(localPath(),'commit','-m','unpublished local history');
+  const unpublishedHead = git(localPath(),'rev-parse','HEAD');
+  const healthyDebt = await debt(healthy.id,'WRITE');
+  await debt(bad.id,'WRITE','',1);
+  const write = files.writeNodeFile, copy = fs.cpSync;
+  const writeFault = vi.spyOn(files,'writeNodeFile').mockImplementation((...args) => {
+   const result = write(...args);
+   if(args[1].id===bad.id)throw new Error('synthetic partial write');
+   return result;
+  });
+  const copyFault = vi.spyOn(fs,'cpSync').mockImplementation((source,dest,options) => {
+   if(String(dest)===join(localPath(),'bad.md'))throw new Error('synthetic rollback error');
+   return copy(source,dest,options);
+  });
+  await tick();
+  expect((await rows()).find(r=>r.nodeId===healthy.id)).toEqual(healthyDebt);
+  const backup = readFileSync(mirrorMutationMarker(localPath()),'utf8');
+  expect(backup.startsWith(join(localPath(),'.git','hadron-mirror-row-'))).toBe(true);
+  expect(git(localPath(),'rev-parse','HEAD')).toBe(unpublishedHead);
+  expect(env.commands.filter(args=>args[0]==='push')).toEqual([]);
+  writeFault.mockRestore(); copyFault.mockRestore();
+  // Private-fixture execution of the operator runbook, not an application repair API.
+  const manifest = JSON.parse(readFileSync(join(backup,'manifest.json'),'utf8')) as Array<{path:string,index:string,exists:boolean}>;
+  for(const entry of manifest) {
+   expect(entry.path.startsWith(localPath()+'/')).toBe(true);
+   rmSync(entry.path,{recursive:true,force:true});
+   if(entry.exists) {
+    mkdirSync(join(entry.path,'..'),{recursive:true});
+    fs.cpSync(join(backup,entry.index),entry.path,{recursive:true,verbatimSymlinks:true});
+   }
+  }
+  expect(readFileSync(join(localPath(),'bad.md'),'utf8')).toBe('original bad');
+  expect(readFileSync(join(localPath(),'healthy.md'),'utf8')).toContain('fresh healthy');
+  expect(git(localPath(),'rev-parse','HEAD')).toBe(unpublishedHead);
+  expect(readFileSync(join(localPath(),'unpublished.txt'),'utf8')).toBe('must survive repair');
+  rmSync(mirrorMutationMarker(localPath()));
+  rmSync(backup,{recursive:true,force:true});
+  await tick(new Date(Date.now()+7*24*60*60_000));
+  expect(await rows()).toEqual([]);
+  expect(remote('unpublished.txt')).toBe('must survive repair');
+  expect(remote('healthy.md')).toContain('fresh healthy');
+  expect(remote('bad.md')).toContain('fresh bad');
+  expect(git(localPath(),'status','--porcelain')).toBe('');
+ });
+
 });

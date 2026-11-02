@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 vi.mock('fs', async original => ({ ...(await original<typeof import('fs')>()) }));
-import { mirrorMutationMarker, mutateMirrorFiles } from './mirrorFileMutation.js';
+import { hasIncompleteMirrorMutation, mirrorMutationMarker, mutateMirrorFiles } from './mirrorFileMutation.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -46,6 +46,7 @@ it('retains the checkout guard and backup when rollback itself fails',()=>{
   fs.writeFileSync(path,'partial');throw new Error('failed row');
  })).toThrow('synthetic restore failure');
  const backup=fs.readFileSync(mirrorMutationMarker(root),'utf8');
+ expect(backup.startsWith(join(root,'.git','hadron-mirror-row-'))).toBe(true);
  expect(fs.readFileSync(join(backup,'0'),'utf8')).toBe('original');
  // This test owns the intentionally retained recovery backup.
  fs.rmSync(backup,{recursive:true,force:true});
@@ -70,4 +71,34 @@ it('backup cleanup failure does not turn a successful mutation into failed debt'
  expect(fs.existsSync(mirrorMutationMarker(root))).toBe(false);
  expect(retained).not.toBe('');
  real(retained,{recursive:true,force:true});
+});
+
+it.each(['EACCES', 'ENOTDIR'])('unreadable marker fails closed without throwing (%s)', code => {
+ const root = fixture();
+ const stat = fs.lstatSync;
+ vi.spyOn(fs, 'lstatSync').mockImplementation((...args: Parameters<typeof stat>) => {
+  if (String(args[0]) === mirrorMutationMarker(root)) {
+   throw Object.assign(new Error('synthetic marker read'), { code });
+  }
+  return stat(...args);
+ });
+ expect(hasIncompleteMirrorMutation(root)).toBe(true);
+});
+it('logs only redacted original-error metadata before a failed rollback replaces it', () => {
+ const root = fixture(), path = join(root, 'bad.md');
+ fs.writeFileSync(path, 'original');
+ const copy = fs.cpSync;
+ vi.spyOn(fs, 'cpSync').mockImplementation((source, dest, options) => {
+  if (String(dest) === path) throw new Error('synthetic rollback failure');
+  return copy(source, dest, options);
+ });
+ const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+ const original = Object.assign(new Error('Bearer synthetic-private-value'), { code: 'EACCES' });
+ expect(() => mutateMirrorFiles(root, [path], () => {
+  fs.writeFileSync(path, 'partial');
+  throw original;
+ })).toThrow('synthetic rollback failure');
+ expect(log).toHaveBeenCalledWith('[git-mirror] Row mutation failed; rolling back',
+  { phase: 'tree', class: 'TREE_WRITE', providerCode: 'EACCES' });
+ expect(JSON.stringify(log.mock.calls)).not.toContain('synthetic-private-value');
 });
