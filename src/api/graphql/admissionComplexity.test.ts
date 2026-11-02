@@ -22,6 +22,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
   "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
   "AgentTask.blocks", // Same shared dependency page resolver.
+  "AgentTaskResult.findings", // #2662: pageArgs default20/cap200; result itself is bounded at100 findings.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
@@ -311,6 +312,14 @@ describe('cost (graphql-query-complexity), enforce', () => {
     }
     expect(found.sort()).toEqual(REVIEWED_PAGED_FIELDS);
     for (const key of Object.keys(OMITTED_PAGE_SIZE)) expect(REVIEWED_PAGED_FIELDS).toContain(key);
+  });
+
+  it('#2662 findings admission charges the clamped page for literals and variables', () => {
+    const q = (n: string) => `{ agentTask(id: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
+    const variables = 'query($n:Int){agentTask(id:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
+    expect(cost(q('2147483647'))).toBe(cost(q('200')));
+    expect(cost(variables, {n:2147483647})).toBe(cost(q('200')));
+    expect(cost(q('0'))).toBeLessThan(cost(q('200')));
   });
 
   it('saturates: a huge page size cannot wrap around or go non-finite', () => {

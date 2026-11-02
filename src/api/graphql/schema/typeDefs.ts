@@ -10256,6 +10256,24 @@ export const typeDefs = `#graphql
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
     """
+    #2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06, creating several at once; ruling 0011 A): create 1 to 25
+    tasks in the App appRef, all or none, in one transaction. Each task is judged exactly as createAgentTask judges it
+    alone (the same gates, owner rules, refusals and warnings); the first refusal refuses the whole call, creates and
+    records nothing, and carries extensions.position, the 1-based position of the task that caused it (tasks are
+    judged one at a time in list order, each wholly before the next: its checks before the write, then its whole write,
+    its blockers named by an existing task or by an earlier position included; last come the links to later
+    positions, in list order). An empty list is
+    BAD_USER_INPUT and more than 25 is TASK_BATCH_TOO_LARGE, before anything is created. A task names an existing
+    parent, never another task of the call; a root task naming an App other than appRef is APP_NOT_FOUND, and a parent
+    in another App TASK_NOT_FOUND. blockedByPositions names other tasks of the call as blockers (a self-block or a
+    cycle is TASK_BLOCKER_CYCLE, a position outside the list BAD_USER_INPUT), and needs the same assigner authority as
+    blockedBy. Handles follow list order and a refused call spends none. Each task records the events a single create
+    records; matching and launches run only after the commit, and each task's warnings are filed under
+    "<response key>.<position>". The result is every task, in list order. Not idempotent: nothing is deduplicated, so a
+    caller that lost the answer lists the App's tasks before trying again.
+    """
+    createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!): [AgentTask!]!
+    """
     #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
     untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
     to the caller, created STARTED with startedAt set, externalId and source the item's URL, an ISSUE reference to it,
@@ -14092,10 +14110,21 @@ export const typeDefs = `#graphql
     modelGroupNotIn: [String!]
   }
 
+  "#2662: severity is shape only, never matcher, authorization or alarm input (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+  enum AgentTaskFindingSeverity { P1 P2 P3 note }
+  "#2662: immutable finding set at finish; text never enters the event stream."
+  type AgentTaskFinding { id: String!, severity: AgentTaskFindingSeverity!, text: String! }
+  "#2662: findings in supplied order, capped pages (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
+  type AgentTaskFindingPage { items: [AgentTaskFinding!]!, total: Int!, hasMore: Boolean! }
+  "#2662: give every id, or none for platform F1/F2/... ids in list order. Ids unique, 1–32 letters/digits/_/-. Text at most 2,000 Unicode code points; no trimming."
+  input AgentTaskFindingInput { id: String, severity: AgentTaskFindingSeverity!, text: String! }
+
   "A finished task's result (hrn:node:hadronmemory.com:specs:cor:agt:050:01)."
   type AgentTaskResult {
     "One word: succeeded, failed, or a word the team chooses."
     outcome: String!
+    "#2662: immutable result findings; default 20, max 200, limit 0 count-only; same readers as this result."
+    findings(limit: Int, offset: Int): AgentTaskFindingPage!
     summary: String
     "A URL or a node URN."
     evidence: String
@@ -14135,6 +14164,8 @@ export const typeDefs = `#graphql
     outcome: String!
     summary: String
     evidence: String
+    "#2662: optional immutable findings, at most 100 (hrn:node:hadronmemory.com:specs:cor:agt:050:30); omitted/null preserves legacy finish."
+    findings: [AgentTaskFindingInput!]
   }
 
   "#2068 (hrn:node:hadronmemory.com:specs:cor:agt:080:01, :10) — why a ticker fires. A closed set; several fire it when any one holds."
@@ -15775,6 +15806,14 @@ export const typeDefs = `#graphql
     closeSessionWhenDone: Boolean
     "#2649 (hrn:node:hadronmemory.com:specs:cor:agt:050:09): a list replaces the whole list, order kept; null or an empty list clears it; omission leaves it. The task.edited event names references, never the values."
     references: [AgentTaskReferenceInput!]
+  }
+
+  "#2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06): one task of a createAgentTasks call."
+  input CreateAgentTasksItemInput {
+    "The task, exactly as createAgentTask takes it. appRef may be left out; if given it must be the call's App."
+    task: CreateAgentTaskInput!
+    "Other tasks of the same call that block this one, by their 1-based position in the list."
+    blockedByPositions: [Int!]
   }
 
   """
