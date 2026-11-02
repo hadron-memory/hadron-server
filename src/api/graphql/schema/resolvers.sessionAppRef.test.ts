@@ -103,7 +103,7 @@ beforeEach(async () => {
 
   // The Team Agent — through the real mutation, with the roles: branch marker
   // the worker bootstraps locate it by (mirrors resolvers.teamChat.test.ts).
-  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent' }, ctx(admin.id));
+  const created = await M.createAgent({}, { orgId: org.id, name: 'Team Agent', personaRole: 'test-worker' }, ctx(admin.id));
   teamAgent = { id: created.id, urn: created.urn, systemMemoryId: created.systemMemoryId };
   await db.node.create({
     data: {

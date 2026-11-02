@@ -27,6 +27,24 @@ export type CastingAgent = { id: string; name: string; urn: string; personaRole:
 const refusal = (code: string, message: string, extensions: Record<string, unknown> = {}) =>
   new GraphQLError(message, { extensions: { code, ...extensions } });
 
+/**
+ * #3256 / hrn:node:hadronmemory.com:specs:cor:dmo:050:11: cast, preview and change take the Agent's own nonblank
+ * role. Call AFTER the existing installation/licence checks, and again on the cast's locked transaction read.
+ */
+export function requireWorkerAgentRole(agent: Pick<CastingAgent, 'personaRole'>, workerId?: string): string {
+  const role = (agent.personaRole ?? '').trim();
+  if (role === '') {
+    throw refusal(
+      'WORKER_AGENT_HAS_NO_ROLE',
+      workerId
+        ? 'That agent has no role of its own, so a worker cannot change to it; give the agent a personaRole first.'
+        : 'That agent has no role of its own, so a worker cannot be cast from it; give the agent a personaRole first.',
+      workerId ? { workerId } : {},
+    );
+  }
+  return role;
+}
+
 /** The one answer for an absent Agent and one not installed here (#1946 ruling A): no agentId, no existence oracle. */
 export const workerAgentNotInstalled = (appId: string) => refusal(
   'WORKER_AGENT_NOT_INSTALLED',
