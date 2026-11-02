@@ -193,6 +193,14 @@ export type TaskActor =
  */
 export type RunCreator = { kind: 'run'; runId: string };
 
+/**
+ * #3132 (cor:agt:050:23, :120:03): the App's own key claiming an outside item, its ONE task write. Like `RunCreator`
+ * it is not a `TaskActor`, so no read, transition or assignment path ever sees it; only the claim constructs it.
+ * `inTaskWriteTx` re-runs the key read gate (`keyMayReadApp`) under the App's shared anchors, so a revocation or an
+ * App or org deletion either committed first (refused, nothing written) or waits for the claim.
+ */
+export type KeyCreator = { kind: 'appKey'; appKeyId: string };
+
 /** The run is this App's, and still running, judged under the write's locks (a finished run creates nothing). */
 async function requireRunLive(txCtx: Context, app: TaskApp, runId: string): Promise<void> {
   if (app.deletedAt) throw new TaskGateRefused();
@@ -936,7 +944,7 @@ class TaskGateRefused extends Error {}
 export async function inTaskWriteTx<T>(
   ctx: Context,
   app: TaskApp,
-  actor: TaskActor | RunCreator,
+  actor: TaskActor | RunCreator | KeyCreator,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp) => Promise<T>,
   /**
@@ -974,6 +982,9 @@ export async function inTaskWriteTx<T>(
         if (!fresh) throw new TaskGateRefused();
         if (actor.kind === 'run') {
           await requireRunLive(txCtx, fresh, actor.runId);
+        } else if (actor.kind === 'appKey') {
+          // The same key, still live, of this App and a live org, sending no session: the read gate, re-run locked.
+          if (appKeyCaller(txCtx)?.appKeyId !== actor.appKeyId || !(await keyMayReadApp(txCtx, fresh))) throw new TaskGateRefused();
         } else {
           const again = await resolveTaskActor(txCtx, fresh);
           if (!again || !sameActor(again, actor)) throw new TaskGateRefused();
@@ -1138,6 +1149,8 @@ async function insertTask(
     /** #2420: already normalized and schema-checked by the caller, which also decided the creator may set it. */
     properties?: Prisma.InputJsonObject | null;
     created: Record<string, unknown>; assigned: Record<string, unknown>; evActor: EventActor;
+    /** #3132 (rulings:0009): whom a key's or run's create was for, recorded as each event's subject (never its actor). */
+    evFor?: TaskParty | null;
     /** #1754: a backlog task is parked, never queued (cor:agt:050:02). Default pending. */
     status?: 'backlog' | 'pending';
     /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
@@ -1212,26 +1225,26 @@ async function insertTask(
     throw e;
   });
   await appendTaskEvent(tx, {
-    appId: a.app.id, taskId: created.id, actor: a.evActor,
+    appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
     // The owner rides the event (#1757): a named owner is visible to the
     // event stream — and so to the alarm chain — from creation.
     event: { type: 'task.created', parentTaskId: a.parentId, owner: a.owner, hasAssignee: a.assignee !== null },
   });
   if (a.properties) {
     await appendTaskEvent(tx, {
-      appId: a.app.id, taskId: created.id, actor: a.evActor,
+      appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
       event: { type: 'task.properties-changed', from: null, to: propertiesFingerprint(a.properties) },
     });
   }
   if (a.assignee) {
     await appendTaskEvent(tx, {
-      appId: a.app.id, taskId: created.id, actor: a.evActor,
+      appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor,
       event: { type: 'task.assigned', assignee: a.assignee, closeSessionWhenDone: a.closeSessionWhenDone },
     });
   } else if ((a.status ?? 'pending') === 'pending') {
     // #1707: the task enters the queue (cor:agt:050:03, :11). A backlog task
     // never does — it is parked (#1754, cor:agt:050:02).
-    await appendTaskEvent(tx, { appId: a.app.id, taskId: created.id, actor: a.evActor, event: { type: 'assignment.queued' } });
+    await appendTaskEvent(tx, { appId: a.app.id, taskId: created.id, actor: a.evActor, forParty: a.evFor, event: { type: 'assignment.queued' } });
   }
   return { id: created.id, queued: a.assignee === null && (a.status ?? 'pending') === 'pending' };
 }
@@ -1336,6 +1349,130 @@ export async function createStartedClaim(
     if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
     throw e;
   }
+}
+
+/** #3132: a key's or run's claim names its parties; each is resolved to a party of the App (`resolveClaimParties`). */
+export type ClaimPartiesInput = { owner?: PartyInput; assignee?: PartyInput };
+export type ClaimParties = { owner: TaskParty; assignee: TaskParty };
+
+/**
+ * #3132 (cor:agt:120:03, V45 point 12; cor:agt:050:01): the owner and assignee of a claim by an App key or a run, judged
+ * on `c` (the caller's gate transaction, and again inside each claim's write). The assignee must be named
+ * (TASK_ASSIGNEE_REQUIRED); the owner is the one named, else the person a run acts for (`actsForUserId`; a key acts for
+ * nobody, so it must name one), else TASK_OWNER_REQUIRED. Each must be a worker or participant of the App, refused
+ * exactly as `createAgentTask` refuses one (TASK_OWNER_INVALID / TASK_ASSIGNEE_INVALID).
+ */
+export async function resolveClaimParties(
+  c: Context,
+  app: TaskApp,
+  input: ClaimPartiesInput,
+  actsForUserId: string | null,
+): Promise<ClaimParties> {
+  if (!input.assignee) {
+    throw taskError('TASK_ASSIGNEE_REQUIRED', 'A claim by an App key or a run names its assignee: a worker of the App or a person who participates in it. The claimed task is started on their behalf.');
+  }
+  let owner: TaskParty;
+  if (input.owner) owner = await resolveParty(c, app, input.owner, 'TASK_OWNER_INVALID');
+  else if (actsForUserId) owner = await resolveParty(c, app, { user: actsForUserId }, 'TASK_OWNER_INVALID');
+  else throw taskError('TASK_OWNER_REQUIRED', 'A claim by an App key, or by a run that acts for no person, names the task\'s owner: a worker of the App or a person who participates in it.');
+  const assignee = await resolveParty(c, app, input.assignee, 'TASK_ASSIGNEE_INVALID');
+  return { owner, assignee };
+}
+
+const partyRef = (p: TaskParty): NonNullable<PartyInput> => (p.workerId ? { worker: p.workerId } : { user: p.userId as string });
+
+/**
+ * #3132 (cor:agt:120:03, :050:08 claims exception, :050:11, :050:23): claim one outside item for an App key or a run, in
+ * its OWN write transaction, owned by and assigned to the parties the caller's gate resolved (re-resolved here under
+ * the locks, so one who left meanwhile is refused). Created STARTED on the assignee's behalf, as `createStartedClaim`
+ * does for a person or worker. The key or run is the creator and every event's actor (`actorAppKeyId` /
+ * `actorRunId`; no person, worker or agent is credited), and the assignee is each event's subject when the actor does
+ * not resolve it (`forParty`: always for a key; for a run unless the assignee is the person it acts for).
+ * Returns null when another caller already holds the item.
+ */
+export async function createStartedClaimFor(
+  ctx: Context,
+  app: TaskApp,
+  creator: KeyCreator | RunCreator,
+  item: { title: string; url: string },
+  parties: ClaimParties,
+): Promise<TaskRow | null> {
+  const externalId = externalIdInput(item.url);
+  const references = taskReferencesInput([{ kind: 'issue', target: item.url }]);
+  const evActor: EventActor = creator.kind === 'appKey'
+    ? { userId: null, workerId: null, agentId: null, appKeyId: creator.appKeyId }
+    : { userId: null, workerId: null, agentId: null, runId: creator.runId };
+  const actsFor = creator.kind === 'run' ? ctx.userId ?? null : null;
+  const evFor = parties.assignee.userId && parties.assignee.userId === actsFor ? null : parties.assignee;
+  const lockedAssignee = parties.assignee.workerId ?? null;
+  const now = new Date();
+  try {
+    return await inTaskWriteTx(ctx, app, creator, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
+      const again = await resolveClaimParties(txCtx, fresh, { owner: partyRef(parties.owner), assignee: partyRef(parties.assignee) }, null);
+      if ((again.assignee.workerId ?? null) !== lockedAssignee) {
+        throw taskError('TASK_CONFLICT', 'The assignee named changed while this write waited; try again.');
+      }
+      await refuseResettingAssignee(tx, fresh.id, again.assignee.workerId);
+      const made = await insertTask(tx, {
+        app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
+        startBy: null, closeSessionWhenDone: false, requirements: null, owner: again.owner, assignee: again.assignee, status: 'pending',
+        created: {
+          createdBy: null, createdByWorkerId: null, createdByAgentId: null, createdByRunId: creator.kind === 'run' ? creator.runId : null,
+          updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
+        },
+        assigned: { assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null },
+        evActor, evFor,
+      });
+      // The start the assignee would make, made here on their behalf (V41, the claims exception to cor:agt:050:08).
+      const started = await tx.agentTask.update({
+        where: { id: made.id },
+        data: { status: 'started', startedAt: new Date(), updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null },
+      });
+      await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: evActor, forParty: evFor, event: { type: 'task.started' } });
+      return started;
+    }, { lockWorkerIds: [lockedAssignee] });
+  } catch (e) {
+    if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
+    throw e;
+  }
+}
+
+/**
+ * #3132: a headless run's read of its OWN App's tasks (the untracked list's claimed-id read), in one transaction under
+ * the App's shared anchors: the App and its org live and the run still RUNNING, re-judged after the lock. Anything
+ * else answers as a missing App.
+ */
+export async function withRunTaskApp<T>(
+  principal: Context,
+  run: { id: string; appId: string },
+  body: (c: Context, app: TaskApp) => Promise<T>,
+): Promise<T> {
+  const gone = (): never => { throw appNotFound(run.appId); };
+  return inAnchoredAppTx(principal, run.appId, gone, async (txCtx, app) => {
+    if (app.organizationId) {
+      const org = await txCtx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+      if (!org) return gone();
+    }
+    try {
+      await requireRunLive(txCtx, app, run.id);
+    } catch (e) {
+      if (e instanceof TaskGateRefused) return gone();
+      throw e;
+    }
+    return body(txCtx, app);
+  });
+}
+
+/** #3132: a run names no App but its own; any other ref, or one that resolves to nothing, is the missing-App answer. */
+export async function requireRunOwnApp(principal: Context, run: { appId: string }, appRef: string | null | undefined): Promise<void> {
+  if (appRef == null || appRef === '') return;
+  let namedAppId: string | null = null;
+  try {
+    namedAppId = (await resolveAppRef(principal.db, appRef)).id;
+  } catch (e) {
+    if (!(e instanceof AppNotFoundError)) throw e;
+  }
+  if (namedAppId !== run.appId) throw appNotFound(appRef);
 }
 
 /** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
@@ -2532,6 +2669,8 @@ export const agentTaskFieldResolvers = {
       partyView(ctx, e.actorWorkerId, e.actorWorkerId ? null : e.actorUserId),
     subjectWorker: (e: { subjectWorkerId: string | null }, _: unknown, ctx: Context) =>
       e.subjectWorkerId ? partyView(ctx, e.subjectWorkerId, null) : null,
+    subjectUser: (e: { subjectUserId: string | null }, _: unknown, ctx: Context) =>
+      e.subjectUserId ? partyView(ctx, null, e.subjectUserId) : null,
     acknowledgedBy: (e: { acknowledgedByWorkerId: string | null; acknowledgedByUserId: string | null }, _: unknown, ctx: Context) =>
       partyView(ctx, e.acknowledgedByWorkerId, e.acknowledgedByWorkerId ? null : e.acknowledgedByUserId),
   },

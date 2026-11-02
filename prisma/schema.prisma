@@ -5869,8 +5869,14 @@ model AgentTeamEvent {
   actorAgentId           String?   @map("actor_agent_id")
   /// #1756: the headless run that acted, when one did; the other actor columns are then null.
   actorRunId             String?   @map("actor_run_id")
+  /// #3132 (cor:agt:050:11, :23): the App key that acted, when one did (its one task write is a claim); the other
+  /// actor columns are then null. No FK: like the other actor ids, a sealed record of who acted at the time.
+  actorAppKeyId          String?   @map("actor_app_key_id")
   /// The worker the event concerns, if any (e.g. the new assignee).
   subjectWorkerId        String?   @map("subject_worker_id")
+  /// #3132 (rulings:0009): the PERSON the event concerns, when a key or run acted for one it cannot itself resolve
+  /// (the assignee its claim named). Never the actor. No FK, sealed like the actor ids (not rewritten by a merge).
+  subjectUserId          String?   @map("subject_user_id")
   /// null for an ordinary event, 'alarm' for an alarm.
   severity               String?
   /// Alarms only: the owner chain when raised, nearest first.

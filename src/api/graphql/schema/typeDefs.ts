@@ -10093,10 +10093,15 @@ export const typeDefs = `#graphql
     task.assigned and task.started. Each claim commits on its own. An item another caller claimed first is skipped,
     so concurrent callers get disjoint sets. A refusal mid-walk stops it and is returned with the claims already
     made: incompleteReason claim_refused with its code in refusalCode (claim_failed, refusalCode null, for an
-    unexpected failure after a claim). A person or a worker claims; the App's own key gets
-    TASK_CLAIM_PRINCIPAL_UNSUPPORTED before anything else is read. Other refusals as untrackedTaskItems.
+    unexpected failure after a claim). A person or a worker claims for themselves and names no assignee or owner
+    (BAD_USER_INPUT if it does). #3132: the App's own key names the assignee (TASK_ASSIGNEE_REQUIRED) and the owner
+    (TASK_OWNER_REQUIRED), each a worker of the App or a person who participates in it (TASK_ASSIGNEE_INVALID /
+    TASK_OWNER_INVALID, as createAgentTask), all judged before any GitHub call; the task is started on the assignee's
+    behalf, and its events name the key as actorAppKeyId and the assignee as their subject. A claim is the only task
+    write an App key makes. A key request carrying a session is APP_KEY_SESSION_BOUND. Other refusals as
+    untrackedTaskItems.
     """
-    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, repository: String, ready: ReadyFilter, limit: Int): ClaimUntrackedTaskItemsResult!
+    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1."
     setAgentTaskPriority(taskRef: ID!, priority: Int!): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority."
@@ -14742,8 +14747,12 @@ export const typeDefs = `#graphql
     actor: AgentTaskParty
     "#1833 — the headless run that acted, when a run made this event (actor is then null: a run is never a person or a worker). Null otherwise. Matches AgentTask.createdByRunId for the task a run created."
     actorRunId: ID
+    "#3132 — the App key that acted, when a key made this event (its claim of an outside item; actor and actorRunId are then null: a key is never a person or a worker). Null otherwise."
+    actorAppKeyId: ID
     "The worker the event concerns, e.g. a new assignee."
     subjectWorker: AgentTaskParty
+    "#3132 — the person the event concerns, when a key or a run acted for one it cannot itself resolve (the assignee its claim named). Never the actor. Null otherwise."
+    subjectUser: AgentTaskParty
     "ALARM for an alarm; null for an ordinary event."
     severity: AgentTeamEventSeverity
     "Alarms only: the owner chain when the alarm was raised, nearest first."
