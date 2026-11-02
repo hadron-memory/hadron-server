@@ -1,5 +1,6 @@
 // agentQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { GraphQLError } from 'graphql';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { decryptToken } from '../../../lib/tokenCrypto.js';
 import { AI_PROVIDER_ENDPOINTS, effectiveApiStyle, effectiveEndpoint } from '../../../lib/aiEndpoint.js';
 import {
@@ -32,6 +33,8 @@ import {
   requireAiConfigPickerAccess,
   rethrowAiConfigTyped,
   AGENT_INCLUDE,
+  pageArgs,
+  pageEnvelope,
 } from './resolvers.helpers.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
@@ -57,6 +60,39 @@ async function listedEntries<E extends { node: ListedNode }>(ctx: Context, agent
     if (!row) return [];
     return [{ ...e, node: e.node.inheritedFrom ? Object.assign(row, { inheritedFrom: e.node.inheritedFrom }) : row }];
   });
+}
+
+/**
+ * #2213 S2 — the row scope of `myAgentSubscriptions`, shared with
+ * `myAgentSubscriptionsPage` (hrn:node:hadronmemory.com:specs:cor:api:120:04).
+ * Null means the caller has no inventory to read: no user, or an impersonated
+ * request (#876 class sweep: identity-scoped and org-unconstrained, it would
+ * list the target's subscriptions across every org). The old field answers [],
+ * the page the empty page. `AgentSubscription` has the composite key
+ * (userId, agentId) and no id, so the tiebreak is the key's other half.
+ */
+export function myAgentSubscriptionScope(ctx: Context) {
+  if (!ctx.userId || ctx.impersonation) return null;
+  return {
+    where: { userId: ctx.userId } satisfies Prisma.AgentSubscriptionWhereInput,
+    orderBy: [{ createdAt: 'desc' as const }, { agentId: 'asc' as const }],
+  };
+}
+
+/**
+ * #2213 S2 — the admission and row scope of `agentSubscriptions`, shared with
+ * `agentSubscriptionsPage`. An Agent the caller cannot read answers as absent
+ * (#1944); a readable one needs ADMIN of its owning org (005 FR-022). Refuses
+ * before returning a scope, so no count or page is read for a refused caller.
+ */
+export async function agentSubscriptionScope(ctx: Context, agentRef: string) {
+  // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
+  const agent = await resolveReadableAgentRef(ctx, agentRef);
+  await requireAgentAccess(ctx, agent, 'ADMIN');
+  return {
+    where: { agentId: agent.id } satisfies Prisma.AgentSubscriptionWhereInput,
+    orderBy: [{ createdAt: 'desc' as const }, { userId: 'asc' as const }],
+  };
 }
 
 export const agentQueries = {
@@ -513,13 +549,26 @@ export const agentQueries = {
     },
 
     myAgentSubscriptions: async (_: unknown, __: unknown, ctx: Context) => {
-      // #876 class sweep: identity-scoped and org-unconstrained — this listed
-      // the target's subscriptions across every org.
-      if (!ctx.userId || ctx.impersonation) return [];
-      return ctx.db.agentSubscription.findMany({
-        where: { userId: ctx.userId },
-        orderBy: { createdAt: 'desc' },
-      });
+      const scope = myAgentSubscriptionScope(ctx);
+      if (!scope) return [];
+      return ctx.db.agentSubscription.findMany(scope);
+    },
+
+    // #2213 S2: `myAgentSubscriptions` as a page — the same rows and order, with the real total.
+    myAgentSubscriptionsPage: async (
+      _: unknown,
+      args: { limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const scope = myAgentSubscriptionScope(ctx);
+      if (!scope) return { items: [], total: 0, hasMore: false };
+      const { where, orderBy } = scope;
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.agentSubscription.count({ where }),
+        ctx.db.agentSubscription.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
     // 005-agent-subscription FR-022: list all AgentSubscriptions to an Agent.
@@ -529,15 +578,22 @@ export const agentQueries = {
       { agentRef }: { agentRef: string },
       ctx: Context,
     ) => {
-      // 007-entity-id-or-urn: agentRef may be ID, bare URN, or prefixed URN.
-      // #1944: an Agent the caller can't read answers as absent.
-      const agent = await resolveReadableAgentRef(ctx, agentRef);
-      const resolvedAgentId = agent.id;
-      await requireAgentAccess(ctx, agent, 'ADMIN');
-      return ctx.db.agentSubscription.findMany({
-        where: { agentId: resolvedAgentId },
-        orderBy: { createdAt: 'desc' },
-      });
+      return ctx.db.agentSubscription.findMany(await agentSubscriptionScope(ctx, agentRef));
+    },
+
+    // #2213 S2: `agentSubscriptions` as a page — the same gate, rows and order, with the real total.
+    agentSubscriptionsPage: async (
+      _: unknown,
+      args: { agentRef: string; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { where, orderBy } = await agentSubscriptionScope(ctx, args.agentRef);
+      const { take, skip } = pageArgs(args);
+      const [total, items] = await ctx.db.$transaction([
+        ctx.db.agentSubscription.count({ where }),
+        ctx.db.agentSubscription.findMany({ where, orderBy, take, skip }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      return pageEnvelope(items, total, skip);
     },
 
 };

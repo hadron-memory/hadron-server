@@ -9134,12 +9134,37 @@ export const typeDefs = `#graphql
     myAgentSubscriptions: [AgentSubscription!]!
 
     """
+    #2213 — \`myAgentSubscriptions\` as a page: the same rows (no user or an impersonated
+    request gets the empty page where the old field gives []), newest first with agentId
+    ascending on a tie, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04).
+    \`limit\` defaults to 20, 0 returns the count only, a negative limit is 0 and a limit
+    over 200 is served as 200 (never refused). \`offset\` below 0 is 0. A consumer that
+    decides on this list must follow the pages to the end; \`myAgentSubscriptions\` stays
+    the complete set.
+    """
+    myAgentSubscriptionsPage(limit: Int, offset: Int): AgentSubscriptionPage!
+
+    """
     005-agent-subscription FR-022: list all AgentSubscriptions for an
     Agent. Authorized for ADMIN/OWNER of the Agent's owning org.
 
     Accepts the entity's ID or URN.
     """
     agentSubscriptions(agentRef: ID!): [AgentSubscription!]!
+
+    """
+    #2213 — \`agentSubscriptions\` as a page: the same gate and refusals (an Agent the
+    caller cannot read answers as absent; otherwise ADMIN of its owning org), the same
+    rows, newest first with userId ascending on a tie, and the real total
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04). A refused caller gets the old
+    field's error, never a total. \`limit\` defaults to 20, 0 returns the count only, a
+    negative limit is 0 and a limit over 200 is served as 200 (never refused). \`offset\`
+    below 0 is 0. A consumer that decides on this list (who is subscribed) must follow the
+    pages to the end; \`agentSubscriptions\` stays the complete set.
+
+    Accepts the entity's ID or URN.
+    """
+    agentSubscriptionsPage(agentRef: ID!, limit: Int, offset: Int): AgentSubscriptionPage!
 
     """
     Nodes in the App's current readable installed-Agent memory scope, with
@@ -9222,6 +9247,19 @@ export const typeDefs = `#graphql
     appKeys(appRef: ID!): [AppKey!]!
 
     """
+    #2213 — \`appKeys\` as a page: the same manager-only gate and refusals
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), the same live keys, newest first with
+    id descending on a tie, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04).
+    A refused caller gets the old field's error, never a total. \`limit\` defaults to 20, 0
+    returns the count only, a negative limit is 0 and a limit over 200 is served as 200
+    (never refused). \`offset\` below 0 is 0. A consumer that decides on this list (the
+    admin key inventory) must follow the pages to the end; \`appKeys\` stays the complete set.
+
+    Accepts the entity's ID or URN.
+    """
+    appKeysPage(appRef: ID!, limit: Int, offset: Int): AppKeyPage!
+
+    """
     025-oauth-for-mcp FR-004: list the calling User's API keys (active
     + revoked, createdAt DESC). Powers Phase 3's portal revocation UI
     (SC-006). Rejected with UNAUTHENTICATED for AppKey-resolved
@@ -9231,6 +9269,22 @@ export const typeDefs = `#graphql
       "#2298: include keys the owner hid with setUserApiKeyHidden. Default false."
       includeHidden: Boolean = false
     ): [UserApiKey!]!
+
+    """
+    #2213 — \`myUserApiKeys\` as a page: the same refusals (UNAUTHENTICATED with no user in
+    context, Forbidden under impersonation), the same rows (active and revoked; hidden keys
+    only with includeHidden), newest first with id descending on a tie, and the real total
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04). \`limit\` defaults to 20, 0 returns the
+    count only, a negative limit is 0 and a limit over 200 is served as 200 (never refused).
+    \`offset\` below 0 is 0. A consumer that decides on this list must follow the pages to the
+    end; \`myUserApiKeys\` stays the complete set.
+    """
+    myUserApiKeysPage(
+      "#2298: include keys the owner hid with setUserApiKeyHidden. Default false."
+      includeHidden: Boolean = false
+      limit: Int
+      offset: Int
+    ): UserApiKeyPage!
 
     """
     #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
@@ -14312,6 +14366,27 @@ export const typeDefs = `#graphql
   "#2213 — one page of the caller's saved widget presets."
   type DashboardWidgetPresetPage {
     items: [DashboardWidgetPreset!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of an App's live keys."
+  type AppKeyPage {
+    items: [AppKey!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of the caller's own user API keys."
+  type UserApiKeyPage {
+    items: [UserApiKey!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of agent subscriptions."
+  type AgentSubscriptionPage {
+    items: [AgentSubscription!]!
     total: Int!
     hasMore: Boolean!
   }
