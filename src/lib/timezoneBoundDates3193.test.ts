@@ -99,4 +99,20 @@ describe.each(ZONES)('#3193 bound timestamps with session %s', zone => {
       }
     });
   }
+
+  it('retrieval treats an accepted date-only bound as UTC, matching the ORM date parse', async () => {
+    const client = zoneClient(zone);
+    const at = new Date('2026-01-15');
+    const rows = await Promise.all([-1, 0, 1].map((hours, i) => db.node.create({ data: {
+      id: generateId(), memoryId, loc: `date${i}`, name: 'date',
+      updatedAt: new Date(at.getTime() + hours * 3_600_000),
+    } })));
+    const ids = await retrieval.filterSearch({
+      db: client, memoryIds: [memoryId], limit: 10,
+      filter: { updatedAfter: '2026-01-15', updatedBefore: '2026-01-15' },
+    });
+    expect(ids).toEqual([rows[1].id]);
+    const control = await db.node.findMany({ where: { memoryId, updatedAt: { gte: at, lte: at } } });
+    expect(control.map(r => r.id)).toEqual(ids);
+  });
 });
