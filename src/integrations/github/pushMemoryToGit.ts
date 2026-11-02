@@ -17,6 +17,7 @@ import {
   orphanedLegacyPaths,
 } from './nodeFrontmatter.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
+import { hasIncompleteMirrorMutation } from './mirrorFileMutation.js';
 import { withMirrorCheckoutLock, EncryptedMemoryFenceError } from './mirrorCheckoutLock.js';
 import { RESTORE_DEADLINE_MS } from './originRestoreDeadline.js';
 import { mirrorFailureMetadata } from './mirrorFailureMetadata.js';
@@ -94,6 +95,10 @@ async function pushMemoryToGitUnderLock(
   } catch (error) {
     if (error instanceof ProjectionPathError) return { nodeCount: 0, error: error.message };
     throw error;
+  }
+
+  if (hasIncompleteMirrorMutation(localPath)) {
+    return { nodeCount: 0, error: 'Checkout needs repair after an incomplete file mutation' };
   }
 
   // 2. Get installation token
