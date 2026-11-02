@@ -54,7 +54,10 @@ export async function cancelFirstPasskey(
         AND EXISTS (SELECT 1 FROM users u WHERE u.id = owner_id AND u.deleted_at IS NULL)
       FOR UPDATE`;
     if (open.length !== 1) return false;
-    const spent = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_cancel_tokens SET used_at = clock_timestamp()
+    // used_at is naive UTC like every clock here (#3195). The guard trigger also stamps it with its own UTC clock, so
+    // this only matters where the trigger does not run; the single-use refusal is still this guarded update.
+    const spent = await tx.$queryRaw<Array<{ id: string }>>`UPDATE passkey_cancel_tokens
+      SET used_at = (clock_timestamp() AT TIME ZONE 'UTC')::timestamp(3)
       WHERE token_hash = ${tokenHash} AND used_at IS NULL RETURNING id`;
     if (spent.length !== 1) return false;
     await tx.$executeRaw`UPDATE passkey_credentials SET

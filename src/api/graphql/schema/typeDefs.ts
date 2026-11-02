@@ -4897,8 +4897,9 @@ export const typeDefs = `#graphql
     "The compile revision that owns the provenance."
     provenanceRevSeq: Int!
     compiledContentHash: String!
-    "1 for a bind or a run; a chat counts up each time its served revision changes."
+    "1 for a bind or a run; a chat counts up each time its served revision or filled variable values change (#3096)."
     ordinal: Int!
+    "Recorded platform values. Chat records label session.llmModel.source as client-reported or unspecified (#3096); neither is verified model identity."
     variables: JSON!
     servedAt: DateTime!
     "True when the served revision is no longer retained (neither current nor in history)."
@@ -9134,12 +9135,37 @@ export const typeDefs = `#graphql
     myAgentSubscriptions: [AgentSubscription!]!
 
     """
+    #2213 — \`myAgentSubscriptions\` as a page: the same rows (no user or an impersonated
+    request gets the empty page where the old field gives []), newest first with agentId
+    ascending on a tie, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04).
+    \`limit\` defaults to 20, 0 returns the count only, a negative limit is 0 and a limit
+    over 200 is served as 200 (never refused). \`offset\` below 0 is 0. A consumer that
+    decides on this list must follow the pages to the end; \`myAgentSubscriptions\` stays
+    the complete set.
+    """
+    myAgentSubscriptionsPage(limit: Int, offset: Int): AgentSubscriptionPage!
+
+    """
     005-agent-subscription FR-022: list all AgentSubscriptions for an
     Agent. Authorized for ADMIN/OWNER of the Agent's owning org.
 
     Accepts the entity's ID or URN.
     """
     agentSubscriptions(agentRef: ID!): [AgentSubscription!]!
+
+    """
+    #2213 — \`agentSubscriptions\` as a page: the same gate and refusals (an Agent the
+    caller cannot read answers as absent; otherwise ADMIN of its owning org), the same
+    rows, newest first with userId ascending on a tie, and the real total
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04). A refused caller gets the old
+    field's error, never a total. \`limit\` defaults to 20, 0 returns the count only, a
+    negative limit is 0 and a limit over 200 is served as 200 (never refused). \`offset\`
+    below 0 is 0. A consumer that decides on this list (who is subscribed) must follow the
+    pages to the end; \`agentSubscriptions\` stays the complete set.
+
+    Accepts the entity's ID or URN.
+    """
+    agentSubscriptionsPage(agentRef: ID!, limit: Int, offset: Int): AgentSubscriptionPage!
 
     """
     Nodes in the App's current readable installed-Agent memory scope, with
@@ -9222,6 +9248,19 @@ export const typeDefs = `#graphql
     appKeys(appRef: ID!): [AppKey!]!
 
     """
+    #2213 — \`appKeys\` as a page: the same manager-only gate and refusals
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), the same live keys, newest first with
+    id descending on a tie, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04).
+    A refused caller gets the old field's error, never a total. \`limit\` defaults to 20, 0
+    returns the count only, a negative limit is 0 and a limit over 200 is served as 200
+    (never refused). \`offset\` below 0 is 0. A consumer that decides on this list (the
+    admin key inventory) must follow the pages to the end; \`appKeys\` stays the complete set.
+
+    Accepts the entity's ID or URN.
+    """
+    appKeysPage(appRef: ID!, limit: Int, offset: Int): AppKeyPage!
+
+    """
     025-oauth-for-mcp FR-004: list the calling User's API keys (active
     + revoked, createdAt DESC). Powers Phase 3's portal revocation UI
     (SC-006). Rejected with UNAUTHENTICATED for AppKey-resolved
@@ -9231,6 +9270,22 @@ export const typeDefs = `#graphql
       "#2298: include keys the owner hid with setUserApiKeyHidden. Default false."
       includeHidden: Boolean = false
     ): [UserApiKey!]!
+
+    """
+    #2213 — \`myUserApiKeys\` as a page: the same refusals (UNAUTHENTICATED with no user in
+    context, Forbidden under impersonation), the same rows (active and revoked; hidden keys
+    only with includeHidden), newest first with id descending on a tie, and the real total
+    (hrn:node:hadronmemory.com:specs:cor:api:120:04). \`limit\` defaults to 20, 0 returns the
+    count only, a negative limit is 0 and a limit over 200 is served as 200 (never refused).
+    \`offset\` below 0 is 0. A consumer that decides on this list must follow the pages to the
+    end; \`myUserApiKeys\` stays the complete set.
+    """
+    myUserApiKeysPage(
+      "#2298: include keys the owner hid with setUserApiKeyHidden. Default false."
+      includeHidden: Boolean = false
+      limit: Int
+      offset: Int
+    ): UserApiKeyPage!
 
     """
     #1631 PR3: the caller's own passkey records, revoked ones included, newest first. Only the
@@ -10093,10 +10148,15 @@ export const typeDefs = `#graphql
     task.assigned and task.started. Each claim commits on its own. An item another caller claimed first is skipped,
     so concurrent callers get disjoint sets. A refusal mid-walk stops it and is returned with the claims already
     made: incompleteReason claim_refused with its code in refusalCode (claim_failed, refusalCode null, for an
-    unexpected failure after a claim). A person or a worker claims; the App's own key gets
-    TASK_CLAIM_PRINCIPAL_UNSUPPORTED before anything else is read. Other refusals as untrackedTaskItems.
+    unexpected failure after a claim). A person or a worker claims for themselves and names no assignee or owner
+    (BAD_USER_INPUT if it does). #3132: the App's own key names the assignee (TASK_ASSIGNEE_REQUIRED) and the owner
+    (TASK_OWNER_REQUIRED), each a worker of the App or a person who participates in it (TASK_ASSIGNEE_INVALID /
+    TASK_OWNER_INVALID, as createAgentTask), all judged before any GitHub call; the task is started on the assignee's
+    behalf, and its events name the key as actorAppKeyId and the assignee as their subject. A claim is the only task
+    write an App key makes. A key request carrying a session is APP_KEY_SESSION_BOUND. Other refusals as
+    untrackedTaskItems.
     """
-    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, repository: String, ready: ReadyFilter, limit: Int): ClaimUntrackedTaskItemsResult!
+    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1."
     setAgentTaskPriority(taskRef: ID!, priority: Int!): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority."
@@ -12279,11 +12339,11 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false): ChatStartResult!
+    startChat(agentId: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt)
     """
-    sendChatMessage(chatId: String!, userMessage: String!): ChatPromptResult!
+    sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
     """
     Process the LLM's tool response (extract data, transition stage, save assistant message)
     """
@@ -14324,6 +14384,27 @@ export const typeDefs = `#graphql
     hasMore: Boolean!
   }
 
+  "#2213 — one page of an App's live keys."
+  type AppKeyPage {
+    items: [AppKey!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of the caller's own user API keys."
+  type UserApiKeyPage {
+    items: [UserApiKey!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
+  "#2213 — one page of agent subscriptions."
+  type AgentSubscriptionPage {
+    items: [AgentSubscription!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+
   """
   #2024 — one ticker an Agent declares. Casting a worker from the Agent into an App creates the worker's tickers from the live
   templates and subscribes it, in the cast's own transaction. A SNAPSHOT: a later edit or removal reaches only future casts;
@@ -14750,8 +14831,12 @@ export const typeDefs = `#graphql
     actor: AgentTaskParty
     "#1833 — the headless run that acted, when a run made this event (actor is then null: a run is never a person or a worker). Null otherwise. Matches AgentTask.createdByRunId for the task a run created."
     actorRunId: ID
+    "#3132 — the App key that acted, when a key made this event (its claim of an outside item; actor and actorRunId are then null: a key is never a person or a worker). Null otherwise."
+    actorAppKeyId: ID
     "The worker the event concerns, e.g. a new assignee."
     subjectWorker: AgentTaskParty
+    "#3132 — the person the event concerns, when a key or a run acted for one it cannot itself resolve (the assignee its claim named). Never the actor. Null otherwise."
+    subjectUser: AgentTaskParty
     "ALARM for an alarm; null for an ordinary event."
     severity: AgentTeamEventSeverity
     "Alarms only: the owner chain when the alarm was raised, nearest first."

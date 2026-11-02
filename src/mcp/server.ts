@@ -11551,6 +11551,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            // #3078: carry impersonation into the resolver, whose record gate refuses it and whose heartbeat (since #3078)
+            // would otherwise drive the impersonated user's session. /mcp rejects an impersonation JWT at init, so this
+            // is defence in depth, as in the other delegations that pass it.
+            impersonation: auth.impersonation ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,

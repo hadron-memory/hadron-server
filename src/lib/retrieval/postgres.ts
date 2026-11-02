@@ -57,8 +57,10 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   if (flt.tags && flt.tags.length) parts.push(`tags @> ARRAY[${flt.tags.map((t) => bind(t)).join(', ')}]::text[]`);
   if (flt.locPrefix) parts.push(`starts_with(loc, ${bind(flt.locPrefix)})`);
   if (flt.createdBy) parts.push(`created_by = ${bind(flt.createdBy)}`);
-  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(flt.updatedAfter)}::timestamptz`);
-  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(flt.updatedBefore)}::timestamptz`);
+  // #3193: use the same Date parse as the ORM path (including date-only inputs and caller offsets), then bind UTC-naive.
+  // Keep the column bare for indexes; PostgreSQL must not interpret an offset-less bound in the session's zone.
+  if (flt.updatedAfter) parts.push(`updated_at >= ${bind(new Date(flt.updatedAfter).toISOString())}::timestamp`);
+  if (flt.updatedBefore) parts.push(`updated_at <= ${bind(new Date(flt.updatedBefore).toISOString())}::timestamp`);
   // #719 — structured predicate over properties/data JSONB, compiled to a
   // parameterized boolean expr sharing this query's `bind` accumulator.
   if (flt.where) parts.push(`(${compileNodeWhere(flt.where, bind)})`);

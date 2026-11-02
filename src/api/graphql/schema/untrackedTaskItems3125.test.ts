@@ -526,10 +526,9 @@ describe('claimUntrackedTaskItems (cor:agt:120:03)', () => {
     for (const limit of [0, 11]) expect((await refusal(claim({ limit }))).code).toBe('BAD_USER_INPUT');
   });
 
-  it("an App key's claim is refused TASK_CLAIM_PRINCIPAL_UNSUPPORTED before any GitHub call; another App's key is APP_NOT_FOUND", async () => {
+  it("another App's key claiming is APP_NOT_FOUND before any GitHub call (#3132 replaced the own key's interim refusal)", async () => {
     fake.repos.widgets = [issue('widgets', 1)];
-    expect((await refusal(claim({}, keyCtx(app.id, keyX.id)))).code).toBe('TASK_CLAIM_PRINCIPAL_UNSUPPORTED');
-    expect((await refusal(claim({}, keyCtx(otherApp.id, keyY.id)))).code).toBe('APP_NOT_FOUND');
+    expect((await refusal(claim({ assignee: { worker: zed.id }, owner: { user: outsider.id } }, keyCtx(otherApp.id, keyY.id)))).code).toBe('APP_NOT_FOUND');
     expect(fake.calls).toBe(0);
     expect(await db.agentTask.count({ where: { appId: app.id, externalId: { not: null } } })).toBe(0);
   });

@@ -25,6 +25,7 @@ import { captureSetupConsent, currentOriginPin, AutomationPinError } from '../li
 import { runAsActor } from '../lib/requestActor.js';
 import type { PrismaClient, Prisma, AppRun } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
+import { toNaiveUtc } from '../lib/sessionActivity.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
@@ -133,12 +134,16 @@ async function ensureQuotaRow(
   // Native conflict handling is race-safe AND transaction-safe. Catching a
   // Prisma P2002 works in autocommit mode, but PostgreSQL marks an interactive
   // transaction aborted before JavaScript can catch the error (#667 review).
+  // reset_at is a `timestamp` (no zone) holding UTC. A raw JS Date bind
+  // arrives as timestamptz and is converted through the SESSION zone on
+  // assignment, so under a non-UTC session the window would end early or
+  // late by the offset (#3192, #3187 audit). Bind the naive UTC text instead.
   await db.$executeRaw`
     INSERT INTO quota_counters
       (id, scope_kind, scope_id, action, "window", used, "limit", reset_at)
     VALUES
       (${generateId()}, ${scopeKind}, ${scopeId}, ${action}, ${QUOTA_WINDOW}, 0,
-       ${defaultLimit}::int, ${nextUtcMidnight()})
+       ${defaultLimit}::int, ${toNaiveUtc(nextUtcMidnight())}::timestamp(3))
     ON CONFLICT (scope_kind, scope_id, action, "window") DO NOTHING`;
   await db.quotaCounter.updateMany({
     where: { scopeKind, scopeId, action, window: QUOTA_WINDOW, resetAt: { lte: now } },
