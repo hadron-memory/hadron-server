@@ -798,8 +798,8 @@
     },
     "CompiledBootPrompt.node": {
       "target": "Node",
-      "class": "open",
-      "evidence": "issue: the compiling manager's direct read of the returned node is not shown; needs a differential test against the direct node read"
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::every principal whose compile succeeds reads the returned node directly, and it is the node in the compile memory"
     },
     "ConnectionGrantsPage.items": {
       "class": "parent-implies-child",
@@ -1015,7 +1015,7 @@
     },
     "DueChannel.channel": {
       "class": "child-gated",
-      "test": "src/lib/tickers/dueWakes.test.ts::a worker whose only unread is in its holder\\'s personal memory: a wake for the holder, nothing — and no trace — for a manager",
+      "test": "src/lib/tickers/dueWakes.test.ts::a worker whose only unread is in its holder\\'s personal memory: a wake for the holder, nothing \u2014 and no trace \u2014 for a manager",
       "target": "Channel"
     },
     "DueWake.worker": {
@@ -1655,9 +1655,9 @@
       "target": "Session"
     },
     "ScopeExplanation.memories": {
-      "class": "open",
-      "evidence": "issue: not proved equal to the Query.memory record gate; see cor:acl:120:01",
-      "target": "Memory"
+      "target": "Memory",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::every Memory the lens returns is one the same principal reads directly (cor:acl:120:01)"
     },
     "ScopeExplanation.scope": {
       "target": "Scope",
@@ -1672,14 +1672,14 @@
       "resolver": "src/lib/scopes.ts::canReadScope"
     },
     "ScopeExplanation.winner": {
-      "class": "open",
-      "evidence": "issue: not proved equal to the Query.memory record gate; see cor:acl:120:01",
-      "target": "Memory"
+      "target": "Memory",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::the winner skips an unreadable memory that holds the loc earlier in the order"
     },
     "ScopeMemoryEntry.memory": {
-      "class": "open",
-      "evidence": "issue: not proved equal to the Query.memory record gate; see cor:acl:120:01",
-      "target": "Memory"
+      "target": "Memory",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::for an ordinary member the lens is exactly the direct read, in scope order"
     },
     "ScopesPage.items": {
       "class": "parent-implies-child",
