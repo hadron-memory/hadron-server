@@ -587,10 +587,11 @@ function lateStopMilliseconds(value: unknown): number {
 /**
  * #3255 (cor:agt:050:27 part 10): host-reported telemetry only. The reset row is already locked by lockForHost,
  * serializing re-reports, and the event is inserted in the report's transaction. A later re-report never replaces
- * the first lateness, and zero adds nothing. No reset, availability, task or alarm state moves.
+ * the first lateness. A prior stopped report consumes the grant even without an annotation; zero adds nothing.
+ * No reset, availability, task or alarm state moves.
  */
 async function recordLateStop(tx: Prisma.TransactionClient, r: ContextResetRow, value: number, now: Date): Promise<void> {
-  if (value === 0) return;
+  if (value === 0 || r.agentStoppedAt) return;
   const previous = await tx.agentTeamEvent.findFirst({
     where: { appId: r.appId, taskId: r.taskId, type: CONTEXT_RESET_LATE_STOP_EVENT, payload: { path: ['resetId'], equals: r.id } },
     select: { id: true },
