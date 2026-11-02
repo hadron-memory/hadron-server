@@ -1298,6 +1298,46 @@ export async function createRootTaskForRun(
   return principal.db.agentTask.findUniqueOrThrow({ where: { id: made.id } });
 }
 
+/**
+ * #3125 S3 (cor:agt:120:03, V42): claim one outside item for the caller, in its OWN write transaction. A root task
+ * through the root create gate (the participant re-judged under the anchors by `inTaskWriteTx`), owned by and assigned
+ * to the caller, with the item's URL as external id, source and an issue reference, created STARTED with its start
+ * time set: the one create that enters as started (cor:agt:050:02), so no not-started alarm can fire (050:14). Events,
+ * in order: task.created, task.assigned (as any create onto an assignee), task.started (V-2, V45).
+ * Returns null when another caller already holds the item (TASK_EXTERNAL_ID_TAKEN from the index): the walk skips it.
+ * Any other refusal is thrown, for the walk to stop on.
+ */
+export async function createStartedClaim(
+  ctx: Context,
+  app: TaskApp,
+  actor: TaskActor,
+  item: { title: string; url: string },
+): Promise<TaskRow | null> {
+  const externalId = externalIdInput(item.url);
+  const references = taskReferencesInput([{ kind: 'issue', target: item.url }]);
+  const owner = actorParty(actor);
+  const lockedWorker = actor.kind === 'worker' ? actor.workerId : null;
+  const now = new Date();
+  try {
+    // The row the answer carries is read inside the claim's transaction: nothing can fail between the commit and the
+    // answer, so a committed claim is never left out of it (Jane, #3150 delta P2).
+    return await inTaskWriteTx(ctx, app, actor, () => appNotFound(app.id), async (tx, txCtx, fresh) => {
+      await refuseResettingAssignee(tx, fresh.id, owner.workerId);
+      const made = await insertTask(tx, {
+        app: fresh, parentId: null, title: item.title, description: null, source: externalId, externalId, tags: [], references,
+        startBy: null, closeSessionWhenDone: false, requirements: null, owner, assignee: owner, status: 'pending',
+        created: createdStamp(txCtx), assigned: assignedStamp(txCtx, now), evActor: eventActor(txCtx.userId),
+      });
+      const started = await tx.agentTask.update({ where: { id: made.id }, data: { status: 'started', startedAt: new Date(), ...updatedStamp(txCtx) } });
+      await appendTaskEvent(tx, { appId: fresh.id, taskId: made.id, actor: eventActor(txCtx.userId), event: { type: 'task.started' } });
+      return started;
+    }, { lockWorkerIds: [lockedWorker] });
+  } catch (e) {
+    if (e instanceof GraphQLError && e.extensions?.code === 'TASK_EXTERNAL_ID_TAKEN') return null;
+    throw e;
+  }
+}
+
 /** #2644: priority/blockers use exactly the existing assigner set, never the assignee alone. */
 async function requireTaskDirection(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow) {
   if (!(await mayDirectTask(tx, txCtx, app, actor, task))) throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task sets its priority or blockers.', { taskId: task.id });

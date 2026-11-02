@@ -25,6 +25,7 @@ const REVIEWED_PAGED_FIELDS = [
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
+  "Mutation.claimUntrackedTaskItems", // #3125 S3: limit default 1, cap 10; common omitted bound 100 is conservative.
   "Mutation.collectHostOperations",
   "Node.lintWarnings",
   "Node.signingRequests",
@@ -105,6 +106,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.teamStopSignals",
   "Query.teamWorkItems",
   "Query.tickersPage",
+  "Query.untrackedTaskItems", // #3125 S3: limit default 20, cap 100.
   "Query.usageEvents",
   "Query.usageEventsPage",
   "Query.users",
