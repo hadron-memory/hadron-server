@@ -9813,8 +9813,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         return textResult(
           activeMemoryLine +
           (includeEnded
-            ? 'You have no sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>") to work as a teammate.'
-            : 'You have no open sessions. Start one with hadron_start_session(description: "<task>", workerRef: "<name>"); pass includeEnded to see recent ended ones.'),
+            ? 'You have no sessions. Start a plain session with hadron_start_session(description: "<task>"). A worker session starts only from the CLI (hadron team session start), never over MCP.'
+            : 'You have no open sessions. Start a plain session with hadron_start_session(description: "<task>"); pass includeEnded to see recent ended ones. A worker session starts only from the CLI (hadron team session start), never over MCP.'),
         );
       }
 

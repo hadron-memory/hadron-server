@@ -253,6 +253,18 @@ describe('#3082 R2: no worker binding on MCP', () => {
   });
 });
 
+describe('#3082 ask 4: whoami no-session guidance points at the CLI, never at an MCP worker bind', () => {
+  it.each([[{}, 'no open sessions'], [{ includeEnded: true }, 'You have no sessions']])('empty whoami %j names the CLI and no workerRef', async (args, lead) => {
+    const sfx = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+    const lone = await db.user.create({ data: { id: generateId(), githubId: 408_200 + Math.floor(Math.random() * 90_000), githubUsername: `lone3082-${sfx}`, roles: ['READER'] } });
+    const out = await createTestableMcpServer({ userId: lone.id, roles: ['READER'], clientId: `user:${lone.id}` } as never).callToolText('hadron_whoami', args);
+    expect(out).toContain(lead);
+    expect(out).toContain('hadron team session start');
+    expect(out).toContain('hadron_start_session(description: "<task>")');
+    expect(out).not.toContain('workerRef');
+  });
+});
+
 describe('#3082 capabilities: no team capability is advertised', () => {
   it('hadron_server_info names none of the removed tokens', async () => {
     const out = await createTestableMcpServer(userAuth()).callToolText('hadron_server_info', {});
