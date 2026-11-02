@@ -58,7 +58,7 @@ beforeEach(async () => {
 afterEach(()=>{vi.restoreAllMocks();rmSync(env.root,{recursive:true,force:true});});
 
 describe('#3156 retry throws', () => {
- it.each(['REMOVE', 'WRITE'] as const)('%s beforeGit throws settle LOCK_FAILED, back off and exhaust across 12 weekly ticks', async kind => {
+ it.each(['REMOVE', 'WRITE'] as const)('%s reload throws settle their failure, back off and exhaust across 12 weekly ticks', async kind => {
   const n = await makeNode();
   const initial = await owe(n.id, { kind, removeLoc: kind === 'REMOVE' ? 'old' : '' });
   const hook = kind === 'REMOVE'
@@ -73,12 +73,17 @@ describe('#3156 retry throws', () => {
   }
   expect(snapshots.map(r => r.attempts)).toEqual([2,3,4,5,6,7,8,9,10,10,10,10]);
   expect(snapshots[0].lastAttemptAt.getTime()).toBeGreaterThan(initial.lastAttemptAt.getTime());
-  expect(snapshots.slice(0,9).every(r => r.errorClass === 'LOCK_FAILED')).toBe(true);
+  expect(snapshots.slice(0,9).every(r => r.errorClass === (kind === 'WRITE' ? 'TREE_WRITE' : 'LOCK_FAILED'))).toBe(true);
   expect(snapshots[8]).toMatchObject({ state: 'EXHAUSTED', attempts: 10 });
   expect(snapshots.slice(9)).toEqual([snapshots[8],snapshots[8],snapshots[8]]);
-  expect(hook).toHaveBeenCalledTimes(9);
+  expect(hook).toHaveBeenCalledTimes(kind === 'WRITE' ? 18 : 9); // WRITE retries the payload at the row-local mutation boundary
   expect(sequences).toHaveBeenCalledTimes(9); // reuse the taken fence, never allocate in the retry catch
-  expect(env.commands).toEqual([]);
+  if (kind === 'REMOVE') expect(env.commands).toEqual([]);
+  else {
+   // First-refresh outage requests preparation so the second, per-row load can classify it.
+   expect(env.commands.filter(args=>args[0]==='fetch')).toHaveLength(9);
+   expect(env.commands.filter(args=>args[0]==='push')).toEqual([]);
+  }
  });
 
  it('restarts backoff after a throwing hook and retries only at the new exact boundary', async () => {
@@ -107,6 +112,25 @@ describe('#3156 retry throws', () => {
   }, () => { throw new Error('must not mutate'); });
   expect(result).toBe('failed');
   expect(await rows()).toEqual(newer);
+  expect(sequences).toHaveBeenCalledTimes(1);
+  expect(env.commands).toEqual([]);
+ });
+
+ it('a throwing fixed-branch retry rekeys its captured debt with the original fence and cap', async () => {
+  const n = await makeNode();
+  await db.memory.update({where:{id:memoryId},data:{writeBranch:'current'}});
+  await db.gitMirrorObligation.create({data:{memoryId,nodeId:n.id,kind:'WRITE',removeLoc:'',branch:'captured',
+   state:'FAILED',errorClass:'PUSH_FAILED',attempts:9,attemptSeq:0n,lastAttemptAt:old()}});
+  const other = await db.gitMirrorObligation.create({data:{memoryId,nodeId:n.id,kind:'WRITE',removeLoc:'',branch:'unselected',
+   state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:0n,lastAttemptAt:old()}});
+  const sequences = vi.spyOn(obligations, 'tryTakeAttemptSeq');
+  expect(await withMirrorCheckout({db,memoryId,obligations:[{nodeId:n.id,kind:'WRITE',branch:'captured'}],
+   retry:{now:new Date(),maxAttempts:10,branch:'captured'},commitSubject:'throwing rekey',logPrefix:'[3156]',
+   beforeGit:async()=>{throw new Error('synthetic first refresh outage');}},()=>{})).toBe('failed');
+  const result = await rows();
+  expect(result).toHaveLength(2);
+  expect(result.find(r=>r.branch==='unselected')).toEqual(other);
+  expect(result.find(r=>r.branch==='current')).toMatchObject({attempts:10,state:'EXHAUSTED',errorClass:'LOCK_FAILED'});
   expect(sequences).toHaveBeenCalledTimes(1);
   expect(env.commands).toEqual([]);
  });

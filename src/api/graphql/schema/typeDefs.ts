@@ -3230,6 +3230,13 @@ export const typeDefs = `#graphql
     or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
     """
     bootPromptTargetDeleted: Boolean
+    """
+    #2708 — what a non-customised worker of this App, or a chatbot chat in it, would be served now
+    (hrn:node:hadronmemory.com:specs:cor:agt:040:10): the install's pointer, else the Agent's. Computed by the resolver a
+    bind uses, so it never substitutes a fallback. Null when the caller may not see it (same gate as bootPromptRef, the
+    App's participants), which is judged before anything is resolved.
+    """
+    bootPromptServe: BootPromptServeOutcome
     createdAt: DateTime!
     createdBy: String
     updatedAt: DateTime
@@ -4547,6 +4554,13 @@ export const typeDefs = `#graphql
     or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
     """
     bootPromptTargetDeleted: Boolean
+    """
+    #2708 — what this Agent's OWN pointer would serve now (hrn:node:hadronmemory.com:specs:cor:agt:040:10): the Agent's own
+    compiled prompt, saying nothing about an App install or a worker that overrides it (see AppAgent.bootPromptServe and
+    Worker.bootPromptServe). Computed by the resolver a bind uses, so it never substitutes a fallback. Null when the caller
+    may not see it (same gate as bootPromptRef), which is judged before anything is resolved.
+    """
+    bootPromptServe: BootPromptServeOutcome
     systemMemoryId: String
     visibility: AgentVisibility!
     "cor:acl:080:04 — opt-in marketplace catalogue flag (advertisement, not access)."
@@ -4914,6 +4928,44 @@ export const typeDefs = `#graphql
   }
 
   """
+  #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: why a serve would be refused now, the typed code the bind,
+  chat or run itself would get. BOOT_PROMPT_NOT_SIGNED cannot occur until an organisation can switch signing on (#1614).
+  """
+  enum BootPromptServeRefusal {
+    BOOT_PROMPT_NOT_SET
+    BOOT_PROMPT_TARGET_DELETED
+    BOOT_PROMPT_NOT_APPROVED
+    BOOT_PROMPT_NOT_SIGNED
+  }
+
+  """
+  #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: the revision a serve would be given now. The identity fields a
+  ServedPrompt record carries after the serve, so the two can be compared; never the text.
+  """
+  type BootPromptServeDecision {
+    pointerLevel: ServedPromptPointerLevel!
+    compiledNodeId: ID!
+    "Node.revSeq of the revision that would be served: the compiled node's newest approved revision."
+    servedRevSeq: Int!
+    "The compile revision that owns that revision's provenance."
+    provenanceRevSeq: Int!
+    compiledContentHash: String!
+  }
+
+  """
+  #2708 / hrn:node:hadronmemory.com:specs:cor:agt:040:10: what a serve would decide now, from the resolver the serve
+  itself uses, so the same resolution rules apply. A preview of the current state: a later serve gives the same answer
+  only while that state is unchanged (a pointer edit or an approval in between can change it). Exactly one of served
+  and refusal is set; nothing is ever substituted for a refused serve.
+  """
+  type BootPromptServeOutcome {
+    "The revision that would be served; null exactly when refusal is set."
+    served: BootPromptServeDecision
+    "The typed code the serve would be refused with; null exactly when served is set."
+    refusal: BootPromptServeRefusal
+  }
+
+  """
   A saved chat in one of the chat-scope tiers.
 
   Per spec 017, scope is set at chat creation and immutable
@@ -5208,6 +5260,14 @@ export const typeDefs = `#graphql
     or the caller may not see it. Same gate as bootPromptRef. Nothing is served from a deleted target (R27).
     """
     bootPromptTargetDeleted: Boolean
+    """
+    #2708 — what this worker's NEXT bind would be served now (hrn:node:hadronmemory.com:specs:cor:agt:040:10): its own
+    pointer, else the install's, else the Agent's. Computed by the resolver the bind itself uses, so the bind is refused
+    exactly when refusal is set and records exactly the revision served names. Only the boot prompt is judged: a bind
+    can still be refused for other reasons (a retired worker, a held worker). Null when the caller may not see it (same
+    gate as bootPromptRef, WORKING-STATE), which is judged before anything is resolved.
+    """
+    bootPromptServe: BootPromptServeOutcome
     "The worker-scoped working memory in the App's container (null until provisioned)."
     memoryId: ID
     """

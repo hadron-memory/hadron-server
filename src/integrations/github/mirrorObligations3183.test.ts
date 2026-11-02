@@ -56,4 +56,19 @@ describe.each(ZONES)('#3183 settle stamps UTC wall time under session zone %s', 
     expect((await db.gitMirrorObligation.findFirstOrThrow({ where: { memoryId } })).attempts).toBe(2);
     within(await stamp(), before, Date.now());
   });
+
+  it.each([false, true])('branch rekey stamps UTC (existing destination=%s)', async existing => {
+    const source = [{nodeId:'n1',kind:'WRITE' as const,branch:'old'}];
+    await settleMirrorObligations(db,memoryId,source,{result:'failed',errorClass:'PUSH_FAILED'},await takeAttemptSeq(db));
+    if (existing) await settleMirrorObligations(db,memoryId,[{...source[0],branch:'new'}],
+      {result:'failed',errorClass:'PUSH_FAILED'},await takeAttemptSeq(db));
+    await db.gitMirrorObligation.updateMany({where:{memoryId},data:{lastAttemptAt:new Date(Date.now()-86_400_000)}});
+    const before = Date.now();
+    await settleMirrorObligations(zoneClient(zone),memoryId,source,{result:'failed',errorClass:'PUSH_FAILED'},
+      await takeAttemptSeq(db),10,{targetBranch:'new'});
+    const result = await db.gitMirrorObligation.findMany({where:{memoryId}});
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({branch:'new',attempts:2});
+    within(result[0].lastAttemptAt.getTime(),before,Date.now());
+  });
 });
