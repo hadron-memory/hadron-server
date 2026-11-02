@@ -8,6 +8,7 @@ import { execGit, GitCommandError } from './execGit.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
 
 let root: string;
+let childKnownGone = false;
 let watchdog: ReturnType<typeof setTimeout> | undefined;
 const SECRET = 'ghs_SYNTHETIC_RESTORE_2569';
 function pid(): number | undefined {
@@ -18,6 +19,7 @@ function pid(): number | undefined {
   return value;
 }
 function killOwnedChild() {
+  if (childKnownGone) return;
   const child = pid();
   if (child === undefined) return;
   try { process.kill(child, 'SIGKILL'); } catch (e) {
@@ -25,12 +27,14 @@ function killOwnedChild() {
   }
 }
 beforeEach(() => {
+  childKnownGone = false;
   root = mkdtempSync(join(tmpdir(), 'restore2569-'));
   mkdirSync(join(root, 'bin'));
   // Only this invocation's PATH changes. No real repository, network or credentials.
   writeFileSync(join(root, 'bin', 'git'), `#!${process.execPath}\n` +
     `const fs = require('node:fs');\n` +
     `if (!process.argv.includes('stall-2569')) { process.stdout.write('ordinary'); process.exit(0); }\n` +
+    // Prove a slow child startup cannot consume the whole test deadline before PID capture.
     `setTimeout(() => {\n` +
     `process.on('SIGTERM', () => {});\n` +
     `fs.writeFileSync(${JSON.stringify(join(root, 'pid'))}, String(process.pid));\n` +
@@ -54,7 +58,7 @@ describe('#2569 bounded child completion under the checkout lock', () => {
     let restored = false;
     let nextEntered = false;
     // A broken implementation is cleaned up too; reaching this timer makes the pin RED.
-    watchdog = setTimeout(() => { safetyKill = true; killOwnedChild(); }, 4000);
+    watchdog = setTimeout(() => { safetyKill = true; killOwnedChild(); }, 15_000);
     const first = withMirrorCheckoutLock(memory, async () => {
       try {
         if (fail) throw primary;
@@ -62,8 +66,10 @@ describe('#2569 bounded child completion under the checkout lock', () => {
       } finally {
         try {
           await execGit(['remote', 'set-url', 'origin', `https://${SECRET}@github.com/o/r`, 'stall-2569'], {
-            cwd: root, env: { ...process.env, PATH: join(root, 'bin') }, timeout: 1000,
-          } as Parameters<typeof execGit>[1] & { timeout: number });
+            cwd: root, env: { ...process.env, PATH: join(root, 'bin') },
+            // Independent production-size deadline pin; do not import the implementation constant.
+            timeout: 10_000,
+          });
         } catch (error) { caught = error; }
         restored = true;
       }
@@ -74,10 +80,15 @@ describe('#2569 bounded child completion under the checkout lock', () => {
       const child = pid();
       expect(child).toBeDefined();
       // kill(0) still sees an unreaped zombie; ESRCH proves the child is gone at lock handoff.
-      expect(() => process.kill(child!, 0)).toThrowError(expect.objectContaining({ code: 'ESRCH' }));
+      expect(() => {
+        try { process.kill(child!, 0); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') childKnownGone = true;
+          throw error;
+        }
+      }).toThrowError(expect.objectContaining({ code: 'ESRCH' }));
     });
     const [outcome, successor] = await Promise.allSettled([first, next]);
-    expect(successor.status).toBe('fulfilled');
+    expect(successor).toEqual({ status: 'fulfilled', value: undefined });
     expect(nextEntered).toBe(true);
     expect(safetyKill, 'deadline must kill a child that ignores SIGTERM').toBe(false);
     expect(caught).toBeInstanceOf(GitCommandError);
@@ -86,7 +97,7 @@ describe('#2569 bounded child completion under the checkout lock', () => {
     expect(inspect(caught, { depth: null })).not.toContain(root);
     if (fail) expect(outcome).toEqual({ status: 'rejected', reason: primary });
     else expect(outcome).toEqual({ status: 'fulfilled', value: 'primary-success' });
-  }, 10_000);
+  }, 25_000);
 
   it('keeps an invocation without a deadline working normally', async () => {
     const output = await execGit(['status'], { cwd: root, env: { ...process.env, PATH: join(root, 'bin') } });
