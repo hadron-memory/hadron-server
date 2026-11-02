@@ -76,6 +76,7 @@ import { modelGroupMutations, modelGroupQueries } from './resolvers.modelGroup.j
 import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
 import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
+import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolvers.untrackedTaskItems.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
@@ -196,6 +197,7 @@ export const resolvers = {
     ...teamAttentionQueries,
     ...teamWorkQueries,
     ...agentTaskQueries,
+    ...untrackedTaskItemQueries,
     ...tickerQueries,
     ...agentTickerTemplateQueries,
     ...modelGroupQueries,
@@ -266,6 +268,7 @@ export const resolvers = {
     ...modelGroupMutations,
     ...deliverySettingsMutations,
     ...appPropertiesMutations,
+    ...untrackedTaskItemMutations,
     ...stopSignalMutations,
     ...wakeMutations,
     ...deliveryBatchMutations,
