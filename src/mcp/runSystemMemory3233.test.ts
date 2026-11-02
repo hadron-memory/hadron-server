@@ -54,7 +54,7 @@ describe.each([false, true])('#3233 run on-behalf-of=%s', onBehalf => {
     expect(await canReadMemory(db, auth, a.systemMemoryId)).toBe(false);
     await db.agentOrgGrant.create({ data: { agentId: a.id, orgId: org.id, activatedAt: new Date() } });
     await expectReadOnly(auth, a.systemMemoryId);
-    await db.agentOrgGrant.update({ where: { agentId_orgId: { agentId: a.id, orgId: org.id } }, data: { revokedAt: new Date() } });
+    await db.agentOrgGrant.update({ where: { orgId_agentId: { agentId: a.id, orgId: org.id } }, data: { revokedAt: new Date() } });
     expect(await canReadMemory(db, auth, a.systemMemoryId)).toBe(false);
   });
   it.each(['uninstalled-agent', 'deleted-agent', 'deleted-memory', 'uninstalled-app', 'deleted-app', 'deleted-org'] as const)('refuses %s', async kind => {
@@ -74,11 +74,26 @@ describe.each([false, true])('#3233 run on-behalf-of=%s', onBehalf => {
     const rows = [
       await db.memory.create({ data: { class: 'knowledge', name: 'wrong class', urn: `bad-${generateId().toLowerCase()}:class`, organizationId: org.id } }),
       await db.memory.create({ data: { class: 'system', name: 'wrong tenant', urn: `bad-${generateId().toLowerCase()}:tenant`, organizationId: foreign.id } }),
+      await db.memory.create({ data: { class: 'system', name: 'wrong owner', urn: `bad-${generateId().toLowerCase()}:owner`, ownerUserId: member.id } }),
       await db.memory.create({ data: { class: 'system', name: 'install', urn: `bad-${generateId().toLowerCase()}:install`, organizationId: org.id, appId: app.id, isInstallMemory: true, installOfAgentId: a.id } }),
     ];
     for (const row of rows) {
       await db.agent.update({ where: { id: a.id }, data: { systemMemoryId: row.id } });
       expect((await getPrincipalAppMemoryAccess(db, auth)).has(row.id), row.name).toBe(false);
+    }
+  });
+  it('rejects a user-owned Agent pointer to another owner in the same null-org tenant shape', async () => {
+    const personalApp = await db.app.create({ data: { name: 'Personal', urn: `personal-${generateId().toLowerCase()}:app`, ownerUserId: member.id } });
+    const memory = await db.memory.create({ data: { class: 'system', name: 'Other owner', urn: `personal-${generateId().toLowerCase()}:def`, ownerUserId: member.id } });
+    const a = await db.agent.create({ data: { name: 'User Agent', urn: `personal-${generateId().toLowerCase()}:agent`, ownerUserId: admin.id, visibility: 'PERSONAL', systemMemoryId: memory.id } });
+    await createDbAppAgent(db, personalApp.id, a.id);
+    await db.agentSubscription.create({ data: { userId: member.id, agentId: a.id, activatedAt: new Date() } });
+    expect((await getPrincipalAppMemoryAccess(db, { ...run(onBehalf), appId: personalApp.id })).has(memory.id)).toBe(false);
+  });
+  it('does not add the run fold to impersonated or session-bound shapes', async () => {
+    const auth = run(onBehalf);
+    for (const blocked of [{ ...auth, impersonation: { orgId: org.id } }, { ...auth, sessionId: generateId() }]) {
+      expect((await getPrincipalAppMemoryAccess(db, blocked)).has(agents[1].systemMemoryId)).toBe(false);
     }
   });
   it('does not widen second-Agent items or keys/session-isolated principals', async () => {
