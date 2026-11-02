@@ -1,3 +1,4 @@
+import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
@@ -2010,7 +2011,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null } },
+    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2020,6 +2021,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
+    const findings = finishFindings(result?.findings);
     const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
@@ -2038,11 +2040,12 @@ export const agentTaskMutations = {
         data: {
           status: 'finished', finishedAt: new Date(),
           resultOutcome: outcome, resultSummary: summary, resultEvidence: evidence,
+          ...(findings !== undefined ? { resultFindings: findings } : {}),
           ...updatedStamp(ctx),
         },
       });
       await appendTaskEvent(tx, {
-        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
+        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome, ...(findings !== undefined ? { findingCounts: countFindings(findings) } : {}) },
       });
       // #1709 (cor:agt:050:10): ask the assignee to end its session when the task says so.
       const ending = await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
@@ -2605,6 +2608,14 @@ async function relationPages(
 }
 
 export const agentTaskFieldResolvers = {
+  AgentTaskResult: {
+    /** Result is reachable only through the existing task read gate; no separate finding read surface. */
+    findings: (result: { findings?: unknown }, args: { limit?: number | null; offset?: number | null }) => {
+      const items = (result.findings ?? []) as TaskFinding[];
+      const { take, skip } = pageArgs(args);
+      return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
+    },
+  },
   AgentTask: {
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
@@ -2616,7 +2627,7 @@ export const agentTaskFieldResolvers = {
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),
     result: (t: TaskRow) =>
       t.status === 'finished' && t.resultOutcome
-        ? { outcome: t.resultOutcome, summary: t.resultSummary, evidence: t.resultEvidence }
+        ? { outcome: t.resultOutcome, summary: t.resultSummary, evidence: t.resultEvidence, ...(t.resultFindings !== null && t.resultFindings !== undefined ? { findings: t.resultFindings } : {}) }
         : null,
     /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
     handBack: (t: TaskRow) =>

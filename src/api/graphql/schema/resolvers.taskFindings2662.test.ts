@@ -1,6 +1,7 @@
 /** #2662, cor:agt:050:30 / ruling0013A: immutable findings, shape only; events count, never text. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildSchema } from 'graphql';
+import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
+import { readFileSync } from 'node:fs';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -77,4 +78,25 @@ describe('#2662 findings on finish', () => {
   expect((schema.getType('AgentTaskResult') as any).getFields().findings.args.map((a:any)=>a.name)).toEqual(['limit','offset']);
   expect((schema.getType('AgentTaskResultInput') as any).getFields().findings).toBeDefined();
  });
+});
+
+it('GraphQL finish and paged read expose the typed findings; invalid severity writes nothing', async()=>{
+ const schema=buildSchema(typeDefs);
+ const fieldResolver=(parent:any,args:any,c:any,info:any)=>{const fn=R[info.parentType.name]?.[info.fieldName];return typeof fn==='function'?fn(parent,args,c,info):defaultFieldResolver(parent,args,c,info);};
+ const before=await stored();
+ const bad=await graphql({schema,source:'mutation($id:ID!){finishAgentTask(taskId:$id,result:{outcome:"done",findings:[{severity:critical,text:"x"}]}){id}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
+ expect(bad.errors).toBeDefined();expect(await stored()).toEqual(before);expect(await events()).toHaveLength(0);
+ const good=await graphql({schema,source:'mutation($id:ID!){finishAgentTask(taskId:$id,result:{outcome:"done",findings:[{severity:P2,text:"wire text"}]}){result{outcome findings(limit:1){total hasMore items{id severity text}}}}}',variableValues:{id:task.id},contextValue:ctx(),fieldResolver});
+ expect(good.errors).toBeUndefined();expect(good.data).toEqual({finishAgentTask:{result:{outcome:'done',findings:{total:1,hasMore:false,items:[{id:'F1',severity:'P2',text:'wire text'}]}}}});
+});
+it('database refuses findings on an open task and replacement after finish',async()=>{
+ await expect(db.agentTask.update({where:{id:task.id},data:{resultFindings:[]}})).rejects.toThrow();
+ await finish([{severity:'P1',text:'fixed result'}]);
+ await expect(db.agentTask.update({where:{id:task.id},data:{resultFindings:[]}})).rejects.toThrow();
+ expect((await read()).items[0].text).toBe('fixed result');
+});
+
+it('migration carries the exact post-push findings guards',()=>{
+ const sql=readFileSync('prisma/agent-task-findings-invariants.sql','utf8');
+ expect(readFileSync('prisma/migrations/20261102193000_agent_task_findings/migration.sql','utf8').endsWith(sql)).toBe(true);
 });
