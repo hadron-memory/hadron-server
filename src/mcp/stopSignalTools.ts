@@ -11,6 +11,7 @@ import { mcpRequestSessionContext } from './requestSession.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { offTeamTool } from './disabledTools.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { appKeyCaller } from '../lib/appKeyScopes/scopes.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
@@ -99,6 +100,7 @@ async function namesFor(db: PrismaClient, appRef: string, signals: StopSignalVie
 
 /** Register the stop-signal tools on one MCP server instance. `auth` is the connection's principal. */
 export function registerStopSignalTools(server: McpServer, deps: { db: PrismaClient; auth: AuthContext }): void {
+  const off = offTeamTool(server); // #3082: every tool in this module is disabled (R1)
   const { db, auth } = deps;
   const ctxOf = (): Context => ({
     db,
@@ -151,7 +153,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     }
   }
 
-  server.tool(
+  off(
     'hadron_stop_signal_set',
     'Set a STOP SIGNAL on an App (cor:agt:090): PAUSE_DISPATCH stops assignment; PAUSE also stops ticks and stall time; ' +
       'HALT also tells the worker to save its work and write a hand-off now (typed as an ordinary notice into a verified-empty input; no interrupt key is sent). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
@@ -165,7 +167,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     }),
   );
 
-  server.tool(
+  off(
     'hadron_stop_signal_lift',
     'Lift a stop signal (cor:agt:090:05). Lifting one never ends another; lifting one that already ended changes nothing ' +
       'and tells nobody again. Whoever manages the App, any; a host key, a HALT on its own host.',
@@ -176,7 +178,7 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
     }),
   );
 
-  server.tool(
+  off(
     'hadron_stop_signal_list',
     'List an App\'s stop signals (cor:agt:090:07), oldest set first. A person in the App sees all of them; a worker\'s ' +
       'session sees the live ones covering it; a host key sees its own host\'s.',

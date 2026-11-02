@@ -1014,13 +1014,12 @@ describe('Orca attention router — untracked terminals: unknown is not busy (#7
 });
 
 describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
-  it('present anchor: names the first unread, BOTH forms, bounded — no --all', () => {
+  it('present anchor: names the first unread, the CLI form, bounded — no --all, no MCP form (#3082)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5, first: 100, relevant: 110, head: 120 }));
     expect(t).toContain('START AT #100 (your first unread message of any kind)');
     expect(t).toContain('--since 99 --limit 200');
     expect(t).toContain('nextSince');
-    expect(t).toContain('hadron_team_chat_read');
-    expect(t).toContain('sinceSeq=99');
+    expect(t).not.toMatch(/hadron_[a-z_]+|MCP|sinceSeq/);
     expect(t).not.toContain('--all');
     expect(t).not.toContain('\n');
   });
@@ -1033,27 +1032,22 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
   it('first unread 1, SMALL span (cursor-0 worker near the head): since clamps to 0, still bounded', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 349, first: 1, relevant: 110, head: 350 }));
     expect(t).toContain('--since 0 --limit 200');
-    expect(t).toContain('sinceSeq=0');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('--mentions-me');
   });
   it('cursor-0 worker with a LARGE gap: the mentions walk starts at 0 too — clamped, filtered, bounded (#1811)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9000, first: 1, relevant: 110, head: 9001 }));
     expect(t).toContain('--mentions-me --since 0 --before 9002 --limit 200');
-    expect(t).toContain('sinceSeq=0');
-    expect(t).toContain('beforeSeq=9002');
     expect(t).not.toContain('--all');
     expect(t).not.toContain('START AT');
   });
-  it('LARGE GAP (span > 400): mentions-only anchor — filter, both forms, own-session mark ceiling, failure discipline (#1811)', () => {
+  it('LARGE GAP (span > 400): mentions-only anchor — filter, CLI form, own-session mark ceiling, failure discipline (#1811, #3082)', () => {
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
     expect(t).toContain('LARGE GAP');
     expect(t).toContain('unread #61–#9901, latest mention #9750');
     expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
-    expect(t).toContain('sinceSeq=60');
-    expect(t).toContain('hadron_team_chat_read');
+    expect(t).not.toMatch(/hadron_[a-z_]+|MCP|sinceSeq/);
     expect(t).toContain('mark-read --through');
-    expect(t).toContain('hadron_team_chat_mark_read');
     expect(t).toContain('never auto-marks');
     expect(t).toContain('marks NOTHING');
     expect(t).toContain('your OWN session');
@@ -1068,7 +1062,6 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     // never reach it. The walk's upper bound is the nudge's OWN head value.
     const t = nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 9841, first: 61, relevant: 9750, head: 9901 }));
     expect(t).toContain('--before 9902');
-    expect(t).toContain('beforeSeq=9902');
     expect(t).toContain('never above #9901');
     expect(t).toContain('actually delivered');
     expect(t).not.toContain('--before 9903');
@@ -1085,16 +1078,11 @@ describe('nudgeText read anchor (#1805 P2s, #1811 large-gap branch)', () => {
     expect(t).toContain('BACKWARD');
     expect(t).not.toContain('nextSince'); // the forward cursor is what lost the oldest mention
     expect(t).toContain('--mentions-me --since 60 --before 9902 --limit 200');
-    expect(t).toContain('sinceSeq=60');
-    expect(t).toContain('beforeSeq=9902');
     expect(t).toContain('never above #9901'); // the H+1 arrival stays outside sample and mark
     expect(t).not.toContain('--before 9903');
-    // The MCP tool returns numbered pages with NO prevBefore field (Anne and
-    // Colin, independently): its instruction must say to re-call with
-    // beforeSeq = the smallest seq on the last page, not "follow prevBefore".
-    expect(t).toContain('the smallest seq on your last page');
-    expect(t).toContain('no prevBefore field');
-    expect(t).toContain('limit 200'); // the MCP page limit spelled with its value
+    // The MCP forms left with the MCP team cut (#3082): the CLI pages carry prevBefore, so "follow prevBefore" is the one rule.
+    expect(t).toContain('follow each page\'s prevBefore BACKWARD');
+    expect(t).not.toContain('the smallest seq on your last page');
   });
   it('the boundary is deterministic: span 399 and exactly 400 keep the unfiltered anchor, 401 switches (#1811)', () => {
     for (const head of [499, 500]) {
@@ -1964,7 +1952,7 @@ describe('Orca attention router — coordinator/lifecycle liveness rule (#1826)'
     expect(text).toContain('#100'); // its cursor, named
     expect(text).toContain('#120'); // the head, named
     expect(text).toContain('--since 100');
-    expect(text).toContain('sinceSeq=100');
+    expect(text).not.toMatch(/hadron_[a-z_]+|MCP|sinceSeq/); // #3082: CLI form only
     expect(text).toContain('mark read');
     expect((text.match(/mark read/g) ?? []).length).toBe(1); // once, not twice (Taylor #9748)
     expect(text).toContain('as of send');

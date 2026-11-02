@@ -106,7 +106,7 @@ const KEPT_SAMPLE = [
 ];
 const TOKENS_REMOVED = [
   'worker-model', 'worker-boot-briefing', 'team-chat', 'team-worklog', 'session-app-recovery', 'channels',
-  'team-chat-monitor', 'worklog-model', 'team-attention',
+  'team-chat-monitor', 'worklog-model', 'transcript-backward-cursor', 'team-attention',
 ];
 const GOLDEN = new URL('./__golden__/toolSurface2260.json', import.meta.url);
 
@@ -248,7 +248,7 @@ describe('#3082 R2: no worker binding on MCP', () => {
     await createTestableMcpServer({ ...userAuth(), sessionId: started.id } as never).callToolText('hadron_whoami', {});
     const after = await db.session.findUniqueOrThrow({ where: { id: started.id } });
     expect(after.endedAt?.getTime()).toBe(before.endedAt?.getTime());
-    expect(after.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    expect(after.updatedAt?.getTime()).toBe(before.updatedAt?.getTime());
   });
 });
 
