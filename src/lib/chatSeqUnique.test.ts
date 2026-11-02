@@ -501,4 +501,22 @@ describe('#992 — prisma/chat-seq-invariants.sql (the preflight + index)', () =
     await runSql();
     expect(await indexExists()).toBe(true);
   });
+
+  // Atilla LOCAL delta P2-1: a counterless chat-message is outside the index and
+  // cannot collide, so a nested loc on one must not block installation.
+  it('does not refuse on a counterless chat-message under a messages-bearing loc (outside the index)', async () => {
+    await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${INDEX_NAME}"`);
+    const id = await seedMessage(legacyMem.id, null, { loc: 'ops:messages:alerts:messages:counterless' });
+    await runSql();
+    expect(await indexExists()).toBe(true);
+    expect((await db.node.findUniqueOrThrow({ where: { id } })).loc).toBe('ops:messages:alerts:messages:counterless');
+  });
+
+  // Ralion §10 P3-A: a root ENDING in `messages` folds into its ancestor too.
+  it('refuses a transcript under a root that ends in the messages segment', async () => {
+    await db.$executeRawUnsafe(`DROP INDEX IF EXISTS "${INDEX_NAME}"`);
+    await seedMessage(legacyMem.id, 1, { loc: 'ops:messages:messages:001-x' });
+    await expect(runSql()).rejects.toThrow(/reserved "messages" loc segment/);
+    expect(await indexExists()).toBe(false);
+  });
 });

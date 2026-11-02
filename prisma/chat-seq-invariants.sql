@@ -69,6 +69,8 @@ END $$;
 -- install; the repair (relocating the address) is the owner's choice — this
 -- file never renames, deletes or exempts. New Channels are refused at the
 -- address boundary (LOC_RESERVED_SEGMENT), so after this check none can appear.
+-- Only rows the index covers (seq IS NOT NULL) count: a counterless message is
+-- outside the index and cannot collide, so it never blocks installation.
 DO $$
 DECLARE
   offender record;
@@ -81,7 +83,7 @@ BEGIN
     UNION ALL
     SELECT 'nested-transcript', memory_id, split_part(loc, ':messages:', 1), count(*)
     FROM nodes
-    WHERE node_type = 'chat-message' AND loc ~ ':messages:(.*:)?messages:'
+    WHERE node_type = 'chat-message' AND seq IS NOT NULL AND loc ~ ':messages:(.*:)?messages:'
     GROUP BY memory_id, split_part(loc, ':messages:', 1)
     LIMIT 10
   LOOP
@@ -90,7 +92,7 @@ BEGIN
   END LOOP;
 
   SELECT (SELECT count(*) FROM channels WHERE 'messages' = ANY (string_to_array(loc, ':')))
-       + (SELECT count(*) FROM nodes WHERE node_type = 'chat-message' AND loc ~ ':messages:(.*:)?messages:')
+       + (SELECT count(*) FROM nodes WHERE node_type = 'chat-message' AND seq IS NOT NULL AND loc ~ ':messages:(.*:)?messages:')
     INTO total;
   IF total > 0 THEN
     RAISE EXCEPTION 'chat seq uniqueness preflight: % Channel/transcript row(s) use the reserved "messages" loc segment — relocate them under an approved repair first; refusing to create the unique index', total
