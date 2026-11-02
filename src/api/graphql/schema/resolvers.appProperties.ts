@@ -102,14 +102,6 @@ export async function writeAppProperties(
     if (rawProperties !== null && rawProperties !== undefined) {
       const shaped = checkAppPropertiesShape(rawProperties);
       if (Object.hasOwn(shaped, TASK_INTEGRATIONS_KEY)) {
-        // #3125 Ask 5: task integrations reach GitHub through the organization's installation; an App with no
-        // organization has none, so it may not hold them (Holger may veto).
-        if (!fresh.organizationId) {
-          throw taskError(
-            'TASK_INTEGRATION_ORG_REQUIRED',
-            'Task integrations need an App that belongs to an organization. Nothing was changed.',
-          );
-        }
         const integrations = await normalizeTaskIntegrations(shaped[TASK_INTEGRATIONS_KEY], async (ref) => {
           const id = await resolveTaskWorkerId(txCtx, fresh.id, ref);
           if (!id) return null;
