@@ -1,3 +1,4 @@
+import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
 import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
@@ -179,7 +180,7 @@ const APP_SELECT = {
   uninstalledAt: true, deletedAt: true,
 } as const;
 export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
-type TaskRow = Prisma.AgentTaskGetPayload<Record<string, never>>;
+type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
 
 /** Who is acting on a task: a worker through its session, or a person as themselves. */
 export type TaskActor =
@@ -2010,7 +2011,7 @@ export const agentTaskMutations = {
    */
   finishAgentTask: async (
     _: unknown,
-    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null } },
+    { taskId, result }: { taskId: string; result: { outcome: string; summary?: string | null; evidence?: string | null; findings?: unknown } },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2020,6 +2021,7 @@ export const agentTaskMutations = {
     }
     const summary = optionalText(result?.summary, TASK_SUMMARY_MAX, 'summary');
     const evidence = optionalText(result?.evidence, TASK_EVIDENCE_MAX, 'evidence');
+    const findings = finishFindings(result?.findings);
     const warn: TaskWarningCode[] = [];
     const finished = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
@@ -2038,11 +2040,12 @@ export const agentTaskMutations = {
         data: {
           status: 'finished', finishedAt: new Date(),
           resultOutcome: outcome, resultSummary: summary, resultEvidence: evidence,
+          ...(findings !== undefined ? { resultFindings: findings } : {}),
           ...updatedStamp(ctx),
         },
       });
       await appendTaskEvent(tx, {
-        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome },
+        appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.finished', outcome, ...(findings !== undefined ? { findingCounts: countFindings(findings) } : {}) },
       });
       // #1709 (cor:agt:050:10): ask the assignee to end its session when the task says so.
       const ending = await requestSessionEnd(tx, { appId: app.id, task, actor: eventActor(ctx.userId), now: new Date() });
@@ -2349,6 +2352,7 @@ export const agentTaskQueries = {
     const assigneeWhere = await partyFilter(c, app, args.assignee, 'assignee');
     const creatorWhere = await partyFilter(c, app, args.creator, 'creator');
     return c.db.agentTask.findMany({
+      omit: { resultFindings: true },
       where: { AND: [where, noZero, rootsWhere, ownerWhere, assigneeWhere, creatorWhere, ...filters] },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: clampListTake(args.limit),
@@ -2374,6 +2378,7 @@ export const agentTaskQueries = {
       )
       SELECT id, depth FROM tree LIMIT ${TASK_TREE_MAX}`;
     const tasks = await c.db.agentTask.findMany({
+      omit: { resultFindings: true },
       where: { id: { in: rows.map((r) => r.id) }, appId: readable.app.id },
     });
     const depth = new Map(rows.map((r) => [r.id, r.depth]));
@@ -2596,7 +2601,7 @@ async function relationPages(
     }
   }
   const wanted = [...new Set([...relatedIds.values()].flat())];
-  if (wanted.length) for (const t of await db.agentTask.findMany({ where: { id: { in: wanted } } })) related.set(t.id, t);
+  if (wanted.length) for (const t of await db.agentTask.findMany({ where: { id: { in: wanted } }, omit: { resultFindings: true } })) related.set(t.id, t);
   for (const r of mine) {
     const items = (relatedIds.get(`${r.direction}:${r.take}:${r.skip}:${r.id}`) ?? []).map((id) => related.get(id)).filter((t): t is TaskRow => !!t);
     out.set(r, pageEnvelope(items, totals.get(`${r.direction}:${r.id}`) ?? 0, r.skip));
@@ -2605,6 +2610,14 @@ async function relationPages(
 }
 
 export const agentTaskFieldResolvers = {
+  AgentTaskResult: {
+    /** Result is reachable only through the existing task read gate; no separate finding read surface. */
+    findings: (result: { findings?: unknown }, args: { limit?: number | null; offset?: number | null }) => {
+      const items = (result.findings ?? []) as TaskFinding[];
+      const { take, skip } = pageArgs(args);
+      return pageEnvelope(items.slice(skip, skip + take), items.length, skip);
+    },
+  },
   AgentTask: {
     blockedBy: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blockedBy', args),
     blocks: async (task: TaskRow, args: { limit?: number | null; offset?: number | null }, ctx: Context) => taskRelations(ctx, task.id, 'blocks', args),
@@ -2614,10 +2627,15 @@ export const agentTaskFieldResolvers = {
     status: (t: TaskRow) => t.status.toUpperCase(),
     owner: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.ownerWorkerId, t.ownerUserId),
     assignee: (t: TaskRow, _: unknown, ctx: Context) => partyView(ctx, t.assigneeWorkerId, t.assigneeUserId),
-    result: (t: TaskRow) =>
-      t.status === 'finished' && t.resultOutcome
-        ? { outcome: t.resultOutcome, summary: t.resultSummary, evidence: t.resultEvidence }
-        : null,
+    result: (t: TaskRow, _: unknown, ctx: Context) => {
+      const view = (row: TaskRow) => row.status === 'finished' && row.resultOutcome
+        ? { outcome: row.resultOutcome, summary: row.resultSummary, evidence: row.resultEvidence, ...(row.resultFindings != null ? { findings: row.resultFindings } : {}) }
+        : null;
+      if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
+      // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the
+      // SAME task read gate (including the App-key arm), rechecked at this read rather than trusting an old row.
+      return withReadableTask(ctx, t.id, async (_c, { task }) => view(task));
+    },
     /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
     handBack: (t: TaskRow) =>
       t.handBackReasonCode && t.handedBackAt
