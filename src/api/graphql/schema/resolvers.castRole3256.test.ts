@@ -51,12 +51,46 @@ describe('#3256 roleless cast', () => {
     expect(await db.ticker.count({ where: { generatedForWorkerId: worker.id, deletedAt: null } })).toBe(1);
   });
 
-  it('preview uses the same role refusal without reserving or writing anything', async () => {
-    await db.agent.update({ where: { id: agent.id }, data: { personaRole: null } });
+  it.each([null, '', '   ', '\t\n'])('preview refuses role %j without reserving or writing anything', async personaRole => {
+    await db.agent.update({ where: { id: agent.id }, data: { personaRole } });
     const before = await snapshot();
     await expect((resolvers.Query as any).castWorkerPreview({}, {
       appRef: app.id, agentRef: agent.id, name: 'RolePin',
     }, ctx())).rejects.toMatchObject({ extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE' } });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  for (const surface of ['cast', 'preview'] as const) {
+    it.each(['security-engineer', ' SECURITY-ENGINEER ', '\tsecurity-engineer\n'])(`${surface} accepts matching role %j on a padded Agent role`, async role => {
+      await db.agent.update({ where: { id: agent.id }, data: { personaRole: ' \tsecurity-engineer \n' } });
+      const before = await snapshot();
+      const args = { appRef: app.id, agentRef: agent.id, role, name: 'RolePin' };
+      if (surface === 'preview') {
+        const preview = await (resolvers.Query as any).castWorkerPreview({}, args, ctx());
+        expect(preview).toMatchObject({ role: 'security-engineer' });
+        expect(preview.prompt).toContain('ROLE security-engineer');
+        expect(await snapshot()).toEqual(before);
+      } else {
+        const worker = await M.castWorker({}, args, ctx());
+        expect(await db.worker.findUniqueOrThrow({ where: { id: worker.id } })).toMatchObject({ role: 'security-engineer' });
+      }
+    });
+  }
+
+  it('preview renders a padded Agent role trimmed even without an explicit role', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { personaRole: ' \tsecurity-engineer \n' } });
+    const before = await snapshot();
+    const preview = await (resolvers.Query as any).castWorkerPreview({}, { appRef: app.id, agentRef: agent.id, name: 'RolePin' }, ctx());
+    expect(preview).toMatchObject({ role: 'security-engineer' });
+    expect(preview.prompt).toContain('ROLE security-engineer');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('refuses the Agent role before the missing permanent worker name', async () => {
+    await db.agent.update({ where: { id: agent.id }, data: { personaRole: null } });
+    const before = await snapshot();
+    await expect(M.castWorker({}, { appRef: app.id, agentRef: agent.id }, ctx()))
+      .rejects.toMatchObject({ extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE' } });
     expect(await snapshot()).toEqual(before);
   });
 
