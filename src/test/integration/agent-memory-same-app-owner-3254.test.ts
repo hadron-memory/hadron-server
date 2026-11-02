@@ -18,7 +18,10 @@ import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../helpers.js';
 import { generateId } from '../../lib/id.js';
-import { mintUserApiKey } from '../../middleware/auth.js';
+import { mintUserApiKey, resolveAuthContext } from '../../middleware/auth.js';
+import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import type { Request } from 'express';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -257,5 +260,47 @@ describe('#3254 — the deciding membership is held through the link', () => {
       (tx) => tx.appMember.delete({ where: { appId_userId: { appId: appX.id, userId: owner.id } } }));
     expect(code(r)).toBe('MEMORY_NOT_FOUND');
     expect(await linked(agentId, groupMem.id)).toBeNull();
+  });
+});
+
+type Resolver = (p: unknown, a: Record<string, unknown>, c: Context) => Promise<unknown>;
+const addMemoryToAgent = resolvers.Mutation.addMemoryToAgent as unknown as Resolver;
+const startImpersonation = resolvers.Mutation.startImpersonation as unknown as Resolver;
+
+/** The refusal as a caller sees it: message and extensions, the memory ref masked. */
+async function refusalOf(ctx: Context, agentId: string): Promise<string> {
+  try {
+    await addMemoryToAgent({}, { agentRef: agentId, memoryRef: groupMem.urn, role: 'read' }, ctx);
+  } catch (error) {
+    const e = error as { message: string; extensions?: Record<string, unknown> };
+    return JSON.stringify({ message: e.message, extensions: e.extensions }).split(groupMem.urn).join('<REF>');
+  }
+  return 'ADMITTED';
+}
+
+describe('#3254 — an impersonated session never manages the App (cor:dmo:050:12)', () => {
+  // Over GraphQL the read-only impersonation plugin refuses every mutation first, so this is pinned at the
+  // resolver with a context resolved from a real impersonation token: the attach path itself must refuse.
+  it('an impersonated org ADMIN is refused exactly as a plain non-manager is', async () => {
+    const target = await mkUser('imp-target');
+    await db.orgMember.create({ data: { organizationId: orgId, userId: target.id, role: 'ADMIN' } });
+    const actor = await mkUser('imp-actor', ['ADMIN']);
+    const started = (await startImpersonation({}, { orgRef: orgId, userRef: target.id, reason: '#3254 pin' },
+      { db, userId: actor.id, roles: ['ADMIN'] } as unknown as Context)) as { token: string };
+    const auth = await resolveAuthContext({ headers: { authorization: `Bearer ${started.token}` } } as unknown as Request, db);
+    expect(auth.userId).toBe(target.id);
+    expect(auth.impersonation).toBeTruthy();
+    const impAgent = await orgAgentIn(appX.id, 'imp-agent');
+    const impersonated = await refusalOf({ db, ...auth } as unknown as Context, impAgent);
+
+    const plain = await mkUser('imp-plain');
+    await createDbAppMember(db, appX.id, plain.id, 'member');
+    const plainAgent = await ownAgentIn(appX.id, plain.id, 'imp-plain');
+    const plainAuth = await resolveAuthContext({ headers: { authorization: `Bearer ${plain.key}` } } as unknown as Request, db);
+    const refused = await refusalOf({ db, ...plainAuth } as unknown as Context, plainAgent);
+
+    expect(refused).toContain('MEMORY_NOT_FOUND');
+    expect(impersonated).toBe(refused);
+    expect(await linked(impAgent, groupMem.id)).toBeNull();
   });
 });
