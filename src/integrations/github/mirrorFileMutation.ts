@@ -54,6 +54,11 @@ export function mutateMirrorFiles(localPath: string, paths: readonly string[], m
     rmSync(marker);
     safeToClean = true;
   } finally {
-    if (safeToClean) rmSync(backup, { recursive: true, force: true });
+    if (safeToClean) {
+      // Completed checkpoint cleanup is not a row failure: publishing a successful
+      // mutation while charging it TREE_WRITE would misreport that row again.
+      try { rmSync(backup, { recursive: true, force: true }); }
+      catch { console.warn('[git-mirror] Could not remove a completed file checkpoint'); }
+    }
   }
 }

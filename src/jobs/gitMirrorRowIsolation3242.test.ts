@@ -1,5 +1,6 @@
 /** #3242: row-local mutation errors must not exhaust healthy siblings. Private DB and local Git only. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -7,6 +8,8 @@ import { join } from 'path';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+
+vi.mock('fs', async original => ({ ...(await original<typeof import('fs')>()) }));
 
 const env = vi.hoisted(() => ({ root: '', bare: '', commands: [] as string[][] }));
 vi.mock('../config.js', () => ({ get GRAPHS_PATH() { return env.root; } }));
@@ -54,7 +57,16 @@ beforeEach(async () => {
  const local=join(env.root,org.urn,'memory'); mkdirSync(join(env.root,org.urn));
  execFileSync('git',['-c','protocol.allow=never','-c','protocol.file.allow=always','-c',`url.${env.bare}.insteadOf=${SOURCE}`,'clone',SOURCE,local],{stdio:'ignore'});
 });
-afterEach(()=>{vi.restoreAllMocks();rmSync(env.root,{recursive:true,force:true});});
+afterEach(()=>{
+ vi.restoreAllMocks();
+ const marker=mirrorMutationMarker(localPath());
+ if(existsSync(marker)) {
+  const backup=readFileSync(marker,'utf8');
+  // Only the backup named by this fixture's private checkout is ours.
+  if(backup.startsWith(join(tmpdir(),'hadron-mirror-row-')))rmSync(backup,{recursive:true,force:true});
+ }
+ rmSync(env.root,{recursive:true,force:true});
+});
 
 
 const localPath = () => join(env.root, 'isolation3242.test', 'memory');
@@ -175,6 +187,31 @@ describe('#3242 row-local file operation failures', () => {
   expect(await pushMemoryToGit(memoryId)).toMatchObject({nodeCount:0,error:expect.stringContaining('needs repair')});
   expect(env.commands).toEqual([]);
   expect(()=>remote('partial.md')).toThrow();
+ });
+
+ it('rollback failure blocks publication while retaining healthy sibling debt unchanged',async()=>{
+  const healthy=await node('healthy'),bad=await node('bad');
+  baseline({'bad.md':'original'});
+  const healthyDebt=await debt(healthy.id,'WRITE');await debt(bad.id,'WRITE');
+  const realWrite=files.writeNodeFile,realCopy=fs.cpSync;
+  vi.spyOn(files,'writeNodeFile').mockImplementation((...args)=>{
+   const result=realWrite(...args);
+   if(args[1].id===bad.id)throw new Error('synthetic partial mutation');
+   return result;
+  });
+  vi.spyOn(fs,'cpSync').mockImplementation((source,dest,options)=>{
+   if(String(dest)===join(localPath(),'bad.md'))throw new Error('synthetic restore failure');
+   return realCopy(source,dest,options);
+  });
+  await tick();
+  const after=await rows();
+  expect(after.find(r=>r.nodeId===healthy.id)).toEqual(healthyDebt);
+  expect(after.find(r=>r.nodeId===bad.id)).toMatchObject({attempts:10,errorClass:'TREE_WRITE',state:'EXHAUSTED'});
+  expect(env.commands.filter(args=>args[0]==='push')).toEqual([]);
+  const backup=readFileSync(mirrorMutationMarker(localPath()),'utf8');
+  expect(readFileSync(join(backup,'0'),'utf8')).toBe('original');
+  // This fixture owns the intentionally retained checkpoint.
+  rmSync(backup,{recursive:true,force:true});
  });
 
 });

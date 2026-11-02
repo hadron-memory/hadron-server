@@ -126,14 +126,15 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
               return [file, legacy.readme, legacy.sidecar];
             };
             const failedOperation = (err: unknown) => {
-              // Rollback itself failed: stop the batch and leave the shared checkout guard.
-              if (hasIncompleteMirrorMutation(localPath)) throw err;
               console.error('[git-mirror-sweep] File mutation failed', mirrorFailureMetadata(err, 'tree', 'TREE_WRITE'));
             };
             const rejected = new Set(failedWrites);
             for (const node of writes) if (!rejected.has(node.id)) {
               try { mutateMirrorFiles(localPath, paths(node.loc), () => { writeNodeFile(localPath, node, memoryUrn); }); }
-              catch (err) { failedOperation(err); failedWrites.push(node.id); }
+              catch (err) {
+                failedOperation(err); failedWrites.push(node.id);
+                if (hasIncompleteMirrorMutation(localPath)) return { failedWrites, failedRemoves };
+              }
             }
             for (const ref of obligations) if (ref.kind === 'REMOVE') {
               try {
@@ -142,7 +143,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
                     removeNodeFile(localPath, ref.removeLoc ?? '', ref.nodeId, memoryUrn);
                   });
                 }
-              } catch (err) { failedOperation(err); failedRemoves.push(ref); }
+              } catch (err) {
+                failedOperation(err); failedRemoves.push(ref);
+                if (hasIncompleteMirrorMutation(localPath)) return { failedWrites, failedRemoves };
+              }
             }
             return { failedWrites, failedRemoves };
           });

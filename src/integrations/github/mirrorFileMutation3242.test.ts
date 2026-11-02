@@ -8,7 +8,14 @@ import { mirrorMutationMarker, mutateMirrorFiles } from './mirrorFileMutation.js
 const roots: string[] = [];
 afterEach(() => {
  vi.restoreAllMocks();
- for (const root of roots.splice(0)) fs.rmSync(root,{recursive:true,force:true});
+ for (const root of roots.splice(0)) {
+  const marker=mirrorMutationMarker(root);
+  if(fs.existsSync(marker)) {
+   const backup=fs.readFileSync(marker,'utf8');
+   if(backup.startsWith(join(tmpdir(),'hadron-mirror-row-')))fs.rmSync(backup,{recursive:true,force:true});
+  }
+  fs.rmSync(root,{recursive:true,force:true});
+ }
 });
 function fixture() {
  const root=fs.mkdtempSync(join(tmpdir(),'mirror-rollback3242-'));roots.push(root);
@@ -48,4 +55,19 @@ it('successful mutation clears its checkpoint guard',()=>{
  mutateMirrorFiles(root,[path],()=>{fs.writeFileSync(path,'valid');});
  expect(fs.readFileSync(path,'utf8')).toBe('valid');
  expect(fs.existsSync(mirrorMutationMarker(root))).toBe(false);
+});
+
+it('backup cleanup failure does not turn a successful mutation into failed debt',()=>{
+ const root=fixture(), path=join(root,'new.md');
+ const real=fs.rmSync;let retained='';
+ vi.spyOn(console,'warn').mockImplementation(()=>{});
+ vi.spyOn(fs,'rmSync').mockImplementation((target,options)=>{
+  if(String(target).includes('hadron-mirror-row-')){retained=String(target);throw new Error('cleanup outage');}
+  return real(target,options);
+ });
+ expect(()=>mutateMirrorFiles(root,[path],()=>{fs.writeFileSync(path,'valid');})).not.toThrow();
+ expect(fs.readFileSync(path,'utf8')).toBe('valid');
+ expect(fs.existsSync(mirrorMutationMarker(root))).toBe(false);
+ expect(retained).not.toBe('');
+ real(retained,{recursive:true,force:true});
 });

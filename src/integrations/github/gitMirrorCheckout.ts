@@ -325,6 +325,13 @@ export async function withMirrorCheckout(
           await settleMirrorObligations(db, resolvedMemoryId, failed, { result: 'failed', errorClass: 'TREE_WRITE' },
             attemptSeq, opts.retry.maxAttempts, { targetBranch: attemptedBranch });
           obligations = obligations.filter(r => !isFailed(r));
+          if (hasIncompleteMirrorMutation(localPath)) {
+            // Failed row charged, but an unrecoverable checkout must not charge or
+            // clear unattempted/healthy siblings and must never reach git add.
+            settlement = null;
+            await restoreRemote(localPath, memory.source);
+            return 'failed';
+          }
           if (!obligations.length) {
             settlement = null;
             await restoreRemote(localPath, memory.source);
