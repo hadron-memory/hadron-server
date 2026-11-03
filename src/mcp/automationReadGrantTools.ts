@@ -62,7 +62,7 @@ export function registerAutomationReadGrantTools(server: McpServer, deps: { db: 
 
   server.tool(
     'hadron_set_automation_read_grant',
-    'Give an automation (a live schedule or webhook of an App) a read grant on one memory or one loc prefix (cor:agt:010:01). Read-only, used only by that automation\'s runs reading a node, checked live. Only whoever manages the target may give it: the Agent\'s manager for an Agent\'s system memory (the Agent must be installed in the App), the memory\'s manager otherwise. Never personal, private, encrypted, install, Worker or session memories or another App\'s team space. Omit prefix for the whole memory.',
+    'Give an automation (a live schedule or webhook of an App) a read grant on one memory or one loc prefix (cor:agt:010:01). Read-only, used only by that automation\'s runs reading a node, checked live. Person-only (cor:dmo:050:12): never from a worker session. Only whoever manages the target may give it: the Agent\'s manager for an Agent\'s system memory (the Agent must be installed in the App), the memory\'s manager otherwise. Never personal, private, encrypted, install, Worker or session memories or another App\'s team space. Omit prefix for the whole memory.',
     SHAPE_HADRON_SET_AUTOMATION_READ_GRANT,
     async ({ app, triggerKind, triggerId, memory, prefix }) => guard(async () =>
       `Granted. ${line(await r.Mutation.setAutomationReadGrant(null, { appRef: app, triggerKind, triggerId, memoryRef: memory, prefix }, ctxOf()))}`),

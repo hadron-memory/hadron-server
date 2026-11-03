@@ -48,7 +48,8 @@ async function fixture() {
   const personSession = await db.session.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, userId: mgr.id, tool: 'vitest' } });
   const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'hdr_app_x...0000', label: 'existing' } });
   const dest = await db.memory.create({ data: { name: 'dest', urn: 'po3277.test:dest', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never });
-  return { mgr, org, app, agent, worker, target, workerSession, personSession, key, dest };
+  const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: 'hrn:node:example.com:m:flows:entry' } });
+  return { mgr, org, app, agent, worker, target, workerSession, personSession, key, dest, schedule };
 }
 
 let f: F;
@@ -73,6 +74,7 @@ const writes = async () => ({
   scopes: await db.appKeyScope.findMany({ orderBy: { id: 'asc' } }),
   grants: await db.appGrant.findMany({ orderBy: { id: 'asc' } }),
   writeGrants: await db.appMemoryWriteGrant.findMany({ orderBy: { id: 'asc' } }),
+  readGrants: await db.appAutomationReadGrant.findMany({ orderBy: { id: 'asc' } }),
 });
 
 const DOORS: Record<string, (c: Context) => Promise<unknown>> = {
@@ -81,6 +83,8 @@ const DOORS: Record<string, (c: Context) => Promise<unknown>> = {
   grantAppKeyScope: (c) => M.grantAppKeyScope({}, { id: f.key.id, scope: 'attention:deliver' }, c),
   grantApp: (c) => M.grantApp({}, { appRef: f.app.id, workerRef: f.target.id, name: 'TICKER_SUBSCRIBE_WORKERS' }, c),
   setAppMemoryWriteGrant: (c) => M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.dest.id, prefix: 'reports:x' }, c),
+  // The sixth door (Ada #68814, Xanthos #68810, folded by Patrick #68818): giving an automation's read grant.
+  setAutomationReadGrant: (c) => M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.dest.id, prefix: 'tasks' }, c),
 };
 
 const answer = (p: Promise<unknown>) => p.then(
@@ -104,8 +108,9 @@ const EXPECTED: Record<string, Record<keyof typeof CLASSES, { code: string; mess
   regenerateAppKey: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN /* RED */, ambiguousActor: FORBIDDEN /* RED */, refusedBinding: FORBIDDEN /* RED */, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN /* RED */, appKey: FORBIDDEN },
   grantAppKeyScope: { boundWorker: SCOPE_REFUSAL, sessionRowWorker: SCOPE_REFUSAL /* RED */, ambiguousActor: SCOPE_REFUSAL /* RED */, refusedBinding: NOT_BOUND, impersonation: READ_ONLY, runPrincipal: SCOPE_REFUSAL /* RED */, appKey: { code: 'APP_KEY_NOT_FOUND', message: 'App key not found.' } },
   grantApp: { boundWorker: GRANT_REFUSAL, sessionRowWorker: GRANT_REFUSAL /* RED */, ambiguousActor: GRANT_REFUSAL /* RED */, refusedBinding: NOT_BOUND, impersonation: READ_ONLY, runPrincipal: GRANT_REFUSAL /* RED */, appKey: { code: 'APP_NOT_FOUND', message: 'App not found.' } },
-  // Already on the person gate on main: regression pins for the whole matrix.
+  // Already on the person gate on main (both grant doors): regression pins for the whole matrix.
   setAppMemoryWriteGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
+  setAutomationReadGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
 };
 
 describe('#3277 person-only doors refuse every non-person shape, byte-identical, writing nothing', () => {
@@ -133,13 +138,15 @@ describe('#3277 person-only doors refuse every non-person shape, byte-identical,
 
 describe('#3277 a person who manages the App still succeeds at every door (regression)', () => {
   for (const [label, extra] of [['no session', {}], ['a non-worker session', 'person-session']] as const) {
-    it(`createAppKey, regenerateAppKey, grantAppKeyScope, grantApp, setAppMemoryWriteGrant with ${label}`, async () => {
+    it(`createAppKey, regenerateAppKey, grantAppKeyScope, grantApp, setAppMemoryWriteGrant, setAutomationReadGrant with ${label}`, async () => {
       const c = person(extra === 'person-session' ? { sessionId: f.personSession.id } : {});
       expect((await DOORS.createAppKey(c) as any).rawKey).toMatch(/^hdr_app_/);
       expect((await DOORS.grantAppKeyScope(c) as any).id).toBe(f.key.id);
       expect(await db.appKeyScope.count({ where: { appKeyId: f.key.id, revokedAt: null } })).toBe(1);
       expect((await DOORS.grantApp(c) as any).granteeWorkerId).toBe(f.target.id);
       expect((await DOORS.setAppMemoryWriteGrant(c) as any).prefix).toBe('reports:x');
+      await DOORS.setAutomationReadGrant(c);
+      expect(await db.appAutomationReadGrant.count({ where: { revokedAt: null } })).toBe(1);
       expect(await DOORS.regenerateAppKey(c)).toBeTruthy();
       expect(await db.appKey.count({ where: { appId: f.app.id, revokedAt: null } })).toBe(1);
     });

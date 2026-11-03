@@ -19,7 +19,7 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
+import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { GRANT_MEMORY_SELECT, grantTargetRefusal, isStrictOwnerClass } from '../../../lib/appWriteGrant.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -96,7 +96,8 @@ export const appWriteGrantMutations = {
   ) => {
     const prefix = parsePrefix(input.prefix);
     const registerNodeUrn = parseRegisterUrn(input.registerNodeUrn);
-    const actorId = await requirePersonAsThemselves(ctx, denied);
+    // #3277: giving a grant is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0099 A).
+    const actorId = await requirePersonOnlyAct(ctx, 'grant.give', denied);
     const { id: appId } = await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef));
     const { id: memoryId } = await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef));
     const app0 = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null, uninstalledAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });

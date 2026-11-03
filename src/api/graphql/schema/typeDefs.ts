@@ -10246,11 +10246,11 @@ export const typeDefs = `#graphql
     approveAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!, expectedHash: String!): Boolean!
     "#2441: decline. An adopted trigger is revoked, so its next run fails AUTOMATION_UNADOPTED (REVOKE event); with nothing adopted it changes no state (DECLINE event). A MANUAL origin deletes its consent row. Runs already started keep their snapshot."
     declineAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): Boolean!
-    "#2484: let an App's userless runs create or update a node in one memory under one loc prefix (required; no memory-wide grant). The caller is a person acting as themselves who manages the App and can write the memory. A shared memory must be one the App's own org or team space holds; a personal or private memory only by its owner, who must also manage the App; an encrypted memory is never grantable; nor is a system-class memory (#2710: an Agent's system memory, its boot-prompt source included, is written only by whoever manages the Agent, hrn:node:hadronmemory.com:specs:cor:agt:040:11), and a grant made on one before that rule authorizes no write. Granting the same prefix again returns the live grant. One content-free event is recorded. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    "#2484: let an App's userless runs create or update a node in one memory under one loc prefix (required; no memory-wide grant). The caller is a person acting as themselves who manages the App and can write the memory (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A shared memory must be one the App's own org or team space holds; a personal or private memory only by its owner, who must also manage the App; an encrypted memory is never grantable; nor is a system-class memory (#2710: an Agent's system memory, its boot-prompt source included, is written only by whoever manages the Agent, hrn:node:hadronmemory.com:specs:cor:agt:040:11), and a grant made on one before that rule authorizes no write. Granting the same prefix again returns the live grant. One content-free event is recorded. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
     "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, acting as themselves. The row stays with its end time; revoking a revoked grant changes nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     revokeAppMemoryWriteGrant(id: ID!): AppMemoryWriteGrant!
-    "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise. A refusal is the same Forbidden as an unknown App, trigger or memory."
+    "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise, as a person (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A refusal is the same Forbidden as an unknown App, trigger or memory."
     setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
     "#2883: end an automation read grant. The App's managers or the target's manager. Terminal."
     revokeAutomationReadGrant(id: ID!): AutomationReadGrant!
@@ -10529,7 +10529,7 @@ export const typeDefs = `#graphql
     "#2162 — a failure after the claim that the host saw; the reset ends and the mark is released."
     reportContextResetRelaunchFailed(input: ReportContextResetRelaunchFailedInput!): ContextResetStep!
 
-    "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent."
+    "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent. Person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277): never a worker session (a worker never gives a grant to itself) in any shape, a run principal, an impersonation or an App key, even when the worker's holder manages the App."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
     "#1747 — revoke a grant. Whoever manages the App only. Takes effect at the grantee next call."
@@ -11552,7 +11552,7 @@ export const typeDefs = `#graphql
     App key management — revoke all active keys for an App and mint a
     fresh one. Only whoever manages the App, as themselves
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
-    Never an App key, a bound worker session or an impersonated request. The replacement key holds no scopes.
+    Person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277): never a worker session in any shape, a run principal, an impersonation or an App key, even when the worker's holder manages the App. The replacement key holds no scopes.
 
     Accepts the entity's ID or URN.
     """
@@ -13860,7 +13860,7 @@ export const typeDefs = `#graphql
     """
     Mint a new AppKey for an App. Only whoever manages the App, as themselves
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
-    Never an App key, a bound worker session or an impersonated request; new keys hold no scopes.
+    Person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277): never a worker session in any shape, a run principal, an impersonation or an App key, even when the worker's holder manages the App. New keys hold no scopes.
     Granting or revoking scopes uses the same manager audience.
 
     Accepts the entity's ID or URN.
@@ -13874,7 +13874,8 @@ export const typeDefs = `#graphql
     revokeAppKey(id: ID!): Boolean!
     """
     #1749 — give an App key a scope (hrn:node:hadronmemory.com:specs:cor:aut:010:04). Only whoever manages the App, as
-    themselves: never an App key, a worker's session or an impersonation. Granting a scope the key holds changes nothing.
+    themselves: never an App key, a worker's session or an impersonation (person-only: giving a grant,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). Granting a scope the key holds changes nothing.
     A new key, and a rotated one, holds none. Unknown scope: BAD_USER_INPUT.
     #1709: host:operate is granted for ONE host, named by hostId (hrn:node:hadronmemory.com:specs:cor:agt:070:04), and
     hostId is refused for any other scope. A key already operating as another host is refused
