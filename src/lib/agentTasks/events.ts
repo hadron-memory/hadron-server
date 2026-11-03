@@ -1,3 +1,4 @@
+import type { ActAdmission, ActInstruction } from '../auth/instructedAct.js';
 import type { FindingCounts } from './findings.js';
 /**
  * #1705 — the application writer of `agent_team_events` (cor:agt:050:11).
@@ -448,7 +449,7 @@ export async function appendWorkerCastingEvent(
   args: {
     appId: string; actor: EventActor; workerId: string;
     fromAgentId: string; toAgentId: string; fromRole: string | null; toRole: string | null;
-    clearedBootPromptNodeId: string | null;
+    clearedBootPromptNodeId: string | null; instruction?: ActInstruction;
   },
 ): Promise<void> {
   await tx.agentTeamEvent.create({
@@ -462,6 +463,7 @@ export async function appendWorkerCastingEvent(
       payload: {
         fromAgentId: args.fromAgentId, toAgentId: args.toAgentId, fromRole: args.fromRole, toRole: args.toRole,
         clearedBootPromptNodeId: args.clearedBootPromptNodeId,
+        ...(args.instruction ? { instruction: {kind:args.instruction.kind,ref:args.instruction.ref} } : {}),
       },
     },
   });
@@ -593,4 +595,16 @@ export async function appendReportsToEvent(
       },
     },
   });
+}
+
+/** #3307 / cor:dmo:050:12: one instruction record for a signature/trailer act; no template text is recorded. */
+export async function appendWorkerSignatureInstructionEvent(
+ tx: Prisma.TransactionClient,
+ args: {appId:string;workerId:string;admission:ActAdmission;fields:string[]},
+): Promise<void> {
+ if(args.admission.kind !== 'instructed-worker') return;
+ const a=args.admission;
+ await tx.agentTeamEvent.create({data:{appId:args.appId,type:'worker.signature-changed',subjectWorkerId:args.workerId,
+  actorUserId:a.userId,actorWorkerId:a.workerId,actorAgentId:a.agentId,
+  payload:{fields:args.fields.sort(),instruction:{kind:a.instruction.kind,ref:a.instruction.ref}}}});
 }

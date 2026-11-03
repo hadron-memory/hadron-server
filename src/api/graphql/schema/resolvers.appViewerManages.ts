@@ -6,8 +6,9 @@
 // run and a worker-bound request are not the direct user, so they read false)
 // and request-local batching with fresh role and App reads.
 
-import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
-import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { currentActor } from '../../../lib/requestActor.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+export { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { managesAppBatch } from '../../../lib/auth/appManagement.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -20,20 +21,6 @@ export interface ViewerManagesCache {
   facts: Map<string, Promise<boolean>>;
   batch: Batch | null;
   actor: Promise<{ roles: string[] } | null> | null;
-}
-
-/**
- * Is this request a principal other than the user acting for themself, setting a
- * worker session aside (cor:dmo:050:12)? An impersonation, a run principal, an
- * ambiguous actor or a refused session binding. Worker-session admission is its own
- * question (#2483), so a door that must not decide it reads this arm alone (#2448).
- */
-export function isRefusedPrincipal(ctx: Context): boolean {
-  return !ctx.userId
-    || !!ctx.impersonation
-    || isRunPrincipal(ctx)
-    || currentActorAmbiguity() !== null
-    || !!ctx.sessionBindingRefused;
 }
 
 /** Is this request the direct user acting for themself (cor:dmo:050:12)? */

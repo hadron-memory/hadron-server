@@ -27,7 +27,7 @@
  * stale token's role grants nothing.
  */
 
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
 /** The caller fields this predicate reads — a structural slice of the GraphQL Context. */
@@ -204,4 +204,13 @@ export async function appManagerUserIds(
     out.push(...admins.map((a) => a.userId));
   }
   return [...new Set(out)];
+}
+
+/** Hold deciding manager memberships (#3307); worker writes call after assignment locks, before worker rows.
+ * Self-leave deletes
+ * an AppMember without the App authority anchor, so the anchor alone does not fence that revocation. */
+export async function lockAppManagerMemberships(tx: Prisma.TransactionClient, userId: string | undefined, app: ManagedApp): Promise<void> {
+  if (!userId) return;
+  await tx.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${app.id} AND user_id = ${userId} FOR SHARE`;
+  if (app.organizationId) await tx.$queryRaw`SELECT user_id FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${userId} FOR SHARE`;
 }

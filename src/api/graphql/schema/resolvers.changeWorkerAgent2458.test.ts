@@ -133,7 +133,7 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
       : kind === 'impersonation' ? ctx(admin, { roles: [], impersonation: { sessionId: generateId(), actorUserId: outsider.id, orgId: org.id, expiresAt: new Date(Date.now() + 60000) } })
       : ctx();
     const call = () => change(newAgent.id, c);
-    // A worker session is refused even when its holder manages the App (R113): the manager acts as themselves.
+    // A worker session with NO instruction is refused even when its holder manages the App (#3307).
     const result = kind === 'session' ? runAsActor({ workerId: worker.id, agentId: oldAgent.id }, call)
       : kind === 'run' ? runAsActor({ workerId: null, agentId: oldAgent.id }, call) : call();
     // Every kind fails the gate; none may reach (and leak) a casting refusal. An outsider cannot read the worker.

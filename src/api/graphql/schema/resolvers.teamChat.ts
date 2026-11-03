@@ -1,3 +1,5 @@
+import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
+import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { requireWorkerReadAccess } from './resolvers.worker.js';
@@ -1960,3 +1962,15 @@ export const teamChatQueries = {
     return Object.assign(page, { channelId: target.channelId, channelIncarnation: pinned ? expectedIncarnation : target.incarnation.value });
   },
 };
+
+/** #3307: a message instruction uses the SAME Channel read gate as channelMessages, with no cursor write. */
+export async function readableInstructionMessageApp(ctx: Context, ref: string): Promise<string | null> {
+  if (!/^hrn:node:/i.test(ref)) return null;
+  let nodeId: string;
+  try { nodeId = (await resolveNodeRef(ctx.db, ref)).id; }
+  catch (e) { if (e instanceof NodeNotFoundError || e instanceof AmbiguousLegacyUrnError || e instanceof UrnNotQualifiedError) return null; throw e; }
+  const node = await ctx.db.node.findUnique({where:{id:nodeId},select:{nodeType:true,messageChannelId:true,deletedAt:true,memory:{select:{appId:true}}}});
+  if (!node || node.deletedAt || node.nodeType !== 'chat-message' || !node.messageChannelId) return null;
+  try { await resolveChannelTarget(ctx, node.messageChannelId, 'read'); return node.memory.appId; }
+  catch (e) { if (e instanceof GraphQLError && e.extensions?.code === 'CHANNEL_NOT_FOUND') return null; throw e; }
+}
