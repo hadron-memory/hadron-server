@@ -332,6 +332,15 @@ describe('#3308 leaveApp self-leave narrowing', () => {
   await M.leaveApp({}, {appId:f.app.id}, bound());
   expect(await db.appMember.findUnique({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}})).toBeNull();
   expect(await instructionEvents()).toHaveLength(0);
+  const event = await db.agentTeamEvent.findFirst({where:{appId:f.app.id,type:'member.removed'}});
+  expect(event).toMatchObject({actorUserId:f.holder.id,actorWorkerId:f.worker.id});
+  expect(event?.payload).toMatchObject({userId:f.holder.id});
+ });
+ it('launched grantless worker cannot self-leave even with a claim', async () => {
+  await db.session.update({where:{id:f.session.id},data:{launchOperationId:generateId(),launchHostId:generateId(),launchIssuedBy:'manager'}});
+  const before=await snapshot();
+  expect((await answer(M.leaveApp({}, {appId:f.app.id,instruction:live}, bound()))).code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
  });
  it('instructed repeated cleanup records the no-op claim', async () => {
   await db.appMember.delete({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}});
@@ -387,4 +396,29 @@ it('#3308 leaveApp retains the first worker across delegated admission', async (
   expect((await answer(M.leaveApp({}, {appId:f.app.id}, bound({db:client})))).code).toBe('FORBIDDEN');
   expect(await snapshot()).toEqual(before);
  } finally { await db.session.update({where:{id:f.session.id},data:{workerId:f.worker.id}}); }
+});
+
+
+it('#3308 leaveApp direct person retains uninstalled-ID cleanup', async () => {
+ await db.app.update({where:{id:f.app.id},data:{uninstalledAt:new Date()}});
+ await M.leaveApp({}, {appId:f.app.id}, ctx());
+ expect(await db.appMember.findUnique({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}})).toBeNull();
+});
+it('#3308 leaveApp retains existing soft-deleted App reference refusal', async () => {
+ await db.app.update({where:{id:f.app.id},data:{deletedAt:new Date()}});
+ const before=await snapshot();
+ await expect(M.leaveApp({}, {appId:f.app.id}, ctx())).rejects.toThrow();
+ expect(await snapshot()).toEqual(before);
+});
+
+
+it('#3308 leaveApp person cleanup adds no second App existence probe', async () => {
+ const client=new Proxy(db,{get(target,key){
+  if(key==='app') return new Proxy(target.app,{get(delegate,field){
+   if(field==='findUniqueOrThrow') return async()=>{throw new Error('second App read unavailable');};
+   const v=(delegate as any)[field];return typeof v==='function'?v.bind(delegate):v;
+  }});
+  const v=(target as any)[key];return typeof v==='function'?v.bind(target):v;
+ }});
+ expect((await answer(M.leaveApp({}, {appId:f.app.id}, ctx({db:client})))).code).toBe('RESOLVED');
 });
