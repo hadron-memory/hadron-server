@@ -135,7 +135,7 @@ describe('#2448: the role arms still succeed', () => {
   });
 });
 
-describe('#2448: worker-session callers behave exactly as on main (admission is #2483 S2b)', () => {
+describe('#2448: holder role checks remain after #3308 worker grant admission', () => {
   let workerId: string;
   beforeEach(async () => {
     workerId = generateId();
@@ -143,10 +143,14 @@ describe('#2448: worker-session callers behave exactly as on main (admission is 
   });
   const asWorker = <T,>(fn: () => Promise<T>) => runAsActor({ workerId, agentId: null }, fn);
 
-  it('a worker session whose holder manages the App is still admitted on both doors', async () => {
-    const added: any = await asWorker(() => M.ensureAppMember(null, { appRef: orgApp.id, userRef: target.id, role: 'member' }, ctxFor(orgAdmin.id)));
+  it('a worker session with its own grant whose holder manages the App is admitted on both doors', async () => {
+    await db.worker.update({ where: { id: workerId }, data: { appId: orgApp.id, heldByUserId: orgAdmin.id } });
+    const session = await db.session.create({ data: { id: generateId(), appId: orgApp.id, workerId, userId: orgAdmin.id, tool: 'vitest' } });
+    await M.grantApp({}, { appRef: orgApp.id, workerRef: workerId, name: 'APP_MEMBERS' }, ctxFor(orgAdmin.id));
+    const bound = ctxFor(orgAdmin.id, ['READER'], { sessionId: session.id });
+    const added: any = await asWorker(() => M.ensureAppMember(null, { appRef: orgApp.id, userRef: target.id, role: 'member' }, bound));
     expect(added.role).toBe('member');
-    await asWorker(() => M.removeAppMember(null, { appRef: orgApp.id, userRef: target.id }, ctxFor(orgAdmin.id)));
+    await asWorker(() => M.removeAppMember(null, { appRef: orgApp.id, userRef: target.id }, bound));
     expect(await member(orgApp.id, target.id)).toBeNull();
   });
 
