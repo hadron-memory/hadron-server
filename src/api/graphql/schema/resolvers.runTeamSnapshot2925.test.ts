@@ -165,3 +165,43 @@ it('a userless run snapshots only its enabled App, never an App supplied as data
     await denied(tool.execute(c, { ...WINDOW, [arg]: otherAppId }), 'TEAM_SNAPSHOT_INVALID_ARGUMENT');
   }
 });
+
+it('pages tasks without dropping equal timestamps and carries the bounded window in its cursor', async () => {
+  await enable();
+  await db.agentTask.createMany({ data: Array.from({ length: 105 }, (_, n) => ({ appId, title: `Paged ${n}`, ownerUserId: manager, status: 'pending' })) });
+  const c = toolCtx(await mintRun());
+  const tool = snapshotTool();
+  const first = await tool.execute(c, WINDOW) as any;
+  expect(first).toMatchObject({ complete: false, incompleteReason: 'page_limit', hasMore: true });
+  expect(typeof first.cursor).toBe('string');
+  const second = await tool.execute(c, { ...WINDOW, cursor: first.cursor }) as any;
+  expect(second).toMatchObject({ complete: true, incompleteReason: null, hasMore: false, cursor: null });
+  const ids = [...first.tasks, ...second.tasks].map(t => t.id);
+  expect(ids).toHaveLength(106);
+  expect(new Set(ids).size).toBe(106);
+  expect(first.acquiredAt).toMatch(/Z$/);
+  await denied(tool.execute(c, { ...WINDOW, since: '2026-10-19T00:00:00Z', cursor: first.cursor }), 'TEAM_SNAPSHOT_INVALID_ARGUMENT');
+  await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } } as any);
+  await denied(tool.execute(c, { ...WINDOW, cursor: first.cursor }), 'APP_NOT_FOUND');
+});
+it('includes live work plus ended work in the half-open window, not unrelated Apps or AT0', async () => {
+  await enable();
+  const data = (title: string, status: string, extra = {}) => ({ appId, title, status, ownerUserId: manager, ...extra });
+  await db.agentTask.createMany({ data: [
+    data('finished-in', 'finished', { finishedAt: new Date(WINDOW.since) }),
+    data('finished-end', 'finished', { finishedAt: new Date(WINDOW.until) }),
+    data('cancelled-in', 'cancelled', { cancelledAt: new Date('2026-10-20T12:00:00Z') }),
+    data('foreign', 'pending', { appId: otherAppId }),
+    data('AT0', 'backlog', { handle: 'AT0' }),
+  ] });
+  const result = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW) as any;
+  expect(result.tasks.map((t: any) => t.title).sort()).toEqual(['Existing task', 'cancelled-in', 'finished-in'].sort());
+});
+it.each([
+  {}, { since: 'garbage' }, { since: '2026-02-30T00:00:00Z' },
+  { since: '2026-10-20T00:00:00+00:00' }, { since: WINDOW.until, until: WINDOW.since },
+  { since: '2025-01-01T00:00:00Z', until: WINDOW.until }, { ...WINDOW, cursor: 'garbage' },
+])('refuses invalid UTC windows and cursors with one typed code: %j', async args => {
+  await enable();
+  await denied(snapshotTool().execute(toolCtx(await mintRun()), args), 'TEAM_SNAPSHOT_INVALID_ARGUMENT');
+});
