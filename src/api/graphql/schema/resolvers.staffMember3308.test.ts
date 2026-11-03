@@ -115,3 +115,106 @@ describe('#3308 red-first staffing/member narrowing', () => {
   expect(names).toContain('WORKERS_STAFF'); expect(names).toContain('APP_MEMBERS');
  });
 });
+
+const grantName = (door: string) => door === 'add' || door === 'remove' ? 'APP_MEMBERS' : 'WORKERS_STAFF';
+const give = (door: string, workerId = f.worker.id, name = grantName(door)) => M.grantApp({}, { appRef: f.app.id, workerRef: workerId, name }, ctx());
+
+describe('#3308 grant identity and holder ceiling', () => {
+ for (const [door, call] of Object.entries(calls)) {
+  it(`${door}: matching live grant admits headless but adds no instruction claim`, async () => {
+   await give(door);
+   expect((await answer(call())).code).toBe('RESOLVED');
+   expect(await instructionEvents()).toHaveLength(0);
+  });
+  it(`${door}: host-launched matching grant is headless despite a claim`, async () => {
+   await give(door);
+   await db.session.update({ where: { id: f.session.id }, data: { launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'manager' } });
+   expect((await answer(call(live))).code).toBe('RESOLVED');
+   expect(await instructionEvents()).toHaveLength(0);
+  });
+  for (const mismatch of ['wrong-name', 'other-worker', 'revoked', 'foreign-app'] as const) {
+   it(`${door}: ${mismatch} grant refuses without writes`, async () => {
+    if (mismatch === 'foreign-app') {
+     const app = await db.app.create({ data: { organizationId: f.org.id, name: 'Other', urn: 'staff3308.test:other' } });
+     await db.appMember.create({ data: { appId: app.id, userId: f.holder.id, role: 'owner' } });
+     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: f.agent.id, name: 'Foreign', slug: 'foreign', heldByUserId: f.holder.id } });
+     await M.grantApp({}, { appRef: app.id, workerRef: worker.id, name: grantName(door) }, ctx());
+    } else {
+     const row = await give(door, mismatch === 'other-worker' ? f.target.id : f.worker.id,
+      mismatch === 'wrong-name' ? (grantName(door) === 'APP_MEMBERS' ? 'WORKERS_STAFF' : 'APP_MEMBERS') : grantName(door));
+     if (mismatch === 'revoked') await M.revokeAppGrant({}, { appRef: f.app.id, workerRef: f.worker.id, name: grantName(door) }, ctx());
+     expect(row.id).toBeTruthy();
+    }
+    const before = await snapshot();
+    expect((await answer(call())).code).toBe('FORBIDDEN');
+    expect(await snapshot()).toEqual(before);
+   });
+  }
+  it(`${door}: a grant never widens a reader holder's rights`, async () => {
+   await give(door);
+   await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'READER' } });
+   await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'reader' } });
+   const direct = await answer(call(undefined, ctx()));
+   const before = await snapshot();
+   expect((await answer(call())).code).toBe('FORBIDDEN');
+   expect(await answer(call())).toEqual(direct);
+   expect(await snapshot()).toEqual(before);
+  });
+  for (const binding of ['unbound', 'ambiguous', 'refused', 'other-holder', 'retired', 'ended'] as const) {
+   it(`${door}: grant does not repair an invalid ${binding} binding`, async () => {
+    await give(door);
+    let c = bound();
+    if (binding === 'unbound') await db.session.update({ where: { id: f.session.id }, data: { workerId: null } });
+    if (binding === 'refused') c = bound({ sessionBindingRefused: true });
+    if (binding === 'other-holder') await db.worker.update({ where: { id: f.worker.id }, data: { heldByUserId: f.other.id } });
+    if (binding === 'retired') await db.worker.update({ where: { id: f.worker.id }, data: { retiredAt: new Date() } });
+    if (binding === 'ended') await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+    const before = await snapshot();
+    const invoke = () => call(undefined, c);
+    const got = await answer(binding === 'ambiguous' ? requestActorStorage.run({ workerId: null, agentId: null, ambiguousSessionIds: ['one', 'two'] }, invoke) : binding === 'unbound' ? runAsActor({ workerId: f.worker.id, agentId: f.agent.id }, invoke) : invoke());
+    expect(got.code).toBe('FORBIDDEN');
+    expect(await snapshot()).toEqual(before);
+   });
+  }
+ }
+ for (const door of ['cast', 'retire']) it(`${door}: revocation on the act transaction is observed before writing`, async () => {
+  await give(door);
+  const client = new Proxy(db, { get(target, key) {
+   if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => {
+    await tx.appGrant.updateMany({ where: { appId: f.app.id, granteeWorkerId: f.worker.id, revokedAt: null }, data: { revokedAt: new Date() } });
+    return callback(tx);
+   }, options);
+   const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  const before = await snapshot();
+  expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
+ });
+ for (const mode of ['instruction', 'grant'] as const) it(`self-leave admits on ${mode}`, async () => {
+  if (mode === 'grant') await give('remove');
+  await M.removeAppMember({}, { appRef: f.app.id, userRef: f.holder.id, instruction: mode === 'instruction' ? live : undefined }, bound());
+  expect(await db.appMember.findUnique({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } } })).toBeNull();
+  expect(await instructionEvents()).toHaveLength(mode === 'instruction' ? 1 : 0);
+ });
+});
+
+describe('#3308 instructed previews and idempotent calls have one claim, not a repeated act', () => {
+ it('preview with an instruction records once but allocates no worker', async () => {
+  const count = await db.worker.count({ where: { appId: f.app.id } });
+  await calls.preview(live);
+  expect(await db.worker.count({ where: { appId: f.app.id } })).toBe(count);
+  expect(await instructionEvents()).toHaveLength(1);
+ });
+ for (const door of ['add', 'remove', 'retire']) it(`${door}: admitted instructed no-op writes one separate claim`, async () => {
+  await calls[door](undefined, ctx());
+  const before = await snapshot();
+  await calls[door](live);
+  const after = await snapshot();
+  expect(after.workers).toEqual(before.workers);
+  const memberState = (rows: typeof after.members) => rows.map(({ appId, userId, role }) => ({ appId, userId, role }));
+  expect(memberState(after.members)).toEqual(memberState(before.members));
+  expect(await instructionEvents()).toHaveLength(1);
+  expect(after.events.filter(e => e.type === 'member.added' || e.type === 'member.role-changed' || e.type === 'member.removed' || e.type === 'worker.retired')).toEqual(
+   before.events.filter(e => e.type === 'member.added' || e.type === 'member.role-changed' || e.type === 'member.removed' || e.type === 'worker.retired'));
+ });
+});
