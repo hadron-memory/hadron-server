@@ -261,3 +261,66 @@ it('#3308 instructed retirement no-op records do not turn bookkeeping into exter
  expect(await instructionEvents()).toHaveLength(2);
  expect(await M.deleteWorker({}, { workerRef: f.target.id, confirmNoExternalAttribution: true }, ctx())).toBe(true);
 });
+
+// #3308: stable preflight principals and fail-closed session projections.
+it('#3308 admission stability database refuses a persisted workerless launched session', async () => {
+ await expect(db.session.update({ where: { id: f.session.id }, data: { workerId: null, launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'manager' } })).rejects.toThrow('chk_sessions_launch');
+ expect((await db.session.findUniqueOrThrow({ where: { id: f.session.id } })).workerId).toBe(f.worker.id);
+});
+for (const door of Object.keys(calls)) it(`#3308 admission stability ${door}: a corrupted launched-session projection never falls back to person`, async () => {
+ // A real workerless launch is CHECK-rejected above; corrupt only the read projection to pin defensive admission.
+ await db.session.update({ where: { id: f.session.id }, data: { launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'manager' } });
+ const wrap = (client: any): any => new Proxy(client, { get(target, key) {
+  if (key === '$transaction' && typeof target.$transaction === 'function') return (callback: any, options: any) => target.$transaction((tx: any) => callback(wrap(tx)), options);
+  if (key === 'session') return new Proxy(target.session, { get(delegate, field) {
+   if (field === 'findUnique') return async (query: any) => {
+    const row = await delegate.findUnique(query);
+    return query.where.id === f.session.id && row ? { ...row, workerId: null } : row;
+   };
+   const value = delegate[field]; return typeof value === 'function' ? value.bind(delegate) : value;
+  } });
+  const value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
+ } });
+ const before = await snapshot();
+ expect((await answer(calls[door](live, bound({ db: wrap(db) })))).code).toBe('FORBIDDEN');
+ expect(await snapshot()).toEqual(before);
+});
+for (const door of ['cast', 'preview']) it(`#3308 admission stability ${door}: transaction session substitution cannot replace the preflight worker`, async () => {
+ await db.worker.update({ where: { id: f.target.id }, data: { heldByUserId: f.holder.id } });
+ await give(door); await give(door, f.target.id);
+ const client = new Proxy(db, { get(target, key) {
+  if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => {
+   await tx.session.update({ where: { id: f.session.id }, data: { workerId: f.target.id } });
+   return callback(tx);
+  }, options);
+  const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
+ } });
+ const before = await snapshot();
+ expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('FORBIDDEN');
+ expect(await snapshot()).toEqual(before);
+});
+
+it('#3308 admission stability cast: ownership drift after the deciding membership lock keeps the typed retry', async () => {
+ const otherOrg = await db.organization.create({ data: { name: 'Moved', urn: 'staff3308.test:moved' } });
+ let changed = false;
+ const client = new Proxy(db, { get(target, key) {
+  if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => callback(new Proxy(tx, { get(t, k) {
+   if (k === '$queryRaw') return async (query: any, ...values: any[]) => {
+    const sql = Array.isArray(query) ? query.join('?') : query.sql;
+    const value = await (t.$queryRaw as any)(query, ...values);
+    if (!changed && /FROM app_members[\s\S]*FOR SHARE/.test(sql)) {
+     changed = true;
+     await t.app.update({ where: { id: f.app.id }, data: { organizationId: otherOrg.id } });
+    }
+    return value;
+   };
+   const value = (t as any)[k]; return typeof value === 'function' ? value.bind(t) : value;
+  } })), options);
+  const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
+ } });
+ const before = await snapshot();
+ expect((await answer(calls.cast(undefined, ctx({ db: client })))).code).toBe('CAST_TARGET_CHANGED');
+ expect(changed).toBe(true);
+ expect(await snapshot()).toEqual(before);
+ expect((await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).organizationId).toBe(f.org.id);
+});
