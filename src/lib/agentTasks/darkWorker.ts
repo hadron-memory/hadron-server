@@ -139,7 +139,7 @@ async function unackedWakeAges(db: PrismaClient, app: { id: string; organization
   }
 }
 
-/** The worker's reporting line, nearest first (cycle-safe, same App, retired workers skipped), then whoever manages the App. */
+/** The live same-App reporting line, nearest first; only an empty line falls back to App managers (cor:agt:050:18/:26, #3358). */
 export async function darkAlarmChain(db: Prisma.TransactionClient | PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, workerId: string): Promise<AlarmChain> {
   const rows = await db.$queryRaw<{ id: string }[]>`
     WITH RECURSIVE up AS (
@@ -156,7 +156,9 @@ export async function darkAlarmChain(db: Prisma.TransactionClient | PrismaClient
     seen.add(r.id);
     chain.push({ workerId: r.id });
   }
-  for (const userId of await appManagerUserIds(db, app)) chain.push({ userId, via: 'manager' });
+  if (chain.length === 0) {
+    for (const userId of await appManagerUserIds(db, app)) chain.push({ userId, via: 'manager' });
+  }
   return chain;
 }
 
