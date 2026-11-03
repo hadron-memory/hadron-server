@@ -446,9 +446,15 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     // otherwise grow the map unboundedly (the sibling login flows prune the
     // same way).
     const now = Date.now();
+    const evicted: string[] = [];
     for (const [key, value] of pendingStates) {
-      if (value.expiresAt < now) pendingStates.delete(key);
+      if (value.expiresAt < now) {
+        pendingStates.delete(key);
+        // An evicted state can never reach its callback, so a GraphQL flow riding on it ends here, not at PENDING.
+        if (value.origin === 'graphql' && value.flowId) evicted.push(value.flowId);
+      }
     }
+    for (const flowId of evicted) await settleConnectionFlow(flowId, { failureCode: 'state_expired' });
 
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {
@@ -579,9 +585,11 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         },
         select: { toolConnectionId: true, provider: true },
       });
-      if (existing?.toolConnectionId && existing.toolConnectionId !== identity.id) {
-        void deleteToolConnection(existing.provider, existing.toolConnectionId);
-      }
+      // Its teardown waits for the commit below: a rollback keeps the row on this old tool connection.
+      const superseded =
+        existing?.toolConnectionId && existing.toolConnectionId !== identity.id
+          ? { provider: existing.provider, id: existing.toolConnectionId }
+          : null;
 
       const minted = identity;
       const connection = await db.$transaction(async (tx) => {
@@ -630,6 +638,8 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         if (pending.origin === 'graphql') await settleConnectionFlow(pending.flowId, { connectionId: row.id }, tx);
         return row;
       });
+
+      if (superseded) void deleteToolConnection(superseded.provider, superseded.id);
 
       // Subscribe the inbox to provider change notifications (the event
       // plane). Best-effort: until the tool's public ingress route is

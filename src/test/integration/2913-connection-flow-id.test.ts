@@ -23,7 +23,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';
 import { confirmConnect } from '../connectInterstitial.js';
 import { signJwt } from '../../auth/index.js';
-import { createToolConnection } from '../../lib/emailClient.js';
+import { createToolConnection, deleteToolConnection } from '../../lib/emailClient.js';
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
@@ -212,6 +212,58 @@ describe('#2913 connectionFlow', () => {
     }
     const r = await gql(FLOW(s.flowId), adminId);
     expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'state_expired' });
+  });
+
+  it('a state evicted by another confirm settles its flow FAILED state_expired (not left PENDING)', async () => {
+    const first = await start();
+    await confirmConnect(first.authorizeUrl);
+    const second = await start();
+    const real = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(real + 11 * 60 * 1000);
+    try {
+      await confirmConnect(second.authorizeUrl);
+    } finally {
+      spy.mockRestore();
+    }
+    const r = await gql(FLOW(first.flowId), adminId);
+    expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'state_expired' });
+  });
+
+  it('a reconnect whose settle rolls back keeps the old tool connection (its deletion waits for the commit)', async () => {
+    await db.exchangeConnection.create({
+      data: {
+        organizationId: orgId, userId: adminId, mailboxEmail: 'rollback@flow.example', provider: 'gmail',
+        toolConnectionId: 'tool-old', syncStatus: 'OK',
+      },
+    });
+    vi.mocked(deleteToolConnection).mockClear();
+    const s = await start();
+    mockTool('rollback@flow.example', 'tool-new');
+    await db.$executeRawUnsafe('ALTER TABLE connection_flows ADD CONSTRAINT t_no_connected CHECK (connection_id IS NULL)');
+    try {
+      await consentAndCallback(s.authorizeUrl);
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE connection_flows DROP CONSTRAINT t_no_connected');
+    }
+    const row = await db.exchangeConnection.findFirstOrThrow({ where: { mailboxEmail: 'rollback@flow.example' } });
+    expect(row.toolConnectionId).toBe('tool-old');
+    const deleted = vi.mocked(deleteToolConnection).mock.calls.map((c) => c[1]);
+    expect(deleted).toContain('tool-new');
+    expect(deleted).not.toContain('tool-old');
+  });
+
+  it('a committed reconnect still deletes the superseded tool connection', async () => {
+    await db.exchangeConnection.create({
+      data: {
+        organizationId: orgId, userId: adminId, mailboxEmail: 'commit@flow.example', provider: 'gmail',
+        toolConnectionId: 'tool-old2', syncStatus: 'OK',
+      },
+    });
+    vi.mocked(deleteToolConnection).mockClear();
+    const s = await start();
+    mockTool('commit@flow.example', 'tool-new2');
+    await consentAndCallback(s.authorizeUrl);
+    expect(vi.mocked(deleteToolConnection).mock.calls.map((c) => c[1])).toEqual(['tool-old2']);
   });
 
   it('a callback for an unknown state still answers 400 and settles nothing', async () => {
