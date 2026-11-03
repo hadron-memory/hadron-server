@@ -189,7 +189,7 @@ type PromotionTarget = {
  * Owner congruence and the already-claimed check stay at the call sites.
  */
 async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarget | null): Promise<void> {
-  const notFound = () => new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+  const notFound = promotionTargetNotFound;
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
   if (readable !== null && !readable.includes(target.id)) throw notFound();
@@ -229,10 +229,47 @@ function promotionTargetAnchors(ctx: Context, memoryId: string, owner: Promotion
 }
 
 /**
+ * The promotion target's owner moved between the snapshot its anchors were
+ * derived from and the locked read. Never surfaces: the deciding transaction
+ * is retried with anchors derived from the current owner (private#25 LOCAL
+ * P2: a plain "ownership changed" error, thrown before the read decision,
+ * told a non-reader that the id exists).
+ */
+class PromotionOwnerDriftError extends Error {
+  constructor() {
+    super('promotion target owner changed before its anchors were held');
+    this.name = 'PromotionOwnerDriftError';
+  }
+}
+
+/** Attempts at deciding a promotion under anchors that match the target's current owner. */
+const MAX_PROMOTION_OWNER_ATTEMPTS = 3;
+
+/** The one refusal a promotion target the caller can't read answers with (cor:api:140:03). */
+function promotionTargetNotFound(): GraphQLError {
+  return new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+}
+
+/**
+ * The owner columns a promotion's anchors derive from, read fresh. `null`
+ * (missing) is decided by the deciding transaction, which refuses it with the
+ * uniform not-found.
+ */
+async function observePromotionOwner(db: Context['db'], memoryId: string): Promise<PromotionOwner | null> {
+  return db.memory.findUnique({
+    where: { id: memoryId },
+    select: { organizationId: true, ownerUserId: true, userId: true },
+  });
+}
+
+/**
  * Under the anchors from {@link promotionTargetAnchors}: the target must still
  * have the owner the anchors were derived from (a transfer that won the race
  * moved its revokers onto other anchors), and readability is decided with a
- * context bound to `tx`.
+ * context bound to `tx`. A moved owner throws {@link PromotionOwnerDriftError},
+ * which the caller retries under fresh anchors and, once its attempts run
+ * out, answers with the uniform not-found: nothing about the target is
+ * revealed before a read decision made under its current owner's anchors.
  */
 async function fencedPromotionCtx(
   ctx: Context,
@@ -242,7 +279,7 @@ async function fencedPromotionCtx(
 ): Promise<Context> {
   if (locked && (locked.organizationId !== observed.organizationId
     || locked.ownerUserId !== observed.ownerUserId || locked.userId !== observed.userId)) {
-    throw new Error('Memory ownership changed; retry the operation');
+    throw new PromotionOwnerDriftError();
   }
   return liveTxContext(ctx, tx);
 }
@@ -318,13 +355,22 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // the dropped `type` column) and its `visibility` is always NULL
   // (chk_memory_visibility_class forbids a non-null visibility on
   // class='system'); agent visibility does not sync onto it.
-  const promotionOwner: PromotionOwner | null = systemMemoryId
-    ? await ctx.db.memory.findUnique({
-      where: { id: systemMemoryId },
-      select: { organizationId: true, ownerUserId: true, userId: true },
-    })
-    : null;
-  const createdAgent = await ctx.db.$transaction(async (tx) => {
+  // A promotion decides under anchors derived from this owner snapshot; when
+  // the owner moved before they were held, the whole transaction is retried
+  // with a fresh snapshot (PromotionOwnerDriftError never surfaces).
+  let createdAgent!: Awaited<ReturnType<typeof createAgentTx>>;
+  for (let attempt = 1; ; attempt++) {
+    const promotionOwner = systemMemoryId ? await observePromotionOwner(ctx.db, systemMemoryId) : null;
+    try {
+      createdAgent = await createAgentTx(promotionOwner);
+      break;
+    } catch (e) {
+      if (!(e instanceof PromotionOwnerDriftError)) throw e;
+      if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound();
+    }
+  }
+  function createAgentTx(promotionOwner: PromotionOwner | null) {
+  return ctx.db.$transaction(async (tx) => {
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
       // First locks of this transaction: the target's revokers wait on these.
@@ -432,6 +478,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
     }
     throw e;
   });
+  }
   // #2199 (cor:rag:010:01 r17): a memory promoted to class='system' is always summary-indexed. Its existing nodes were
   // written while it was an ordinary memory, so stamp them for the drain (post-commit; a fresh auto-provisioned memory
   // is empty and every later write enqueues itself). Never fails the create.
@@ -1006,6 +1053,15 @@ export const agentMutations = {
       });
       } catch (err) {
         if (err instanceof AgentLinkSetChangedError && attempt < MAX_PUBLISH_ATTEMPTS) continue;
+        // The first-attach target's owner moved before its anchors were held:
+        // re-derive them from the current owner and decide again. Out of
+        // attempts, the uniform not-found (never an existence signal).
+        if (err instanceof PromotionOwnerDriftError) {
+          if (attempt >= MAX_PROMOTION_OWNER_ATTEMPTS) throw promotionTargetNotFound();
+          promoteObservedOwner = await observePromotionOwner(ctx.db, promoteSystemMemoryId!);
+          if (!promoteObservedOwner) throw promotionTargetNotFound();
+          continue;
+        }
         if (err instanceof AgentLinkSetChangedError) {
           throw new GraphQLError(
             'The agent\'s knowledge links kept changing while publishing it; retry the request.',
