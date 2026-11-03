@@ -254,3 +254,18 @@ for(const initial of ['worker','person','agent']) for(const door of ['signature'
  expect((await answer(calls[door](live,bound({db:client})))).code).toBe('FORBIDDEN');expect(moved).toBe(true);expect(await snapshot()).toEqual(before);
  expect(await db.session.findUniqueOrThrow({where:{id:f.session.id}})).toMatchObject({workerId:initial==='person'?null:f.worker.id,agentId:f.agent.id});
 });
+
+it('#3307 refuses an App ownership scope different from its authority anchors',async()=>{
+ const nextOrg=await db.organization.create({data:{name:'Other scope',urn:'instruction-scope.test'}});
+ await db.appMember.deleteMany({where:{appId:f.app.id,userId:f.holder.id}});
+ await db.orgMember.create({data:{organizationId:nextOrg.id,userId:f.holder.id,role:'ADMIN'}});
+ const client=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>{
+   await tx.app.update({where:{id:f.app.id},data:{organizationId:nextOrg.id}});
+   return callback(tx);
+  },options);
+  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+ }});
+ const before=await snapshot();expect((await answer(calls.signature(live,bound({db:client})))).code).toBe('FORBIDDEN');expect(await snapshot()).toEqual(before);
+ expect((await db.app.findUniqueOrThrow({where:{id:f.app.id}})).organizationId).toBe(f.org.id);
+});
