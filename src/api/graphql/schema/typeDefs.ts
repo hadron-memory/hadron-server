@@ -10346,6 +10346,15 @@ export const typeDefs = `#graphql
     baseUrl: String!
   }
 
+  "Instruction claim for one act, recorded rather than verified for authorship, recency or reuse; the holder answers for the claim (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0096)."
+  enum ActInstructionKind { TEAM_CHAT_MESSAGE TASK LIVE_CHAT }
+  "A typed instruction reference, never instruction text."
+  input ActInstructionInput {
+    kind: ActInstructionKind!
+    "TASK and TEAM_CHAT_MESSAGE use a caller-readable same-App URN, including one the worker authored. LIVE_CHAT is a self-asserted opaque client address, 1-512 UTF-16 code units, without whitespace. A person's present claim is validated too, but never recorded as an instructed act."
+    ref: String!
+  }
+
   type Mutation {
     "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."
     setRateLimitPolicy(input: SetRateLimitPolicyInput!): RateLimitPolicy!
@@ -13322,7 +13331,9 @@ export const typeDefs = `#graphql
     prompt override: a worker's own boot prompt is its compiled boot source
     (hrn:node:hadronmemory.com:specs:cor:agt:040:06), changed by compile and approve.
 
-    Signature/trailer edits require an App manager; a bound worker is provisionally refused (H26).
+    Signature/trailer edits require an App manager acting as themselves, or a worker held by that manager carrying
+    an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). A host-launched or uninstructed worker is FORBIDDEN.
+    An instructed act records the worker, holder and instruction reference in one team event; a person records no instruction.
     Omitted preserves, null refuses, whitespace-only becomes empty text; other text is raw, max 2000 characters, no NUL.
     A mixed update is atomic. These values reach the next compose/bind via S4.
     A retired worker refuses WORKER_RETIRED.
@@ -13332,7 +13343,7 @@ export const typeDefs = `#graphql
     neither field changes nothing and keeps castWorker staffing authorization.
     workerRef is the worker's id or URN (#991).
     """
-    updateWorker(workerRef: ID!, signature: String, trailer: String): Worker!
+    updateWorker(workerRef: ID!, signature: String, trailer: String, instruction: ActInstructionInput): Worker!
 
     """
     #2458 (hrn:node:hadronmemory.com:specs:cor:dmo:050:11, R222): change the
@@ -13341,8 +13352,9 @@ export const typeDefs = `#graphql
     stay; past sessions keep the agent and role they ran under
     (Session.agentId, Session.role).
 
-    Who: whoever manages the App, as themselves. A worker session (even one
-    its manager holds), an App key, an impersonation or a run is FORBIDDEN.
+    Who: whoever manages the App, as themselves, or their held worker with an instruction
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). A host-launched or uninstructed worker,
+    an App key, an impersonation or a run is FORBIDDEN. The casting event records an admitted worker's instruction.
 
     To what: the same checks as castWorker (WORKER_AGENT_NOT_INSTALLED,
     AGENT_ORG_GRANT_INACTIVE / _REQUIRED, BOOT_PROMPT_GRANT_REQUIRED /
@@ -13359,7 +13371,7 @@ export const typeDefs = `#graphql
     role. It takes effect at the worker's next bind: an open session
     finishes under the agent and role it was bound with. workerRef and agentRef are ids or URNs.
     """
-    changeWorkerAgent(workerRef: ID!, agentRef: ID!): Worker!
+    changeWorkerAgent(workerRef: ID!, agentRef: ID!, instruction: ActInstructionInput): Worker!
 
     """
     #2045 (S8) — set or clear an Agent's boot-prompt pointer. nodeRef (a node id or a

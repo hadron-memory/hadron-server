@@ -118,19 +118,19 @@ describe('#3278 userless run item admission', () => {
     }
     expect(await canReadMemory(db, f.principal, f.team.id)).toBe(true);
   });
-  it('CONTROL/residual: on-behalf user and direct user+App retain the existing item fold', async () => {
-    // An App member with NO org membership: this deliberately exposes the pre-existing user-layer residual,
-    // which #3278 asks us to report rather than fix. It is not desired product law.
+  it('#3280: on-behalf run refuses item-only reach while direct user+App is unchanged', async () => {
+    // Ruling0105 A: an App member with NO independent org access loses item-only reach as a run;
+    // the direct user session remains unchanged in this slice.
     const userOnly = { ...ctx(f.user.id) };
     const backedRun = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
     const onBehalf = { db, ...runAuthContext(backedRun) } as Context;
     const selectedUser = { ...userOnly, appId: f.app.id };
     expect(await getAccessibleMemoryIds(userOnly, f.read.id, { excludeAppDerived: true })).not.toContain(f.read.id);
-    for (const principal of [onBehalf, selectedUser]) {
-      expect(await canReadMemory(db, principal, f.read.id)).toBe(true);
-      expect((await getPrincipalAppMemoryAccess(db, principal)).has(f.read.id)).toBe(true);
-    }
-    expect(await hadronReadNode.execute({ ...f.tool, run: backedRun, principal: onBehalf }, { urn: urn(f.read) })).toMatchObject({ content: 'secret read' });
+    expect(await canReadMemory(db, selectedUser, f.read.id)).toBe(true);
+    expect((await getPrincipalAppMemoryAccess(db, selectedUser)).has(f.read.id)).toBe(true);
+    expect(await canReadMemory(db, onBehalf, f.read.id)).toBe(false);
+    expect((await getPrincipalAppMemoryAccess(db, onBehalf)).has(f.read.id)).toBe(false);
+    expect(await rejection(hadronReadNode.execute({ ...f.tool, run: backedRun, principal: onBehalf }, { urn: urn(f.read) }))).toMatchObject({ message: expect.stringContaining('not readable') });
   });
   it('CONTROL: bare App keys still refuse non-PUBLIC items and retain PUBLIC read-only', async () => {
     const key = { appId: f.app.id, roles: [], clientId: 'app-key' };

@@ -367,3 +367,48 @@ describe('#3287 bounds, no writes, SDL (acceptance 8, 9, 11)', () => {
     expect(typeDefs).toMatch(/enum ActionRegisterIndexState \{\s*MAPPED\s*UNRESOLVED\s*UNMAPPED\s*\}/);
   });
 });
+
+// #3319 (follow-up pins from #3312's review; behavior unchanged): the task-side inheritance
+// exclusion and the two soft-delete filters, each killed by its own mutant at the call site.
+describe('#3319 task-side inheritance and soft-delete pins', () => {
+  it('a base boot-prompt task is not inherited: the farther eligible task is MAPPED; the own memory serves the same role', async () => {
+    // Asking chain: Coder -> Engineer -> EngBase. The nearer base (Engineer) holds the excluded role.
+    const engBase = await agent('Eng Base');
+    await db.agent.update({ where: { id: engineer.id }, data: { extendsAgentId: engBase.id } });
+    await entry(teamBase.memoryId, 'p.boot', 'tasks:p');
+    await task(engineer.memoryId, 'tasks:p', { role: 'boot-prompt' });     // nearer, not inheritable
+    await task(engBase.memoryId, 'tasks:p');                               // farther, eligible
+    const r = await index({ code: 'p.boot' });
+    expect(r.entries).toEqual([expect.objectContaining({ code: 'p.boot', state: 'MAPPED', taskUrn: `hrn:node:${await memUrn(engBase.memoryId)}:tasks:p` })]);
+
+    // The asking Agent's OWN memory serves anything, the excluded role included.
+    await entry(teamBase.memoryId, 'q.own', 'tasks:q');
+    await task(coder.memoryId, 'tasks:q', { role: 'boot-prompt' });
+    const own = await index({ code: 'q.own' });
+    expect(own.entries).toEqual([expect.objectContaining({ code: 'q.own', state: 'MAPPED', taskUrn: `hrn:node:${await memUrn(coder.memoryId)}:tasks:q` })]);
+  });
+
+  it('a soft-deleted nearer task is absent, not non-runnable: the base task is MAPPED (not UNRESOLVED, not the deleted node)', async () => {
+    await db.node.updateMany({ where: { memoryId: coder.memoryId, loc: 'tasks:alpha' }, data: { deletedAt: new Date() } });
+    const r = await index({ code: 'a.base' });
+    expect(r.entries).toEqual([expect.objectContaining({ code: 'a.base', state: 'MAPPED', taskUrn: `hrn:node:${await memUrn(engineer.memoryId)}:tasks:alpha` })]);
+  });
+
+  it('a soft-deleted entry in the Team Agent own memory is absent: unlisted with no other entry, the base entry shows through otherwise', async () => {
+    const only = await entry(team.memoryId, 'e.only', 'tasks:alpha');
+    expect((await index()).total).toBe(5);
+    await db.node.update({ where: { id: only.id }, data: { deletedAt: new Date() } });
+    const gone = await index();
+    expect(gone.total).toBe(4);
+    expect(gone.entries.map((e: any) => e.code)).not.toContain('e.only');
+
+    // b.over is defined in Team over TeamBase's tasks:base-b; deleting Team's entry reveals the base's.
+    await db.node.updateMany({ where: { memoryId: team.memoryId, loc: 'register:b.over' }, data: { deletedAt: new Date() } });
+    const shown = await index({ code: 'b.over' });
+    expect(shown.entries).toEqual([expect.objectContaining({
+      code: 'b.over', state: 'MAPPED', definedBy: agentUrn(teamBase), taskLoc: 'tasks:base-b',
+      entryUrn: `hrn:node:${await memUrn(teamBase.memoryId)}:register:b.over`,
+      taskUrn: `hrn:node:${await memUrn(engineer.memoryId)}:tasks:base-b`,
+    })]);
+  });
+});

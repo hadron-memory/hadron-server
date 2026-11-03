@@ -11331,7 +11331,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_update_worker',
-    "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
+    "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only. This tool takes no instruction claim, so worker-session edits remain headless and refused; instructed signature edits use GraphQL updateWorker). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
     SHAPE_HADRON_UPDATE_WORKER,
     async ({ workerRef, signature, trailer, app, session }) => {
       // This tool owns `session`, so the common actor gate leaves invalid names to us.
@@ -11414,7 +11414,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   server.tool(
     'hadron_change_worker_agent',
-    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
+    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves. This tool takes no instruction claim, so a worker session stays headless and refused; instructed changes use GraphQL changeWorkerAgent. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
     SHAPE_HADRON_CHANGE_WORKER_AGENT,
     async ({ workerRef, agent, app, session }) => {
       if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {

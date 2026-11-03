@@ -511,9 +511,11 @@ describe('#2193 — run principal', () => {
         const viaNode = await NodeR.memory({ memoryId }, {}, c);
         expect(viaNode?.id ?? null, `run for ${who}: ${key}`).toBe(record?.id ?? null);
       }
-      // Stated up front: the run reaches the installed Agent's knowledge memory, so the
-      // control is not vacuously null on both sides.
-      expect(await NodeR.memory({ memoryId: mem.know }, {}, c), `run for ${who}: know`).toMatchObject({ id: mem.know });
+      // #3280 / ruling0105 A: keep a positive admin control, while an App member
+      // with no independent org access is explicitly refused by both record doors.
+      const know = await NodeR.memory({ memoryId: mem.know }, {}, c);
+      if (who === 'admin') expect(know, `run for ${who}: know`).toMatchObject({ id: mem.know });
+      else expect(know, `run for ${who}: know`).toBeNull();
     }
   });
 });

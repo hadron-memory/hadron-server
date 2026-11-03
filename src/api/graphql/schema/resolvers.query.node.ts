@@ -106,6 +106,7 @@ import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } f
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 
 /**
  * #3113 — the validated `filter.nodeTypes` list (or null), refused as
@@ -1027,12 +1028,16 @@ export const nodeQueries = {
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
-      const allowed = (memoryId: string): boolean => {
+      const allowedByList = (memoryId: string): boolean => {
         if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
           return (access.memoryId.in as string[]).includes(memoryId);
         }
         return true;
       };
+      // #3306: a pure App key / userless run also reads PUBLIC knowledge, one named row at a time (no id list).
+      const allowed = async (memoryId: string): Promise<boolean> =>
+        allowedByList(memoryId)
+        || (readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId));
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
@@ -1057,7 +1062,7 @@ export const nodeQueries = {
           current.deletedAt ||
           current.memoryId !== selected.memoryId ||
           current.loc !== selected.loc ||
-          (!inheritedFrom && !allowed(current.memoryId))
+          (!inheritedFrom && !(await allowed(current.memoryId)))
         ) return null;
         // An inherited selection is re-checked on the version actually served:
         // a base node turned boot prompt, or a child override added, since
@@ -1086,7 +1091,7 @@ export const nodeQueries = {
       // (findUnique can't carry deletedAt in its where, so guard post-fetch).
       if (isId(ref)) {
         const node = await ctx.db.node.findUnique({ where: { id: ref }, include });
-        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
+        if (!node || node.deletedAt || !(await allowed(node.memoryId))) return null;
         return finish(node);
       }
 
@@ -1106,7 +1111,7 @@ export const nodeQueries = {
           return null;
         }
         const memory = await resolveMemoryRef(ctx.db, parts.memoryUrn).catch(() => null);
-        if (!memory || !allowed(memory.id)) return null;
+        if (!memory || !(await allowed(memory.id))) return null;
         const effective = await findEffectiveNodeIdByLoc(ctx.db, memory.id, parts.loc);
         if (!effective?.inheritedFrom) return null;
         const inherited = await ctx.db.node.findUnique({ where: { id: effective.id }, include });
@@ -1121,7 +1126,7 @@ export const nodeQueries = {
           throw e;
         }
         const selected = await ctx.db.node.findUnique({ where: { id }, include });
-        return selected && !selected.deletedAt && allowed(selected.memoryId)
+        return selected && !selected.deletedAt && (await allowed(selected.memoryId))
           ? finish(selected)
           : null;
       };
@@ -1145,7 +1150,7 @@ export const nodeQueries = {
         // the node-content gate this resolver already computed, so the
         // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!allowed(scopedMemoryId)) throw new MemoryNotFoundError(memoryRef);
+        if (!(await allowed(scopedMemoryId))) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
@@ -1178,7 +1183,7 @@ export const nodeQueries = {
           select: { id: true },
         });
         if (memory) {
-          if (allowed(memory.id)) {
+          if (await allowed(memory.id)) {
             const node = await ctx.db.node.findFirst({
               where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
               include,
@@ -1433,8 +1438,18 @@ export const nodeQueries = {
       }
 
       // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-      const accessible = await getAccessibleMemoryIds(ctx);
       const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+      // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
+      // only those, never every PUBLIC memory.
+      const requestedIds = explicitIds
+        ? (await Promise.all(
+            f.memoryIds!.map((ref) =>
+              isId(ref)
+                ? Promise.resolve(ref)
+                : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+          )).filter((id): id is string => id !== null)
+        : [];
+      const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: requestedIds });
       const memClassClause: unknown =
         f.memoryClasses && f.memoryClasses.length > 0
           ? { in: f.memoryClasses }
@@ -1456,13 +1471,7 @@ export const nodeQueries = {
 
       let scopeIds: string[];
       if (explicitIds) {
-        const resolved = await Promise.all(
-          f.memoryIds!.map((ref) =>
-            isId(ref)
-              ? Promise.resolve(ref)
-              : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
-        );
-        const requested = resolved.filter((id): id is string => id !== null);
+        const requested = requestedIds;
         const allowed = accessible === null ? null : new Set(accessible);
         scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
         // Query only when a class or org filter must be applied to the requested
