@@ -9,6 +9,8 @@ import { ctx, M, NEW_PROC, PROC, setUpResetFixture, type ResetFixture } from '..
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
+import { sweepUnreportedHostOperations } from '../../../lib/hostOperations/settle.js';
+import { sweepContextResets } from '../../../lib/contextReset/contextReset.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -87,6 +89,35 @@ describe('#3273 ContextReset read', () => {
     const row = await db.contextReset.findUniqueOrThrow({ where: { taskId: task.id } });
     const answer = await recorded(row.id, 'HOST_OPERATION_NOT_COLLECTED');
     expect(answer.errors?.[0].extensions).toEqual({ code: 'HOST_OPERATION_NOT_COLLECTED' });
+  });
+
+  it('a failed operation never collected is still NOT_COLLECTED, even after its reset ends', async () => {
+    const task = await f.startedTask();
+    await f.finish(task.id);
+    const row = await db.contextReset.findUniqueOrThrow({ where: { taskId: task.id } });
+    await db.hostRegistration.updateMany({ where: { appId: f.app.id, hostId: 'orca1' }, data: { lostAt: new Date() } });
+    await sweepUnreportedHostOperations(db);
+    await sweepContextResets(db);
+    expect(await db.hostOperation.findUniqueOrThrow({ where: { id: row.hostOperationId! } }))
+      .toMatchObject({ status: 'failed', collectedAt: null });
+    expect(await db.contextReset.findUniqueOrThrow({ where: { id: row.id } }))
+      .toMatchObject({ phase: 'failed', reason: 'HOST_LOST' });
+    const answer = await recorded(row.id, 'HOST_OPERATION_NOT_COLLECTED');
+    expect(answer.errors?.[0].extensions).toEqual({ code: 'HOST_OPERATION_NOT_COLLECTED' });
+  });
+
+  it('a collected operation that later fails stays readable with its ended reset', async () => {
+    const s = await f.collectedReset();
+    const later = new Date(Date.now() + 24 * 60 * 60_000);
+    await sweepUnreportedHostOperations(db, later);
+    await sweepContextResets(db, later);
+    const op = await db.hostOperation.findUniqueOrThrow({ where: { id: s.operationId } });
+    expect(op.status).toBe('failed');
+    expect(op.collectedAt).not.toBeNull();
+    const answer = await recorded(s.resetId, null);
+    expect(answer.errors).toBeUndefined();
+    expect(answer.data.contextReset).toMatchObject({ phase: 'failed', reason: 'REPORT_TIMEOUT' });
+    expect(answer.data.contextReset.endedAt).not.toBeNull();
   });
 
   it('unknown, malformed, another host/App, and missing operation have byte-identical full wire errors', async () => {
