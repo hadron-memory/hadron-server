@@ -302,4 +302,21 @@ describe('#2763 fix head: the decision is re-derived inside the raise transactio
     await evaluateCoordinatorCadence(db, later(2));
     expect(((await pendingTaskWakes(db, [w.Cass.id], later(2))).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(false);
   });
+
+  it('escalation up the chain ends with the episode: the unwoken owner is closed, not woken (stall.ts)', async () => {
+    w.Dee = await mk('Dee', null, 'lead');
+    w.Cass = await mk('Cass', w.Dee.id, 'lead');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    await evaluateCoordinatorCadence(db, NOW);
+    const [a] = await alarms();
+    expect(a.chain).toEqual([{ workerId: w.Cass.id }, { workerId: w.Dee.id }]);
+    await event('task.assigned', 'Ada', -1);
+    await evaluateCoordinatorCadence(db, later(2)); // the episode ends
+    const { wakeDueOwners } = await import('./stall.js');
+    expect(await wakeDueOwners(db, later(70))).toBe(0);
+    const rows = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: a.id }, orderBy: { chainIndex: 'asc' } });
+    expect(rows[1].wokenAt).toBeNull();
+    expect(rows[1].endedAt).not.toBeNull();
+  });
 });
