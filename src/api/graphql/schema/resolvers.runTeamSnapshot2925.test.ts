@@ -38,7 +38,7 @@ async function enable(appRef = appId) {
   expect(out.data.setAppRunTeamSnapshotEnabled.runTeamSnapshotEnabled).toBe(true);
 }
 async function mintRun(userId: string | null = null, forApp = appId): Promise<AppRun> {
-  return db.appRun.create({ data: { organizationId: orgId, appId: forApp, userId, triggerKind: 'MANUAL',
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId, triggerKind: 'MANUAL',
     entryNodeUrn: 'hrn:node:snapshot2925.example:flows:report', status: 'RUNNING' } });
 }
 const toolCtx = (run: AppRun) => ({ db, run, principal: runContext(db, run), log: vi.fn() });
@@ -213,4 +213,61 @@ it('the existing teamRoster read shares the run arm, while host and event capabi
   expect(roster.workers.map((w: any) => w.workerId)).toContain(workerId);
   await denied(Q.teamRoster({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   await denied(Q.agentTeamEvents({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
+});
+
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+it.each(['off', 'app-deleted', 'org-deleted'] as const)('rechecks %s after waiting for the authority anchor', async kind => {
+  await enable();
+  const c = toolCtx(await mintRun());
+  const tool = snapshotTool();
+  let unlock!: () => void, ready!: () => void;
+  const held = new Promise<void>(r => { ready = r; });
+  const release = new Promise<void>(r => { unlock = r; });
+  const holder = db.$transaction(async tx => {
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'org', id: orgId }], 'exclusive');
+    if (kind === 'off') await tx.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } });
+    if (kind === 'app-deleted') await tx.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
+    if (kind === 'org-deleted') await tx.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    ready(); await release;
+  }, { timeout: 20_000 });
+  await held;
+  const read = tool.execute(c, WINDOW).then(() => null, e => e);
+  try { await waitForLockWaitersOfType(db, 'advisory', 1); }
+  finally { unlock(); await holder; }
+  expect((await read)?.extensions.code).toBe('APP_NOT_FOUND');
+});
+it('rechecks a manager demotion after waiting for the setting write lock', async () => {
+  let unlock!: () => void, ready!: () => void;
+  const held = new Promise<void>(r => { ready = r; });
+  const release = new Promise<void>(r => { unlock = r; });
+  const holder = db.$transaction(async tx => {
+    await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'org', id: orgId }], 'exclusive');
+    await tx.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: manager } }, data: { role: 'CONTRIBUTOR' } });
+    ready(); await release;
+  }, { timeout: 20_000 });
+  await held;
+  const write = setting(true);
+  try { await waitForLockWaitersOfType(db, 'advisory', 1); }
+  finally { unlock(); await holder; }
+  expect((await write).errors?.[0].extensions.code).toBe('FORBIDDEN');
+  expect((await db.app.findUniqueOrThrow({ where: { id: appId } })).runTeamSnapshotEnabled).toBe(false);
+});
+
+it('a source failure is typed and never returns a partial snapshot or echoes database diagnostics', async () => {
+  await enable();
+  const roster = await import('../../../lib/agentTasks/roster.js');
+  const spy = vi.spyOn(roster, 'loadTeamRoster').mockRejectedValueOnce(new Error('private-source-sentinel'));
+  try {
+    const err = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW).then(() => null, e => e);
+    expect(err?.extensions.code).toBe('TEAM_SNAPSHOT_SOURCE_FAILED');
+    expect(err.message).not.toContain('private-source-sentinel');
+  } finally { spy.mockRestore(); }
+});
+it('an oversized roster is explicitly non-continuable, never an empty complete roster', async () => {
+  await enable();
+  await db.worker.createMany({ data: Array.from({ length: 1000 }, (_, n) => ({ ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: `Member ${n}`, slug: `member-${n}` })) });
+  const out = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW) as any;
+  expect(out).toMatchObject({ complete: false, incompleteReason: 'nested_truncated', hasMore: false, cursor: null, roster: [] });
+  expect(out.tasks.map((t: any) => t.id)).toContain(taskId);
 });
