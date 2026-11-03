@@ -275,7 +275,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
       data: { id: generateId(), name: 'UO App', urn: `@appowner:uo-app-${generateId()}`, ownerUserId: ownerId,
         appAgents: { create: { agentId: agent.id } } },
     });
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryAccess(db, app.id, { callerUserId: ownerId });
     expect(access.has(foreignMem.id)).toBe(false);
   });
 
@@ -291,7 +291,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
       data: { id: generateId(), name: 'UO App', urn: `@appowner:uo-app-${generateId()}`, ownerUserId: ownerId,
         appAgents: { create: { agentId: agent.id } } },
     });
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryAccess(db, app.id, { callerUserId: ownerId });
     expect(access.get(ownMem.id)).toBe('READ_ONLY');
   });
 
