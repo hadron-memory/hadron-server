@@ -27,7 +27,7 @@ const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
 /** Shared projected rows. Person reads use RepeatableRead; run reads hold live authority anchors through projection. */
 async function readTeamRoster(ctx: Context, appRef: string) {
-    if (isRunPrincipal(ctx)) return withReadableApp(ctx, appRef, projectTeamRoster, true);
+    if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.
     return ctx.db.$transaction(async (tx) => {
       const readCtx = withoutRequestCaches(ctx, tx);

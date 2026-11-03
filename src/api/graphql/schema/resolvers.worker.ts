@@ -180,7 +180,7 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * refused it. Found by the #1347 differential test; checked here, once.
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
-  if (isRunPrincipal(ctx)) {
+  if (isRunPrincipal(ctx) && !ctx.userId) {
     if (!await mayReadAppTasks(ctx, app.id)) throw forbidden();
     return;
   }
@@ -245,7 +245,7 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  * resolvers.worker.test.ts pins every arm to `requireWorkerReadAccess`.
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
-  if (isRunPrincipal(ctx)) return { appId: { in: ctx.appId && await mayReadAppTasks(ctx, ctx.appId) ? [ctx.appId] : [] } };
+  if (isRunPrincipal(ctx) && !ctx.userId) return { appId: { in: ctx.appId && await mayReadAppTasks(ctx, ctx.appId) ? [ctx.appId] : [] } };
   if (!ctx.userId) {
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
@@ -2028,7 +2028,7 @@ export const workerQueries = {
       return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
     };
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
-    if (isRunPrincipal(ctx)) return inRunTeamReadTx(ctx, appId, () => { throw forbidden(); }, c => read(c, appId));
+    if (isRunPrincipal(ctx) && !ctx.userId) return inRunTeamReadTx(ctx, appId, () => { throw forbidden(); }, c => read(c, appId));
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireWorkerReadAccess(ctx, app);
     return read(ctx, appId);

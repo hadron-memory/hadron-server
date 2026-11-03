@@ -219,7 +219,7 @@ async function requireRunLive(txCtx: Context, app: TaskApp, runId: string): Prom
  * shared participation predicate rather than a per-resolver gate.
  */
 export async function resolveTaskActor(ctx: Context, app: TaskApp): Promise<TaskActor | null> {
-  if (app.deletedAt || isRunPrincipal(ctx)) return null;
+  if (app.deletedAt) return null;
   const bound = currentActor();
   if (bound.workerId) {
     // INTERIM until cor:agt:050:21 is ruled (Rook P2-1): no App key acts as a
@@ -420,10 +420,12 @@ export async function withHostKeyTickerApp<T>(
   return inHostKeyTickerReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
 }
 
-/** Shared participant/key read. Only roster/task callers opt into the separate, read-only run arm. */
+/**
+ * Shared participant/key read. Only roster/task callers opt into the separate USERLESS run arm (#2925).
+ * Xanthos #70403: a user-backed run keeps its existing person arm, actor and non-task management behavior.
+ */
 export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false): Promise<T> {
-  if (isRunPrincipal(ctx)) {
-    if (!allowRun) throw appNotFound(appRef);
+  if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
     let id: string;
     try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (e instanceof AppNotFoundError) throw appNotFound(appRef); throw e; }
     if (id !== ctx.appId) throw appNotFound(appRef);
@@ -453,7 +455,7 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
 export async function mayReadAppTasks(ctx: Context, appId: string): Promise<boolean> {
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt) return false;
-  if (isRunPrincipal(ctx)) return runMayReadTeam(ctx, app);
+  if (isRunPrincipal(ctx) && !ctx.userId) return runMayReadTeam(ctx, app);
   if (appKeyCaller(ctx)) return keyMayReadApp(ctx, app);
   return (await resolveTaskActor(ctx, app)) !== null;
 }
@@ -496,7 +498,7 @@ async function participatedAppIds(ctx: Context): Promise<string[]> {
 
 /** The ONE App a BARE handle means for this caller: a key's own App, a worker session's App, else the one App a person belongs to. */
 async function bareHandleApp(ctx: Context, ref: string): Promise<string | null> {
-  if (isRunPrincipal(ctx)) return ctx.appId ?? null;
+  if (isRunPrincipal(ctx) && !ctx.userId) return ctx.appId ?? null;
   const key = appKeyCaller(ctx);
   if (key) return key.appId;
   const bound = currentActor();
@@ -565,7 +567,7 @@ async function withReadableTask<T>(
   taskRef: string,
   body: (c: Context, r: { task: TaskRow; app: TaskApp }) => Promise<T>,
 ): Promise<T | null> {
-  if (isRunPrincipal(ctx)) {
+  if (isRunPrincipal(ctx) && !ctx.userId) {
     const taskId = await resolveTaskRef(ctx, taskRef, ctx.appId);
     if (!taskId || !ctx.appId) return null;
     return inRunTeamReadTx<T | null>(ctx, ctx.appId, () => null, async (c, app) => {
