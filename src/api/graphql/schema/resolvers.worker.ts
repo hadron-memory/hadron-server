@@ -920,6 +920,7 @@ type CastArgs = CastTeamArgs & {
 };
 
 type CastTarget = {
+  admission: StaffActAdmission;
   appId: string;
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null };
@@ -983,7 +984,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       extensions: { code: 'APP_UNINSTALLED', appId },
     });
   }
-  await admitWorkerStaffAct(ctx, app, args.instruction);
+  const admission = await admitWorkerStaffAct(ctx, app, args.instruction);
   let reportingHeadId: string | null = null;
   if (choice.kind === 'REPORTS_TO') {
     if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
@@ -1077,7 +1078,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   }
   const { agent: castAgent } = await assertCastable(ctx.db, app, agent.id);
   const workerRole = requireWorkerAgentRole(castAgent);
-  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
+  return { admission, appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
 }
 
 /** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
@@ -1126,7 +1127,7 @@ export const workerMutations = {
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
   castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, app, agent, workerRole, requestedRole, requestedName, choice, reportingHeadId } = await resolveCastTarget(
+    const { admission: plannedAdmission, appId, app, agent, workerRole, requestedRole, requestedName, choice, reportingHeadId } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -1175,9 +1176,9 @@ export const workerMutations = {
             await lockAppReportsTo(tx, appId);
             await lockAppTickers(tx, appId);
             // Preserve the existing typed cast retry before the generic mechanism refusal.
-            const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
-            if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
-            let admission = await admitWorkerStaffAct(txCtx, app, args.instruction);
+            const plannedFreshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
+            if (plannedFreshApp.organizationId !== app.organizationId || plannedFreshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
+            let admission = await admitWorkerStaffAct(txCtx, app, args.instruction, plannedAdmission);
             const actWorkerIds = [plannedWorkerId, ...(reportingHeadId ? [reportingHeadId] : []),
               ...(admission.kind === 'person' ? [] : [admission.workerId])];
             await lockWorkersForAssignment(tx, actWorkerIds);
@@ -1189,9 +1190,11 @@ export const workerMutations = {
               await tx.$queryRaw`
                 SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
             }
+            // The early read preserves refusal ordering; the deciding row is fresh after membership waits.
+            const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
             if (freshApp.deletedAt) throw forbidden();
-            await requireWorkerStaffAccess(txCtx, freshApp);
             if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
+            await requireWorkerStaffAccess(txCtx, freshApp);
             const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
             if (freshAgent.organizationId !== agentOwner.organizationId || freshAgent.ownerUserId !== agentOwner.ownerUserId) throw castTargetChanged();
             if (freshApp.uninstalledAt) {
@@ -2204,7 +2207,7 @@ export const workerQueries = {
       ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : [])];
     let admission: StaffActAdmission;
     return withAuthorizedTx(ctx, anchors, async txCtx => {
-      admission = await admitWorkerStaffAct(txCtx, app, args.instruction);
+      admission = await admitWorkerStaffAct(txCtx, app, args.instruction, planned.admission);
     }, async (tx, txCtx) => {
       const ctx = txCtx;
       await lockStaffingAct(tx, app, admission, ctx.sessionId);

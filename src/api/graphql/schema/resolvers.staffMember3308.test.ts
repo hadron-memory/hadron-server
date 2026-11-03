@@ -219,7 +219,7 @@ describe('#3308 instructed previews and idempotent calls have one claim, not a r
  });
 });
 
-for (const door of ['cast', 'retire']) it(`#3308 ${door}: final recheck sees a transaction-local revocation after worker locking`, async () => {
+for (const door of ['cast', 'retire', 'delete', 'add', 'remove', 'preview']) it(`#3308 ${door}: final recheck sees a transaction-local revocation after worker locking`, async () => {
  await give(door);
  let revoked = false;
  const client = new Proxy(db, { get(target, key) {

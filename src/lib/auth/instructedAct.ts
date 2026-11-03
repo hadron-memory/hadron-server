@@ -48,7 +48,9 @@ export async function requireInstructedAct(
   }) : null;
   // A caller cannot erase or substitute the actor authenticated by the transport with a different session row.
   if (ctx.sessionId && (!session || session.userId !== ctx.userId || session.endedAt)) throw refuse();
-  if (session?.launchOperationId && !grant) throw refuse();
+  // Even a malformed read projection must never turn a launched worker into a person.
+  // PostgreSQL chk_sessions_launch independently requires worker_id on persisted launched sessions.
+  if (session?.launchOperationId && (!grant || !session.workerId)) throw refuse();
   const workerId = session?.workerId ?? actor.workerId;
   if (actor.workerId && actor.workerId !== session?.workerId) throw refuse();
   if (actor.agentId && !workerId) throw refuse();

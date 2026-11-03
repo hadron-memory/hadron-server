@@ -623,15 +623,17 @@ function instructionPayload(instruction?: ActInstruction): Prisma.InputJsonObjec
 /** One ids-only claim on an admitted instructed preview/no-op; never pretend the state changed (#3308/0111). */
 export async function appendStaffingInstructionClaim(
   tx: Prisma.TransactionClient,
-  args: { appId: string; admission: StaffActAdmission;
-    operation: 'worker.preview' | 'worker.retire' | 'member.ensure' | 'member.remove';
-    workerId?: string; userId?: string; agentId?: string },
+  args: { appId: string; admission: StaffActAdmission } & (
+    | { operation: 'worker.retire'; workerId: string; userId?: never; agentId?: never }
+    | { operation: 'worker.preview'; agentId: string; workerId?: never; userId?: never }
+    | { operation: 'member.ensure' | 'member.remove'; userId: string; workerId?: never; agentId?: never }
+  ),
 ): Promise<void> {
   const instruction = staffingInstruction(args.admission);
   if (!instruction) return;
   await appendStaffingEvent(tx, { appId: args.appId, actor: staffingActActor(args.admission),
-    type: 'worker.instruction-claimed', subjectWorkerId: args.workerId,
-    payload: { operation: args.operation, ...(args.workerId ? { workerId: args.workerId } : {}),
+    type: 'worker.instruction-claimed', subjectWorkerId: args.operation === 'worker.retire' ? args.workerId : undefined,
+    payload: { operation: args.operation, ...(args.operation === 'worker.retire' ? { workerId: args.workerId } : {}),
       ...(args.userId ? { userId: args.userId } : {}), ...(args.agentId ? { agentId: args.agentId } : {}),
       ...instructionPayload(instruction) } });
 }
