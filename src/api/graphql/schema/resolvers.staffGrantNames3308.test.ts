@@ -99,7 +99,8 @@ describe('#3308 staged grant-name provisioning', () => {
  it('the existing ticker grant remains supported', async () => {
   expect((await grant('TICKER_SUBSCRIBE_WORKERS')).name).toBe('ticker.subscribe-workers');
  });
- it('PR A does not narrow the existing worker member-add door', async () => {
+ it('PR B preserves member-add for a worker with its own new grant', async () => {
+  await grant('APP_MEMBERS');
   await expect(M.ensureAppMember({}, { appRef: f.app.id, userRef: f.target.id, role: 'owner' }, person({ sessionId: f.session.id }))).resolves.toMatchObject({ userId: f.target.id, role: 'owner' });
  });
 });

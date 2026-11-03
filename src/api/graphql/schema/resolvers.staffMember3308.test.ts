@@ -218,3 +218,46 @@ describe('#3308 instructed previews and idempotent calls have one claim, not a r
    before.events.filter(e => e.type === 'member.added' || e.type === 'member.role-changed' || e.type === 'member.removed' || e.type === 'worker.retired'));
  });
 });
+
+for (const door of ['cast', 'retire']) it(`#3308 ${door}: final recheck sees a transaction-local revocation after worker locking`, async () => {
+ await give(door);
+ let revoked = false;
+ const client = new Proxy(db, { get(target, key) {
+  if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => callback(new Proxy(tx, { get(t, k) {
+   if (k === '$queryRaw') return async (query: any, ...values: any[]) => {
+    const sql = Array.isArray(query) ? query.join('?') : query.sql;
+    const value = await (t.$queryRaw as any)(query, ...values);
+    if (!revoked && /FROM workers[\s\S]*FOR UPDATE/.test(sql)) {
+     revoked = true;
+     await t.appGrant.updateMany({ where: { appId: f.app.id, granteeWorkerId: f.worker.id, revokedAt: null }, data: { revokedAt: new Date() } });
+    }
+    return value;
+   };
+   const value = (t as any)[k]; return typeof value === 'function' ? value.bind(t) : value;
+  } })), options);
+  const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
+ } });
+ const before = await snapshot();
+ expect((await answer(calls[door](undefined, bound({ db: client })))).code).toBe('FORBIDDEN');
+ expect(revoked).toBe(true);
+ expect(await snapshot()).toEqual(before);
+});
+
+for (const [door, call] of Object.entries(calls)) for (const shape of ['app-key', 'impersonation', 'run'] as const) {
+ it(`#3308 ${door}: a matching grant does not repair the ${shape} principal`, async () => {
+  await give(door);
+  const c = shape === 'app-key' ? { db, appId: f.app.id, appKeyId: generateId(), roles: [] } as Context
+   : shape === 'impersonation' ? bound({ impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } } as any)
+   : bound({ clientId: 'run:fixture', appId: f.app.id });
+  const before = await snapshot();
+  expect((await answer(call(live, c))).code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
+ });
+}
+
+it('#3308 instructed retirement no-op records do not turn bookkeeping into external use', async () => {
+ await calls.retire(live);
+ await calls.retire(live);
+ expect(await instructionEvents()).toHaveLength(2);
+ expect(await M.deleteWorker({}, { workerRef: f.target.id, confirmNoExternalAttribution: true }, ctx())).toBe(true);
+});

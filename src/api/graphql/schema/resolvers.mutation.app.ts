@@ -1,5 +1,8 @@
+import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { readActInstruction } from './resolvers.instruction.js';
+import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
-import { appendMemberRemovedEvent, appendMemberSetEvent, eventActor } from '../../../lib/agentTasks/events.js';
+import { appendMemberRemovedEvent, appendMemberSetEvent, appendStaffingInstructionClaim, staffingActActor, staffingInstruction, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { requireAppKeyIssuer, requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
@@ -155,8 +158,7 @@ async function assertNoInstallMemories(
  * an owner-role AppMember; spec 047 blocker 3), so it has one source. On top of
  * it, a principal that is not the direct user is refused whatever its role: an
  * impersonation, a run principal, an ambiguous actor, a refused session binding
- * (#2448). A worker session is deliberately NOT decided here: it keeps its
- * holder's answer until #2483 S2b. Shared by ensureAppMember + removeAppMember
+ * (#2448). The worker mechanism is decided separately by admitMemberAct (#3308); this predicate still decides the holder's right. Shared by ensureAppMember + removeAppMember
  * and evaluated BEFORE the target user is resolved, so a non-authorized caller
  * can't turn user-ref resolution into an existence oracle (#816 review).
  */
@@ -167,6 +169,25 @@ export async function callerManagesAppMembers(
 ): Promise<boolean> {
   if (isRefusedPrincipal(ctx)) return false;
   return managesApp(ctx, { id: resolvedAppId, organizationId: app.organizationId, ownerUserId: app.ownerUserId });
+}
+
+/** #3308: mechanism before user lookup; the original manager/self-leave predicate remains separate. */
+async function admitMemberAct(
+  ctx: Context,
+  scope: { id: string; organizationId: string | null; ownerUserId: string | null },
+  instruction: ActInstruction | null | undefined,
+  refuse: () => Error,
+  expected?: StaffActAdmission,
+  lock = false,
+): Promise<StaffActAdmission> {
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
+  if (app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) {
+    throw new Error('App ownership changed; retry member management');
+  }
+  const admission = await requireInstructedAct(ctx, app.id, instruction, async () => true, readActInstruction, refuse,
+    { name: 'app.members', lock });
+  if (expected && !sameActPrincipal(expected, admission)) throw refuse();
+  return admission;
 }
 
 /**
@@ -1083,12 +1104,14 @@ export const appMutations = {
         userRef,
         userId,
         role,
+        instruction,
       }: {
         appRef?: string | null;
         appId?: string | null;
         userRef?: string | null;
         userId?: string | null;
         role: string;
+        instruction?: ActInstruction | null;
       },
       ctx: Context,
     ) => {
@@ -1102,6 +1125,9 @@ export const appMutations = {
       // replacing the strict one): an owner-role AppMember has the user-owner's
       // rights, and platform admins manage org Apps. That is safe only because
       // joinApp never self-grants `owner` (#1714).
+      const refuse = () => forbiddenError('Forbidden: only org admins or App owners can manage members');
+      const initial = await admitMemberAct(ctx, app, instruction, refuse);
+      let admission = initial;
       if (!(await callerManagesAppMembers(ctx, app, resolvedAppId))) {
         throw forbiddenError('Forbidden: only org admins or App owners can manage members');
       }
@@ -1123,6 +1149,7 @@ export const appMutations = {
             if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
               throw new Error('App ownership changed; retry member management');
             }
+            admission = await admitMemberAct(txCtx, app, instruction, refuse, initial, true);
             if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId))) {
               throw forbiddenError('Forbidden: only org admins or App owners can manage members');
             }
@@ -1132,10 +1159,12 @@ export const appMutations = {
               actorId: ctx.userId ?? null,
             });
             // #2766: the act is recorded in its own transaction, after every refusal above.
-            await appendMemberSetEvent(tx, { appId: resolvedAppId, actor: eventActor(ctx.userId), userId: resolvedUserId, priorRole, role });
+            if (priorRole === role) await appendStaffingInstructionClaim(tx, { appId: resolvedAppId, admission, operation: 'member.ensure', userId: resolvedUserId });
+            await appendMemberSetEvent(tx, { appId: resolvedAppId, actor: staffingActActor(admission), userId: resolvedUserId, priorRole, role, instruction: staffingInstruction(admission) });
           },
           { afterLock: async (tx) => {
             await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+            await lockStaffingAct(tx, app, initial, ctx.sessionId);
             await tx.$queryRaw`
               SELECT user_id FROM app_members
               WHERE app_id = ${resolvedAppId} AND user_id = ${ctx.userId} FOR SHARE`;
@@ -1171,11 +1200,13 @@ export const appMutations = {
         appId,
         userRef,
         userId,
+        instruction,
       }: {
         appRef?: string | null;
         appId?: string | null;
         userRef?: string | null;
         userId?: string | null;
+        instruction?: ActInstruction | null;
       },
       ctx: Context,
     ) => {
@@ -1195,6 +1226,8 @@ export const appMutations = {
       // #2448: a principal that is not the direct user is refused outright, the
       // self-leave arm included, and before the target is resolved.
       if (isRefusedPrincipal(ctx)) throw forbidRemove();
+      const initial = await admitMemberAct(ctx, app, instruction, forbidRemove);
+      let admission = initial;
       const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
       let resolvedUserId: string;
       if (authorizedByRole) {
@@ -1222,6 +1255,7 @@ export const appMutations = {
             throw new Error('App ownership changed; retry member management');
           }
           if (isRefusedPrincipal(txCtx)) throw forbidRemove();
+          admission = await admitMemberAct(txCtx, app, instruction, forbidRemove, initial, true);
           if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
             throw forbidRemove();
           }
@@ -1235,11 +1269,14 @@ export const appMutations = {
           const { count } = await tx.appMember.deleteMany({ where: { appId: resolvedAppId, userId: resolvedUserId } });
           // #2766: an idempotent no-op (no row) records nothing.
           if (count > 0 && existing) {
-            await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: eventActor(ctx.userId), userId: resolvedUserId, role: existing.role });
+            await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: staffingActActor(admission), userId: resolvedUserId, role: existing.role, instruction: staffingInstruction(admission) });
+          } else {
+            await appendStaffingInstructionClaim(tx, { appId: resolvedAppId, admission, operation: 'member.remove', userId: resolvedUserId });
           }
         },
         { lockMode: 'exclusive', afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+          await lockStaffingAct(tx, app, initial, ctx.sessionId);
           await tx.$queryRaw`
             SELECT user_id FROM app_members
             WHERE app_id = ${resolvedAppId} AND user_id = ${resolvedUserId} FOR UPDATE`;
