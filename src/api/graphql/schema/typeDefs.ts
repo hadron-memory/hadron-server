@@ -3674,7 +3674,7 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation."
+    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation; checkpoint: registerContextResetRecovery with checkpoint input (including replay/refusal)."
     action: String!
     "The operation a report was about."
     operationId: ID
@@ -10316,7 +10316,10 @@ export const typeDefs = `#graphql
     { path (the mutation's response key), code, text, register? }. Codes are a
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
-    task.finish.open-children, and from #2607 task.cancel.open-children on
+    task.finish.open-children, from #3267 task.start.other-started,
+    task.start.parent-ended (both on startAgentTask) and task.progress.children-ended
+    (on recordAgentTaskProgress; other-started and children-ended, like the three assign
+    facts, are filed only to a caller who may read the App's worker state), and from #2607 task.cancel.open-children on
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
     a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
@@ -10341,11 +10344,20 @@ export const typeDefs = `#graphql
     in another App TASK_NOT_FOUND. blockedByPositions names other tasks of the call as blockers (a self-block or a
     cycle is TASK_BLOCKER_CYCLE, a position outside the list BAD_USER_INPUT), and needs the same assigner authority as
     blockedBy. Handles follow list order and a refused call spends none. Each task records the events a single create
-    records; matching and launches run only after the commit, and each task's warnings are filed under
+    records; ordinary matching and all launches run only after the commit, and each task's warnings are filed under
     "<response key>.<position>". The result is every task, in list order. Not idempotent: nothing is deduplicated, so a
     caller that lost the answer lists the App's tasks before trying again.
+    distinctAssignees (default false; hrn:node:hadronmemory.com:specs:cor:agt:050:06, ruling 0084 A) matches each task whose match is true
+    inside the same transaction, in list order, excluding every explicitly named worker in this call and every
+    worker already matched. Each task keeps its own requirements; there is no global search or backtracking.
+    After the normal create and blocker checks, any failed match refuses the whole call as TASK_MATCH_FAILED,
+    with extensions.position (1-based) and extensions.reason (the single match's failure reason). No tasks,
+    handles, events, failure marks or launches survive. Naming the same worker twice with this option is
+    BAD_USER_INPUT at the second position. Named people and tasks not asking for a match keep their meaning.
+    Launches and warnings run only after commit. Without the option (or with null/false), existing batch
+    behavior is unchanged: requested matches run after commit and an ordinary failure marks only that task.
     """
-    createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!): [AgentTask!]!
+    createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!, distinctAssignees: Boolean): [AgentTask!]!
     """
     #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
     untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
@@ -10560,7 +10572,15 @@ export const typeDefs = `#graphql
     RESETTING, or the reset is refused SESSION_CHANGED, OTHER_WORK, UNAVAILABLE, PAUSED, SETTING_OFF or WORKER_GONE.
     """
     claimContextReset(input: ClaimContextResetInput!): ContextResetStep!
-    "#2162 — register the durable checkpoint before any process control. A wrong reference is RECOVERY_REF_INVALID and changes nothing."
+    """
+    #3276 / ruling 0090 A, hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 3 and
+    hrn:node:hadronmemory.com:specs:cor:agt:070:04: register a live checkpointNode or atomically write checkpoint,
+    exactly one. Host key only; generic node writes stay refused. Refusal order: CONTEXT_RESET_NOT_FOUND,
+    HOST_OPERATION_NOT_COLLECTED, STALE_EPOCH, CONTEXT_RESET_WRONG_PHASE, CLAIM_LAPSED, RECOVERY_REF_INVALID,
+    CHECKPOINT_MEMORY_ENCRYPTED, CHECKPOINT_LOC_TAKEN. Replay of registered non-ended phases returns the stored node
+    without writing, even if checkpoint differs. DB UTC stamp: sheds:auto-YYYY-MM-DDTHHMMSSZ (seconds); occupied live
+    or deleted address refuses with phase still claimed, no suffix/overwrite/parent/edge. Encrypted memory refused.
+    """
     registerContextResetRecovery(input: RegisterContextResetRecoveryInput!): ContextResetStep!
     """
     #2162 — the single stop grant per claim; a replay returns the same grant. The host signals only within stopLeaseMs of
@@ -10602,6 +10622,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — start a pending task: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:08).
+    #3267: may succeed with warnings, in extensions.warnings (see the experiment note on createAgentTask).
     Refusals: TASK_NOT_FOUND, TASK_NOT_ASSIGNEE, TASK_ENDED,
     TASK_INVALID_TRANSITION, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -10609,7 +10630,8 @@ export const typeDefs = `#graphql
 
     """
     #1705 — record progress on a started task: its assignee only
-    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. Refusals as startAgentTask.
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. #3267: may succeed with a
+    warning, as startAgentTask does. Refusals as startAgentTask.
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
 
@@ -15377,12 +15399,21 @@ export const typeDefs = `#graphql
     process: ObservedProcessInput!
   }
 
+  input ContextResetCheckpointInput {
+    "Nonblank after trim; at most 200 Unicode characters (CHECKPOINT_TITLE_MAX_CHARS); stored verbatim."
+    title: String!
+    "At most 65536 UTF-8 bytes (CHECKPOINT_CONTENT_MAX_BYTES); bounds refused RECOVERY_REF_INVALID after reset admission."
+    content: String!
+  }
+
   input RegisterContextResetRecoveryInput {
     appRef: String!
     resetId: ID!
     epoch: Int!
     "The checkpoint node the host wrote: its id or full URN, in the worker's own working memory."
-    checkpointNode: String!
+    checkpointNode: String
+    "#3276: atomically write one plain checkpoint in the reset worker working memory; exactly one of checkpointNode/checkpoint."
+    checkpoint: ContextResetCheckpointInput
     "The reset's own session and task."
     sessionId: ID!
     taskId: ID!

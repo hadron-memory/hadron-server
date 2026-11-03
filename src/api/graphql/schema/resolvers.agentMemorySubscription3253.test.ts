@@ -13,6 +13,8 @@ let a: string, b: string, c: string, caller: string, reader: string, agent: stri
 const ctx = (userId = caller, roles: string[] = []): Context => ({ db, userId, roles } as Context);
 const item = () => db.agentMemoryItem.findUnique({ where: { agentId_memoryId: { agentId: agent, memoryId: memory } } });
 const link = (role = 'read', op = 'addMemoryToAgent', context = ctx()) => M[op]({}, { agentRef: agent, memoryRef: memory, role }, context);
+/** Every Prisma model write method; the race barrier pauses whichever one the attach uses (#3290). */
+const ITEM_WRITES = new Set(['create', 'createMany', 'createManyAndReturn', 'update', 'updateMany', 'updateManyAndReturn', 'upsert', 'delete', 'deleteMany']);
 async function outcome(p: Promise<unknown>) {
   try { await p; return { code: 'ADMITTED', reason: undefined }; }
   catch (e) { const v = e as { code?: string; message: string; extensions?: Record<string, unknown> }; return { code: v.extensions?.code ?? v.code, reason: v.extensions?.reason }; }
@@ -158,14 +160,19 @@ for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) for (const chang
     let release!: () => void, hit!: () => void;
     const held = new Promise<void>(r => { release = r; });
     const reached = new Promise<void>(r => { hit = r; });
-    const paused = db.$extends({ query: { agentMemoryItem: { async upsert({ args, query }) {
-      hit(); await held; return query(args);
-    }, async updateMany({ args, query }) {
-      hit(); await held; return query(args);
+    // #3290: pause EVERY AgentMemoryItem write method, so a refactor to another method still meets the barrier.
+    const paused = db.$extends({ query: { agentMemoryItem: { async $allOperations({ operation, args, query }) {
+      if (ITEM_WRITES.has(operation)) { hit(); await held; }
+      return query(args);
     } } } });
     const linking = outcome(link('read-write', op, { ...ctx(), db: paused as unknown as Context['db'] }));
     const didReach = await Promise.race([reached.then(() => true), linking.then(() => false)]);
-    if (!didReach) { release(); expect(await linking).toEqual({ code: 'ADMITTED', reason: undefined }); return; }
+    if (!didReach) {
+      release();
+      // Red on a base that refuses the link; an admitted link that never met the barrier tested no serialization.
+      expect(await linking).toEqual({ code: 'ADMITTED', reason: undefined });
+      expect.fail('the AgentMemoryItem write barrier was not reached: the admitted link wrote through no Prisma write method');
+    }
     let ready!: () => void, pid = 0, finished = false;
     const identified = new Promise<void>(r => { ready = r; });
     const revoke = db.$transaction(async tx => {
@@ -193,10 +200,11 @@ for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) for (const chang
     if (op === 'updateAgentMemoryRole') await db.agentMemoryItem.create({ data: { agentId: agent, memoryId: memory, role: 'read' } });
     const before = await item();
     const sub = await subscribe('CONTRIBUTOR');
-    let release!: () => void, ready!: () => void;
+    let release!: () => void, ready!: () => void, revoker = 0;
     const held = new Promise<void>(r => { release = r; });
     const reached = new Promise<void>(r => { ready = r; });
     const revoke = db.$transaction(async tx => {
+      revoker = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
       await tx.$queryRaw`SELECT id FROM memory_subscriptions WHERE id = ${sub.id} FOR UPDATE`;
       await tx.memorySubscription.update({ where: { id: sub.id }, data: change === 'unsubscribe' ? { deletedAt: new Date() } : { role: 'READER' } });
       ready(); await held;
@@ -207,9 +215,12 @@ for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) for (const chang
     try {
       const until = Date.now() + 5000;
       while (!finished && Date.now() < until) {
+        // #3290: the waiter is the backend the revoking transaction blocks (blocker ownership), on its FOR SHARE,
+        // not any FOR SHARE anywhere in the database.
         const rows = await db.$queryRaw<Array<{ n: bigint }>>`
-          SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database()
-          AND wait_event_type = 'Lock' AND query ILIKE '%memory_subscriptions%' AND query ILIKE '%FOR SHARE%'`;
+          SELECT count(*) AS n FROM pg_stat_activity WHERE pid <> ${revoker}::int
+          AND ${revoker}::int = ANY(pg_blocking_pids(pid))
+          AND query ILIKE '%memory_subscriptions%' AND query ILIKE '%FOR SHARE%'`;
         if (Number(rows[0]?.n ?? 0) > 0) { blocked = true; break; }
         await new Promise(r => setTimeout(r, 10));
       }
@@ -226,5 +237,25 @@ for (const asked of ['read', 'read-write']) {
     await subscribe(asked === 'read' ? 'READER' : 'CONTRIBUTOR', { activated: true });
     expect(await outcome(link(asked))).toEqual({ code: 'ADMITTED', reason: undefined });
     expect((await item())?.role).toBe(asked);
+  });
+}
+
+// #3288: independently writable through C, but only the Agent org B may set the link's cap.
+for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) {
+  it(`#3288 ${op}: Agent-org READER stays capped beside another org CONTRIBUTOR`, async () => {
+    // This org sorts before B as well as being inserted first, exposing an unscoped first-role selection.
+    const other = await db.organization.create({
+      data: { id: `0000${generateId().slice(4)}`, name: 'Synthetic', urn: `o${generateId()}` },
+    });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: caller, role: 'ADMIN' } });
+    // Insert the other org first: an unscoped role select must not mistake its write level for B's.
+    await subscribe('CONTRIBUTOR', { organizationId: other.id });
+    await subscribe('READER');
+    if (op === 'updateAgentMemoryRole') {
+      await db.agentMemoryItem.create({ data: { agentId: agent, memoryId: memory, role: 'read' } });
+    }
+    const before = await item();
+    expect(await outcome(link('read-write', op))).toEqual({ code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' });
+    expect(await item()).toEqual(before);
   });
 }

@@ -113,7 +113,7 @@ import {
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
-import { loadAppModelGroups, matchAfterChange, matchTaskNow } from '../../../lib/agentTasks/matcher.js';
+import { loadAppModelGroups, matchAfterChange, matchTaskNow, matchTaskNowInTx } from '../../../lib/agentTasks/matcher.js';
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
@@ -992,6 +992,8 @@ export async function inTaskWriteTx<T>(
      * come after the worker row and cycle).
      */
     lockWorkerIds?: readonly (string | null | undefined)[];
+    /** #3243: fill and lock the whole live candidate pool at the existing graph-before-worker point. */
+    lockWorkerPool?: Set<string>;
   } = {},
 ): Promise<T> {
   const anchors: AuthorityAnchor[] = [
@@ -1030,7 +1032,12 @@ export async function inTaskWriteTx<T>(
           // of cor:agt:050:09 then reads a graph no writer can change before
           // this commits.
           await lockAppReportsTo(tx, app.id, 'shared');
-          if (options.lockWorkerIds?.length) await lockWorkersForAssignment(tx, options.lockWorkerIds);
+          if (options.lockWorkerPool) {
+            const pool = await tx.worker.findMany({ where: { appId: app.id, retiredAt: null }, select: { id: true } });
+            for (const w of pool) options.lockWorkerPool.add(w.id);
+          }
+          const workers = [...(options.lockWorkerIds ?? []), ...(options.lockWorkerPool ?? [])];
+          if (workers.length) await lockWorkersForAssignment(tx, workers);
           if (ctx.userId) {
             await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
           }
@@ -1811,10 +1818,10 @@ async function applyTaskCreateBlockers(
 }
 
 /** What a committed create does next: start the assignee it names (#1709) and file its warnings (#2198). */
-async function afterTaskCreate(ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[]) {
+async function afterTaskCreate(ctx: Context, info: Pick<GraphQLResolveInfo, 'path'> | undefined, taskId: string, warn: TaskWarningCode[], family?: string) {
   const created = await ctx.db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   // #1709 (cor:agt:070:08): created straight onto a worker, it may start that worker.
-  await launchAssignee(ctx.db, created);
+  await launchAssignee(ctx.db, created, family);
   await emitTaskWarnings(ctx, info, created.appId, { codes: warn, taskId: created.id });
   return created;
 }
@@ -1962,7 +1969,7 @@ export const agentTaskMutations = {
    * in the list, in list order. A task names an
    * existing parent, never another task of the call; `blockedByPositions` names other tasks of the call as its
    * blockers (a self-block or a cycle is TASK_BLOCKER_CYCLE). Handles follow list order and a refused call spends none. Events are a single
-   * create's, per task; matching, launches and warnings run only after the commit (warnings filed per task under
+   * create's, per task; ordinary matching, all launches and warnings run only after the commit (warnings filed per task under
    * `<responseKey>.<position>`). Not idempotent.
    *
    * LOCKS: the call holds the App's task graph EXCLUSIVE (every other task write in the App holds it shared, so the
@@ -1972,7 +1979,7 @@ export const agentTaskMutations = {
    */
   createAgentTasks: async (
     _: unknown,
-    { appRef, tasks }: { appRef: string; tasks: CreateBatchItem[] },
+    { appRef, tasks, distinctAssignees }: { appRef: string; tasks: CreateBatchItem[]; distinctAssignees?: boolean | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2004,6 +2011,9 @@ export const agentTaskMutations = {
       }
     }
     if (prepared.length === 0) throw refusedBeforeWrite;
+    const distinct = distinctAssignees === true;
+    const workerPool = new Set<string>();
+    const matchedFamilies = new Map<string, string>();
     const parents = [...new Set(prepared.map(p => p.parentTaskId).filter((id): id is string => id !== null))].sort();
     const made = await inTaskWriteTx(ctx, inApp.app, inApp.actor, () => appNotFound(appRef), async (tx, txCtx, app) => {
       for (const id of parents) await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${id} FOR UPDATE`;
@@ -2038,13 +2048,29 @@ export const agentTaskMutations = {
           throw atPosition(badInput('A blocked task cannot be matched now.'), i + 1);
         }
       }
+      if (distinct) {
+        // Reserve every named worker, including later list entries, before matching the first task.
+        const excluded = new Set<string>();
+        for (const [i, m] of out.entries()) {
+          if (!m.row.assigneeWorkerId) continue;
+          if (excluded.has(m.row.assigneeWorkerId)) throw atPosition(badInput('Distinct assignees cannot name the same worker twice.'), i + 1);
+          excluded.add(m.row.assigneeWorkerId);
+        }
+        for (const [i, p] of prepared.entries()) {
+          if (!p.input.match) continue;
+          const outcome = await matchTaskNowInTx(tx, out[i]!.id, new Date(), excluded, workerPool);
+          if ('reason' in outcome) throw taskError('TASK_MATCH_FAILED', 'A task of this distinct batch could not be matched.', { position: i + 1, reason: outcome.reason });
+          excluded.add(outcome.workerId);
+          matchedFamilies.set(out[i]!.id, outcome.family);
+        }
+      }
       return out;
-    }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), taskGraph: 'exclusive' });
+    }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), lockWorkerPool: distinct && prepared.some(p => p.input.match) ? workerPool : undefined, taskGraph: 'exclusive' });
     // Each requested match gets its single attempt in list order after the complete commit.
-    // Ordinary failures mark only that task; distinct/all-or-none matching is separate (#3243).
+    // Ordinary failures mark only that task; distinct matching already completed atomically above (#3243).
     const matchErrors: unknown[] = [];
     for (const [i, m] of made.entries()) {
-      if (!prepared[i]!.input.match) continue;
+      if (distinct || !prepared[i]!.input.match) continue;
       try {
         await matchTaskNow(ctx.db, m.id, new Date());
       } catch (error) {
@@ -2059,7 +2085,7 @@ export const agentTaskMutations = {
     const created = [];
     for (const [i, m] of made.entries()) {
       const at = typeof key === 'string' ? { path: { key: `${key}.${i + 1}`, prev: undefined, typename: undefined } } : undefined;
-      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn));
+      created.push(await afterTaskCreate(ctx, at, m.id, prepared[i]!.warn, matchedFamilies.get(m.id)));
     }
     if (inApp.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, inApp.actor.workerId);
     return created;
@@ -2323,8 +2349,9 @@ export const agentTaskMutations = {
    * Start a task: the assignee only (cor:agt:050:08). Explicit start only —
    * 050:02's inferred start is an open question (#1705 interim).
    */
-  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
+    const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee starts it.", { taskId });
       }
@@ -2335,16 +2362,29 @@ export const agentTaskMutations = {
       if (task.blocked) throw taskError('TASK_BLOCKED', 'This task has an open blocker.', { taskId });
       // #2162: unreachable while the claim requires no open task, and asserted here as a guard, not a path.
       await refuseResettingAssignee(tx, app.id, task.assigneeWorkerId);
+      // #3267: advice, decided from the locked row in this transaction; starting still succeeds. A worker assignee
+      // that already holds another STARTED task in this App, and a parent that has already ended.
+      if (task.assigneeWorkerId && (await tx.agentTask.count({
+        where: { appId: app.id, assigneeWorkerId: task.assigneeWorkerId, status: 'started' }, // this task is pending, so never counted
+      })) > 0) warn.push('task.start.other-started');
+      if (task.parentTaskId) {
+        const parent = await tx.agentTask.findUnique({ where: { id: task.parentTaskId }, select: { status: true } });
+        if (parent && ENDED.includes(parent.status)) warn.push('task.start.parent-ended');
+      }
       await tx.agentTask.update({
         where: { id: task.id },
         data: { status: 'started', startedAt: new Date(), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.started' } });
-    }, { assignee: true }),
+    }, { assignee: true });
+    await emitTaskWarnings(ctx, info, started.appId, { codes: warn });
+    return started;
+  },
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
-  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
+    const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee records progress on it.", { taskId });
       }
@@ -2352,9 +2392,16 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before recording progress.', { taskId, status: task.status });
       }
+      // #3267: advice from the locked row's children, in this transaction: it has children and none is still
+      // unended (backlog, pending or started), so its own finish is probably due. Recording still succeeds.
+      if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { notIn: [...ENDED] } } })) === 0
+        && (await tx.agentTask.count({ where: { parentTaskId: task.id } })) > 0) warn.push('task.progress.children-ended');
       await tx.agentTask.update({ where: { id: task.id }, data: { ...updatedStamp(ctx) } });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.progress' } });
-    }),
+    });
+    await emitTaskWarnings(ctx, info, recorded.appId, { codes: warn });
+    return recorded;
+  },
 
   /** #2663 / hrn:node:hadronmemory.com:specs:cor:agt:050:30: assigners dispose a finished finding, never its result. */
   disposeAgentTaskFinding: async (
@@ -2581,9 +2628,9 @@ async function assigneeAdvice(
  * assignment committed: if its assignee is a worker, ask the platform to start it through its host. Never fails the
  * assignment; a worker it cannot start leaves the task waiting.
  */
-async function launchAssignee(db: Context['db'], t: TaskRow): Promise<void> {
+async function launchAssignee(db: Context['db'], t: TaskRow, family?: string): Promise<void> {
   if (!t.assigneeWorkerId || !['pending', 'started'].includes(t.status)) return;
-  await launchForAssignment(db as PrismaClient, { appId: t.appId, taskId: t.id, workerId: t.assigneeWorkerId });
+  await launchForAssignment(db as PrismaClient, { appId: t.appId, taskId: t.id, workerId: t.assigneeWorkerId, ...(family ? { family } : {}) });
 }
 
 // ── Queries ───────────────────────────────────────────────────────────────

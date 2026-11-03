@@ -18,7 +18,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 export type HostKey = { appKeyId: string; appId: string; hostId: string };
 
 /** What a host key did, for the use record (cor:agt:070:07). #2162: `reset` is a context reset's protocol step. */
-export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability' | 'read' | 'session' | 'issue' | 'deliver' | 'stop' | 'reset' | 'terminal';
+export type HostKeyAction = 'register' | 'collect' | 'report' | 'availability' | 'read' | 'session' | 'issue' | 'deliver' | 'stop' | 'reset' | 'terminal' | 'checkpoint';
 
 /**
  * The host this key operates as RIGHT NOW: the host id on its live
@@ -57,7 +57,7 @@ export async function recordHostKeyUse(
   tx: Prisma.TransactionClient,
   key: HostKey,
   action: HostKeyAction,
-  detail: { operationId?: string; count?: number } = {},
+  detail: { operationId?: string; count?: number; refusedCode?: string } = {},
 ): Promise<void> {
   await tx.hostKeyUse.create({
     data: {
@@ -68,6 +68,7 @@ export async function recordHostKeyUse(
       action,
       operationId: detail.operationId ?? null,
       count: detail.count ?? null,
+      refusedCode: detail.refusedCode ?? null,
     },
   });
 }

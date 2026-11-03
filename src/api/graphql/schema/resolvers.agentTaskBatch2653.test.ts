@@ -46,7 +46,7 @@ beforeEach(async () => {
 
 describe('#2653 createAgentTasks (cor:agt:050:06 creating several at once)', () => {
   it('SDL: the mutation, its item input and the position field exist', () => {
-    expect(typeDefs).toMatch(/createAgentTasks\(appRef: ID!, tasks: \[CreateAgentTasksItemInput!\]!\): \[AgentTask!\]!/);
+    expect(typeDefs).toMatch(/createAgentTasks\(appRef: ID!, tasks: \[CreateAgentTasksItemInput!\]!, distinctAssignees: Boolean\): \[AgentTask!\]!/);
     expect(typeDefs).toMatch(/input CreateAgentTasksItemInput \{[\s\S]*task: CreateAgentTaskInput![\s\S]*blockedByPositions: \[Int!\]/);
   });
 

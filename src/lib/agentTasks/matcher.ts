@@ -493,46 +493,52 @@ async function tryAssign(
   anchor: number = anchorNow(),
   matchNow = false,
 ): Promise<AttemptOutcome> {
-  return db.$transaction(async (tx) => {
-    await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
-    const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
-    if (!app || app.deletedAt || app.uninstalledAt) return 'task-gone';
-    // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
-    // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
-    await lockStopFence(tx, task.appId, 'shared');
-    // Same graph-before-worker order as requirement writers; team membership cannot move under the deciding read.
-    await lockTaskGraph(tx, task.appId, 'shared');
-    await lockAppReportsTo(tx, task.appId, 'shared');
-    // The per-worker lock (src/lib/agentTasks/workerLock.ts).
-    await lockWorkersForAssignment(tx, [workerId]);
-    const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
-    if (!currentTask) return 'task-gone';
-    if (!(await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor))) return 'worker-not-free';
-    const creator = task.createdByWorkerId ?? null;
-    // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
-    const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
-    if (covering.has(workerId)) return 'worker-not-free';
-    // R71: a task its creator made under a pause or halt waits while that still covers the creator.
-    if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
-    await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
-    const n = await tx.agentTask.updateMany({
-      where: { id: task.id, appId: task.appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
-        matchPending: matchNow, matchFailedAt: null,
-        requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
-      data: {
-        assigneeWorkerId: workerId,
-        matchPending: false, matchFailedAt: null, matchFailedReason: null,
-        assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null,
-        updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
-      },
-    });
-    if (n.count === 0) return 'task-gone';
-    await appendTaskEvent(tx, {
-      appId: task.appId, taskId: task.id, actor: PLATFORM_ACTOR, createdAt: now,
-      event: { type: 'assignment.matched', assignee: { workerId }, family, closeSessionWhenDone: task.closeSessionWhenDone },
-    });
-    return 'assigned';
+  return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow));
+}
+
+/** Shared deciding write. A batch caller already holds every candidate worker lock before its task rows. */
+async function tryAssignInTx(
+  tx: Prisma.TransactionClient, task: QueuedTask, workerId: string, family: string, now: Date,
+  hooks: MatcherHooks, anchor: number, matchNow: boolean,
+): Promise<AttemptOutcome> {
+  await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
+  const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
+  if (!app || app.deletedAt || app.uninstalledAt) return 'task-gone';
+  // #2022: the App's stop fence, shared, then the authoritative stop check: a signal set after the candidates were
+  // loaded is seen here, or waits for this assignment (src/lib/stopSignals/state.ts, the lock order).
+  await lockStopFence(tx, task.appId, 'shared');
+  // Same graph-before-worker order as requirement writers; team membership cannot move under the deciding read.
+  await lockTaskGraph(tx, task.appId, 'shared');
+  await lockAppReportsTo(tx, task.appId, 'shared');
+  // The per-worker lock (src/lib/agentTasks/workerLock.ts).
+  await lockWorkersForAssignment(tx, [workerId]);
+  const currentTask = await tx.agentTask.findUnique({ where: { id: task.id }, select: { requirements: true } });
+  if (!currentTask) return 'task-gone';
+  if (!(await stillFreeAs(tx, task.appId, workerId, family, now, parseRequirements(currentTask.requirements), anchor))) return 'worker-not-free';
+  const creator = task.createdByWorkerId ?? null;
+  // Decided at the moment after the waits (Xan #2166 LOCAL-1), not the pass's start.
+  const covering = await coveringSignals(tx, task.appId, creator && creator !== workerId ? [workerId, creator] : [workerId], afterWaits(now, anchor));
+  if (covering.has(workerId)) return 'worker-not-free';
+  // R71: a task its creator made under a pause or halt waits while that still covers the creator.
+  if (creator && timeStoppedWorkers(covering).has(creator)) return 'task-gone';
+  await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
+  const n = await tx.agentTask.updateMany({
+    where: { id: task.id, appId: task.appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
+      matchPending: matchNow, matchFailedAt: null,
+      requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
+    data: {
+      assigneeWorkerId: workerId,
+      matchPending: false, matchFailedAt: null, matchFailedReason: null,
+      assignedAt: now, assignedBy: null, assignedByWorkerId: null, assignedByAgentId: null,
+      updatedBy: null, updatedByWorkerId: null, updatedByAgentId: null,
+    },
   });
+  if (n.count === 0) return 'task-gone';
+  await appendTaskEvent(tx, {
+    appId: task.appId, taskId: task.id, actor: PLATFORM_ACTOR, createdAt: now,
+    event: { type: 'assignment.matched', assignee: { workerId }, family, closeSessionWhenDone: task.closeSessionWhenDone },
+  });
+  return 'assigned';
 }
 
 export type MatchResult = { taskId: string; workerId: string; family: string };
@@ -723,12 +729,29 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date):
   const anchor = anchorNow();
   const task = await db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   if (!task.matchPending || task.status !== 'pending' || task.assigneeWorkerId || task.assigneeUserId) return;
+  const outcome = await chooseMatchNow(db, task, now, async (workerId, family) =>
+    tryAssign(db, task, workerId, family, now, {}, anchor, true));
+  if ('workerId' in outcome) {
+    if (!outcome.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
+    return;
+  }
+  const { reason } = outcome;
+  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
+    data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
+}
+
+/** Same eligibility and reason ordering for single-shot and atomic batch matching. */
+async function chooseMatchNow(
+  db: Db, task: Awaited<ReturnType<Prisma.TransactionClient['agentTask']['findUniqueOrThrow']>>, now: Date,
+  assign: (workerId: string, family: string) => Promise<AttemptOutcome>,
+  excluded: ReadonlySet<string> = new Set(), poolIds?: ReadonlySet<string>,
+): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason}> {
   const req = parseRequirements(task.requirements);
   let reason: MatchFailureReason = 'NOBODY_FREE';
   if (task.blocked) reason = 'NOBODY_FREE';
   else if (req.invalid) reason = 'REQUIREMENTS_EXCLUDED';
   else {
-    const states = await loadWorkerWorkStates(db, task.appId, now, { bySession: true });
+    const states = (await loadWorkerWorkStates(db, task.appId, now, { bySession: true })).filter(w => !poolIds || poolIds.has(w.id));
     const roles = states.filter(w => roleAllowed(req, w.role));
     const pool = req.teamWorkerId ? await matchingTeamPool(db, task.appId, req.teamWorkerId) : null;
     const team = roles.filter(w => !pool || pool.has(w.id));
@@ -741,19 +764,30 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date):
     else if (pool && team.length === 0) reason = 'TEAM_POOL_EMPTY';
     else if (eligible.length === 0) reason = 'REQUIREMENTS_EXCLUDED';
     else {
-      const free = eligible.filter(w => w.free && matchable(w));
+      const free = eligible.filter(w => !excluded.has(w.id) && w.free && matchable(w));
       if (free.length && free.every(w => covering.has(w.id))) reason = 'STOP_SIGNAL';
       for (const w of free.filter(w => !covering.has(w.id)).sort((a,b) => tierPreference(workerTier(a)) - tierPreference(workerTier(b)) || compareRank(a,b))) {
         const family = eligibleFor(req, w, groups)!;
-        const outcome = await tryAssign(db, task, w.id, family, now, {}, anchor, true);
+        const outcome = await assign(w.id, family);
         if (outcome === 'assigned') {
-          if (!w.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: w.id, family }, now, anchor);
-          return;
+          return { workerId: w.id, family, live: w.live };
         }
         if (outcome === 'task-gone') break;
       }
     }
   }
-  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
-    data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
+  return { reason };
+}
+
+/** #3243: caller supplies fresh pending, unassigned match rows and holds the stop,
+ * graph, reportsTo and pool-worker locks before any task row write. Re-holds in
+ * tryAssignInTx are same-transaction, same-mode. No commit, failure mark or launch
+ * here; caller rolls back its entire batch on a reason. */
+export async function matchTaskNowInTx(
+  tx: Prisma.TransactionClient, taskId: string, now: Date, excluded: ReadonlySet<string>, poolIds: ReadonlySet<string>,
+): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason}> {
+  const task = await tx.agentTask.findUniqueOrThrow({ where: { id: taskId } });
+  const anchor = anchorNow();
+  return chooseMatchNow(tx, task, now, (workerId, family) =>
+    tryAssignInTx(tx, task, workerId, family, now, {}, anchor, true), excluded, poolIds);
 }
