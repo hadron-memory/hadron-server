@@ -679,6 +679,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2883: an automation's read grant, keyed to its trigger row, and its append-only events.
 \ir app-automation-read-grant-invariants.sql
 
+-- #2659: the append-only record of a deleted user API key.
+\ir user-api-key-deletion-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
