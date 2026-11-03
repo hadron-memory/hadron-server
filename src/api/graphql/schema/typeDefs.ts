@@ -3202,7 +3202,7 @@ export const typeDefs = `#graphql
     one entry per install).
     """
     agents: [Agent!]!
-    "Key inventory, only for whoever manages the App as themselves, never through a bound worker session (hrn:node:hadronmemory.com:specs:cor:dmo:050:05)."
+    "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."
     keys: [AppKey!]!
     createdAt: DateTime!
     updatedAt: DateTime
@@ -8146,8 +8146,8 @@ export const typeDefs = `#graphql
     automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
     "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
-    "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App, acting as themselves, may list them; a grant on a personal or private memory is listed to its owner alone. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
-    appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false): [AppMemoryWriteGrant!]!
+    "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App may list them, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0111 A: one team event per admitted instructed call, never a grant id); a grant on a personal or private memory is listed to the holder alone, when they own it. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AppMemoryWriteGrant!]!
     "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of."
     automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false): [AutomationReadGrant!]!
 
@@ -9453,25 +9453,28 @@ export const typeDefs = `#graphql
 
     """
     List keys for an App, only for whoever manages the App
-    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
-    Never an App key, a bound worker session or an impersonated request.
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12; hrn:node:hadronmemory.com:specs:cor:acl:010:01),
+    as themselves, or through their held worker on a validated \`instruction\` (S6, ruling 0098). An admitted
+    instructed call records one team event (ruling 0111): the worker, the holder, the App and the instruction,
+    never a key. Never an App key, a host-launched or uninstructed worker session, a run or an impersonated request.
 
     Accepts the entity's ID or URN.
     """
-    appKeys(appRef: ID!): [AppKey!]!
+    appKeys(appRef: ID!, instruction: ActInstructionInput): [AppKey!]!
 
     """
     #2213 — \`appKeys\` as a page: the same manager-only gate and refusals
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), the same live keys, newest first with
     id descending on a tie, and the real total (hrn:node:hadronmemory.com:specs:cor:api:120:04).
-    A refused caller gets the old field's error, never a total. \`limit\` defaults to 20, 0
+    An instructed call (\`instruction\`, as on \`appKeys\`) records one team event per call, so
+    each page records one. A refused caller gets the old field's error, never a total. \`limit\` defaults to 20, 0
     returns the count only, a negative limit is 0 and a limit over 200 is served as 200
     (never refused). \`offset\` below 0 is 0. A consumer that decides on this list (the
     admin key inventory) must follow the pages to the end; \`appKeys\` stays the complete set.
 
     Accepts the entity's ID or URN.
     """
-    appKeysPage(appRef: ID!, limit: Int, offset: Int): AppKeyPage!
+    appKeysPage(appRef: ID!, limit: Int, offset: Int, instruction: ActInstructionInput): AppKeyPage!
 
     """
     025-oauth-for-mcp FR-004: list the calling User's API keys (active
@@ -10366,8 +10369,8 @@ export const typeDefs = `#graphql
     declineAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): Boolean!
     "#2484: let an App's userless runs create or update a node in one memory under one loc prefix (required; no memory-wide grant). The caller is a person acting as themselves who manages the App and can write the memory (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A shared memory must be one the App's own org or team space holds; a personal or private memory only by its owner, who must also manage the App; an encrypted memory is never grantable; nor is a system-class memory (#2710: an Agent's system memory, its boot-prompt source included, is written only by whoever manages the Agent, hrn:node:hadronmemory.com:specs:cor:agt:040:11), and a grant made on one before that rule authorizes no write. Granting the same prefix again returns the live grant. One content-free event is recorded. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
-    "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, acting as themselves. The row stays with its end time; revoking a revoked grant changes nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
-    revokeAppMemoryWriteGrant(id: ID!): AppMemoryWriteGrant!
+    "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A; one team event, never the grant id). The row stays with its end time; revoking a revoked grant changes nothing and records nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+    revokeAppMemoryWriteGrant(id: ID!, instruction: ActInstructionInput): AppMemoryWriteGrant!
     "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise, as a person (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A refusal is the same Forbidden as an unknown App, trigger or memory."
     setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
     "#2883: end an automation read grant. The App's managers or the target's manager. Terminal."
@@ -10676,8 +10679,8 @@ export const typeDefs = `#graphql
     "#1747 — give a worker a named App grant (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Whoever manages the App only. Idempotent. Person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277): never a worker session (a worker never gives a grant to itself) in any shape, a run principal, an impersonation or an App key, even when the worker's holder manages the App."
     grantApp(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
 
-    "#1747 — revoke a grant. Whoever manages the App only. Takes effect at the grantee next call."
-    revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!): AppGrant!
+    "#1747 — revoke a grant. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke records one team event (never the grant id). Takes effect at the grantee next call."
+    revokeAppGrant(appRef: String!, workerRef: String!, name: AppGrantName!, instruction: ActInstructionInput): AppGrant!
 
     """
     #1705 — assign a task with no assignee — a queued task (pending) or a BACKLOG task: the
@@ -14019,11 +14022,14 @@ export const typeDefs = `#graphql
     """
     createAppKey(appRef: ID!, label: String): AppKeyCreated!
     """
-    Revoke an AppKey. Only whoever manages the App, as themselves
-    (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:acl:010:01).
-    Never an App key, a bound worker session or an impersonated request. AppKey has no URN; the id is raw ID-only.
+    Revoke an AppKey. Only whoever manages the App, as themselves, or through their held worker on a validated
+    \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
+    hrn:node:hadronmemory.com:specs:cor:acl:010:01). Never an App key, a host-launched or uninstructed worker session,
+    a run or an impersonated request. A worker session that is refused cannot tell a missing key from an existing one.
+    An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
+    AppKey has no URN; the id is raw ID-only.
     """
-    revokeAppKey(id: ID!): Boolean!
+    revokeAppKey(id: ID!, instruction: ActInstructionInput): Boolean!
     """
     #1749 — give an App key a scope (hrn:node:hadronmemory.com:specs:cor:aut:010:04). Only whoever manages the App, as
     themselves: never an App key, a worker's session or an impersonation (person-only: giving a grant,
@@ -14034,8 +14040,8 @@ export const typeDefs = `#graphql
     APP_KEY_SCOPE_HOST_CONFLICT: revoke host:operate first.
     """
     grantAppKeyScope(id: ID!, scope: String!, hostId: String): AppKey!
-    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing."
-    revokeAppKeyScope(id: ID!, scope: String!): AppKey!
+    "#1749 — take a scope back. The key's next call is refused. Revoking a scope it does not hold changes nothing. Whoever manages the App, as themselves, or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A); an admitted instructed revoke that ended a scope records one team event (never the key or scope id)."
+    revokeAppKeyScope(id: ID!, scope: String!, instruction: ActInstructionInput): AppKey!
 
     """
     025-oauth-for-mcp FR-004: mint a new user-scoped API key for the
