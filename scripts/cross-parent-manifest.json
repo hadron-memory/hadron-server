@@ -1,5 +1,6 @@
 {
   "nonEntityTypes": {
+    "AgentTaskMatchFailure": "value",
     "NodeVectorMeta": "value",
     "NodeHit": "value",
     "FindNodesResult": "envelope",
@@ -708,6 +709,12 @@
       "class": "parent-implies-child",
       "audience": "Only the caller's own User (ctx.userId); the User's own field gates still apply.",
       "resolver": "src/api/graphql/schema/resolvers.types.ts::AuthContext"
+    },
+    "AutomationApproval.readGrants": {
+      "class": "closed-projection",
+      "projection": "AutomationReadGrant",
+      "target": "AutomationReadGrant",
+      "why": "liveReadGrants (resolvers.automationPin.ts) projects only the trigger's own live grant rows, shown to the adopter approving them; the target memory URN is named only when canReadMemory holds for the caller and is null otherwise, so the row carries nothing the memory's own read would withhold."
     },
     "Channel.memory": {
       "target": "Memory",

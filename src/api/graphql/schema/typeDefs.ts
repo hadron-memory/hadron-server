@@ -7936,6 +7936,8 @@ export const typeDefs = `#graphql
     hash: String!
     summary: AutomationSummary!
     depth: JSON!
+    "#2883: the live read grants this automation holds (memory and loc prefix), so the adopter approves what it may read. memoryUrn is null when the adopter cannot read that memory."
+    readGrants: [AutomationReadGrant!]!
   }
 
   type AutomationApprovalRow {
@@ -7968,6 +7970,24 @@ export const typeDefs = `#graphql
     "The register line this grant cites. A citation only, never evidence that the line exists."
     registerNodeUrn: String
     "The person who set it."
+    grantedBy: String!
+    createdAt: DateTime!
+    revokedAt: DateTime
+    revokedBy: String
+  }
+
+  "#2883: an automation's READ grant on one memory (the whole memory, or one loc prefix), held on the trigger row (a schedule or webhook) a run executes. Read-only: consulted only by the run's own node read, live at each read, never for writes, listing or search, and only for the memory's own run. It carries over an edit and a re-adoption and ends on revoke or when the trigger is deleted. Runs the trigger starts carry it; a manual run does not. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
+  type AutomationReadGrant {
+    id: ID!
+    appId: ID!
+    "SCHEDULE or WEBHOOK."
+    triggerKind: String!
+    "The AgentSchedule or AgentWebhook id."
+    triggerId: ID!
+    memoryUrn: String
+    "The loc prefix (the loc itself and its colon-boundary descendants), or null for the whole memory."
+    prefix: String
+    "The person who gave it."
     grantedBy: String!
     createdAt: DateTime!
     revokedAt: DateTime
@@ -8070,6 +8090,8 @@ export const typeDefs = `#graphql
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
     "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App, acting as themselves, may list them; a grant on a personal or private memory is listed to its owner alone. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false): [AppMemoryWriteGrant!]!
+    "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of."
+    automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false): [AutomationReadGrant!]!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -8126,6 +8148,17 @@ export const typeDefs = `#graphql
 
     "#1709 — the App's host registrations, liveness derived now (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Whoever reads the App's tasks and events, the App's own key included."
     hostRegistrations(appRef: String!): [HostRegistration!]!
+    """
+    #3273 (hrn:node:hadronmemory.com:specs:cor:agt:050:27, hrn:node:hadronmemory.com:specs:cor:agt:070:04):
+    the current state of one context reset whose operation this App key's host collected, ended resets included.
+    The host-key gate runs first, as for the protocol steps: HOST_KEY_REQUIRED (not an App key), APP_NOT_FOUND
+    (not the key's live App), APP_KEY_SCOPE_REQUIRED (no live host scope), APP_KEY_SESSION_BOUND (session carried).
+    Then CONTEXT_RESET_NOT_FOUND for malformed/unknown reset id, another App/host, or a missing operation, all
+    with identical message and extensions and no echoed id; then HOST_OPERATION_NOT_COLLECTED when collectedAt is null,
+    even if settlement already failed the operation. A collected operation's failed/ended reset stays readable.
+    Changes no reset, event, availability or alarm. Each host-key read/refusal is recorded (hrn:node:hadronmemory.com:specs:cor:agt:070:07).
+    """
+    contextReset(appRef: String!, resetId: ID!): ContextReset!
     "#1709 — the App's host operations, newest first (hrn:node:hadronmemory.com:specs:cor:agt:070:02). Whoever reads the App's tasks and events. A host key (one ever granted host:operate, revoked or not) is refused with FORBIDDEN, whatever it passes: it sees its own host's operations only by collecting them (hrn:node:hadronmemory.com:specs:cor:agt:070:04 S5, Holger's ruling 0). after: the endCursor of the previous page."
     hostOperations(appRef: String!, hostId: String, status: HostOperationStatus, worker: String, first: Int, after: String): HostOperationPage!
 
@@ -8198,6 +8231,8 @@ export const typeDefs = `#graphql
       parentTaskId: ID
       rootsOnly: Boolean
       queued: Boolean
+      "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."
+      matchFailed: Boolean
       limit: Int
       offset: Int
     ): [AgentTask!]!
@@ -10228,6 +10263,10 @@ export const typeDefs = `#graphql
     setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
     "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, acting as themselves. The row stays with its end time; revoking a revoked grant changes nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     revokeAppMemoryWriteGrant(id: ID!): AppMemoryWriteGrant!
+    "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise. A refusal is the same Forbidden as an unknown App, trigger or memory."
+    setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
+    "#2883: end an automation read grant. The App's managers or the target's manager. Terminal."
+    revokeAutomationReadGrant(id: ID!): AutomationReadGrant!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
@@ -10261,6 +10300,9 @@ export const typeDefs = `#graphql
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
     """
+    Items with match:true each get one post-commit match attempt in list order; failure marks that task, not a call refusal.
+    A match item blocked after all links refuses the whole call as BAD_USER_INPUT with its position, before any commit or attempt.
+    This does not ask for different workers or all-or-none matching. With no match items the ordinary batch behavior is unchanged.
     #2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06, creating several at once; ruling 0011 A): create 1 to 25
     tasks in the App appRef, all or none, in one transaction. Each task is judged exactly as createAgentTask judges it
     alone (the same gates, owner rules, refusals and warnings); the first refusal refuses the whole call, creates and
@@ -10618,7 +10660,7 @@ export const typeDefs = `#graphql
     """
     #1754 — make a backlog task ready to be worked
     (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
-    the queue. Whoever may assign a task may make it ready: its owner, a worker
+    the queue. Clears any match failure and held-back match reservation; regular matching resumes, without a second match-now attempt. Whoever may assign a task may make it ready: its owner, a worker
     the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -14115,6 +14157,10 @@ export const typeDefs = `#graphql
 
   "What the platform's matcher must respect when it chooses an assignee (plan design:agent-tasks section 3.1; consumed by T3)."
   type AgentTaskRequirements {
+    "Any one listed role suffices; null retains the single-role requirement."
+    roles: [String!]
+    "Optional matching team lead; never an authorization grant."
+    teamWorkerId: ID
     role: String
     familyIn: [String!]
     familyNotIn: [String!]
@@ -14128,6 +14174,10 @@ export const typeDefs = `#graphql
   }
 
   input AgentTaskRequirementsInput {
+    "Any one listed role suffices. Empty sets are refused. Give role or roles, not both."
+    roles: [String!]
+    "Lead worker (id, URN or name) of this App. Pool: lead, descendants and workers reporting to nobody."
+    team: String
     role: String
     "Model families the assignee must run as. Give this or familyNotIn, not both."
     familyIn: [String!]
@@ -14862,6 +14912,12 @@ export const typeDefs = `#graphql
 
   type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
 
+  "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
+  type AgentTaskMatchFailure {
+    reason: String!
+    failedAt: DateTime!
+  }
+
   """
   One piece of work a team App has assigned, or wants assigned
   (hrn:node:hadronmemory.com:specs:cor:agt:050:01). The platform records who holds it, since when and how it
@@ -14869,6 +14925,8 @@ export const typeDefs = `#graphql
   workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
   type AgentTask {
+    "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
+    matchFailure: AgentTaskMatchFailure
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
     priority: Int!
     "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
@@ -15895,6 +15953,8 @@ export const typeDefs = `#graphql
   parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
   """
   input CreateAgentTaskInput {
+    "Run one blocking match. Failure is marked and skipped by automatic runs. Assignment, cancellation, or park then ready clears it. Only for pending, unblocked tasks without an assignee; a blocked create refuses BAD_USER_INPUT atomically. Batch items run requested attempts in list order after the whole commit; a blocked match item refuses the whole call before commit, with its position. No distinct-workers guarantee."
+    match: Boolean
     "#2644 — naming priority or blockers requires the task assigner authority; otherwise creation refuses atomically."
     priority: Int
     blockedBy: [ID!]

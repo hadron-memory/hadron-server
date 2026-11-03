@@ -129,12 +129,12 @@ import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const TASK_SELECT = {
-  id: true, appId: true, status: true, parentTaskId: true, blocked: true, releasedAt: true,
+  id: true, appId: true, status: true, matchFailedAt: true, parentTaskId: true, blocked: true, releasedAt: true,
   ownerWorkerId: true, ownerUserId: true, assigneeWorkerId: true, assigneeUserId: true,
   startBy: true, finishBy: true, assignedAt: true, startedAt: true, createdAt: true,
 } as const;
 type SelectedTaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
-type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy'>>;
+type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy' | 'matchFailedAt'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy' | 'matchFailedAt'>>;
 
 /** Everything one task's rules read. */
 export type StallInputs = {
@@ -454,7 +454,7 @@ export function stallCandidates(
   // stint would share the first alarm's episode key and be silenced. Rows with
   // no queue event (seeded past the resolvers) fall back to creation, the
   // pre-#1754 start.
-  if (task.status === 'pending' && !assignee) {
+  if (task.status === 'pending' && !assignee && !task.matchFailedAt) {
     const queuedAt = floor(inputs.queuedAt ?? task.createdAt);
     add('unassignable', queuedAt, countedDueAt(queuedAt, windows.assignmentMinutes * MINUTE, inputs.stopHolds), {}, inputs.stopHolds);
   }
