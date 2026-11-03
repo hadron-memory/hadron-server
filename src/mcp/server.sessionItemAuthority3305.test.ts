@@ -5,7 +5,7 @@ import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { createTestableMcpServer } from './server.js';
-import { canReadMemory, canWriteToMemory, getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
+import { canReadMemory, canWriteToMemory, getAppMemoryAccess, getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
@@ -139,7 +139,7 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
     if (role === 'writer' && !selected) expect(written).toHaveProperty('value');
     else expect(written).toMatchObject({ error: { code: 'FORBIDDEN' } });
     // Selected-App writer-share refusal is reproduced on base2eb466b2,
-    // routed to QA separately; this item-fold change does not alter that gate.
+    // #3331 records this accepted baseline; #3305 preserves both outcomes.
   });
   it.each(['READER', 'CONTRIBUTOR'] as const)('subscription %s preserves exactly its user level', async role => {
     const subscriber = await db.organization.create({ data: { name: 'subscriber', urn: `sub-${generateId().toLowerCase()}.example` } });
@@ -162,4 +162,14 @@ it.each(['none', 'READER', 'CONTRIBUTOR', 'subscription', 'owner'] as const)('#3
   const actual = await independentUserItemAccess(db, f.user.id);
   const oracle = await getAccessibleMemoryIds(ctx(f.user.id), undefined, { excludeAppDerived: true });
   expect(ids.filter(id => actual.has(id)).sort()).toEqual(ids.filter(id => oracle?.includes(id)).sort());
+});
+
+
+it.each(['none', 'READER', 'CONTRIBUTOR'] as const)('known-user App access defaults to the independent item ceiling: %s', async role => {
+  if (role !== 'none') await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.user.id, role } });
+  const access = await getAppMemoryAccess(db, f.app.id, { callerUserId: f.user.id, memberAdmitted: true });
+  expect(access.get(f.write.id)).toBe(role === 'none' ? undefined : role === 'READER' ? 'READ_ONLY' : 'READ_WRITE');
+  expect(access.get(f.read.id)).toBe(role === 'none' ? undefined : 'READ_ONLY');
+  expect(access.get(f.agent.systemMemoryId)).toBe('READ_ONLY');
+  expect(access.get(f.team.id)).toBe('READ_ONLY');
 });

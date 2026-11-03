@@ -280,6 +280,15 @@ describe('#1092 memory read gates agree per principal shape', () => {
     const memberCtx = { db, roles: ['READER'], userId: externalMemberId } as Context;
     expect((await E.source(edge, {}, memberCtx))?.id).toBe(src.id);
     expect((await E.target(edge, {}, memberCtx))?.id).toBe(tgt.id);
+    const itemTarget = await db.node.create({
+      data: { id: generateId(), memoryId: fx.agentItemMemoryId, loc: 'x:item-only', isLink: false, name: 'item-only', tags: [] },
+    });
+    const itemEdge = await db.edge.create({
+      data: { id: generateId(), memoryId: fx.teamSpaceId, loc: 'x:src:relation:x:item-only', sourceId: src.id, targetId: itemTarget.id, name: 'relation' },
+    });
+    expect((await E.source(itemEdge, {}, memberCtx))?.id).toBe(src.id);
+    expect(await E.target(itemEdge, {}, memberCtx)).toBeNull();
+
 
     // …and the gate still CLOSES on the far side for someone outside the App:
     // the cross-memory endpoint check is doing its job, not switched off.
@@ -448,8 +457,7 @@ describe('#1092 memory read gates agree per principal shape', () => {
         organizationId: fx.orgId,
       },
     });
-    // App-INTERNAL team memory of the FIRST App: participation is its
-    // independent audience, unlike an ordinary knowledge item (#3305).
+    // App-scoped knowledge stays outside App membership authority (#653/#3305).
     const appAInternal = await db.memory.create({
       data: {
         id: generateId(),
@@ -457,8 +465,8 @@ describe('#1092 memory read gates agree per principal shape', () => {
         appId: fx.appId,
         urn: `${fx.orgId}:parity-a-internal`,
         name: 'parity-a-internal',
-        class: 'app',
-        visibility: null,
+        class: 'knowledge',
+        visibility: 'ORGANIZATION',
       },
     });
     const sharedAgentId = (
@@ -480,12 +488,15 @@ describe('#1092 memory read gates agree per principal shape', () => {
     expect(await mcpGate(bAuth, appAInternal.id)).toBe(false);
     expect(await enumerateGate(bCtx, appAInternal.id)).toBe(false);
 
-    // A member of App A still reaches it — the scope rule narrows to the App
-    // whose fold is being built, not to nothing.
+    // Neither App membership admits App-scoped knowledge; App-class team
+    // space remains independently available to the member of its own App.
     const aCtx = { db, roles: ['READER'], userId: externalMemberId } as Context;
     const aAuth = { userId: externalMemberId, roles: ['READER'] } as AuthContext;
-    expect(await mcpGate(aAuth, appAInternal.id)).toBe(true);
-    expect(await enumerateGate(aCtx, appAInternal.id)).toBe(true);
+    expect(await mcpGate(aAuth, appAInternal.id)).toBe(false);
+    expect(await enumerateGate(aCtx, appAInternal.id)).toBe(false);
+    expect(await mcpGate(aAuth, fx.teamSpaceId)).toBe(true);
+    expect(await enumerateGate(aCtx, fx.teamSpaceId)).toBe(true);
+    expect(await enumerateGate(bCtx, fx.teamSpaceId)).toBe(false);
 
     // #3305: neither App membership independently admits ordinary org knowledge,
     // even when its item is not App-scoped.
