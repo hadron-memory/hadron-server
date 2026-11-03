@@ -45,7 +45,7 @@ import {
   CANCELLABLE_PHASES,
   CLAIM_LEASE_MS,
   CLAIMED_PHASES,
-  HOST_REPORTED_REASONS,
+  hostReportedReasons,
   isRefusal,
   PROCESS_START_TIME_PATTERN,
   RELAUNCH_FAILED_REASONS,
@@ -788,10 +788,11 @@ export async function onContextResetReported(
     return;
   }
   const code = (failureReason ?? '').split(/[\s:]/, 1)[0] ?? '';
-  if (!(HOST_REPORTED_REASONS as readonly string[]).includes(code) && !r.endedAt) {
+  const reasons = hostReportedReasons(r.phase);
+  if (!(reasons as readonly string[]).includes(code) && !r.endedAt) {
     throw new ContextResetError(
       'BAD_CONTEXT_RESET_INPUT',
-      `A reset's failure starts with its reason: one of ${HOST_REPORTED_REASONS.join(', ')}, then ": " and any detail.`,
+      `A reset's failure in phase ${r.phase} starts with its reason: one of ${reasons.join(', ')}, then ": " and any detail.`,
     );
   }
   if (r.endedAt) return;
@@ -886,7 +887,7 @@ async function sweepOne(db: PrismaClient, d: { id: string; workerId: string }, n
     else if (!session || session.endedAt || session.deletedAt) reason = 'SESSION_ENDED';
     else if (op?.status === 'failed' || op?.status === 'succeeded') {
       const code = (op.failureReason ?? '').split(/[\s:]/, 1)[0] ?? '';
-      reason = (HOST_REPORTED_REASONS as readonly string[]).includes(code) ? code as ContextResetReason
+      reason = (hostReportedReasons(r.phase) as readonly string[]).includes(code) ? code as ContextResetReason
         : r.phase === 'stop-granted' || r.phase === 'agent-stopped' ? 'RELAUNCH_UNVERIFIED'
         : !op.collectedAt ? 'HOST_LOST'
         : 'REPORT_TIMEOUT';
