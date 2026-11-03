@@ -78,11 +78,12 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
     expect(await db.node.count({ where: { memoryId: f.write.id, loc: 'docs:new' } })).toBe(0);
     expect(await db.node.findUnique({ where: { loc_memoryId: { memoryId: f.write.id, loc: LOC } } })).toMatchObject({ content: 'secret write' });
   }, 20000);
-  it.each(['memory', 'node', 'find', 'create'] as const)('GraphQL %s matches item deletion', async door => {
+  it.each(['memory', 'node', 'find', 'appNodes', 'create'] as const)('GraphQL %s matches item deletion', async door => {
     const user = session(selected);
     const call = () => door === 'memory' ? Q.memory({}, { ref: f.write.id }, user)
       : door === 'node' ? Q.node({}, { ref: urn(f.write) }, user)
       : door === 'find' ? Q.findNodes({}, { filter: { memoryIds: [f.write.id] }, query: 'needle3305', mode: 'keyword', limit: 10 }, user)
+      : door === 'appNodes' ? Q.appNodes({}, { appRef: f.app.id }, user)
       : M.createNode({}, { input: { memoryId: f.write.id, loc: 'docs:gql-new', name: 'unauthorized' } }, user);
     const linked = await result(call);
     await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: f.agent.id, memoryId: f.write.id } } });
@@ -90,6 +91,7 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
     expect(linked).toEqual(unlinked);
     if (door === 'memory' || door === 'node') expect(unlinked).toEqual({ value: null });
     if (door === 'find') expect((unlinked as any).value.hits).toEqual([]);
+    if (door === 'appNodes') expect((unlinked as any).value.some((node: { memoryId: string }) => node.memoryId === f.write.id)).toBe(false);
     if (door === 'create') {
       expect(unlinked).toHaveProperty('error');
       expect(await db.node.count({ where: { memoryId: f.write.id, loc: 'docs:gql-new' } })).toBe(0);
@@ -98,7 +100,7 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
   it.each(['READER', 'CONTRIBUTOR'] as const)('independent org %s keeps its own level and the item ceiling agrees with runs', async role => {
     await db.orgMember.create({ data: { organizationId: f.org.id, userId: f.user.id, role } });
     const user = session(selected);
-    const run = await db.appRun.create({ data: { organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
     const runPrincipal = runAuthContext(run);
     const sessionItems = await getPrincipalAppMemoryAccess(db, user);
     const runItems = await getPrincipalAppMemoryAccess(db, runPrincipal);
@@ -121,6 +123,23 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
     for (const agent of [f.agent, f.second]) expect(await canReadMemory(db, user, agent.systemMemoryId)).toBe(true);
     expect(await canReadMemory(db, user, f.team.id)).toBe(true);
     expect(await canWriteToMemory(db, user, f.team.id)).toBe(true);
+  });
+  it('an inadmissible item on the same installed system memory cannot remove its independent read path', async () => {
+    await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: f.second.systemMemoryId, role: 'read-write' } });
+    expect((await independentUserItemAccess(db, f.user.id)).has(f.second.systemMemoryId)).toBe(false);
+    expect((await getPrincipalAppMemoryAccess(db, session(selected))).get(f.second.systemMemoryId)).toBe('READ_ONLY');
+    expect(await canReadMemory(db, session(selected), f.second.systemMemoryId)).toBe(true);
+  });
+  it.each(['reader', 'writer'] as const)('personal share %s keeps its baseline direct GraphQL authority independently of an item', async role => {
+    const memory = await db.memory.create({ data: { urn: `@${f.admin.handle}:share`, name: 'shared', class: 'personal', userId: f.admin.id, ownerUserId: f.admin.id } });
+    await db.memoryShare.create({ data: { memoryId: memory.id, granteeId: f.user.id, grantorId: f.admin.id, role } });
+    await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: memory.id, role: 'read-write' } });
+    expect(await Q.memory({}, { ref: memory.id }, session(selected))).toMatchObject({ id: memory.id });
+    const written = await result(() => M.createNode({}, { input: { memoryId: memory.id, loc: 'shared:entry', name: 'shared' } }, session(selected)));
+    if (role === 'writer' && !selected) expect(written).toHaveProperty('value');
+    else expect(written).toMatchObject({ error: { code: 'FORBIDDEN' } });
+    // Selected-App writer-share refusal is reproduced on base2eb466b2,
+    // routed to QA separately; this item-fold change does not alter that gate.
   });
   it.each(['READER', 'CONTRIBUTOR'] as const)('subscription %s preserves exactly its user level', async role => {
     const subscriber = await db.organization.create({ data: { name: 'subscriber', urn: `sub-${generateId().toLowerCase()}.example` } });
