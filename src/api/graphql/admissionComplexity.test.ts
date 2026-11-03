@@ -53,6 +53,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.apps",
   "Query.assets",
   "Query.automationApprovals",
+  "Query.automationTeamSnapshotGrants", // #3350: pageTake default20/cap200; common omitted100 is conservative.
   "Query.calendarEvents",
   "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",

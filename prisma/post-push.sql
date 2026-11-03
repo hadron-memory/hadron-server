@@ -860,3 +860,5 @@ CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
 
 \ir agent-task-dispositions-invariants.sql
+
+\ir app-automation-team-snapshot-grant-invariants.sql
