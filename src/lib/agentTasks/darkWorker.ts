@@ -38,7 +38,7 @@ export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
 export type DarkReason = 'overdue' | 'wake-unacked';
 
 /** The PENDING reasons that exempt a worker from every trigger (`NO_TASK` is not one of them). */
-const EXEMPT_PENDING = new Set(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'STOPPED']);
+export const EXEMPT_PENDING = new Set(['TEAM_PAUSED', 'PAUSED', 'ISOLATED', 'STANDBY', 'STOPPED']);
 
 type DarkWorker = { workerId: string; reason: DarkReason; status: WorkerCheckStatus; oldestWakeAgeSeconds: number | null };
 
@@ -275,7 +275,11 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
 }
 
 /** The evidence a dark-worker alarm carries beyond its reason: shown only to a reader of the worker's internals. */
-const EVIDENCE_KEYS = ['lastCheckedAt', 'oldestWakeAgeSeconds'] as const;
+const EVIDENCE_KEYS: Record<string, readonly string[]> = {
+  'alarm.dark-worker': ['lastCheckedAt', 'oldestWakeAgeSeconds'],
+  // #2763: when the coordinator last assigned and how many lane workers were free describe the team's internals.
+  'alarm.coordinator-cadence': ['lastAssignedAt', 'freeWorkerCount'],
+};
 
 /**
  * An event's payload as one reader may see it. Every event but a dark-worker alarm is returned as written; a
@@ -286,11 +290,12 @@ export async function eventPayloadFor(
   e: { type: string; appId: string; payload: unknown },
   ctx: Context,
 ): Promise<unknown> {
-  if (e.type !== DARK_WORKER_EVENT_TYPE || !e.payload || typeof e.payload !== 'object') return e.payload;
+  const evidence = EVIDENCE_KEYS[e.type];
+  if (!evidence || !e.payload || typeof e.payload !== 'object') return e.payload;
   // Lazy: resolvers.worker imports a long chain of resolvers.
   const { maySeeWorkerInternals } = await import('../../api/graphql/schema/resolvers.worker.js');
   if (await maySeeWorkerInternals(ctx, e.appId)) return e.payload;
   const rest: Record<string, unknown> = { ...(e.payload as Record<string, unknown>) };
-  for (const k of EVIDENCE_KEYS) delete rest[k];
+  for (const k of evidence) delete rest[k];
   return rest;
 }

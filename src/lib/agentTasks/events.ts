@@ -240,6 +240,8 @@ export const ALARM_EVENT_TYPES = [
   'stall.finish-by',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
+  // #2763: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31, Proposed). Task-less; its episode lives in `coordinator_cadence_episodes`.
+  'alarm.coordinator-cadence',
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
 ] as const;
