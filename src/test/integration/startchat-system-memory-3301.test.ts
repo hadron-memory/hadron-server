@@ -1,8 +1,8 @@
 /**
  * #3301 (refs #2895, #1376): an Agent's system memory is never a startChat target on ANY branch
  * (cor:cht:010:02; Vera's #2895 ruling, option a: refuse). #3295 refused it only in the session
- * branch. Every case here is a raw-DB fixture: no API path puts a system memory where a branch
- * would select it, so each row is inserted directly, the way a corrupt or hand-made row would be.
+ * branch. Every case here is a raw-DB fixture: no API path stamps a system memory with the per-user provenance
+ * column (userMemoryOfAgentId) or links one where a branch would select it, so each row is inserted directly, the way a corrupt or hand-made row would be.
  *
  * Per branch (the schedule in the issue):
  *   session  — already refused by #3295 (GREEN control on main)
@@ -90,6 +90,18 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
     expect(refused).toMatch(/No target memory available/);
     // nothing written into the system memory, and nothing provisioned in its place
     expect(await footprint(f.systemId)).toEqual(before);
+  });
+
+  it("user branch: ANOTHER Agent's system memory carrying userMemoryOfAgentId=A is refused when chatting with A (Rico §10 P2)", async () => {
+    // The reachable user-branch row is not the chat's own Agent's system memory: the lookup keys on
+    // userMemoryOfAgentId + createdBy, so Agent B's system memory stamped with A's id is what it selects.
+    // A guard narrowed to "A's own systemMemoryId" would pass every other pin here; this one is red for it.
+    const a = await fixture();
+    const b = await fixture();
+    await db.memory.update({ where: { id: b.systemId }, data: { userMemoryOfAgentId: a.agentId, createdBy: a.userId } as never });
+    const before = await footprint(b.systemId);
+    expect(await start(a.agentId, { userId: a.userId })).toMatch(/No target memory available/);
+    expect(await footprint(b.systemId)).toEqual(before);
   });
 
   it('shared branch (pin-only decline, green on main): unreachable, the DB refuses a system row on the (App, Agent) shared key', async () => {
