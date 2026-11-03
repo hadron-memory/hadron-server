@@ -10,6 +10,7 @@ import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
 import { requireAppKeyManager } from './appKeyManagement.js';
+import { callerIsWorkerSession } from './resolvers.instruction.js';
 import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
@@ -1873,6 +1874,9 @@ export const typeResolvers = {
       // #1744: an App read grants no credential inventory. Check even an eager list.
       const app = await ctx.db.app.findFirst({ where: { id: a.id, deletedAt: null } });
       if (!app) throw authorizationDenied();
+      // #3311: a nested field carries no instruction, so a worker session reaching it is headless and refused (S3b
+      // admits an instructed worker through appKeys / appKeysPage only). Both the transport actor and a session row.
+      if (await callerIsWorkerSession(ctx)) throw authorizationDenied();
       await requireAppKeyManager(ctx, app);
       if (a.keys) return a.keys;
       return ctx.db.appKey.findMany({

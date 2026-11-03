@@ -22,6 +22,9 @@ import { APP_KEY_SCOPES, isAppKeyScope, type AppKeyScopeName } from '../../../li
 import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
 import { appKeyHostUses } from './resolvers.hostOperation.js';
+import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { admitAppManagement, requireInstructedActKeepingRuns, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
 const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
 const scopeForbidden = () => taskError('FORBIDDEN', 'Only whoever manages this App can change what its keys may do.');
@@ -39,18 +42,40 @@ async function changeScope(
   ctx: Context,
   id: string,
   scope: string,
-  apply: (tx: Prisma.TransactionClient, keyId: string, scope: AppKeyScopeName, userId: string) => Promise<void>,
+  /** Resolves to true when the call changed a row (a revoke of a scope the key does not hold changes nothing). */
+  apply: (tx: Prisma.TransactionClient, keyId: string, scope: AppKeyScopeName, userId: string) => Promise<void | boolean>,
   hostId?: string | null,
-  /** #3277: `grant.give` for grantAppKeyScope (person-only, cor:dmo:050:12); revoke passes none and keeps its gate (S3b). */
+  /** #3277: `grant.give` for grantAppKeyScope (person-only, cor:dmo:050:12). */
   personOnly?: PersonOnlyAct,
+  /** #3311: revoking a scope is allowed on a holder's instruction (S6); only the revoke passes this. */
+  revoke?: { instruction?: ActInstruction | null },
 ) {
-  const { key, app, actor } = await resolveKey(ctx, id);
+  let resolved: Awaited<ReturnType<typeof resolveKey>>;
+  try {
+    resolved = await resolveKey(ctx, id);
+  } catch (e) {
+    // A worker session never learns whether a key exists: a missing key and one it may not act on answer alike.
+    // Only the not-found answer is converted; an outage stays an outage.
+    if (revoke && (e as { extensions?: { code?: string } }).extensions?.code === 'APP_KEY_NOT_FOUND' && await callerIsWorkerSession(ctx)) throw scopeForbidden();
+    throw e;
+  }
+  const { key, app, actor } = resolved;
+  // A worker session is admitted (or refused) before anything else about the key is told: an unknown scope or an
+  // uninstalled App answers a refused worker as a missing key does.
+  if (revoke && await callerIsWorkerSession(ctx)) await admitAppManagement(ctx, app, scopeForbidden, revoke.instruction);
   requireWritable(ctx, app);
   if (!isAppKeyScope(scope)) {
     throw new GraphQLError(`Unknown scope "${scope}". The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (hostId !== undefined) checkHostArg(scope, hostId);
   await inTaskWriteTx(ctx, app, actor, () => keyNotFound(id), async (tx, txCtx, fresh) => {
+    let admission: ActAdmission | null = null;
+    if (revoke) {
+      // #3311: a person as themselves, or their held worker on a validated instruction; judged on the holder.
+      // The session row is fenced before the judgement, so a session end cannot commit between it and the write.
+      await lockCallerSession(tx, txCtx.sessionId);
+      admission = await requireInstructedActKeepingRuns(txCtx, fresh.id, revoke.instruction, () => managesApp(txCtx, fresh), readActInstruction, scopeForbidden);
+    } else
     // Whoever manages the App, as a person: not a worker's session, not a key, not an impersonation.
     if (!(await actorManagesApp(txCtx, fresh, actor)) || actor.kind !== 'user') throw scopeForbidden();
     // #3277: giving a scope is giving a grant, person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling
@@ -59,8 +84,9 @@ async function changeScope(
     if (personOnly) await requirePersonOnlyAct(txCtx, personOnly, scopeForbidden);
     const live = await tx.appKey.findFirst({ where: { id: key.id, appId: fresh.id, revokedAt: null }, select: { id: true } });
     if (!live) throw keyNotFound(id);
-    await apply(tx, key.id, scope, actor.userId);
-  }, { lockMode: 'exclusive' });
+    const changed = await apply(tx, key.id, scope, (txCtx.userId ?? actor.userId)!);
+    if (revoke && admission && changed) await appendCredentialInstructionEvent(tx, { appId: fresh.id, admission, act: 'app-key.scope-revoke' });
+  }, { lockMode: 'exclusive', ...(actor.kind === 'worker' ? { lockWorkerIds: [actor.workerId] } : {}) });
   return ctx.db.appKey.findUniqueOrThrow({ where: { id: key.id } });
 }
 
@@ -78,13 +104,14 @@ export const appKeyScopeMutations = {
       }
       if (!have) await tx.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope, grantedByUserId: userId, hostId } });
     }, a.hostId ?? null, 'grant.give'),
-  revokeAppKeyScope: (_: unknown, a: { id: string; scope: string }, ctx: Context) =>
+  revokeAppKeyScope: (_: unknown, a: { id: string; scope: string; instruction?: ActInstruction | null }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
-      await tx.appKeyScope.updateMany({
+      const ended = await tx.appKeyScope.updateMany({
         where: { appKeyId: keyId, scope, revokedAt: null },
         data: { revokedAt: new Date(), revokedByUserId: userId },
       });
-    }),
+      return ended.count > 0;
+    }, undefined, undefined, { instruction: a.instruction }),
 };
 
 /** #1709: host:operate names exactly one host (cor:agt:070:04); no other scope takes one. */

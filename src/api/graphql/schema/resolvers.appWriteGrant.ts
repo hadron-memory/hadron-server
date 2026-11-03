@@ -8,7 +8,7 @@
  *    App (cor:dmo:050:12, the shared {@link managesApp}) and can WRITE the target memory themselves (the delegation
  *    ceiling, cor:acl:040). A shared memory must be one the App's own org or team space already holds; a personal or
  *    private memory is grantable only by its OWNER, who must also manage the App; an encrypted one never.
- *  - REVOKE: whoever manages the App, as themselves; nothing more.
+ *  - REVOKE: whoever manages the App, as themselves, or their held worker on a validated instruction (#3311, S6).
  *  - LIST: the same managers; a grant on a personal or private memory is shown to its owner alone.
  *
  * Every refusal on the set and revoke doors is the one `Forbidden`, and an unknown App, memory or grant is the same
@@ -27,6 +27,10 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { parseUrnInput } from '../../../lib/urn.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { admitAppManagement, admitCredentialList, lockInstructedActRows } from './resolvers.instruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { requireMemoryWriteAccess, safeCanonicalUrn, type Context } from './resolvers.helpers.js';
 
 const denied = () => authorizationDenied();
@@ -151,41 +155,55 @@ export const appWriteGrantMutations = {
     return project(row, memory, actorId);
   },
 
-  revokeAppMemoryWriteGrant: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    const actorId = await requirePersonAsThemselves(ctx, denied);
+  revokeAppMemoryWriteGrant: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
+    // A missing grant answers the one refusal, before any admission, so no caller learns whether a grant exists.
     const existing = await ctx.db.appMemoryWriteGrant.findUnique({ where: { id }, include: { app: { select: { id: true, organizationId: true, ownerUserId: true } } } });
     if (!existing) throw denied();
     const app0 = existing.app;
+    // #3311 / cor:dmo:050:12 S6, ruling 0109 A: a person as themselves, or their held worker on a validated
+    // instruction, judged on the holder. The holder, never the worker, is the one who revokes and who reads back.
+    let admission: ActAdmission = await admitAppManagement(ctx, app0, denied, instruction);
     await withAuthorizedTx(
       ctx,
       anchorsOf(app0),
       async (txCtx) => {
-        const app = await txCtx.db.app.findUnique({ where: { id: app0.id }, select: { id: true, organizationId: true, ownerUserId: true } });
-        if (!app || app.organizationId !== app0.organizationId || app.ownerUserId !== app0.ownerUserId) throw denied();
-        if (!(await managesApp(txCtx, app))) throw denied();
+        admission = await admitAppManagement(txCtx, app0, denied, instruction, admission);
       },
-      async (tx) => {
+      async (tx, txCtx) => {
+        if (admission.kind === 'instructed-worker') {
+          // The last lock the act takes: the holder's worker and session rows, then the final judgement on them.
+          await lockInstructedActRows(tx, [admission.workerId], ctx.sessionId);
+          admission = await admitAppManagement(txCtx, app0, denied, instruction, admission);
+        }
         // The UPDATE takes the grant row's lock: it waits for a write that already read the grant (FOR SHARE) and every
         // later write sees `revokedAt`. Terminal: a second revoke matches nothing and records nothing.
-        const ended = await tx.appMemoryWriteGrant.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date(), revokedBy: actorId } });
+        const ended = await tx.appMemoryWriteGrant.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date(), revokedBy: admission.userId } });
         if (ended.count === 1) {
-          await tx.appMemoryWriteGrantEvent.create({ data: { appId: existing.appId, memoryId: existing.memoryId, grantId: id, prefix: existing.prefix, action: 'REVOKE', actorUserId: actorId } });
+          await tx.appMemoryWriteGrantEvent.create({ data: { appId: existing.appId, memoryId: existing.memoryId, grantId: id, prefix: existing.prefix, action: 'REVOKE', actorUserId: admission.userId } });
+          await appendCredentialInstructionEvent(tx, { appId: existing.appId, admission, act: 'app-write-grant.revoke' });
         }
       },
-      { afterLock: (tx) => lockManagerMemberships(tx, actorId, app0) },
+      {
+        afterLock: async (tx) => {
+          if (admission.kind === 'instructed-worker') await lockWorkersForAssignment(tx, [admission.workerId]);
+          await lockManagerMemberships(tx, admission.userId, app0);
+        },
+      },
     );
     const row = await ctx.db.appMemoryWriteGrant.findUniqueOrThrow({ where: { id } });
     const memory = await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true, class: true, userId: true } });
-    return project(row, memory, actorId);
+    return project(row, memory, admission.userId);
   },
 };
 
 export const appWriteGrantQueries = {
-  appMemoryWriteGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null }, ctx: Context) => {
-    const actorId = await requirePersonAsThemselves(ctx, denied);
+  appMemoryWriteGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null; instruction?: ActInstruction | null }, ctx: Context) => {
     const { id: appId } = await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef));
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null, uninstalledAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
-    if (!app || !(await managesApp(ctx, app))) throw denied();
+    if (!app) throw denied();
+    // #3311 / ruling 0111 A: a person as themselves, or their held worker on a validated instruction (one record per
+    // admitted instructed call, before the rows are read). The personal/private filter below is the HOLDER's, never wider.
+    const { userId: actorId } = await admitCredentialList(ctx, app, denied, input.instruction, 'app-write-grant.list');
     const rows = await ctx.db.appMemoryWriteGrant.findMany({
       where: { appId, ...(input.includeRevoked ? {} : { revokedAt: null }) },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],

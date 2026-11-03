@@ -594,12 +594,12 @@
     "AppKeyCreated.key": {
       "target": "AppKey",
       "class": "parent-implies-child",
-      "audience": "Only createAppKey returns AppKeyCreated, after requireAppKeyManager; those callers are exactly the managers who may list keys.",
-      "resolver": "src/api/graphql/schema/resolvers.mutation.app.ts::requireAppKeyManager"
+      "audience": "Only createAppKey returns AppKeyCreated, after requireAppKeyIssuer (a person who manages the App); those callers are exactly the managers who may list keys.",
+      "resolver": "src/api/graphql/schema/resolvers.mutation.app.ts::requireAppKeyIssuer"
     },
     "AppKeyPage.items": {
       "class": "parent-implies-child",
-      "audience": "App key managers (appKeyInventoryScope, requireAppKeyManager); live keys only; AppKey exposes a preview, never the secret",
+      "audience": "App key managers, as themselves or through a held worker on a validated instruction (appKeyInventoryScope, admitCredentialList); live keys only; AppKey exposes a preview, never the secret",
       "resolver": "src/api/graphql/schema/resolvers.query.app.ts::appKeyInventoryScope",
       "target": "AppKey"
     },
