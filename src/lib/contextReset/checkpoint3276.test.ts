@@ -7,7 +7,8 @@ import { buildSchema, graphql, defaultFieldResolver } from 'graphql';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../id.js';
-import { registerContextResetRecovery } from './contextReset.js';
+import { sweepUnreportedHostOperations } from '../hostOperations/settle.js';
+import { sweepContextResets, registerContextResetRecovery } from './contextReset.js';
 vi.mock('../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../bus/index.js',()=>({getBusClient:vi.fn(async()=>null)}));
 let f:ResetFixture;
@@ -21,12 +22,16 @@ it('writes exactly one plain node in the working memory, with host-key authorshi
  const s=await claimed(),n=await nodeCount(),edges=await db.edge.count();
  const out=await call(s);expect(out).toMatchObject({refused:null,replayed:false,reset:{phase:'checkpointed'}});
  const ref=out.reset.recoveryRef;const node=await db.node.findUniqueOrThrow({where:{id:ref.checkpointNodeId}});
- expect(node).toMatchObject({memoryId:f.kitMemory.id,name:'Recovery',content:'private checkpoint',nodeType:'info',role:null,isRunnable:false,createdBy:f.orca1.id});
+ expect(node).toMatchObject({memoryId:f.kitMemory.id,name:'Recovery',content:'private checkpoint',nodeType:'info',role:null,isRunnable:false,createdBy:f.orca1.id,authoredByHuman:null});
  expect(node.loc).toMatch(/^sheds:auto-\d{4}-\d{2}-\d{2}T\d{6}Z$/);
  expect(ref).toMatchObject({sessionId:f.session.id,taskId:s.taskId});
  expect(await nodeCount()).toBe(n+1);expect(await db.edge.count()).toBe(edges);
  expect(await db.node.count({where:{memoryId:f.kitMemory.id,loc:'sheds'}})).toBe(0);
  expect(await uses()).toHaveLength(1);
+ const memory=await db.memory.findUniqueOrThrow({where:{id:f.kitMemory.id}});
+ const tree=await createTestableMcpServer({userId:f.manager.id,roles:['READER']}).callToolText('hadron_list_nodes',{memoryUrn:`hrn:mem:${memory.urn}`,depth:1});
+ expect(tree).toMatch(/sheds.*missing.*use hadron_create_parent_node/);
+ expect(await db.node.count({where:{memoryId:f.kitMemory.id,loc:'sheds'}})).toBe(0);
 });
 it('replays the stored node through each registered nonended phase, ignoring changed checkpoint content',async()=>{
  const s=await claimed();const first=await call(s);const n=await nodeCount();
@@ -54,20 +59,20 @@ it.each(['epoch','phase','lease','collected','host','app','missing','malformed',
  let s:{taskId:string;resetId:string;operationId:string};
  if(kind==='collected'){const t=await f.startedTask();await f.finish(t.id);const r=await db.contextReset.findUniqueOrThrow({where:{taskId:t.id}});s={taskId:t.id,resetId:r.id,operationId:r.hostOperationId!};}
  else if(kind==='phase')s=await f.collectedReset();else s=await claimed();
- const n=await nodeCount();let p:Promise<unknown>,expected:string|undefined;
+ const n=await nodeCount();let p:Promise<unknown>,expected:string|undefined;let auditKey:string|null=f.orca1.id;
  if(kind==='epoch'){p=call(s,{epoch:0});expected='STALE_EPOCH';}
  else if(kind==='phase'){p=call(s,{epoch:0});expected='CONTEXT_RESET_WRONG_PHASE';}
- else if(kind==='lease'){await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(0)}});p=call(s);expected='CLAIM_LAPSED';}
+ else if(kind==='lease'){await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(0)}});p=call(s,{checkpoint:{title:'',content:''}});expected='CLAIM_LAPSED';}
  else if(kind==='collected'){p=call(s,{epoch:0});expected='HOST_OPERATION_NOT_COLLECTED';}
- else if(kind==='host'){const k=await f.hostKey('other');p=call(s,{},k);expected='CONTEXT_RESET_NOT_FOUND';}
- else if(kind==='app'){const other=await db.app.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`}});const key=await db.appKey.create({data:{appId:other.id,keyHash:generateId(),keyPreview:'test'}});await M.grantAppKeyScope({}, {id:key.id,scope:'host:operate',hostId:'orca1'},ctx(f.manager.id));p=M.registerContextResetRecovery({}, {input:{...input(s),appRef:other.id}}, {...f.keyCtx(key),appId:other.id});expected='CONTEXT_RESET_NOT_FOUND';}
+ else if(kind==='host'){const k=await f.hostKey('other');auditKey=k.id;p=call(s,{},k);expected='CONTEXT_RESET_NOT_FOUND';}
+ else if(kind==='app'){const other=await db.app.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`}});const key=await db.appKey.create({data:{appId:other.id,keyHash:generateId(),keyPreview:'test'}});auditKey=key.id;await M.grantAppKeyScope({}, {id:key.id,scope:'host:operate',hostId:'orca1'},ctx(f.manager.id));p=M.registerContextResetRecovery({}, {input:{...input(s),appRef:other.id}}, {...f.keyCtx(key),appId:other.id});expected='CONTEXT_RESET_NOT_FOUND';}
  else if(kind==='missing'||kind==='malformed'){p=call(s,{resetId:kind==='missing'?generateId():'invalid/id'});expected='CONTEXT_RESET_NOT_FOUND';}
  else if(kind==='scope'||kind==='revoked'){if(kind==='scope')await M.revokeAppKeyScope({}, {id:f.orca1.id,scope:'host:operate'},ctx(f.manager.id));else await db.appKey.update({where:{id:f.orca1.id},data:{revokedAt:new Date()}});p=call(s);expected='APP_KEY_SCOPE_REQUIRED';}
- else if(kind==='person'){p=M.registerContextResetRecovery({}, {input:{appRef:f.app.id,...input(s)}},ctx(f.manager.id));}
- else {const k=await db.appKey.create({data:{appId:f.app.id,keyHash:generateId(),keyPreview:'test'}});p=call(s,{},k);expected='APP_KEY_SCOPE_REQUIRED';}
+ else if(kind==='person'){auditKey=null;p=M.registerContextResetRecovery({}, {input:{appRef:f.app.id,...input(s)}},ctx(f.manager.id));}
+ else {auditKey=null;const k=await db.appKey.create({data:{appId:f.app.id,keyHash:generateId(),keyPreview:'test'}});p=call(s,{},k);expected='APP_KEY_SCOPE_REQUIRED';}
  if(kind==='lease'){expect(await p).toMatchObject({refused:'CLAIM_LAPSED'});}else {const c=await code(p);if(expected)expect(c).toBe(expected);else expect(c).toBeDefined();}
  expect(await nodeCount()).toBe(n);
- if(!['host','app','person','plain-key'].includes(kind)){expect(await uses()).toHaveLength(1);if(kind!=='lease')expect((await uses())[0]?.refusedCode).toBe(expected);}
+ if(auditKey){const records=await db.hostKeyUse.findMany({where:{appKeyId:auditKey,action:'checkpoint'}});expect(records).toHaveLength(1);expect(records[0]?.refusedCode).toBe(expected);}
 });
 it('keeps the legacy checkpoint-node input and rejects memory redirection on the new input',async()=>{
  const s=await claimed();const node=await f.checkpoint();
@@ -149,7 +154,7 @@ it('registration failure rolls back its new checkpoint as well',async()=>{
 
 it('checkpoint audit obeys the real closed CHECK and append-only trigger',async()=>{
  const s=await claimed();await call(s);const [use]=await uses();expect(use?.operationId).toBe(s.operationId);
- await expect(db.hostKeyUse.create({data:{appKeyId:f.orca1.id,appId:f.app.id,hostId:'orca1',action:'invented'}})).rejects.toThrow(/chk_host_key_uses_shape/);
+ await expect(db.hostKeyUse.create({data:{id:generateId(),appKeyId:f.orca1.id,appId:f.app.id,hostId:'orca1',action:'invented'}})).rejects.toThrow(/chk_host_key_uses_shape/);
  await expect(db.hostKeyUse.update({where:{id:use!.id},data:{action:'reset'}})).rejects.toThrow();
  await expect(db.hostKeyUse.delete({where:{id:use!.id}})).rejects.toThrow();
  expect(await uses()).toEqual([use]);
@@ -164,7 +169,7 @@ it.each(['\u0000','\ud800'])('unstorable checkpoint text is a typed refusal, no 
 it('the deploy migration widens only the audit CHECK and keeps append-only protection',async()=>{
  const {Client}=await import('pg');const {readFileSync}=await import('node:fs');const client=new Client({connectionString:process.env.DATABASE_URL});await client.connect();
  const migration=readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql',import.meta.url),'utf8');
- const s=await claimed();const action={appKeyId:f.orca1.id,appId:f.app.id,hostId:'orca1',action:'checkpoint',operationId:s.operationId};
+ const s=await claimed();const action={id:generateId(),appKeyId:f.orca1.id,appId:f.app.id,hostId:'orca1',action:'checkpoint',operationId:s.operationId};
  const trigger=()=>client.query("SELECT pg_get_functiondef('host_key_use_append_only()'::regprocedure) AS body");
  try{
   const before=(await trigger()).rows;
@@ -197,3 +202,12 @@ it('a claim that expires while waiting on the memory lock writes no checkpoint',
   expect(await pending).toMatchObject({refused:'CLAIM_LAPSED'});expect(await nodeCount()).toBe(n);
  }finally{try{await holder.query('ROLLBACK');}finally{await holder.end();await pending;}}
 },15000);
+
+it('a failed-never-collected operation is refused before phase or epoch, no node',async()=>{
+ const t=await f.startedTask();await f.finish(t.id);const r=await db.contextReset.findUniqueOrThrow({where:{taskId:t.id}});
+ await db.hostRegistration.updateMany({where:{appId:f.app.id,hostId:'orca1'},data:{lostAt:new Date()}});
+ await sweepUnreportedHostOperations(db);await sweepContextResets(db);
+ expect(await db.hostOperation.findUniqueOrThrow({where:{id:r.hostOperationId!}})).toMatchObject({status:'failed',collectedAt:null});
+ const n=await nodeCount();expect(await code(call({resetId:r.id,taskId:t.id},{epoch:999}))).toBe('HOST_OPERATION_NOT_COLLECTED');expect(await nodeCount()).toBe(n);
+ expect((await uses()).at(-1)?.refusedCode).toBe('HOST_OPERATION_NOT_COLLECTED');
+});
