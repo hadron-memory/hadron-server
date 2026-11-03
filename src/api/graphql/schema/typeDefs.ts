@@ -10325,7 +10325,10 @@ export const typeDefs = `#graphql
     { path (the mutation's response key), code, text, register? }. Codes are a
     closed list per release (task.create.no-source, task.assign.assignee-unavailable,
     task.assign.assignee-busy, task.assign.assignee-paused,
-    task.finish.open-children, and from #2607 task.cancel.open-children on
+    task.finish.open-children, from #3267 task.start.other-started,
+    task.start.parent-ended (both on startAgentTask) and task.progress.children-ended
+    (on recordAgentTaskProgress; other-started and children-ended, like the three assign
+    facts, are filed only to a caller who may read the App's worker state), and from #2607 task.cancel.open-children on
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
     a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
@@ -10611,6 +10614,7 @@ export const typeDefs = `#graphql
 
     """
     #1705 — start a pending task: its assignee only (hrn:node:hadronmemory.com:specs:cor:agt:050:08).
+    #3267: may succeed with warnings, in extensions.warnings (see the experiment note on createAgentTask).
     Refusals: TASK_NOT_FOUND, TASK_NOT_ASSIGNEE, TASK_ENDED,
     TASK_INVALID_TRANSITION, SESSION_NOT_BOUND, APP_UNINSTALLED.
     """
@@ -10618,7 +10622,8 @@ export const typeDefs = `#graphql
 
     """
     #1705 — record progress on a started task: its assignee only
-    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. Refusals as startAgentTask.
+    (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. #3267: may succeed with a
+    warning, as startAgentTask does. Refusals as startAgentTask.
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
 
@@ -12195,14 +12200,17 @@ export const typeDefs = `#graphql
     repairAgentSystemMemory(agentRef: ID!): Agent!
 
     """
-    Attach a Memory to an Agent.
+    Attach a Memory to an Agent. #3253 (hrn:node:hadronmemory.com:specs:cor:dmo:050:09): a live subscription
+    of the Agent's org admits a cross-tenant link up to its level (READER read, CONTRIBUTOR read-write).
+    The caller must hold that capability. Activation and license add no check beyond the memory read gate.
 
     Accepts the entity's ID or URN.
     """
     addMemoryToAgent(agentRef: ID!, memoryRef: ID!, role: String): Agent!
 
     """
-    Update an Agent's role on an attached Memory.
+    Update an Agent's role on an attached Memory. #3253 (hrn:node:hadronmemory.com:specs:cor:dmo:050:09):
+    the same subscription, caller-capability, class and PUBLIC-Agent gates apply as on addMemoryToAgent.
 
     Accepts the entity's ID or URN.
     """
