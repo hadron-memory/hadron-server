@@ -50,6 +50,8 @@ for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) {
     });
   }
   it(`${op}: a READER cannot give read-write; byte-identical no-subscription refusal`, async () => {
+    // The caller independently writes A, so the subscription level is the deciding cap, not the later write gate.
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: a, userId: caller } }, data: { role: 'CONTRIBUTOR' } });
     if (op === 'updateAgentMemoryRole') await db.agentMemoryItem.create({ data: { agentId: agent, memoryId: memory, role: 'read' } });
     const before = await item();
     const baseline = await refusal(link('read-write', op));
@@ -80,19 +82,21 @@ for (const bad of ['deleted', 'other-org', 'caller-org-only', 'org-less-agent', 
       ...(['other-org', 'caller-org-only'].includes(bad) ? { organizationId: c } : {}),
     });
     expect(await refusal(link())).toBe(baseline);
+    if (bad !== 'org-less-agent') expect(await getOrgReadableMemoryIds(db, reader, memory)).not.toContain(memory);
     expect(await item()).toBeNull();
   });
 }
 
-for (const kind of ['personal', 'private', 'group', 'system', 'app-scoped', 'user-memory']) {
+for (const kind of ['personal', 'private', 'group', 'system', 'app', 'app-scoped', 'user-memory']) {
   it(`${kind}: subscription does not widen existing refusal or canonical read set`, async () => {
     const patch: Record<string, unknown> = {};
     if (kind === 'personal' || kind === 'private') Object.assign(patch, { class: kind, visibility: null, organizationId: null, ownerUserId: caller, userId: caller });
     if (kind === 'group') Object.assign(patch, { class: 'group', visibility: 'GROUP' });
     if (kind === 'system') Object.assign(patch, { class: 'system', visibility: null });
-    if (kind === 'app-scoped') {
+    if (kind === 'app-scoped' || kind === 'app') {
       const app = await db.app.create({ data: { id: generateId(), organizationId: a, name: 'Synthetic', urn: `app${generateId()}` } });
       patch.appId = app.id;
+      if (kind === 'app') Object.assign(patch, { class: 'app', visibility: null });
     }
     if (kind === 'user-memory') Object.assign(patch, { userMemoryOfAgentId: agent, createdBy: caller });
     await db.memory.update({ where: { id: memory }, data: patch });
@@ -100,7 +104,10 @@ for (const kind of ['personal', 'private', 'group', 'system', 'app-scoped', 'use
     await db.user.update({ where: { id: caller }, data: { roles: ['ADMIN'] } });
     const admin = ctx(caller, ['ADMIN']);
     const baseline = await refusal(link('read', 'addMemoryToAgent', admin));
-    expect(baseline).not.toBe('ADMITTED');
+    const expected = ['personal', 'private', 'app'].includes(kind) ? 'UNSUPPORTED_MEMORY_CLASS'
+      : kind === 'system' ? 'BAD_USER_INPUT' : 'FORBIDDEN';
+    expect(JSON.parse(baseline).extensions.code).toBe(expected);
+    if (kind === 'app-scoped') expect(JSON.parse(baseline).extensions.reason).toBe('APP_SCOPED_ATTACH');
     await subscribe('CONTRIBUTOR');
     expect(await refusal(link('read', 'addMemoryToAgent', admin))).toBe(baseline);
     expect(await getOrgReadableMemoryIds(db, reader, memory)).not.toContain(memory);
@@ -144,16 +151,19 @@ it('subscription never permits a PUBLIC Agent read-write or non-PUBLIC covered k
   expect(await item()).toBeNull();
 });
 
-for (const change of ['unsubscribe', 'downgrade'] as const) {
-  it(`attach first: subscription FOR SHARE blocks ${change} until the item commits`, async () => {
+for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) for (const change of ['unsubscribe', 'downgrade'] as const) {
+  it(`${op} first: subscription FOR SHARE blocks ${change} until the item commits`, async () => {
+    if (op === 'updateAgentMemoryRole') await db.agentMemoryItem.create({ data: { agentId: agent, memoryId: memory, role: 'read' } });
     const sub = await subscribe('CONTRIBUTOR');
     let release!: () => void, hit!: () => void;
     const held = new Promise<void>(r => { release = r; });
     const reached = new Promise<void>(r => { hit = r; });
     const paused = db.$extends({ query: { agentMemoryItem: { async upsert({ args, query }) {
       hit(); await held; return query(args);
+    }, async updateMany({ args, query }) {
+      hit(); await held; return query(args);
     } } } });
-    const linking = outcome(link('read-write', 'addMemoryToAgent', { ...ctx(), db: paused as unknown as Context['db'] }));
+    const linking = outcome(link('read-write', op, { ...ctx(), db: paused as unknown as Context['db'] }));
     const didReach = await Promise.race([reached.then(() => true), linking.then(() => false)]);
     if (!didReach) { release(); expect(await linking).toEqual({ code: 'ADMITTED', reason: undefined }); return; }
     let ready!: () => void, pid = 0, finished = false;
@@ -168,7 +178,7 @@ for (const change of ['unsubscribe', 'downgrade'] as const) {
       await identified;
       const until = Date.now() + 5000;
       while (!finished && Date.now() < until) {
-        const rows = await db.$queryRaw<Array<{ blocked: boolean }>>`SELECT cardinality(pg_blocking_pids(${pid})) > 0 AS blocked`;
+        const rows = await db.$queryRaw<Array<{ blocked: boolean }>>`SELECT cardinality(pg_blocking_pids(${pid}::int)) > 0 AS blocked`;
         if (rows[0]?.blocked) { blocked = true; break; }
         await new Promise(r => setTimeout(r, 10));
       }
@@ -179,7 +189,9 @@ for (const change of ['unsubscribe', 'downgrade'] as const) {
     expect(await outcome(link('read-write', 'updateAgentMemoryRole'))).toEqual({ code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' });
   }, 20000);
 
-  it(`${change} first: the attach waits for the row and judges the committed change`, async () => {
+  it(`${change} first: ${op} waits for the row and judges the committed change`, async () => {
+    if (op === 'updateAgentMemoryRole') await db.agentMemoryItem.create({ data: { agentId: agent, memoryId: memory, role: 'read' } });
+    const before = await item();
     const sub = await subscribe('CONTRIBUTOR');
     let release!: () => void, ready!: () => void;
     const held = new Promise<void>(r => { release = r; });
@@ -191,7 +203,7 @@ for (const change of ['unsubscribe', 'downgrade'] as const) {
     }, { timeout: 20000 });
     await reached;
     let finished = false, blocked = false;
-    const linking = outcome(link('read-write')).finally(() => { finished = true; });
+    const linking = outcome(link('read-write', op)).finally(() => { finished = true; });
     try {
       const until = Date.now() + 5000;
       while (!finished && Date.now() < until) {
@@ -204,6 +216,15 @@ for (const change of ['unsubscribe', 'downgrade'] as const) {
     } finally { release(); await Promise.all([revoke, linking]); }
     expect(blocked).toBe(true);
     expect(await linking).toEqual({ code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' });
-    expect(await item()).toBeNull();
+    expect(await item()).toEqual(before);
   }, 20000);
+}
+
+for (const asked of ['read', 'read-write']) {
+  it(`Agent-org admin alone, with no owner-org membership, links ${asked} via its subscription`, async () => {
+    await db.orgMember.delete({ where: { organizationId_userId: { organizationId: a, userId: caller } } });
+    await subscribe(asked === 'read' ? 'READER' : 'CONTRIBUTOR', { activated: true });
+    expect(await outcome(link(asked))).toEqual({ code: 'ADMITTED', reason: undefined });
+    expect((await item())?.role).toBe(asked);
+  });
 }

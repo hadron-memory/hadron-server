@@ -12141,14 +12141,17 @@ export const typeDefs = `#graphql
     repairAgentSystemMemory(agentRef: ID!): Agent!
 
     """
-    Attach a Memory to an Agent.
+    Attach a Memory to an Agent. #3253 (hrn:node:hadronmemory.com:specs:cor:dmo:050:09): a live subscription
+    of the Agent's org admits a cross-tenant link up to its level (READER read, CONTRIBUTOR read-write).
+    The caller must hold that capability. Activation and license add no check beyond the memory read gate.
 
     Accepts the entity's ID or URN.
     """
     addMemoryToAgent(agentRef: ID!, memoryRef: ID!, role: String): Agent!
 
     """
-    Update an Agent's role on an attached Memory.
+    Update an Agent's role on an attached Memory. #3253 (hrn:node:hadronmemory.com:specs:cor:dmo:050:09):
+    the same subscription, caller-capability, class and PUBLIC-Agent gates apply as on addMemoryToAgent.
 
     Accepts the entity's ID or URN.
     """
