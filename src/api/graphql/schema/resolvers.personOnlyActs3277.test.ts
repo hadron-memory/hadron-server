@@ -179,12 +179,15 @@ describe('#3307 instructed worker remains refused at person-only doors', () => {
  grantApp:c=>M.grantApp({}, {appRef:f.app.id,workerRef:f.target.id,name:'TICKER_SUBSCRIBE_WORKERS',instruction},c),
  setAppMemoryWriteGrant:c=>M.setAppMemoryWriteGrant({}, {appRef:f.app.id,memoryRef:f.dest.id,prefix:'reports:x',instruction},c),
  setAutomationReadGrant:c=>M.setAutomationReadGrant({}, {appRef:f.app.id,triggerKind:'SCHEDULE',triggerId:f.schedule.id,memoryRef:f.dest.id,prefix:'tasks',instruction},c),
- startImpersonation:c=>M.startImpersonation({}, {orgRef:f.org.id,userRef:f.mgr.id,reason:'fixture',instruction},c),
+ startImpersonation:c=>M.startImpersonation({}, {orgRef:f.org.id,userRef:(f as any).impTarget.id,reason:'fixture',instruction},c),
  };
  for(const [name,call] of Object.entries(instructed)) it(name+' refuses instruction byte-identically, no writes',async()=>{
+  if(name==='startImpersonation'){(f as any).impTarget=await db.user.create({data:{handle:'po-imp-target',roles:['READER']}});await db.orgMember.create({data:{organizationId:f.org.id,userId:(f as any).impTarget.id,role:'CONTRIBUTOR'}});}
   const before={writes:await writes(),events:await db.agentTeamEvent.findMany({where:{appId:f.app.id}}),support:await db.impersonationSession.findMany()};
-  const plain=name==='startImpersonation'?(c:Context)=>M.startImpersonation({}, {orgRef:f.org.id,userRef:f.mgr.id,reason:'fixture'},c):DOORS[name];
-  expect(await answer(CLASSES.sessionRowWorker(call))).toEqual(await answer(CLASSES.sessionRowWorker(plain)));
+  const plain=name==='startImpersonation'?(c:Context)=>M.startImpersonation({}, {orgRef:f.org.id,userRef:(f as any).impTarget.id,reason:'fixture'},c):DOORS[name];
+  const got=await answer(CLASSES.sessionRowWorker(call));
+  expect(got).toEqual(await answer(CLASSES.sessionRowWorker(plain)));
+  expect(got).toHaveProperty('code',name==='grantApp'?'APP_GRANT_FORBIDDEN':'FORBIDDEN');
   expect({writes:await writes(),events:await db.agentTeamEvent.findMany({where:{appId:f.app.id}}),support:await db.impersonationSession.findMany()}).toEqual(before);
  });
 });

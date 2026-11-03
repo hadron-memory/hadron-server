@@ -1,3 +1,6 @@
+import { buildSchema } from 'graphql';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
 /** #3307 / cor:dmo:050:12: instruction carries the holder's right, never more; record in the act transaction. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -31,6 +34,7 @@ beforeEach(async()=>{
  await db.appMember.create({data:{appId:app.id,userId:holder.id,role:'owner'}});
  f={holder,other,org,app};
  const agent=await M.createAgent({}, {orgId:org.id,name:'Current',personaRole:'server-engineer'},ctx({userId:other.id}));
+ await db.node.create({data:{memoryId:agent.systemMemoryId,loc:'roles',name:'Roles',nodeType:'info'}});
  const next=await M.createAgent({}, {orgId:org.id,name:'Next',personaRole:'qa-engineer'},ctx({userId:other.id}));
  for(const a of [agent,next]) { await db.appAgent.create({data:{appId:app.id,agentId:a.id}}); await serveAgentBootPrompt(db,a.id,'{{worker.name}} {{worker.role}}'); }
  const worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Caller',slug:'caller',heldByUserId:holder.id}});
@@ -87,6 +91,20 @@ describe('#3307 instructed acts',()=>{
    const ref=`hrn:agenttask:${f.app.urn}:${task.handle}`;
    await call({kind:'TASK',ref});expect((await instructionEvents())[0].payload).toMatchObject({instruction:{kind:'TASK',ref}});
   });
+  it(`${door}: missing, unreadable and foreign messages use the same refusal`,async()=>{
+   const mem=await db.memory.create({data:{name:'Private',urn:'instruct3307.test:private',class:'private',visibility:null,userId:f.other.id,organizationId:f.org.id,appId:f.app.id,userMemoryOfAgentId:f.agent.id}});
+   const channel=await M.createChannel({}, {input:{memoryRef:mem.id,loc:'chats:private',name:'Private'}},ctx({userId:f.other.id}));
+   const secret=await M.createChannelMessage({}, {channelRef:channel.id,body:'private instruction'},ctx({userId:f.other.id}));
+   const foreign=await db.app.create({data:{organizationId:f.org.id,name:'Other',urn:'instruct3307.test:other'}});
+   await db.appAgent.create({data:{appId:foreign.id,agentId:f.agent.id}});
+   await db.appMember.create({data:{appId:foreign.id,userId:f.holder.id,role:'owner'}});
+   const visible=await M.createTeamChatMessage({}, {appRef:foreign.id,body:'other App'},ctx());
+   const before=await snapshot();
+   const absent=await answer(call({kind:'TEAM_CHAT_MESSAGE',ref:'hrn:node:instruct3307.test:private:missing'}));
+   expect(await answer(call({kind:'TEAM_CHAT_MESSAGE',ref:secret.urn}))).toEqual(absent);
+   expect(await answer(call({kind:'TEAM_CHAT_MESSAGE',ref:visible.urn}))).toEqual(absent);
+   expect(absent.code).toBe('FORBIDDEN');expect(await snapshot()).toEqual(before);
+  });
   it(`${door}: same-App team message URN succeeds`,async()=>{
    const msg=await M.createTeamChatMessage({}, {appRef:f.app.id,body:'fixture instruction'},ctx());
    expect(msg.urn).toMatch(/^hrn:node:/);await call({kind:'TEAM_CHAT_MESSAGE',ref:msg.urn});expect(await instructionEvents()).toHaveLength(1);
@@ -95,4 +113,74 @@ describe('#3307 instructed acts',()=>{
  it('a claimed worker actor without a persisted session stays headless',async()=>{
   expect((await answer(runAsActor({workerId:f.worker.id,agentId:f.agent.id},()=>calls.signature(live,ctx())))).code).toBe('FORBIDDEN');
  });
+});
+
+// Instrument only event attempts, leaving real PostgreSQL writes/rollback in place.
+it('#3307 no instruction event is attempted before a casting refusal',async()=>{
+ let attempted=0;
+ const client=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>callback(new Proxy(tx,{get(t,k){
+   if(k==='agentTeamEvent')return new Proxy(t.agentTeamEvent,{get(delegate,op){
+    if(op==='create')return (...args:any[])=>{attempted++;return (delegate.create as any)(...args);};
+    const value=(delegate as any)[op];return typeof value==='function'?value.bind(delegate):value;
+   }});
+   const value=(t as any)[k];return typeof value==='function'?value.bind(t):value;
+  }})),options);
+  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+ }});
+ const before=await snapshot();
+ expect((await answer(M.changeWorkerAgent({}, {workerRef:f.target.id,agentRef:generateId(),instruction:live},bound({db:client})))).code).toBe('WORKER_AGENT_NOT_INSTALLED');
+ expect(attempted).toBe(0);expect(await snapshot()).toEqual(before);
+});
+
+/** Real transaction wrapper: an uncommitted hold change must be judged on tx, never pooled db. */
+for(const door of ['signature','agent']) it('#3307 '+door+' reads its instruction authority from the transaction',async()=>{
+ const client=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>{
+   await tx.worker.update({where:{id:f.worker.id},data:{heldByUserId:f.other.id}});
+   return callback(tx);
+  },options);
+  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+ }});
+ const before=await snapshot();expect((await answer(calls[door](live,bound({db:client})))).code).toBe('FORBIDDEN');expect(await snapshot()).toEqual(before);
+});
+
+for(const door of ['signature','agent']) for(const moving of ['holder','launch']) it('#3307 '+door+' rechecks '+moving+' after the first admission',async()=>{
+ let moved=false;
+ const client=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>callback(new Proxy(tx,{get(t,k){
+   if(k===(moving==='holder'?'worker':'session')) {
+    const delegate=(t as any)[k];return new Proxy(delegate,{get(d,op){
+     if(op==='findUnique')return async(args:any)=>{
+      const row=await d.findUnique(args);
+      if(!moved && args.where.id===(moving==='holder'?f.worker.id:f.session.id)) {
+       moved=true;
+       if(moving==='holder')await tx.worker.update({where:{id:f.worker.id},data:{heldByUserId:f.other.id}});
+       else await tx.session.update({where:{id:f.session.id},data:{launchOperationId:generateId(),launchHostId:generateId(),launchIssuedBy:'manager'}});
+      }
+      return row;
+     };
+     const value=d[op];return typeof value==='function'?value.bind(d):value;
+    }});
+   }
+   const value=(t as any)[k];return typeof value==='function'?value.bind(t):value;
+  }})),options);
+  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+ }});
+ const before=await snapshot();expect((await answer(calls[door](live,bound({db:client})))).code).toBe('FORBIDDEN');expect(moved).toBe(true);expect(await snapshot()).toEqual(before);
+});
+
+it('#3307 SDL accepts one typed instruction per call',async()=>{
+ const apollo=new ApolloServer<Context>({typeDefs,resolvers});
+ try {
+ const result=await apollo.executeOperation({query:'mutation($worker:ID!,$instruction:ActInstructionInput!){updateWorker(workerRef:$worker,signature:"signed",instruction:$instruction){id signature}}',variables:{worker:f.target.id,instruction:live}},{contextValue:bound()});
+ expect(result.body.kind).toBe('single');if(result.body.kind!=='single')throw new Error('unexpected response');
+ expect(result.body.singleResult.errors).toBeUndefined();expect((result.body.singleResult.data as any).updateWorker.signature).toBe('signed');expect(await instructionEvents()).toHaveLength(1);
+ }finally{await apollo.stop();}
+});
+
+it('#3307 instruction input exists only on the two widened doors',()=>{
+ const fields=buildSchema(typeDefs).getMutationType()!.getFields();
+ for(const name of ['updateWorker','changeWorkerAgent'])expect(fields[name].args.map(a=>a.name)).toContain('instruction');
+ for(const name of ['createAppKey','regenerateAppKey','grantAppKeyScope','grantApp','setAppMemoryWriteGrant','setAutomationReadGrant','startImpersonation'])expect(fields[name].args.map(a=>a.name)).not.toContain('instruction');
 });
