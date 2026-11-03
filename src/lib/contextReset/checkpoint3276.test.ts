@@ -229,3 +229,32 @@ it('locks the worker before the protocol reset row',async()=>{
   try{await probe.query('ROLLBACK');await holder.query('ROLLBACK');}finally{await probe.end();await holder.end();await pending;}
  }
 },15000);
+
+it('an indexed working-memory checkpoint owns a durable embedding obligation',async()=>{
+ const s=await claimed();await db.memory.update({where:{id:f.kitMemory.id},data:{vectorIndexEnabled:true}});
+ const out=await call(s);const node=await db.node.findUniqueOrThrow({where:{id:out.reset.recoveryRef.checkpointNodeId}});
+ expect(node.embeddingPendingAt).toBeInstanceOf(Date);expect(node.embeddingWorkToken).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+it('explicit null checkpoint retains the legacy reset audit action',async()=>{
+ const s=await claimed();const node=await f.checkpoint();
+ await call(s,{checkpoint:null,checkpointNode:node.id});
+ expect(await uses()).toHaveLength(0);
+ expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset'}})).toBe(2);
+});
+it.each([{title:'',content:'ok'},{title:'x'.repeat(201),content:'ok'},{title:'ok',content:'x'.repeat(65537)},{title:'ok',content:'\u0000'}])('invalid checkpoint input precedes encrypted-memory refusal',async checkpoint=>{
+ const s=await claimed();await db.memory.update({where:{id:f.kitMemory.id},data:{isEncrypted:true}});
+ expect(await code(call(s,{checkpoint}))).toBe('RECOVERY_REF_INVALID');
+});
+it('legacy recovery keeps its original failed-never-collected admission',async()=>{
+ const t=await f.startedTask();await f.finish(t.id);const r=await db.contextReset.findUniqueOrThrow({where:{taskId:t.id}});
+ await db.hostRegistration.updateMany({where:{appId:f.app.id,hostId:'orca1'},data:{lostAt:new Date()}});
+ await sweepUnreportedHostOperations(db);await sweepContextResets(db);
+ const current=await db.contextReset.findUniqueOrThrow({where:{id:r.id}});
+ const node=await f.checkpoint();
+ expect(await code(call({resetId:r.id,taskId:t.id},{epoch:current.epoch,checkpoint:null,checkpointNode:node.id}))).toBe('CONTEXT_RESET_WRONG_PHASE');
+});
+it('a soft-deleted working memory cannot receive a checkpoint',async()=>{
+ const s=await claimed();await db.memory.update({where:{id:f.kitMemory.id},data:{deletedAt:new Date()}});
+ const n=await nodeCount();expect(await code(call(s))).toBe('RECOVERY_REF_INVALID');expect(await nodeCount()).toBe(n);
+});
