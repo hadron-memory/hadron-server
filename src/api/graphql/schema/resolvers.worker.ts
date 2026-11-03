@@ -79,7 +79,7 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { inRunTeamReadTx, mayReadAppTasks, resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
@@ -180,6 +180,10 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * refused it. Found by the #1347 differential test; checked here, once.
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
+  if (isRunPrincipal(ctx)) {
+    if (!await mayReadAppTasks(ctx, app.id)) throw forbidden();
+    return;
+  }
   if (app.deletedAt) throw forbidden();
   if (ctx.impersonation) {
     if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
@@ -241,6 +245,7 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  * resolvers.worker.test.ts pins every arm to `requireWorkerReadAccess`.
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
+  if (isRunPrincipal(ctx)) return { appId: { in: ctx.appId && await mayReadAppTasks(ctx, ctx.appId) ? [ctx.appId] : [] } };
   if (!ctx.userId) {
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }
@@ -2003,26 +2008,30 @@ export const workerQueries = {
     }: { appRef: string; includeRetired?: boolean | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
+    const read = async (c: Context, appId: string) => {
+      const where = {
+        appId,
+        ...(includeRetired ? {} : { retiredAt: null }),
+      };
+      const [items, total] = await Promise.all([
+        c.db.worker.findMany({
+          where,
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: clampListTake(limit),
+          skip: offset ?? 0,
+        }),
+        c.db.worker.count({ where }),
+      ]);
+      // #2971: one memo per page resolution, carried on the rows it serves (never on ctx), so `prompt` on N items reads
+      // what the page shares once. Only `prompt` reads it.
+      const pageMemo = newWorkerPromptPageMemo(ctx);
+      return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
+    };
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    if (isRunPrincipal(ctx)) return inRunTeamReadTx(ctx, appId, () => { throw forbidden(); }, c => read(c, appId));
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireWorkerReadAccess(ctx, app);
-    const where = {
-      appId,
-      ...(includeRetired ? {} : { retiredAt: null }),
-    };
-    const [items, total] = await Promise.all([
-      ctx.db.worker.findMany({
-        where,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        take: clampListTake(limit),
-        skip: offset ?? 0,
-      }),
-      ctx.db.worker.count({ where }),
-    ]);
-    // #2971: one memo per page resolution, carried on the rows it serves (never on ctx), so `prompt` on N items reads
-    // what the page shares once. Only `prompt` reads it.
-    const pageMemo = newWorkerPromptPageMemo(ctx);
-    return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
+    return read(ctx, appId);
   },
 
   /**

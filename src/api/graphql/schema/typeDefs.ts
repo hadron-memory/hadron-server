@@ -3101,6 +3101,8 @@ export const typeDefs = `#graphql
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
     propertiesRevision: Int
+    "Ruling0112: default-off permission for this App's own running automations to read its team roster and tasks. Only a managing person may change it. Null for a caller who may not read this App."
+    runTeamSnapshotEnabled: Boolean
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
@@ -10498,6 +10500,8 @@ export const typeDefs = `#graphql
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
     setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
+    "Ruling0112: opt this App's own running automations into read-only team snapshots, or revoke that permission. Person managing the App only; no worker, key, run or impersonation."
+    setAppRunTeamSnapshotEnabled(appRef: ID!, enabled: Boolean!): App!
     """
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
     or an empty object clears them. Whoever manages the App only, as a person acting as themselves (a worker session,

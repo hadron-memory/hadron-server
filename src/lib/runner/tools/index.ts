@@ -1,3 +1,4 @@
+import { TEAM_SNAPSHOT_TOOLS } from './teamSnapshotTools.js';
 /**
  * Run-tool registry (plan-tools §4/§5 phase 1). Node tools
  * (hadron_create_node / hadron_update_node / hadron_read_node) land in
@@ -33,6 +34,7 @@ export { hadronReadSecret } from './secretTools.js';
 export { driveSearch, driveGetFile, driveExportFile } from './driveTools.js';
 export { hadronTaskCreate, hadronTaskUntrackedList, hadronTaskUntrackedClaim } from './taskTools.js';
 export { teamChatRead } from './teamChatTools.js';
+export { hadronTeamSnapshot } from './teamSnapshotTools.js';
 export { githubIssueSnapshot } from './githubTools.js';
 export type { RunToolDef, RunToolContext };
 
@@ -94,6 +96,7 @@ const REGISTRY = new Map<string, RunToolDef>(
     ...TASK_TOOLS,
     ...TEAM_CHAT_TOOLS,
     ...GITHUB_TOOLS,
+    ...TEAM_SNAPSHOT_TOOLS,
   ].map((t) => [t.name, t]),
 );
 
