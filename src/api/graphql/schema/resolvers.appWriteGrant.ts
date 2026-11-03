@@ -8,7 +8,7 @@
  *    App (cor:dmo:050:12, the shared {@link managesApp}) and can WRITE the target memory themselves (the delegation
  *    ceiling, cor:acl:040). A shared memory must be one the App's own org or team space already holds; a personal or
  *    private memory is grantable only by its OWNER, who must also manage the App; an encrypted one never.
- *  - REVOKE: whoever manages the App, as themselves; nothing more.
+ *  - REVOKE: whoever manages the App, as themselves, or their held worker on a validated instruction (#3311, S6).
  *  - LIST: the same managers; a grant on a personal or private memory is shown to its owner alone.
  *
  * Every refusal on the set and revoke doors is the one `Forbidden`, and an unknown App, memory or grant is the same

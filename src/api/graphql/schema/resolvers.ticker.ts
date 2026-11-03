@@ -38,7 +38,7 @@
 
 import { requireInstructedAct, type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { admitAppManagement, callerIsWorkerSession, readActInstruction } from './resolvers.instruction.js';
+import { admitAppManagement, callerIsWorkerSession, lockCallerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
@@ -1169,6 +1169,8 @@ async function changeGrant(
     if (op === 'revoke') {
       // #3311: a person as themselves, or their held worker on a validated instruction (cor:dmo:050:12 S6, ruling
       // 0109 A); the manager predicate is the holder's, evaluated here under the App's anchors.
+      // The session row is fenced before the judgement, so a session end cannot commit between it and the write.
+      await lockCallerSession(tx, txCtx.sessionId);
       admission = await requireInstructedAct(txCtx, fresh.id, a.instruction, () => managesApp(txCtx, fresh), readActInstruction, forbidden);
     } else if (!(await actorManagesApp(txCtx, fresh, actor))) throw forbidden();
     // #3277: giving a grant is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0099 A), so a worker

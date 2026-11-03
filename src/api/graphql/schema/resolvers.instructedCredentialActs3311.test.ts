@@ -140,6 +140,34 @@ describe('#3311 instructed revokes and lists', () => {
     expect(await instructionEvents()).toHaveLength(Object.keys(revokes).length);
   });
 
+  it('an invalid scope does not tell an uninstructed worker whether the key exists', async () => {
+    const missing = await answer(M.revokeAppKeyScope({}, { id: generateId(), scope: 'not-a-scope', instruction: null }, bound()));
+    const present = await answer(M.revokeAppKeyScope({}, { id: f.key.id, scope: 'not-a-scope', instruction: null }, bound()));
+    expect(missing.code).not.toBe('RESOLVED');
+    expect(present).toEqual(missing);
+  });
+
+  // The session row is fenced through commit: a session-end writer cannot commit between the judgement and the write.
+  for (const door of ['key', 'scope', 'grant'] as const) {
+    it(`${door} revoke fences a concurrent session-end writer until the write commits`, async () => {
+      let blocked = false;
+      const intercept = async ({ args, query }: any) => {
+        try {
+          await db.$transaction(async (other) => {
+            await other.$executeRawUnsafe("SET LOCAL lock_timeout = '250ms'");
+            await other.session.updateMany({ where: { id: f.session.id, endedAt: null }, data: { endedAt: new Date(), endReason: 'expired' } });
+          });
+        } catch (e: any) { blocked = /lock timeout/.test(String(e.message)); }
+        return query(args);
+      };
+      const query: any = door === 'key' ? { appKey: { updateMany: intercept } } : door === 'scope' ? { appKeyScope: { updateMany: intercept } } : { appGrant: { update: intercept } };
+      const client = db.$extends({ query });
+      const got = await requestActorStorage.run({ workerId: f.worker.id, agentId: f.agent.id }, () => answer(revokes[door]!(live, bound({ db: client as any }))));
+      expect({ blocked, code: got.code }).toEqual({ blocked: true, code: 'RESOLVED' });
+      expect((await db.session.findUniqueOrThrow({ where: { id: f.session.id } })).endedAt).toBeNull();
+    });
+  }
+
   it('a no-op revoke (already revoked) writes no record', async () => {
     await db.appKeyScope.updateMany({ where: { appKeyId: f.key.id }, data: { revokedAt: new Date(), revokedByUserId: f.holder.id } });
     await db.appMemoryWriteGrant.update({ where: { id: f.writeGrant.id }, data: { revokedAt: new Date(), revokedBy: f.holder.id } });

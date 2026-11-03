@@ -23,7 +23,7 @@ import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
 import { appKeyHostUses } from './resolvers.hostOperation.js';
 import { requireInstructedAct, type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { readActInstruction, callerIsWorkerSession } from './resolvers.instruction.js';
+import { readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
 const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
@@ -50,6 +50,8 @@ async function changeScope(
   /** #3311: revoking a scope is allowed on a holder's instruction (S6); only the revoke passes this. */
   revoke?: { instruction?: ActInstruction | null },
 ) {
+  // A worker session never learns whether a key exists, so a malformed scope answers as a missing key does.
+  if (revoke && !isAppKeyScope(scope) && await callerIsWorkerSession(ctx)) throw scopeForbidden();
   let resolved: Awaited<ReturnType<typeof resolveKey>>;
   try {
     resolved = await resolveKey(ctx, id);
@@ -68,6 +70,8 @@ async function changeScope(
     let admission: ActAdmission | null = null;
     if (revoke) {
       // #3311: a person as themselves, or their held worker on a validated instruction; judged on the holder.
+      // The session row is fenced before the judgement, so a session end cannot commit between it and the write.
+      await lockCallerSession(tx, txCtx.sessionId);
       admission = await requireInstructedAct(txCtx, fresh.id, revoke.instruction, () => managesApp(txCtx, fresh), readActInstruction, scopeForbidden);
     } else
     // Whoever manages the App, as a person: not a worker's session, not a key, not an impersonation.

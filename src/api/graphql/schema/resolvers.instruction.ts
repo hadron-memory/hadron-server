@@ -53,6 +53,14 @@ export async function lockInstructedActRows(tx: Prisma.TransactionClient, ids: s
   if (sessionId) await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${sessionId} FOR SHARE`;
 }
 
+/**
+ * Fence the caller's session row through commit (a session-end writer waits), for a door whose worker lock comes from
+ * the surrounding write transaction. The instructed judgement that follows reads the session after this lock.
+ */
+export async function lockCallerSession(tx: Prisma.TransactionClient, sessionId?: string | null) {
+  if (sessionId) await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${sessionId} FOR SHARE`;
+}
+
 /** True when the request is a worker's: bound by the transport, or through the persisted session it names. */
 export async function callerIsWorkerSession(ctx: Context): Promise<boolean> {
   if (currentActor().workerId) return true;
