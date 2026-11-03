@@ -10,9 +10,10 @@ type KeyApp = { id: string; organizationId: string | null; ownerUserId: string |
 
 /**
  * Only whoever manages the App may see or manage its keys.
- * Listing and revoking: the bound-worker refusal here stays until S3b of #2483, which admits an instructed worker
- * through S1's shared check (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6: listing and revoking are allowed on
- * an instruction). Minting and rotating are person-only and go through {@link requireAppKeyIssuer} instead.
+ * The person-only helper for the nested and remaining door: it refuses every bound worker. Listing and revoking an
+ * App's credentials on a holder's instruction (cor:dmo:050:12 S6, #3311) no longer pass here: they go through
+ * `admitCredentialList` and `admitAppManagement` in resolvers.instruction.ts. Minting and rotating are person-only and
+ * go through {@link requireAppKeyIssuer} instead.
  * Use the authenticated actor, not App participation: org admins need no AppMember row.
  */
 export async function requireAppKeyManager(ctx: Context, app: KeyApp): Promise<void> {

@@ -637,3 +637,26 @@ export async function appendStaffingInstructionClaim(
       ...(args.userId ? { userId: args.userId } : {}), ...(args.agentId ? { agentId: args.agentId } : {}),
       ...instructionPayload(instruction) } });
 }
+
+/** What an instructed credential act was: a revoke, or a list call (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6). */
+export type CredentialAct =
+  | 'app-key.revoke' | 'app-key.scope-revoke' | 'app-grant.revoke' | 'app-write-grant.revoke'
+  | 'app-key.list' | 'app-write-grant.list';
+
+/**
+ * #3311 / rulings 0098, 0109, 0111: one record per admitted instructed revoke or list call. Names the worker, the
+ * instructing person, the App, the act kind and the instruction; NEVER a key, scope or grant id, and no key details
+ * (cor:agt:050:11: ids only, and this slice adds no manager-only events read gate). A person records nothing.
+ */
+export async function appendCredentialInstructionEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; admission: ActAdmission; act: CredentialAct },
+): Promise<void> {
+  if (args.admission.kind !== 'instructed-worker') return;
+  const a = args.admission;
+  await tx.agentTeamEvent.create({ data: {
+    appId: args.appId, type: 'app.credential-act',
+    actorUserId: a.userId, actorWorkerId: a.workerId, actorAgentId: a.agentId,
+    payload: { act: args.act, instruction: { kind: a.instruction.kind, ref: a.instruction.ref } },
+  } });
+}

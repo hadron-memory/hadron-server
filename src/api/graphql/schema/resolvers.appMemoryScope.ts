@@ -18,7 +18,7 @@
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { effectiveScope, type EffectiveScope } from '../../../lib/effectiveSystemMemory.js';
-import { getAppMemoryAccess, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
+import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import {
   clampListTake,
@@ -128,16 +128,33 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
   // narrowed, because only the join row was soft-deleted.
   // #2190: the fold also reports which installed Agent put each memory here.
   const provenance = new Map<string, AgentProvenance[]>();
-  const installedAccess = await getAppMemoryAccess(ctx.db, resolvedAppId, {
+  const installedAccess = await getAppMemoryCandidates(ctx.db, resolvedAppId, {
     allAgents: orgAuthorized, includeTeamSpace: false, callerUserId: ctx.userId ?? null, provenance,
   });
   // #1647: carry impersonation into the read filter, or a support session regains direct-owner identity privilege.
   const scopedAuth = {
     userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles, impersonation: ctx.impersonation,
   } as AuthContext;
-  const agentMemoryIds = [...await filterReadableMemoryIds(
-    ctx.db as never, scopedAuth, installedAccess.keys(), { access: installedAccess },
-  )];
+  // #3305: installedAccess is candidate scope/provenance, not the user's
+  // authority. Let the canonical batch filter compute its principal map,
+  // including the shared independent-item ceiling and valid App-class paths.
+  const canonicalIds = await filterReadableMemoryIds(
+    ctx.db as never, scopedAuth, installedAccess.keys(),
+    // No user: preserve the existing key/run lens; #3305 narrows sessions.
+    ctx.userId ? {} : { access: installedAccess },
+  );
+  // The explicit App lens historically admits every licensed Agent's system
+  // definition to an org-authorized reader, even without App participation.
+  // Preserve that system-only audience; never reuse its raw map for knowledge
+  // items (the #3305 leak). The class check is on stored rows, not provenance.
+  const systemRows = !ctx.userId || installedAccess.size === 0 ? [] : await ctx.db.memory.findMany({
+    where: { id: { in: [...installedAccess.keys()] }, class: 'system', deletedAt: null },
+    select: { id: true },
+  });
+  const lensSystemIds = await filterReadableMemoryIds(
+    ctx.db as never, scopedAuth, systemRows.map(row => row.id), { access: installedAccess },
+  );
+  const agentMemoryIds = [...new Set([...canonicalIds, ...lensSystemIds])];
 
   // #1031 — the App's own TEAM SPACE, which is structurally unreachable
   // through the installed-agent walk above: it is an app-class memory keyed

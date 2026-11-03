@@ -1,11 +1,11 @@
-import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
 import { readActInstruction } from './resolvers.instruction.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { appendMemberRemovedEvent, appendMemberSetEvent, appendStaffingInstructionClaim, staffingActActor, staffingInstruction, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { requireAppKeyIssuer, requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
+import { requireAppKeyIssuer, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -79,6 +79,10 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRefusedPrincipal } from './resolvers.appViewerManages.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { admitAppManagement, lockInstructedActRows, callerIsWorkerSession } from './resolvers.instruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
+import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
@@ -1443,28 +1447,50 @@ export const appMutations = {
       return { key: appKey, rawKey };
     },
 
-    revokeAppKey: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-      const key = await ctx.db.appKey.findUniqueOrThrow({
-        where: { id },
-        include: { app: true },
-      });
-      await requireAppKeyManager(ctx, key.app);
+    /**
+     * #3311 / cor:dmo:050:12 S6: revoking a key is allowed on a holder's instruction, through #3307's one shared
+     * check, judged on the holder under the App's anchors. A worker session that is refused (no instruction, not
+     * held, host-launched, holder does not manage the App) cannot tell a missing key from an existing one: both
+     * answer the one refusal. The record is one team event in the revoke's transaction, none for a key that was
+     * already revoked, and it names no key id.
+     */
+    revokeAppKey: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
+      const key = await ctx.db.appKey.findUnique({ where: { id }, include: { app: true } });
+      if (!key) {
+        // A worker session never learns whether the key exists; a person keeps the not-found answer of before.
+        if (await callerIsWorkerSession(ctx)) throw authorizationDenied();
+        await ctx.db.appKey.findUniqueOrThrow({ where: { id }, include: { app: true } });
+        throw authorizationDenied();
+      }
+      const target = key;
+      let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction, undefined, true);
       await withAuthorizedTx(
         ctx,
         [
-          { kind: 'app', id: key.app.id },
-          ...(key.app.organizationId ? [{ kind: 'org' as const, id: key.app.organizationId }] : []),
-          ...(key.app.ownerUserId ? [{ kind: 'user' as const, id: key.app.ownerUserId }] : []),
+          { kind: 'app', id: target.app.id },
+          ...(target.app.organizationId ? [{ kind: 'org' as const, id: target.app.organizationId }] : []),
+          ...(target.app.ownerUserId ? [{ kind: 'user' as const, id: target.app.ownerUserId }] : []),
         ],
         async (txCtx) => {
-          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: key.app.id } });
-          if (current.organizationId !== key.app.organizationId || current.ownerUserId !== key.app.ownerUserId) {
-            throw new Error('App ownership changed; retry key revocation');
-          }
-          await requireAppKeyManager(txCtx, current);
+          admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission, true);
         },
-        (tx) => tx.appKey.update({ where: { id }, data: { revokedAt: new Date() } }),
-        { lockMode: 'exclusive', afterLock: (tx) => lockAppKeyManagerMemberships(tx, ctx, key.app) },
+        async (tx, txCtx) => {
+          if (admission.kind === 'instructed-worker') {
+            // Last lock the act takes: the holder's worker and session rows, then the final judgement on them.
+            await lockInstructedActRows(tx, [admission.workerId], ctx.sessionId);
+            admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission, true);
+          }
+          // A key already revoked keeps its first revocation time and records nothing.
+          const ended = await tx.appKey.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date() } });
+          if (ended.count === 1) await appendCredentialInstructionEvent(tx, { appId: target.app.id, admission, act: 'app-key.revoke' });
+        },
+        {
+          lockMode: 'exclusive',
+          afterLock: async (tx) => {
+            if (admission.kind === 'instructed-worker') await lockWorkersForAssignment(tx, [admission.workerId]);
+            await lockAppKeyManagerMemberships(tx, ctx, target.app);
+          },
+        },
       );
       return true;
     },

@@ -118,16 +118,16 @@ describe('#3278 userless run item admission', () => {
     }
     expect(await canReadMemory(db, f.principal, f.team.id)).toBe(true);
   });
-  it('#3280: on-behalf run refuses item-only reach while direct user+App is unchanged', async () => {
+  it('#3305: on-behalf run and direct user+App both refuse item-only reach', async () => {
     // Ruling0105 A: an App member with NO independent org access loses item-only reach as a run;
-    // the direct user session remains unchanged in this slice.
+    // ruling0108 now applies the same independent-user ceiling to sessions.
     const userOnly = { ...ctx(f.user.id) };
     const backedRun = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
     const onBehalf = { db, ...runAuthContext(backedRun) } as Context;
     const selectedUser = { ...userOnly, appId: f.app.id };
     expect(await getAccessibleMemoryIds(userOnly, f.read.id, { excludeAppDerived: true })).not.toContain(f.read.id);
-    expect(await canReadMemory(db, selectedUser, f.read.id)).toBe(true);
-    expect((await getPrincipalAppMemoryAccess(db, selectedUser)).has(f.read.id)).toBe(true);
+    expect(await canReadMemory(db, selectedUser, f.read.id)).toBe(false);
+    expect((await getPrincipalAppMemoryAccess(db, selectedUser)).has(f.read.id)).toBe(false);
     expect(await canReadMemory(db, onBehalf, f.read.id)).toBe(false);
     expect((await getPrincipalAppMemoryAccess(db, onBehalf)).has(f.read.id)).toBe(false);
     expect(await rejection(hadronReadNode.execute({ ...f.tool, run: backedRun, principal: onBehalf }, { urn: urn(f.read) }))).toMatchObject({ message: expect.stringContaining('not readable') });

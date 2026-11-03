@@ -276,10 +276,10 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     const auth: AuthContext = { userId: user.id };
     const access = await getMemoryAccess(db, auth);
 
-    // Both memories accessible via the union — even though no active App is set.
-    expect(access.size).toBe(2);
+    // #3305: installed system reach survives; membership never admits the knowledge item.
+    expect(access.size).toBe(1);
     expect(access.has(systemMemoryId)).toBe(true);
-    expect(access.has(knowledgeMemoryId)).toBe(true);
+    expect(access.has(knowledgeMemoryId)).toBe(false);
   });
 
   it('returns empty when userId is set but the user has no AppMember rows', async () => {
@@ -322,7 +322,7 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     // memories appear in the cross-App view, no memories are missing.
     expect([...unionView.keys()].sort()).toEqual([...appAView.keys()].sort());
     expect([...unionView.keys()].sort()).toEqual([...appBView.keys()].sort());
-    expect(unionView.size).toBe(2);
+    expect(unionView.size).toBe(1);
   });
 
   // FR-016 / spec 021 partial-uniqueness — App.urn is unique only across
@@ -351,7 +351,7 @@ describe('getMemoryAccess (dispatch by principal kind)', () => {
     // its memories. resolveUserApps's filter (`app: { is: { deletedAt:
     // null, uninstalledAt: null } }`) already excludes the history row;
     // this test pins that downstream-of-resolveUserApps behavior.
-    expect(access.size).toBe(2);
+    expect(access.size).toBe(1);
   });
 });
 
