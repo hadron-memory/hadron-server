@@ -15533,6 +15533,8 @@ export const typeDefs = `#graphql
     requestedAt: DateTime!
     claimedAt: DateTime
     recoveryRegisteredAt: DateTime
+    "#3300 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 3; hrn:node:hadronmemory.com:specs:cor:agt:070:04): canonical v2 checkpoint URN fixed at registration and kept after the reset ends or the node moves or is deleted. Null before registration. Legacy id-only rows derive it while the node row exists, otherwise null. Reset state behind the existing host-key gates, not a node read."
+    checkpointNode: String
     "When the single stop was granted; the host may act on it only within stopLeaseMs of its own send time."
     stopGrantedAt: DateTime
     stopLeaseMs: Int

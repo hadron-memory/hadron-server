@@ -31,6 +31,7 @@ import { OPEN_SESSION_PLACEMENT_JOIN } from '../sessionPlacement.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { loadWorkersActivity } from '../../api/graphql/schema/resolvers.worker.js';
 import { generateId } from '../id.js';
+import { emitNodeUrnV2 } from '../urnEmit.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import { appendAvailabilityEvent, PLATFORM_ACTOR, type EventActor } from '../agentTasks/events.js';
@@ -568,6 +569,7 @@ export async function registerContextResetRecovery(
   const worker = await tx.worker.findUnique({where:{id:r.workerId},select:{memoryId:true}});
   if (!worker?.memoryId) throw invalid('The worker has no working memory.');
   let nodeId: string | null = null;
+  let checkpointNodeUrn: string;
   let write: CheckpointWrite | undefined;
   if (writesCheckpoint) {
     // Ruling0090A: deliberately not the generic node writer, nor any grant to that writer.
@@ -584,7 +586,7 @@ export async function registerContextResetRecovery(
     if (hasUnstorableJsonText(ref.checkpoint!.title) || hasUnstorableJsonText(ref.checkpoint!.content)) {
       throw invalid('Checkpoint text cannot contain NUL or unpaired surrogates.');
     }
-    const memory = await tx.memory.findUnique({where:{id:worker.memoryId},select:{id:true,isEncrypted:true,deletedAt:true}});
+    const memory = await tx.memory.findUnique({where:{id:worker.memoryId},select:{id:true,urn:true,isEncrypted:true,deletedAt:true}});
     if (!memory || memory.deletedAt) throw invalid('The working memory is unavailable.');
     if (memory.isEncrypted) throw new ContextResetError('CHECKPOINT_MEMORY_ENCRYPTED','A host key cannot unlock an encrypted working memory.');
     const [clock] = await tx.$queryRaw<{stamp:string}[]>`SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24MISS"Z"') AS stamp`;
@@ -604,15 +606,18 @@ export async function registerContextResetRecovery(
     }
     write = {nodeId:nodeId!,loc,memoryId:worker.memoryId,
       workToken:await stampEmbeddingObligation(tx,nodeId!,worker.memoryId),content:ref.checkpoint!.content};
+    checkpointNodeUrn = emitNodeUrnV2(memory.urn, loc);
   } else {
     if (typeof ref.checkpointNode !== 'string' || ref.checkpointNode.trim() === '') throw invalid('Name the checkpoint node.');
     try { nodeId = (await resolveNodeRef(tx as unknown as PrismaClient, ref.checkpointNode.trim())).id; } catch { nodeId=null; }
-    const node = nodeId ? await tx.node.findFirst({where:{id:nodeId,deletedAt:null},select:{memoryId:true}}) : null;
+    const node = nodeId ? await tx.node.findFirst({where:{id:nodeId,deletedAt:null},select:{memoryId:true,loc:true,memory:{select:{urn:true}}}}) : null;
     if (!node || node.memoryId !== worker.memoryId) throw invalid("The checkpoint is a live node in the worker's own working memory.");
+    checkpointNodeUrn = emitNodeUrnV2(node.memory.urn, node.loc);
   }
   const registered = await tx.contextReset.update({
     where: { id: r.id },
-    data: { phase: 'checkpointed', recoveryRef: { checkpointNodeId: nodeId!, sessionId: r.sessionId, taskId: r.taskId }, recoveryRegisteredAt: now },
+    // #3300 / cor:agt:050:27 part 3: retain the registered address, not a later address of the node or worker memory.
+    data: { phase: 'checkpointed', recoveryRef: { checkpointNodeId: nodeId!, checkpointNodeUrn, sessionId: r.sessionId, taskId: r.taskId }, recoveryRegisteredAt: now },
   });
   // Capture only; the transport publishes after the enclosing transaction commits.
   if (write) checkpointWritten?.(write);

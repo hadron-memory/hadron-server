@@ -24,6 +24,7 @@
 // grace, is src/lib/hostOperations/sessionEnd.ts.
 
 import { GraphQLError } from 'graphql';
+import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { recordNodeWrite } from '../../../lib/usageRecorder.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
@@ -88,6 +89,7 @@ import {
   reportContextResetRelaunched,
   reportContextResetRelaunchFailed,
   type ContextResetStep,
+  type ContextResetRow,
   type ResetHost,
 } from '../../../lib/contextReset/contextReset.js';
 
@@ -904,6 +906,21 @@ async function wasEverHostKey(c: Context): Promise<boolean> {
 }
 
 export const hostOperationFieldResolvers = {
+  ContextReset: {
+    /** #3300: reset state behind the seven existing host gates, never a node-content read or a new reader. */
+    checkpointNode: async (r: ContextResetRow, _a: unknown, ctx: Context): Promise<string | null> => {
+      const ref = r.recoveryRef;
+      if (!r.recoveryRegisteredAt || !ref || typeof ref !== 'object' || Array.isArray(ref)) return null;
+      if (typeof ref.checkpointNodeUrn === 'string') return ref.checkpointNodeUrn;
+      // Pre-#3300 rows stored only the id. Include tombstones, but never backfill on this read or guess after purge.
+      if (typeof ref.checkpointNodeId !== 'string') return null;
+      const node = await ctx.db.node.findUnique({
+        where: { id: ref.checkpointNodeId },
+        select: { loc: true, memory: { select: { urn: true } } },
+      });
+      return node ? emitNodeUrnV2(node.memory.urn, node.loc) : null;
+    },
+  },
   HostOperation: {
     type: (o: HostOperationRow) => o.type,
     status: (o: HostOperationRow) => o.status.toUpperCase(),
