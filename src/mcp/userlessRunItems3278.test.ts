@@ -6,12 +6,17 @@ import { generateId } from '../lib/id.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
 import { loadFlowNode } from '../lib/runner/loadFlowNode.js';
+import { makeProdRunDeps } from '../jobs/appRunDeps.js';
+import { hadronStoreFile } from '../lib/runner/tools/storeTools.js';
+import { putObject } from '../integrations/r2/client.js';
+import { createTestableMcpServer } from './server.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
 const LOC = 'docs:entry';
@@ -133,5 +138,27 @@ describe('#3278 userless run item admission', () => {
     expect(await canReadMemory(db, key, f.write.id)).toBe(false);
     expect(await canReadMemory(db, key, f.publicMemory.id)).toBe(true);
     expect(await canWriteToMemory(db, key, f.publicMemory.id)).toBe(false);
+  });
+  it.each(['hadron_get_node', 'hadron_list_nodes', 'hadron_find_nodes', 'hadron_update_node'] as const)('refuses item-only reach at MCP %s just as with no item', async tool => {
+    const mcp = createTestableMcpServer(f.principal);
+    const args = tool === 'hadron_get_node' ? { urn: urn(f.write) }
+      : tool === 'hadron_update_node' ? { urn: urn(f.write), content: 'unauthorized update' }
+        : { memoryUrn: `hrn:mem:${f.write.urn}`, ...(tool === 'hadron_find_nodes' ? { query: 'needle3278', mode: 'keyword' } : {}) };
+    const withItem = await mcp.callToolText(tool, args);
+    await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: f.agent.id, memoryId: f.write.id } } });
+    const without = await mcp.callToolText(tool, args);
+    expect(withItem).toBe(without);
+    expect(withItem).not.toContain('secret write');
+    expect(await db.node.findUnique({ where: { loc_memoryId: { memoryId: f.write.id, loc: LOC } } })).toMatchObject({ content: 'secret write' });
+  }, 20_000);
+  it('refuses item-only stored-file writes before touching object storage', async () => {
+    vi.mocked(putObject).mockClear();
+    expect(await rejection(hadronStoreFile.execute(f.tool, { urn: urn(f.write, 'docs:asset'), filename: 'report.txt', content: 'no upload' }))).toMatchObject({ message: expect.stringContaining('write') });
+    expect(putObject).not.toHaveBeenCalled();
+  });
+  it('refuses an item-only writeOutput destination while the PUBLIC flow remains readable', async () => {
+    await db.node.update({ where: { loc_memoryId: { memoryId: f.publicMemory.id, loc: LOC } }, data: { data: { output: { writeTo: urn(f.write, 'docs:output') } } } });
+    expect(await rejection(makeProdRunDeps(db).writeOutput(f.run, urn(f.publicMemory), 'must not publish'))).toMatchObject({ message: expect.stringContaining('not granted') });
+    expect(await db.node.count({ where: { memoryId: f.write.id, loc: 'docs:output' } })).toBe(0);
   });
 });
