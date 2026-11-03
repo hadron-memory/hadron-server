@@ -6,9 +6,9 @@
  * first (`darkAlarmChain`). The stall evaluator's pass calls `evaluateCoordinatorCadence`. The email to people outside
  * the team is the follow-up, blocked on ruling 0116; nothing here sends one.
  *
- * WHO. A worker whose role is `coordinator` (cor:agt:110:05; no per-App role-name setting), not retired, with a live
- * session. The exemptions are the dark-worker alarm's, one source: `EXEMPT_PENDING` over the worker check status
- * (TEAM_PAUSED, PAUSED, ISOLATED, STANDBY, STOPPED), and NO_SESSION (no live session, so no clock to run).
+ * WHO. A worker whose role is `coordinator` (cor:agt:110:05; no per-App role-name setting), not retired. The exemptions are the dark-worker alarm's, one source: `EXEMPT_PENDING` over the worker check status
+ * (TEAM_PAUSED, PAUSED, ISOLATED, STANDBY, STOPPED), read from `loadPendingReasons`. A coordinator with no live session is NOT
+ * exempt (cor:agt:050:31 r3: nobody driving it is a case this alarm exists to catch); its clock starts at the first pass that saw it.
  *
  * THE CLOCK. The latest of: the coordinator's last COUNTED assignment (`task.assigned` / `task.reassigned` with
  * `actor_worker_id` = this coordinator; `assignment.matched` is the matcher's and never counts, so a busy matcher cannot
@@ -33,8 +33,7 @@
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
-import { loadWorkerCheckStatuses } from '../workerCheckStatus.js';
-import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
+import { loadPendingReasons } from '../tickers/checkPending.js';
 import { darkAlarmChain, EXEMPT_PENDING } from './darkWorker.js';
 import { loadWorkerWorkStates, matchingTeamPool } from './matcher.js';
 import { isSerializationFailure } from './stall.js';
@@ -76,12 +75,48 @@ async function observe(db: PrismaClient, appId: string, workerIds: string[], now
 
 type Late = { workerId: string; lastAssignedAt: Date | null; freeWorkerCount: number };
 
+/**
+ * Is this coordinator late NOW? Null when it is not (retired, not a coordinator, no session, exempt, inside its window, or
+ * no free worker in its lane). Every input is read through `db`, so the raise transaction can call it again on its own
+ * connection. A coordinator that already has an open episode is the caller's concern (the unique index decides a race).
+ */
+async function decide(db: PrismaClient, appId: string, workerId: string, now: Date): Promise<Late | null> {
+  const c = await db.worker.findFirst({ where: { id: workerId, appId, retiredAt: null }, select: { id: true, role: true } });
+  if (!c || !isCoordinator(c.role)) return null;
+  const observed = await observe(db, appId, [c.id], now);
+  const last = (await lastCountedAssignments(db, appId, [c.id])).get(c.id) ?? null;
+  const first = (await firstSessionStarts(db, [c.id])).get(c.id);
+  // The pending reason is read directly, not through the check status: NO_SESSION would hide it, and a coordinator with no
+  // live session is NOT exempt (cor:agt:050:31 r3), but a paused or isolated one without a session still is.
+  const reason = (await loadPendingReasons(db, appId, [c.id], now)).get(c.id);
+  if (reason && EXEMPT_PENDING.has(reason)) return null;
+  const clock = Math.max(last?.getTime() ?? -Infinity, first?.getTime() ?? -Infinity, observed.get(c.id)?.getTime() ?? -Infinity);
+  if (now.getTime() - clock < COORDINATOR_CADENCE_WINDOW_MINUTES * 60_000) return null;
+  const pool = await matchingTeamPool(db, appId, c.id);
+  const states = new Map((await loadWorkerWorkStates(db, appId, now)).map((st) => [st.id, st]));
+  const freeWorkerCount = [...pool].filter((id) => {
+    const st = states.get(id);
+    return !!st && !isCoordinator(st.role) && st.free;
+  }).length;
+  return freeWorkerCount === 0 ? null : { workerId: c.id, lastAssignedAt: last, freeWorkerCount };
+}
+
 /** Open one episode and raise its alarm, in one transaction. Null when the coordinator already has an open episode. */
 async function raise(db: PrismaClient, app: App, late: Late, now: Date): Promise<string | null> {
   let chainEmpty = false;
   try {
-    const eventId = await db.$transaction(async (tx) => {
-      const chain = await darkAlarmChain(tx, app, late.workerId);
+    const eventId = await db.$transaction(async (tx): Promise<string | null> => {
+      // cor:agt:050:18 (Decided): the reporting line, nearest first; App managers only when there is no reporting line.
+      // `darkAlarmChain` always appends managers (#3358), so they are dropped here when a line exists.
+      const full = await darkAlarmChain(tx, app, late.workerId);
+      const line = full.filter((p) => p.workerId);
+      const chain = line.length ? line : full;
+      // The decision is re-derived HERE, inside the SERIALIZABLE transaction, so its reads are the ones Postgres checks for a
+      // read-write cycle: an assignment, pause or lane change that commits between the pass's reads and this insert makes
+      // one side abort (or is seen now), and nothing is published or woken on a stale decision.
+      const again = await decide(tx as unknown as PrismaClient, app.id, late.workerId, now);
+      if (!again) return null;
+      late = again;
       chainEmpty = chain.length === 0;
       const eventId = generateId();
       const payload: Prisma.InputJsonObject = {
@@ -103,7 +138,7 @@ async function raise(db: PrismaClient, app: App, late: Late, now: Date): Promise
         data: chain.map((_, i) => ({ eventId, chainIndex: i, dueAt: new Date(now.getTime() + i * windowMs), wokenAt: i === 0 ? now : null })),
       });
       return eventId;
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000, maxWait: 10_000 });
     if (chainEmpty) console.warn(JSON.stringify({ event: 'coordinator_cadence.chain_empty', appId: app.id, workerId: late.workerId, eventId }));
     return eventId;
   } catch (err) {
@@ -139,32 +174,13 @@ export async function evaluateCoordinatorCadence(db: PrismaClient, now = new Dat
         }
       }
       if (candidates.length === 0) continue;
-      const candidateIds = candidates.map((c) => c.id);
-      const observed = await observe(db, app.id, candidateIds, now);
-      const firstSession = await firstSessionStarts(db, candidateIds);
-      // Dynamic: resolvers.teamChat imports modules that import this one.
-      const { locateTeamChatChannel } = await import('../../api/graphql/schema/resolvers.teamChat.js');
-      const channel = await locateTeamChatChannel({ db } as Context, app.id);
-      const statuses = await loadWorkerCheckStatuses(db, { appId: app.id, teamChannelId: channel?.channelId ?? null, workerIds: candidateIds, now });
-      const states = await loadWorkerWorkStates(db, app.id, now);
-      const stateOf = new Map(states.map((s) => [s.id, s]));
       const openWorkers = new Set(open.filter((e) => !(lastAssigned.get(e.workerId) && (lastAssigned.get(e.workerId) as Date) > e.openedAt)).map((e) => e.workerId));
       for (const c of candidates) {
         try {
-          const status = statuses.get(c.id);
-          if (!status || status.status === 'NO_SESSION') continue;
-          if (status.status === 'PENDING' && status.pendingReason && EXEMPT_PENDING.has(status.pendingReason)) continue;
+          const late = await decide(db, app.id, c.id, now);
+          if (!late) continue;
           if (openWorkers.has(c.id)) continue;
-          const last = lastAssigned.get(c.id) ?? null;
-          const clock = Math.max(last?.getTime() ?? -Infinity, firstSession.get(c.id)?.getTime() ?? -Infinity, observed.get(c.id)?.getTime() ?? -Infinity);
-          if (now.getTime() - clock < COORDINATOR_CADENCE_WINDOW_MINUTES * 60_000) continue;
-          const pool = await matchingTeamPool(db, app.id, c.id);
-          const freeWorkerCount = [...pool].filter((id) => {
-            const s = stateOf.get(id);
-            return !!s && !isCoordinator(s.role) && s.free;
-          }).length;
-          if (freeWorkerCount === 0) continue;
-          const id = await raise(db, app, { workerId: c.id, lastAssignedAt: last, freeWorkerCount }, now);
+          const id = await raise(db, app, late, now);
           if (id) raised.push(id);
         } catch (err) {
           console.error(`[coordinator-cadence] raising the alarm for worker ${c.id} failed:`, err);

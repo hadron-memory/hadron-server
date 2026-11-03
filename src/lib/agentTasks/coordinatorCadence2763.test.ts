@@ -206,10 +206,13 @@ describe('#2763 the exemptions come from the dark-worker set', () => {
     expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
   });
 
-  it('a coordinator with no live session raises nothing', async () => {
+  it('a coordinator with no live session is NOT exempt (cor:agt:050:31 r3), but a paused one without a session still is', async () => {
     await bind('Liam');
     await evaluateCoordinatorCadence(db, at(70));
+    await db.workerWakeSettings.create({ data: { workerId: w.Ada.id, pausedUntil: later(60) } });
     expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    await db.workerWakeSettings.delete({ where: { workerId: w.Ada.id } });
+    expect(await evaluateCoordinatorCadence(db, later(1))).toHaveLength(1);
   });
 });
 
@@ -241,5 +244,62 @@ describe('#2763 the database and the surfaces', () => {
     expect(pending.find((p) => p.eventId === a.id)?.title).toBe('Ada has stopped assigning work');
     await db.coordinatorCadenceEpisode.updateMany({ where: { eventId: a.id }, data: { endedAt: later(1) } });
     expect(((await pendingTaskWakes(db, [w.Cass.id], later(1))).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(false);
+  });
+});
+
+describe('#2763 fix head: the decision is re-derived inside the raise transaction; the chain follows cor:agt:050:18', () => {
+  it('an assignment that commits between the pass\'s reads and the raise transaction publishes nothing', async () => {
+    await lateAda();
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await event('task.assigned', 'Ada', 0); // commits in the window between the outer read and the transaction
+      return real(...a);
+    }) as never);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    spy.mockRestore();
+    expect(await alarms()).toHaveLength(0);
+    expect(await db.coordinatorCadenceEpisode.count()).toBe(0);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
+  });
+
+  it('a pause that commits in that window publishes nothing', async () => {
+    await lateAda();
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await db.workerWakeSettings.create({ data: { workerId: w.Ada.id, pausedUntil: later(60) } });
+      return real(...a);
+    }) as never);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    spy.mockRestore();
+    expect(await alarms()).toHaveLength(0);
+  });
+
+  it('the chain is the reporting line only when there is one', async () => {
+    w.Cass = await mk('Cass', null, 'lead');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    await evaluateCoordinatorCadence(db, NOW);
+    expect((await alarms())[0].chain).toEqual([{ workerId: w.Cass.id }]);
+  });
+
+  it('the App managers are the chain only when there is no reporting line', async () => {
+    await lateAda();
+    await evaluateCoordinatorCadence(db, NOW);
+    const chain = (await alarms())[0].chain as { workerId?: string; userId?: string; via?: string }[];
+    expect(chain.length).toBeGreaterThan(0);
+    expect(chain.every((p) => !p.workerId && p.userId && p.via === 'manager')).toBe(true);
+  });
+
+  it('a real task.assigned ends the episode and the delivered escalation stops', async () => {
+    w.Cass = await mk('Cass', null, 'lead');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    await evaluateCoordinatorCadence(db, NOW);
+    const [a] = await alarms();
+    const { pendingTaskWakes } = await import('./taskWakes.js');
+    expect(((await pendingTaskWakes(db, [w.Cass.id], NOW)).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(true);
+    await event('task.assigned', 'Ada', -1);
+    await evaluateCoordinatorCadence(db, later(2));
+    expect(((await pendingTaskWakes(db, [w.Cass.id], later(2))).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(false);
   });
 });
