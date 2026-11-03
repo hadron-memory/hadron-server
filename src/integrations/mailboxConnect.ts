@@ -76,6 +76,46 @@ export function getConnectProvider(provider: string): MailboxConnectConfig | und
 export interface ConnectStart {
   nonce: string;
   expiresAt: Date;
+  /** #2913: the flow id a GraphQL start returns; null for a portal start (it has no flow to find). */
+  flowId: string | null;
+}
+
+/** How long a flow id resolves, from its start (cor:dmo:080:04, V12): longer than the 2-minute link on purpose. */
+export const CONNECTION_FLOW_TTL_MS = 60 * 60 * 1000;
+/** Flow rows are kept a day past their hour, then swept by the next start; nothing reads them after the hour. */
+const CONNECTION_FLOW_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/** Where a settle writes: the shared client, or the transaction that also records the connection. */
+type FlowWriter = Pick<typeof db, 'connectionFlow'>;
+
+/**
+ * Settle a flow once: the guard is the unsettled row, so a replayed callback or a second outcome changes nothing.
+ * Inside a transaction (`client` given) a failed write throws, so the connection it would have announced is rolled
+ * back with it. Outside one, a failed write is retried once and then logged: the browser already has its answer.
+ */
+async function settleConnectionFlow(
+  flowId: string | null | undefined,
+  outcome: { connectionId: string } | { failureCode: string },
+  client?: FlowWriter,
+): Promise<void> {
+  if (!flowId) return;
+  const write = () =>
+    (client ?? db).connectionFlow.updateMany({
+      where: { id: flowId, settledAt: null },
+      data: { ...outcome, settledAt: new Date() },
+    });
+  if (client) {
+    await write();
+    return;
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await write();
+      return;
+    } catch (err) {
+      if (attempt === 1) console.error('connection flow settle failed:', err instanceof Error ? err.message : err);
+    }
+  }
 }
 
 /**
@@ -100,14 +140,25 @@ export async function issueConnectStart(
   await requireOrgRole({ db, userId: args.userId, roles: args.roles }, args.orgId, 'ADMIN');
   if (!cfg.isConfigured()) throw new ConnectProviderNotConfiguredError(cfg.routeName);
   const issuedAt = Date.now();
+  // #2913: a GraphQL start also opens the flow row its caller will read. Created before the nonce, so a nonce that
+  // exists always names a flow that does. Expired rows are swept here, never on a read (a read writes nothing).
+  let flowId: string | null = null;
+  if (args.origin === 'graphql') {
+    flowId = crypto.randomBytes(16).toString('hex');
+    await db.connectionFlow.deleteMany({ where: { startedAt: { lt: new Date(issuedAt - CONNECTION_FLOW_RETENTION_MS) } } });
+    await db.connectionFlow.create({
+      data: { id: flowId, userId: args.userId, organizationId: args.orgId, provider: cfg.provider },
+    });
+  }
   const nonce = await issueExchangeStartNonce({
     userId: args.userId,
     orgId: args.orgId,
     redirect: args.redirect,
     provider: cfg.provider,
     origin: args.origin,
+    flowId: flowId ?? undefined,
   });
-  return { nonce, expiresAt: new Date(issuedAt + EXCHANGE_START_TTL_MS) };
+  return { nonce, expiresAt: new Date(issuedAt + EXCHANGE_START_TTL_MS), flowId };
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -208,7 +259,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
   connectProviders.set(cfg.provider, cfg);
   const pendingStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; expiresAt: number }
+    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }
   >();
 
   // #477 Sink 2 — mailbox-connect OAuth start. The portal calls this
@@ -395,9 +446,15 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     // otherwise grow the map unboundedly (the sibling login flows prune the
     // same way).
     const now = Date.now();
+    const evicted: string[] = [];
     for (const [key, value] of pendingStates) {
-      if (value.expiresAt < now) pendingStates.delete(key);
+      if (value.expiresAt < now) {
+        pendingStates.delete(key);
+        // An evicted state can never reach its callback, so a GraphQL flow riding on it ends here, not at PENDING.
+        if (value.origin === 'graphql' && value.flowId) evicted.push(value.flowId);
+      }
     }
+    for (const flowId of evicted) await settleConnectionFlow(flowId, { failureCode: 'state_expired' });
 
     const state = crypto.randomBytes(16).toString('hex');
     pendingStates.set(state, {
@@ -405,6 +462,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       userId: started.userId,
       redirect: started.redirect,
       origin: started.origin,
+      flowId: started.flowId,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
@@ -426,11 +484,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       const refused = state ? pendingStates.get(state) : undefined;
       if (state) pendingStates.delete(state);
       if (refused?.origin === 'graphql') {
-        sendConnectDonePage(res, {
-          provider: cfg.provider,
-          ok: false,
-          code: STABLE_PROVIDER_ERRORS.has(oauthError) ? oauthError : 'provider_error',
-        });
+        const failureCode = STABLE_PROVIDER_ERRORS.has(oauthError) ? oauthError : 'provider_error';
+        await settleConnectionFlow(refused.flowId, { failureCode });
+        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: failureCode });
         return;
       }
       const errorUrl = new URL('/app/dashboard', frontendUrl);
@@ -448,6 +504,11 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     const pending = pendingStates.get(state);
     pendingStates.delete(state);
 
+    if (pending && pending.expiresAt < Date.now() && pending.origin === 'graphql') {
+      // A known state that ran out is consumed and can never finish, so its flow ends here instead of reading
+      // PENDING until its hour is up. An unknown state names no flow and settles nothing.
+      await settleConnectionFlow(pending.flowId, { failureCode: 'state_expired' });
+    }
     if (!pending || pending.expiresAt < Date.now()) {
       res.status(400).json({ error: 'Invalid or expired state' });
       return;
@@ -483,7 +544,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       const forbidden = err instanceof Error && err.message === 'Forbidden';
       if (!forbidden) console.error(`${cfg.routeName}/callback re-check error:`, err);
       if (pending.origin === 'graphql') {
-        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: forbidden ? 'not_authorized' : 'server_error' });
+        const failureCode = forbidden ? 'not_authorized' : 'server_error';
+        await settleConnectionFlow(pending.flowId, { failureCode });
+        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: failureCode });
         return;
       }
       const errorUrl = new URL('/app/dashboard', frontendUrl);
@@ -522,51 +585,61 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         },
         select: { toolConnectionId: true, provider: true },
       });
-      if (existing?.toolConnectionId && existing.toolConnectionId !== identity.id) {
-        void deleteToolConnection(existing.provider, existing.toolConnectionId);
-      }
+      // Its teardown waits for the commit below: a rollback keeps the row on this old tool connection.
+      const superseded =
+        existing?.toolConnectionId && existing.toolConnectionId !== identity.id
+          ? { provider: existing.provider, id: existing.toolConnectionId }
+          : null;
 
-      await db.exchangeConnection.upsert({
-        where: {
-          organizationId_provider_mailboxEmail: {
-            organizationId: pending.orgId,
-            provider: cfg.provider,
-            mailboxEmail: identity.mailboxEmail,
+      const minted = identity;
+      const connection = await db.$transaction(async (tx) => {
+        const row = await tx.exchangeConnection.upsert({
+          where: {
+            organizationId_provider_mailboxEmail: {
+              organizationId: pending.orgId,
+              provider: cfg.provider,
+              mailboxEmail: minted.mailboxEmail,
+            },
           },
-        },
-        create: {
-          organizationId: pending.orgId,
-          userId: pending.userId,
-          mailboxEmail: identity.mailboxEmail,
-          displayName: identity.displayName,
-          provider: identity.provider,
-          toolConnectionId: identity.id,
-          syncStatus: 'OK',
-          lastSyncAt: new Date(),
-          createdBy: pending.userId,
-        },
-        update: {
-          displayName: identity.displayName,
-          provider: identity.provider,
-          toolConnectionId: identity.id,
-          // Reconnect transfers OWNERSHIP: mail operations are owner-only,
-          // and the initiator just proved control of the mailbox via OAuth
-          // (and passed the #506 org-ADMIN gate). Without this, a reconnect
-          // by a different user would strand the row on the old owner.
-          userId: pending.userId,
-          // A reconnect also REVIVES a previously-disconnected row —
-          // otherwise the flow reports success while the row stays
-          // soft-deleted and invisible.
-          deletedAt: null,
-          deletedBy: null,
-          // The legacy core-held token (if any) is superseded by the tool's.
-          refreshTokenEncrypted: null,
-          syncStatus: 'OK',
-          lastSyncAt: new Date(),
-          lastError: null,
-          updatedBy: pending.userId,
-        },
+          create: {
+            organizationId: pending.orgId,
+            userId: pending.userId,
+            mailboxEmail: minted.mailboxEmail,
+            displayName: minted.displayName,
+            provider: minted.provider,
+            toolConnectionId: minted.id,
+            syncStatus: 'OK',
+            lastSyncAt: new Date(),
+            createdBy: pending.userId,
+          },
+          update: {
+            displayName: minted.displayName,
+            provider: minted.provider,
+            toolConnectionId: minted.id,
+            // Reconnect transfers OWNERSHIP: mail operations are owner-only,
+            // and the initiator just proved control of the mailbox via OAuth
+            // (and passed the #506 org-ADMIN gate). Without this, a reconnect
+            // by a different user would strand the row on the old owner.
+            userId: pending.userId,
+            // A reconnect also REVIVES a previously-disconnected row —
+            // otherwise the flow reports success while the row stays
+            // soft-deleted and invisible.
+            deletedAt: null,
+            deletedBy: null,
+            // The legacy core-held token (if any) is superseded by the tool's.
+            refreshTokenEncrypted: null,
+            syncStatus: 'OK',
+            lastSyncAt: new Date(),
+            lastError: null,
+            updatedBy: pending.userId,
+          },
+        });
+        // The flow settles in the same transaction as the connection it announces: both land or neither does.
+        if (pending.origin === 'graphql') await settleConnectionFlow(pending.flowId, { connectionId: row.id }, tx);
+        return row;
       });
+
+      if (superseded) void deleteToolConnection(superseded.provider, superseded.id);
 
       // Subscribe the inbox to provider change notifications (the event
       // plane). Best-effort: until the tool's public ingress route is
@@ -608,6 +681,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         void deleteToolConnection(identity.provider, identity.id);
       }
       if (pending.origin === 'graphql') {
+        await settleConnectionFlow(pending.flowId, { failureCode: 'connection_failed' });
         sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: 'connection_failed' });
         return;
       }
