@@ -1412,7 +1412,7 @@ export const appMutations = {
         throw authorizationDenied();
       }
       const target = key;
-      let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction);
+      let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction, undefined, true);
       await withAuthorizedTx(
         ctx,
         [
@@ -1421,13 +1421,13 @@ export const appMutations = {
           ...(target.app.ownerUserId ? [{ kind: 'user' as const, id: target.app.ownerUserId }] : []),
         ],
         async (txCtx) => {
-          admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission);
+          admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission, true);
         },
         async (tx, txCtx) => {
           if (admission.kind === 'instructed-worker') {
             // Last lock the act takes: the holder's worker and session rows, then the final judgement on them.
             await lockInstructedActRows(tx, [admission.workerId], ctx.sessionId);
-            admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission);
+            admission = await admitAppManagement(txCtx, target.app, authorizationDenied, instruction, admission, true);
           }
           // A key already revoked keeps its first revocation time and records nothing.
           const ended = await tx.appKey.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date() } });

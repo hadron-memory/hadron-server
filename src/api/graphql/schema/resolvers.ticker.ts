@@ -36,9 +36,9 @@
 // (tick and dormancy are decided once, in src/lib/tickers). NOT BUILT: the owner
 // succession of cor:agt:080:18 (Proposed).
 
-import { requireInstructedAct, type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { admitAppManagement, callerIsWorkerSession, lockCallerSession, readActInstruction } from './resolvers.instruction.js';
+import { admitAppManagement, requireInstructedActKeepingRuns, callerIsWorkerSession, lockCallerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
@@ -1171,7 +1171,7 @@ async function changeGrant(
       // 0109 A); the manager predicate is the holder's, evaluated here under the App's anchors.
       // The session row is fenced before the judgement, so a session end cannot commit between it and the write.
       await lockCallerSession(tx, txCtx.sessionId);
-      admission = await requireInstructedAct(txCtx, fresh.id, a.instruction, () => managesApp(txCtx, fresh), readActInstruction, forbidden);
+      admission = await requireInstructedActKeepingRuns(txCtx, fresh.id, a.instruction, () => managesApp(txCtx, fresh), readActInstruction, forbidden);
     } else if (!(await actorManagesApp(txCtx, fresh, actor))) throw forbidden();
     // #3277: giving a grant is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0099 A), so a worker
     // never gives a grant, to itself or another: the one person gate also refuses a worker session found on the session

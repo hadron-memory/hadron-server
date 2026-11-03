@@ -155,17 +155,39 @@ describe('#3311 instructed revokes and lists', () => {
     expect(await call(f.key.id, 'attention:deliver', null)).toEqual(missing);
   });
 
-  for (const [kind, extra] of [
-    ['impersonation', () => ({ impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } })],
-    ['run principal', () => ({ clientId: 'run:test', appId: f.app.id })],
-  ] as const) {
-    it(`a person under ${kind} (no session) is refused at every revoke and list door`, async () => {
+  it('a person under impersonation (no session) is refused at every revoke and list door', async () => {
+    const before = await snapshot();
+    const extra = { impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } };
+    for (const [door, call] of Object.entries(doors)) {
+      const got = await answer(call(null, ctx(extra as any)));
+      expect(got.code, door).not.toBe('RESOLVED');
+      expect(got.code, door).toBeDefined();
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  // Xanthos ruling (#71252): a user-backed App run keeps main's behavior. It revokes keys, scopes and App grants and
+  // lists keys when the user it carries manages the App (no instruction record); the write-grant doors refused it
+  // before and still do.
+  const runCtx = () => ctx({ clientId: 'run:test', appId: f.app.id });
+  for (const door of ['key', 'scope', 'grant', 'appKeys', 'appKeysPage']) {
+    it(`a user-backed run is admitted at ${door}, as before, and writes no instruction record`, async () => {
+      await doors[door]!(null, runCtx());
+      expect(await instructionEvents()).toHaveLength(0);
+    });
+    it(`a user-backed run whose user does not manage the App is refused at ${door}`, async () => {
+      await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
       const before = await snapshot();
-      for (const [door, call] of Object.entries(doors)) {
-        const got = await answer(call(null, ctx(extra() as any)));
-        expect(got.code, door).not.toBe('RESOLVED');
-        expect(got.code, door).toBeDefined();
-      }
+      expect((await answer(doors[door]!(null, runCtx()))).code).not.toBe('RESOLVED');
+      expect(await snapshot()).toEqual(before);
+    });
+  }
+  for (const door of ['writeGrant', 'appMemoryWriteGrants']) {
+    it(`a user-backed run stays refused at ${door}, as before`, async () => {
+      const before = await snapshot();
+      const got = await answer(doors[door]!(null, runCtx()));
+      expect(got.code).not.toBe('RESOLVED');
+      expect(got.code).toBeDefined();
       expect(await snapshot()).toEqual(before);
     });
   }

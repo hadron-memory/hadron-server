@@ -22,8 +22,8 @@ import { APP_KEY_SCOPES, isAppKeyScope, type AppKeyScopeName } from '../../../li
 import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
 import { appKeyHostUses } from './resolvers.hostOperation.js';
-import { requireInstructedAct, type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { admitAppManagement, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
+import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { admitAppManagement, requireInstructedActKeepingRuns, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
 const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
@@ -74,7 +74,7 @@ async function changeScope(
       // #3311: a person as themselves, or their held worker on a validated instruction; judged on the holder.
       // The session row is fenced before the judgement, so a session end cannot commit between it and the write.
       await lockCallerSession(tx, txCtx.sessionId);
-      admission = await requireInstructedAct(txCtx, fresh.id, revoke.instruction, () => managesApp(txCtx, fresh), readActInstruction, scopeForbidden);
+      admission = await requireInstructedActKeepingRuns(txCtx, fresh.id, revoke.instruction, () => managesApp(txCtx, fresh), readActInstruction, scopeForbidden);
     } else
     // Whoever manages the App, as a person: not a worker's session, not a key, not an impersonation.
     if (!(await actorManagesApp(txCtx, fresh, actor)) || actor.kind !== 'user') throw scopeForbidden();

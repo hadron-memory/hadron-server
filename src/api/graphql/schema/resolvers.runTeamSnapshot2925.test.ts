@@ -295,7 +295,7 @@ it('an oversized roster is explicitly non-continuable, never an empty complete r
 });
 
 // Xanthos #70403: the new arm is userless; #2925 does not globally change existing user-backed runs.
-it('preserves a user-backed run’s existing TaskActor and task write; #3311 now refuses its scope revoke', async () => {
+it('preserves a user-backed run’s existing TaskActor, task write and S3b scope-revoke behavior', async () => {
   const principal = runContext(db, await mintRun(manager));
   expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toMatchObject({ kind: 'user', userId: manager });
   expect(await mayReadAppTasks(principal, appId)).toBe(true); // default-off is not a new denial on its legacy person arm.
@@ -310,12 +310,8 @@ it('preserves a user-backed run’s existing TaskActor and task write; #3311 now
   await M.updateAgentTask({}, { taskId: created.id, input: { title: 'Legacy edit' } }, principal);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: created.id } })).title).toBe('Legacy edit');
   await M.grantAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, ctx(manager));
-  // #3311 (cor:dmo:050:12 S6, CHECKED gate 6603872229: "run" is one of the refused principals at every revoke door,
-  // as on the membership writes, ruling 0082): revoking a key's scope is a person acting as themselves, or their held
-  // worker on an instruction, never an App's own run. This line used to pin the legacy admission; it is the one
-  // deliberate narrowing, so the run's attempt is refused and writes nothing.
-  await expect(M.revokeAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, principal)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
-  expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: keyId, scope: 'attention:deliver' } })).revokedAt).toBeNull();
+  await M.revokeAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, principal);
+  expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: keyId, scope: 'attention:deliver' } })).revokedAt).not.toBeNull();
 });
 
 it('an outage in the new run read transaction propagates instead of becoming not-found', async () => {

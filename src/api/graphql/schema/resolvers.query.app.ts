@@ -37,7 +37,7 @@ export async function appKeyInventoryScope(ctx: Context, appRef: string, instruc
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
   // #3311: a person as themselves, or their held worker on a validated instruction (one record per admitted call).
-  await admitCredentialList(ctx, app, authorizationDenied, instruction, 'app-key.list');
+  await admitCredentialList(ctx, app, authorizationDenied, instruction, 'app-key.list', true);
   return {
     where: { appId, revokedAt: null } satisfies Prisma.AppKeyWhereInput,
     orderBy: [{ createdAt: 'desc' as const }, { id: 'desc' as const }],

@@ -5,7 +5,8 @@ import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js'
 import { appendCredentialInstructionEvent, type CredentialAct } from '../../../lib/agentTasks/events.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
-import { currentActor } from '../../../lib/requestActor.js';
+import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
+import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { resolveTaskRef, mayReadAppTasks } from './resolvers.agentTask.js';
 import { readableInstructionMessageApp } from './resolvers.teamChat.js';
 
@@ -26,6 +27,31 @@ export async function readActInstruction(ctx: Context, appId: string, instructio
 }
 
 /**
+ * Xanthos ruling (#71252, 2026-11-03): #3311 keeps main's behavior for a user-backed App RUN at the key, scope and App-grant
+ * revoke doors and the key list: it is admitted when the user it carries manages the App, as `requireAppKeyManager` and
+ * `actorManagesApp` admitted it before. Only a plain run: no session, no worker, no impersonation, no ambiguity, no
+ * refused binding, no App key. (The write-grant doors refused a run before and still do.)
+ */
+export function isLegacyRunPrincipal(ctx: Context): boolean {
+  return isRunPrincipal(ctx) && !!ctx.userId && !ctx.impersonation && !ctx.appKeyId && !ctx.sessionId
+    && !ctx.sessionBindingRefused && currentActorAmbiguity() === null && !currentActor().workerId;
+}
+
+/** `requireInstructedAct`, except that a plain run is judged as main judged it (see {@link isLegacyRunPrincipal}). */
+export async function requireInstructedActKeepingRuns(
+  ctx: Context,
+  appId: string,
+  claim: ActInstruction | null | undefined,
+  allowsHolder: () => Promise<boolean>,
+  readReference: (ctx: Context, appId: string, instruction: ActInstruction) => Promise<boolean>,
+  refuse: () => Error,
+): Promise<ActAdmission> {
+  if (!isLegacyRunPrincipal(ctx)) return requireInstructedAct(ctx, appId, claim, allowsHolder, readReference, refuse);
+  if (!(await allowsHolder())) throw refuse();
+  return { kind: 'person', userId: ctx.userId! };
+}
+
+/**
  * #3307, shared by #3311: one holder/instruction gate on the live transaction. The door's own manager predicate runs
  * on the holder (`managesApp`), never on a worker grant or a claimed role. `refuse` is the door's own refusal, so a
  * refused worker gets exactly what the holder as a person would get.
@@ -36,11 +62,12 @@ export async function admitAppManagement(
   refuse: () => Error,
   instruction?: ActInstruction | null,
   expected?: ActAdmission,
+  keepRuns = false,
 ): Promise<ActAdmission> {
   const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
   // The authority/membership lock set belongs to this ownership scope; a transfer must be retried with new anchors.
   if (app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw refuse();
-  const admission = await requireInstructedAct(ctx, app.id, instruction, () => managesApp(ctx, app), readActInstruction, refuse);
+  const admission = await (keepRuns ? requireInstructedActKeepingRuns : requireInstructedAct)(ctx, app.id, instruction, () => managesApp(ctx, app), readActInstruction, refuse);
   // The lock set came from the first admission. Never adopt a different principal after those locks were taken.
   if (expected && (expected.kind !== admission.kind || expected.userId !== admission.userId
     || (expected.kind === 'instructed-worker' && admission.kind === 'instructed-worker' && (expected.workerId !== admission.workerId || expected.agentId !== admission.agentId)))) throw refuse();
@@ -81,8 +108,9 @@ export async function admitCredentialList(
   refuse: () => Error,
   instruction: ActInstruction | null | undefined,
   act: CredentialAct,
+  keepRuns = false,
 ): Promise<ActAdmission> {
-  let admission = await admitAppManagement(ctx, app, refuse, instruction);
+  let admission = await admitAppManagement(ctx, app, refuse, instruction, undefined, keepRuns);
   if (admission.kind !== 'instructed-worker') return admission;
   await withAuthorizedTx(
     ctx,
@@ -91,11 +119,11 @@ export async function admitCredentialList(
       ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
       ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
     ],
-    async (txCtx) => { admission = await admitAppManagement(txCtx, app, refuse, instruction, admission); },
+    async (txCtx) => { admission = await admitAppManagement(txCtx, app, refuse, instruction, admission, keepRuns); },
     async (tx, txCtx) => {
       // The last lock the act takes: the holder's worker and session rows, then the final judgement on them.
       await lockInstructedActRows(tx, [(admission as { workerId: string }).workerId], ctx.sessionId);
-      admission = await admitAppManagement(txCtx, app, refuse, instruction, admission);
+      admission = await admitAppManagement(txCtx, app, refuse, instruction, admission, keepRuns);
       await appendCredentialInstructionEvent(tx, { appId: app.id, admission, act });
     },
     {
