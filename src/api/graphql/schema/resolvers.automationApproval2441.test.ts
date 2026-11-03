@@ -442,6 +442,17 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     spy.mockRestore();
   });
 
+  it('#2883: a legacy row whose entry is gone still shows its live read grants (the stale-entry answer is not a null readGrants)', async () => {
+    const f = await fixture();
+    const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: 'hrn:node:adopt.test:flow:gone' } });
+    const target = await db.memory.create({ data: { name: 'KnowStale', urn: 'adopt.test:knowstale', class: 'knowledge', organizationId: f.org.id } });
+    await db.appAutomationReadGrant.create({ data: { appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: legacy.id, memoryId: target.id, prefix: 'tasks', grantedBy: f.user.id } });
+    const d = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: legacy.id }, f.ctx);
+    expect(d.state).toBe('UNADOPTED');
+    expect(d.hash).toBe('');
+    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:knowstale', 'tasks']]);
+  });
+
   it('#2883 (0081 A): the approval shows the trigger\'s LIVE read grants (memory and prefix), never a revoked one; a manual run shows none', async () => {
     const f = await fixture();
     const target = await db.memory.create({ data: { name: 'Know', urn: 'adopt.test:know', class: 'knowledge', organizationId: f.org.id } });
@@ -452,7 +463,7 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'old', revokedAt: new Date(), revokedBy: f.user.id } });
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: hidden.id, prefix: null } });
     const d = await detail(f, 'SCHEDULE');
-    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['adopt.test:know', 'tasks'], [null, null]]);
+    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:know', 'tasks'], [null, null]]);
     expect((await detail(f, 'WEBHOOK')).readGrants).toEqual([]);
     expect((await detail(f, 'MANUAL')).readGrants).toEqual([]);
   });

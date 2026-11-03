@@ -15,7 +15,7 @@ import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
+import { requireOwnerOrOrgRole, safeCanonicalUrn, type Context } from './resolvers.helpers.js';
 
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
@@ -149,12 +149,13 @@ async function entryUnavailable(ctx: Context, entryNodeUrn: string): Promise<boo
   return !anchor || !await canReadMemory(ctx.db, ctx, anchor.memoryId);
 }
 /** #2503: no graph resolves, so there is no hash to approve, no flows and no depth; the stale URN is the only detail. */
-const staleEntryApproval = (entryNodeUrn: string) => ({
+const staleEntryApproval = (entryNodeUrn: string, readGrants: Awaited<ReturnType<typeof liveReadGrants>>) => ({
   state: 'UNADOPTED' as AdoptionState,
   hash: '',
   summary: { name: entryNodeUrn, flows: [], reads: [], writes: [], tools: [], schedule: null, cannotDo: [],
     limits: [`The entry node ${entryNodeUrn} this automation was set up with no longer resolves (renamed, moved, deleted or unreadable). Set the trigger to the entry node's current URN, then review and approve again.`] },
   depth: {},
+  readGrants,
 });
 
 export const automationPinQueries = {
@@ -235,7 +236,7 @@ export const automationPinQueries = {
       // #2503: a legacy row (no stamped id, nothing to resolve by) whose stored URN is dead is UNADOPTED, with that
       // URN, which the row already stores, as the detail. Missing and unreadable are one answer (cor:api:140:03).
       // Only the ENTRY decides it: an error from deeper in the graph is not "the entry is gone" and rethrows.
-      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn);
+      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn, await liveReadGrants(ctx, input.triggerKind, row));
       throw e;
     }
     let state: AdoptionState = stored.state;
@@ -269,7 +270,7 @@ async function liveReadGrants(ctx: Context, kind: AutomationTriggerRef['triggerK
   for (const g of rows) {
     const memory = await canReadMemory(ctx.db, ctx as never, g.memoryId)
       ? await ctx.db.memory.findFirst({ where: { id: g.memoryId, deletedAt: null }, select: { urn: true } }) : null;
-    out.push({ id: g.id, appId: g.appId, triggerKind: g.triggerKind, triggerId: g.triggerId, memoryUrn: memory?.urn ?? null,
+    out.push({ id: g.id, appId: g.appId, triggerKind: g.triggerKind, triggerId: g.triggerId, memoryUrn: memory ? safeCanonicalUrn('memory', memory.urn) : null,
       prefix: g.prefix, grantedBy: g.grantedBy, createdAt: g.createdAt, revokedAt: null, revokedBy: null });
   }
   return out;
