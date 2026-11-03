@@ -228,3 +228,23 @@ for (const asked of ['read', 'read-write']) {
     expect((await item())?.role).toBe(asked);
   });
 }
+
+// #3288: independently writable through C, but only the Agent org B may set the link's cap.
+for (const op of ['addMemoryToAgent', 'updateAgentMemoryRole']) {
+  it(`#3288 ${op}: Agent-org READER stays capped beside another org CONTRIBUTOR`, async () => {
+    // This org sorts before B as well as being inserted first, exposing an unscoped first-role selection.
+    const other = await db.organization.create({
+      data: { id: `0000${generateId().slice(4)}`, name: 'Synthetic', urn: `o${generateId()}` },
+    });
+    await db.orgMember.create({ data: { organizationId: other.id, userId: caller, role: 'ADMIN' } });
+    // Insert the other org first: an unscoped role select must not mistake its write level for B's.
+    await subscribe('CONTRIBUTOR', { organizationId: other.id });
+    await subscribe('READER');
+    if (op === 'updateAgentMemoryRole') {
+      await db.agentMemoryItem.create({ data: { agentId: agent, memoryId: memory, role: 'read' } });
+    }
+    const before = await item();
+    expect(await outcome(link('read-write', op))).toEqual({ code: 'FORBIDDEN', reason: 'CROSS_TENANT_ATTACH' });
+    expect(await item()).toEqual(before);
+  });
+}
