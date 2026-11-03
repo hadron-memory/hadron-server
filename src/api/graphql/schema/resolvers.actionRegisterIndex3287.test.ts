@@ -114,6 +114,17 @@ describe('#3287 resolution and states (acceptance 1, 2)', () => {
     ]);
   });
 
+  it('a base boot-prompt entry is not inherited; the same node in the own memory is listed (a comment cannot be an entry: COMMENT_INVARIANT)', async () => {
+    await entry(teamBase.memoryId, 'g.boot', 'tasks:alpha').then((n) => db.node.update({ where: { id: n.id }, data: { role: 'boot-prompt' } }));
+    await entry(teamBase.memoryId, 'h.bootsub', 'tasks:alpha').then((n) => db.node.update({ where: { id: n.id }, data: { role: 'boot-prompt.coder' } }));
+    const r = await index();
+    expect(r.total).toBe(4);
+    expect(r.entries.map((e: any) => e.code)).toEqual(['a.base', 'b.over', 'c.unres', 'd.bad']);
+    await entry(team.memoryId, 'g.boot', 'tasks:alpha').then((n) => db.node.update({ where: { id: n.id }, data: { role: 'boot-prompt' } }));
+    const own = await index({ code: 'g.boot' });
+    expect(own.entries).toEqual([expect.objectContaining({ code: 'g.boot', state: 'MAPPED', definedBy: agentUrn(team) })]);
+  });
+
   it('the base asking resolves its own task, not the child override', async () => {
     const r = await index({ agentRef: engineer.id, code: 'a.base' });
     expect(r.entries[0].taskUrn).toBe(`hrn:node:${await memUrn(engineer.memoryId)}:tasks:alpha`);
@@ -201,6 +212,17 @@ describe('#3287 whole-chain gate, ruling 0107 (acceptance 3, 5a)', () => {
     await db.memory.update({ where: { id: engineer.memoryId }, data: { deletedAt: new Date() } });
     await expectEmptyAsNoTeam();
   });
+
+  it('a soft-deleted system memory empties the page even for a platform admin, whose access reads it', async () => {
+    const platform: Context = { db, userId: admin.id, roles: ['ADMIN'] };
+    expect((await index({}, platform)).total).toBe(4);
+    const empty = await noTeamAnswer();
+    await db.memory.update({ where: { id: engineer.memoryId }, data: { deletedAt: new Date() } });
+    expect(JSON.stringify(await index({}, platform))).toBe(empty);
+    await db.memory.update({ where: { id: engineer.memoryId }, data: { deletedAt: null } });
+    await db.memory.update({ where: { id: teamBase.memoryId }, data: { deletedAt: new Date() } });
+    expect(JSON.stringify(await index({}, platform))).toBe(empty);
+  });
 });
 
 describe('#3287 filters (acceptance 4)', () => {
@@ -238,6 +260,13 @@ describe('#3287 the asking Agent (acceptance 5, ruling 0106)', () => {
   it('a cast worker Agent not installed in the App may be named', async () => {
     const r = await index({ agentRef: agentUrn(coder), code: 'a.base' });
     expect(r.entries[0].taskUrn).toBe(`hrn:node:${await memUrn(coder.memoryId)}:tasks:alpha`);
+  });
+
+  it('a retired worker no longer admits its Agent: refused like an unknown Agent', async () => {
+    await db.worker.update({ where: { id: coderWorker.id }, data: { retiredAt: new Date() } });
+    const unknown = generateId();
+    const shape = async (ref: string) => (await refusal(index({ agentRef: ref }))).replaceAll(ref, '<ref>');
+    expect(await shape(coder.id)).toBe(await shape(unknown));
   });
 
   it('unknown, unreadable, readable-but-outside-the-App and other-tenant Agents answer byte-identically, with no fallback', async () => {
