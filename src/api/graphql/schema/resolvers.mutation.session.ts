@@ -2580,7 +2580,7 @@ export const sessionMutations = {
           await requireOrgRole(ctx, orgId, 'ADMIN');
           throw new ConnectProviderNotConfiguredError(provider);
         }
-        const { nonce, expiresAt } = await issueConnectStart(cfg, {
+        const { nonce, expiresAt, flowId } = await issueConnectStart(cfg, {
           userId: ctx.userId,
           roles: ctx.roles,
           orgId,
@@ -2588,6 +2588,7 @@ export const sessionMutations = {
           origin: 'graphql',
         });
         return {
+          flowId,
           provider,
           orgId,
           authorizeUrl: `${getProjectBaseUrl()}/auth/${cfg.routeName}?nonce=${nonce}`,

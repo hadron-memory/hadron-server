@@ -24,6 +24,10 @@ import { cleanDb } from '../helpers.js';
 import { confirmConnect } from '../connectInterstitial.js';
 import { signJwt } from '../../auth/index.js';
 import { createToolConnection } from '../../lib/emailClient.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
+import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
+import { runAsActor } from '../../lib/requestActor.js';
 
 let server: Server | undefined;
 let baseUrl: string;
@@ -267,5 +271,44 @@ describe('#2913 connectionFlow', () => {
     const cfg = getConnectProvider('gmail')!;
     await issueConnectStart(cfg, { userId: adminId, roles: ['READER'], orgId, redirect: '/', origin: 'portal' });
     expect(await db.$queryRaw`SELECT id FROM connection_flows`).toEqual([]);
+  });
+});
+
+describe('#2913 connectionFlow: credentials that may never read a flow (resolver level)', () => {
+  const apollo = new ApolloServer<Context>({ typeDefs, resolvers });
+  async function run(ctx: Partial<Context>, flowId: string, fn?: <T>(f: () => Promise<T>) => Promise<T>) {
+    const exec = () => apollo.executeOperation({ query: FLOW(flowId) }, { contextValue: { db, ...ctx } as Context });
+    const res = await (fn ? fn(exec) : exec());
+    if (res.body.kind !== 'single') throw new Error('unexpected');
+    return res.body.singleResult;
+  }
+  const codes = (r: Awaited<ReturnType<typeof run>>) => r.errors?.map((e) => e.extensions?.code);
+
+  it('every one of these is refused although the flow is the admin\'s own and live', async () => {
+    const { flowId } = await start();
+    expect(codes(await run({ userId: adminId, roles: ['READER'] }, flowId))).toBeUndefined();
+    // An impersonated request carrying the starter's userId.
+    expect(
+      codes(
+        await run(
+          { userId: adminId, roles: [], impersonation: { sessionId: 's', actorUserId: otherAdminId, orgId, expiresAt: new Date(Date.now() + 60_000) } },
+          flowId,
+        ),
+      ),
+    ).toEqual(['FORBIDDEN']);
+    // An App run on behalf of the starter.
+    expect(codes(await run({ appId: 'app-1', userId: adminId, roles: ['READER'] }, flowId))).toEqual(['FORBIDDEN']);
+    // A bound worker session for the starter.
+    expect(
+      codes(
+        await run({ userId: adminId, roles: ['READER'] }, flowId, (f) =>
+          runAsActor({ workerId: 'worker-1', agentId: null, userId: adminId }, f),
+        ),
+      ),
+    ).toEqual(['FORBIDDEN']);
+    // An OAuth credential limited to the MCP surface.
+    expect(codes(await run({ userId: adminId, roles: ['READER'], oauthScopes: ['mcp'] }, flowId))).toEqual(['FORBIDDEN']);
+    // An App key with no user.
+    expect(codes(await run({ appId: 'app-1', roles: [] }, flowId))).toEqual(['UNAUTHENTICATED']);
   });
 });

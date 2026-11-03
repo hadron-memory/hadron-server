@@ -435,6 +435,7 @@ model User {
   pendingEmailSignIns           PendingEmailSignIn[]
   signIns                       SignIn[]
   authHandoffCodes              AuthHandoffCode[]
+  connectionFlows               ConnectionFlow[]
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions         NodeRevision[]              @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
@@ -619,6 +620,7 @@ model Organization {
 
   invitations            UserInvitation[]        @relation("OrgInvitations")
   exchangeConnections    ExchangeConnection[]
+  connectionFlows        ConnectionFlow[]
   slackConnections       SlackConnection[]
   mcpServers             McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
@@ -2850,6 +2852,27 @@ model ExchangeConnection {
   @@map("exchange_connections")
 }
 
+/// #2913 (cor:dmo:080:04 "Finding the connection a flow made"): where one GraphQL-started connect flow is. Created
+/// pending by `startConnection`; settled once by the callback with the connection id (the existing row on a
+/// reconnect) or the done page's failure code. Readable only by `userId`, for one hour from `startedAt` judged on the
+/// database clock. `connectionId` is a plain id, not a relation: a flow that resolved keeps saying which connection it made.
+model ConnectionFlow {
+  id             String    @id
+  userId         String    @map("user_id")
+  organizationId String    @map("organization_id")
+  provider       String
+  startedAt      DateTime  @default(now()) @map("started_at")
+  connectionId   String?   @map("connection_id")
+  failureCode    String?   @map("failure_code")
+  settledAt      DateTime? @map("settled_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([startedAt])
+  @@map("connection_flows")
+}
+
 /// User→App scoped delegation on a user-owned connection (spec-042 Track B,
 /// #593; supersedes the deferred AgentEmailGrant). Lets a connection's OWNER
 /// grant a specific App install scoped access (e.g. `mail.read`) to their
@@ -4575,6 +4598,8 @@ model AuthHandoffCode {
   createdAt       DateTime  @default(now()) @map("created_at")
   /// #1897: the sign-in this handoff publishes (null = not factor-protected).
   signInId        String?   @map("sign_in_id")
+  /// #2913: exchange_start (GraphQL origin) only — the ConnectionFlow this nonce belongs to. No FK: the flow outlives the nonce.
+  flowId          String?   @map("flow_id")
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   signIn SignIn? @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)

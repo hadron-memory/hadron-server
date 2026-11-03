@@ -5650,13 +5650,42 @@ export const typeDefs = `#graphql
     GOOGLE_DRIVE
   }
 
+  "Where a connect flow is (#2913)."
+  enum ConnectionFlowStatus {
+    "The flow has not completed. An answer, never an error."
+    PENDING
+    "The flow made, or reconnected, the connection in connectionId."
+    CONNECTED
+    "The flow ended without a connection; failureCode says why."
+    FAILED
+  }
+
+  """
+  Where one connect flow is (#2913, hrn:node:hadronmemory.com:specs:cor:dmo:080:04).
+  Scalars only: it never hands out the connection's own fields.
+  """
+  type ConnectionFlow {
+    status: ConnectionFlowStatus!
+    "The connection the flow created, or on a reconnect the existing one for the same organization, provider and account. Null unless CONNECTED."
+    connectionId: ID
+    "The stable code the done page shows (for example access_denied). Null unless FAILED."
+    failureCode: String
+  }
+
   """
   The start of a connection's OAuth flow (#2897). Open authorizeUrl in a
   browser; the consent step belongs to the provider and the browser ends on a
-  page this server hosts, so the portal is not involved. Confirm the result by
-  listing the org's connections.
+  page this server hosts, so the portal is not involved. Find the connection
+  this flow made with connectionFlow(flowId) (#2913,
+  hrn:node:hadronmemory.com:specs:cor:dmo:080:04).
   """
   type ConnectionStart {
+    """
+    The id of this flow. connectionFlow(flowId:) says where it is: pending, the
+    connection it made, or the failure code it ended with. Only the user who
+    started the flow may read it, for one hour from the start.
+    """
+    flowId: ID!
     provider: ConnectionProvider!
     "The org the connection will be attached to."
     orgId: ID!
@@ -8949,6 +8978,15 @@ export const typeDefs = `#graphql
       limit: Int
       offset: Int
     ): DashboardWidgetPresetPage!
+
+    """
+    Where the connect flow started by startConnection is (#2913,
+    hrn:node:hadronmemory.com:specs:cor:dmo:080:04). Readable only by the user
+    who started it, for one hour from the start; an unknown, expired or
+    another user's flowId gets one refusal (FORBIDDEN), the same for all
+    three. Reading writes nothing.
+    """
+    connectionFlow(flowId: ID!): ConnectionFlow!
 
     """
     Exchange connections for an org.

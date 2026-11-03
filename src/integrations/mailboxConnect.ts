@@ -76,6 +76,30 @@ export function getConnectProvider(provider: string): MailboxConnectConfig | und
 export interface ConnectStart {
   nonce: string;
   expiresAt: Date;
+  /** #2913: the flow id a GraphQL start returns; null for a portal start (it has no flow to find). */
+  flowId: string | null;
+}
+
+/** How long a flow id resolves, from its start (cor:dmo:080:04, V12): longer than the 2-minute link on purpose. */
+export const CONNECTION_FLOW_TTL_MS = 60 * 60 * 1000;
+/** Flow rows are kept a day past their hour, then swept by the next start; nothing reads them after the hour. */
+const CONNECTION_FLOW_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/** Settle a flow once: the guard is the unsettled row, so a replayed callback or a second outcome changes nothing. */
+async function settleConnectionFlow(
+  flowId: string | null | undefined,
+  outcome: { connectionId: string } | { failureCode: string },
+): Promise<void> {
+  if (!flowId) return;
+  try {
+    await db.connectionFlow.updateMany({
+      where: { id: flowId, settledAt: null },
+      data: { ...outcome, settledAt: new Date() },
+    });
+  } catch (err) {
+    // The browser already has its answer; a flow that cannot be settled stays PENDING until its hour ends.
+    console.error('connection flow settle failed:', err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -100,14 +124,25 @@ export async function issueConnectStart(
   await requireOrgRole({ db, userId: args.userId, roles: args.roles }, args.orgId, 'ADMIN');
   if (!cfg.isConfigured()) throw new ConnectProviderNotConfiguredError(cfg.routeName);
   const issuedAt = Date.now();
+  // #2913: a GraphQL start also opens the flow row its caller will read. Created before the nonce, so a nonce that
+  // exists always names a flow that does. Expired rows are swept here, never on a read (a read writes nothing).
+  let flowId: string | null = null;
+  if (args.origin === 'graphql') {
+    flowId = crypto.randomBytes(16).toString('hex');
+    await db.connectionFlow.deleteMany({ where: { startedAt: { lt: new Date(issuedAt - CONNECTION_FLOW_RETENTION_MS) } } });
+    await db.connectionFlow.create({
+      data: { id: flowId, userId: args.userId, organizationId: args.orgId, provider: cfg.provider },
+    });
+  }
   const nonce = await issueExchangeStartNonce({
     userId: args.userId,
     orgId: args.orgId,
     redirect: args.redirect,
     provider: cfg.provider,
     origin: args.origin,
+    flowId: flowId ?? undefined,
   });
-  return { nonce, expiresAt: new Date(issuedAt + EXCHANGE_START_TTL_MS) };
+  return { nonce, expiresAt: new Date(issuedAt + EXCHANGE_START_TTL_MS), flowId };
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -208,7 +243,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
   connectProviders.set(cfg.provider, cfg);
   const pendingStates = new Map<
     string,
-    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; expiresAt: number }
+    { orgId: string; userId: string; redirect: string; origin: ExchangeStartOrigin; flowId: string | null; expiresAt: number }
   >();
 
   // #477 Sink 2 — mailbox-connect OAuth start. The portal calls this
@@ -405,6 +440,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       userId: started.userId,
       redirect: started.redirect,
       origin: started.origin,
+      flowId: started.flowId,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
@@ -426,11 +462,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       const refused = state ? pendingStates.get(state) : undefined;
       if (state) pendingStates.delete(state);
       if (refused?.origin === 'graphql') {
-        sendConnectDonePage(res, {
-          provider: cfg.provider,
-          ok: false,
-          code: STABLE_PROVIDER_ERRORS.has(oauthError) ? oauthError : 'provider_error',
-        });
+        const failureCode = STABLE_PROVIDER_ERRORS.has(oauthError) ? oauthError : 'provider_error';
+        await settleConnectionFlow(refused.flowId, { failureCode });
+        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: failureCode });
         return;
       }
       const errorUrl = new URL('/app/dashboard', frontendUrl);
@@ -483,7 +517,9 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       const forbidden = err instanceof Error && err.message === 'Forbidden';
       if (!forbidden) console.error(`${cfg.routeName}/callback re-check error:`, err);
       if (pending.origin === 'graphql') {
-        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: forbidden ? 'not_authorized' : 'server_error' });
+        const failureCode = forbidden ? 'not_authorized' : 'server_error';
+        await settleConnectionFlow(pending.flowId, { failureCode });
+        sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: failureCode });
         return;
       }
       const errorUrl = new URL('/app/dashboard', frontendUrl);
@@ -526,7 +562,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         void deleteToolConnection(existing.provider, existing.toolConnectionId);
       }
 
-      await db.exchangeConnection.upsert({
+      const connection = await db.exchangeConnection.upsert({
         where: {
           organizationId_provider_mailboxEmail: {
             organizationId: pending.orgId,
@@ -589,6 +625,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       // (Microsoft-era names, kept for compatibility); `provider` tells the
       // portal WHICH connect flow this outcome belongs to.
       if (pending.origin === 'graphql') {
+        await settleConnectionFlow(pending.flowId, { connectionId: connection.id });
         const org = await db.organization
           .findUnique({ where: { id: pending.orgId }, select: { name: true } })
           .catch(() => null);
@@ -608,6 +645,7 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         void deleteToolConnection(identity.provider, identity.id);
       }
       if (pending.origin === 'graphql') {
+        await settleConnectionFlow(pending.flowId, { failureCode: 'connection_failed' });
         sendConnectDonePage(res, { provider: cfg.provider, ok: false, code: 'connection_failed' });
         return;
       }
