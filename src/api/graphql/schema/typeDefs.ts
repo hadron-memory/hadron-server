@@ -8350,6 +8350,35 @@ export const typeDefs = `#graphql
     registerRoleCandidates(appRef: ID!, code: String!, limit: Int = 20, offset: Int = 0): RegisterRoleCandidatePage!
     "Experimental: the routed pick for a register code: the named worker, else one role holder (matcher least-recently-assigned), else one coordinator-role holder, else the App's managers (shown only to a manager). Empty when nothing matches. Never assigns or delivers."
     registerRolePick(appRef: ID!, code: String!, workerRef: ID): RegisterRolePick!
+    """
+    #3287 — an App's action-register index, computed at read: every code the App's Team Agent's
+    chain maps, one row per code in code order, with its task loc resolved through the asking
+    Agent's chain (hrn:node:hadronmemory.com:specs:cor:agt:110:03,
+    hrn:node:hadronmemory.com:specs:cor:agt:110:04 Relationships; rulings 0101 A and 0102 A: no
+    stored edge, one server field). Writes nothing and caches nothing.
+
+    Entries: the nearest register:<code> per code on the Team Agent's chain (its own system
+    memory first, then its bases); a child's entry hides its base's, the App's install memory is
+    never searched, and a nearest malformed entry is UNMAPPED (no farther entry replaces it).
+    Tasks: each entry's taskLoc resolves nearest-first through the asking Agent's chain; a
+    nearest node that isn't runnable is UNRESOLVED (no farther task is used). States: MAPPED
+    (taskUrn set), UNRESOLVED (taskLoc set, taskUrn null), UNMAPPED (code only).
+
+    The asking Agent (ruling 0106 A): agentRef, else the caller's own Agent (a worker session or
+    an Agent run). agentRef must name an Agent the caller can read that is installed in this App
+    or is a cast worker's Agent; any other ref (unknown, unreadable, outside the App, readable only
+    through another tenant) is refused AGENT_NOT_FOUND identically, never resolved through another
+    Agent. A caller with no Agent and no agentRef is refused BAD_USER_INPUT.
+
+    Read as the caller, all or nothing (ruling 0107 A): unless the caller can read every system
+    memory on the Team Agent's chain and on the asking Agent's chain, through the base, the answer
+    is the empty page an App with no single Team Agent gets (ruling 0060). Filters: taskLoc keeps
+    the codes whose entry names that loc, code keeps one code; a filter naming nothing gives the
+    same empty page. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): limit defaults to 20,
+    capped at 200, 0 is count-only; total and hasMore count after the gate and the filters.
+    An unknown, foreign or non-participant App is refused APP_NOT_FOUND identically.
+    """
+    actionRegisterIndex(appRef: ID!, agentRef: ID, taskLoc: String, code: String, limit: Int = 20, offset: Int = 0): ActionRegisterIndexPage!
     "Declarative team JSON Schema (2020-12). apiVersion is the full identifier hadron.dev/team/v1alpha1; HTTP discovery uses /schemas/team/v1alpha1.json. CLIENT_INPUT additionally permits file parts for clients to inline; the server accepts SERVER only."
     teamSpecSchema(apiVersion: String!, form: TeamSpecForm = SERVER): String!
     """
@@ -15771,6 +15800,34 @@ export const typeDefs = `#graphql
     id: ID!
     title: String!
     status: AgentTaskStatus!
+  }
+
+  "#3287 — one code's answer in the action-register index (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  enum ActionRegisterIndexState {
+    MAPPED
+    UNRESOLVED
+    UNMAPPED
+  }
+  "#3287 — one row of the action-register index: one code, its winning entry and its task for the asking Agent."
+  type ActionRegisterIndexEntry {
+    code: String!
+    state: ActionRegisterIndexState!
+    "hrn:action:<root>:<agent-slug>:<code>, keyed on the Agent whose system memory holds the winning entry. Null when UNMAPPED."
+    actionUrn: String
+    "The winning register:<code> node's URN. Null when UNMAPPED."
+    entryUrn: String
+    "The URN of the Agent whose system memory holds the winning entry (so an override shows). Null when UNMAPPED."
+    definedBy: String
+    "The entry's task loc. Null when UNMAPPED."
+    taskLoc: String
+    "The asking Agent's nearest runnable task at taskLoc. Set only when MAPPED."
+    taskUrn: String
+  }
+  "#3287 — a page of the action-register index; total and hasMore count after the read gate and the filters."
+  type ActionRegisterIndexPage {
+    entries: [ActionRegisterIndexEntry!]!
+    total: Int!
+    hasMore: Boolean!
   }
 
   "Experimental action register role-picking projection. No routing or assignment."

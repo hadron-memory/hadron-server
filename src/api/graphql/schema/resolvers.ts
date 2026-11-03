@@ -1,6 +1,7 @@
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
+import { actionRegisterIndexQueries } from './resolvers.actionRegisterIndex.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
 import { automationReadGrantQueries, automationReadGrantMutations } from './resolvers.automationReadGrant.js';
@@ -211,6 +212,7 @@ export const resolvers = {
     ...agentTaskMatchingQueries,
     ...registerRoleCandidateQueries,
     ...registerRolePickQueries,
+    ...actionRegisterIndexQueries,
     ...memoryConfigQueries,
     ...memoryConfigTemplateQueries,
     ...scopeQueries,
