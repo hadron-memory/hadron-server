@@ -136,6 +136,14 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
       const text = await mcp.callToolText(tool, { parentRel: urn(f.pub, 'docs'), depth: 2, ...(tool === 'hadron_find_nodes' ? { query: 'needle3306', mode: 'keyword' } : {}) });
       expect(text).toContain('needle3306 pub');
     }, 20_000);
+    it('0114B: MCP named-memory sets admit PUBLIC targets without relaxing mixed-set refusals', async () => {
+      const mcp = createTestableMcpServer(f.confined as never);
+      const args = { query: 'needle3306', mode: 'keyword', memoryUrns: [`hrn:mem:${f.pub.urn}`] };
+      expect(await mcp.callToolText('hadron_find_nodes', args)).toContain('needle3306 pub');
+      const refused = await mcp.callToolText('hadron_find_nodes', { ...args, memoryUrns: [...args.memoryUrns, `hrn:mem:${f.orgVisible.urn}`] });
+      expect(refused).toContain('Memory not found');
+      expect(refused).not.toContain('needle3306 pub');
+    }, 20_000);
     it('0114B never permits an MCP write, even with a read-write item', async () => {
       const mcp = createTestableMcpServer(f.confined as never);
       const before = await mcp.callToolText('hadron_update_node', { urn: urn(f.pub), content: 'changed' });
