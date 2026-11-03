@@ -279,6 +279,8 @@
     "WorkerCheckStatus": "value",
     "TeamRosterTaskSummary": "value",
     "RegisterRoleCandidatePage": "envelope",
+    "ActionRegisterIndexPage": "envelope",
+    "ActionRegisterIndexEntry": "value",
     "RegisterRolePick": "value",
     "RegisterRoleCandidate": "value",
     "TeamComposition": "value",
