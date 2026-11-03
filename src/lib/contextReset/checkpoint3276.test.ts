@@ -38,7 +38,7 @@ it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phas
  expect(await code(call(s,mode==='both'?{checkpointNode:(await f.checkpoint()).id}:{checkpoint:undefined}))).toBe('RECOVERY_REF_INVALID');
  expect(await nodeCount()).toBe(n+(mode==='both'?1:0));
  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
- expect((await uses()).at(-1)?.refusedCode).toBe('RECOVERY_REF_INVALID');
+ expect((await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action:mode==='both'?'checkpoint':'reset'}})).at(-1)?.refusedCode).toBe('RECOVERY_REF_INVALID');
 });
 it.each(['missing-memory','encrypted'])('refuses %s working memory and writes nothing',async kind=>{
  const s=await claimed(),n=await nodeCount();
@@ -63,7 +63,7 @@ it.each(['epoch','phase','lease','collected','host','app','missing','malformed',
  else {const k=await db.appKey.create({data:{appId:f.app.id,keyHash:generateId(),keyPreview:'test'}});p=call(s,{},k);expected='APP_KEY_SCOPE_REQUIRED';}
  if(kind==='lease'){expect(await p).toMatchObject({refused:'CLAIM_LAPSED'});}else {const c=await code(p);if(expected)expect(c).toBe(expected);else expect(c).toBeDefined();}
  expect(await nodeCount()).toBe(n);
- if(!['host','person','plain-key'].includes(kind)){expect(await uses()).toHaveLength(1);if(kind!=='lease')expect((await uses())[0]?.refusedCode).toBe(expected);}
+ if(!['host','app','person','plain-key'].includes(kind)){expect(await uses()).toHaveLength(1);if(kind!=='lease')expect((await uses())[0]?.refusedCode).toBe(expected);}
 });
 it('keeps the legacy checkpoint-node input and rejects memory redirection on the new input',async()=>{
  const s=await claimed();const node=await f.checkpoint();
@@ -90,4 +90,17 @@ it.each([false,true])('refuses a taken loc, soft-deleted=%s, without overwriting
   expect(await tx.node.findUniqueOrThrow({where:{id:existing.id}})).toEqual(existing);
   expect((await tx.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
  });
+});
+
+it.each([
+ ['content-max','a'.repeat(65536),'Title',true],
+ ['content-over','é'.repeat(32768)+'a','Title',false],
+ ['title-max','body','a'.repeat(200),true],
+ ['title-over','body','a'.repeat(201),false],
+ ['title-empty','body','',false],
+ ['title-space','body','   ',false],
+] as const)('checkpoint bounds %s',async(_name,content,title,ok)=>{
+ const s=await claimed(),n=await nodeCount();const p=call(s,{checkpoint:{title,content}});
+ if(ok){expect(await p).toMatchObject({reset:{phase:'checkpointed'}});expect(await nodeCount()).toBe(n+1);}
+ else {expect(await code(p)).toBe('RECOVERY_REF_INVALID');expect(await nodeCount()).toBe(n);expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');}
 });
