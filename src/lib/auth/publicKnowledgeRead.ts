@@ -46,16 +46,3 @@ export async function publicKnowledgeAmong(db: PrismaClient, ids: readonly strin
   });
   return new Set(rows.map((r: { id: string }) => r.id));
 }
-
-/**
- * Every such memory id, for the id-allow-list gates GraphQL node reads and searches share. It is NOT a listing: no
- * list surface returns these ids (`hadron_list_memories` reads the access map, which never carries them), and every
- * node search that consumes the list is paged by its own limit (cor:api:050:03).
- */
-export async function allPublicKnowledgeIds(db: PrismaClient, onlyMemoryId?: string): Promise<string[]> {
-  const rows = await db.memory.findMany({
-    where: { ...PUBLIC_KNOWLEDGE_WHERE, ...(onlyMemoryId ? { id: onlyMemoryId } : {}) } as never,
-    select: { id: true },
-  });
-  return rows.map((r: { id: string }) => r.id);
-}

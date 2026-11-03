@@ -125,9 +125,39 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
     it('the access map and the GraphQL id list for the key and the run name no PUBLIC memory unless scoped to it', async () => {
       for (const principal of [f.keyPrincipal, f.runPrincipal]) {
         expect((await getMemoryAccess(db, principal as never)).has(f.pub.id)).toBe(false);
+        expect(await getAccessibleMemoryIds(principal as Context)).not.toContain(f.pub.id);
+        expect(await getAccessibleMemoryIds(principal as Context, f.pub.id)).toEqual([f.pub.id]);
+        expect(await getAccessibleMemoryIds(principal as Context, undefined, { publicTargetIds: [f.pub.id, f.orgVisible.id] })).toContain(f.pub.id);
+        expect(await getAccessibleMemoryIds(principal as Context, undefined, { publicTargetIds: [f.orgVisible.id, f.appScoped.id] })).not.toContain(f.orgVisible.id);
       }
     });
-    it('an unscoped node search never surfaces a non-PUBLIC or App-scoped memory', async () => {
+    it('an unscoped node search still returns item-linked PUBLIC knowledge exactly as before (only the item-less sweep goes)', async () => {
+    const linked = await db.memory.create({ data: { name: 'linked', urn: `${f.orgB.urn}:linked`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id } });
+    await db.node.create({ data: { memoryId: linked.id, loc: LOC, name: 'needle3306 linked', content: 'x', nodeType: 'record' } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: f.orgA.id, urn: `${f.orgA.urn}:ag-linked`, name: 'Linked' } });
+    await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: linked.id, role: 'read' } });
+    for (const principal of [f.keyPrincipal, f.runPrincipal]) {
+      const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 50 }, { ...principal });
+      const ids = out.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId);
+      expect(ids).toContain(linked.id);
+      expect(ids).not.toContain(f.pub.id);
+    }
+  });
+  it('a PUBLIC knowledge row with an owner, a per-user agent holding or an install flag is not admitted', async () => {
+    const user = await db.user.create({ data: { id: generateId(), email: `o-${generateId().toLowerCase()}@example.test` } as never });
+    for (const [slug, extra] of [['ownerx', { ownerUserId: user.id }], ['installx', { isInstallMemory: true }]] as const) {
+      const row = await db.memory.create({
+        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id, ...extra },
+      }).catch((err: unknown) => {
+        if (!/check constraint|chk_memory/i.test(String((err as Error)?.message))) throw err;
+        return null;
+      });
+      if (!row) continue;
+      expect((await publicKnowledgeAmong(db, [row.id])).has(row.id)).toBe(false);
+    }
+  });
+  it('an unscoped node search never surfaces a non-PUBLIC or App-scoped memory', async () => {
       const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 50 }, { ...f.keyPrincipal });
       const ids = out.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId);
       for (const hidden of [f.orgVisible, f.appScoped, f.ownAppScoped, f.group, f.deleted]) expect(ids).not.toContain(hidden.id);
@@ -147,20 +177,44 @@ describe('#3306 the shared predicate itself', () => {
     for (const [slug, cls] of [['pubsys', 'system'], ['pubapp', 'app']] as const) {
       const row = await db.memory.create({
         data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: cls, visibility: 'PUBLIC', organizationId: f.orgB.id },
-      }).catch(() => null);
+      }).catch((err: unknown) => {
+        // Only a CHECK refusal means the shape cannot exist; anything else is a broken fixture and must fail.
+        if (!/check constraint|chk_memory/i.test(String((err as Error)?.message))) throw err;
+        return null;
+      });
       if (!row) continue; // a CHECK already refuses the shape; nothing to admit
       expect((await publicKnowledgeAmong(db, [row.id])).has(row.id)).toBe(false);
       expect(await canReadMemory(db, f.keyPrincipal as never, row.id)).toBe(false);
     }
   });
-  it('an unscoped node search is bounded by the search limit, not by the number of PUBLIC memories', async () => {
+  it('a node search names its PUBLIC targets: no id-less PUBLIC lookup, however many PUBLIC memories exist', async () => {
+    const extra: string[] = [];
     for (let i = 0; i < 5; i++) {
       const m = await db.memory.create({ data: { name: `p${i}`, urn: `${f.orgB.urn}:extra${i}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id } });
       await db.node.create({ data: { memoryId: m.id, loc: LOC, name: 'needle3306 extra', content: 'x', nodeType: 'record' } });
+      extra.push(m.id);
     }
-    const atCap = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 3 }, { ...f.keyPrincipal });
-    expect(atCap.hits).toHaveLength(3);
-    const over = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 4 }, { ...f.keyPrincipal });
-    expect(over.hits).toHaveLength(4);
+    const seen: unknown[] = [];
+    const orig = db.memory.findMany.bind(db.memory);
+    const spy = vi.spyOn(db.memory, 'findMany').mockImplementation(((args: { where?: { visibility?: string; id?: unknown } }) => {
+      if (args?.where?.visibility === 'PUBLIC') seen.push(args.where.id);
+      return orig(args as never);
+    }) as never);
+    try {
+      // Unscoped: no PUBLIC memory is named, so none is looked up and none surfaces.
+      const unscoped = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 50 }, { ...f.keyPrincipal });
+      expect(unscoped.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId)).not.toContain(extra[0]);
+      expect(seen).toHaveLength(0);
+      // Named: exactly the named ids are looked up (cap and cap+1 on the node page still hold).
+      const named = { memoryIds: extra };
+      const atCap = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 3, filter: named }, { ...f.keyPrincipal });
+      expect(atCap.hits).toHaveLength(3);
+      const over = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 4, filter: named }, { ...f.keyPrincipal });
+      expect(over.hits).toHaveLength(4);
+      expect(seen.length).toBeGreaterThan(0);
+      for (const w of seen) expect(w).toEqual({ in: extra });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

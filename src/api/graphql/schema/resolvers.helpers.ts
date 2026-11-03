@@ -1,5 +1,5 @@
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
-import { allPublicKnowledgeIds, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
@@ -2245,7 +2245,7 @@ export async function getAccessibleMemoryIds(
   // this — the agent-attachment gate, which must not let a grant held through
   // one App be re-granted to another App's audience. Everywhere else the fold
   // is correct and the default keeps it.
-  options?: { excludeAppDerived?: boolean },
+  options?: { excludeAppDerived?: boolean; publicTargetIds?: readonly string[] },
 ): Promise<string[] | null> {
   // #2676 (P9): the conversion's operator principal reads what it converts: an install memory's text is otherwise
   // read only by its App's participants, which no operator is. Writes stay limited to system memories (see
@@ -2344,7 +2344,10 @@ export async function getAccessibleMemoryIds(
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
     if (!readsPublicKnowledgeWithoutUser(ctx)) return derived;
-    return [...new Set([...derived, ...await allPublicKnowledgeIds(ctx.db, onlyMemoryId)])];
+    // Named targets only, never a global lookup: a request that names no memory materializes no PUBLIC ids.
+    const named = onlyMemoryId ? [onlyMemoryId] : (options?.publicTargetIds ?? []);
+    if (named.length === 0) return derived;
+    return [...new Set([...derived, ...await publicKnowledgeAmong(ctx.db, named)])];
   }
 
   // JWT user — org/public/subscription memories + owner-only personal/private
