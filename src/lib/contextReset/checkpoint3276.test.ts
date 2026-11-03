@@ -211,3 +211,21 @@ it('a failed-never-collected operation is refused before phase or epoch, no node
  const n=await nodeCount();expect(await code(call({resetId:r.id,taskId:t.id},{epoch:999}))).toBe('HOST_OPERATION_NOT_COLLECTED');expect(await nodeCount()).toBe(n);
  expect((await uses()).at(-1)?.refusedCode).toBe('HOST_OPERATION_NOT_COLLECTED');
 });
+it('locks the worker before the protocol reset row',async()=>{
+ const {Client}=await import('pg');const holder=new Client({connectionString:process.env.DATABASE_URL}),probe=new Client({connectionString:process.env.DATABASE_URL});
+ await holder.connect();await probe.connect();const s=await claimed();let pending:Promise<any>|undefined;
+ try{
+  await holder.query('BEGIN');await holder.query('SELECT id FROM workers WHERE id=$1 FOR UPDATE',[f.kit.id]);
+  pending=call(s);
+  const deadline=Date.now()+3000;let waiting=false;
+  do{
+   const [row]=await db.$queryRaw<{n:bigint}[]>`SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query ILIKE '%FROM workers%FOR SHARE%'`;
+   waiting=Number(row!.n)>0;if(!waiting)await new Promise(r=>setTimeout(r,10));
+  }while(!waiting&&Date.now()<deadline);
+  expect(waiting).toBe(true);
+  await probe.query('BEGIN');
+  await expect(probe.query('SELECT id FROM context_resets WHERE id=$1 FOR UPDATE NOWAIT',[s.resetId])).resolves.toBeDefined();
+ }finally{
+  try{await probe.query('ROLLBACK');await holder.query('ROLLBACK');}finally{await probe.end();await holder.end();await pending;}
+ }
+},15000);
