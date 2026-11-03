@@ -16,11 +16,11 @@ export const TICKER_DEFAULTS = {
 export const TICKER_RELEVANCE = ['ALL', 'MENTIONS'] as const;
 export const MENTION_WAKE = ['IMMEDIATE', 'OFF'] as const;
 export const SUBSCRIPTION_END_REASONS = ['UNSUBSCRIBED', 'WORKER_RETIRED', 'TICKER_DELETED'] as const;
-/** The closed grant-name list (cor:agt:080:24). One value today. */
-export const APP_GRANT_NAMES = ['ticker.subscribe-workers'] as const;
+/** The closed grant-name list (cor:agt:080:24); #3308 stages staffing/member grants before enforcement. */
+export const APP_GRANT_NAMES = ['ticker.subscribe-workers', 'workers.staff', 'app.members'] as const;
 export type AppGrantName = (typeof APP_GRANT_NAMES)[number];
 export const GRANT_SUBSCRIBE_WORKERS: AppGrantName = 'ticker.subscribe-workers';
 
 /** The GraphQL enum spells the grant name as an identifier; the column keeps the dotted form. */
-export const GRANT_ENUM_TO_NAME: Record<string, AppGrantName> = { TICKER_SUBSCRIBE_WORKERS: 'ticker.subscribe-workers' };
-export const GRANT_NAME_TO_ENUM: Record<AppGrantName, string> = { 'ticker.subscribe-workers': 'TICKER_SUBSCRIBE_WORKERS' };
+export const GRANT_ENUM_TO_NAME: Record<string, AppGrantName> = { TICKER_SUBSCRIBE_WORKERS: 'ticker.subscribe-workers', WORKERS_STAFF: 'workers.staff', APP_MEMBERS: 'app.members' };
+export const GRANT_NAME_TO_ENUM: Record<AppGrantName, string> = { 'ticker.subscribe-workers': 'TICKER_SUBSCRIBE_WORKERS', 'workers.staff': 'WORKERS_STAFF', 'app.members': 'APP_MEMBERS' };
