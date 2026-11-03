@@ -330,7 +330,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
     expect(ids).not.toContain(ownMem.id);
   });
 
-  it('Query.memories still lists an ORG-owned memory through an App member (no regression; a bare key does not, #1376)', async () => {
+  it('Query.memories refuses an ORG-owned item to both an App-only member and a bare key (#3305)', async () => {
     const orgMem = await db.memory.create({
       data: { id: generateId(), class: 'knowledge', name: 'orgmem', urn: `${generateId()}:orgmem`, organizationId: pubOrgId },
     });
@@ -357,7 +357,7 @@ describe('getAppMemoryAccess — blocker 2 (foreign user-owned memory never fold
       { filter: { memoryClasses: ['knowledge'] } },
       ctx({ appId: app.id, userId: member.id }),
     );
-    expect(page.items.map((m: { id: string }) => m.id)).toContain(orgMem.id);
+    expect(page.items.map((m: { id: string }) => m.id)).not.toContain(orgMem.id);
   });
 });
 
