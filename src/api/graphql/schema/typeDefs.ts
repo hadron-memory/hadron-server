@@ -3097,7 +3097,9 @@ export const typeDefs = `#graphql
     member, a live ADMIN or OWNER of its organization, or a platform admin for an
     organization-owned App. A known fact for an App the caller can read, so false
     is an answer and not a refusal. False for an App key, an impersonated
-    session, a headless run and a request bound to a worker session. This is not
+    session, a headless run and a request bound to a worker session: this nested
+    read names no instruction, so no worker carries its holder's right on it
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). This is not
     permission to perform every task or worker operation: each operation checks
     its own authority.
     """
@@ -11555,9 +11557,13 @@ export const typeDefs = `#graphql
     """
     #1667 — switch an asset's anonymous public link on or off. Only whoever
     manages the asset's memory; a refused request changes
-    nothing. Returns the asset.
+    nothing. Returns the asset. On an App memory, a worker session acts only on a validated
+    instruction, judged on its holder (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): the holder must manage
+    the App, exactly as for the holder as a person. Without an instruction a worker session is refused. An
+    admitted instructed call that changes the flag writes one team event, ids only (no asset id). Other memory
+    classes keep their own rules and ignore instruction.
     """
-    setAssetPublicLink(assetRef: ID!, enabled: Boolean!): Asset!
+    setAssetPublicLink(assetRef: ID!, enabled: Boolean!, instruction: ActInstructionInput): Asset!
     softDeleteAsset(assetId: ID!): Asset!
     restoreAsset(assetId: ID!): Asset!
 
