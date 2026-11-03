@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
@@ -280,6 +281,7 @@ it('a source failure is typed and never returns a partial snapshot or echoes dat
     expect(err.message).not.toContain('private-source-sentinel');
     expect(JSON.stringify(err)).not.toContain('private-source-sentinel');
     expect(privateLog).toHaveBeenCalledWith('[run-tool] internal_fault', expect.objectContaining({ error: original, requestId: expect.any(String), site: 'hadron_team_snapshot' }));
+    expect(err.cause).toBe(original);
   } finally { spy.mockRestore(); privateLog.mockRestore(); }
 });
 it('an oversized roster is explicitly non-continuable, never an empty complete roster', async () => {
@@ -337,4 +339,44 @@ it('reads one coherent run-team view while concurrent task state changes', async
     await db.agentTask.create({ data: { appId, title: 'Concurrent task', ownerUserId: manager, status: 'pending' } });
     expect(await c.db.agentTask.count({ where: { appId } })).toBe(count);
   });
+});
+
+it.each(['impersonation', 'user-binding', 'org-binding', 'tool-run-binding'] as const)('refuses a forged run snapshot binding: %s', async kind => {
+  await enable();
+  const run = await mintRun();
+  const c = toolCtx(run);
+  if (kind === 'impersonation') c.principal.impersonation = { orgId } as never;
+  if (kind === 'user-binding') c.principal.userId = manager;
+  if (kind === 'org-binding') c.principal.organizationId = generateId();
+  if (kind === 'tool-run-binding') c.principal.clientId = `run:${generateId()}`;
+  await denied(snapshotTool().execute(c, WINDOW), 'APP_NOT_FOUND');
+});
+it('the new tool uses live own-App opt-in even for a run backed by a nonparticipant user', async () => {
+  const run = await mintRun(outsider);
+  const c = toolCtx(run);
+  await denied(snapshotTool().execute(c, WINDOW), 'APP_NOT_FOUND');
+  await enable();
+  expect((await snapshotTool().execute(c, WINDOW) as { app: { id: string } }).app.id).toBe(appId);
+});
+it.each(['key', 'run', 'outsider', 'personal-outsider'] as const)('masks the nullable App flag for an unauthorized nested reader: %s', async kind => {
+  const c = kind === 'key' ? ctx(undefined, { appId, appKeyId: keyId }) : kind === 'run' ? runContext(db, await mintRun()) : ctx(outsider);
+  const id = kind === 'personal-outsider' ? personalAppId : appId;
+  expect(await (resolvers.App as any).runTeamSnapshotEnabled({ id }, {}, c)).toBeNull();
+});
+
+it('preserves legacy own-App worker, held-worker and chat metadata reads independently of opt-in', async () => {
+  const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+  const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `${app.urn}-shared`, name: 'shared', class: 'app', appId, sharedMemoryOfAgentId: agentId } });
+  const channel = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'Team', createdBy: manager });
+  await db.app.update({ where: { id: appId }, data: { defaultChannelId: channel.channel.id } });
+  await db.worker.update({ where: { id: workerId }, data: { heldByUserId: manager, heldAt: new Date() } });
+  const principal = runContext(db, await mintRun());
+  for (const enabled of [false, true, false]) {
+    await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: enabled } });
+    expect(await Q.worker({}, { ref: workerId }, principal)).toMatchObject({ id: workerId });
+    const held = await Q.heldWorkers({}, { userRef: manager }, principal);
+    expect(held.items.map((worker: { id: string }) => worker.id)).toContain(workerId);
+    const chat = await Q.teamChatMessages({}, { appRef: appId, untagged: true, advanceReadState: false }, principal);
+    expect(chat.items).toEqual([]);
+  }
 });
