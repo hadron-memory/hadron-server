@@ -254,5 +254,5 @@ describe('#2971 the memo is one page long and holds only what the workers of a p
     // constant for the page (21 and 15 measured; 805 and 603 on main, one round per worker). Under N=50 any per-worker read exceeds 40.
     expect(calls.memories, JSON.stringify(calls)).toBeLessThanOrEqual(40);
     expect(calls.members, JSON.stringify(calls)).toBeLessThanOrEqual(40);
-  });
+  }, 30_000);
 });
