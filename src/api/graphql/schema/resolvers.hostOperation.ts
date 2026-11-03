@@ -640,9 +640,9 @@ export const hostOperationMutations = {
   /** Register the durable checkpoint before any process control (§3.4). */
   registerContextResetRecovery: (
     _: unknown,
-    { input }: { input: ResetStepInput & { checkpointNode: string; sessionId: string; taskId: string } },
+    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId: string } },
     ctx: Context,
-  ) => resetStep(ctx, input, (tx, host, now) => registerContextResetRecovery(tx, host, input.resetId, input.epoch, input, now)),
+  ) => resetStep(ctx, input, (tx, host, now) => registerContextResetRecovery(tx, host, input.resetId, input.epoch, input, now), input?.checkpoint !== undefined ? 'checkpoint' : 'reset'),
 
   /** The single stop grant (§2.1): the host signals only within `stopLeaseMs` of its own send time. */
   authorizeContextResetStop: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
@@ -672,20 +672,21 @@ async function resetStep(
   ctx: Context,
   input: ResetStepInput | null | undefined,
   run: (tx: Prisma.TransactionClient, host: ResetHost, now: Date) => Promise<ContextResetStep>,
+  action: HostKeyAction = 'reset',
 ) {
-  return recordingRefusal(ctx, 'reset', null, async () => {
+  return recordingRefusal(ctx, action, null, async () => {
     if (!input) throw badInput('input is required.');
     try {
       const out = await asHost(ctx, input.appRef, async (tx, app, host) => {
-        const result = await run(tx, { appId: app.id, hostId: host.hostId }, new Date());
-        await recordHostKeyUse(tx, host, 'reset', { operationId: result.reset.hostOperationId ?? undefined });
+        const result = await run(tx, { appId: app.id, hostId: host.hostId, appKeyId: host.appKeyId }, new Date());
+        await recordHostKeyUse(tx, host, action, { operationId: result.reset.hostOperationId ?? undefined });
         return result;
       });
       // A refusal or failure may have released the worker; a queued task may now match (cor:agt:060:06).
       if (out.refused) await matchAfterChange(ctx.db, out.reset.appId);
       return out;
     } catch (e) {
-      if (e instanceof ContextResetError) throw taskError(e.code, e.message, { resetId: input.resetId });
+      if (e instanceof ContextResetError) throw taskError(e.code, e.message, e.code === 'CONTEXT_RESET_NOT_FOUND' && action === 'checkpoint' ? {} : { resetId: input.resetId });
       throw e;
     }
   });

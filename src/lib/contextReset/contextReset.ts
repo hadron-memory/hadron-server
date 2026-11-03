@@ -36,6 +36,7 @@ import { appendAvailabilityEvent, PLATFORM_ACTOR, type EventActor } from '../age
 import { loadAvailabilityByFamily, recordInEffect } from '../agentTasks/availability.js';
 import { HOST_LAPSE_CHECK_INS_DEFAULT } from '../agentTasks/hosts.js';
 import { lockWorkersForAssignment } from '../agentTasks/workerLock.js';
+import { hasUnstorableJsonText } from '../agentTasks/references.js';
 import { resolveNodeRef } from '../entityRef/nodeRef.js';
 import { hostReportTimeoutMinutes } from '../hostOperations/settle.js';
 import {
@@ -57,6 +58,9 @@ import {
 type Db = PrismaClient | Prisma.TransactionClient;
 export type ContextResetRow = Prisma.ContextResetGetPayload<Record<string, never>>;
 
+export const CHECKPOINT_CONTENT_MAX_BYTES = 65_536;
+export const CHECKPOINT_TITLE_MAX_CHARS = 200;
+
 export const CONTEXT_RESET_REQUESTED_EVENT = 'task.context-reset-requested';
 // Task-scoped, like the request: chk_agent_team_events_shape allows no hyphen in an event type's first segment.
 export const CONTEXT_RESET_FAILED_EVENT = 'task.context-reset-failed';
@@ -73,6 +77,8 @@ export class ContextResetError extends Error {
       | 'STALE_EPOCH'
       | 'CONTEXT_RESET_WRONG_PHASE'
       | 'RECOVERY_REF_INVALID'
+      | 'CHECKPOINT_LOC_TAKEN'
+      | 'CHECKPOINT_MEMORY_ENCRYPTED'
       | 'HOST_OPERATION_NOT_COLLECTED'
       | 'BAD_USER_INPUT'
       | 'BAD_CONTEXT_RESET_INPUT',
@@ -395,7 +401,7 @@ async function endReset(
 // ── The host's steps ──────────────────────────────────────────────────────
 
 /** The host a step is made by: the key's own App and host (cor:agt:070:04), never a request field. */
-export type ResetHost = { appId: string; hostId: string };
+export type ResetHost = { appId: string; hostId: string; appKeyId?: string };
 
 /**
  * Lock and load a reset for a host step, in the #2162 order: the per-worker lock, the worker's availability row, then
@@ -411,9 +417,9 @@ async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetI
   await lockMark(tx, head.workerId);
   await tx.$queryRaw`SELECT id FROM context_resets WHERE id = ${resetId} FOR UPDATE`;
   const r = await tx.contextReset.findUniqueOrThrow({ where: { id: resetId } });
-  const op = r.hostOperationId ? await tx.hostOperation.findUnique({ where: { id: r.hostOperationId }, select: { status: true } }) : null;
+  const op = r.hostOperationId ? await tx.hostOperation.findUnique({ where: { id: r.hostOperationId }, select: { status: true, collectedAt: true } }) : null;
   if (!op) throw notFound();
-  if (op.status === 'issued') {
+  if (!op.collectedAt) {
     throw new ContextResetError('HOST_OPERATION_NOT_COLLECTED', 'Collect the reset\'s operation before acting on it.');
   }
   return r;
@@ -506,7 +512,7 @@ export async function claimContextReset(
  */
 export async function registerContextResetRecovery(
   tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown,
-  ref: { checkpointNode: unknown; sessionId: unknown; taskId: unknown }, now: Date,
+  ref: { checkpointNode?: unknown; checkpoint?: {title: string; content: string} | null; sessionId: unknown; taskId: unknown }, now: Date,
 ): Promise<ContextResetStep> {
   const r = await lockForHost(tx, host, resetId);
   requireEpoch(r, epoch);
@@ -519,17 +525,52 @@ export async function registerContextResetRecovery(
   const invalid = (why: string) => new ContextResetError('RECOVERY_REF_INVALID', why);
   if (ref.sessionId !== r.sessionId) throw invalid('The recovery reference names another session.');
   if (ref.taskId !== r.taskId) throw invalid('The recovery reference names another task.');
-  if (typeof ref.checkpointNode !== 'string' || ref.checkpointNode.trim() === '') throw invalid('Name the checkpoint node.');
-  const worker = await tx.worker.findUnique({ where: { id: r.workerId }, select: { memoryId: true } });
+  const writesCheckpoint = ref.checkpoint != null;
+  if (writesCheckpoint === (ref.checkpointNode != null)) throw invalid('Supply exactly one of checkpointNode and checkpoint.');
+  const [worker] = await tx.$queryRaw<{memoryId:string|null}[]>`SELECT memory_id AS "memoryId" FROM workers WHERE id=${r.workerId} FOR SHARE`;
+  if (!worker?.memoryId) throw invalid('The worker has no working memory.');
   let nodeId: string | null = null;
-  try {
-    nodeId = (await resolveNodeRef(tx as unknown as PrismaClient, ref.checkpointNode.trim())).id;
-  } catch {
-    nodeId = null;
-  }
-  const node = nodeId ? await tx.node.findFirst({ where: { id: nodeId, deletedAt: null }, select: { memoryId: true } }) : null;
-  if (!node || !worker?.memoryId || node.memoryId !== worker.memoryId) {
-    throw invalid("The checkpoint is a live node in the worker's own working memory.");
+  if (writesCheckpoint) {
+    // Ruling0090A: deliberately not the generic node writer, nor any grant to that writer.
+    const [memory] = await tx.$queryRaw<{id:string;isEncrypted:boolean;deletedAt:Date|null}[]>`
+      SELECT id,is_encrypted AS "isEncrypted",deleted_at AS "deletedAt" FROM memories WHERE id=${worker.memoryId} FOR SHARE`;
+    if (!memory || memory.deletedAt) throw invalid('The working memory is unavailable.');
+    if (memory.isEncrypted) throw new ContextResetError('CHECKPOINT_MEMORY_ENCRYPTED','A host key cannot unlock an encrypted working memory.');
+    if (!host.appKeyId) throw invalid('A checkpoint is written only by the host key.');
+    if (typeof ref.checkpoint!.title !== 'string' || !ref.checkpoint!.title.trim() || typeof ref.checkpoint!.content !== 'string') {
+      throw invalid(`A checkpoint needs a nonblank title (at most ${CHECKPOINT_TITLE_MAX_CHARS} characters) and string content (at most ${CHECKPOINT_CONTENT_MAX_BYTES} UTF-8 bytes).`);
+    }
+    if ([...ref.checkpoint!.title].length > CHECKPOINT_TITLE_MAX_CHARS) {
+      throw invalid(`A checkpoint title is nonblank and at most ${CHECKPOINT_TITLE_MAX_CHARS} characters.`);
+    }
+    if (Buffer.byteLength(ref.checkpoint!.content,'utf8') > CHECKPOINT_CONTENT_MAX_BYTES) {
+      throw invalid(`Checkpoint content is at most ${CHECKPOINT_CONTENT_MAX_BYTES} UTF-8 bytes.`);
+    }
+    if (hasUnstorableJsonText(ref.checkpoint!.title) || hasUnstorableJsonText(ref.checkpoint!.content)) {
+      throw invalid('Checkpoint text cannot contain NUL or unpaired surrogates.');
+    }
+    const [clock] = await tx.$queryRaw<{stamp:string}[]>`SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24MISS"Z"') AS stamp`;
+    const loc = `sheds:auto-${clock!.stamp}`;
+    // Serialize this exact address against other checkpoint calls and check tombstones too.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${worker.memoryId + ':' + loc}, 3276))::text`;
+    if (await tx.node.findUnique({where:{loc_memoryId:{loc,memoryId:worker.memoryId}},select:{id:true}})) {
+      throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
+    }
+    try {
+      nodeId = (await tx.node.create({data:{id:generateId(),memoryId:worker.memoryId,loc,name:ref.checkpoint!.title,
+        content:ref.checkpoint!.content,nodeType:'info',role:null,isRunnable:false,tags:[],createdBy:host.appKeyId,updatedBy:host.appKeyId}})).id;
+    } catch (e) {
+      // A generic writer need not use the checkpoint advisory lock. The unique constraint is the final fence.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
+      }
+      throw e;
+    }
+  } else {
+    if (typeof ref.checkpointNode !== 'string' || ref.checkpointNode.trim() === '') throw invalid('Name the checkpoint node.');
+    try { nodeId = (await resolveNodeRef(tx as unknown as PrismaClient, ref.checkpointNode.trim())).id; } catch { nodeId=null; }
+    const node = nodeId ? await tx.node.findFirst({where:{id:nodeId,deletedAt:null},select:{memoryId:true}}) : null;
+    if (!node || node.memoryId !== worker.memoryId) throw invalid("The checkpoint is a live node in the worker's own working memory.");
   }
   const registered = await tx.contextReset.update({
     where: { id: r.id },
