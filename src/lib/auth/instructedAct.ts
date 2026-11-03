@@ -5,7 +5,7 @@ import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 export type ActInstruction = { kind: 'TEAM_CHAT_MESSAGE' | 'TASK' | 'LIVE_CHAT'; ref: string };
 export type ActAdmission =
   | { kind: 'person'; userId: string }
-  | { kind: 'instructed-worker'; userId: string; workerId: string; agentId: string; instruction: ActInstruction };
+  | { kind: 'instructed-worker'; userId: string; workerId: string; agentId: string | null; instruction: ActInstruction };
 export const INSTRUCTION_REF_MAX = 512;
 type ReadInstruction = (ctx: Context, appId: string, instruction: ActInstruction) => Promise<boolean>;
 
@@ -13,6 +13,9 @@ type ReadInstruction = (ctx: Context, appId: string, instruction: ActInstruction
  * #3307 / cor:dmo:050:12: an instruction is a recorded claim, not a grant. The request user must hold the
  * persisted, hand-started worker session in this App, and the door must still admit that holder. Pass txCtx,
  * never the pooled request client. ReadReference must use the referenced entity's existing caller read gate.
+ * Ruling 0096 accepts self-citation: authorship, recency, reuse and what the holder meant are not verified.
+ * A present claim is validated even for a person (though never recorded for them); a named session must
+ * still exist, belong to that person and not be ended. An invalid binding never becomes a person here.
  */
 export async function requireInstructedAct(
   ctx: Context,
@@ -42,7 +45,7 @@ export async function requireInstructedAct(
       || !['TEAM_CHAT_MESSAGE', 'TASK', 'LIVE_CHAT'].includes(claim.kind)) throw refuse();
     instruction = { kind: claim.kind, ref: claim.ref };
     if (claim.kind === 'LIVE_CHAT') {
-      // Opaque client address only, never pasted prose; the server does not judge what the holder meant.
+      // Opaque client address only, never pasted prose; its origin is a claim the holder answers for.
       if (/[\s\u0000-\u001f\u007f]/u.test(claim.ref)) throw refuse();
     } else if (!(await readReference(ctx, appId, instruction))) throw refuse();
   }
@@ -57,6 +60,6 @@ export async function requireInstructedAct(
   if (!worker || worker.appId !== appId || worker.retiredAt || worker.heldByUserId !== ctx.userId) throw refuse();
   if (!(await allowsHolder())) throw refuse();
   return {
-    kind: 'instructed-worker', userId: ctx.userId!, workerId, agentId: session.agentId!, instruction,
+    kind: 'instructed-worker', userId: ctx.userId!, workerId, agentId: session.agentId, instruction,
   };
 }

@@ -10344,12 +10344,12 @@ export const typeDefs = `#graphql
     baseUrl: String!
   }
 
-  "Instruction claim for one act (hrn:node:hadronmemory.com:specs:cor:dmo:050:12)."
+  "Instruction claim for one act, recorded rather than verified for authorship, recency or reuse; the holder answers for the claim (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0096)."
   enum ActInstructionKind { TEAM_CHAT_MESSAGE TASK LIVE_CHAT }
   "A typed instruction reference, never instruction text."
   input ActInstructionInput {
     kind: ActInstructionKind!
-    "TASK and TEAM_CHAT_MESSAGE use a readable same-App URN. LIVE_CHAT is an opaque client address, 1-512 characters, without whitespace."
+    "TASK and TEAM_CHAT_MESSAGE use a caller-readable same-App URN, including one the worker authored. LIVE_CHAT is a self-asserted opaque client address, 1-512 UTF-16 code units, without whitespace. A person's present claim is validated too, but never recorded as an instructed act."
     ref: String!
   }
 
