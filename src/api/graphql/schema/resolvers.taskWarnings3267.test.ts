@@ -115,15 +115,15 @@ describe('task.start.other-started', () => {
     await task('pending', { assigneeWorkerId: liam.id });
     await task('finished', { assigneeWorkerId: liam.id });
     await task('cancelled', { assigneeWorkerId: liam.id });
-    await task('started', { assigneeWorkerId: anne.id }, otherApp.id); // Anne's id on a row in another App
+    await task('started', { assigneeWorkerId: liam.id }, otherApp.id); // Liam's id on a row in another App
     const c1 = ctx(member.id);
     await start(c1, liam, (await task('pending', { assigneeWorkerId: liam.id })).id);
     expect(codes(c1)).toEqual([]);
 
-    await task('started', { assigneeWorkerId: liam.id });
+    const rook = await worker('Rook'); // Liam now holds a started task; Rook is a different worker
     const c2 = ctx(member.id);
-    await start(c2, anne, (await task('pending', { assigneeWorkerId: anne.id })).id);
-    expect(codes(c2)).toEqual([]); // Liam's started task is not Anne's
+    await start(c2, rook, (await task('pending', { assigneeWorkerId: rook.id })).id);
+    expect(codes(c2)).toEqual([]); // Liam's started task is not Rook's
   });
 
   it('a user assignee has no worker state to describe: none', async () => {
