@@ -462,3 +462,79 @@ describe("#1349 Slice 1 — the same-App row grants nothing extra (Vera's contro
     expect((await gql(y.rawKey, READ, { r: node.id })).data?.node ?? null).toBeNull();
   });
 });
+
+const START_CHAT = 'mutation($agent: ID!) { startChat(agentId: $agent) { chatId } }';
+
+describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
+  /** A session-bound bare App key calling startChat, the shape #2885 gates on the session's verified reach. */
+  async function startChatInSession(link: { appKey: string; agentId: string }, sessionId: string) {
+    const response = await fetch(`${baseUrl}/graphql`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${link.appKey}`, 'x-hadron-session': sessionId },
+      body: JSON.stringify({ query: START_CHAT, variables: { agent: link.agentId } }),
+    });
+    return (await response.json()) as { errors?: Array<{ message: string }>; data?: { startChat?: { chatId?: string } } };
+  }
+
+  it('item 1: a user-attributed session with a personal memory actually starts a chat in it (Baloo, Atilla)', async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const userId = await memberOf(link.appId);
+    const personal = await db.memory.create({
+      data: {
+        id: generateId(), urn: `home-${suffix}:sess-personal-${generateId()}`, name: 'sess-personal', class: 'personal', visibility: null,
+        appId: link.appId, userMemoryOfAgentId: link.agentId, userId, ownerUserId: userId,
+      } as never,
+    });
+    await db.agentSubscription.create({ data: { userId, agentId: link.agentId, activatedAt: new Date() } });
+    const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: personal.id, userId } as never });
+    expect(await sessionScopedMemoryIds(db, link.appId, session.id)).toContain(personal.id);
+    const before = await db.node.count({ where: { memoryId: personal.id } });
+    const body = await startChatInSession(link, session.id);
+    expect(body.errors, JSON.stringify(body)).toBeUndefined();
+    const chatId = body.data?.startChat?.chatId;
+    expect(chatId).toBeTruthy();
+    // the chat was written INTO the personal memory, and nowhere else
+    expect(await db.node.count({ where: { memoryId: personal.id } })).toBeGreaterThan(before);
+    expect(await db.node.findFirst({ where: { loc: chatId!, memoryId: personal.id } })).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId: mem.homeOrg!.id, loc: { startsWith: 'chats' } } })).toBe(0);
+  });
+
+  it('item 2: a malformed stored role on a PUBLIC memory gives the userless key its PUBLIC read and nothing more', async () => {
+    const { appId, appKey } = await legacyLink('homePublic', 'admin');
+    expect(await reads(appKey, 'homePublic')).toBe('homePublic SECRET');
+    expect(await writes(appKey, 'homePublic')).toBe(false);
+    expect(await mcpReads(appId, 'homePublic')).toBe(true);
+    expect(await mcpWrites(appId, 'homePublic')).toBe(false);
+    // the bare principal's App-derived reach holds it read-only, never the malformed role's level
+    expect((await getPrincipalAppMemoryAccess(db, { appId })).get(mem.homePublic!.id)).toBe('READ_ONLY');
+  });
+
+  it("items 3 and 4: an Agent's system memory in Session.memoryId is refused as a startChat target, like any unreadable target (Riana §10, Diego)", async () => {
+    const link = await legacyLink('homeOrg', 'read-write');
+    await giveConversation(link.agentId);
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: link.agentId }, select: { systemMemoryId: true } });
+    const systemId = agent.systemMemoryId!;
+    // raw-DB fixture: no API path writes a system memory into Session.memoryId
+    const session = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: systemId } as never });
+    // reads are NOT narrowed: the session's verified reach still holds the system memory
+    expect(await sessionScopedMemoryIds(db, link.appId, session.id)).toContain(systemId);
+    const before = await db.node.count({ where: { memoryId: systemId } });
+    const refused = await startChatInSession(link, session.id);
+    expect(refused.data?.startChat ?? null, JSON.stringify(refused)).toBeNull();
+    expect(await db.node.count({ where: { memoryId: systemId } })).toBe(before);
+    // byte-identical to the refusal for an item-linked org memory named in Session.memoryId (Diego's P1 case)
+    const other = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: mem.homeOrg!.id } as never });
+    const unreadable = await startChatInSession(link, other.id);
+    expect(unreadable.errors?.length, JSON.stringify(unreadable)).toBe(1);
+    // the envelope carries a per-request id, so compare everything else
+    const shape = (b: { errors?: Array<{ message: string; extensions?: Record<string, unknown> }> }) =>
+      b.errors?.map(({ message, extensions }) => ({ message, ...extensions, requestId: undefined }));
+    expect(shape(refused)).toEqual(shape(unreadable));
+    // and at the resolver, where HTTP masks the text, both are the same "No target memory" refusal
+    const direct = (sessionId: string) => resolvers.Mutation.startChat({}, { agentId: link.agentId }, { db, appId: link.appId, sessionId, roles: ['READER'] } as never)
+      .then(() => null, (e: Error) => e.message);
+    expect(await direct(session.id)).toMatch(/No target memory available/);
+    expect(await direct(session.id)).toBe(await direct(other.id));
+  });
+});
