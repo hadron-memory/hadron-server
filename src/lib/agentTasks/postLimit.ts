@@ -1,6 +1,7 @@
 /**
  * #2014 — the post-limit alarm: the first refusal of a worker's team-chat post by the rate limit in an hour raises ONE
  * `alarm.post-limit`, task-less, on the seam #2755's dark-worker alarm built (event, chain, wake schedule).
+ * cor:agt:020:14 shares its reporting line, with App managers only when that line is empty (#3358).
  *
  * The episode (`post_limit_episodes`) only de-duplicates: the alarm itself stays open and keeps escalating until
  * acknowledged. It is read and written on the DATABASE clock, under the worker's admission lock (the one that counted the

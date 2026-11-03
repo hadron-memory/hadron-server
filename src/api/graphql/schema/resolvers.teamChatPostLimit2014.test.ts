@@ -150,7 +150,7 @@ describe('#2014 the alarm', () => {
     const events = await alarms();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ severity: 'alarm', subjectWorkerId: liam.id, taskId: null, appId: app.id });
-    expect((events[0]!.chain as any[])[0]).toEqual({ workerId: boss.id });
+    expect(events[0]!.chain).toEqual([{ workerId: boss.id }]);
     expect(await db.postLimitEpisode.count({ where: { workerId: liam.id, endedAt: null } })).toBe(1);
     const sched = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: events[0]!.id }, orderBy: { chainIndex: 'asc' } });
     expect(sched[0]!.wokenAt).not.toBeNull();
@@ -259,5 +259,30 @@ describe('#2014 the alarm', () => {
     let err: unknown;
     try { err = await raisePostLimitAlarm(db, liam.id, '10 per minute').catch((e) => e); } finally { spy.mockRestore(); }
     expect(err).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+  });
+});
+
+
+describe('#3358 post-limit alarm shares the reporting-line-only chain (cor:agt:020:14)', () => {
+  it.each(['none', 'retired', 'foreign'] as const)('no live same-App head (%s) uses managers', async (kind) => {
+    if (kind === 'none') await db.worker.update({ where: { id: liam.id }, data: { reportsToWorkerId: null } });
+    if (kind === 'retired') await db.worker.update({ where: { id: boss.id }, data: { retiredAt: new Date() } });
+    if (kind === 'foreign') {
+      const foreign = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+      await db.worker.update({ where: { id: boss.id }, data: { appId: foreign.id } });
+    }
+    const id = await raisePostLimitAlarm(db, liam.id, '10 per minute');
+    const event = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: id! } });
+    expect(event.chain).toEqual([{ userId: manager.id, via: 'manager' }]);
+    expect(await db.agentTeamAlarmSchedule.count({ where: { eventId: id! } })).toBe(1);
+  });
+
+  it('a line excludes managers from schedules while a manager may still acknowledge it', async () => {
+    const id = await raisePostLimitAlarm(db, liam.id, '10 per minute');
+    const event = await db.agentTeamEvent.findUniqueOrThrow({ where: { id: id! } });
+    expect(event.chain).toEqual([{ workerId: boss.id }]);
+    expect(await db.agentTeamAlarmSchedule.count({ where: { eventId: id! } })).toBe(1);
+    const acked = await M.acknowledgeAlarm({}, { eventId: id }, ctx(manager.id));
+    expect(acked.acknowledgedByUserId).toBe(manager.id);
   });
 });

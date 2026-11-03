@@ -107,7 +107,7 @@ async function raise(db: PrismaClient, app: App, late: Late, now: Date): Promise
   try {
     const eventId = await db.$transaction(async (tx): Promise<string | null> => {
       // cor:agt:050:18 (Decided): the reporting line, nearest first; App managers only when there is no reporting line.
-      // `darkAlarmChain` always appends managers (#3358), so they are dropped here when a line exists.
+      // Keep the reporting line when present; App managers are the empty-line fallback.
       const full = await darkAlarmChain(tx, app, late.workerId);
       const line = full.filter((p) => p.workerId);
       const chain = line.length ? line : full;
