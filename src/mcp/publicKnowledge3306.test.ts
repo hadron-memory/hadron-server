@@ -154,7 +154,8 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
       expect(await canReadMemory(db, f.confined as never, team.id)).toBe(false);
       expect(await (resolvers.Node as any).asset(node, {}, f.confined)).toBeNull();
       // An asset in another PUBLIC knowledge memory is independently readable.
-      await db.asset.update({ where: { id: asset.id }, data: { memoryId: f.pub.id } });
+      const publicChild = await db.memory.create({ data: { name: 'public child', urn: `${f.orgB.urn}:public-child`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id } });
+      await db.asset.update({ where: { id: asset.id }, data: { memoryId: publicChild.id } });
       expect(await (resolvers.Node as any).asset(node, {}, f.confined)).toMatchObject({ id: asset.id });
     });
     it('0114B does not hand a session-bound key its own App team space', async () => {
