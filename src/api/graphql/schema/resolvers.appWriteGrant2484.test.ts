@@ -256,7 +256,9 @@ describe('what a userless run of the App may write', () => {
   it('is matched on the destination AFTER writeTo expansion, through the real run write', async () => {
     const f = await fixture();
     await grant(f, f.dest);
-    const flow = await db.memory.create({ data: { name: 'flow', urn: 'grant2484.test:flow', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: f.org.id } as never });
+    // #3278: the flow is PUBLIC read-only; its item alone cannot admit a userless run.
+    // The separate explicit write grant below still decides the output destination.
+    const flow = await db.memory.create({ data: { name: 'flow', urn: 'grant2484.test:flow', class: 'knowledge', visibility: 'PUBLIC', organizationId: f.org.id } as never });
     const agent = await db.agent.create({ data: { name: 'flow-agent', urn: 'grant2484.test:flow-agent', organizationId: f.org.id } as never });
     await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: flow.id, role: 'read-write' } });
