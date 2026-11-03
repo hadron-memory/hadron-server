@@ -144,10 +144,11 @@ describe('#3311 instructed revokes and lists', () => {
     await db.appKeyScope.updateMany({ where: { appKeyId: f.key.id }, data: { revokedAt: new Date(), revokedByUserId: f.holder.id } });
     await db.appMemoryWriteGrant.update({ where: { id: f.writeGrant.id }, data: { revokedAt: new Date(), revokedBy: f.holder.id } });
     await db.appGrant.updateMany({ where: { appId: f.app.id }, data: { revokedAt: new Date(), revokedBy: f.holder.id } });
-    await revokes.key!(); // the first revoke records one
+    for (const door of ['scope', 'grant', 'writeGrant']) await answer(revokes[door]!()); // already ended: nothing changes
+    expect(await instructionEvents()).toHaveLength(0);
+    await revokes.key!(); // the first key revoke records one
     expect(await instructionEvents()).toHaveLength(1);
-    for (const door of ['key', 'scope', 'writeGrant']) await answer(revokes[door]!()); // key again, scope and grant already ended
-    await answer(revokes.grant!());
+    await answer(revokes.key!()); // the same key again is a no-op
     expect(await instructionEvents()).toHaveLength(1);
   });
 
