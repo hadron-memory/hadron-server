@@ -632,7 +632,7 @@ export const hostOperationMutations = {
   }),
 
   // ── #2162 (cor:agt:050:27): a context reset's protocol steps, the host's own key only ──────────────────────
-  // Each names the reset and its epoch; each is idempotent; each is recorded as a `reset` use of the key.
+  // Each names the reset and epoch and is idempotent; checkpoint-writing registration has its own `checkpoint` use.
 
   /** Take the fence: the worker becomes `resetting` (§1.5). Refused steps end the reset and say why. */
   claimContextReset: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
@@ -680,7 +680,10 @@ async function resetStep(
     try {
       const out = await asHost(ctx, input.appRef, async (tx, app, host) => {
         const result = await run(tx, { appId: app.id, hostId: host.hostId, appKeyId: host.appKeyId }, new Date());
-        await recordHostKeyUse(tx, host, action, { operationId: result.reset.hostOperationId ?? undefined });
+        await recordHostKeyUse(tx, host, action, {
+          operationId: result.reset.hostOperationId ?? undefined,
+          ...(action === 'checkpoint' && result.refused ? { refusedCode: result.refused } : {}),
+        });
         return result;
       });
       // A refusal or failure may have released the worker; a queued task may now match (cor:agt:060:06).

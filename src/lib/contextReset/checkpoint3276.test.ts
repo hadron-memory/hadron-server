@@ -80,7 +80,7 @@ it('keeps the legacy checkpoint-node input and rejects memory redirection on the
 });
 it.each([false,true])('generic GraphQL and MCP writes stay refused, claimed=%s',async during=>{
  if(during)await claimed();
- const other=await db.memory.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`,class:'knowledge'}});
+ const other=await db.memory.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`,class:'app',appId:f.app.id}});
  const memories=await db.memory.findMany({where:{id:{in:[f.kitMemory.id,other.id]}}});
  const server=createTestableMcpServer({appId:f.app.id,appKeyId:f.orca1.id,clientId:`app:${f.app.id}`});
  for(const mem of memories){

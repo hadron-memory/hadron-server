@@ -57,7 +57,7 @@ export async function recordHostKeyUse(
   tx: Prisma.TransactionClient,
   key: HostKey,
   action: HostKeyAction,
-  detail: { operationId?: string; count?: number } = {},
+  detail: { operationId?: string; count?: number; refusedCode?: string } = {},
 ): Promise<void> {
   await tx.hostKeyUse.create({
     data: {
@@ -68,6 +68,7 @@ export async function recordHostKeyUse(
       action,
       operationId: detail.operationId ?? null,
       count: detail.count ?? null,
+      refusedCode: detail.refusedCode ?? null,
     },
   });
 }

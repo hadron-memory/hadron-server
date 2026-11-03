@@ -429,7 +429,7 @@ export async function readContextResetForHost(tx: Prisma.TransactionClient, host
  * the reset row. Another App's or another host's reset reads as not found. The operation must have been collected by
  * this host (cor:agt:070:04): a host acts on what it collected, never on an id it guessed.
  */
-async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string): Promise<ContextResetRow> {
+async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string, collectedTimestamp = false): Promise<ContextResetRow> {
   const notFound = () => new ContextResetError('CONTEXT_RESET_NOT_FOUND', 'Context reset not found.');
   if (typeof resetId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(resetId)) throw notFound();
   const head = await tx.contextReset.findUnique({ where: { id: resetId }, select: { workerId: true, appId: true, hostId: true } });
@@ -440,7 +440,7 @@ async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetI
   const r = await tx.contextReset.findUniqueOrThrow({ where: { id: resetId } });
   const op = r.hostOperationId ? await tx.hostOperation.findUnique({ where: { id: r.hostOperationId }, select: { status: true, collectedAt: true } }) : null;
   if (!op) throw notFound();
-  if (!op.collectedAt) {
+  if (collectedTimestamp ? !op.collectedAt : op.status === 'issued') {
     throw new ContextResetError('HOST_OPERATION_NOT_COLLECTED', 'Collect the reset\'s operation before acting on it.');
   }
   return r;
@@ -535,7 +535,7 @@ export async function registerContextResetRecovery(
   tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown,
   ref: { checkpointNode?: unknown; checkpoint?: {title: string; content: string} | null; sessionId: unknown; taskId: unknown }, now: Date,
 ): Promise<ContextResetStep> {
-  const r = await lockForHost(tx, host, resetId);
+  const r = await lockForHost(tx, host, resetId, true);
   requireEpoch(r, epoch);
   if (r.phase !== 'claimed') {
     const stored = (r.recoveryRef ?? null) as { checkpointNodeId?: string } | null;
