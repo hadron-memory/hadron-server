@@ -41,6 +41,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { subscribedAgentMemoryAdmitted } from '../../../lib/auth/memorySubscriptionAccess.js';
 import { getOrgWritableMemoryIds } from '../../../lib/auth/orgWritableMemory.js';
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
@@ -810,11 +811,11 @@ async function sameAppAttachAdmitted(
  *
  * 1. **Tenancy.** The memory must belong to the agent's own tenant (same org,
  *    or the same owning user for a spec-047 user-owned agent), be genuinely
- *    PUBLIC, or be the knowledge of an App where the Agent is live-installed
- *    and licensed. The latter two exceptions grant only `read`.
- *    Holger's ruling (2026-09-25) refuses a cross-tenant non-public attach even
- *    when the caller can read the memory, matching `attachMemoryToApp`'s
- *    `ORGANIZATION_MISMATCH` and the PUBLIC-only cross-org subscription rule.
+ *    PUBLIC, be the knowledge of an App where the Agent is live-installed
+ *    and licensed (both read-only), or carry a live subscription of the Agent
+ *    org up to its subscription role (#3253 / ruling0089 A).
+ *    Ruling0089 A extends the earlier cross-tenant refusal only to these
+ *    counted subscriptions; the ordinary tenant and same-App doors are unchanged.
  * 2. **Capability.** The caller must hold, on their own user principal, the
  *    capability being granted: the node-CONTENT read gate for `read`, and the
  *    memory write gate for `read-write`. The content gate (not the record gate)
@@ -913,7 +914,11 @@ export async function requireAgentMemoryGrant(
     !isExcludedFromCoveredSet(memory) &&
     memory.ownerUserId == null;
   const publicRead = role === 'read' && genuinelyPublic;
-  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead)) {
+  // #3253 / cor:dmo:050:09: a live subscription counts exactly as canonical read, capped by its role.
+  // It belongs to the Agent's org, never a different org the caller happens to administer. Other doors stay intact.
+  const subscribed = !sameTenant && !publicRead && !(role === 'read' && sameAppRead) &&
+    await subscribedAgentMemoryAdmitted(ctx.db, agent.organizationId, memory.id, role);
+  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead) && !subscribed) {
     throw new GraphQLError(
       genuinelyPublic
         ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'
@@ -946,14 +951,9 @@ export async function requireAgentMemoryGrant(
         { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },
       );
     }
-    // Defense in depth, and a KNOWN mutation survivor (harness #7): no caller
-    // constructible today reaches this check without already holding write.
-    // Same tenant, everyone past the agent gate (an org ADMIN, or a user-owned
-    // agent's owner) can write what they can read — and App-scoped knowledge,
-    // which no user writes, is refused by the read gate above (the same-App
-    // branch admits `read` only). Cross tenant, the tenancy rule and the
-    // PUBLIC-is-read-only rule refuse first. It stays because those facts live
-    // in other files, and this is the check that states the actual invariant.
+    // The caller still needs independent write, even when the Agent org's subscription admits this link.
+    // #3253 pins this shared guard with an org READER: that principal cannot manage the Agent through the resolver,
+    // but must not gain write from a subscription cap when this helper is called. Outages are never read as denial.
     try {
       await requireMemoryWriteAccess(self, memory.id);
     } catch (error) {

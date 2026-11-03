@@ -36,6 +36,7 @@
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
+import { subscribedMemoryWhere } from './memorySubscriptionAccess.js';
 
 export async function getOrgReadableMemoryIds(
   db: PrismaClient,
@@ -93,7 +94,7 @@ export async function getOrgReadableMemoryIds(
               // REVOKED (soft-deleted) subscription stops granting read.
               // `appId: null` — app-scoped memories are App-internal, never
               // cross-org-subscription-readable.
-              { class: { notIn: ['personal', 'private', 'group', 'system'] as any }, appId: null, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds }, deletedAt: null } } },
+              subscribedMemoryWhere(orgIds),
             ]
           : []),
         // #1208 / cor:acl:010:01 — group memories are readable ONLY through
