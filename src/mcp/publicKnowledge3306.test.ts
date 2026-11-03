@@ -13,6 +13,7 @@ import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.
 import { canReadMemory, canWriteToMemory, filterReadableMemoryIds, getMemoryAccess } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -131,5 +132,35 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
       const ids = out.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId);
       for (const hidden of [f.orgVisible, f.appScoped, f.ownAppScoped, f.group, f.deleted]) expect(ids).not.toContain(hidden.id);
     });
+  });
+});
+
+describe('#3306 the shared predicate itself', () => {
+  it('names only a credential with an App, no user, no session and no impersonation', () => {
+    expect(readsPublicKnowledgeWithoutUser({ appId: 'a' })).toBe(true);
+    expect(readsPublicKnowledgeWithoutUser({ appId: 'a', userId: 'u' })).toBe(false);
+    expect(readsPublicKnowledgeWithoutUser({ appId: 'a', sessionId: 's' })).toBe(false);
+    expect(readsPublicKnowledgeWithoutUser({ appId: 'a', impersonation: { orgId: 'o' } })).toBe(false);
+    expect(readsPublicKnowledgeWithoutUser({})).toBe(false);
+  });
+  it('a PUBLIC memory of a class other than knowledge is not admitted', async () => {
+    for (const [slug, cls] of [['pubsys', 'system'], ['pubapp', 'app']] as const) {
+      const row = await db.memory.create({
+        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: cls, visibility: 'PUBLIC', organizationId: f.orgB.id },
+      }).catch(() => null);
+      if (!row) continue; // a CHECK already refuses the shape; nothing to admit
+      expect((await publicKnowledgeAmong(db, [row.id])).has(row.id)).toBe(false);
+      expect(await canReadMemory(db, f.keyPrincipal as never, row.id)).toBe(false);
+    }
+  });
+  it('an unscoped node search is bounded by the search limit, not by the number of PUBLIC memories', async () => {
+    for (let i = 0; i < 5; i++) {
+      const m = await db.memory.create({ data: { name: `p${i}`, urn: `${f.orgB.urn}:extra${i}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id } });
+      await db.node.create({ data: { memoryId: m.id, loc: LOC, name: 'needle3306 extra', content: 'x', nodeType: 'record' } });
+    }
+    const atCap = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 3 }, { ...f.keyPrincipal });
+    expect(atCap.hits).toHaveLength(3);
+    const over = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 4 }, { ...f.keyPrincipal });
+    expect(over.hits).toHaveLength(4);
   });
 });

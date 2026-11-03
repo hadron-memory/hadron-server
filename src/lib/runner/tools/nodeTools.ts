@@ -12,6 +12,7 @@
  * no on-behalf-of user cannot touch personal/private memories.
  */
 
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../auth/publicKnowledgeRead.js';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -94,7 +95,10 @@ export const hadronReadNode: RunToolDef = {
         where: { urn: { in: [normalizeUrnForLookup(memoryUrn), legacyMemoryUrnToCanonical(normalizeUrnForLookup(memoryUrn))] }, deletedAt: null },
         select: { id: true, urn: true, isEncrypted: true },
       });
-      if (!foreign || foreign.isEncrypted || !(await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, foreign.id, loc))) throw err;
+      // #3306 / ruling 0104: or the memory is PUBLIC knowledge, which a run with no user reads in any org, read-only.
+      const publicRead = foreign !== null && !foreign.isEncrypted && readsPublicKnowledgeWithoutUser(principalAuth(ctx)) &&
+        (await publicKnowledgeAmong(ctx.db, [foreign.id])).has(foreign.id);
+      if (!foreign || foreign.isEncrypted || !(publicRead || await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, foreign.id, loc))) throw err;
       memory = foreign;
       viaGrant = true;
     }

@@ -37,6 +37,7 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
 import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
@@ -1198,6 +1199,8 @@ interface MemoryReadRowOptions extends MemoryGateOptions {
   workerMemoryIds?: ReadonlySet<string>;
   installedAgentIds?: ReadonlySet<string>;
   subscriptionsByAgentId?: ReadonlyMap<string, SubscriptionReadRow>;
+  /** #3306: the PUBLIC knowledge among a batch's candidates, looked up once for a principal with no user. */
+  publicKnowledgeIds?: ReadonlySet<string>;
 }
 
 /** Apply the canonical MCP memory-read gate to a row that is already loaded. */
@@ -1283,7 +1286,11 @@ async function canReadMemoryRow(
   // auth, nothing more — a caller checking many memories at once would
   // otherwise rebuild the whole App fold per memory.
   const access = opts.access ?? (await getMemoryAccess(db, auth));
-  return access.has(memory.id);
+  if (access.has(memory.id)) return true;
+  // #3306 / ruling 0104: PUBLIC knowledge is read-only for a principal with no user, whatever its items. A point
+  // answer only: the access map above never carries it, so no listing enumerates it.
+  if (!readsPublicKnowledgeWithoutUser(auth)) return false;
+  return (opts.publicKnowledgeIds ?? await publicKnowledgeAmong(db, [memory.id])).has(memory.id);
 }
 
 /**
@@ -1360,6 +1367,8 @@ export async function filterReadableMemoryIds(
   const access = sessionBoundKey
     ? await getMemoryAccess(db, auth)
     : opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
+  const publicKnowledgeIds = readsPublicKnowledgeWithoutUser(auth)
+    ? await publicKnowledgeAmong(db, memories.map((memory) => memory.id)) : undefined;
   const workerMemoryIds = memories.some((memory) =>
     memory.class === 'app' && memory.ownerUserId !== null && memory.ownerUserId !== auth.userId)
     ? new Set(await getWorkerMemoryAccess(db, auth)) : undefined;
@@ -1418,6 +1427,7 @@ export async function filterReadableMemoryIds(
         workerMemoryIds,
         installedAgentIds,
         subscriptionsByAgentId,
+        publicKnowledgeIds,
       })
     ) {
       readable.add(memory.id);

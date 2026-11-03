@@ -1,4 +1,5 @@
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
+import { allPublicKnowledgeIds, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
@@ -2339,7 +2340,11 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    return appDerivedMemoryIds(ctx, onlyMemoryId);
+    const derived = await appDerivedMemoryIds(ctx, onlyMemoryId);
+    // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
+    // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
+    if (!readsPublicKnowledgeWithoutUser(ctx)) return derived;
+    return [...new Set([...derived, ...await allPublicKnowledgeIds(ctx.db, onlyMemoryId)])];
   }
 
   // JWT user — org/public/subscription memories + owner-only personal/private
