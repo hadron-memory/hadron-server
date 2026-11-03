@@ -1,9 +1,12 @@
 /** #3308 PR A: provision the two named grants before staffing/member enforcement is deployed. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
+import { readFileSync } from 'node:fs';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { wakeStampsFor } from '../../../lib/tickers/postStamp.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
@@ -58,9 +61,39 @@ describe('#3308 staged grant-name provisioning', () => {
    } finally { await server.stop(); }
   });
  }
+ for (const [wire] of names) it(`${wire}: does not grant ticker subscriptions or broadcast wakes`, async () => {
+  await grant(wire);
+  const target = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'OtherWorker', slug: 'other-worker' } });
+  const ticker = await M.createTicker({}, { appRef: f.app.id, input: { name: 'Ticker', cadenceSeconds: 600 } }, person());
+  const workerCtx = person({ sessionId: f.session.id });
+  const subscribe = () => runAsActor({ workerId: f.worker.id, agentId: f.agent.id }, () => M.subscribeWorker({}, { tickerRef: ticker.id, workerRef: target.id }, workerCtx));
+  await expect(subscribe()).rejects.toMatchObject({ extensions: { code: 'SUBSCRIBE_FORBIDDEN' } });
+  const stamps = () => runAsActor({ workerId: f.worker.id, agentId: f.agent.id }, () => db.$transaction(tx => wakeStampsFor(workerCtx, tx, f.app, f.worker.id, ['all'])));
+  expect(await stamps()).toEqual({});
+  await grant('TICKER_SUBSCRIBE_WORKERS');
+  expect(await stamps()).toEqual({ broadcastWakes: true });
+  await expect(subscribe()).resolves.toBeTruthy();
+ });
+ it('schema-only migration upgrades the old CHECK, replays, preserves grants and creates no grants itself', async () => {
+  const existing = await grant('TICKER_SUBSCRIBE_WORKERS');
+  const sql = readFileSync(new URL('../../../../prisma/migrations/20261103160000_staff_member_grant_names/migration.sql', import.meta.url), 'utf8');
+  await db.$transaction(async tx => {
+   await tx.$executeRawUnsafe('ALTER TABLE app_grants DROP CONSTRAINT chk_app_grants_shape');
+   await tx.$executeRawUnsafe("ALTER TABLE app_grants ADD CONSTRAINT chk_app_grants_shape CHECK(name IN ('ticker.subscribe-workers'))");
+   for (let replay = 0; replay < 2; replay++) {
+    for (const statement of sql.split(';').filter(part => part.trim())) await tx.$executeRawUnsafe(statement);
+    expect(await tx.appGrant.findMany({ where: { appId: f.app.id } })).toEqual([existing]);
+   }
+   for (const [, name] of names) await tx.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name } });
+   await tx.$executeRawUnsafe('SAVEPOINT invalid_name');
+   await expect(tx.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant' } })).rejects.toThrow(/chk_app_grants_shape/);
+   await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT invalid_name');
+   expect(await tx.appGrant.count({ where: { appId: f.app.id } })).toBe(3);
+  });
+ });
  it('unknown names remain rejected at both the mutation and the database', async () => {
   await expect(grant('UNKNOWN_GRANT')).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-  await expect(db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant' } })).rejects.toThrow();
+  await expect(db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name: 'unknown.grant' } })).rejects.toThrow(/chk_app_grants_shape/);
   expect(await db.appGrant.count({ where: { appId: f.app.id } })).toBe(0);
  });
  it('the existing ticker grant remains supported', async () => {
