@@ -1,3 +1,5 @@
+import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
+import { RUN_CLIENT_PREFIX, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
 import { isDeepStrictEqual } from 'node:util';
 import { lockTaskGraph, taskPriority, addTaskBlocker, removeTaskBlocker } from '../../../lib/agentTasks/blockers.js';
@@ -177,7 +179,7 @@ const forbidden = (message = 'You are not a participant of this App.'): GraphQLE
 
 const APP_SELECT = {
   id: true, name: true, urn: true, organizationId: true, ownerUserId: true,
-  uninstalledAt: true, deletedAt: true,
+  uninstalledAt: true, deletedAt: true, runTeamSnapshotEnabled: true,
 } as const;
 export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
 type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
@@ -304,6 +306,22 @@ async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
   return true;
 }
 
+/** #2925 / ruling0112: read-only own-App run arm, evaluated again inside the read's anchors. */
+export async function runMayReadTeam(ctx: Context, app: TaskApp): Promise<boolean> {
+  if (!isRunPrincipal(ctx) || ctx.impersonation || app.deletedAt || !app.runTeamSnapshotEnabled || ctx.appId !== app.id) return false;
+  if (!ctx.organizationId || !await ctx.db.organization.findFirst({ where: { id: ctx.organizationId, deletedAt: null }, select: { id: true } })) return false;
+  const rows = await ctx.db.$queryRaw<Array<{ app_id: string; status: string; organization_id: string; user_id: string | null }>>`
+    SELECT app_id, status::text AS status, organization_id, user_id FROM app_runs WHERE id = ${ctx.clientId!.slice(RUN_CLIENT_PREFIX.length)} FOR SHARE`;
+  const run = rows[0];
+  return rows.length === 1 && run!.app_id === app.id && run!.status === 'RUNNING'
+    && (app.organizationId === null || app.organizationId === run!.organization_id) && run!.organization_id === ctx.organizationId && (run!.user_id ?? undefined) === (ctx.userId ?? undefined);
+}
+
+/** The callback projection stays under shared authority anchors in one coherent view; later GraphQL fields re-gate separately. */
+export async function inRunTeamReadTx<T>(ctx: Context, appId: string, onGone: () => T, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+  return retryOnSerializationFailure(() => inAnchoredAppTx(ctx, appId, onGone, async (c, app) => await runMayReadTeam(c, app) ? body(c, app) : onGone(), true));
+}
+
 /**
  * A key's whole read in ONE transaction that holds the App's authority anchors
  * SHARED: whoever revokes the key or deletes the App takes them exclusively, so
@@ -326,6 +344,7 @@ async function inAnchoredAppTx<T>(
   appId: string,
   onGone: () => T,
   body: (txCtx: Context, app: TaskApp) => Promise<T>,
+  coherentRunRead = false,
 ): Promise<T> {
   const head = await loadApp(ctx, appId);
   if (!head) return onGone();
@@ -335,12 +354,19 @@ async function inAnchoredAppTx<T>(
       ...(head.organizationId ? [{ kind: 'org' as const, id: head.organizationId }] : []),
       ...(head.ownerUserId ? [{ kind: 'user' as const, id: head.ownerUserId }] : []),
     ], 'shared');
+    if (coherentRunRead) {
+      // A repeatable-read snapshot may predate an advisory-lock wait. Locking owner rows first
+      // detects a committed revocation with 40001, then the outer bounded retry re-gates afresh.
+      if (head.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${head.organizationId} FOR SHARE`;
+      if (head.ownerUserId) await tx.$queryRaw`SELECT id FROM users WHERE id = ${head.ownerUserId} FOR SHARE`;
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${head.id} FOR SHARE`;
+    }
     const txCtx = withoutRequestCaches(ctx, tx);
     const app = await loadApp(txCtx, appId);
     // Ownership moved while we waited for the anchors: the locks we hold are the wrong ones, so answer as missing.
     if (!app || app.organizationId !== head.organizationId || app.ownerUserId !== head.ownerUserId) return onGone();
     return body(txCtx, app);
-  });
+  }, coherentRunRead ? { timeout: 20_000, isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : undefined);
 }
 
 /**
@@ -403,8 +429,17 @@ export async function withHostKeyTickerApp<T>(
   return inHostKeyTickerReadTx(ctx, appId, () => { throw appNotFound(appRef); }, body);
 }
 
-/** Run a read over an App the caller may READ tasks and events of: a participant, or the App's own key. */
-export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>): Promise<T> {
+/**
+ * Shared participant/key read. Only roster/task callers opt into the separate USERLESS run arm (#2925).
+ * Xanthos #70403: a user-backed run keeps its existing person arm, actor and non-task management behavior.
+ */
+export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c: Context, app: TaskApp) => Promise<T>, allowRun = false): Promise<T> {
+  if (isRunPrincipal(ctx) && !ctx.userId && allowRun) {
+    let id: string;
+    try { ({ id } = await resolveAppRef(ctx.db, appRef)); } catch (e) { if (e instanceof AppNotFoundError) throw appNotFound(appRef); throw e; }
+    if (id !== ctx.appId) throw appNotFound(appRef);
+    return inRunTeamReadTx(ctx, id, () => { throw appNotFound(appRef); }, body);
+  }
   const key = appKeyCaller(ctx);
   if (!key) {
     const { app } = await resolveParticipatedApp(ctx, appRef);
@@ -429,6 +464,7 @@ export async function withReadableApp<T>(ctx: Context, appRef: string, body: (c:
 export async function mayReadAppTasks(ctx: Context, appId: string): Promise<boolean> {
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt) return false;
+  if (isRunPrincipal(ctx) && !ctx.userId) return runMayReadTeam(ctx, app);
   if (appKeyCaller(ctx)) return keyMayReadApp(ctx, app);
   return (await resolveTaskActor(ctx, app)) !== null;
 }
@@ -471,6 +507,7 @@ async function participatedAppIds(ctx: Context): Promise<string[]> {
 
 /** The ONE App a BARE handle means for this caller: a key's own App, a worker session's App, else the one App a person belongs to. */
 async function bareHandleApp(ctx: Context, ref: string): Promise<string | null> {
+  if (isRunPrincipal(ctx) && !ctx.userId) return ctx.appId ?? null;
   const key = appKeyCaller(ctx);
   if (key) return key.appId;
   const bound = currentActor();
@@ -538,7 +575,17 @@ async function withReadableTask<T>(
   ctx: Context,
   taskRef: string,
   body: (c: Context, r: { task: TaskRow; app: TaskApp }) => Promise<T>,
+  allowRun = false,
 ): Promise<T | null> {
+  if (isRunPrincipal(ctx) && !ctx.userId) {
+    if (!allowRun || !ctx.appId) return null;
+    const taskId = await resolveTaskRef(ctx, taskRef, ctx.appId);
+    if (!taskId) return null;
+    return inRunTeamReadTx<T | null>(ctx, ctx.appId, () => null, async (c, app) => {
+      const task = await c.db.agentTask.findFirst({ where: { id: taskId, appId: app.id } });
+      return task ? body(c, { task, app }) : null;
+    });
+  }
   const key = appKeyCaller(ctx);
   if (!key) {
     const readable = await loadReadableTask(ctx, taskRef);
@@ -2684,7 +2731,7 @@ async function partyFilter(ctx: Context, app: TaskApp, input: PartyInput, prefix
 export const agentTaskQueries = {
   /** One task, or null when it does not exist or the caller may not read it (cor:agt:050:21). */
   agentTask: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    return withReadableTask(ctx, id, async (_c, { task }) => task);
+    return withReadableTask(ctx, id, async (_c, { task }) => task, true);
   },
 
   /** An App's tasks, newest first, for its participants and the App's own key (cor:agt:050:21, #1755). */
@@ -2786,7 +2833,7 @@ export const agentTaskQueries = {
       take: clampListTake(args.limit),
       skip: Math.max(0, args.offset ?? 0),
     });
-    }),
+    }, true),
 
   /**
    * A task and every task below it, root first then by creation. Null when the
@@ -2812,7 +2859,7 @@ export const agentTaskQueries = {
     const depth = new Map(rows.map((r) => [r.id, r.depth]));
     return tasks.sort((a, b) =>
       (depth.get(a.id)! - depth.get(b.id)!) || a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
-    }),
+    }, true),
 
   /**
    * An App's team event stream (cor:agt:050:11, :21), in (createdAt, id)
@@ -3081,7 +3128,7 @@ export const agentTaskFieldResolvers = {
      */
     clonedFrom: async (task: TaskRow, _: unknown, ctx: Context) => {
       if (!task.clonedFromId) return null;
-      return withReadableTask(ctx, task.clonedFromId, async (c, r) => (r.task.appId === task.appId ? r.task : null));
+      return withReadableTask(ctx, task.clonedFromId, async (c, r) => (r.task.appId === task.appId ? r.task : null), true);
     },
     /** #2553: the per-App handle. Never null in the database; the column is optional only in the client type. */
     handle: (t: TaskRow) => t.handle!,
@@ -3096,7 +3143,7 @@ export const agentTaskFieldResolvers = {
       if (t.status !== 'finished' || !t.resultOutcome || Object.hasOwn(t, 'resultFindings')) return view(t);
       // #2662: wide list/tree/relation rows omit the large payload. Only a selected result loads it, under the
       // SAME task read gate (including the App-key arm), rechecked at this read rather than trusting an old row.
-      return withReadableTask(ctx, t.id, async (_c, { task }) => view(task));
+      return withReadableTask(ctx, t.id, async (_c, { task }) => view(task), true);
     },
     /** #2651 (cor:agt:050:29, :01): the latest hand-back, readable as the task is; null when never handed back. */
     handBack: (t: TaskRow) =>
