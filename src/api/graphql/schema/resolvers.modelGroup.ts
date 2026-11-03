@@ -184,7 +184,9 @@ export const modelGroupMutations = {
       const row = existing
         ? await tx.modelGroup.update({ where: { id: existing.id }, data: { patterns: list, updatedBy: by } })
         : await tx.modelGroup.create({ data: { appId: freshApp.id, name: group, patterns: list, createdBy: by, updatedBy: by } });
-      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.model-group.set');
+      // #3323 (acceptance 6): the same patterns again is a no-op, and a no-op writes no record.
+      const same = existing !== null && existing.patterns.length === list.length && existing.patterns.every((p, i) => p === list[i]);
+      if (!same) await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.model-group.set');
       return view(row);
     });
   },

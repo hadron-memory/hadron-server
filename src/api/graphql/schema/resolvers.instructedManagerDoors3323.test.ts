@@ -15,6 +15,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { GraphQLError } from 'graphql';
+import { actorManagesApp, inTaskWriteTx } from './resolvers.agentTask.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -254,6 +256,11 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
       expect(await managerActs()).toHaveLength(0);
     });
 
+    it(`${name}: the holder acting as themselves WITH an instruction is admitted and writes no instructed-act record`, async () => {
+      expect(await answer(() => door.call(live, ctx()))).toEqual({ code: 'RESOLVED' });
+      expect(await door.took()).toBe(true);
+      expect(await managerActs()).toHaveLength(0);
+    });
   }
 
   // Acceptance 6: the record comes after every refusal. Each act is admitted by the gate, then refused on its own state.
@@ -295,6 +302,29 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
     expect(await managerActs()).toHaveLength(0);
   });
 
+  it('a no-op writes no record: removing a blocker the task does not have', async () => {
+    expect(await answer(() => asWorker(() => M.removeAgentTaskBlocker({}, { taskRef: f.task.id, blockerTaskRef: f.blocker.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('a no-op writes no record: the priority the task already has', async () => {
+    await doors.setAgentTaskPriority!.call(undefined, ctx());
+    expect(await answer(() => asWorker(() => doors.setAgentTaskPriority!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('a no-op writes no record: the stall windows the App already has', async () => {
+    await doors.setAgentTaskStallSchedule!.call(undefined, ctx());
+    expect(await answer(() => asWorker(() => doors.setAgentTaskStallSchedule!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('a no-op writes no record: the patterns the group already has', async () => {
+    await doors.setAppModelGroup!.call(undefined, ctx());
+    expect(await answer(() => asWorker(() => doors.setAppModelGroup!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
   it('a no-op writes no record: adding a blocker the task already has', async () => {
     expect(await answer(() => asWorker(() => M.addAgentTaskBlocker({}, { taskRef: f.blocked.id, blockerTaskRef: f.blocker.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
@@ -321,6 +351,19 @@ describe('#3323 other arms are unchanged and write no record (acceptance 5)', ()
     expect(await managerActs()).toHaveLength(0);
   });
 
+  it('the reportsTo arm decides before the instructed manager arm: an instructed coordinator writes no record', async () => {
+    await db.worker.update({ where: { id: f.target.id }, data: { reportsToWorkerId: f.worker.id } });
+    const owned: any = await runAsActor({ workerId: f.target.id, agentId: f.agent.id }, () => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Theirs' } }, ctx({ userId: f.holder.id })));
+    expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskId: owned.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('the worker\'s own availability arm decides first: an instructed self-mark is the worker\'s and writes no record', async () => {
+    expect(await answer(() => asWorker(() => M.setWorkerAvailability({}, { input: { worker: f.worker.id, state: 'UNAVAILABLE', reason: 'OUT_OF_TOKENS' }, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect((await db.workerAvailability.findUniqueOrThrow({ where: { workerId: f.worker.id } })).setBy).toBe('worker');
+    expect(await managerActs()).toHaveLength(0);
+  });
+
   it('an owner in the alarm\'s chain acknowledges it with no instruction', async () => {
     const mine = await db.agentTeamEvent.create({ data: {
       appId: f.app.id, taskId: f.blocker.id, type: 'stall.not-started', severity: 'alarm', chain: [{ workerId: f.worker.id }] as never, episodeStart: new Date(),
@@ -339,6 +382,43 @@ describe('#3323 other arms are unchanged and write no record (acceptance 5)', ()
     await M.assignAgentTask({}, { taskId: f.task.id, assignee: { worker: f.worker.id } }, { db, userId: f.boss.id, roles: ['READER'] } as Context);
     expect(await answer(() => asWorker(() => M.updateAgentTask({}, { taskId: f.task.id, input: { properties: { k: 9 } } }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
+  });
+});
+
+describe('#3323 the choke point\'s fences', () => {
+  const app = () => db.app.findUniqueOrThrow({ where: { id: f.app.id } }) as never;
+  const claim = () => ({ claim: live as never, admitted: null });
+
+  it('an impersonated person is refused with no instruction', async () => {
+    const c = ctx({ impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } } as never);
+    expect(await actorManagesApp(c, await app(), { kind: 'user', userId: f.holder.id })).toBe(false);
+  });
+
+  it('an admission for one worker never admits another actor', async () => {
+    const stranger = { kind: 'worker', workerId: f.target.id, agentId: f.agent.id, userId: f.holder.id } as const;
+    const instructed = claim();
+    await db.$transaction(async (tx) => {
+      expect(await asWorker(async () => actorManagesApp(bound({ db: tx as never }), await app(), stranger, instructed))).toBe(false);
+    });
+    expect(instructed.admitted).toBeNull();
+  });
+
+  it('a session ending while the act is judged is waited for, and the act is refused', async () => {
+    let call!: Promise<unknown>;
+    await db.$transaction(async (tx) => {
+      await tx.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+      call = answer(() => asWorker(() => doors.cancelAgentTask!.call(live, bound())));
+      await new Promise((resolve) => setTimeout(resolve, 750));
+    }, { timeout: 15000 });
+    expect(await call).toMatchObject({ code: 'TASK_NOT_OWNER' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('each attempt judges again: an admission never carries into a retried attempt', async () => {
+    const actor = { kind: 'worker', workerId: f.worker.id, agentId: f.agent.id, userId: f.holder.id, instructed: claim() } as const;
+    (actor.instructed as { admitted: unknown }).admitted = { kind: 'instructed-worker' };
+    const seen = await asWorker(() => inTaskWriteTx(bound(), f.app, actor, () => new GraphQLError('refused'), async () => actor.instructed.admitted));
+    expect(seen).toBeNull();
   });
 });
 

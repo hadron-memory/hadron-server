@@ -2035,7 +2035,8 @@ export const agentTaskMutations = {
     const value = taskPriority(priority);
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await setTaskPriorityInTx(tx, txCtx, app, actor, task, value);
-      await recordInstructedManagerAct(tx, app.id, actor, 'task.priority', { taskId: task.id });
+      // #3323 (acceptance 6): a no-op writes no instructed-act record. The door's own event stays as it was.
+      if (task.priority !== value) await recordInstructedManagerAct(tx, app.id, actor, 'task.priority', { taskId: task.id });
     }, {}, instruction);
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });

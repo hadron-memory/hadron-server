@@ -468,12 +468,15 @@ export const agentTaskAlarmMutations = {
       // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
       // #1881: so is a report-timeout decision, which reads the timeout under the same lock shared.
       if ('hostLapseCheckIns' in data || 'hostReportTimeoutMinutes' in data) await lockAppHostLapse(tx, freshApp.id, 'exclusive');
+      const before = await tx.agentTaskStallSchedule.findUnique({ where: { appId: freshApp.id } });
       await tx.agentTaskStallSchedule.upsert({
         where: { appId: freshApp.id },
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
         update: { ...data, updatedBy: ctx.userId ?? null },
       });
-      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.stall-schedule');
+      // #3323 (acceptance 6): windows set to what they already are is a no-op, and a no-op writes no record.
+      const changed = !before || Object.entries(data).some(([k, v]) => before[k as keyof typeof data] !== v);
+      if (changed) await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.stall-schedule');
     });
     return stallWindowsView(ctx, app.id);
   },
