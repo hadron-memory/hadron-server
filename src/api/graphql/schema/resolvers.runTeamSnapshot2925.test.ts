@@ -9,7 +9,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { resolveRunTools } from '../../../lib/runner/tools/index.js';
-import { loadApp, mayReadAppTasks, resolveTaskActor } from './resolvers.agentTask.js';
+import { loadApp, mayReadAppTasks, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
@@ -112,15 +112,15 @@ it('an enabled own-App run reads tasks without becoming an actor; other Apps rem
   const principal = runContext(db, await mintRun());
   expect(await mayReadAppTasks(principal, appId)).toBe(true);
   expect(await mayReadAppTasks(principal, otherAppId)).toBe(false);
-  expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toBeNull();
+  await withReadableApp(principal, appId, async (...args) => { expect(args).toHaveLength(2); }, true);
   const page = await Q.agentTasks({}, { appRef: appId }, principal);
   expect(page.map((t: { id: string }) => t.id)).toContain(taskId);
   await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   expect(await Q.agentTask({}, { id: taskId }, principal)).toMatchObject({ id: taskId });
 });
-it('a user-backed run still yields no TaskActor and generic create/update/assign are refused without writes', async () => {
-  const principal = runContext(db, await mintRun(manager));
-  expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toBeNull();
+it('a userless run cannot use the new read arm for generic create/update/assign writes', async () => {
+  await enable();
+  const principal = runContext(db, await mintRun());
   const before = await db.agentTask.count();
   await denied(M.createAgentTask({}, { input: { appRef: appId, title: 'forged' } }, principal), 'APP_NOT_FOUND');
   await denied(M.updateAgentTask({}, { taskId, input: { title: 'forged' } }, principal), 'TASK_NOT_FOUND');
@@ -271,4 +271,31 @@ it('an oversized roster is explicitly non-continuable, never an empty complete r
   const out = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW) as any;
   expect(out).toMatchObject({ complete: false, incompleteReason: 'nested_truncated', hasMore: false, cursor: null, roster: [] });
   expect(out.tasks.map((t: any) => t.id)).toContain(taskId);
+});
+
+// Xanthos #70403: the new arm is userless; #2925 does not globally change existing user-backed runs.
+it('preserves a user-backed run’s existing TaskActor, task write and S3b scope-revoke behavior', async () => {
+  const principal = runContext(db, await mintRun(manager));
+  expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toMatchObject({ kind: 'user', userId: manager });
+  expect(await mayReadAppTasks(principal, appId)).toBe(true); // default-off is not a new denial on its legacy person arm.
+  const created = await M.createAgentTask({}, { input: { appRef: appId, title: 'Legacy user-backed write' } }, principal);
+  await M.updateAgentTask({}, { taskId: created.id, input: { title: 'Legacy edit' } }, principal);
+  expect((await db.agentTask.findUniqueOrThrow({ where: { id: created.id } })).title).toBe('Legacy edit');
+  await M.grantAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, ctx(manager));
+  await M.revokeAppKeyScope({}, { id: keyId, scope: 'attention:deliver' }, principal);
+  expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: keyId, scope: 'attention:deliver' } })).revokedAt).not.toBeNull();
+});
+
+it('an outage in the new userless worker read gate propagates instead of becoming not-found', async () => {
+  await enable();
+  const principal = runContext(db, await mintRun());
+  const realDb = principal.db;
+  principal.db = new Proxy(realDb, { get(target, prop, receiver) {
+    if (prop === '$queryRaw') return (query: TemplateStringsArray, ...values: unknown[]) => {
+      if (query.join(' ').includes('FROM app_runs')) throw new Error('synthetic run-read outage');
+      return target.$queryRaw(query, ...values);
+    };
+    return Reflect.get(target, prop, receiver);
+  } });
+  await expect(Q.worker({}, { ref: workerId }, principal)).rejects.toThrow('synthetic run-read outage');
 });
