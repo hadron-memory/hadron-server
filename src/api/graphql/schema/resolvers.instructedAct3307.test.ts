@@ -184,3 +184,50 @@ it('#3307 instruction input exists only on the two widened doors',()=>{
  for(const name of ['updateWorker','changeWorkerAgent'])expect(fields[name].args.map(a=>a.name)).toContain('instruction');
  for(const name of ['createAppKey','regenerateAppKey','grantAppKeyScope','grantApp','setAppMemoryWriteGrant','setAutomationReadGrant','startImpersonation'])expect(fields[name].args.map(a=>a.name)).not.toContain('instruction');
 });
+
+it('#3307 a transport-bound actor uses the persisted session and records both principals',async()=>{
+ await runAsActor({workerId:f.worker.id,agentId:f.agent.id},()=>calls.signature());
+ expect((await instructionEvents())[0]).toMatchObject({actorUserId:f.holder.id,actorWorkerId:f.worker.id,actorAgentId:f.agent.id});
+});
+it('#3307 a live-chat URL reference is opaque, not a restricted identifier alphabet',async()=>{
+ const instruction={kind:'LIVE_CHAT',ref:'https://client.example/chat/17?turn=3%2F4'};
+ await calls.signature(instruction);expect((await instructionEvents())[0].payload).toMatchObject({instruction});
+});
+it('#3307 the instruction ref length boundary is inclusive',async()=>{
+ await calls.signature({kind:'LIVE_CHAT',ref:'x'.repeat(512)});expect(await instructionEvents()).toHaveLength(1);
+});
+it('#3307 a malformed or missing message URN gives the same refusal',async()=>{
+ expect(await answer(calls.signature({kind:'TEAM_CHAT_MESSAGE',ref:'hrn:node:bad'}))).toEqual(await answer(calls.signature({kind:'TEAM_CHAT_MESSAGE',ref:'hrn:node:instruct3307.test:absent:missing'})));
+});
+it('#3307 a refused mixed signature update records no instruction or partial change',async()=>{
+ const before=await snapshot();expect((await answer(M.updateWorker({}, {workerRef:f.target.id,signature:'new',trailer:null,instruction:live},bound()))).code).toBe('BAD_USER_INPUT');expect(await snapshot()).toEqual(before);
+});
+
+it('#3307 holds the live manager membership while waiting for its worker row',async()=>{
+ let held!:()=>void, release!:()=>void;
+ const ready=new Promise<void>(r=>{held=r;}), gate=new Promise<void>(r=>{release=r;});
+ const side=db.$transaction(async tx=>{await tx.$queryRaw`SELECT id FROM workers WHERE id=${f.target.id} FOR UPDATE`;held();await gate;},{timeout:30000});
+ await ready;
+ const call=answer(calls.signature());
+ let outcome:any;
+ try {
+  for(let i=0;;i++) {
+   const [{n}]=await db.$queryRaw<Array<{n:number}>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`;
+   if(n>0)break;if(i>200)throw new Error('worker act never waited');await new Promise(r=>setTimeout(r,25));
+  }
+  let denied=false;
+  try {await db.$transaction(async tx=>{await tx.$executeRawUnsafe("SET LOCAL lock_timeout='100ms'");await tx.appMember.delete({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}});});}
+  catch(e){expect(String(e)).toMatch(/lock timeout/);denied=true;}
+  expect(denied).toBe(true);
+ }finally{release();await side;outcome=await call;}
+ expect(outcome.code).toBe('RESOLVED');expect(await instructionEvents()).toHaveLength(1);
+});
+
+it('#3307 task instructions reuse the caller task-read gate even at the right App',async()=>{
+ const outsider=await db.user.create({data:{handle:'instruction-outsider',roles:['READER']}});
+ const task=await db.agentTask.create({data:{appId:f.app.id,title:'private task',ownerUserId:f.holder.id}});
+ const {readActInstruction}=await import('./resolvers.instruction.js');
+ const claim={kind:'TASK' as const,ref:`hrn:agenttask:${f.app.urn}:${task.handle}`};
+ expect(await readActInstruction(ctx(),f.app.id,claim)).toBe(true);
+ expect(await readActInstruction(ctx({userId:outsider.id}),f.app.id,claim)).toBe(false);
+});
