@@ -7,12 +7,16 @@ import { buildSchema, graphql, defaultFieldResolver } from 'graphql';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../id.js';
+import { publishNodeWritten } from '../events/nodeWritten.js';
+import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
+vi.mock('../events/nodeWritten.js',async original=>({...await original<typeof import('../events/nodeWritten.js')>(),publishNodeWritten:vi.fn(async()=>{})}));
+vi.mock('../../services/embedding/enqueue.js',async original=>({...await original<typeof import('../../services/embedding/enqueue.js')>(),enqueueNodeEmbedding:vi.fn(async()=>{})}));
 import { sweepUnreportedHostOperations } from '../hostOperations/settle.js';
 import { sweepContextResets, registerContextResetRecovery } from './contextReset.js';
 vi.mock('../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../bus/index.js',()=>({getBusClient:vi.fn(async()=>null)}));
 let f:ResetFixture;
-beforeEach(async()=>{f=await setUpResetFixture();});
+beforeEach(async()=>{f=await setUpResetFixture();vi.mocked(publishNodeWritten).mockClear();vi.mocked(enqueueNodeEmbedding).mockClear();});
 const nodeCount=()=>db.node.count();
 async function claimed(){const s=await f.collectedReset();await f.step('claimContextReset',{resetId:s.resetId,epoch:0,process:PROC});return s;}
 function input(s:{resetId:string;taskId:string},extra={}){return {resetId:s.resetId,epoch:1,sessionId:f.session.id,taskId:s.taskId,checkpoint:{title:'Recovery',content:'private checkpoint'},...extra};}
@@ -125,7 +129,7 @@ it.each([
 ] as const)('checkpoint bounds %s',async(_name,content,title,ok)=>{
  const s=await claimed(),n=await nodeCount();const p=call(s,{checkpoint:{title,content}});
  if(ok){expect(await p).toMatchObject({reset:{phase:'checkpointed'}});expect(await nodeCount()).toBe(n+1);}
- else {expect(await code(p)).toBe('RECOVERY_REF_INVALID');expect(await nodeCount()).toBe(n);expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');}
+ else {expect(await code(p)).toBe('RECOVERY_REF_INVALID');expect(publishNodeWritten).not.toHaveBeenCalled();expect(enqueueNodeEmbedding).not.toHaveBeenCalled();expect(await nodeCount()).toBe(n);expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');}
 });
 
 it('GraphQL admits only the narrow input and conceals all unknown targets identically',async()=>{
@@ -257,4 +261,18 @@ it('legacy recovery keeps its original failed-never-collected admission',async()
 it('a soft-deleted working memory cannot receive a checkpoint',async()=>{
  const s=await claimed();await db.memory.update({where:{id:f.kitMemory.id},data:{deletedAt:new Date()}});
  const n=await nodeCount();expect(await code(call(s))).toBe('RECOVERY_REF_INVALID');expect(await nodeCount()).toBe(n);
+});
+
+it('publishes checkpoint effects once after commit, never on replay or refusal',async()=>{
+ const s=await claimed();vi.mocked(publishNodeWritten).mockClear();vi.mocked(enqueueNodeEmbedding).mockClear();
+ vi.mocked(publishNodeWritten).mockImplementationOnce(async event=>{
+  expect(await db.node.findUnique({where:{id:event.nodeId}})).not.toBeNull();
+  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('checkpointed');
+ });
+ const out=await call(s);const id=out.reset.recoveryRef.checkpointNodeId;
+ expect(publishNodeWritten).toHaveBeenCalledExactlyOnceWith({nodeId:id,memoryId:f.kitMemory.id,clientId:f.keyCtx().clientId});
+ expect(enqueueNodeEmbedding).toHaveBeenCalledOnce();
+ expect(vi.mocked(enqueueNodeEmbedding).mock.calls[0]?.[1]).toMatchObject({nodeId:id,memoryId:f.kitMemory.id,plaintext:{content:'private checkpoint',abstract:null}});
+ await call(s);await code(call(s,{epoch:0}));
+ expect(publishNodeWritten).toHaveBeenCalledTimes(1);expect(enqueueNodeEmbedding).toHaveBeenCalledTimes(1);
 });
