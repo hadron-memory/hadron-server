@@ -231,3 +231,26 @@ it('#3307 task instructions reuse the caller task-read gate even at the right Ap
  expect(await readActInstruction(ctx(),f.app.id,claim)).toBe(true);
  expect(await readActInstruction(ctx({userId:outsider.id}),f.app.id,claim)).toBe(false);
 });
+
+for(const initial of ['worker','person']) for(const door of ['signature','agent']) it('#3307 '+door+' refuses '+initial+' session principal drift before the final lock',async()=>{
+ const replacement=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:f.app.id,agentId:f.agent.id,name:'Replacement',slug:'replacement',heldByUserId:f.holder.id}});
+ if(initial==='person')await db.session.update({where:{id:f.session.id},data:{workerId:null}});
+ let moved=false;
+ const client=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>callback(new Proxy(tx,{get(t,k){
+   if(k==='session')return new Proxy(t.session,{get(d,op){
+    if(op==='findUnique')return async(args:any)=>{
+     const prior=await d.findUnique(args);
+     if(!moved && args.where.id===f.session.id){moved=true;await tx.session.update({where:{id:f.session.id},data:{workerId:replacement.id}});}
+     return prior;
+    };
+    const value=(d as any)[op];return typeof value==='function'?value.bind(d):value;
+   }});
+   const value=(t as any)[k];return typeof value==='function'?value.bind(t):value;
+  }})),options);
+  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+ }});
+ const before=await snapshot();
+ expect((await answer(calls[door](live,bound({db:client})))).code).toBe('FORBIDDEN');expect(moved).toBe(true);expect(await snapshot()).toEqual(before);
+ expect((await db.session.findUniqueOrThrow({where:{id:f.session.id}})).workerId).toBe(initial==='person'?null:f.worker.id);
+});
