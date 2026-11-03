@@ -79,7 +79,7 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { inRunTeamReadTx, resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
@@ -2003,30 +2003,26 @@ export const workerQueries = {
     }: { appRef: string; includeRetired?: boolean | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const read = async (c: Context, appId: string) => {
-      const where = {
-        appId,
-        ...(includeRetired ? {} : { retiredAt: null }),
-      };
-      const [items, total] = await Promise.all([
-        c.db.worker.findMany({
-          where,
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-          take: clampListTake(limit),
-          skip: offset ?? 0,
-        }),
-        c.db.worker.count({ where }),
-      ]);
-      // #2971: one memo per page resolution, carried on the rows it serves (never on ctx), so `prompt` on N items reads
-      // what the page shares once. Only `prompt` reads it.
-      const pageMemo = newWorkerPromptPageMemo(ctx);
-      return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
-    };
     const { id: appId } = await resolveAppRef(ctx.db, appRef);
-    if (isRunPrincipal(ctx) && !ctx.userId) return inRunTeamReadTx(ctx, appId, () => { throw forbidden(); }, c => read(c, appId));
     const app = await ctx.db.app.findUniqueOrThrow({ where: { id: appId } });
     await requireWorkerReadAccess(ctx, app);
-    return read(ctx, appId);
+    const where = {
+      appId,
+      ...(includeRetired ? {} : { retiredAt: null }),
+    };
+    const [items, total] = await Promise.all([
+      ctx.db.worker.findMany({
+        where,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: clampListTake(limit),
+        skip: offset ?? 0,
+      }),
+      ctx.db.worker.count({ where }),
+    ]);
+    // #2971: one memo per page resolution, carried on the rows it serves (never on ctx), so `prompt` on N items reads
+    // what the page shares once. Only `prompt` reads it.
+    const pageMemo = newWorkerPromptPageMemo(ctx);
+    return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
   },
 
   /**
