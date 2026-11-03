@@ -79,7 +79,7 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { inRunTeamReadTx, mayReadAppTasks, resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { inRunTeamReadTx, resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
@@ -180,10 +180,6 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
  * refused it. Found by the #1347 differential test; checked here, once.
  */
 export async function requireWorkerReadAccess(ctx: Context, app: AppRow): Promise<void> {
-  if (isRunPrincipal(ctx) && !ctx.userId) {
-    if (!await mayReadAppTasks(ctx, app.id)) throw forbidden();
-    return;
-  }
   if (app.deletedAt) throw forbidden();
   if (ctx.impersonation) {
     if (app.organizationId === null || app.organizationId !== ctx.impersonation.orgId) {
@@ -245,7 +241,6 @@ export async function requireWorkerProfileAccess(ctx: Context, app: AppRow): Pro
  * resolvers.worker.test.ts pins every arm to `requireWorkerReadAccess`.
  */
 async function workerReadableWhere(ctx: Context): Promise<Prisma.WorkerWhereInput> {
-  if (isRunPrincipal(ctx) && !ctx.userId) return { appId: { in: ctx.appId && await mayReadAppTasks(ctx, ctx.appId) ? [ctx.appId] : [] } };
   if (!ctx.userId) {
     return { appId: { in: ctx.appId ? [ctx.appId] : [] } };
   }

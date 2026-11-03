@@ -25,7 +25,7 @@ import { canSeeUserPersonalFieldsMany } from '../../../lib/auth/userVisibility.j
 
 const toGqlWord = (s: string): string => s.toUpperCase().replace(/-/g, '_');
 
-/** Shared projected rows. Person reads use RepeatableRead; run reads hold live authority anchors through projection. */
+/** Shared projected rows. Person and run reads use RepeatableRead; run reads also hold live authority anchors through projection. */
 async function readTeamRoster(ctx: Context, appRef: string) {
     if (isRunPrincipal(ctx) && !ctx.userId) return withReadableApp(ctx, appRef, projectTeamRoster, true);
     // Admission, status and assignment projections share one read snapshot, including MCP callers.

@@ -1,3 +1,5 @@
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 /** #2925 / ruling0112: the run read is opt-in, own-App and never a task actor. */
 import { ApolloServer } from '@apollo/server';
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
@@ -102,7 +104,7 @@ it.each(['member', 'own-key', 'run', 'worker', 'impersonation'] as const)('%s ca
     ? await runAsActor({ workerId, agentId }, () => setting(true, c)) : await setting(true, c);
   expect(out.data).toBeNull();
   expect(out.errors?.[0].extensions.code).toBe('FORBIDDEN');
-  const row = await db.app.findUniqueOrThrow({ where: { id: appId } }) as any;
+  const row = await db.app.findUniqueOrThrow({ where: { id: appId } });
   expect(row.runTeamSnapshotEnabled).toBe(false);
 });
 it('a default-off run cannot bypass opt-in through the existing worker list', async () => {
@@ -196,7 +198,7 @@ it('pages tasks without dropping equal timestamps and carries the bounded window
   expect(new Set(ids).size).toBe(106);
   expect(first.acquiredAt).toMatch(/Z$/);
   await denied(tool.execute(c, { ...WINDOW, since: '2026-10-19T00:00:00Z', cursor: first.cursor }), 'TEAM_SNAPSHOT_INVALID_ARGUMENT');
-  await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } } as any);
+  await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } });
   await denied(tool.execute(c, { ...WINDOW, cursor: first.cursor }), 'APP_NOT_FOUND');
 });
 it('includes live work plus ended work in the half-open window, not unrelated Apps or AT0', async () => {
@@ -230,8 +232,6 @@ it('the existing teamRoster read shares the run arm, while host and event capabi
   await denied(Q.agentTeamEvents({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
 });
 
-import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
-import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 it.each(['off', 'app-deleted', 'org-deleted'] as const)('rechecks %s after waiting for the authority anchor', async kind => {
   await enable();
   const c = toolCtx(await mintRun());
@@ -306,18 +306,13 @@ it('preserves a user-backed run’s existing TaskActor, task write and S3b scope
   expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: keyId, scope: 'attention:deliver' } })).revokedAt).not.toBeNull();
 });
 
-it('an outage in the new userless worker read gate propagates instead of becoming not-found', async () => {
+it('an outage in the new run read transaction propagates instead of becoming not-found', async () => {
   await enable();
   const principal = runContext(db, await mintRun());
-  const realDb = principal.db;
-  principal.db = new Proxy(realDb, { get(target, prop, receiver) {
-    if (prop === '$queryRaw') return (query: TemplateStringsArray, ...values: unknown[]) => {
-      if (query.join(' ').includes('FROM app_runs')) throw new Error('synthetic run-read outage');
-      return target.$queryRaw(query, ...values);
-    };
-    return Reflect.get(target, prop, receiver);
-  } });
-  await expect(Q.worker({}, { ref: workerId }, principal)).rejects.toThrow('synthetic run-read outage');
+  await expect(inRunTeamReadTx(principal, appId, () => null, async c => {
+    await c.db.$queryRaw`SELECT id FROM app_runs WHERE id = ${principal.clientId!.slice(4)} FOR SHARE`;
+    throw new Error('synthetic run-read outage');
+  })).rejects.toThrow('synthetic run-read outage');
 });
 
 it('keeps the longer transaction budget confined to run team reads', async () => {
@@ -347,8 +342,8 @@ it.each(['impersonation', 'user-binding', 'org-binding', 'tool-run-binding'] as 
   const c = toolCtx(run);
   if (kind === 'impersonation') c.principal.impersonation = { orgId } as never;
   if (kind === 'user-binding') c.principal.userId = manager;
-  if (kind === 'org-binding') c.principal.organizationId = generateId();
-  if (kind === 'tool-run-binding') c.principal.clientId = `run:${generateId()}`;
+  if (kind === 'org-binding') c.principal.organizationId = (await db.organization.create({ data: { name: 'Other live org', urn: `other-${generateId()}.example` } })).id;
+  if (kind === 'tool-run-binding') c.principal.clientId = `run:${(await mintRun()).id}`;
   await denied(snapshotTool().execute(c, WINDOW), 'APP_NOT_FOUND');
 });
 it('the new tool uses live own-App opt-in even for a run backed by a nonparticipant user', async () => {
