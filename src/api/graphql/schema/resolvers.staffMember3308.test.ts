@@ -366,3 +366,25 @@ describe('#3308 App reader with independent org staffing authority', () => {
   });
  }
 });
+
+
+it('#3308 leaveApp retains the first worker across delegated admission', async () => {
+ await db.worker.update({where:{id:f.target.id},data:{heldByUserId:f.holder.id}});
+ await give('remove'); await give('remove', f.target.id);
+ let reads=0;
+ const client = new Proxy(db,{get(target,key){
+  if(key==='session') return new Proxy(target.session,{get(delegate,field){
+   if(field==='findUnique') return async(query:any)=>{
+    if(query.where.id===f.session.id && ++reads===2) await db.session.update({where:{id:f.session.id},data:{workerId:f.target.id}});
+    return delegate.findUnique(query);
+   };
+   const v=(delegate as any)[field]; return typeof v==='function'?v.bind(delegate):v;
+  }});
+  const v=(target as any)[key]; return typeof v==='function'?v.bind(target):v;
+ }});
+ const before=await snapshot();
+ try {
+  expect((await answer(M.leaveApp({}, {appId:f.app.id}, bound({db:client})))).code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
+ } finally { await db.session.update({where:{id:f.session.id},data:{workerId:f.worker.id}}); }
+});
