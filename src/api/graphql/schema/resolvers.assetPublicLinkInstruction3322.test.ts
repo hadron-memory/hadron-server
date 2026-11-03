@@ -158,17 +158,22 @@ describe('#3322 asset public link on an instruction', () => {
     });
     await holding;
     const call = answer(toggle());
-    // PostgreSQL itself reports a backend parked on a lock: the call provably reached the session row.
-    let waiters = 0;
-    for (let i = 0; i < 100 && waiters === 0; i++) {
-      const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
-        SELECT count(*) AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`;
-      waiters = Number(n);
-      if (waiters === 0) await new Promise((r) => setTimeout(r, 50));
+    try {
+      // PostgreSQL itself reports a backend parked on a lock held by the blocker: the call provably reached the session row.
+      let waiters = 0;
+      for (let i = 0; i < 100 && waiters === 0; i++) {
+        const [{ n }] = await db.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*) AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()
+            AND query ILIKE '%sessions%'`;
+        waiters = Number(n);
+        if (waiters === 0) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(waiters).toBeGreaterThan(0);
+    } finally {
+      release();
+      await Promise.allSettled([blocker, call]);
     }
-    expect(waiters).toBeGreaterThan(0);
-    release(); await blocker;
     expect((await call).code).not.toBe('RESOLVED');
     expect(await flag()).toBe(false);
     expect({ ...(await snapshot()), asset: before.asset }).toEqual(before);
