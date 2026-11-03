@@ -234,4 +234,20 @@ describe('#3361 instructed automation grants',()=>{
     expect(await instructionEvents()).toHaveLength(0);
   });
 
+  it('a direct-person memory-only list explicitly refuses a supplied claim, while no claim keeps its reach',async()=>{
+    const before=await snapshot();
+    expect((await answer(Q.automationReadGrants({}, {memoryRef:f.mem.id,instruction:live},ctx()))).code).toBe('FORBIDDEN');
+    expect((await Q.automationReadGrants({}, {memoryRef:f.mem.id},ctx())).map((r:any)=>r.id)).toEqual([f.readGrant.id]);
+    expect(await snapshot()).toEqual(before);
+  });
+  it('a direct-person claim with an explicit App is validated without an instruction event',async()=>{
+    const task=await db.agentTask.create({data:{appId:f.app.id,title:'instruction',ownerUserId:f.holder.id}});
+    const instruction={kind:'TASK',ref:`hrn:agenttask:${f.app.urn}:${task.handle}`};
+    expect((await Q.automationReadGrants({}, {appRef:f.app.id,memoryRef:f.mem.id,instruction},ctx())).map((r:any)=>r.id)).toEqual([f.readGrant.id]);
+    expect(await instructionEvents()).toHaveLength(0);
+    const before=await snapshot();
+    expect((await answer(Q.automationReadGrants({}, {appRef:f.app.id,instruction:{kind:'TASK',ref:'hrn:agenttask:cred3311.test:team:AT999'}},ctx()))).code).toBe('FORBIDDEN');
+    expect(await snapshot()).toEqual(before);
+  });
+
 });
