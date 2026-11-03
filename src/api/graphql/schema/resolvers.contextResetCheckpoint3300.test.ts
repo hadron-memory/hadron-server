@@ -181,7 +181,14 @@ it.each(['person', 'plain-key', 'session-bound', 'revoked', 'other-app', 'not-co
   }
   if (kind === 'session-bound') { context = { ...context, sessionId: f.session.id }; expected = 'APP_KEY_SESSION_BOUND'; }
   if (kind === 'revoked') await M.revokeAppKeyScope({}, { id: f.orca1.id, scope: 'host:operate' }, ctx(f.manager.id));
-  if (kind === 'other-app') { appRef = generateId(); expected = 'CONTEXT_RESET_NOT_FOUND'; }
+  if (kind === 'other-app') {
+    const app = await db.app.create({ data: { organizationId: f.orgId, name: 'Other App', urn: `other-${generateId()}.example:team` } });
+    const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'synthetic' } });
+    await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(f.manager.id));
+    appRef = app.id;
+    context = { db, appId: app.id, appKeyId: key.id, roles: [] };
+    expected = 'CONTEXT_RESET_NOT_FOUND';
+  }
   if (kind === 'not-collected') {
     // A second fixture creates an issued reset with no collected operation.
     f = await setUpResetFixture();
