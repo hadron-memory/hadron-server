@@ -1,0 +1,117 @@
+/** #3308 / cor:dmo:050:12: staff/member acts need an instruction or the acting worker's own grant. */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildSchema } from 'graphql';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { runAsActor, requestActorStorage } from '../../../lib/requestActor.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
+import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+const M = resolvers.Mutation as any;
+const Q = resolvers.Query as any;
+let f: any;
+const live = { kind: 'LIVE_CHAT', ref: 'client-chat:turn-18' };
+const ctx = (extra: Partial<Context> = {}): Context => ({ db, userId: f.holder.id, roles: ['READER'], ...extra });
+const bound = (extra: Partial<Context> = {}) => ctx({ sessionId: f.session.id, ...extra });
+const answer = async (p: Promise<unknown>) => {
+ try { await p; return { code: 'RESOLVED' }; }
+ catch (e: any) { return { code: e.extensions?.code, message: e.message }; }
+};
+const calls: Record<string, (claim?: unknown, c?: Context) => Promise<any>> = {
+ cast: (instruction, c = bound()) => M.castWorker({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'NewWorker', noTeam: true, instruction }, c),
+ retire: (instruction, c = bound()) => M.retireWorker({}, { workerRef: f.target.id, instruction }, c),
+ delete: (instruction, c = bound()) => M.deleteWorker({}, { workerRef: f.target.id, confirmNoExternalAttribution: true, instruction }, c),
+ add: (instruction, c = bound()) => M.ensureAppMember({}, { appRef: f.app.id, userRef: f.other.id, role: 'member', instruction }, c),
+ remove: (instruction, c = bound()) => M.removeAppMember({}, { appRef: f.app.id, userRef: f.other.id, instruction }, c),
+ preview: (instruction, c = bound()) => Q.castWorkerPreview({}, { appRef: f.app.id, agentRef: f.agent.id, name: 'Preview', noTeam: true, instruction }, c),
+};
+const snapshot = async () => ({
+ workers: await db.worker.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
+ members: await db.appMember.findMany({ where: { appId: f.app.id }, orderBy: { userId: 'asc' } }),
+ events: await db.agentTeamEvent.findMany({ where: { appId: f.app.id }, orderBy: { id: 'asc' } }),
+});
+const instructionEvents = () => db.agentTeamEvent.findMany({ where: { appId: f.app.id } }).then(es => es.filter(e => (e.payload as any)?.instruction));
+beforeEach(async()=>{
+ await cleanDb(db);
+ const holder=await db.user.create({data:{handle:'staff-holder',roles:['READER']}});
+ const other=await db.user.create({data:{handle:'staff-other',roles:['READER']}});
+ const org=await db.organization.create({data:{name:'Instruction',urn:'staff3308.test'}});
+ await db.orgMember.createMany({data:[{organizationId:org.id,userId:holder.id,role:'CONTRIBUTOR'},{organizationId:org.id,userId:other.id,role:'ADMIN'}]});
+ const app=await db.app.create({data:{organizationId:org.id,name:'Team',urn:'staff3308.test:team'}});
+ await db.appMember.create({data:{appId:app.id,userId:holder.id,role:'owner'}});
+ f={holder,other,org,app};
+ const agent=await M.createAgent({}, {orgId:org.id,name:'Current',personaRole:'server-engineer'},ctx({userId:other.id}));
+ await db.node.create({data:{memoryId:agent.systemMemoryId,loc:'roles',name:'Roles',nodeType:'info'}});
+ const next=await M.createAgent({}, {orgId:org.id,name:'Next',personaRole:'qa-engineer'},ctx({userId:other.id}));
+ for(const a of [agent,next]) { await db.appAgent.create({data:{appId:app.id,agentId:a.id}}); await serveAgentBootPrompt(db,a.id,'{{worker.name}} {{worker.role}}'); }
+ const worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Caller',slug:'caller',heldByUserId:holder.id}});
+ const target=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:agent.id,name:'Target',slug:'target'}});
+ const session=await db.session.create({data:{id:generateId(),appId:app.id,agentId:agent.id,workerId:worker.id,userId:holder.id,tool:'vitest'}});
+ await db.appMember.create({data:{appId:app.id,userId:other.id,role:"reader"}});
+ f={...f,agent,next,worker,target,session};
+});
+
+
+describe('#3308 red-first staffing/member narrowing', () => {
+ for (const [door, call] of Object.entries(calls)) {
+  it(`${door}: headless without a grant is refused and writes nothing`, async () => {
+   const before = await snapshot();
+   expect((await answer(call())).code).toBe('FORBIDDEN');
+   expect(await snapshot()).toEqual(before);
+  });
+  it(`${door}: a direct person keeps the existing admission`, async () => {
+   expect((await answer(call(undefined, ctx()))).code).toBe('RESOLVED');
+   expect(await instructionEvents()).toHaveLength(0);
+  });
+  it(`${door}: a launched worker without a grant is refused even with a claim`, async () => {
+   await db.session.update({ where: { id: f.session.id }, data: { launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'manager' } });
+   const before = await snapshot();
+   expect((await answer(call(live))).code).toBe('FORBIDDEN');
+   expect(await snapshot()).toEqual(before);
+  });
+ }
+ for (const door of ['cast', 'retire', 'delete', 'add', 'remove']) {
+  it(`${door}: a valid instruction needs no grant and is recorded with both principals`, async () => {
+   await calls[door](live);
+   const events = await instructionEvents();
+   expect(events).toHaveLength(1);
+   expect(events[0]).toMatchObject({ actorUserId: f.holder.id, actorWorkerId: f.worker.id, actorAgentId: f.agent.id });
+   expect(events[0].payload).toMatchObject({ instruction: live });
+  });
+ }
+ for (const door of ['add', 'remove']) it(`${door}: refused headless worker cannot resolve a real or missing target`, async () => {
+  const method = door === 'add' ? M.ensureAppMember : M.removeAppMember;
+  const invoke = (userRef: string) => answer(method({}, { appRef: f.app.id, userRef, role: 'member' }, bound()));
+  const before = await snapshot();
+  const real = await invoke(f.other.id);
+  expect(real.code).toBe('FORBIDDEN');
+  expect(await invoke(generateId())).toEqual(real);
+  expect(await snapshot()).toEqual(before);
+ });
+ it('self-leave is refused for a headless worker without app.members', async () => {
+  const before = await snapshot();
+  expect((await answer(M.removeAppMember({}, { appRef: f.app.id, userRef: f.holder.id }, bound()))).code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
+ });
+ it('direct person self-leave stays admitted', async () => {
+  expect(await M.removeAppMember({}, { appRef: f.app.id, userRef: f.holder.id }, ctx())).toBe(true);
+ });
+ it('no-op updateWorker is not narrowed by workers.staff', async () => {
+  expect((await answer(M.updateWorker({}, { workerRef: f.target.id }, bound()))).code).toBe('RESOLVED');
+ });
+ it('S1 signature path still refuses a workers.staff-less worker without instruction', async () => {
+  expect((await answer(M.updateWorker({}, { workerRef: f.target.id, signature: 'New signature' }, bound()))).code).toBe('FORBIDDEN');
+ });
+ it('SDL exposes instruction at the staffing/member doors and both new grant names', () => {
+  const schema = buildSchema(typeDefs);
+  for (const name of ['castWorker', 'retireWorker', 'deleteWorker', 'ensureAppMember', 'removeAppMember']) {
+   expect(schema.getMutationType()!.getFields()[name].args.map(a => a.name)).toContain('instruction');
+  }
+  expect(schema.getQueryType()!.getFields().castWorkerPreview.args.map(a => a.name)).toContain('instruction');
+  const names = (schema.getType('AppGrantName') as any).getValues().map((v: any) => v.name);
+  expect(names).toContain('WORKERS_STAFF'); expect(names).toContain('APP_MEMBERS');
+ });
+});
