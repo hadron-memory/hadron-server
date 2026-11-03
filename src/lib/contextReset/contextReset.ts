@@ -404,6 +404,27 @@ async function endReset(
 export type ResetHost = { appId: string; hostId: string; appKeyId?: string };
 
 /**
+ * #3273: a host may inspect one reset it collected, ended resets included (cor:agt:070:04).
+ * Same not-found order as lockForHost, without taking the protocol's worker/mark locks or changing a reset.
+ * Deliberately stricter collection proof: settlement may fail an issued operation without collecting it.
+ * The caller holds the host key's App authority anchor while reading. No id is echoed in a refusal.
+ */
+export async function readContextResetForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string): Promise<ContextResetRow> {
+  const notFound = () => new ContextResetError('CONTEXT_RESET_NOT_FOUND', 'Context reset not found.');
+  if (typeof resetId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(resetId)) throw notFound();
+  const reset = await tx.contextReset.findUnique({ where: { id: resetId } });
+  if (!reset || reset.appId !== host.appId || reset.hostId !== host.hostId) throw notFound();
+  const operation = reset.hostOperationId
+    ? await tx.hostOperation.findUnique({ where: { id: reset.hostOperationId }, select: { collectedAt: true } })
+    : null;
+  if (!operation) throw notFound();
+  if (!operation.collectedAt) {
+    throw new ContextResetError('HOST_OPERATION_NOT_COLLECTED', 'Collect the reset\'s operation before acting on it.');
+  }
+  return reset;
+}
+
+/**
  * Lock and load a reset for a host step, in the #2162 order: the per-worker lock, the worker's availability row, then
  * the reset row. Another App's or another host's reset reads as not found. The operation must have been collected by
  * this host (cor:agt:070:04): a host acts on what it collected, never on an id it guessed.
