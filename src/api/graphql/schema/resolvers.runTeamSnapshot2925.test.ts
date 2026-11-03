@@ -32,17 +32,26 @@ async function wire(query: string, variables: Record<string, unknown>, c: Contex
   if (answer.body.kind !== 'single') throw new Error('unexpected incremental response');
   return JSON.parse(JSON.stringify(answer.body.singleResult));
 }
-const setting = (enabled: boolean, c = ctx(manager), appRef = appId) => wire(
-  'mutation($app:ID!,$enabled:Boolean!){setAppRunTeamSnapshotEnabled(appRef:$app,enabled:$enabled){id runTeamSnapshotEnabled}}',
-  { app: appRef, enabled }, c,
-);
+let triggers = new Map<string, string>();
+async function schedule(forApp = appId) {
+  const old = triggers.get(forApp); if (old) return old;
+  const row = await db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId: forApp,
+    name: 'Snapshot automation', cron: '* * * * *', entryNodeUrn: 'hrn:node:snapshot2925.example:flows:report' } });
+  triggers.set(forApp, row.id); return row.id;
+}
+const setting = async (enabled: boolean, c = ctx(manager), appRef = appId) => {
+  if (enabled) return wire('mutation($app:ID!,$trigger:ID!){setAutomationTeamSnapshotGrant(appRef:$app,triggerKind:"SCHEDULE",triggerId:$trigger){id appId triggerId revokedAt}}',
+    { app: appRef, trigger: await schedule(appRef) }, c);
+  const row = await db.appAutomationTeamSnapshotGrant.findFirst({ where: { appId: appRef, triggerId: await schedule(appRef), revokedAt: null } });
+  return wire('mutation($id:ID!){revokeAutomationTeamSnapshotGrant(id:$id){id revokedAt}}', { id: row?.id ?? 'unknown-grant' }, c);
+};
 async function enable(appRef = appId) {
   const out = await setting(true, ctx(manager), appRef);
   expect(out.errors).toBeUndefined();
-  expect(out.data.setAppRunTeamSnapshotEnabled.runTeamSnapshotEnabled).toBe(true);
+  expect(out.data.setAutomationTeamSnapshotGrant.revokedAt).toBeNull();
 }
 async function mintRun(userId: string | null = null, forApp = appId): Promise<AppRun> {
-  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId, triggerKind: 'MANUAL',
+  return db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId: forApp, userId, triggerKind: 'SCHEDULE', triggerId: await schedule(forApp),
     entryNodeUrn: 'hrn:node:snapshot2925.example:flows:report', status: 'RUNNING' } });
 }
 const toolCtx = (run: AppRun) => ({ db, run, principal: runContext(db, run), log: vi.fn() });
@@ -58,7 +67,7 @@ async function denied(p: Promise<unknown>, code: string) {
 }
 const WINDOW = { since: '2026-10-20T00:00:00Z', until: '2026-10-21T00:00:00Z' };
 beforeEach(async () => {
-  await cleanDb(db);
+  await cleanDb(db); triggers = new Map();
   const org = await db.organization.create({ data: { name: 'Snapshot', urn: `snapshot-${generateId()}.example` } });
   orgId = org.id;
   const user = async () => (await db.user.create({ data: { handle: `snap-${generateId()}`, roles: ['READER'] } })).id;
@@ -74,38 +83,31 @@ beforeEach(async () => {
   keyId = (await db.appKey.create({ data: { appId, keyHash: generateId(), keyPreview: 'synthetic' } })).id;
 });
 
-it('ships the nullable masked App field and person-manager mutation for client siblings', () => {
+it('replaces the per-App setting with per-automation grant doors', () => {
   const schema = buildSchema(typeDefs);
-  expect(String((schema.getType('App') as GraphQLObjectType).getFields().runTeamSnapshotEnabled?.type)).toBe('Boolean');
-  const m = schema.getMutationType()!.getFields().setAppRunTeamSnapshotEnabled;
-  expect(m?.args.map(a => `${a.name}:${a.type}`)).toEqual(['appRef:ID!', 'enabled:Boolean!']);
-  expect(String(m?.type)).toBe('App!');
+  expect((schema.getType('App') as GraphQLObjectType).getFields().runTeamSnapshotEnabled).toBeUndefined();
+  expect(schema.getMutationType()!.getFields().setAppRunTeamSnapshotEnabled).toBeUndefined();
+  expect(schema.getMutationType()!.getFields().setAutomationTeamSnapshotGrant).toBeDefined();
 });
-it('existing and newly created Apps default off on the wire', async () => {
-  const out = await wire('query($id:ID!){app(ref:$id){id runTeamSnapshotEnabled}}', { id: appId }, ctx(manager));
-  expect(out.errors).toBeUndefined();
-  expect(out.data.app).toMatchObject({ id: appId, runTeamSnapshotEnabled: false });
+it('existing and newly created automations default off', async () => {
+  expect(await db.appAutomationTeamSnapshotGrant.count()).toBe(0);
+  await denied(snapshotTool().execute(toolCtx(await mintRun()), WINDOW), 'APP_NOT_FOUND');
 });
-it.each(['org-admin', 'app-owner', 'personal-owner'] as const)('only a managing person toggles on and back off: %s', async kind => {
+it.each(['org-admin', 'app-owner', 'personal-owner'] as const)('a managing person gives and revokes: %s', async kind => {
   const c = ctx(kind === 'org-admin' ? manager : kind === 'app-owner' ? owner : personalOwner);
   const id = kind === 'personal-owner' ? personalAppId : appId;
-  for (const enabled of [true, false]) {
-    const out = await setting(enabled, c, id);
-    expect(out.errors).toBeUndefined();
-    expect(out.data.setAppRunTeamSnapshotEnabled).toEqual({ id, runTeamSnapshotEnabled: enabled });
-  }
+  for (const enabled of [true, false]) expect((await setting(enabled, c, id)).errors).toBeUndefined();
+  expect(await db.appAutomationTeamSnapshotGrantEvent.count({ where: { appId: id } })).toBe(2);
 });
-it.each(['member', 'own-key', 'run', 'worker', 'impersonation'] as const)('%s cannot change the setting even when the human/App would manage', async kind => {
+it.each(['member', 'own-key', 'run', 'worker', 'impersonation'] as const)('%s cannot give even when the human/App would manage', async kind => {
   let c = kind === 'member' ? ctx(member) : ctx(manager);
   if (kind === 'own-key') c = ctx(undefined, { appId, appKeyId: keyId });
   if (kind === 'run') c = runContext(db, await mintRun(manager));
   if (kind === 'impersonation') c = ctx(manager, { impersonation: { orgId } as never });
-  const out = kind === 'worker'
-    ? await runAsActor({ workerId, agentId }, () => setting(true, c)) : await setting(true, c);
-  expect(out.data).toBeNull();
-  expect(out.errors?.[0].extensions.code).toBe('FORBIDDEN');
-  const row = await db.app.findUniqueOrThrow({ where: { id: appId } });
-  expect(row.runTeamSnapshotEnabled).toBe(false);
+  const out = kind === 'worker' ? await runAsActor({ workerId, agentId }, () => setting(true, c)) : await setting(true, c);
+  expect(out.data).toBeNull(); expect(out.errors?.[0].extensions.code).toBe('FORBIDDEN');
+  expect(await db.appAutomationTeamSnapshotGrant.count()).toBe(0);
+  expect(await db.appAutomationTeamSnapshotGrantEvent.count()).toBe(0);
 });
 it('preserves the legacy default-off own-App worker list', async () => {
   const page = await Q.workers({}, { appRef: appId }, runContext(db, await mintRun()));
@@ -199,7 +201,7 @@ it('pages tasks without dropping equal timestamps and carries the bounded window
   expect(new Set(ids).size).toBe(106);
   expect(first.acquiredAt).toMatch(/Z$/);
   await denied(tool.execute(c, { ...WINDOW, since: '2026-10-19T00:00:00Z', cursor: first.cursor }), 'TEAM_SNAPSHOT_INVALID_ARGUMENT');
-  await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } });
+  expect((await setting(false)).errors).toBeUndefined();
   await denied(tool.execute(c, { ...WINDOW, cursor: first.cursor }), 'APP_NOT_FOUND');
 });
 it('includes live work plus ended work in the half-open window, not unrelated Apps or AT0', async () => {
@@ -233,7 +235,7 @@ it('the existing teamRoster read shares the run arm, while host and event capabi
   await denied(Q.agentTeamEvents({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
 });
 
-it.each(['off', 'app-deleted', 'org-deleted', 'run-ended'] as const)('rechecks %s after waiting for the authority anchor', async kind => {
+it.each(['off', 'app-deleted', 'org-deleted', 'run-ended', 'trigger-deleted'] as const)('rechecks %s after waiting for the authority anchor', async kind => {
   await enable();
   const c = toolCtx(await mintRun());
   const tool = snapshotTool();
@@ -242,9 +244,10 @@ it.each(['off', 'app-deleted', 'org-deleted', 'run-ended'] as const)('rechecks %
   const release = new Promise<void>(r => { unlock = r; });
   const holder = db.$transaction(async tx => {
     await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'org', id: orgId }], 'exclusive');
-    if (kind === 'off') await tx.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } });
+    if (kind === 'off') await tx.appAutomationTeamSnapshotGrant.updateMany({ where: { appId, revokedAt: null }, data: { revokedAt: new Date(), revokedBy: manager } });
     if (kind === 'app-deleted') await tx.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
     if (kind === 'org-deleted') await tx.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    if (kind === 'trigger-deleted') await tx.agentSchedule.update({ where: { id: c.run.triggerId! }, data: { deletedAt: new Date() } });
     if (kind === 'run-ended') await tx.appRun.update({ where: { id: c.run.id }, data: { status: 'COMPLETED' } });
     ready(); await release;
   }, { timeout: 20_000 });
@@ -268,7 +271,7 @@ it('rechecks a manager demotion after waiting for the setting write lock', async
   try { await waitForLockWaitersOfType(db, 'advisory', 1); }
   finally { unlock(); await holder; }
   expect((await write).errors?.[0].extensions.code).toBe('FORBIDDEN');
-  expect((await db.app.findUniqueOrThrow({ where: { id: appId } })).runTeamSnapshotEnabled).toBe(false);
+  expect(await db.appAutomationTeamSnapshotGrant.count()).toBe(0);
 });
 
 it('a source failure is typed and never returns a partial snapshot or echoes database diagnostics', async () => {
@@ -286,12 +289,10 @@ it('a source failure is typed and never returns a partial snapshot or echoes dat
     expect(err.cause).toBe(original);
   } finally { spy.mockRestore(); privateLog.mockRestore(); }
 });
-it('an oversized roster is explicitly non-continuable, never an empty complete roster', async () => {
+it('an oversized roster refuses before any partial output', async () => {
   await enable();
   await db.worker.createMany({ data: Array.from({ length: 1000 }, (_, n) => ({ ...WORKER_SIGNATURE_DEFAULTS, appId, agentId, name: `Member ${n}`, slug: `member-${n}` })) });
-  const out = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW) as any;
-  expect(out).toMatchObject({ complete: false, incompleteReason: 'nested_truncated', hasMore: false, cursor: null, roster: [] });
-  expect(out.tasks.map((t: any) => t.id)).toContain(taskId);
+  await denied(snapshotTool().execute(toolCtx(await mintRun()), WINDOW), 'TEAM_SNAPSHOT_SOURCE_FAILED');
 });
 
 // Xanthos #70403: the new arm is userless; #2925 does not globally change existing user-backed runs.
@@ -361,12 +362,6 @@ it('the new tool uses live own-App opt-in even for a run backed by a nonparticip
   await enable();
   expect((await snapshotTool().execute(c, WINDOW) as { app: { id: string } }).app.id).toBe(appId);
 });
-it.each(['key', 'run', 'outsider', 'personal-outsider'] as const)('masks the nullable App flag for an unauthorized nested reader: %s', async kind => {
-  const c = kind === 'key' ? ctx(undefined, { appId, appKeyId: keyId }) : kind === 'run' ? runContext(db, await mintRun()) : ctx(outsider);
-  const id = kind === 'personal-outsider' ? personalAppId : appId;
-  expect(await (resolvers.App as any).runTeamSnapshotEnabled({ id }, {}, c)).toBeNull();
-});
-
 it('preserves legacy own-App worker list, by-ref, held-worker and chat metadata reads independently of opt-in', async () => {
   const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `${app.urn}-shared`, name: 'shared', class: 'app', appId, sharedMemoryOfAgentId: agentId } });
@@ -375,7 +370,7 @@ it('preserves legacy own-App worker list, by-ref, held-worker and chat metadata 
   await db.worker.update({ where: { id: workerId }, data: { heldByUserId: manager, heldAt: new Date() } });
   const principal = runContext(db, await mintRun());
   for (const enabled of [false, true, false]) {
-    await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: enabled } });
+    if (enabled) await enable(); else if (await db.appAutomationTeamSnapshotGrant.count({ where: { appId, revokedAt: null } })) expect((await setting(false)).errors).toBeUndefined();
     expect(await Q.worker({}, { ref: workerId }, principal)).toMatchObject({ id: workerId });
     const page = await Q.workers({}, { appRef: appId }, principal);
     expect(page.items.map((worker: { id: string }) => worker.id)).toContain(workerId);

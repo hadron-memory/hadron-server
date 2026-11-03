@@ -3349,8 +3349,6 @@ model App {
   /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
   /// Its own column, not `updatedAt`, which every other App write moves.
   propertiesRevision                Int                  @default(0) @map("properties_revision")
-  /// Ruling0112: only a managing person may opt this App’s runs into read-only roster/task access.
-  runTeamSnapshotEnabled            Boolean              @default(false) @map("run_team_snapshot_enabled")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
   /// avoid spurious portal churn.
@@ -3443,6 +3441,8 @@ model App {
   /// #2883 — this App's automation read grants and their append-only history.
   automationReadGrants    AppAutomationReadGrant[]
   automationReadGrantEvents AppAutomationReadGrantEvent[]
+  automationTeamSnapshotGrants AppAutomationTeamSnapshotGrant[]
+  automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
   /// #1706 — model-family availability (cor:agt:060:03) and the stall schedule.
   modelFamilyAvailability ModelFamilyAvailability[]
   agentTaskStallSchedule  AgentTaskStallSchedule?
@@ -7287,4 +7287,38 @@ model RateLimitPolicyAudit {
   changeReference String   @map("change_reference")
   createdAt       DateTime @default(now()) @map("created_at")
   @@map("rate_limit_policy_audits")
+}
+
+/// #3350 / ruling 0112 amended: a read-only team snapshot grant on one automation, never an App-wide permission.
+/// Rows are immutable except for terminal revoke; live trigger identity is checked on every read.
+model AppAutomationTeamSnapshotGrant {
+  id          String    @id @default(cuid())
+  appId       String    @map("app_id")
+  triggerKind String    @map("trigger_kind")
+  triggerId   String    @map("trigger_id")
+  grantedBy   String    @map("granted_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+  app         App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt], map: "automation_team_snapshot_grants_app_created_idx")
+  @@map("app_automation_team_snapshot_grants")
+}
+
+/// #3350: one append-only content-free event per give/revoke, in the same transaction. Actor and grant ids survive erasure.
+model AppAutomationTeamSnapshotGrantEvent {
+  id          String   @id @default(cuid())
+  appId       String   @map("app_id")
+  triggerKind String   @map("trigger_kind")
+  triggerId   String   @map("trigger_id")
+  grantId     String   @map("grant_id")
+  action      String
+  actorUserId String   @map("actor_user_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  app         App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId, createdAt], map: "automation_team_snapshot_events_app_created_idx")
+  @@index([grantId], map: "automation_team_snapshot_events_grant_idx")
+  @@map("app_automation_team_snapshot_grant_events")
 }

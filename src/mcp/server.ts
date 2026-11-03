@@ -1,3 +1,4 @@
+import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
@@ -3737,6 +3738,7 @@ export function createMcpServerInstance(
   registerCommentTools(server, { db, auth });
   registerAssetTools(server, { db, auth });
   registerAutomationReadGrantTools(server, { db, auth });
+  registerAutomationTeamSnapshotGrantTools(server, { db, auth });
 
   // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
   registerSigningTools(server, { db, auth });
