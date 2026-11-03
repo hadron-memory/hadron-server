@@ -107,8 +107,9 @@ it.each(['member', 'own-key', 'run', 'worker', 'impersonation'] as const)('%s ca
   const row = await db.app.findUniqueOrThrow({ where: { id: appId } });
   expect(row.runTeamSnapshotEnabled).toBe(false);
 });
-it('a default-off run cannot bypass opt-in through the existing worker list', async () => {
-  await denied(Q.workers({}, { appRef: appId }, runContext(db, await mintRun())), 'FORBIDDEN');
+it('preserves the legacy default-off own-App worker list', async () => {
+  const page = await Q.workers({}, { appRef: appId }, runContext(db, await mintRun()));
+  expect(page.items.map((worker: { id: string }) => worker.id)).toContain(workerId);
 });
 it('an enabled own-App run reads tasks without becoming an actor; other Apps remain concealed', async () => {
   await enable();
@@ -232,7 +233,7 @@ it('the existing teamRoster read shares the run arm, while host and event capabi
   await denied(Q.agentTeamEvents({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
 });
 
-it.each(['off', 'app-deleted', 'org-deleted'] as const)('rechecks %s after waiting for the authority anchor', async kind => {
+it.each(['off', 'app-deleted', 'org-deleted', 'run-ended'] as const)('rechecks %s after waiting for the authority anchor', async kind => {
   await enable();
   const c = toolCtx(await mintRun());
   const tool = snapshotTool();
@@ -244,6 +245,7 @@ it.each(['off', 'app-deleted', 'org-deleted'] as const)('rechecks %s after waiti
     if (kind === 'off') await tx.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: false } });
     if (kind === 'app-deleted') await tx.app.update({ where: { id: appId }, data: { deletedAt: new Date() } });
     if (kind === 'org-deleted') await tx.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
+    if (kind === 'run-ended') await tx.appRun.update({ where: { id: c.run.id }, data: { status: 'COMPLETED' } });
     ready(); await release;
   }, { timeout: 20_000 });
   await held;
@@ -298,6 +300,12 @@ it('preserves a user-backed run’s existing TaskActor, task write and S3b scope
   expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toMatchObject({ kind: 'user', userId: manager });
   expect(await mayReadAppTasks(principal, appId)).toBe(true); // default-off is not a new denial on its legacy person arm.
   expect((await Q.agentTasks({}, { appRef: appId }, principal)).map((task: { id: string }) => task.id)).toContain(taskId);
+  expect(await Q.agentTask({}, { id: taskId }, principal)).toMatchObject({ id: taskId });
+  const transact = vi.spyOn(db, '$transaction');
+  try {
+    await Q.teamRoster({}, { appRef: appId }, principal);
+    expect(transact).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ isolationLevel: 'RepeatableRead' }));
+  } finally { transact.mockRestore(); }
   const created = await M.createAgentTask({}, { input: { appRef: appId, title: 'Legacy user-backed write' } }, principal);
   await M.updateAgentTask({}, { taskId: created.id, input: { title: 'Legacy edit' } }, principal);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: created.id } })).title).toBe('Legacy edit');
@@ -359,7 +367,7 @@ it.each(['key', 'run', 'outsider', 'personal-outsider'] as const)('masks the nul
   expect(await (resolvers.App as any).runTeamSnapshotEnabled({ id }, {}, c)).toBeNull();
 });
 
-it('preserves legacy own-App worker, held-worker and chat metadata reads independently of opt-in', async () => {
+it('preserves legacy own-App worker list, by-ref, held-worker and chat metadata reads independently of opt-in', async () => {
   const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
   const memory = await db.memory.create({ data: { id: generateId(), organizationId: orgId, urn: `${app.urn}-shared`, name: 'shared', class: 'app', appId, sharedMemoryOfAgentId: agentId } });
   const channel = await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'Team', createdBy: manager });
@@ -369,6 +377,8 @@ it('preserves legacy own-App worker, held-worker and chat metadata reads indepen
   for (const enabled of [false, true, false]) {
     await db.app.update({ where: { id: appId }, data: { runTeamSnapshotEnabled: enabled } });
     expect(await Q.worker({}, { ref: workerId }, principal)).toMatchObject({ id: workerId });
+    const page = await Q.workers({}, { appRef: appId }, principal);
+    expect(page.items.map((worker: { id: string }) => worker.id)).toContain(workerId);
     const held = await Q.heldWorkers({}, { userRef: manager }, principal);
     expect(held.items.map((worker: { id: string }) => worker.id)).toContain(workerId);
     const chat = await Q.teamChatMessages({}, { appRef: appId, untagged: true, advanceReadState: false }, principal);
