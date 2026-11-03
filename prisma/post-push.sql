@@ -445,6 +445,11 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
 
 CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
 
+-- #2832: direct-children read (NodeFilter.childrenOf). Mirrors prisma/migrations/20261030100000_nodes_parent_loc_index
+-- (keep in lockstep). The expression is PARENT_LOC_SQL in src/lib/childLoc.ts; a filter must compare it unchanged.
+CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
+  ON nodes (memory_id, (regexp_replace(loc, '(^|:)[^:]*$', '')));
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
