@@ -225,4 +225,13 @@ describe('#3361 instructed automation grants',()=>{
     await expect(revokes[name]!(live,c)).rejects.toThrow('injected event fault');expect(await snapshot()).toEqual(before);
   });
 
+  it('a direct person retains filtered list but anchored revoke refuses an uninstalled App',async()=>{
+    await db.app.update({where:{id:f.app.id},data:{uninstalledAt:new Date()}});
+    expect((await lists.readList!(null,ctx())).map((r:any)=>r.id)).toEqual([f.readGrant.id]);
+    const before=await snapshot();
+    expect((await answer(revokes.read!(null,ctx()))).code).toBe('FORBIDDEN');
+    expect(await snapshot()).toEqual(before);
+    expect(await instructionEvents()).toHaveLength(0);
+  });
+
 });
