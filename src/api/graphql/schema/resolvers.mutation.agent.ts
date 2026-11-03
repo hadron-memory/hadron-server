@@ -74,6 +74,7 @@ import {
   resolveUserRefArg,
   resolveReadableAgentRefArg,
   getAccessibleMemoryIds,
+  requireMemoryWriteAccess,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
@@ -147,11 +148,12 @@ export interface CreateAgentCoreInput {
 const PROMOTION_TARGET_SELECT = {
   id: true, organizationId: true, ownerUserId: true, deletedAt: true,
   appId: true, installOfAgentId: true, isInstallMemory: true,
-  userMemoryOfAgentId: true, sharedMemoryOfAgentId: true, userId: true,
+  userMemoryOfAgentId: true, sharedMemoryOfAgentId: true, userId: true, class: true,
 } as const;
 
 type PromotionTarget = {
   id: string;
+  class: string;
   deletedAt: Date | null;
   appId: string | null;
   installOfAgentId: string | null;
@@ -169,8 +171,18 @@ type PromotionTarget = {
  * 1. the caller must read it. Missing, deleted and unreadable answer one
  *    `MEMORY_NOT_FOUND`, byte for byte (cor:api:140:03), and come FIRST, so
  *    nothing below tells a non-reader the id exists;
- * 2. it is not an App's install memory ({@link assertNotInstallMemory});
- * 3. it is not a memory an Agent holds for a person or an App
+ *    A platform ADMIN reads every non-identity-scoped memory
+ *    (`getAccessibleMemoryIds` answers `null`) and is admitted here by design;
+ * 2. the caller must WRITE it (the shared `requireMemoryWriteAccess`):
+ *    promotion rewrites the memory's class, name and audience, so a reader
+ *    must not do it (private#24 §10 P2-1: a group reader who is an org ADMIN
+ *    became a writer and opened the group to the org). A reader who cannot
+ *    write gets that gate's own refusal, which says nothing they can't see;
+ * 3. it is not a `group` memory, even for its owner or a writer: its audience
+ *    is its MemoryMember rows (cor:acl:010:01), which a system memory drops,
+ *    so the promotion would lock the owner out and widen the audience;
+ * 4. it is not an App's install memory ({@link assertNotInstallMemory});
+ * 5. it is not a memory an Agent holds for a person or an App
  *    ({@link assertNotAgentHolding}), even when its owner asks.
  *
  * Owner congruence and the already-claimed check stay at the call sites.
@@ -180,6 +192,12 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
   if (readable !== null && !readable.includes(target.id)) throw notFound();
+  await requireMemoryWriteAccess(ctx, target.id);
+  if (target.class === 'group') {
+    throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
 }
