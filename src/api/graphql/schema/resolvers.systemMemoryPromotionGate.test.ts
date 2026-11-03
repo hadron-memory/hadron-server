@@ -18,6 +18,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -244,5 +245,72 @@ describe('updateAgent(systemMemoryId) first attach', () => {
     });
     const updated = await M.updateAgent({}, { ref: c.id, systemMemoryId: plain.id }, userCtx(admin.id));
     expect(updated.systemMemoryId).toBe(plain.id);
+  });
+});
+
+describe('createAgent(systemMemoryId) is serialized with a revocation of the read', () => {
+  it('a member removal started while the promotion is deciding waits on its anchors and cannot commit mid-decision', async () => {
+    // A group memory the promoting admin reads only through a MemoryMember row.
+    const target = await db.memory.create({
+      data: { id: generateId(), name: 'race-group', urn: `race-group-${generateId()}`, organizationId: org.id, class: 'group', visibility: 'GROUP' },
+    });
+    await db.memoryMember.createMany({ data: [
+      { memoryId: target.id, userId: ownerAdmin.id, role: 'owner' },
+      { memoryId: target.id, userId: admin.id, role: 'reader' },
+    ] });
+    const { getAccessibleMemoryIds } = await import('./resolvers.helpers.js');
+    expect(await getAccessibleMemoryIds(userCtx(admin.id), target.id)).toEqual([target.id]);
+
+    const memberRow = () => db.memoryMember.findUnique({ where: { memoryId_userId: { memoryId: target.id, userId: admin.id } } });
+    let removal: Promise<unknown> | null = null;
+    let removalSettled = false;
+    let blockedOnAnchor = false;
+    let rowDuringPause: unknown = 'unread';
+    // Pause the promotion's write (after its readability decision, inside its
+    // transaction) and start the real revocation door from another connection.
+    const paused = new Proxy(db, {
+      get(base, key) {
+        if (key === '$transaction') {
+          return (fn: any, ...rest: any[]) => db.$transaction(async (tx: any) => {
+            const memory = new Proxy(tx.memory, {
+              get(d: any, k) {
+                if (k === 'update') {
+                  return async (a: any) => {
+                    if (a.where?.id === target.id && a.data?.class === 'system' && !removal) {
+                      removal = M.removeMemoryMember({}, { memoryId: target.id, userId: admin.id }, userCtx(ownerAdmin.id))
+                        .finally(() => { removalSettled = true; });
+                      try {
+                        await waitForLockWaitersOfType(db, 'advisory', 1, 2_000);
+                        blockedOnAnchor = true;
+                      } catch { /* not blocked: the mutant case */ }
+                      rowDuringPause = await memberRow();
+                    }
+                    return d.update(a);
+                  };
+                }
+                const v = d[k];
+                return typeof v === 'function' ? v.bind(d) : v;
+              },
+            });
+            const wrapped = new Proxy(tx, { get(t: any, k) { if (k === 'memory') return memory; const v = t[k]; return typeof v === 'function' ? v.bind(t) : v; } });
+            return fn(wrapped);
+          }, ...rest);
+        }
+        const v = (base as any)[key];
+        return typeof v === 'function' ? v.bind(base) : v;
+      },
+    });
+
+    const b = await M.createAgent({}, { orgId: org.id, name: 'Race B', systemMemoryId: target.id }, { ...userCtx(admin.id), db: paused as typeof db } as Context);
+    expect(removal).not.toBeNull();
+    expect(blockedOnAnchor).toBe(true); // the revocation waited on the promotion's anchors
+    expect(rowDuringPause).not.toBeNull(); // and had not committed while the promotion decided
+    // Serialized: the promotion decided while the read was live and committed
+    // first; the removal then runs against a system memory, which has no
+    // members to manage, and refuses. It never landed inside the decision.
+    expect(b.systemMemoryId).toBe(target.id);
+    const removalOutcome = await (removal as unknown as Promise<unknown>).then(() => 'committed', (e: Error) => e.message);
+    expect(removalSettled).toBe(true);
+    expect(removalOutcome).toMatch(/not authorized to manage members/);
   });
 });
