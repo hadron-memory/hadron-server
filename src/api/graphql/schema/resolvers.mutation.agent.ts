@@ -18,6 +18,7 @@ class AgentLinkSetChangedError extends Error {
 import {
   assertSystemMemoryOwner,
   assertNotInstallMemory,
+  assertNotAgentHolding,
   repairAgentSystemMemoryOwner,
 } from '../../../lib/agentSystemMemory.js';
 import {
@@ -72,6 +73,7 @@ import {
   rethrowAiConfigTyped,
   resolveUserRefArg,
   resolveReadableAgentRefArg,
+  getAccessibleMemoryIds,
   AGENT_INCLUDE,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
@@ -141,6 +143,47 @@ export interface CreateAgentCoreInput {
  * (blank-after-trim ⇒ NULL); the named
  * identity lives on the Worker entity, never here.
  */
+/** The columns {@link assertPromotableSystemMemory} decides on. */
+const PROMOTION_TARGET_SELECT = {
+  id: true, organizationId: true, ownerUserId: true, deletedAt: true,
+  appId: true, installOfAgentId: true, isInstallMemory: true,
+  userMemoryOfAgentId: true, sharedMemoryOfAgentId: true,
+} as const;
+
+type PromotionTarget = {
+  id: string;
+  deletedAt: Date | null;
+  appId: string | null;
+  installOfAgentId: string | null;
+  isInstallMemory: boolean;
+  userMemoryOfAgentId: string | null;
+  sharedMemoryOfAgentId: string | null;
+};
+
+/**
+ * The TARGET half of every promotion door (createAgent's `systemMemoryId`,
+ * updateAgent's first attach and its locked re-check), shared so they cannot
+ * drift. The org role the caller holds says nothing about this one memory:
+ * promotion turns it into a definition the caller then reads, so
+ *
+ * 1. the caller must read it. Missing, deleted and unreadable answer one
+ *    `MEMORY_NOT_FOUND`, byte for byte (cor:api:140:03), and come FIRST, so
+ *    nothing below tells a non-reader the id exists;
+ * 2. it is not an App's install memory ({@link assertNotInstallMemory});
+ * 3. it is not a memory an Agent holds for a person or an App
+ *    ({@link assertNotAgentHolding}), even when its owner asks.
+ *
+ * Owner congruence and the already-claimed check stay at the call sites.
+ */
+async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarget | null): Promise<void> {
+  const notFound = () => new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
+  if (!target || target.deletedAt) throw notFound();
+  const readable = await getAccessibleMemoryIds(ctx, target.id);
+  if (readable !== null && !readable.includes(target.id)) throw notFound();
+  assertNotInstallMemory(target);
+  assertNotAgentHolding(target);
+}
+
 export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput) {
   const {
     organizationId: resolvedOrgId,
@@ -215,8 +258,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   const createdAgent = await ctx.db.$transaction(async (tx) => {
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
-      const target = await tx.memory.findUniqueOrThrow({ where: { id: systemMemoryId } });
-      assertNotInstallMemory(target);
+      const found = await tx.memory.findUnique({ where: { id: systemMemoryId }, select: PROMOTION_TARGET_SELECT });
+      await assertPromotableSystemMemory(ctx, found);
+      const target = found!;
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
       // so this path and updateAgent's first-attach can't drift.
@@ -581,16 +625,14 @@ export const agentMutations = {
           // this memory converted to class='system' with its visibility cleared
           // and uploads disabled, attached to nothing. Deferring the write is
           // what makes the refusal and the promotion succeed or fail together.
-          const target = await ctx.db.memory.findUniqueOrThrow({ where: { id: incoming } });
-          if (target.deletedAt) {
-            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
-          }
+          const found = await ctx.db.memory.findUnique({ where: { id: incoming } });
+          await assertPromotableSystemMemory(ctx, found);
+          const target = found!;
           // #949: was a bare `target.organizationId !== agent.organizationId`,
           // which for a USER-owned agent compares `null !== null` ⇒ false and
           // waves through ANOTHER user's memory
           // (findings:org-xor-owner-null-comparison-bypass). The shared
           // assertion branches on the ownership class first.
-          assertNotInstallMemory(target);
           assertSystemMemoryOwner(agent, {
             organizationId: target.organizationId,
             ownerUserId: target.ownerUserId,
@@ -795,14 +837,12 @@ export const agentMutations = {
               { extensions: { code: 'BAD_USER_INPUT' } },
             );
           }
-          const lockedTarget = await tx.memory.findUniqueOrThrow({
+          const lockedFound = await tx.memory.findUnique({
             where: { id: promoteSystemMemoryId },
-            select: { organizationId: true, ownerUserId: true, id: true, deletedAt: true, appId: true, installOfAgentId: true, isInstallMemory: true },
+            select: PROMOTION_TARGET_SELECT,
           });
-          assertNotInstallMemory(lockedTarget);
-          if (lockedTarget.deletedAt) {
-            throw new GraphQLError('Memory not found', { extensions: { code: 'MEMORY_NOT_FOUND' } });
-          }
+          await assertPromotableSystemMemory(ctx, lockedFound);
+          const lockedTarget = lockedFound!;
           assertSystemMemoryOwner(lockedAgent, {
             organizationId: lockedTarget.organizationId,
             ownerUserId: lockedTarget.ownerUserId,

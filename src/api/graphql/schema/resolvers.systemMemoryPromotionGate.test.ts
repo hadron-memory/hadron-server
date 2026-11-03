@@ -90,7 +90,7 @@ async function expectUnpromoted(memoryId: string) {
 }
 
 /**
- * A context whose FIRST plain `memory.findUniqueOrThrow` on `memoryId` (updateAgent's
+ * A context whose FIRST plain `memory.findUnique` on `memoryId` (updateAgent's
  * pre-lock read) answers the row with its holding links cleared, as if the
  * link landed after that read. The deciding transaction's re-read is real.
  */
@@ -98,9 +98,9 @@ function staleHoldingCtx(userId: string, memoryId: string): { ctx: Context; stal
   let stale = 0;
   const memoryDelegate = new Proxy(db.memory, {
     get(target, prop, receiver) {
-      if (prop === 'findUniqueOrThrow') {
+      if (prop === 'findUnique') {
         return async (args: any) => {
-          const row = await (target as any).findUniqueOrThrow(args);
+          const row = await (target as any).findUnique(args);
           if (stale === 0 && row?.id === memoryId && !args?.select) {
             stale++;
             return { ...row, userMemoryOfAgentId: null, sharedMemoryOfAgentId: null };
