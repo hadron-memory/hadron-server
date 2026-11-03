@@ -8384,7 +8384,9 @@ export const typeDefs = `#graphql
     an Agent run). agentRef must name an Agent the caller can read that is installed in this App
     or is a cast worker's Agent; any other ref (unknown, unreadable, outside the App, readable only
     through another tenant) is refused AGENT_NOT_FOUND identically, never resolved through another
-    Agent. A caller with no Agent and no agentRef is refused BAD_USER_INPUT.
+    Agent. The implicit Agent must also be installed or be a live cast worker's Agent in this App
+    (ruling 0120 A, hrn:node:hadronmemory.com:specs:cor:agt:110:03); otherwise AGENT_NOT_FOUND
+    carries its own Agent URN. A caller with no Agent and no agentRef is refused BAD_USER_INPUT.
 
     Read as the caller, all or nothing (ruling 0107 A): unless the caller can read every system
     memory on the Team Agent's chain and on the asking Agent's chain, through the base, the answer

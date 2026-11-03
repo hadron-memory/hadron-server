@@ -4,6 +4,8 @@
  * Real-Postgres pins. Every "empty" answer is compared byte-for-byte with the
  * same App when it has no Team Agent (ruling 0060's empty answer).
  */
+import { GraphQLError } from 'graphql';
+import { formatGraphQLError } from '../formatError.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -288,6 +290,64 @@ describe('#3287 the asking Agent (acceptance 5, ruling 0106)', () => {
     // a worker session naming an unknown Agent is refused too: never its own Agent instead
     expect(await shape(unknown, (p) => p)).toBe(base);
     expect(await refusal(asWorker(coder.id, () => index(ref(unknown))))).toBe(await refusal(index(ref(unknown))));
+  });
+});
+
+describe('#3359 implicit asking Agent membership (ruling 0120)', () => {
+  const wireRefusal = async (p: Promise<unknown>) => {
+    try { await p; } catch (e: any) {
+      const error = new GraphQLError(e.message, { originalError: e, path: ['actionRegisterIndex'] });
+      const formatted = formatGraphQLError(error.toJSON(), error);
+      return JSON.stringify({ message: formatted.message, extensions: formatted.extensions });
+    }
+    throw new Error('expected a refusal');
+  };
+  const implicit = () => index({ agentRef: undefined });
+  const asRun = (agentId: string, fn: () => Promise<any>) =>
+    requestActorStorage.run({ workerId: null, agentId }, fn);
+
+  it.each(['worker', 'run'])('refuses an outside implicit %s Agent byte-identically to its named URN', async (kind) => {
+    const outside = await agent('Outside Asking');
+    const wrap = kind === 'worker' ? asWorker : asRun;
+    const named = await wireRefusal(index({ agentRef: agentUrn(outside) }));
+    expect(JSON.parse(named)).toMatchObject({ message: expect.stringContaining(agentUrn(outside)), extensions: { code: 'AGENT_NOT_FOUND' } });
+    expect(await wireRefusal(wrap(outside.id, implicit))).toBe(named);
+  });
+
+  it.each(['worker', 'run'])('allows the implicit %s Agent when installed or cast-only', async (kind) => {
+    const wrap = kind === 'worker' ? asWorker : asRun;
+    for (const a of [engineer, coder]) {
+      expect(await wrap(a.id, implicit)).toEqual(await index({ agentRef: agentUrn(a) }));
+      expect((await wrap(a.id, implicit)).total).toBe(4);
+    }
+  });
+
+  it('refuses a retired-only implicit cast, but an installation still admits it', async () => {
+    await db.worker.update({ where: { id: coderWorker.id }, data: { retiredAt: new Date() } });
+    const outside = await agent('Outside Retired Control');
+    const named = (await wireRefusal(index({ agentRef: agentUrn(outside) }))).replaceAll(agentUrn(outside), agentUrn(coder));
+    expect(await wireRefusal(asRun(coder.id, implicit))).toBe(named);
+    await db.appAgent.create({ data: { appId: app.id, agentId: coder.id } });
+    expect((await asRun(coder.id, implicit)).total).toBe(4);
+  });
+
+  it('orders App admission before asking Agent, and asking Agent before Team/chain/memory reads', async () => {
+    const outside = await agent('Outside Before Team');
+    const reads: string[] = [];
+    const counted = db.$extends({ query: { $allModels: { async $allOperations({ model, operation, args, query }) {
+      reads.push(`${model}.${operation}`);
+      return query(args);
+    } } } });
+    const c = ctx(admin.id, counted);
+    const call = (appRef: string) => asRun(outside.id, () => index({ appRef, agentRef: undefined }, c));
+    const missingApp = JSON.parse(await wireRefusal(call(generateId())));
+    expect(missingApp.extensions.code).toBe('APP_NOT_FOUND');
+    expect(reads.some((r) => /^(Agent|Memory|Node)\./.test(r))).toBe(false);
+    reads.length = 0;
+    await db.node.updateMany({ where: { memoryId: team.memoryId, loc: 'roles' }, data: { deletedAt: new Date() } });
+    expect(JSON.parse(await wireRefusal(call(app.id))).extensions.code).toBe('AGENT_NOT_FOUND');
+    expect(reads.filter((r) => r.startsWith('Agent.'))).toHaveLength(1);
+    expect(reads.some((r) => /^(Memory|Node)\./.test(r))).toBe(false);
   });
 });
 
