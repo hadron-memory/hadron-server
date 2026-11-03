@@ -106,11 +106,13 @@ describe('sameOwner', () => {
 
 describe('#949 — createAgent cannot promote a foreign-owned memory', () => {
   it('refuses a memory owned by another org', async () => {
-    // Readable to the caller (a READER of org B), so the refusal is the owner
-    // check's, not the read gate's: an unreadable target answers MEMORY_NOT_FOUND
-    // before any owner comparison (resolvers.systemMemoryPromotionGate.test.ts).
+    // Readable and writable to the caller (a CONTRIBUTOR of org B), so the
+    // refusal is the owner check's, not the promotion target gate's: an
+    // unreadable target answers MEMORY_NOT_FOUND and an unwritable one the
+    // write gate's refusal, before any owner comparison
+    // (resolvers.systemMemoryPromotionGate.test.ts).
     await db.orgMember.create({
-      data: { id: generateId(), organizationId: orgB.id, userId: adminA.id, role: 'READER' },
+      data: { id: generateId(), organizationId: orgB.id, userId: adminA.id, role: 'CONTRIBUTOR' },
     });
     const foreign = await db.memory.create({
       data: {

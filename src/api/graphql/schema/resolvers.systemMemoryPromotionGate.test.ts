@@ -331,21 +331,46 @@ describe('the target must be writable, not a group memory, and the platform ADMI
     expect(await db.agent.findFirst({ where: { systemMemoryId: id } })).toBeNull();
   }
 
-  it('create: a group READER who is an org ADMIN is refused by the write gate', async () => {
+  it('create: a group READER who is an org ADMIN (the §10 probe) is refused, and nothing changes', async () => {
     const g = await groupMemory();
     const err = await refusal(M.createAgent({}, { orgId: org.id, name: 'B', systemMemoryId: g.id }, userCtx(admin.id)));
-    expect(err).toBeInstanceOf(GraphQLError);
-    expect(err.extensions?.code).not.toBe('MEMORY_NOT_FOUND');
-    expect(err.message).toMatch(READ_ONLY);
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.message).toBe(GROUP);
     await expectGroupUntouched(g.id);
   });
 
-  it('update pre-lock: the same reader is refused', async () => {
+  it('update pre-lock: the same group reader is refused', async () => {
     const g = await groupMemory();
     const c = await brainlessAgent('C');
     const err = await refusal(M.updateAgent({}, { ref: c.id, systemMemoryId: g.id }, userCtx(admin.id)));
-    expect(err.message).toMatch(READ_ONLY);
+    expect(err.message).toBe(GROUP);
     await expectGroupUntouched(g.id);
+  });
+
+  async function readOnlyTarget() {
+    // An org-B knowledge memory the org-A admin reads (a READER of org B) but cannot write.
+    const orgB = await db.organization.create({ data: { id: generateId(), name: 'promote-b', urn: `promote-b-${generateId()}.com` } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: orgB.id, userId: admin.id, role: 'READER' } });
+    return db.memory.create({
+      data: { id: generateId(), name: 'read-only', urn: `ro-${generateId()}`, organizationId: orgB.id, class: 'knowledge' },
+    });
+  }
+
+  it('create: a readable but unwritable target is refused by the write gate, not as not-found', async () => {
+    const t = await readOnlyTarget();
+    const err = await refusal(M.createAgent({}, { orgId: org.id, name: 'B', systemMemoryId: t.id }, userCtx(admin.id)));
+    expect(err).toBeInstanceOf(GraphQLError);
+    expect(err.extensions?.code).toBe('FORBIDDEN');
+    expect(err.message).toMatch(READ_ONLY);
+    await expectUnpromoted(t.id);
+  });
+
+  it('update pre-lock: the same readable but unwritable target is refused by the write gate', async () => {
+    const t = await readOnlyTarget();
+    const c = await brainlessAgent('C');
+    const err = await refusal(M.updateAgent({}, { ref: c.id, systemMemoryId: t.id }, userCtx(admin.id)));
+    expect(err.extensions?.code).toBe('FORBIDDEN');
+    await expectUnpromoted(t.id);
   });
 
   it('the group OWNER is refused too: a group memory is never promoted', async () => {

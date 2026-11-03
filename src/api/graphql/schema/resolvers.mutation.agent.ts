@@ -174,7 +174,7 @@ type PromotionTarget = {
  *    A platform ADMIN gets an explicit accessible set (live, non-identity-
  *    scoped rows) and is admitted for those by design; only the operator
  *    conversion principal answers `null`, and it never reaches these doors;
- * 2. the caller must WRITE it (the shared `requireMemoryWriteAccess`):
+ * 2. (checked last, after 3-5) the caller must WRITE it (the shared `requireMemoryWriteAccess`):
  *    promotion rewrites the memory's class, name and audience, so a reader
  *    must not do it (private#24 §10 P2-1: a group reader who is an org ADMIN
  *    became a writer and opened the group to the org). A reader who cannot
@@ -193,7 +193,8 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   if (!target || target.deletedAt) throw notFound();
   const readable = await getAccessibleMemoryIds(ctx, target.id);
   if (readable !== null && !readable.includes(target.id)) throw notFound();
-  await requireMemoryWriteAccess(ctx, target.id);
+  // The refusals below reach only a reader, so their order discloses nothing;
+  // the specific ones come before the write gate so a reader learns why.
   if (target.class === 'group') {
     throw new GraphQLError("A group memory cannot become an Agent's system memory: its members would lose it.", {
       extensions: { code: 'BAD_USER_INPUT' },
@@ -201,6 +202,7 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   }
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
+  await requireMemoryWriteAccess(ctx, target.id);
 }
 
 /** The owner columns a promotion target's authority anchors derive from. */
