@@ -1,5 +1,6 @@
 /** #2662 / cor:agt:050:30 (ruling0013A): immutable result data, never a matcher or authority input. */
 import { GraphQLError } from 'graphql';
+import { hasUnstorableJsonText } from './references.js';
 export const FINDING_SEVERITIES = ['P1', 'P2', 'P3', 'note'] as const;
 export type FindingSeverity = typeof FINDING_SEVERITIES[number];
 export type TaskFinding = { id: string; severity: FindingSeverity; text: string };
@@ -18,7 +19,7 @@ export function finishFindings(input: unknown): TaskFinding[] | undefined {
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,32}$/.test(id) || ids.has(id)) throw invalid();
     if (!(FINDING_SEVERITIES as readonly unknown[]).includes(f.severity) || typeof f.text !== 'string') throw invalid();
     // PostgreSQL JSON text cannot represent NUL or an unpaired UTF-16 surrogate. Refuse before the write.
-    if (/\u0000|\p{Cs}/u.test(f.text)) throw invalid();
+    if (hasUnstorableJsonText(f.text)) throw invalid();
     // The UTF-16 bound limits counting work; a Unicode code point occupies at most two code units.
     if (f.text.length > 4000 || Array.from(f.text).length > 2000) throw invalid();
     ids.add(id);

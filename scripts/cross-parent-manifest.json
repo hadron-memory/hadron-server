@@ -226,6 +226,8 @@
     "AgentTaskRequirements": "value",
     "AgentTaskResult": "envelope",
     "AgentTaskFinding": "value",
+    "AgentTaskFindingDisposition": "value",
+    "AgentTaskFindingDispositionPage": "envelope",
     "AgentTaskFindingPage": "envelope",
     "AgentTaskHandBack": "value",
     "DueTaskReason": "value",

@@ -8177,6 +8177,8 @@ export const typeDefs = `#graphql
       externalId: String
       "#2649: tasks carrying a reference with exactly this target, and this kind when given; the label is ignored. Runs inside the App read gate."
       reference: AgentTaskReferenceFilter
+      "#2663: true narrows to finished tasks with at least one undisposed finding; false/omitted do not narrow. Existing App read scope, before paging (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+      unresolvedFindings: Boolean
       "Case-insensitive substring of the title or description, 1 to 200 characters after trimming (else BAD_USER_INPUT). Percent, underscore and backslash match literally. ANDed with every other filter."
       text: String
       "True: start-by passed on the database clock, not started, not ended, not backlog. False: all other tasks. Not an alarm."
@@ -10499,7 +10501,7 @@ export const typeDefs = `#graphql
     the moment it SENT this request (CLOCK_BOOTTIME). Refused NO_RECOVERY_REF, CLAIM_LAPSED, PROCESS_CHANGED or NOT_IDLE.
     """
     authorizeContextResetStop(input: AuthorizeContextResetStopInput!): ContextResetStep!
-    "#2162 — the old agent stopped; its resetting mark now lasts until the relaunched agent's first activity."
+    "#2162 / #3255 (hrn:node:hadronmemory.com:specs:cor:agt:050:27): the old agent stopped; its resetting mark now lasts until the relaunched agent's first activity. Optional lateStopMs records the host's late signal once. For an ended reset, a positive annotation from the collected host holding its stop-grant epoch records telemetry only and changes no reset, task, outcome, availability or alarm state."
     reportContextResetAgentStopped(input: ContextResetStepInput!): ContextResetStep!
     "#2162 — the agent was relaunched under its wrapper."
     reportContextResetRelaunched(input: ReportContextResetRelaunchedInput!): ContextResetStep!
@@ -10544,6 +10546,9 @@ export const typeDefs = `#graphql
     (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Carries no text. Refusals as startAgentTask.
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
+
+    "#2663: finished tasks only, their assigners only; never an App key or impersonation. Records a new disposition value, never clears it; omitted/null reference means no reference on the new value. Unknown finding TASK_FINDING_NOT_FOUND; open task TASK_NOT_FINISHED; non-assigner TASK_NOT_OWNER; unreadable task TASK_NOT_FOUND; result unchanged (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+    disposeAgentTaskFinding(taskRef: ID!, findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReferenceInput): AgentTask!
 
     """
     #1705 — finish a started task with its result: its assignee only
@@ -14149,6 +14154,12 @@ export const typeDefs = `#graphql
   enum AgentTaskFindingSeverity { P1 P2 P3 note }
   "#2662: immutable finding set at finish; text never enters the event stream."
   type AgentTaskFinding { id: String!, severity: AgentTaskFindingSeverity!, text: String! }
+  "#2663: every code resolves the finding, including deferred (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+  enum AgentTaskFindingDispositionCode { fixed accepted deferred rejected }
+  "#2663: latest disposition, separate from immutable findings. Every code, including deferred, resolves the finding."
+  type AgentTaskFindingDisposition { findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReference }
+  "#2663: current dispositions, ordered by finding order, capped pages."
+  type AgentTaskFindingDispositionPage { items: [AgentTaskFindingDisposition!]!, total: Int!, hasMore: Boolean! }
   "#2662: findings in supplied order, capped pages (hrn:node:hadronmemory.com:specs:cor:api:120:04)."
   type AgentTaskFindingPage { items: [AgentTaskFinding!]!, total: Int!, hasMore: Boolean! }
   "#2662: give every id, or none for platform F1/F2/... ids in list order. Ids unique, 1–32 letters/digits/_/-. Text at most 2,000 Unicode code points; no trimming."
@@ -14935,6 +14946,8 @@ export const typeDefs = `#graphql
     cancelledAt: DateTime
     "Set only on a finished task."
     result: AgentTaskResult
+    "#2663: dispositions beside the result, same readers; default20/max200/limit0 count-only (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+    findingDispositions(limit: Int, offset: Int): AgentTaskFindingDispositionPage!
     "#2651: the task's latest hand-back by its assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:29); null when it was never handed back. A later hand-back replaces it; every earlier code stays in the task.handed-back events."
     handBack: AgentTaskHandBack
     tags: [String!]!
@@ -15266,6 +15279,8 @@ export const typeDefs = `#graphql
     appRef: String!
     resetId: ID!
     epoch: Int!
+    "#3255 (hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 10): milliseconds the host's stop signal landed after its window, an integer from 0 to 86400000. Omitted, null or zero means no late-stop event. On the first stopped report, a positive value records one task.context-reset-late-stop event per reset for the worker's coordinator. Later reports record nothing, even if the first report had no annotation. After the reset ended, the same collected host may annotate its granted stop using that grant's epoch; this changes no reset, task, availability, outcome or alarm state. Other steps keep their epoch checks."
+    lateStopMs: Int
   }
 
   input ClaimContextResetInput {
