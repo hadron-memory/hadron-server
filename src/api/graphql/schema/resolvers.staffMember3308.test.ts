@@ -327,6 +327,18 @@ it('#3308 admission stability cast: ownership drift after the deciding membershi
 
 
 describe('#3308 leaveApp self-leave narrowing', () => {
+ it('own app.members grant admits worker cleanup without an instruction claim', async () => {
+  await give('remove');
+  await M.leaveApp({}, {appId:f.app.id}, bound());
+  expect(await db.appMember.findUnique({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}})).toBeNull();
+  expect(await instructionEvents()).toHaveLength(0);
+ });
+ it('instructed repeated cleanup records the no-op claim', async () => {
+  await db.appMember.delete({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}});
+  await M.leaveApp({}, {appId:f.app.id,instruction:live}, bound());
+  expect(await instructionEvents()).toHaveLength(1);
+ });
+
  it('grantless bound worker refuses and retains membership', async () => {
   const before = await snapshot();
   expect((await answer(M.leaveApp({}, {appId:f.app.id}, bound()))).code).toBe('FORBIDDEN');
@@ -342,4 +354,15 @@ describe('#3308 leaveApp self-leave narrowing', () => {
   expect(await db.appMember.findUnique({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}})).toBeNull();
   expect(await instructionEvents()).toHaveLength(0);
  });
+});
+
+
+describe('#3308 App reader with independent org staffing authority', () => {
+ for (const door of ['cast','preview','retire','delete']) {
+  for (const mode of ['person','worker'] as const) it(`${door}: ${mode} retains org CONTRIBUTOR right with App reader role`, async () => {
+   if (mode === 'worker') await give(door);
+   await db.appMember.update({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}},data:{role:'reader'}});
+   expect((await answer(calls[door](undefined,mode === 'person' ? ctx() : bound()))).code).toBe('RESOLVED');
+  });
+ }
 });

@@ -1370,16 +1370,24 @@ export const appMutations = {
     // currently-logged-in user leaves an App. Idempotent.
     leaveApp: async (
       _: unknown,
-      { appId }: { appId: string },
+      { appId, instruction }: { appId: string; instruction?: ActInstruction | null },
       ctx: Context,
-    ) => {
+    ): Promise<{ appId: string; userId: string }> => {
       if (!ctx.userId) {
         throw new GraphQLError('leaveApp requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
-      await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      const admission = await admitMemberAct(ctx, app, instruction, () => forbiddenError('Forbidden: self-leave requires an instruction or own app.members grant'));
+      if (admission.kind === 'person') {
+        // Keep the legacy person cleanup path, including dead-App/idempotent behavior.
+        await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
+      } else {
+        // Reuse the locked member gate and canonical removal/no-op records for a worker's self-leave.
+        await appMutations.removeAppMember(_, { appId: resolvedAppId, userId: ctx.userId, instruction }, ctx);
+      }
       return { appId: resolvedAppId, userId: ctx.userId };
     },
 

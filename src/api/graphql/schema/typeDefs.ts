@@ -13800,10 +13800,13 @@ export const typeDefs = `#graphql
     leaves an App. Idempotent (no-op when not a member). The user's
     personal-class Memory at (appId, userId) is NOT cascade-deleted
     per spec 008 FR-015 — it re-attaches if the user later re-joins.
+    Bound workers require an instruction or their own live app.members grant
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); successful instructed removals/no-ops record the claim.
+    Direct-person cleanup remains available for dead Apps.
 
     Accepts the entity's ID or URN.
     """
-    leaveApp(appId: ID!): LeaveAppPayload!
+    leaveApp(appId: ID!, instruction: ActInstructionInput): LeaveAppPayload!
 
     """
     023-app-shape US3 — asymmetric cross-user grant on a personal-class
