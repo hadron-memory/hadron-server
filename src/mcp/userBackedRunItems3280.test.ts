@@ -9,6 +9,7 @@ import { createTestableMcpServer } from './server.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -136,9 +137,50 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     expect(await canWriteToMemory(db, user, f.write.id)).toBe(true);
   });
   it('userless App key retains non-PUBLIC refusal and PUBLIC read-only', async () => {
-    const key = { appId: f.app.id, userId: null, roles: [], clientId: 'app-key' };
+    const key = { appId: f.app.id, roles: [], clientId: 'app-key' };
     expect(await canReadMemory(db, key, f.write.id)).toBe(false);
     expect(await canReadMemory(db, key, f.publicMemory.id)).toBe(true);
     expect(await canWriteToMemory(db, key, f.publicMemory.id)).toBe(false);
   });
+  it.each(['reader', 'writer'] as const)('group membership %s supplies user authority but never revives an inadmissible Agent item', async role => {
+    const m = await db.memory.create({ data: { name: 'group', urn: `${f.org.urn}:group`, class: 'group', visibility: 'GROUP', organizationId: f.org.id } });
+    await db.agentMemoryItem.create({ data: { agentId: f.agent.id, memoryId: m.id, role: 'read-write' } });
+    await db.memoryMember.create({ data: { memoryId: m.id, userId: f.user.id, role } });
+    expect(await getAccessibleMemoryIds(ctx(f.user.id), m.id, { excludeAppDerived: true })).toContain(m.id);
+    expect((await independentUserItemAccess(db, f.user.id)).get(m.id)).toBe(role === 'writer' ? 'READ_WRITE' : 'READ_ONLY');
+    // The Agent tenant itself cannot hold group reach: preserve that pre-existing cap.
+    expect((await getPrincipalAppMemoryAccess(db, backed.principal)).has(m.id)).toBe(false);
+    await db.memoryMember.delete({ where: { memoryId_userId: { memoryId: m.id, userId: f.user.id } } });
+    expect((await independentUserItemAccess(db, f.user.id)).has(m.id)).toBe(false);
+  });
+  it.each((['READER', 'CONTRIBUTOR'] as const).flatMap(role => (['READER', 'CONTRIBUTOR'] as const).map(userRole => ({ role, userRole }))))('subscription $role and user $userRole preserve their lower independent level and revocation', async ({ role, userRole }) => {
+    const subscriber = await db.organization.create({ data: { name: 'subscriber', urn: `sub-${generateId().toLowerCase()}.example` } });
+    await db.orgMember.create({ data: { userId: f.user.id, organizationId: subscriber.id, role: userRole } });
+    const sub = await db.memorySubscription.create({ data: { id: generateId(), memoryId: f.write.id, organizationId: subscriber.id, role } });
+    expect(await getAccessibleMemoryIds(ctx(f.user.id), f.write.id, { excludeAppDerived: true })).toContain(f.write.id);
+    expect((await getPrincipalAppMemoryAccess(db, backed.principal)).get(f.write.id)).toBe(role === 'CONTRIBUTOR' && userRole === 'CONTRIBUTOR' ? 'READ_WRITE' : 'READ_ONLY');
+    await db.memorySubscription.update({ where: { id: sub.id }, data: { deletedAt: new Date() } });
+    expect((await getPrincipalAppMemoryAccess(db, backed.principal)).has(f.write.id)).toBe(false);
+  });
+  it('automation node-read grant is unchanged for an independently admitted user', async () => {
+    await db.orgMember.create({ data: { userId: f.user.id, organizationId: f.org.id, role: 'READER' } });
+    await M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.granted.id, prefix: 'docs' }, ctx(f.admin.id));
+    const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, entryNodeUrn: f.run.entryNodeUrn } });
+    const tool = { ...backed, run, principal: { db, ...runAuthContext(run) } as Context };
+    expect(await hadronReadNode.execute(tool, { urn: urn(f.granted) })).toMatchObject({ content: 'secret granted' });
+  });
+  it('explicit App write grant is unchanged at an unlinked node destination', async () => {
+    // Userless grant authority is a separate path and must not be removed by the user ceiling.
+    await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.granted.id, prefix: 'docs', registerNodeUrn: 'hrn:node:example.com:register:authority' }, ctx(f.admin.id));
+    expect(await hadronCreateNode.execute(f.tool, { urn: urn(f.granted, 'docs:granted'), name: 'granted' })).toMatchObject({ created: true });
+  });
+
+  it('ownership ceiling equals the independent-user read oracle for non-personal memory', async () => {
+    const owned = await db.memory.create({ data: { name: 'owned', urn: `@${f.user.handle}:owned`, class: 'knowledge', ownerUserId: f.user.id } });
+    expect(await getAccessibleMemoryIds(ctx(f.user.id), owned.id, { excludeAppDerived: true })).toContain(owned.id);
+    expect((await independentUserItemAccess(db, f.user.id)).get(owned.id)).toBe('READ_WRITE');
+    await db.memory.update({ where: { id: owned.id }, data: { deletedAt: new Date() } });
+    expect((await independentUserItemAccess(db, f.user.id)).has(owned.id)).toBe(false);
+  });
+
 });
