@@ -248,20 +248,15 @@ describe('updateAgent(systemMemoryId) first attach', () => {
   });
 });
 
-describe('createAgent(systemMemoryId) is serialized with a revocation of the read', () => {
-  it('a member removal started while the promotion is deciding waits on its anchors and cannot commit mid-decision', async () => {
-    // A group memory the promoting admin reads only through a MemoryMember row.
+describe('createAgent(systemMemoryId) is serialized with a revocation of the caller\'s access', () => {
+  it('an org-member removal started while the promotion is deciding waits on its anchors and cannot commit mid-decision', async () => {
+    // An org knowledge memory the promoting admin reads and writes through
+    // their org membership; the revocation is removing them from the org.
     const target = await db.memory.create({
-      data: { id: generateId(), name: 'race-group', urn: `race-group-${generateId()}`, organizationId: org.id, class: 'group', visibility: 'GROUP' },
+      data: { id: generateId(), name: 'race-knowledge', urn: `race-k-${generateId()}`, organizationId: org.id, class: 'knowledge' },
     });
-    await db.memoryMember.createMany({ data: [
-      { memoryId: target.id, userId: ownerAdmin.id, role: 'owner' },
-      { memoryId: target.id, userId: admin.id, role: 'reader' },
-    ] });
-    const { getAccessibleMemoryIds } = await import('./resolvers.helpers.js');
-    expect(await getAccessibleMemoryIds(userCtx(admin.id), target.id)).toEqual([target.id]);
-
-    const memberRow = () => db.memoryMember.findUnique({ where: { memoryId_userId: { memoryId: target.id, userId: admin.id } } });
+    const memberRow = () => db.orgMember.findFirst({ where: { organizationId: org.id, userId: admin.id, deletedAt: null } });
+    expect(await memberRow()).not.toBeNull();
     let removal: Promise<unknown> | null = null;
     let removalSettled = false;
     let blockedOnAnchor = false;
@@ -277,7 +272,7 @@ describe('createAgent(systemMemoryId) is serialized with a revocation of the rea
                 if (k === 'update') {
                   return async (a: any) => {
                     if (a.where?.id === target.id && a.data?.class === 'system' && !removal) {
-                      removal = M.removeMemoryMember({}, { memoryId: target.id, userId: admin.id }, userCtx(ownerAdmin.id))
+                      removal = M.removeOrgMember({}, { orgId: org.id, userId: admin.id }, userCtx(ownerAdmin.id))
                         .finally(() => { removalSettled = true; });
                       try {
                         await waitForLockWaitersOfType(db, 'advisory', 1, 2_000);
@@ -305,12 +300,77 @@ describe('createAgent(systemMemoryId) is serialized with a revocation of the rea
     expect(removal).not.toBeNull();
     expect(blockedOnAnchor).toBe(true); // the revocation waited on the promotion's anchors
     expect(rowDuringPause).not.toBeNull(); // and had not committed while the promotion decided
-    // Serialized: the promotion decided while the read was live and committed
-    // first; the removal then runs against a system memory, which has no
-    // members to manage, and refuses. It never landed inside the decision.
+    // Serialized: the promotion decided while the membership was live and
+    // committed first; the removal then committed after it.
     expect(b.systemMemoryId).toBe(target.id);
     const removalOutcome = await (removal as unknown as Promise<unknown>).then(() => 'committed', (e: Error) => e.message);
     expect(removalSettled).toBe(true);
-    expect(removalOutcome).toMatch(/not authorized to manage members/);
+    expect(removalOutcome).toBe('committed');
+    expect(await memberRow()).toBeNull();
+  });
+});
+
+describe('the target must be writable, not a group memory, and the platform ADMIN path is explicit', () => {
+  const READ_ONLY = /not authorized|forbidden|write/i;
+  const GROUP = "A group memory cannot become an Agent's system memory: its members would lose it.";
+
+  async function groupMemory() {
+    const g = await db.memory.create({
+      data: { id: generateId(), name: 'grp', urn: `grp-${generateId()}`, organizationId: org.id, class: 'group', visibility: 'GROUP' },
+    });
+    await db.memoryMember.createMany({ data: [
+      { memoryId: g.id, userId: ownerAdmin.id, role: 'owner' },
+      { memoryId: g.id, userId: admin.id, role: 'reader' },
+    ] });
+    return g;
+  }
+
+  async function expectGroupUntouched(id: string) {
+    const m = await db.memory.findUniqueOrThrow({ where: { id } });
+    expect(m.class).toBe('group');
+    expect(await db.agent.findFirst({ where: { systemMemoryId: id } })).toBeNull();
+  }
+
+  it('create: a group READER who is an org ADMIN is refused by the write gate', async () => {
+    const g = await groupMemory();
+    const err = await refusal(M.createAgent({}, { orgId: org.id, name: 'B', systemMemoryId: g.id }, userCtx(admin.id)));
+    expect(err).toBeInstanceOf(GraphQLError);
+    expect(err.extensions?.code).not.toBe('MEMORY_NOT_FOUND');
+    expect(err.message).toMatch(READ_ONLY);
+    await expectGroupUntouched(g.id);
+  });
+
+  it('update pre-lock: the same reader is refused', async () => {
+    const g = await groupMemory();
+    const c = await brainlessAgent('C');
+    const err = await refusal(M.updateAgent({}, { ref: c.id, systemMemoryId: g.id }, userCtx(admin.id)));
+    expect(err.message).toMatch(READ_ONLY);
+    await expectGroupUntouched(g.id);
+  });
+
+  it('the group OWNER is refused too: a group memory is never promoted', async () => {
+    const g = await groupMemory();
+    const err = await refusal(M.createAgent({}, { orgId: org.id, name: 'B', systemMemoryId: g.id }, userCtx(ownerAdmin.id)));
+    expect(err.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(err.message).toBe(GROUP);
+    await expectGroupUntouched(g.id);
+  });
+
+  it('a platform ADMIN (accessible set = null) may promote a readable org memory, by design', async () => {
+    const pa = await db.user.create({ data: { id: generateId(), githubId: 930299, githubUsername: `promote-pa-${generateId()}`, roles: ['ADMIN'] } });
+    const plain = await db.memory.create({
+      data: { id: generateId(), name: 'plain', urn: `plain-${generateId()}`, organizationId: org.id, class: 'knowledge' },
+    });
+    const b = await M.createAgent({}, { orgId: org.id, name: 'B', systemMemoryId: plain.id }, { db, userId: pa.id, roles: ['ADMIN'] } as Context);
+    expect(b.systemMemoryId).toBe(plain.id);
+  });
+
+  it('a platform ADMIN still gets MEMORY_NOT_FOUND for a deleted target', async () => {
+    const pa = await db.user.create({ data: { id: generateId(), githubId: 930298, githubUsername: `promote-pa2-${generateId()}`, roles: ['ADMIN'] } });
+    const deleted = await db.memory.create({
+      data: { id: generateId(), name: 'gone', urn: `gone-${generateId()}`, organizationId: org.id, class: 'knowledge', deletedAt: new Date() },
+    });
+    const err = await refusal(M.createAgent({}, { orgId: org.id, name: 'B', systemMemoryId: deleted.id }, { db, userId: pa.id, roles: ['ADMIN'] } as Context));
+    expect(err.extensions?.code).toBe('MEMORY_NOT_FOUND');
   });
 });
