@@ -1,6 +1,6 @@
 /** #2925 / ruling0112: the run read is opt-in, own-App and never a task actor. */
 import { ApolloServer } from '@apollo/server';
-import { afterAll, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { buildSchema, type GraphQLObjectType } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -19,6 +19,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any;
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError, includeStacktraceInErrorResponses: false });
+beforeAll(() => server.start());
 afterAll(() => server.stop());
 let orgId: string, appId: string, otherAppId: string, personalAppId: string, workerId: string, agentId: string, taskId: string;
 let manager: string, owner: string, member: string, outsider: string, personalOwner: string, keyId: string;
@@ -260,7 +261,7 @@ it('a source failure is typed and never returns a partial snapshot or echoes dat
   const spy = vi.spyOn(roster, 'loadTeamRoster').mockRejectedValueOnce(new Error('private-source-sentinel'));
   try {
     const err = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW).then(() => null, e => e);
-    expect(err?.extensions.code).toBe('TEAM_SNAPSHOT_SOURCE_FAILED');
+    expect(err?.extensions?.code).toBe('TEAM_SNAPSHOT_SOURCE_FAILED');
     expect(err.message).not.toContain('private-source-sentinel');
   } finally { spy.mockRestore(); }
 });
