@@ -205,14 +205,24 @@ it('#3307 a refused mixed signature update records no instruction or partial cha
 
 it('#3307 holds the live manager membership while waiting for its worker row',async()=>{
  let held!:()=>void, release!:()=>void;
+ let blockerPid!:number;
+ let publishActPid!:(pid:number)=>void;
+ const actPidReady=new Promise<number>(resolve=>{publishActPid=resolve;});
  const ready=new Promise<void>(r=>{held=r;}), gate=new Promise<void>(r=>{release=r;});
- const side=db.$transaction(async tx=>{await tx.$queryRaw`SELECT id FROM workers WHERE id=${f.target.id} FOR UPDATE`;held();await gate;},{timeout:30000});
+ const side=db.$transaction(async tx=>{const [{pid}]=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`;blockerPid=pid;await tx.$queryRaw`SELECT id FROM workers WHERE id=${f.target.id} FOR UPDATE`;held();await gate;},{timeout:30000});
  await ready;
- const call=answer(calls.signature());
+ const client=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>{
+   const [{pid}]=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`;publishActPid(pid);return callback(tx);
+  },options);
+  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+ }});
+ const call=answer(calls.signature(live,bound({db:client})));
  let outcome:any;
  try {
+  const actPid=await Promise.race([actPidReady,call.then(()=>{throw new Error('worker act did not publish its backend PID');})]);
   for(let i=0;;i++) {
-   const [{n}]=await db.$queryRaw<Array<{n:number}>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'`;
+   const [{n}]=await db.$queryRaw<Array<{n:number}>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND pid=${actPid} AND wait_event_type='Lock' AND ${blockerPid}=ANY(pg_blocking_pids(pid))`;
    if(n>0)break;if(i>200)throw new Error('worker act never waited');await new Promise(r=>setTimeout(r,25));
   }
   let denied=false;
@@ -275,4 +285,105 @@ it('#3307 malformed live-chat references refuse before writing',async()=>{
  for(const ref of ['instruction prose', 'bad\u0000ref', 'bad\ud800ref'])expect((await answer(calls.signature({kind:'LIVE_CHAT',ref}))).code).toBe('FORBIDDEN');
  expect(await snapshot()).toEqual(before);
  await calls.signature({kind:'LIVE_CHAT',ref:'client:😀'});expect((await instructionEvents())[0].payload).toMatchObject({instruction:{kind:'LIVE_CHAT',ref:'client:😀'}});
+});
+
+describe('#3314 BLIND P2: person controls and instruction-claim limits', () => {
+  for (const [door, call] of Object.entries(calls)) {
+    it(`${door}: a worker may instruct an act on itself without duplicating locks or records`, async () => {
+      f.target = f.worker;
+      await runAsActor({ workerId: f.worker.id, agentId: f.agent.id }, () => call(live, bound()));
+      const events = await instructionEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actorWorkerId: f.worker.id, subjectWorkerId: f.worker.id });
+    });
+    for (const claim of [null, live]) {
+      it(`${door}: a normal person session succeeds without an instruction record (${claim ? 'valid claim' : 'no claim'})`, async () => {
+        const session = await db.session.create({ data: { id: generateId(), userId: f.holder.id } });
+        await call(claim, ctx({ sessionId: session.id }));
+        expect(await instructionEvents()).toHaveLength(0);
+      });
+    }
+
+    for (const state of ['missing', 'ended', 'foreign-user'] as const) {
+      it(`${door}: a person's ${state} session refuses before any act write`, async () => {
+        const sessionId = generateId();
+        if (state !== 'missing') {
+          await db.session.create({ data: {
+            id: sessionId,
+            userId: state === 'foreign-user' ? f.other.id : f.holder.id,
+            ...(state === 'ended' ? { endedAt: new Date() } : {}),
+          } });
+        }
+        const before = await snapshot();
+        const baseline = await answer(call(null, bound()));
+        const actual = await answer(call(null, ctx({ sessionId })));
+        expect(actual).toEqual(baseline);
+        expect(actual.code).toBe('FORBIDDEN');
+        expect(await snapshot()).toEqual(before);
+      });
+    }
+
+    for (const kind of ['LIVE_CHAT', 'TASK', 'TEAM_CHAT_MESSAGE'] as const) {
+      it(`${door}: a person's invalid ${kind} claim refuses before any act write`, async () => {
+        const claim = { kind, ref: kind === 'LIVE_CHAT' ? 'not an opaque reference' : 'not-a-urn' };
+        const before = await snapshot();
+        const baseline = await answer(call(null, bound()));
+        const actual = await answer(call(claim, ctx()));
+        expect(actual).toEqual(baseline);
+        expect(actual.code).toBe('FORBIDDEN');
+        expect(await snapshot()).toEqual(before);
+      });
+
+      it(`${door}: a held worker may self-cite a ${kind} claim and the record preserves its provenance`, async () => {
+        const actor = { workerId: f.worker.id, agentId: f.agent.id };
+        let ref: string;
+        if (kind === 'LIVE_CHAT') {
+          ref = `client-chat:${f.worker.id}:turn-1`;
+        } else if (kind === 'TASK') {
+          const task = await runAsActor(actor, () => M.createAgentTask({}, {
+            input: { appRef: f.app.id, title: 'worker-authored instruction claim' },
+          }, bound()));
+          expect(task.createdByWorkerId).toBe(f.worker.id);
+          ref = `hrn:agenttask:${f.app.urn}:${task.handle}`;
+        } else {
+          const message = await runAsActor(actor, () => M.createTeamChatMessage({}, {
+            appRef: f.app.id, body: 'worker-authored instruction claim', sessionRef: f.session.id,
+          }, bound()));
+          const stored = await db.node.findUniqueOrThrow({ where: { id: message.nodeId } });
+          expect(message.authorWorkerId).toBe(f.worker.id);
+          expect(stored.data).toMatchObject({ authorWorkerId: f.worker.id });
+          ref = message.urn;
+        }
+        const claim = { kind, ref };
+        await runAsActor(actor, () => call(claim, bound()));
+        const events = await instructionEvents();
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ actorUserId: f.holder.id, actorWorkerId: f.worker.id });
+        expect(events[0].payload).toMatchObject({ instruction: claim });
+      });
+    }
+  }
+
+  it('a host-launched session cannot become a person session and is refused with a claim', async () => {
+    await db.session.update({ where: { id: f.session.id }, data: {
+      launchOperationId: generateId(), launchHostId: generateId(), launchIssuedBy: 'manager',
+    } });
+    // cor:agt:070:08: only a worker session can carry a launch marker. The person-shaped case is not a legal row.
+    await expect(db.session.update({ where: { id: f.session.id }, data: { workerId: null } }))
+      .rejects.toThrow(/chk_sessions_launch/);
+    const before = await snapshot();
+    for (const call of Object.values(calls)) {
+      expect((await answer(call(live, bound()))).code).toBe('FORBIDDEN');
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('the LIVE_CHAT cap counts UTF-16 units and preserves valid emoji in the record', async () => {
+    const ref = '😀'.repeat(256);
+    await calls.signature({ kind: 'LIVE_CHAT', ref });
+    expect((await instructionEvents())[0].payload).toMatchObject({ instruction: { kind: 'LIVE_CHAT', ref } });
+    const before = await snapshot();
+    expect((await answer(calls.signature({ kind: 'LIVE_CHAT', ref: `${ref}😀` }))).code).toBe('FORBIDDEN');
+    expect(await snapshot()).toEqual(before);
+  });
 });
