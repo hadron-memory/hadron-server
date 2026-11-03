@@ -11,7 +11,7 @@ import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
-import { canReadMemory, canWriteToMemory, filterReadableMemoryIds, getMemoryAccess } from './access-control.js';
+import { canReadMemory, canWriteToMemory, filterReadableMemoryIds, getMemoryAccess, EXPLICIT_REF } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
@@ -186,15 +186,70 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
 
   });
 
+  describe('session selectors retain the canonical negative matrix', () => {
+    it.each([
+      ['hadron_find_nodes', 'memoryUrn'],
+      ['hadron_find_nodes', 'memoryUrns'],
+      ['hadron_find_nodes', 'parentRel'],
+      ['hadron_list_nodes', 'memoryUrn'],
+      ['hadron_list_nodes', 'parentRel'],
+    ] as const)('%s via %s conceals every non-PUBLIC exception exactly like a missing memory', async (tool, selector) => {
+      const owner = await db.user.create({ data: { id: generateId(), email: `selector-${generateId().toLowerCase()}@example.test` } as never });
+      const ownerMemory = await db.memory.create({ data: { name: 'owner', urn: `${f.orgA.urn}:owner`, class: 'private', userId: owner.id, ownerUserId: owner.id } });
+      const team = await db.memory.create({ data: { name: 'team', urn: `${f.orgA.urn}:team`, class: 'app', appId: f.app.id, organizationId: f.orgA.id } });
+      for (const m of [ownerMemory, team]) await db.node.create({ data: { memoryId: m.id, loc: LOC, name: 'needle3306 denied', content: 'hidden', nodeType: 'record' } });
+      const mcp = createTestableMcpServer(f.confined as never);
+      const args = (memoryUrn: string) => ({
+        ...(tool === 'hadron_find_nodes' ? { query: 'needle3306', mode: 'keyword' } : { depth: 2 }),
+        ...(selector === 'parentRel' ? { parentRel: `hrn:node:${memoryUrn}:docs` } : selector === 'memoryUrns' ? { memoryUrns: [`hrn:mem:${memoryUrn}`] } : { memoryUrn: `hrn:mem:${memoryUrn}` }),
+      });
+      const missingUrn = `${f.orgB.urn}:missing-selector`;
+      const missing = await mcp.callToolText(tool, args(missingUrn));
+      for (const m of [f.orgVisible, f.appScoped, f.ownAppScoped, f.group, f.deleted, ownerMemory, team]) {
+        expect(await canReadMemory(db, f.confined as never, m.id, EXPLICIT_REF)).toBe(false);
+        const hidden = await mcp.callToolText(tool, args(m.urn));
+        expect(hidden.replaceAll(m.urn, 'X')).toBe(missing.replaceAll(missingUrn, 'X'));
+        expect(hidden).not.toContain('needle3306 denied');
+      }
+      expect(await mcp.callToolText(tool, args(f.pub.urn))).toContain('needle3306 pub');
+    }, 30_000);
+  });
+
   describe('discovery: PUBLIC memories are not enumerated', () => {
-    it('the access map and the GraphQL id list for the key and the run name no PUBLIC memory unless scoped to it', async () => {
-      for (const principal of [f.keyPrincipal, f.runPrincipal]) {
+    it('the access map and GraphQL id list never enumerate PUBLIC knowledge for keys, runs or session keys', async () => {
+      for (const principal of [f.keyPrincipal, f.runPrincipal, f.confined]) {
         expect((await getMemoryAccess(db, principal as never)).has(f.pub.id)).toBe(false);
         expect(await getAccessibleMemoryIds(principal as Context)).not.toContain(f.pub.id);
         expect(await getAccessibleMemoryIds(principal as Context, f.pub.id)).toEqual([f.pub.id]);
         expect(await getAccessibleMemoryIds(principal as Context, undefined, { publicTargetIds: [f.pub.id, f.orgVisible.id] })).toContain(f.pub.id);
         expect(await getAccessibleMemoryIds(principal as Context, undefined, { publicTargetIds: [f.orgVisible.id, f.appScoped.id] })).not.toContain(f.orgVisible.id);
       }
+    });
+    it('session discovery stays closed over GraphQL, MCP search and MCP memory listing', async () => {
+      const mcp = createTestableMcpServer(f.confined as never);
+      const gql = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 50 }, { ...f.confined });
+      expect(gql.hits).toEqual([]);
+      const search = await mcp.callToolText('hadron_find_nodes', { query: 'needle3306', mode: 'keyword' });
+      expect(search).not.toContain('needle3306 pub');
+      const listing = await mcp.callToolText('hadron_list_memories', {});
+      expect(listing).not.toContain(f.pub.urn);
+      expect((await getMemoryAccess(db, f.confined as never)).has(f.pub.id)).toBe(false);
+      expect(await mcp.callToolText('hadron_find_nodes', { query: 'needle3306', mode: 'keyword', memoryUrn: `hrn:mem:${f.pub.urn}` })).toContain('needle3306 pub');
+    }, 20_000);
+    it('a user-backed run keeps its identity at a cross-memory private asset gate', async () => {
+      const owner = await db.user.create({ data: { id: generateId(), email: `asset-${generateId().toLowerCase()}@example.test` } as never });
+      const privateMemory = await db.memory.create({ data: { name: 'private asset', urn: `${f.orgA.urn}:private-asset`, class: 'private', userId: owner.id, ownerUserId: owner.id } });
+      const asset = await db.asset.create({ data: { memoryId: privateMemory.id, filename: 'private.txt', mimeType: 'text/plain', sizeBytes: 1, storageKey: `test/${privateMemory.id}` } });
+      const parentMemory = await db.memory.create({ data: { name: 'personal parent', urn: `${f.orgA.urn}:personal-parent`, class: 'personal', userId: owner.id, ownerUserId: owner.id } });
+      const parent = await db.node.create({ data: { memoryId: parentMemory.id, loc: LOC, name: 'personal parent', nodeType: 'record', data: { asset: { id: asset.id } } } });
+      const run = { ...f.run, userId: owner.id };
+      const principal = { db, ...runAuthContext(run) } as Context;
+      expect(await canReadMemory(db, principal as never, parentMemory.id)).toBe(true);
+      expect(await canReadMemory(db, principal as never, privateMemory.id)).toBe(false);
+      expect(await (resolvers.Node as any).asset(parent, {}, principal)).toBeNull();
+      const person = { ...principal, clientId: undefined };
+      expect(await canReadMemory(db, person as never, privateMemory.id)).toBe(true);
+      expect(await (resolvers.Node as any).asset(parent, {}, person)).toMatchObject({ id: asset.id });
     });
     it('an unscoped node search still returns item-linked PUBLIC knowledge exactly as before (only the item-less sweep goes)', async () => {
     const linked = await db.memory.create({ data: { name: 'linked', urn: `${f.orgB.urn}:linked`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id } });
@@ -215,11 +270,12 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
     const refused: Array<{ id: string; urn: string }> = [f.orgVisible, f.appScoped, f.ownAppScoped, f.group, f.deleted];
     for (const [slug, extra] of [['nodeowner', { ownerUserId: user.id }], ['nodeinstall', { isInstallMemory: true }]] as const) {
       const row = await db.memory.create({
-        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id, ...extra },
+        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: slug === 'nodeowner' ? null : f.orgB.id, ...extra },
       }).catch((err: unknown) => {
         if (!/check constraint|chk_memory/i.test(String((err as Error)?.message))) throw err;
         return null;
       });
+      if (slug === 'nodeowner') expect(row).not.toBeNull();
       if (row) {
         await db.node.create({ data: { memoryId: row.id, loc: LOC, name: `needle3306 ${slug}`, content: `secret ${slug}`, nodeType: 'record' } });
         refused.push(row);
@@ -245,13 +301,20 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
     const user = await db.user.create({ data: { id: generateId(), email: `o-${generateId().toLowerCase()}@example.test` } as never });
     for (const [slug, extra] of [['ownerx', { ownerUserId: user.id }], ['installx', { isInstallMemory: true }]] as const) {
       const row = await db.memory.create({
-        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id, ...extra },
+        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: slug === 'ownerx' ? null : f.orgB.id, ...extra },
       }).catch((err: unknown) => {
         if (!/check constraint|chk_memory/i.test(String((err as Error)?.message))) throw err;
         return null;
       });
-      if (!row) continue;
+      if (slug === 'ownerx') expect(row).not.toBeNull();
+      if (!row) continue; // only the install shape can be excluded by its validated CHECK
       expect((await publicKnowledgeAmong(db, [row.id])).has(row.id)).toBe(false);
+      await db.node.create({ data: { memoryId: row.id, loc: LOC, name: 'owned PUBLIC', content: 'owner only', nodeType: 'record' } });
+      for (const principal of [f.keyPrincipal, f.runPrincipal, f.confined]) {
+        expect(await getAccessibleMemoryIds(principal, row.id)).not.toContain(row.id);
+        expect(await Q.node({}, { ref: urn(row) }, principal)).toBeNull();
+        expect(await canReadMemory(db, principal as never, row.id, EXPLICIT_REF)).toBe(false);
+      }
     }
   });
   it('an unscoped node search never surfaces a non-PUBLIC or App-scoped memory', async () => {
@@ -297,7 +360,8 @@ describe('#3306 the shared predicate itself', () => {
     expect(new Set([...at.hits, ...next.hits].map((h: any) => h.node.id)).size).toBe(201);
     expect([...at.hits, ...next.hits].every((h: any) => h.node.memoryId === f.pub.id)).toBe(true);
   });
-  it('a node search names its PUBLIC targets: no id-less PUBLIC lookup, however many PUBLIC memories exist', async () => {
+  it.each(['key', 'run', 'session'] as const)('a %s search names PUBLIC targets without an id-less lookup', async who => {
+    const principal = who === 'key' ? f.keyPrincipal : who === 'run' ? f.runPrincipal : f.confined;
     const extra: string[] = [];
     for (let i = 0; i < 5; i++) {
       const m = await db.memory.create({ data: { name: `p${i}`, urn: `${f.orgB.urn}:extra${i}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id } });
@@ -312,14 +376,14 @@ describe('#3306 the shared predicate itself', () => {
     }) as never);
     try {
       // Unscoped: no PUBLIC memory is named, so none is looked up and none surfaces.
-      const unscoped = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 50 }, { ...f.keyPrincipal });
+      const unscoped = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 50 }, { ...principal });
       expect(unscoped.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId)).not.toContain(extra[0]);
       expect(seen).toHaveLength(0);
       // Named: exactly the named ids are looked up (cap and cap+1 on the node page still hold).
       const named = { memoryIds: extra };
-      const atCap = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 3, filter: named }, { ...f.keyPrincipal });
+      const atCap = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 3, filter: named }, { ...principal });
       expect(atCap.hits).toHaveLength(3);
-      const over = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 4, filter: named }, { ...f.keyPrincipal });
+      const over = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 4, filter: named }, { ...principal });
       expect(over.hits).toHaveLength(4);
       expect(seen.length).toBeGreaterThan(0);
       for (const w of seen) expect(w).toEqual({ in: extra });
