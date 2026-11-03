@@ -1,0 +1,245 @@
+/**
+ * #2763 — the coordinator-cadence alarm (cor:agt:050:31, Proposed): one task-less alarm per coordinator per episode when it
+ * made no counted assignment for 60 minutes while a worker in its lane was free. Every timestamp is relative to a fixed `now`.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb } from '../../test/helpers.js';
+import { generateId } from '../id.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
+import { ensureChannelWithRoot } from '../channels.js';
+import { evaluateCoordinatorCadence } from './coordinatorCadence.js';
+import { eventPayloadFor } from './darkWorker.js';
+import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
+
+vi.mock('../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+
+const MIN = 60_000;
+const NOW = new Date('2026-11-03T12:00:00.000Z');
+const at = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * MIN);
+const TYPE = 'alarm.coordinator-cadence';
+
+let org: { id: string; urn: string };
+let app: { id: string };
+let user: { id: string };
+let agent: { id: string };
+const w: Record<string, { id: string }> = {};
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+  org = await db.organization.create({ data: { id: generateId(), name: 'cad-org', urn: `cad-${suffix}.com` } });
+  user = await db.user.create({ data: { id: generateId(), githubId: 98_200 + Math.floor(Math.random() * 1000), githubUsername: `cad-${suffix}`, roles: ['READER'] } });
+  agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Engineer', urn: `${org.urn}:engineer`, visibility: 'ORGANIZATION' } });
+  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+  await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
+  const memory = await db.memory.create({
+    data: { id: generateId(), organizationId: org.id, urn: `${org.urn}:team-shared`, name: 'shared', class: 'app', appId: app.id, sharedMemoryOfAgentId: agent.id },
+  });
+  await ensureChannelWithRoot(db, { memoryId: memory.id, loc: 'chats:team', name: 'team', createdBy: user.id, asDefaultOfAppId: app.id });
+  // Ada coordinates; Liam reports to Ada; Tove reports to nobody.
+  w.Ada = await mk('Ada', null, 'coordinator');
+  w.Liam = await mk('Liam', w.Ada.id);
+  w.Tove = await mk('Tove', null);
+});
+
+const mk = (name: string, reportsTo: string | null, role = 'engineer') =>
+  db.worker.create({
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name, slug: name.toLowerCase(), role, heldByUserId: user.id, reportsToWorkerId: reportsTo },
+    select: { id: true },
+  });
+/** A live, bound session started `minutesAgo` minutes before NOW (family claude, so the worker is free for work when idle). */
+const bind = (name: string, minutesAgo = 300) =>
+  db.session.create({
+    data: { id: generateId(), appId: app.id, userId: user.id, workerId: w[name].id, agentId: agent.id, type: 'DEVELOPER', startedAt: at(minutesAgo), updatedAt: NOW, family: 'claude' },
+  });
+const event = async (type: string, actor: string, minutesAgo: number, subject = 'Liam') => {
+  // A task event names its task (`chk_agent_team_events_shape`); the task is unassigned so it never makes anyone busy.
+  const task = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: user.id } });
+  return db.agentTeamEvent.create({ data: { appId: app.id, type, taskId: task.id, actorWorkerId: w[actor].id, subjectWorkerId: w[subject].id, payload: {}, createdAt: at(minutesAgo) } });
+};
+const alarms = (name = 'Ada') => db.agentTeamEvent.findMany({ where: { subjectWorkerId: w[name].id, type: TYPE }, orderBy: { createdAt: 'asc' } });
+const later = (m: number) => new Date(NOW.getTime() + m * MIN);
+
+/** Ada bound 300 min ago, last assigned 90 min ago; Liam bound and idle. Observed first at NOW-70 so the clock has run out. */
+async function lateAda() {
+  await bind('Ada');
+  await bind('Liam');
+  await event('task.assigned', 'Ada', 90);
+  await evaluateCoordinatorCadence(db, at(70)); // first observation (no alarm: clock = max(assign 90, session 300, observed 70) = 70 min ago... see below)
+}
+
+describe('#2763 the rule', () => {
+  it('raises exactly one alarm, with the payload and chain, once the clock passes 60 minutes with a free lane worker', async () => {
+    await lateAda();
+    expect(await alarms()).toHaveLength(0); // observed at NOW-70, so 70 minutes later is NOW
+    const raised = await evaluateCoordinatorCadence(db, NOW);
+    expect(raised).toHaveLength(1);
+    const [a] = await alarms();
+    expect(a).toMatchObject({ taskId: null, severity: 'alarm', appId: app.id, subjectWorkerId: w.Ada.id });
+    expect(a.payload).toEqual({ reason: 'coordinator-cadence', windowMinutes: 60, lastAssignedAt: at(90).toISOString(), freeWorkerCount: 1 });
+    expect(JSON.stringify(a.payload)).not.toMatch(/title|text/i);
+    expect(await db.coordinatorCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(1);
+  });
+
+  it('a second pass and two raced passes add nothing', async () => {
+    await lateAda();
+    const results = await Promise.all([evaluateCoordinatorCadence(db, NOW), evaluateCoordinatorCadence(db, NOW)]);
+    expect(results.flat()).toHaveLength(1);
+    expect(await evaluateCoordinatorCadence(db, later(5))).toEqual([]);
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('its next task.assigned closes the episode and a later lateness raises a new one', async () => {
+    await lateAda();
+    await evaluateCoordinatorCadence(db, NOW);
+    await event('task.reassigned', 'Ada', -1); // 1 minute after NOW
+    expect(await evaluateCoordinatorCadence(db, later(2))).toEqual([]);
+    expect(await db.coordinatorCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(0);
+    expect(await evaluateCoordinatorCadence(db, later(60))).toEqual([]); // 59 minutes after the assignment at +1
+    expect(await evaluateCoordinatorCadence(db, later(61))).toHaveLength(1);
+    expect(await alarms()).toHaveLength(2);
+  });
+
+  it('assignment.matched alone does not reset the clock, and neither does another worker\'s assignment', async () => {
+    await lateAda();
+    await event('assignment.matched', 'Tove', 10);
+    await event('task.assigned', 'Tove', 5);
+    await event('assignment.matched', 'Ada', 5);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1);
+  });
+
+  it('raises nothing when no lane worker is free, and an open episode survives such a pass without a second alarm', async () => {
+    await lateAda();
+    await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: user.id, assigneeWorkerId: w.Liam.id, assignedAt: at(10) } });
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    await db.agentTask.deleteMany({ where: { appId: app.id, assigneeWorkerId: { not: null } } });
+    expect(await evaluateCoordinatorCadence(db, later(1))).toHaveLength(1);
+    await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: user.id, assigneeWorkerId: w.Liam.id, assignedAt: at(10) } });
+    expect(await evaluateCoordinatorCadence(db, later(2))).toEqual([]);
+    expect(await db.coordinatorCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(1);
+    await db.agentTask.deleteMany({ where: { appId: app.id, assigneeWorkerId: { not: null } } });
+    expect(await evaluateCoordinatorCadence(db, later(3))).toEqual([]);
+    expect(await alarms()).toHaveLength(1);
+  });
+
+  it('a never-assigned coordinator is not late before 60 minutes from its observed row, and an existing one is not late at first pass', async () => {
+    await bind('Ada', 500);
+    await bind('Liam');
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    expect(await evaluateCoordinatorCadence(db, later(59))).toEqual([]);
+    expect(await evaluateCoordinatorCadence(db, later(60))).toHaveLength(1);
+    expect((await alarms())[0].payload).toMatchObject({ lastAssignedAt: null });
+  });
+
+  it('a coordinator whose first session is recent is not late even when first observed long ago', async () => {
+    await bind('Liam');
+    await db.coordinatorCadenceClock.create({ data: { workerId: w.Ada.id, appId: app.id, observedAt: at(500) } });
+    await bind('Ada', 10);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+  });
+
+  it('an App without a coordinator raises nothing, and a retired coordinator is not evaluated', async () => {
+    await bind('Liam');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { retiredAt: at(1) } });
+    await evaluateCoordinatorCadence(db, at(70));
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    expect(await db.coordinatorCadenceClock.count()).toBe(0);
+  });
+});
+
+describe('#2763 the lane', () => {
+  it('a lone idle coordinator raises nothing (self-exclusion)', async () => {
+    await db.worker.updateMany({ where: { id: { in: [w.Liam.id, w.Tove.id] } }, data: { retiredAt: at(1) } });
+    await bind('Ada');
+    await evaluateCoordinatorCadence(db, at(70));
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+  });
+
+  it('a free second coordinator with no reporting line does not make the first late', async () => {
+    w.Beth = await mk('Beth', null, 'coordinator');
+    await db.worker.updateMany({ where: { id: { in: [w.Liam.id, w.Tove.id] } }, data: { retiredAt: at(1) } });
+    await bind('Ada');
+    await bind('Beth');
+    await evaluateCoordinatorCadence(db, at(70));
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+  });
+
+  it('a free worker reporting to another coordinator does not count', async () => {
+    w.Beth = await mk('Beth', null, 'coordinator');
+    w.Sam = await mk('Sam', w.Beth.id);
+    await db.worker.updateMany({ where: { id: { in: [w.Liam.id, w.Tove.id] } }, data: { retiredAt: at(1) } });
+    await bind('Ada');
+    await bind('Beth');
+    await bind('Sam');
+    await evaluateCoordinatorCadence(db, at(70));
+    expect(await alarms('Ada')).toHaveLength(0);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1); // Beth is late (Sam is hers); Ada is not
+    expect(await alarms('Beth')).toHaveLength(1);
+    expect(await alarms('Ada')).toHaveLength(0);
+  });
+
+  it('a free worker with no reporting line counts for every coordinator: one episode each', async () => {
+    w.Beth = await mk('Beth', null, 'coordinator');
+    await db.worker.update({ where: { id: w.Liam.id }, data: { retiredAt: at(1) } });
+    await bind('Ada');
+    await bind('Beth');
+    await bind('Tove');
+    await evaluateCoordinatorCadence(db, at(70));
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(2);
+    expect(await alarms('Ada')).toHaveLength(1);
+    expect(await alarms('Beth')).toHaveLength(1);
+    expect(await evaluateCoordinatorCadence(db, later(1))).toEqual([]);
+  });
+});
+
+describe('#2763 the exemptions come from the dark-worker set', () => {
+  it.each([
+    ['PAUSED', async () => db.workerWakeSettings.create({ data: { workerId: w.Ada.id, pausedUntil: later(60) } })],
+    ['TEAM_PAUSED', async () => db.app.update({ where: { id: app.id }, data: { teamPausedAt: at(100) } })],
+  ])('%s raises nothing', async (_name, apply) => {
+    await bind('Ada');
+    await bind('Liam');
+    await evaluateCoordinatorCadence(db, at(70));
+    await apply();
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+  });
+
+  it('a coordinator with no live session raises nothing', async () => {
+    await bind('Liam');
+    await evaluateCoordinatorCadence(db, at(70));
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+  });
+});
+
+describe('#2763 the database and the surfaces', () => {
+  it('admits one OPEN episode per coordinator, and the stall tick runs the pass', async () => {
+    await lateAda();
+    const tick = await taskStallTick(db, NOW);
+    expect(tick.cadenceRaised).toBe(1);
+    const second = await db.agentTeamEvent.create({ data: { appId: app.id, type: TYPE, subjectWorkerId: w.Ada.id, severity: 'alarm', chain: [], payload: {} } });
+    await expect(db.coordinatorCadenceEpisode.create({ data: { appId: app.id, workerId: w.Ada.id, eventId: second.id, openedAt: NOW } })).rejects.toThrow();
+  });
+
+  it('redacts the evidence for a reader without access to worker internals, keeps the reason and window', async () => {
+    const payload = { reason: 'coordinator-cadence', windowMinutes: 60, lastAssignedAt: NOW.toISOString(), freeWorkerCount: 2 };
+    const out = await eventPayloadFor({ type: TYPE, appId: app.id, payload }, { db, user: { id: generateId() }, roles: [] } as never);
+    expect(out).toEqual({ reason: 'coordinator-cadence', windowMinutes: 60 });
+  });
+
+  it('wakes the nearest owner of the chain through the episode-bound delivery, and stops when the episode ends', async () => {
+    w.Cass = await mk('Cass', null, 'lead');
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Cass.id } });
+    await lateAda();
+    await evaluateCoordinatorCadence(db, NOW);
+    const [a] = await alarms();
+    expect((a.chain as { workerId?: string }[])[0]).toEqual({ workerId: w.Cass.id });
+    const { pendingTaskWakes } = await import('./taskWakes.js');
+    const pending = (await pendingTaskWakes(db, [w.Cass.id], NOW)).get(w.Cass.id) ?? [];
+    expect(pending.filter((p) => p.eventId === a.id)).toHaveLength(1);
+    expect(pending.find((p) => p.eventId === a.id)?.title).toBe('Ada has stopped assigning work');
+    await db.coordinatorCadenceEpisode.updateMany({ where: { eventId: a.id }, data: { endedAt: later(1) } });
+    expect(((await pendingTaskWakes(db, [w.Cass.id], later(1))).get(w.Cass.id) ?? []).some((p) => p.eventId === a.id)).toBe(false);
+  });
+});
