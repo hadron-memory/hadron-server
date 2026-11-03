@@ -65,7 +65,7 @@ it('#3343 computes one independent-user ceiling across three unselected App fold
   const memoryReads = vi.spyOn(db.memory, 'findMany');
   const appReads = vi.spyOn(db.app, 'findUnique');
   try {
-    const access = await getPrincipalAppMemoryAccess(db, { userId: f.user.id, roles: ['READER'] });
+    const access = await getPrincipalAppMemoryAccess(db, { userId: f.user.id });
     expect(access.has(f.knowledge.id)).toBe(false);
     expect(access.get(f.publicMemory.id)).toBe('READ_ONLY');
     expect(access.get(f.system.id)).toBe('READ_ONLY');
