@@ -112,14 +112,14 @@ type AppMemoryAccessOptions = {
   callerUserId?: string | null;
   allAgents?: boolean;
   memberAdmitted?: boolean;
-  /** #1376: the principal is a bare App key (no user, not an AppRun): the Agent's items admit it nothing. */
+  /** Userless principals, including App keys and AppRuns, receive no item-derived authority. */
   credentialOnly?: boolean;
   /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
   provenance?: Map<string, AgentProvenance[]>;
 };
 type ItemUserAccessLoader = () => Promise<ReadonlyMap<string, string>>;
 
-/** Known users always receive the independent item ceiling, including direct callers. */
+/** Direct authority callers default to credential-only without a user; known users receive the independent item ceiling. */
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
@@ -128,7 +128,7 @@ export async function getAppMemoryAccess(
   const loadItemUserAccess = opts.loadItemUserAccess ?? (opts.callerUserId
     ? () => independentUserItemAccess(db, opts.callerUserId!)
     : undefined);
-  return buildAppMemoryMap(db, appId, opts, loadItemUserAccess);
+  return buildAppMemoryMap(db, appId, { ...opts, credentialOnly: opts.credentialOnly ?? !opts.callerUserId }, loadItemUserAccess);
 }
 
 /** Candidate/provenance inventory only: callers must independently authorize every returned memory. */

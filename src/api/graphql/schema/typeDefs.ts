@@ -10095,7 +10095,9 @@ export const typeDefs = `#graphql
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
-    ): CastWorkerPreview!
+          "#3308: a held worker needs this validated instruction or its own live workers.staff grant; host-launched sessions are always headless. The holder still needs staffing rights. Instruction claims are recorded, including previews/no-ops (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
+      instruction: ActInstructionInput
+): CastWorkerPreview!
 
     # ── Assets (spec 004-asset-upload + 006-asset-upload-redesign) ────
     """
@@ -13263,7 +13265,9 @@ export const typeDefs = `#graphql
       reportsTo: ID
       "Set to true to record that the worker has no reporting head; do not supply reportsTo as well. Null or false is invalid. Omitting both arguments records no choice (UNSET) when omission is allowed; otherwise the request is refused with WORKER_TEAM_CHOICE_REQUIRED."
       noTeam: Boolean
-    ): Worker!
+          "#3308: a held worker needs this validated instruction or its own live workers.staff grant; host-launched sessions are always headless. The holder still needs staffing rights. Instruction claims are recorded, including previews/no-ops (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
+      instruction: ActInstructionInput
+): Worker!
 
     """
     #974 — retire a Worker (cor:agt:020:02): end the casting while reserving
@@ -13271,11 +13275,11 @@ export const typeDefs = `#graphql
     worker-App pin checks retirement at post time), takes no new work records,
     and refuses new session bindings; the row and its name reservation
     survive. Idempotent — retiring an already-retired worker returns it
-    unchanged. Same authorization as castWorker. workerRef is the worker's id
+    unchanged; an instructed no-op records its claim only. Same instruction/grant authorization as castWorker. workerRef is the worker's id
     or its URN (#991). Retiring clears the worker's own reportsTo (#1726);
     workers that report to it keep theirs and read reportsToRetired.
     """
-    retireWorker(workerRef: ID!): Worker!
+    retireWorker(workerRef: ID!, instruction: ActInstructionInput): Worker!
 
     """
     #1726 — set, hand over or clear (reportsTo: null) who a worker reports to:
@@ -13450,9 +13454,9 @@ export const typeDefs = `#graphql
     external history means retire instead. Omitted or false confirmation
     refuses WORKER_EXTERNAL_ATTRIBUTION_UNCONFIRMED. No external crawl.
     Also removes empty ended stints and the empty working memory.
-    Same staffing authorization as castWorker.
+    Same staffing authorization as castWorker: instruction or own workers.staff grant for a worker session.
     """
-    deleteWorker(workerRef: ID!, confirmNoExternalAttribution: Boolean): Boolean!
+    deleteWorker(workerRef: ID!, confirmNoExternalAttribution: Boolean, instruction: ActInstructionInput): Boolean!
 
     """
     #960 — mint a roles:<role> definition in the Team Agent's system memory.
@@ -13750,6 +13754,8 @@ export const typeDefs = `#graphql
       userRef: String
       userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
       role: String!
+          "#3308: worker sessions need a validated instruction or their own live app.members grant, including self-leave; the holder still needs the original manager/self right. Refusal precedes target-user resolution. Instructed no-ops record a claim only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
+      instruction: ActInstructionInput
     ): AppMember!
 
     """
@@ -13767,6 +13773,8 @@ export const typeDefs = `#graphql
       "#764 — the user as an id / email / handle / hrn:user:<handle> URN. Supply this OR userId."
       userRef: String
       userId: ID @deprecated(reason: "Use userRef (accepts id / email / handle / URN).")
+          "#3308: worker sessions need a validated instruction or their own live app.members grant, including self-leave; the holder still needs the original manager/self right. Refusal precedes target-user resolution. Instructed no-ops record a claim only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, hrn:node:hadronmemory.com:specs:cor:agt:080:24)."
+      instruction: ActInstructionInput
     ): Boolean!
 
     """
@@ -13806,10 +13814,13 @@ export const typeDefs = `#graphql
     leaves an App. Idempotent (no-op when not a member). The user's
     personal-class Memory at (appId, userId) is NOT cascade-deleted
     per spec 008 FR-015 — it re-attaches if the user later re-joins.
+    Bound workers require an instruction or their own live app.members grant
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); successful instructed removals/no-ops record the claim.
+    Direct-person cleanup keeps the existing App reference-resolution behavior.
 
     Accepts the entity's ID or URN.
     """
-    leaveApp(appId: ID!): LeaveAppPayload!
+    leaveApp(appId: ID!, instruction: ActInstructionInput): LeaveAppPayload!
 
     """
     023-app-shape US3 — asymmetric cross-user grant on a personal-class

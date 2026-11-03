@@ -1,6 +1,8 @@
-import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { admitAppManagement, lockInstructedActRows } from './resolvers.instruction.js';
-import { appendWorkerSignatureInstructionEvent } from '../../../lib/agentTasks/events.js';
+import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
+import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
+import { requireInstructedAct, sameActPrincipal, type ActAdmission, type StaffActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { readActInstruction, admitAppManagement, lockInstructedActRows } from './resolvers.instruction.js';
+import { appendWorkerSignatureInstructionEvent, appendStaffingInstructionClaim, staffingActActor, staffingInstruction } from '../../../lib/agentTasks/events.js';
 import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
@@ -81,7 +83,7 @@ import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../l
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
-import { withAuthorizedTx } from './authorizedTx.js';
+import { withAuthorizedTx, liveTxContext } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
@@ -166,6 +168,19 @@ async function requireWorkerStaffAccess(ctx: Context, app: AppRow): Promise<void
     if (await isNonReaderAppMember(ctx, app)) return;
   }
   throw forbidden();
+}
+
+/** #3308: opt-in narrowing at staffing doors only; no-op updateWorker keeps requireWorkerStaffAccess. */
+async function admitWorkerStaffAct(
+  ctx: Context, scope: AppRow, instruction?: ActInstruction | null, expected?: StaffActAdmission, lock = false,
+): Promise<StaffActAdmission> {
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
+  if (app.deletedAt || app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw forbidden();
+  const admission = await requireInstructedAct(ctx, app.id, instruction,
+    async () => { await requireWorkerStaffAccess(ctx, app); return true; }, readActInstruction, forbidden,
+    { name: 'workers.staff', lock });
+  if (expected && !sameActPrincipal(expected, admission)) throw forbidden();
+  return admission;
 }
 
 /**
@@ -875,12 +890,14 @@ export async function provisionWorkerMemory(
 /** Argument shape shared by castWorker and its preview (#964). */
 type CastArgs = CastTeamArgs & {
   appRef: string;
+  instruction?: ActInstruction | null;
   agentRef?: string | null;
   role?: string | null;
   name?: string | null;
 };
 
 type CastTarget = {
+  admission: StaffActAdmission;
   appId: string;
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null };
@@ -944,7 +961,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       extensions: { code: 'APP_UNINSTALLED', appId },
     });
   }
-  await requireWorkerStaffAccess(ctx, app);
+  const admission = await admitWorkerStaffAct(ctx, app, args.instruction);
   let reportingHeadId: string | null = null;
   if (choice.kind === 'REPORTS_TO') {
     if (!(await managesApp(ctx, app))) throw new GraphQLError('Only whoever manages the App may name a reporting head at cast.', { extensions: { code: 'WORKER_REPORTS_TO_FORBIDDEN' } });
@@ -1038,7 +1055,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   }
   const { agent: castAgent } = await assertCastable(ctx.db, app, agent.id);
   const workerRole = requireWorkerAgentRole(castAgent);
-  return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
+  return { admission, appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
 }
 
 /** The typed refusal for a failure while a cast generates its tickers (#2024); anything else is not ours. */
@@ -1087,7 +1104,7 @@ export const workerMutations = {
    * (advance on WORKER_NAME_TAKEN, exhausted register is typed).
    */
   castWorker: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, app, agent, workerRole, requestedRole, requestedName, choice } = await resolveCastTarget(
+    const { admission: plannedAdmission, appId, app, agent, workerRole, requestedRole, requestedName, choice, reportingHeadId } = await resolveCastTarget(
       ctx,
       args,
     );
@@ -1135,6 +1152,13 @@ export const workerMutations = {
             await lockWorkerNames(tx, appId);
             await lockAppReportsTo(tx, appId);
             await lockAppTickers(tx, appId);
+            // Preserve the existing typed cast retry before the generic mechanism refusal.
+            const plannedFreshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
+            if (plannedFreshApp.organizationId !== app.organizationId || plannedFreshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
+            let admission = await admitWorkerStaffAct(txCtx, app, args.instruction, plannedAdmission);
+            const actWorkerIds = [plannedWorkerId, ...(reportingHeadId ? [reportingHeadId] : []),
+              ...(admission.kind === 'person' ? [] : [admission.workerId])];
+            await lockWorkersForAssignment(tx, actWorkerIds);
             // Cleanup doors such as public leaveApp intentionally take no authority anchor.
             // Hold the deciding membership rows as well, before any Worker row/write.
             if (ctx.userId) {
@@ -1143,10 +1167,11 @@ export const workerMutations = {
               await tx.$queryRaw`
                 SELECT user_id FROM app_members WHERE app_id = ${appId} AND user_id = ${ctx.userId} FOR SHARE`;
             }
+            // The early read preserves refusal ordering; the deciding row is fresh after membership waits.
             const freshApp = await tx.app.findUniqueOrThrow({ where: { id: appId } });
             if (freshApp.deletedAt) throw forbidden();
-            await requireWorkerStaffAccess(txCtx, freshApp);
             if (freshApp.organizationId !== app.organizationId || freshApp.ownerUserId !== app.ownerUserId) throw castTargetChanged();
+            await requireWorkerStaffAccess(txCtx, freshApp);
             const freshAgent = await tx.agent.findUniqueOrThrow({ where: { id: agent.id } });
             if (freshAgent.organizationId !== agentOwner.organizationId || freshAgent.ownerUserId !== agentOwner.ownerUserId) throw castTargetChanged();
             if (freshApp.uninstalledAt) {
@@ -1154,6 +1179,7 @@ export const workerMutations = {
             }
             const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
+            if (freshTarget.reportingHeadId !== reportingHeadId) throw castTargetChanged();
             // #2458's deciding licence/role check, on the transaction. It only PLANS the missing same-org grants
             // (#2906); they are written below, once nothing that returns a value can still end the cast.
             const { provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
@@ -1170,6 +1196,8 @@ export const workerMutations = {
             // #2906 / cor:agt:040:08: provision the missing same-org grants in THIS transaction. Placed after the
             // NAME_TAKEN return, which commits, so a refused name leaves none; any later throw rolls them back.
             await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
+            await lockInstructedActRows(tx, actWorkerIds, ctx.sessionId);
+            admission = await admitWorkerStaffAct(txCtx, app, args.instruction, admission, true);
             const workerIds = [plannedWorkerId, ...(freshTarget.reportingHeadId ? [freshTarget.reportingHeadId] : [])].sort();
             await tx.$queryRaw`SELECT id FROM workers WHERE id = ANY(${workerIds}::text[]) ORDER BY id FOR UPDATE`;
             const castWorkerRow = await tx.worker.create({
@@ -1192,11 +1220,11 @@ export const workerMutations = {
             });
             // #2766: the cast is recorded in its own transaction; a later refusal rolls it back with the worker.
             await appendWorkerCastEvent(tx, {
-              appId, actor: eventActor(ctx.userId), workerId: castWorkerRow.id, agentId: agent.id, role: castRole,
+              appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: castWorkerRow.id, agentId: agent.id, role: castRole,
               reportsToWorkerId: choice.kind === 'REPORTS_TO' ? freshTarget.reportingHeadId : null,
             });
             if (choice.kind !== 'UNSET') {
-              await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: eventActor(ctx.userId), setBy: 'cast' });
+              await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: staffingActActor(admission), setBy: 'cast' });
             }
             if (freshTarget.reportingHeadId) await reconcileStopCoverage(tx, appId, new Date());
             // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
@@ -1285,11 +1313,12 @@ export const workerMutations = {
    */
   retireWorker: async (
     _: unknown,
-    { workerRef }: { workerRef: string },
+    { workerRef, instruction }: { workerRef: string; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
-    await requireWorkerStaffAccess(ctx, app);
+    const initial = await admitWorkerStaffAct(ctx, app, instruction);
+    let admission = initial;
     // #1416 (R204): `retired_by` is a User.id that a merge rewrites to the survivor, so the retirer takes its own
     // shared user anchor (withAuthorizedTx adds the caller's) and is re-authorized on the transaction context: a
     // retirer merged away before this point is refused instead of stamping a deleted account. Lock order, as
@@ -1303,8 +1332,10 @@ export const workerMutations = {
     await withAuthorizedTx(
       ctx,
       anchors,
-      async (txCtx) => { await requireWorkerStaffAccess(txCtx, app); },
-      async (tx) => {
+      async (txCtx) => { admission = await admitWorkerStaffAct(txCtx, app, instruction, initial); },
+      async (tx, txCtx) => {
+        await lockStaffingAct(tx, app, admission, ctx.sessionId, [worker.id]);
+        admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
         const retired = await tx.worker.updateMany({
           where: { id: worker.id, retiredAt: null },
           data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
@@ -1313,8 +1344,8 @@ export const workerMutations = {
         // keep their value; the roster flags them (`reportsToRetired`) rather
         // than the platform silently clearing a structure someone set.
         if (retired.count > 0) {
-          await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: eventActor(ctx.userId), workerId: worker.id });
-          await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: eventActor(ctx.userId), setBy: 'retirement' });
+          await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
+          await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: staffingActActor(admission), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
           // with it, reason WORKER_RETIRED (history kept, never deleted).
           const actor = currentActor();
@@ -1329,6 +1360,8 @@ export const workerMutations = {
           // them). Nothing else is touched.
           await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
           await reconcileStopCoverage(tx, worker.appId, new Date());
+        } else {
+          await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.retire', workerId: worker.id });
         }
       },
       {
@@ -1882,11 +1915,11 @@ export const workerMutations = {
   /** #1162 / cor:dmo:050:11: only an unreferenced, released miscast is removable. */
   deleteWorker: async (
     _: unknown,
-    { workerRef, confirmNoExternalAttribution }: { workerRef: string; confirmNoExternalAttribution?: boolean | null },
+    { workerRef, confirmNoExternalAttribution, instruction }: { workerRef: string; confirmNoExternalAttribution?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, workerRef);
-    await requireWorkerStaffAccess(ctx, app);
+    const initial = await admitWorkerStaffAct(ctx, app, instruction);
     // Auth first: the negative attestation must not open a roster oracle.
     if (confirmNoExternalAttribution !== true) {
       throw new GraphQLError(
@@ -1900,6 +1933,18 @@ export const workerMutations = {
     if (await miscastHasReferences(ctx.db, worker)) throw refuse();
     try {
       await ctx.db.$transaction(async (tx) => {
+        // Preserve this door's SERIALIZABLE reference fence (including uninstalled Apps), while adding
+        // a live transaction principal and the same canonical caller/subject/grant bracket as the other doors.
+        await lockAuthorityAnchors(tx, [
+          { kind: 'app', id: app.id }, ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        ], 'shared');
+        await tx.$queryRaw`SELECT id FROM apps WHERE id = ${app.id} FOR SHARE`;
+        const txCtx = await liveTxContext(ctx, tx);
+        let admission = await admitWorkerStaffAct(txCtx, app, instruction, initial);
+        await lockStaffingAct(tx, app, admission, ctx.sessionId, [worker.id]);
+        admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
         // Re-read after acquiring the identity lock; stale pre-wait eligibility
         // never authorizes destruction. The private MVCC fence
         // and SERIALIZABLE census jointly reject pre-wait snapshots.
@@ -1914,7 +1959,7 @@ export const workerMutations = {
         await tx.worker.delete({ where: { id: worker.id } });
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
         // #2766: recorded last, so any refusal above leaves no event; the row is gone, the id stays in the history.
-        await appendWorkerDeletedEvent(tx, { appId: current.appId, actor: eventActor(ctx.userId), workerId: worker.id });
+        await appendWorkerDeletedEvent(tx, { appId: current.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
       // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
@@ -2132,83 +2177,99 @@ export const workerQueries = {
    * could mint anyway.
    */
   castWorkerPreview: async (_: unknown, args: CastArgs, ctx: Context) => {
-    const { appId, agent, workerRole, requestedName, choice, reportingHeadId } = await resolveCastTarget(
-      ctx,
-      args,
-    );
-    let name: string;
-    if (requestedName) {
-      // Taken-ness judged by the DB's lower() — the constraint's own
-      // expression (see takenWorkersByName).
-      const taken = await takenWorkersByName(ctx.db, appId, [requestedName]);
-      if (taken.has(requestedName)) {
-        throw nameTaken(requestedName, appId);
-      }
-      await assertWorkerNameNotConfusable(ctx.db, appId, requestedName);
-      name = requestedName;
-    } else {
-      // #1050: same refusal as castWorker, and deliberately the SAME code —
-      // the preview's whole contract is to answer "what would the cast do",
-      // so a nameless preview must fail exactly where the cast would.
-      throw new GraphQLError(
-        'Pass a name for the worker — a name is permanent within the App (cor:agt:020:02), so it is chosen, never derived.',
-        { extensions: { code: 'WORKER_NAME_REQUIRED', ...(workerRole ? { role: workerRole } : {}) } },
+    const planned = await resolveCastTarget(ctx, args);
+    const app = planned.app;
+    const anchors: AuthorityAnchor[] = [{ kind: 'app', id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : [])];
+    let admission: StaffActAdmission;
+    return withAuthorizedTx(ctx, anchors, async txCtx => {
+      admission = await admitWorkerStaffAct(txCtx, app, args.instruction, planned.admission);
+    }, async (tx, txCtx) => {
+      const ctx = txCtx;
+      await lockStaffingAct(tx, app, admission, ctx.sessionId);
+      admission = await admitWorkerStaffAct(txCtx, app, args.instruction, admission, true);
+
+      const { appId, agent, workerRole, requestedName, choice, reportingHeadId } = await resolveCastTarget(
+        ctx,
+        args,
+        planned.agent.id,
       );
-    }
+      let name: string;
+      if (requestedName) {
+        // Taken-ness judged by the DB's lower() — the constraint's own
+        // expression (see takenWorkersByName).
+        const taken = await takenWorkersByName(ctx.db, appId, [requestedName]);
+        if (taken.has(requestedName)) {
+          throw nameTaken(requestedName, appId);
+        }
+        await assertWorkerNameNotConfusable(ctx.db, appId, requestedName);
+        name = requestedName;
+      } else {
+        // #1050: same refusal as castWorker, and deliberately the SAME code —
+        // the preview's whole contract is to answer "what would the cast do",
+        // so a nameless preview must fail exactly where the cast would.
+        throw new GraphQLError(
+          'Pass a name for the worker — a name is permanent within the App (cor:agt:020:02), so it is chosen, never derived.',
+          { extensions: { code: 'WORKER_NAME_REQUIRED', ...(workerRole ? { role: workerRole } : {}) } },
+        );
+      }
 
-    const previewRole = workerRole;
-    // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
-    const values = withWorkerSignatures({
-      'worker.name': name,
-      'worker.role': previewRole,
-      'agent.name': agent.name,
-      'worker.reportsTo.name': '',
-      'worker.signature': '',
-      'worker.trailer': '',
-      'worker.url': '',
-      'session.llmModel': '',
-    }, WORKER_SIGNATURE_DEFAULTS);
-    // #2047 (S10): the preview shows what a bind would be served now (no worker pointer exists yet); a prompt that could not
-    // be served previews as none rather than failing a cast it does not gate. #2712: there is no other text to preview.
-    let servedTemplate: string | null = null;
-    try {
-      servedTemplate = (await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId, agent: { id: agent.id, name: agent.name } })).content;
-    } catch (err) {
-      const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
-      if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
-      servedTemplate = null;
-    }
-    const prompt = servedTemplate ? applyPlatformVariables(servedTemplate, values) : null;
+      const previewRole = workerRole;
+      // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
+      const values = withWorkerSignatures({
+        'worker.name': name,
+        'worker.role': previewRole,
+        'agent.name': agent.name,
+        'worker.reportsTo.name': '',
+        'worker.signature': '',
+        'worker.trailer': '',
+        'worker.url': '',
+        'session.llmModel': '',
+      }, WORKER_SIGNATURE_DEFAULTS);
+      // #2047 (S10): the preview shows what a bind would be served now (no worker pointer exists yet); a prompt that could not
+      // be served previews as none rather than failing a cast it does not gate. #2712: there is no other text to preview.
+      let servedTemplate: string | null = null;
+      try {
+        servedTemplate = (await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId, agent: { id: agent.id, name: agent.name } })).content;
+      } catch (err) {
+        const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+        if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
+        servedTemplate = null;
+      }
+      const prompt = servedTemplate ? applyPlatformVariables(servedTemplate, values) : null;
 
-    // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
-    // what is committed now, takes no lock and writes nothing, so a cast may still differ if the App changes.
-    let tickers;
-    try {
-      tickers = await planGeneratedTickers(ctx.db as unknown as Prisma.TransactionClient, { appId, agentId: agent.id, workerName: name });
-    } catch (e) {
-      throw generatedTickerRefusal(e) ?? e;
-    }
+      // #2024 (S8): the tickers this cast would create, validated by the cast's own planner. Non-reserving: it reads
+      // what is committed now without reserving a worker or ticker, so a cast may still differ if the App changes.
+      let tickers;
+      try {
+        tickers = await planGeneratedTickers(ctx.db as unknown as Prisma.TransactionClient, { appId, agentId: agent.id, workerName: name });
+      } catch (e) {
+        throw generatedTickerRefusal(e) ?? e;
+      }
 
-    return {
-      name,
-      role: workerRole,
-      agentId: agent.id,
-      agentName: agent.name,
-      prompt,
-      teamPlacement: choice.kind,
-      reportsToWorkerId: reportingHeadId,
-      // Deprecated (#2049 S12): always null; kept so older clients' queries validate.
-      hasNamePlaceholder: null,
-      tickers: tickers.map((t) => ({
-        name: t.name,
-        templateId: t.templateId,
-        templateRevision: t.templateRevision,
-        requestedCadenceSeconds: t.requestedCadenceSeconds,
-        effectiveCadenceSeconds: t.effectiveCadenceSeconds,
-        relevance: t.relevance,
-        reasons: t.reasons.map(reasonEnum),
-      })),
-    };
+      await appendStaffingInstructionClaim(tx, { appId, admission, operation: 'worker.preview', agentId: agent.id });
+      return {
+        name,
+        role: workerRole,
+        agentId: agent.id,
+        agentName: agent.name,
+        prompt,
+        teamPlacement: choice.kind,
+        reportsToWorkerId: reportingHeadId,
+        // Deprecated (#2049 S12): always null; kept so older clients' queries validate.
+        hasNamePlaceholder: null,
+        tickers: tickers.map((t) => ({
+          name: t.name,
+          templateId: t.templateId,
+          templateRevision: t.templateRevision,
+          requestedCadenceSeconds: t.requestedCadenceSeconds,
+          effectiveCadenceSeconds: t.effectiveCadenceSeconds,
+          relevance: t.relevance,
+          reasons: t.reasons.map(reasonEnum),
+        })),
+      };
+    });
   },
 };
 

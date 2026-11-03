@@ -1,4 +1,4 @@
-import type { ActAdmission, ActInstruction } from '../auth/instructedAct.js';
+import type { ActAdmission, ActInstruction, StaffActAdmission } from '../auth/instructedAct.js';
 import type { FindingCounts } from './findings.js';
 /**
  * #1705 — the application writer of `agent_team_events` (cor:agt:050:11).
@@ -479,12 +479,12 @@ export async function appendWorkerCastingEvent(
  * for a person). Ids and role words only: no name, email, signature, message text or key.
  */
 export const STAFFING_EVENT_TYPES = [
-  'member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted',
+  'member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted', 'worker.instruction-claimed',
 ] as const;
 export type StaffingEventType = (typeof STAFFING_EVENT_TYPES)[number];
 
-/** The census (`miscastHasReferences`) treats these on the subject worker as the cast's own bookkeeping, not use. */
-export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired'] as const;
+/** The census treats these on the subject as bookkeeping, not use. Instruction-claim subjects occur only for no-op retirement. */
+export const SELF_BOOKKEEPING_EVENT_TYPES = ['worker.cast', 'worker.retired', 'worker.instruction-claimed'] as const;
 
 async function appendStaffingEvent(
   tx: Prisma.TransactionClient,
@@ -506,49 +506,49 @@ async function appendStaffingEvent(
 /** `member.added` (a new membership) or `member.role-changed` (an existing member's role changed); nothing for an unchanged role. */
 export async function appendMemberSetEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; userId: string; priorRole: string | null; role: string },
+  args: { appId: string; actor: EventActor; userId: string; priorRole: string | null; role: string; instruction?: ActInstruction },
 ): Promise<void> {
   if (args.priorRole === args.role) return;
   if (args.priorRole === null) {
-    return appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.added', payload: { userId: args.userId, role: args.role } });
+    return appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.added', payload: { userId: args.userId, role: args.role, ...instructionPayload(args.instruction) } });
   }
   return appendStaffingEvent(tx, {
     appId: args.appId, actor: args.actor, type: 'member.role-changed',
-    payload: { userId: args.userId, fromRole: args.priorRole, toRole: args.role },
+    payload: { userId: args.userId, fromRole: args.priorRole, toRole: args.role, ...instructionPayload(args.instruction) },
   });
 }
 
 export async function appendMemberRemovedEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; userId: string; role: string },
+  args: { appId: string; actor: EventActor; userId: string; role: string; instruction?: ActInstruction },
 ): Promise<void> {
-  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.removed', payload: { userId: args.userId, role: args.role } });
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'member.removed', payload: { userId: args.userId, role: args.role, ...instructionPayload(args.instruction) } });
 }
 
 export async function appendWorkerCastEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string; agentId: string; role: string | null; reportsToWorkerId: string | null },
+  args: { appId: string; actor: EventActor; workerId: string; agentId: string; role: string | null; reportsToWorkerId: string | null; instruction?: ActInstruction },
 ): Promise<void> {
   await appendStaffingEvent(tx, {
     appId: args.appId, actor: args.actor, type: 'worker.cast', subjectWorkerId: args.workerId,
-    payload: { workerId: args.workerId, agentId: args.agentId, role: args.role, reportsToWorkerId: args.reportsToWorkerId },
+    payload: { workerId: args.workerId, agentId: args.agentId, role: args.role, reportsToWorkerId: args.reportsToWorkerId, ...instructionPayload(args.instruction) },
   });
 }
 
 export async function appendWorkerRetiredEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string },
+  args: { appId: string; actor: EventActor; workerId: string; instruction?: ActInstruction },
 ): Promise<void> {
-  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.retired', subjectWorkerId: args.workerId, payload: { workerId: args.workerId } });
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.retired', subjectWorkerId: args.workerId, payload: { workerId: args.workerId, ...instructionPayload(args.instruction) } });
 }
 
 export async function appendWorkerDeletedEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; actor: EventActor; workerId: string },
+  args: { appId: string; actor: EventActor; workerId: string; instruction?: ActInstruction },
 ): Promise<void> {
   // The id rides the payload only: a `subject_worker_id` naming a worker that no longer exists is refused by the
   // worker-reference fence (#1162), and this event is written after the row is gone.
-  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId } });
+  await appendStaffingEvent(tx, { appId: args.appId, actor: args.actor, type: 'worker.deleted', payload: { workerId: args.workerId, ...instructionPayload(args.instruction) } });
 }
 
 // ── #3125 S1 (V43): who changed the App's properties ─────────────────────
@@ -609,6 +609,35 @@ export async function appendWorkerSignatureInstructionEvent(
  await tx.agentTeamEvent.create({data:{appId:args.appId,type:'worker.signature-changed',subjectWorkerId:args.workerId,
   actorUserId:a.userId,actorWorkerId:a.workerId,actorAgentId:a.agentId,
   payload:{fields:args.fields.sort(),instruction:{kind:a.instruction.kind,ref:a.instruction.ref}}}});
+}
+
+/** #3308: explicit persisted admission supplies row-only session attribution too. */
+export function staffingActActor(admission: StaffActAdmission): EventActor {
+  return { userId: admission.userId, workerId: admission.kind === 'person' ? null : admission.workerId,
+    agentId: admission.kind === 'person' ? null : admission.agentId };
+}
+export function staffingInstruction(admission: StaffActAdmission): ActInstruction | undefined {
+  return admission.kind === 'instructed-worker' ? admission.instruction : undefined;
+}
+function instructionPayload(instruction?: ActInstruction): Prisma.InputJsonObject {
+  return instruction ? { instruction: { kind: instruction.kind, ref: instruction.ref } } : {};
+}
+/** One ids-only claim on an admitted instructed preview/no-op; never pretend the state changed (#3308/0111). */
+export async function appendStaffingInstructionClaim(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; admission: StaffActAdmission } & (
+    | { operation: 'worker.retire'; workerId: string; userId?: never; agentId?: never }
+    | { operation: 'worker.preview'; agentId: string; workerId?: never; userId?: never }
+    | { operation: 'member.ensure' | 'member.remove'; userId: string; workerId?: never; agentId?: never }
+  ),
+): Promise<void> {
+  const instruction = staffingInstruction(args.admission);
+  if (!instruction) return;
+  await appendStaffingEvent(tx, { appId: args.appId, actor: staffingActActor(args.admission),
+    type: 'worker.instruction-claimed', subjectWorkerId: args.operation === 'worker.retire' ? args.workerId : undefined,
+    payload: { operation: args.operation, ...(args.operation === 'worker.retire' ? { workerId: args.workerId } : {}),
+      ...(args.userId ? { userId: args.userId } : {}), ...(args.agentId ? { agentId: args.agentId } : {}),
+      ...instructionPayload(instruction) } });
 }
 
 /** What an instructed credential act was: a revoke, or a list call (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6). */
