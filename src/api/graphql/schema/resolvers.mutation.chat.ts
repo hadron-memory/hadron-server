@@ -444,6 +444,12 @@ export const chatMutations = {
         targetMemoryId = session?.memoryId &&
           (await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId)).includes(session.memoryId)
           ? session.memoryId : null;
+        // #2895 (Vera, option a): an Agent's system memory is the Agent's own definition, not a chat space. The read
+        // scope above keeps it (reads are unchanged), but no API path writes it into Session.memoryId, so a chat
+        // never lands in it. Refused through the same null as any unreadable target, so nothing is disclosed.
+        if (targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: targetMemoryId }, select: { id: true } })) {
+          targetMemoryId = null;
+        }
       } else if (ctx.userId) {
         const existing = await ctx.db.memory.findFirst({
           where: {
