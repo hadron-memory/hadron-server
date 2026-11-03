@@ -186,13 +186,13 @@ it('pages tasks without dropping equal timestamps and carries the bounded window
 });
 it('includes live work plus ended work in the half-open window, not unrelated Apps or AT0', async () => {
   await enable();
-  const data = (title: string, status: string, extra = {}) => ({ appId, title, status, ownerUserId: manager, ...extra });
+  const data = (title: string, status: string, extra = {}) => ({ appId, title, status, ownerUserId: manager, ...(status === 'finished' ? { startedAt: new Date('2026-10-19T00:00:00Z'), assignedAt: new Date('2026-10-19T00:00:00Z'), assigneeUserId: manager, resultOutcome: 'succeeded' } : {}), ...extra });
   await db.agentTask.createMany({ data: [
     data('finished-in', 'finished', { finishedAt: new Date(WINDOW.since) }),
     data('finished-end', 'finished', { finishedAt: new Date(WINDOW.until) }),
     data('cancelled-in', 'cancelled', { cancelledAt: new Date('2026-10-20T12:00:00Z') }),
     data('foreign', 'pending', { appId: otherAppId }),
-    data('AT0', 'backlog', { handle: 'AT0' }),
+    data('No project', 'backlog', { handle: 'AT0', taskNumber: 0n }),
   ] });
   const result = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW) as any;
   expect(result.tasks.map((t: any) => t.title).sort()).toEqual(['Existing task', 'cancelled-in', 'finished-in'].sort());
@@ -204,4 +204,13 @@ it.each([
 ])('refuses invalid UTC windows and cursors with one typed code: %j', async args => {
   await enable();
   await denied(snapshotTool().execute(toolCtx(await mintRun()), args), 'TEAM_SNAPSHOT_INVALID_ARGUMENT');
+});
+
+it('the existing teamRoster read shares the run arm, while host and event capabilities stay closed', async () => {
+  await enable();
+  const principal = runContext(db, await mintRun());
+  const roster = await Q.teamRoster({}, { appRef: appId }, principal);
+  expect(roster.workers.map((w: any) => w.workerId)).toContain(workerId);
+  await denied(Q.teamRoster({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
+  await denied(Q.agentTeamEvents({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
 });
