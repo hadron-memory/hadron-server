@@ -208,9 +208,13 @@ describe('#1903 / #1952 roster liveness probe', () => {
         tx.$queryRaw<Record<string, unknown>[]>(Prisma.sql`SELECT * FROM (${sql}) r ORDER BY r."workerId"`);
       const shippedPlan = await explain(tx, shipped);
       const shippedRows = await read(shipped);
+      // Steered, the incident shape must have left the walk BEFORE the drop: this is what proves the steer took
+      // (the red pin shows it deterministic). Without it, deleting the steer leaves every assertion green.
+      const steeredPlan = steered ? await explain(tx, incident) : null;
       // The incident shape is read where it MUST walk created_at (#2577), not where the planner happens to.
       await removeSessionKeyedIndexes(tx);
       return {
+        steeredPlan,
         shippedPlan,
         incidentPlan: await explain(tx, incident),
         shipped: shippedRows,
@@ -218,6 +222,7 @@ describe('#1903 / #1952 roster liveness probe', () => {
       };
     });
 
+    if (steered) expect(result.steeredPlan, withPlan(result.steeredPlan!)).not.toContain(WALK);
     // Two genuinely different plans were compared (by construction for the incident's, #2577)...
     expect(result.incidentPlan, withPlan(result.incidentPlan)).toContain(WALK);
     expect(result.shippedPlan, withPlan(result.shippedPlan)).not.toContain(WALK);
