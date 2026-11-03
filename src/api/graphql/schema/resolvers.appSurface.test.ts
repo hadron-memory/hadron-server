@@ -550,7 +550,7 @@ describe('memories — App-key orgId', () => {
     const b = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id }));
     expect(a.items.map((m: { id: string }) => m.id)).toContain(internal.id);
     expect(b.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
-    // #1376: the org memory the shared Agent's item links is reached through an App member, not a bare key.
+    // Org authority is independent of App membership; an item does not admit a bare key or user.
     expect(b.items.map((m: { id: string }) => m.id)).not.toContain(memoryId);
     const member = await db.user.create({ data: { githubId: 7782, githubUsername: 'memory-list-member', roles: ['READER'] } });
     await createDbAppMember(db, appB.id, member.id);
@@ -562,7 +562,7 @@ describe('memories — App-key orgId', () => {
   it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
     const { app } = await createDbAppWithKey(db, 'mm-appkey', orgId);
     await db.appAgent.create({ data: { appId: app.id, agentId } });
-    // #1376: a bare key is not admitted to the org memory the Agent's item links (an App member is); what it
+    // A bare key and an App-only member gain no org knowledge from the item; what the key
     // still reaches is its own App's scoped memory, so the org gate is proven against that one.
     const own = await db.memory.create({
       data: {
@@ -578,7 +578,7 @@ describe('memories — App-key orgId', () => {
     expect(memberAll.items.some((m: { id: string }) => m.id === memoryId)).toBe(false);
     const appCtx = ctx({ appId: app.id });
 
-    // No orgId → the App's memories (its own scoped memory; the item's org memory only for a member).
+    // No orgId: own App-class memory remains visible; item-only org knowledge does not.
     const all = await resolvers.Query.memories({}, {}, appCtx);
     expect(all.items.some((m: { id: string }) => m.id === own.id)).toBe(true);
     expect(all.items.some((m: { id: string }) => m.id === memoryId)).toBe(false);
@@ -815,7 +815,7 @@ describe('appNodes', () => {
     expect(locs).not.toContain('org.test.node');
     // …and the team space…
     expect(locs).toContain('chats:team');
-    // …but NOT the second installed agent, which the MCP fold never grants.
+    // The secondary Agent item also supplies no independent knowledge authority.
     expect(locs).not.toContain('secondary.node');
 
     // And an ORG member's scope is untouched — they still see everything the

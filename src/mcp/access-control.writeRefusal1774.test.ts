@@ -70,6 +70,16 @@ describe('#1774 explainWriteRefusal names the cause for a caller who can read', 
     expect(await why(auth('reader'), 'scoped')).toBe('');
   });
 
+  it('keeps a helpful refusal for independently readable knowledge with a read item', async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), urn: 'w1774.example:read-item', name: 'read-item', organizationId: org.id } });
+    await db.appAgent.create({ data: { appId, agentId: agent.id } });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: mem.km.id, role: 'read' } });
+    await db.appMember.create({ data: { appId, userId: users.reader, role: 'member' } });
+    expect(await canReadMemory(db, auth('reader'), mem.km.id)).toBe(true);
+    expect(await canWriteToMemory(db, auth('reader'), mem.km.id)).toBe(false);
+    expect(await why(auth('reader'), 'km')).toMatch(/CONTRIBUTOR/);
+  });
+
   it('group memory: names the MemoryMember writer/owner grant', async () => {
     expect(await why(auth('reader'), 'grp')).toMatch(/MemoryMember writer or owner/);
   });

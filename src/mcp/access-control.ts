@@ -105,23 +105,46 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 /** #2190: which installed Agent put a memory into an App's access map, and whether as its system memory. */
 export type AgentProvenance = { agentId: string; system: boolean };
 
+type AppMemoryAccessOptions = {
+  includeTeamSpace?: boolean;
+  /** #3233: runs obtain system definitions through the shared all-install own-definition fold instead. */
+  includeSystemMemories?: boolean;
+  callerUserId?: string | null;
+  allAgents?: boolean;
+  memberAdmitted?: boolean;
+  /** #1376: the principal is a bare App key (no user, not an AppRun): the Agent's items admit it nothing. */
+  credentialOnly?: boolean;
+  /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
+  provenance?: Map<string, AgentProvenance[]>;
+};
+type ItemUserAccessLoader = () => Promise<ReadonlyMap<string, string>>;
+
+/** Known users always receive the independent item ceiling, including direct callers. */
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
-  opts: {
-    includeTeamSpace?: boolean;
-    /** #3233: runs obtain system definitions through the shared all-install own-definition fold instead. */
-    includeSystemMemories?: boolean;
-    callerUserId?: string | null;
-    allAgents?: boolean;
-    memberAdmitted?: boolean;
-    /** #1376: the principal is a bare App key (no user, not an AppRun): the Agent's items admit it nothing. */
-    credentialOnly?: boolean;
-    /** #3280: optional independent-user ceiling for items only, never systems/team space. */
-    itemUserAccess?: ReadonlyMap<string, string> | (() => Promise<ReadonlyMap<string, string>>);
-    /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
-    provenance?: Map<string, AgentProvenance[]>;
-  } = {},
+  opts: AppMemoryAccessOptions & { loadItemUserAccess?: ItemUserAccessLoader } = {},
+): Promise<Map<string, string>> {
+  const loadItemUserAccess = opts.loadItemUserAccess ?? (opts.callerUserId
+    ? () => independentUserItemAccess(db, opts.callerUserId!)
+    : undefined);
+  return buildAppMemoryMap(db, appId, opts, loadItemUserAccess);
+}
+
+/** Candidate/provenance inventory only: callers must independently authorize every returned memory. */
+export async function getAppMemoryCandidates(
+  db: PrismaClient,
+  appId: string,
+  opts: AppMemoryAccessOptions = {},
+): Promise<Map<string, string>> {
+  return buildAppMemoryMap(db, appId, opts);
+}
+
+async function buildAppMemoryMap(
+  db: PrismaClient,
+  appId: string,
+  opts: AppMemoryAccessOptions,
+  loadItemUserAccess?: ItemUserAccessLoader,
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -177,10 +200,10 @@ export async function getAppMemoryAccess(
   const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
   // No item can contribute without a licensed live Agent carrying one. Keep
   // system/team-only reads on their existing query budget (#3048/#2608).
-  const itemUserAccess = typeof opts.itemUserAccess === 'function'
+  const itemUserAccess = loadItemUserAccess
     ? (agents.some(agent => licensedAgentIds.has(agent.id) && agent.memoryItems.length > 0)
-      ? await opts.itemUserAccess() : new Map<string, string>())
-    : opts.itemUserAccess;
+      ? await loadItemUserAccess() : new Map<string, string>())
+    : undefined;
   const access = new Map<string, string>();
   for (const install of app.appAgents) {
     const agentAccess = getPrimaryAgentAccess(
@@ -495,7 +518,7 @@ export async function getPrincipalAppMemoryAccess(
   // authority through App membership. Compute the same independent-user
   // ceiling once, including when an unselected user folds several Apps.
   let independentItems: Promise<Map<string, string>> | undefined;
-  const itemUserAccess = principal.userId
+  const loadItemUserAccess = principal.userId
     ? () => independentItems ??= independentUserItemAccess(db, principal.userId!)
     : undefined;
 
@@ -511,14 +534,14 @@ export async function getPrincipalAppMemoryAccess(
         // #3278 / cor:dmo:050:09: an item never admits a userless principal, including an AppRun.
         // Runs keep installed system memories below and explicit read/write grants at their own gates.
         credentialOnly: !principal.userId,
-        itemUserAccess,
+        loadItemUserAccess,
       }),
     });
   } else if (principal.userId) {
     const apps = await resolveUserApps(principal.userId, db);
     const maps = await Promise.all(
       apps.map((app) => getAppMemoryAccess(db, app.id, {
-        callerUserId: principal.userId, memberAdmitted: !principal.impersonation, itemUserAccess,
+        callerUserId: principal.userId, memberAdmitted: !principal.impersonation, loadItemUserAccess,
       })),
     );
     apps.forEach((app, i) => folds.push({ appId: app.id, map: maps[i] }));

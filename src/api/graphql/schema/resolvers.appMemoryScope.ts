@@ -18,7 +18,7 @@
 import { GraphQLError } from 'graphql';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { effectiveScope, type EffectiveScope } from '../../../lib/effectiveSystemMemory.js';
-import { getAppMemoryAccess, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
+import { getAppMemoryCandidates, filterReadableMemoryIds, type AgentProvenance } from '../../../mcp/access-control.js';
 import { type AuthContext } from '../../../middleware/auth.js';
 import {
   clampListTake,
@@ -128,7 +128,7 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
   // narrowed, because only the join row was soft-deleted.
   // #2190: the fold also reports which installed Agent put each memory here.
   const provenance = new Map<string, AgentProvenance[]>();
-  const installedAccess = await getAppMemoryAccess(ctx.db, resolvedAppId, {
+  const installedAccess = await getAppMemoryCandidates(ctx.db, resolvedAppId, {
     allAgents: orgAuthorized, includeTeamSpace: false, callerUserId: ctx.userId ?? null, provenance,
   });
   // #1647: carry impersonation into the read filter, or a support session regains direct-owner identity privilege.
