@@ -251,6 +251,13 @@ describe('#2913 connectionFlow', () => {
     }
   });
 
+  it('the cascading foreign keys of connection_flows are indexed (#3303: a user or org delete must not scan the table)', async () => {
+    const idx = await db.$queryRaw<{ indexdef: string }[]>`SELECT indexdef FROM pg_indexes WHERE tablename = 'connection_flows'`;
+    const defs = idx.map((r) => r.indexdef).join('\n');
+    expect(defs).toContain('(user_id)');
+    expect(defs).toContain('(organization_id)');
+  });
+
   it('a reconnect whose settle rolls back keeps the old tool connection (its deletion waits for the commit)', async () => {
     await db.exchangeConnection.create({
       data: {
