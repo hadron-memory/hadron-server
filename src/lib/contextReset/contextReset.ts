@@ -553,6 +553,9 @@ export async function registerContextResetRecovery(
     const loc = `sheds:auto-${clock!.stamp}`;
     // Serialize this exact address against other checkpoint calls and check tombstones too.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${worker.memoryId + ':' + loc}, 3276))::text`;
+    // Memory/address lock waits may outlive the initially checked claim. No write uses that stale clock.
+    const writeNow = new Date();
+    if (claimLapsed(r, writeNow)) return endReset(tx,r,'CLAIM_LAPSED',writeNow).then(e=>step(e,'CLAIM_LAPSED'));
     if (await tx.node.findUnique({where:{loc_memoryId:{loc,memoryId:worker.memoryId}},select:{id:true}})) {
       throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
     }
