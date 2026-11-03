@@ -2,7 +2,7 @@ import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { appendMemberRemovedEvent, appendMemberSetEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
+import { requireAppKeyIssuer, requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -204,8 +204,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, appRef);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint, with the same audience.
-      await requireAppKeyManager(ctx, existing);
+      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint. #3277: person-only (cor:dmo:050:12, ruling 0098 A).
+      await requireAppKeyIssuer(ctx, existing, 'app-key.rotate');
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
       return withAuthorizedTx(
@@ -218,7 +218,7 @@ export const appMutations = {
           if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
             throw new Error('App ownership changed; retry key regeneration');
           }
-          await requireAppKeyManager(txCtx, current);
+          await requireAppKeyIssuer(txCtx, current, 'app-key.rotate');
         },
         async (tx) => {
           // Revocation and replacement are one atomic authority change.
@@ -1334,7 +1334,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireAppKeyManager(ctx, app);
+      // #3277: minting is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0098 A).
+      await requireAppKeyIssuer(ctx, app, 'app-key.mint');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -1349,7 +1350,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry key creation');
           }
-          await requireAppKeyManager(txCtx, current);
+          await requireAppKeyIssuer(txCtx, current, 'app-key.mint');
         },
         (tx) => tx.appKey.create({
           data: {
