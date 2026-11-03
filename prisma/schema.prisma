@@ -2871,6 +2871,8 @@ model ConnectionFlow {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([startedAt])
+  @@index([userId])
+  @@index([organizationId])
   @@map("connection_flows")
 }
 

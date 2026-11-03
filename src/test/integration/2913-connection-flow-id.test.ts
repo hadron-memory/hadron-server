@@ -229,6 +229,35 @@ describe('#2913 connectionFlow', () => {
     expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'state_expired' });
   });
 
+  it('the expiry sweep leaves a LIVE flow alone: only the expired state settles (#3303 E3)', async () => {
+    const expired = await start();
+    await confirmConnect(expired.authorizeUrl);
+    const live = await start();
+    const third = await start();
+    const real = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(real + 11 * 60 * 1000);
+    try {
+      // The live flow's state is minted 11 minutes on, so it is well inside its own window when the third confirm sweeps.
+      await confirmConnect(live.authorizeUrl);
+      await confirmConnect(third.authorizeUrl);
+    } finally {
+      spy.mockRestore();
+    }
+    const a = await gql(FLOW(expired.flowId), adminId);
+    expect(a.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'state_expired' });
+    for (const f of [live, third]) {
+      const r = await gql(FLOW(f.flowId), adminId);
+      expect(r.data!.connectionFlow).toEqual({ status: 'PENDING', connectionId: null, failureCode: null });
+    }
+  });
+
+  it('the cascading foreign keys of connection_flows are indexed (#3303: a user or org delete must not scan the table)', async () => {
+    const idx = await db.$queryRaw<{ indexdef: string }[]>`SELECT indexdef FROM pg_indexes WHERE tablename = 'connection_flows'`;
+    const defs = idx.map((r) => r.indexdef).join('\n');
+    expect(defs).toContain('(user_id)');
+    expect(defs).toContain('(organization_id)');
+  });
+
   it('a reconnect whose settle rolls back keeps the old tool connection (its deletion waits for the commit)', async () => {
     await db.exchangeConnection.create({
       data: {
