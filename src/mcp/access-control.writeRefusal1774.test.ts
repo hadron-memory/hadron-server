@@ -58,14 +58,16 @@ const auth = (who: string) => ({ userId: users[who], roles: ['READER'] }) as nev
 const why = (a: never, key: string) => explainWriteRefusal(db, a, mem[key].id);
 
 describe('#1774 explainWriteRefusal names the cause for a caller who can read', () => {
-  it('app-scoped memory, caller already in the App with a read grant: says the missing piece is a write grant', async () => {
-    // A reader-only participant: the App's agent carries the memory with role "read".
+  it('conceals the cause for App-scoped knowledge admitted only by an item (#3305)', async () => {
     const agent = await db.agent.create({ data: { id: generateId(), urn: 'w1774.example:eng', name: 'eng', organizationId: org.id } });
     await db.appAgent.create({ data: { appId, agentId: agent.id } });
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: mem.scoped.id, role: 'read' } });
     await db.appMember.create({ data: { appId, userId: users.reader, role: 'member' } });
-    expect(await why(auth('reader'), 'scoped')).toMatch(/participate in this memory's App but hold only a read grant[^.]*write grant/);
-    expect(await why(auth('reader'), 'scoped')).not.toMatch(/needs participation/);
+    // Org READER excludes App-internal knowledge, and App membership is not
+    // independent item authority. A refusal must not disclose its cause.
+    expect(await canReadMemory(db, auth('reader'), mem.scoped.id)).toBe(false);
+    expect(await canWriteToMemory(db, auth('reader'), mem.scoped.id)).toBe(false);
+    expect(await why(auth('reader'), 'scoped')).toBe('');
   });
 
   it('group memory: names the MemoryMember writer/owner grant', async () => {

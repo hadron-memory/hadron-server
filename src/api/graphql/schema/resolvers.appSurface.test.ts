@@ -486,12 +486,12 @@ describe('memories — App-key orgId', () => {
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
-    // #1376: a bare key no longer reaches org memory through an item; an App member (a user behind the key,
-    // not an org member) keeps the fold, which is what the malformed-role cap applies to.
-    const member = await db.user.create({ data: { githubId: 7781, githubUsername: 'invalid-role-member', roles: ['READER'] } });
-    await createDbAppMember(db, app.id, member.id);
+    await db.memory.update({ where: { id: memoryId }, data: { visibility: 'PUBLIC' } });
+    await db.memory.update({ where: { id: invalid.id }, data: { visibility: 'PUBLIC' } });
+    // The unchanged bare-key PUBLIC fold must still reject malformed roles.
+    // A session's independent PUBLIC path would bypass that item filter.
     const page = await resolvers.Query.memories(
-      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id, userId: member.id }),
+      {}, { filter: { memoryClasses: ['knowledge'] } }, ctx({ appId: app.id }),
     );
     const ids = page.items.map((m: { id: string }) => m.id);
     expect(ids).toContain(memoryId);
@@ -556,7 +556,7 @@ describe('memories — App-key orgId', () => {
     await createDbAppMember(db, appB.id, member.id);
     const bm = await resolvers.Query.memories({}, {}, ctx({ appId: appB.id, userId: member.id }));
     expect(bm.items.map((m: { id: string }) => m.id)).not.toContain(internal.id);
-    expect(bm.items.map((m: { id: string }) => m.id)).toContain(memoryId);
+    expect(bm.items.map((m: { id: string }) => m.id)).not.toContain(memoryId);
   });
 
   it('scopes to the App own org: match → its memories, any other org → empty page', async () => {
@@ -575,7 +575,7 @@ describe('memories — App-key orgId', () => {
     const member = await db.user.create({ data: { githubId: 7783, githubUsername: 'mm-appkey-member', roles: ['READER'] } });
     await createDbAppMember(db, app.id, member.id);
     const memberAll = await resolvers.Query.memories({}, {}, ctx({ appId: app.id, userId: member.id }));
-    expect(memberAll.items.some((m: { id: string }) => m.id === memoryId)).toBe(true);
+    expect(memberAll.items.some((m: { id: string }) => m.id === memoryId)).toBe(false);
     const appCtx = ctx({ appId: app.id });
 
     // No orgId → the App's memories (its own scoped memory; the item's org memory only for a member).
@@ -729,8 +729,8 @@ describe('appNodes', () => {
     const locs = (await resolvers.Query.appNodes({}, { appRef: app.id }, ctx)).map(
       (n: { loc: string }) => n.loc,
     );
-    // The installed agent's memories, as the MCP map already grants them...
-    expect(locs).toContain('org.test.node');
+    // #3305: the external member has no independent org knowledge authority...
+    expect(locs).not.toContain('org.test.node');
     // ...and the team space, because they ARE a participant.
     expect(locs).toContain('chats:team');
   });
@@ -811,8 +811,8 @@ describe('appNodes', () => {
       {}, { appRef: app.id }, { db, roles: ['READER'], userId: outsider.id } as Context,
     )).map((n: { loc: string }) => n.loc);
 
-    // What the platform grants them elsewhere: the primary agent's memory…
-    expect(locs).toContain('org.test.node');
+    // #3305: even the primary item grants no independent knowledge authority…
+    expect(locs).not.toContain('org.test.node');
     // …and the team space…
     expect(locs).toContain('chats:team');
     // …but NOT the second installed agent, which the MCP fold never grants.

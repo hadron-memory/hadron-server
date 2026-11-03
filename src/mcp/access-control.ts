@@ -117,7 +117,7 @@ export async function getAppMemoryAccess(
     /** #1376: the principal is a bare App key (no user, not an AppRun): the Agent's items admit it nothing. */
     credentialOnly?: boolean;
     /** #3280: optional independent-user ceiling for items only, never systems/team space. */
-    itemUserAccess?: ReadonlyMap<string, string>;
+    itemUserAccess?: ReadonlyMap<string, string> | (() => Promise<ReadonlyMap<string, string>>);
     /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
     provenance?: Map<string, AgentProvenance[]>;
   } = {},
@@ -174,12 +174,18 @@ export async function getAppMemoryAccess(
       })
     : [];
   const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
+  // No item can contribute without a licensed live Agent carrying one. Keep
+  // system/team-only reads on their existing query budget (#3048/#2608).
+  const itemUserAccess = typeof opts.itemUserAccess === 'function'
+    ? (agents.some(agent => licensedAgentIds.has(agent.id) && agent.memoryItems.length > 0)
+      ? await opts.itemUserAccess() : new Map<string, string>())
+    : opts.itemUserAccess;
   const access = new Map<string, string>();
   for (const install of app.appAgents) {
     const agentAccess = getPrimaryAgentAccess(
       { ...app, appAgents: [install] }, licensedAgentIds, opts.includeSystemMemories === false ? new Set<string>() : liveSystemIds,
       // #1376 (R201): an item is a limit, never a grant, so a credential-only principal gets none of its Agent's items.
-      !opts.credentialOnly, opts.itemUserAccess,
+      !opts.credentialOnly, itemUserAccess,
     );
     for (const [memoryId, level] of agentAccess) {
       if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
@@ -487,8 +493,10 @@ export async function getPrincipalAppMemoryAccess(
   // #3280/#3305 / cor:dmo:050:09: neither a run nor a session gains item
   // authority through App membership. Compute the same independent-user
   // ceiling once, including when an unselected user folds several Apps.
+  let independentItems: Promise<Map<string, string>> | undefined;
   const itemUserAccess = principal.userId
-    ? await independentUserItemAccess(db, principal.userId) : undefined;
+    ? () => independentItems ??= independentUserItemAccess(db, principal.userId!)
+    : undefined;
 
   if (principal.appId) {
     const sessionIsolated = Boolean(principal.sessionId) && !principal.userId;

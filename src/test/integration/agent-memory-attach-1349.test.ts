@@ -72,10 +72,13 @@ async function agentWithApp(orgId: string, label: string) {
   return { agentId: agent.id, appKey: rawKey, appId: app.id };
 }
 
-/** #1376: an App member (a user behind the App), the principal that still reaches memory through the agent's items. */
+/** Positive attach/transfer control: an App member with independent org authority (#3305). */
 async function appMemberOf(appId: string) {
   const user = await db.user.create({ data: { id: generateId(), handle: `am-${generateId()}`, githubUsername: `am-${generateId()}` } });
   await createDbAppMember(db, appId, user.id, 'member');
+  const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+  // #3305: attach/transfer positives use independently authorized people.
+  await db.orgMember.create({ data: { organizationId: app.organizationId!, userId: user.id, role: 'CONTRIBUTOR' } });
   return { appId, userId: user.id };
 }
 
