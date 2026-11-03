@@ -484,9 +484,9 @@ export async function getPrincipalAppMemoryAccess(
         includeSystemMemories: !isRunPrincipal(principal),
         callerUserId: principal.userId ?? null,
         memberAdmitted: !principal.impersonation,
-        // An AppRun with no on-behalf-of user is also userless but is the App acting, not a credential: its reach
-        // keeps the fold until explicit App authority exists for unattended runs (#1376, tracked in the PR body).
-        credentialOnly: !principal.userId && !isRunPrincipal(principal),
+        // #3278 / cor:dmo:050:09: an item never admits a userless principal, including an AppRun.
+        // Runs keep installed system memories below and explicit read/write grants at their own gates.
+        credentialOnly: !principal.userId,
       }),
     });
   } else if (principal.userId) {
