@@ -232,7 +232,7 @@ it('#3307 task instructions reuse the caller task-read gate even at the right Ap
  expect(await readActInstruction(ctx({userId:outsider.id}),f.app.id,claim)).toBe(false);
 });
 
-for(const initial of ['worker','person']) for(const door of ['signature','agent']) it('#3307 '+door+' refuses '+initial+' session principal drift before the final lock',async()=>{
+for(const initial of ['worker','person','agent']) for(const door of ['signature','agent']) it('#3307 '+door+' refuses '+initial+' session principal drift before the final lock',async()=>{
  const replacement=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:f.app.id,agentId:f.agent.id,name:'Replacement',slug:'replacement',heldByUserId:f.holder.id}});
  if(initial==='person')await db.session.update({where:{id:f.session.id},data:{workerId:null}});
  let moved=false;
@@ -241,7 +241,7 @@ for(const initial of ['worker','person']) for(const door of ['signature','agent'
    if(k==='session')return new Proxy(t.session,{get(d,op){
     if(op==='findUnique')return async(args:any)=>{
      const prior=await d.findUnique(args);
-     if(!moved && args.where.id===f.session.id){moved=true;await tx.session.update({where:{id:f.session.id},data:{workerId:replacement.id}});}
+     if(!moved && args.where.id===f.session.id){moved=true;await tx.session.update({where:{id:f.session.id},data:initial==='agent'?{agentId:f.next.id}:{workerId:replacement.id}});}
      return prior;
     };
     const value=(d as any)[op];return typeof value==='function'?value.bind(d):value;
@@ -252,5 +252,5 @@ for(const initial of ['worker','person']) for(const door of ['signature','agent'
  }});
  const before=await snapshot();
  expect((await answer(calls[door](live,bound({db:client})))).code).toBe('FORBIDDEN');expect(moved).toBe(true);expect(await snapshot()).toEqual(before);
- expect((await db.session.findUniqueOrThrow({where:{id:f.session.id}})).workerId).toBe(initial==='person'?null:f.worker.id);
+ expect(await db.session.findUniqueOrThrow({where:{id:f.session.id}})).toMatchObject({workerId:initial==='person'?null:f.worker.id,agentId:f.agent.id});
 });
