@@ -641,7 +641,9 @@ export async function appendStaffingInstructionClaim(
 /** What an instructed credential act was: a revoke, or a list call (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6). */
 export type CredentialAct =
   | 'app-key.revoke' | 'app-key.scope-revoke' | 'app-grant.revoke' | 'app-write-grant.revoke'
-  | 'app-key.list' | 'app-write-grant.list';
+  | 'app-key.list' | 'app-write-grant.list'
+  /** #3322: an instructed switch of an App memory asset's public link that changed the flag. */
+  | 'asset.public-link';
 
 /**
  * #3311 / rulings 0098, 0109, 0111: one record per admitted instructed revoke or list call. Names the worker, the

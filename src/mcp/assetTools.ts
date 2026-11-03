@@ -18,6 +18,10 @@ import { GraphQLError } from 'graphql';
 export const SHAPE_HADRON_SET_ASSET_PUBLIC_LINK = {
   asset: z.string().min(1).describe('The asset id.'),
   enabled: z.boolean().describe('true switches the asset\'s anonymous public link on, false switches it off.'),
+  instruction: z.object({
+    kind: z.enum(['TEAM_CHAT_MESSAGE', 'TASK', 'LIVE_CHAT']),
+    ref: z.string().min(1),
+  }).nullish().describe('Only for a worker session acting on an App memory\'s asset (#3322, cor:dmo:050:12): the typed reference to the instruction you act on, never text. TASK and TEAM_CHAT_MESSAGE name a same-App URN you can read; LIVE_CHAT is an opaque client address with no whitespace. It is a recorded claim your holder answers for, and the holder must manage the App. Without it a worker session is refused on an App memory.'),
 };
 
 type AssetFields = {
@@ -47,12 +51,12 @@ export function registerAssetTools(server: McpServer, deps: { db: PrismaClient; 
 
   server.tool(
     'hadron_set_asset_public_link',
-    'Switch an asset\'s anonymous public link on or off (cor:dmo:060:15). Only whoever manages the asset\'s memory may; writing to the memory is not enough, and in a personal or private memory only its owner. Every asset starts off. The link also needs the deployment switch and a live, scanned asset in an unencrypted memory, so turning it on may still leave publicUrl empty; the result says which.',
+    'Switch an asset\'s anonymous public link on or off (cor:dmo:060:15). Only whoever manages the asset\'s memory may; writing to the memory is not enough, and in a personal or private memory only its owner. Every asset starts off. The link also needs the deployment switch and a live, scanned asset in an unencrypted memory, so turning it on may still leave publicUrl empty; the result says which. A worker session on an App memory\'s asset passes `instruction` and is judged as its holder (#3322).',
     SHAPE_HADRON_SET_ASSET_PUBLIC_LINK,
-    async ({ asset, enabled }) => {
+    async ({ asset, enabled, instruction }) => {
       const ctx = ctxOf();
       try {
-        const updated = await setAssetPublicLink(ctx, asset, enabled);
+        const updated = await setAssetPublicLink(ctx, asset, enabled, instruction);
         const fields = (resolvers as unknown as { Asset: AssetFields }).Asset;
         const url = await fields.publicUrl(updated, {}, ctx);
         return textResult([
