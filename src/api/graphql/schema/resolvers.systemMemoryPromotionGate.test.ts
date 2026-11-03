@@ -356,7 +356,7 @@ describe('the target must be writable, not a group memory, and the platform ADMI
     await expectGroupUntouched(g.id);
   });
 
-  it('a platform ADMIN (accessible set = null) may promote a readable org memory, by design', async () => {
+  it('a platform ADMIN (an explicit accessible set, not null) may promote a readable org memory, by design', async () => {
     const pa = await db.user.create({ data: { id: generateId(), githubId: 930299, githubUsername: `promote-pa-${generateId()}`, roles: ['ADMIN'] } });
     const plain = await db.memory.create({
       data: { id: generateId(), name: 'plain', urn: `plain-${generateId()}`, organizationId: org.id, class: 'knowledge' },

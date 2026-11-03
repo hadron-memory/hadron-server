@@ -171,8 +171,9 @@ type PromotionTarget = {
  * 1. the caller must read it. Missing, deleted and unreadable answer one
  *    `MEMORY_NOT_FOUND`, byte for byte (cor:api:140:03), and come FIRST, so
  *    nothing below tells a non-reader the id exists;
- *    A platform ADMIN reads every non-identity-scoped memory
- *    (`getAccessibleMemoryIds` answers `null`) and is admitted here by design;
+ *    A platform ADMIN gets an explicit accessible set (live, non-identity-
+ *    scoped rows) and is admitted for those by design; only the operator
+ *    conversion principal answers `null`, and it never reaches these doors;
  * 2. the caller must WRITE it (the shared `requireMemoryWriteAccess`):
  *    promotion rewrites the memory's class, name and audience, so a reader
  *    must not do it (private#24 §10 P2-1: a group reader who is an org ADMIN
