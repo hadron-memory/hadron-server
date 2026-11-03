@@ -447,9 +447,7 @@ export const chatMutations = {
         // #2895 (Vera, option a): an Agent's system memory is the Agent's own definition, not a chat space. The read
         // scope above keeps it (reads are unchanged), but no API path writes it into Session.memoryId, so a chat
         // never lands in it. Refused through the same null as any unreadable target, so nothing is disclosed.
-        if (targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: targetMemoryId }, select: { id: true } })) {
-          targetMemoryId = null;
-        }
+        // (#3301 moved this check below the branch chain so every branch shares it.)
       } else if (ctx.userId) {
         const existing = await ctx.db.memory.findFirst({
           where: {
@@ -556,6 +554,15 @@ export const chatMutations = {
         });
         // #1376: an item is never a grant to a userless non-run key (cor:dmo:050:09).
         targetMemoryId = !ctx.userId && !isRunPrincipal(ctx) ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+      }
+
+      // #3301 (refs #2895, Vera's ruling option a; cor:cht:010:02): an Agent's system memory is the Agent's
+      // own definition, never a chat's target, on EVERY branch (session, shared, user, legacy item). One
+      // check after selection covers them all, so a branch added later is covered too. Refused through the
+      // same null as any unreadable target, so the answer discloses nothing. It sits BEFORE the chat write
+      // and, in the user branch, a found system row means nothing is provisioned.
+      if (targetMemoryId && await ctx.db.agent.findFirst({ where: { systemMemoryId: targetMemoryId }, select: { id: true } })) {
+        targetMemoryId = null;
       }
 
       if (!targetMemoryId) {

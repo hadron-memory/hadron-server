@@ -140,7 +140,11 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
 
   it('control: a normal user chat still starts when no system row is in the way', async () => {
     const f = await fixture();
+    const before = await footprint(f.systemId);
     expect(await start(f.agentId, { userId: f.userId })).toBeNull();
-    expect(await db.node.count({ where: { loc: { startsWith: 'chats' } } })).toBeGreaterThan(0);
+    // the chat landed in a per-user memory (a new one), never in the system memory
+    const after = await footprint(f.systemId);
+    expect(after.nodes).toBeGreaterThan(before.nodes);
+    expect(after.systemNodes).toBe(before.systemNodes);
   });
 });
