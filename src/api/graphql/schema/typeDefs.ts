@@ -10312,11 +10312,20 @@ export const typeDefs = `#graphql
     in another App TASK_NOT_FOUND. blockedByPositions names other tasks of the call as blockers (a self-block or a
     cycle is TASK_BLOCKER_CYCLE, a position outside the list BAD_USER_INPUT), and needs the same assigner authority as
     blockedBy. Handles follow list order and a refused call spends none. Each task records the events a single create
-    records; matching and launches run only after the commit, and each task's warnings are filed under
+    records; ordinary matching and all launches run only after the commit, and each task's warnings are filed under
     "<response key>.<position>". The result is every task, in list order. Not idempotent: nothing is deduplicated, so a
     caller that lost the answer lists the App's tasks before trying again.
+    distinctAssignees (default false; hrn:node:hadronmemory.com:specs:cor:agt:050:06, ruling 0084 A) matches each task whose match is true
+    inside the same transaction, in list order, excluding every explicitly named worker in this call and every
+    worker already matched. Each task keeps its own requirements; there is no global search or backtracking.
+    After the normal create and blocker checks, any failed match refuses the whole call as TASK_MATCH_FAILED,
+    with extensions.position (1-based) and extensions.reason (the single match's failure reason). No tasks,
+    handles, events, failure marks or launches survive. Naming the same worker twice with this option is
+    BAD_USER_INPUT at the second position. Named people and tasks not asking for a match keep their meaning.
+    Launches and warnings run only after commit. Without the option (or with null/false), existing batch
+    behavior is unchanged: requested matches run after commit and an ordinary failure marks only that task.
     """
-    createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!): [AgentTask!]!
+    createAgentTasks(appRef: ID!, tasks: [CreateAgentTasksItemInput!]!, distinctAssignees: Boolean): [AgentTask!]!
     """
     #3125 S3 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): claim up to limit (1 to 10, default 1) of the items
     untrackedTaskItems would list with the same filters, in its order. Each claim is a root task owned by and assigned
