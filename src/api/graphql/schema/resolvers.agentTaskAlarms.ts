@@ -43,12 +43,15 @@ import {
 import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { type Context } from './resolvers.helpers.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { emitTaskWarnings, type TaskWarningCode } from './resolvers.taskWarnings.js';
 import {
   actorManagesApp,
   inTaskWriteTx,
   loadApp,
   partyView,
+  recordInstructedManagerAct,
+  withInstruction,
   requireWritable,
   resolveParticipatedApp,
   withReadableApp,
@@ -207,15 +210,16 @@ export const agentTaskAlarmMutations = {
    * with the `alarm.ack.outside-chain` warning. Decided from the locked row's chain with the same `inChain` the gate
    * uses, so an owner in the chain who also manages the App gets none; filed after commit.
    */
-  acknowledgeAlarm: async (_: unknown, { eventId }: { eventId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  acknowledgeAlarm: async (_: unknown, { eventId, instruction }: { eventId: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const id = typeof eventId === 'string' ? eventId.trim() : '';
     const found = isId(id)
       ? await ctx.db.agentTeamEvent.findUnique({ where: { id }, select: { appId: true } })
       : null;
     const app = found ? await loadApp(ctx, found.appId) : null;
-    const actor = app ? await resolveTaskActor(ctx, app) : null;
+    const resolved = app ? await resolveTaskActor(ctx, app) : null;
     // An event of an App the caller does not participate in reads as missing.
-    if (!app || !actor) throw alarmNotFound(id);
+    if (!app || !resolved) throw alarmNotFound(id);
+    const actor = withInstruction(resolved, instruction);
     requireWritable(ctx, app);
     const warn: TaskWarningCode[] = [];
     await inTaskWriteTx(ctx, app, actor, () => alarmNotFound(id), async (tx, txCtx, freshApp) => {
@@ -229,7 +233,7 @@ export const agentTaskAlarmMutations = {
       // Membership is checked against the chain ON THE LOCKED ROW (Rook P3-2).
       // cor:agt:050:24 (#1762): an owner in the chain, or whoever manages the App, for any alarm in it.
       const ownerInChain = inChain(actor, row.chain);
-      if (!ownerInChain && !(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!ownerInChain && !(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError(
           'ALARM_NOT_IN_CHAIN',
           "Only an owner in the alarm's chain, or whoever manages the App, acknowledges it (cor:agt:050:24).",
@@ -249,6 +253,7 @@ export const agentTaskAlarmMutations = {
           acknowledgedByWorkerId: actor.kind === 'worker' ? actor.workerId : null,
         },
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'alarm.acknowledge', { eventId: id });
     });
     await emitTaskWarnings(ctx, info, app.id, { codes: warn });
     return ctx.db.agentTeamEvent.findUniqueOrThrow({ where: { id } });
@@ -263,13 +268,15 @@ export const agentTaskAlarmMutations = {
    */
   setWorkerAvailability: async (
     _: unknown,
-    { input }: { input: AvailabilityInput & { worker: string; appRef?: string | null } },
+    { input, instruction }: { input: AvailabilityInput & { worker: string; appRef?: string | null }; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
     const now = new Date();
     const value = normalizeAvailability(input, now);
-    const { workerId, app, actor } = await resolveAvailabilityWorker(ctx, input.worker, input.appRef);
+    const resolved = await resolveAvailabilityWorker(ctx, input.worker, input.appRef);
+    const { workerId, app } = resolved;
+    const actor = withInstruction(resolved.actor, instruction);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => workerNotFound(input.worker), async (tx, txCtx, freshApp) => {
       // The holder and retirement are read under a lock: releaseWorker and
@@ -286,24 +293,35 @@ export const agentTaskAlarmMutations = {
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       let setBy: AvailabilitySetter;
       if (actor.kind === 'worker') {
+        // #3323: the worker's own arms decide first and need no instruction. Only when they refuse is the App-manager
+        // arm asked, and only with the instruction the call carried; if it refuses too, the worker's own refusal stands.
+        const managerArm = async (refusal: GraphQLError): Promise<AvailabilitySetter> => {
+          if (actor.instructed && await actorManagesApp(txCtx, freshApp, actor, actor.instructed)) return 'app-manager';
+          throw refusal;
+        };
         if (actor.workerId !== workerId) {
           if (target.reportsToWorkerId !== actor.workerId) {
-            throw notPermitted(
+            setBy = await managerArm(notPermitted(
               "A worker sets only its own availability; another worker's is set by its holder, whoever manages the App, " +
                 'or, to clear a stall, the worker it reports to.',
-            );
+            ));
+          } else {
+            try {
+              await authorizeReportsToClear(tx, workerId, value.state);
+              setBy = 'reports-to';
+            } catch (e) {
+              if (!(e instanceof GraphQLError) || e.extensions?.code !== 'AVAILABILITY_NOT_PERMITTED') throw e;
+              setBy = await managerArm(e);
+            }
           }
-          await authorizeReportsToClear(tx, workerId, value.state);
-          setBy = 'reports-to';
+        } else if (value.state !== 'unavailable') {
+          setBy = await managerArm(notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.'));
         } else {
-          if (value.state !== 'unavailable') {
-            throw notPermitted('A worker may mark itself unavailable, never available: its holder or whoever manages the App does that.');
-          }
           setBy = 'worker';
         }
       } else if (target.heldByUserId !== null && target.heldByUserId === actor.userId) {
         setBy = 'holder';
-      } else if (await actorManagesApp(txCtx, freshApp, actor)) {
+      } else if (await actorManagesApp(txCtx, freshApp, actor, actor.instructed)) {
         setBy = 'app-manager';
       } else {
         throw notPermitted("Only the worker itself, the person holding its name, or whoever manages the App sets a worker's availability.");
@@ -332,6 +350,7 @@ export const agentTaskAlarmMutations = {
         actor: eventActor(ctx.userId),
         event: { kind: 'worker', workerId, state: value.state, reason: value.reason, until, setBy },
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'worker.availability', { workerId });
     }, { lockWorkerIds: [workerId] });
     // #1707: availability changed, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
@@ -341,7 +360,7 @@ export const agentTaskAlarmMutations = {
   /** cor:agt:060:09 — set a model family's availability in an App: whoever manages the App only. */
   setModelFamilyAvailability: async (
     _: unknown,
-    { input }: { input: AvailabilityInput & { appRef: string; family: string } },
+    { input, instruction }: { input: AvailabilityInput & { appRef: string; family: string }; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
@@ -351,10 +370,12 @@ export const agentTaskAlarmMutations = {
     if (!family) {
       throw badInput('family is a lowercase token (letters, digits, ".", "_" or "-"; up to 64 characters), e.g. claude or codex.');
     }
-    const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
+    const participated = await resolveParticipatedApp(ctx, input.appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef: input.appRef }), async (tx, txCtx, freshApp) => {
-      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw notPermitted("Only whoever manages the App sets a model family's availability.");
       }
       const data = { ...value, setAt: now, ...setByColumns(ctx) };
@@ -373,6 +394,7 @@ export const agentTaskAlarmMutations = {
         actor: eventActor(ctx.userId),
         event: { kind: 'family', family, state: value.state, reason: value.reason, until: value.until },
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'model-family.availability');
     });
     // #1707: availability changed, so a queued task may now match (cor:agt:060:06).
     await matchAfterChange(ctx.db, app.id);
@@ -389,7 +411,7 @@ export const agentTaskAlarmMutations = {
    */
   setAgentTaskStallSchedule: async (
     _: unknown,
-    { appRef, input }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes' | 'hostReportTimeoutMinutes', number | null>> },
+    { appRef, input, instruction }: { appRef: string; input: Partial<Record<keyof StallWindows | 'hostLapseCheckIns' | 'sessionEndGraceMinutes' | 'hostReportTimeoutMinutes', number | null>>; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     if (!input) throw badInput('input is required.');
@@ -435,10 +457,12 @@ export const agentTaskAlarmMutations = {
       }
       data.hostReportTimeoutMinutes = v ?? null;
     }
-    const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
     await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
-      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
       // #1863: a lapse decision in flight either finishes under the old count or waits for this one.
@@ -449,6 +473,7 @@ export const agentTaskAlarmMutations = {
         create: { appId: freshApp.id, ...data, updatedBy: ctx.userId ?? null },
         update: { ...data, updatedBy: ctx.userId ?? null },
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.stall-schedule');
     });
     return stallWindowsView(ctx, app.id);
   },

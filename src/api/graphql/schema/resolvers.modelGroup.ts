@@ -4,7 +4,8 @@
 // WHO: an Agent's groups are written by whoever manages the Agent (cor:dmo:050:13, the `requireAgentAccess(...,
 // 'ADMIN')` door `updateAgent` uses), re-decided inside the deciding transaction under the Agent's authority anchors.
 // An App's groups (an override by name, or the App's own) are written by whoever manages the App (cor:dmo:050:12,
-// `actorManagesApp`), also decided inside the transaction. An App manager is not thereby an Agent manager.
+// `actorManagesApp`; #3323: also their held worker on an instruction), decided inside the transaction. An App manager
+// is not thereby an Agent manager.
 //
 // WHAT A WRITE DOES: it stores one list of patterns under one name for one owner. Nothing is copied at install, and no
 // group is ever an authorization input. An App cannot delete an Agent's group: deleting an App's row of that name
@@ -21,7 +22,8 @@ import {
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { type Context, requireAgentAccess, resolveReadableAgentRef } from './resolvers.helpers.js';
-import { actorManagesApp, inTaskWriteTx, resolveParticipatedApp, taskError } from './resolvers.agentTask.js';
+import { actorManagesApp, inTaskWriteTx, recordInstructedManagerAct, resolveParticipatedApp, taskError, withInstruction } from './resolvers.agentTask.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { locateTeamAgent } from './resolvers.worker.js';
 import { type AgentManagementOp, absentAsWorkerRefusal, assertNoWorkerSessionAgentManagement } from '../../../lib/auth/agentManagementWorkerSession.js';
 
@@ -163,14 +165,16 @@ export const modelGroupMutations = {
   /** An App's group of this name: an override of the Agent's (replacing its whole list), or an App-only group. */
   setAppModelGroup: async (
     _: unknown,
-    { appRef, name, patterns }: { appRef: string; name: string; patterns: string[] },
+    { appRef, name, patterns, instruction }: { appRef: string; name: string; patterns: string[]; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     const group = cleanName(name);
     const list = cleanPatterns(patterns);
-    const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
     return inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
-      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App declares its model groups.');
       }
       await lockOwnerGroups(tx, freshApp.id);
@@ -180,21 +184,25 @@ export const modelGroupMutations = {
       const row = existing
         ? await tx.modelGroup.update({ where: { id: existing.id }, data: { patterns: list, updatedBy: by } })
         : await tx.modelGroup.create({ data: { appId: freshApp.id, name: group, patterns: list, createdBy: by, updatedBy: by } });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.model-group.set');
       return view(row);
     });
   },
 
   /** Remove the App's group of this name: an override reverts to the Agent's group; an App-only group goes. */
-  deleteAppModelGroup: async (_: unknown, { appRef, name }: { appRef: string; name: string }, ctx: Context) => {
+  deleteAppModelGroup: async (_: unknown, { appRef, name, instruction }: { appRef: string; name: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const group = cleanName(name);
-    const { app, actor } = await resolveParticipatedApp(ctx, appRef);
+    const participated = await resolveParticipatedApp(ctx, appRef);
+    const { app } = participated;
+    const actor = withInstruction(participated.actor, instruction);
     return inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
-      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App declares its model groups.');
       }
       await lockOwnerGroups(tx, freshApp.id);
       const { count } = await tx.modelGroup.deleteMany({ where: { appId: freshApp.id, name: group } });
       if (count === 0) throw groupNotFound(group);
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'app.model-group.delete');
       return true;
     });
   },

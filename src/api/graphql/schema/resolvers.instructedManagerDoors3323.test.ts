@@ -258,10 +258,7 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
 
   // Acceptance 6: the record comes after every refusal. Each act is admitted by the gate, then refused on its own state.
   const refusedAfterGate: Record<string, () => Promise<unknown>> = {
-    'acknowledgeAlarm on an acknowledged alarm': async () => {
-      await M.acknowledgeAlarm({}, { eventId: f.alarm.id }, ctx());
-      return M.acknowledgeAlarm({}, { eventId: f.alarm.id, instruction: live }, bound());
-    },
+    'acknowledgeAlarm on an acknowledged alarm': () => M.acknowledgeAlarm({}, { eventId: f.alarm.id, instruction: live }, bound()),
     'makeAgentTaskReady on a pending task': () => M.makeAgentTaskReady({}, { taskId: f.task.id, instruction: live }, bound()),
     'parkAgentTask on an assigned task': () => M.parkAgentTask({}, { taskId: f.assigned.id, instruction: live }, bound()),
     'deleteAppModelGroup of a missing group': () => M.deleteAppModelGroup({}, { appRef: f.app.id, name: 'none', instruction: live }, bound()),
@@ -269,6 +266,8 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
   };
   for (const [name, call] of Object.entries(refusedAfterGate)) {
     it(`${name}: refused after the gate, no record`, async () => {
+      // The first acknowledgement stands, made by the holder as themselves (outside the worker's request).
+      if (name.startsWith('acknowledgeAlarm')) await M.acknowledgeAlarm({}, { eventId: f.alarm.id }, ctx());
       const got = await answer(() => asWorker(call));
       expect(got.code).not.toBe('RESOLVED');
       expect(got.code).not.toMatch(/NOT_OWNER|MANAGER_REQUIRED|FORBIDDEN|NOT_IN_CHAIN|NOT_PERMITTED/);
@@ -304,20 +303,20 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
 
 describe('#3323 other arms are unchanged and write no record (acceptance 5)', () => {
   it('the task owner\'s worker cancels its own task with no instruction', async () => {
-    const own = await asWorker(() => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Mine' } }, bound()));
+    const own: any = await asWorker(() => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Mine' } }, bound()));
     expect(await answer(() => asWorker(() => M.cancelAgentTask({}, { taskId: own.id }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
   it('the owner arm decides before the instructed manager arm: an instructed owner writes no record', async () => {
-    const own = await asWorker(() => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Mine' } }, bound()));
+    const own: any = await asWorker(() => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Mine' } }, bound()));
     expect(await answer(() => asWorker(() => M.cancelAgentTask({}, { taskId: own.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
 
   it('a worker the owner reports to directs the task with no instruction', async () => {
     await db.worker.update({ where: { id: f.target.id }, data: { reportsToWorkerId: f.worker.id } });
-    const owned = await runAsActor({ workerId: f.target.id, agentId: f.agent.id }, () => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Theirs' } }, ctx({ userId: f.holder.id })));
+    const owned: any = await runAsActor({ workerId: f.target.id, agentId: f.agent.id }, () => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Theirs' } }, ctx({ userId: f.holder.id })));
     expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskId: owned.id }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
   });
