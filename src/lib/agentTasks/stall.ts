@@ -849,6 +849,12 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
       const over = await tx.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true } });
       for (const e of over) endedEvents.add(e.eventId);
     }
+    // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
+    const cadenceIds = due.filter((d) => d.type === 'alarm.coordinator-cadence').map((d) => d.eventId);
+    if (cadenceIds.length) {
+      const over = await tx.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true } });
+      for (const e of over) endedEvents.add(e.eventId);
+    }
     if (endedEvents.size) {
       // The alarm's own episode is over: close EVERY row of it still unwoken (not only the due ones), so no later
       // owner up the chain is woken for a condition that is gone. Nothing else is written: the alarm, its chain and

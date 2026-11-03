@@ -3433,6 +3433,8 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
+  cadenceEpisodes         CoordinatorCadenceEpisode[]
+  cadenceClocks           CoordinatorCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
@@ -3859,6 +3861,8 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
+  cadenceEpisodes    CoordinatorCadenceEpisode[]
+  cadenceClock       CoordinatorCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
   appId             String    @map("app_id")
   agentId           String    @map("agent_id")
@@ -6032,6 +6036,7 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
+  cadenceEpisode CoordinatorCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
 
   @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
@@ -6093,6 +6098,39 @@ model DarkWorkerEpisode {
 
   @@index([appId, endedAt])
   @@map("dark_worker_episodes")
+}
+
+/// #2763 — one coordinator-cadence episode: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31,
+/// Proposed). It de-duplicates the task-less alarm raised with it (agent_team_events, type `alarm.coordinator-cadence`, task_id
+/// NULL, which `agent_team_events_episode_uniq` cannot dedupe). At most one OPEN row per coordinator (partial unique index in
+/// prisma/coordinator-cadence-invariants.sql); the episode ends only at the coordinator's next counted assignment.
+model CoordinatorCadenceEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  workerId String    @map("worker_id")
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app    App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker         @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("coordinator_cadence_episodes")
+}
+
+/// #2763 — when the evaluator first saw each coordinator, so a coordinator that existed before the deploy (or never assigned)
+/// is not late at the first pass. Inserted once, `ON CONFLICT DO NOTHING`; never updated.
+model CoordinatorCadenceClock {
+  workerId   String   @id @map("worker_id")
+  appId      String   @map("app_id")
+  observedAt DateTime @map("observed_at")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@map("coordinator_cadence_clocks")
 }
 
 /// #2014 — one post-limit episode: the first refusal of a worker's team-chat post by the rate limit in an hour. It only
