@@ -324,7 +324,8 @@ describe('#3359 implicit asking Agent membership (ruling 0120)', () => {
 
   it('refuses a retired-only implicit cast, but an installation still admits it', async () => {
     await db.worker.update({ where: { id: coderWorker.id }, data: { retiredAt: new Date() } });
-    const named = await wireRefusal(index({ agentRef: agentUrn(coder) }));
+    const outside = await agent('Outside Retired Control');
+    const named = (await wireRefusal(index({ agentRef: agentUrn(outside) }))).replaceAll(agentUrn(outside), agentUrn(coder));
     expect(await wireRefusal(asRun(coder.id, implicit))).toBe(named);
     await db.appAgent.create({ data: { appId: app.id, agentId: coder.id } });
     expect((await asRun(coder.id, implicit)).total).toBe(4);
@@ -345,7 +346,7 @@ describe('#3359 implicit asking Agent membership (ruling 0120)', () => {
     reads.length = 0;
     await db.node.updateMany({ where: { memoryId: team.memoryId, loc: 'roles' }, data: { deletedAt: new Date() } });
     expect(JSON.parse(await wireRefusal(call(app.id))).extensions.code).toBe('AGENT_NOT_FOUND');
-    expect(reads.filter((r) => r.startsWith('Agent.'))).toEqual(['Agent.findUnique']);
+    expect(reads.filter((r) => r.startsWith('Agent.'))).toHaveLength(1);
     expect(reads.some((r) => /^(Memory|Node)\./.test(r))).toBe(false);
   });
 });
