@@ -147,7 +147,7 @@ export interface CreateAgentCoreInput {
 const PROMOTION_TARGET_SELECT = {
   id: true, organizationId: true, ownerUserId: true, deletedAt: true,
   appId: true, installOfAgentId: true, isInstallMemory: true,
-  userMemoryOfAgentId: true, sharedMemoryOfAgentId: true,
+  userMemoryOfAgentId: true, sharedMemoryOfAgentId: true, userId: true,
 } as const;
 
 type PromotionTarget = {
@@ -182,6 +182,48 @@ async function assertPromotableSystemMemory(ctx: Context, target: PromotionTarge
   if (readable !== null && !readable.includes(target.id)) throw notFound();
   assertNotInstallMemory(target);
   assertNotAgentHolding(target);
+}
+
+/** The owner columns a promotion target's authority anchors derive from. */
+type PromotionOwner = { organizationId: string | null; ownerUserId: string | null; userId: string | null };
+
+/**
+ * The advisory anchors a writer that can REVOKE the caller's read of `target`
+ * takes exclusively before it commits (`withAuthorizedMemoryTx`: the memory,
+ * its owning org and users, and the affected user, e.g. `removeMemoryMember`).
+ * A promotion takes them SHARED as the first locks of its deciding
+ * transaction, then decides readability on that transaction, so a revocation
+ * either commits before the decision (and is seen) or waits for the promotion
+ * to commit. Without the fence, a member removed between the read decision and
+ * the promotion write regained the memory as a definition.
+ */
+function promotionTargetAnchors(ctx: Context, memoryId: string, owner: PromotionOwner): AuthorityAnchor[] {
+  return [
+    { kind: 'memory', id: memoryId },
+    ...(owner.organizationId ? [{ kind: 'org' as const, id: owner.organizationId }] : []),
+    ...(owner.ownerUserId ? [{ kind: 'user' as const, id: owner.ownerUserId }] : []),
+    ...(owner.userId ? [{ kind: 'user' as const, id: owner.userId }] : []),
+    ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
+  ];
+}
+
+/**
+ * Under the anchors from {@link promotionTargetAnchors}: the target must still
+ * have the owner the anchors were derived from (a transfer that won the race
+ * moved its revokers onto other anchors), and readability is decided with a
+ * context bound to `tx`.
+ */
+async function fencedPromotionCtx(
+  ctx: Context,
+  tx: Prisma.TransactionClient,
+  observed: PromotionOwner,
+  locked: PromotionOwner | null,
+): Promise<Context> {
+  if (locked && (locked.organizationId !== observed.organizationId
+    || locked.ownerUserId !== observed.ownerUserId || locked.userId !== observed.userId)) {
+    throw new Error('Memory ownership changed; retry the operation');
+  }
+  return liveTxContext(ctx, tx);
 }
 
 export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput) {
@@ -255,11 +297,22 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // the dropped `type` column) and its `visibility` is always NULL
   // (chk_memory_visibility_class forbids a non-null visibility on
   // class='system'); agent visibility does not sync onto it.
+  const promotionOwner: PromotionOwner | null = systemMemoryId
+    ? await ctx.db.memory.findUnique({
+      where: { id: systemMemoryId },
+      select: { organizationId: true, ownerUserId: true, userId: true },
+    })
+    : null;
   const createdAgent = await ctx.db.$transaction(async (tx) => {
     let resolvedSystemMemoryId: string;
     if (systemMemoryId) {
+      // First locks of this transaction: the target's revokers wait on these.
+      if (promotionOwner) {
+        await lockAuthorityAnchors(tx, promotionTargetAnchors(ctx, systemMemoryId, promotionOwner), 'shared');
+      }
       const found = await tx.memory.findUnique({ where: { id: systemMemoryId }, select: PROMOTION_TARGET_SELECT });
-      await assertPromotableSystemMemory(ctx, found);
+      const decideCtx = promotionOwner ? await fencedPromotionCtx(ctx, tx, promotionOwner, found) : ctx;
+      await assertPromotableSystemMemory(decideCtx, found);
       const target = found!;
       // spec 047 / #949: the promoted memory must share the agent's owner —
       // same org (org-owned) OR same user (user-owned). One shared assertion
@@ -592,6 +645,7 @@ export const agentMutations = {
       // Set when a first-attach promotion is due; performed inside the
       // deciding transaction so a refusal cannot leave it half-applied (#1364).
       let promoteSystemMemoryId: string | null = null;
+      let promoteObservedOwner: PromotionOwner | null = null;
       if (systemMemoryId !== undefined) {
         const incoming = systemMemoryId === '' ? null : systemMemoryId;
         if (agent.systemMemoryId && incoming !== agent.systemMemoryId) {
@@ -646,6 +700,7 @@ export const agentMutations = {
             throw new Error('This memory is already the system memory of another agent');
           }
           promoteSystemMemoryId = incoming;
+          promoteObservedOwner = { organizationId: target.organizationId, ownerUserId: target.ownerUserId, userId: target.userId };
           // These validations are re-run under the row locks in the deciding
           // transaction (@codex, PR #1357). Reading them here first keeps the
           // common refusal cheap and its message early; the authoritative pass
@@ -689,6 +744,14 @@ export const agentMutations = {
         // advisory anchors, then org/user rows, then the memory and agent rows
         // below). The pre-transaction gate alone left the authorize-then-write
         // window open: a manager demoted in between still landed the edit.
+        // A first-attach promotion's target anchors join the SAME single
+        // advisory acquisition (one sorted order), ahead of every row lock.
+        const promotionAnchors = promoteSystemMemoryId && promoteObservedOwner
+          ? promotionTargetAnchors(ctx, promoteSystemMemoryId, promoteObservedOwner)
+          : [];
+        if (memberRolesNorm === undefined && promotionAnchors.length > 0) {
+          await lockAuthorityAnchors(tx, promotionAnchors, 'shared');
+        }
         if (memberRolesNorm !== undefined) {
           const anchors: AuthorityAnchor[] = [
             { kind: 'agent', id },
@@ -696,7 +759,7 @@ export const agentMutations = {
             ...(agent.ownerUserId ? [{ kind: 'user' as const, id: agent.ownerUserId }] : []),
             ...(ctx.userId ? [{ kind: 'user' as const, id: ctx.userId }] : []),
           ];
-          await lockAuthorityAnchors(tx, anchors, 'shared');
+          await lockAuthorityAnchors(tx, [...anchors, ...promotionAnchors], 'shared');
           if (agent.organizationId) await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${agent.organizationId} FOR SHARE`;
           for (const uid of new Set(anchors.filter((a) => a.kind === 'user').map((a) => a.id)).values()) {
             await tx.$queryRaw`SELECT id FROM users WHERE id = ${uid} FOR SHARE`;
@@ -841,7 +904,10 @@ export const agentMutations = {
             where: { id: promoteSystemMemoryId },
             select: PROMOTION_TARGET_SELECT,
           });
-          await assertPromotableSystemMemory(ctx, lockedFound);
+          await assertPromotableSystemMemory(
+            await fencedPromotionCtx(ctx, tx, promoteObservedOwner!, lockedFound),
+            lockedFound,
+          );
           const lockedTarget = lockedFound!;
           assertSystemMemoryOwner(lockedAgent, {
             organizationId: lockedTarget.organizationId,
