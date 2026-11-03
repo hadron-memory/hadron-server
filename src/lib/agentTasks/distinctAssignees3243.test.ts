@@ -167,7 +167,7 @@ it('a distinct call with no match items completes while an unrelated worker assi
  let operation:Promise<any>|undefined;let timer:ReturnType<typeof setTimeout>|undefined;
  try{
   await entered;
-  operation=batch([item({requirements:{role:'missing'}})],true).then(value=>({value}),error=>({error}));
+  operation=batch([item({requirements:{role:'missing'}})],true).then((value:any)=>({value}),(error:any)=>({error}));
   const outcome=await Promise.race([operation,new Promise<{timeout:true}>(r=>{timer=setTimeout(()=>r({timeout:true}),5000);})]);
   expect('timeout' in outcome).toBe(false);
   if('timeout' in outcome)throw Error('unrelated worker lock blocked a non-matching batch');

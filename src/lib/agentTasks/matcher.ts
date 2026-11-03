@@ -779,7 +779,10 @@ async function chooseMatchNow(
   return { reason };
 }
 
-/** #3243: no commit, failure mark or launch here; caller rolls back its entire batch on a reason. */
+/** #3243: caller supplies fresh pending, unassigned match rows and holds the stop,
+ * graph, reportsTo and pool-worker locks before any task row write. Re-holds in
+ * tryAssignInTx are same-transaction, same-mode. No commit, failure mark or launch
+ * here; caller rolls back its entire batch on a reason. */
 export async function matchTaskNowInTx(
   tx: Prisma.TransactionClient, taskId: string, now: Date, excluded: ReadonlySet<string>, poolIds: ReadonlySet<string>,
 ): Promise<{workerId: string; family: string; live: boolean} | {reason: MatchFailureReason}> {

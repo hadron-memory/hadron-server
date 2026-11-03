@@ -2065,7 +2065,7 @@ export const agentTaskMutations = {
         }
       }
       return out;
-    }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), lockWorkerPool: distinct ? workerPool : undefined, taskGraph: 'exclusive' });
+    }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), lockWorkerPool: distinct && prepared.some(p => p.input.match) ? workerPool : undefined, taskGraph: 'exclusive' });
     // Each requested match gets its single attempt in list order after the complete commit.
     // Ordinary failures mark only that task; distinct matching already completed atomically above (#3243).
     const matchErrors: unknown[] = [];
