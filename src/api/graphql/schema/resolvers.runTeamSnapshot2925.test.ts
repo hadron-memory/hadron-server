@@ -113,7 +113,7 @@ it('an enabled own-App run reads tasks without becoming an actor; other Apps rem
   expect(await mayReadAppTasks(principal, otherAppId)).toBe(false);
   expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toBeNull();
   const page = await Q.agentTasks({}, { appRef: appId }, principal);
-  expect(page.items.map((t: { id: string }) => t.id)).toContain(taskId);
+  expect(page.map((t: { id: string }) => t.id)).toContain(taskId);
   await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   expect(await Q.agentTask({}, { id: taskId }, principal)).toMatchObject({ id: taskId });
 });
@@ -130,7 +130,7 @@ it('a user-backed run still yields no TaskActor and generic create/update/assign
 it('setting revocation applies to the next read with the same run context', async () => {
   await enable();
   const principal = runContext(db, await mintRun());
-  expect((await Q.agentTasks({}, { appRef: appId }, principal)).items.length).toBeGreaterThan(0);
+  expect((await Q.agentTasks({}, { appRef: appId }, principal)).length).toBeGreaterThan(0);
   expect((await setting(false)).errors).toBeUndefined();
   await denied(Q.agentTasks({}, { appRef: appId }, principal), 'APP_NOT_FOUND');
 });
