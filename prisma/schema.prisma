@@ -5767,6 +5767,10 @@ model AgentTask {
   resultEvidence       String?   @map("result_evidence")
   /// #2662: immutable ordered findings, set only with the finish result; null is legacy/omitted.
   resultFindings       Json?     @map("result_findings")
+  /// #2663: latest disposition for each finding, stored beside the immutable result (at most100).
+  findingDispositions  Json      @default("[]") @map("finding_dispositions")
+  /// Derived by the database trigger from resultFindings + findingDispositions; filter before SQL paging.
+  unresolvedFindingIds String[]  @default([]) @map("unresolved_finding_ids")
   /// #2651 (cor:agt:050:29, :01): the latest hand-back — its code (closed set, chk_agent_tasks_hand_back), optional
   /// text (<= 2,000 characters; never put into an event) and time. A later hand-back replaces all three.
   handBackReasonCode   String?   @map("hand_back_reason_code")
