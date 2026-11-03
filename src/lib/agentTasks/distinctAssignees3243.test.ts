@@ -1,3 +1,4 @@
+import { lockWorkersForAssignment } from './workerLock.js';
 import { matchQueuedTasks } from './matcher.js';
 import * as launchModule from '../hostOperations/launch.js';
 /** #3243, ruling0084 A: distinct batch matching is all-or-none, named workers count. */
@@ -157,3 +158,59 @@ it('automatic matcher holds graph shared before a distinct batch takes its pool 
   expect(await db.agentTeamEvent.count({where:{appId:app.id,type:'assignment.matched'}})).toBe(2);
  }finally{release.resolve();await Promise.allSettled([automatic,...(batchRun?[batchRun]:[])]);}
 },15000);
+
+it('a distinct call with no match items completes while an unrelated worker assignment lock is held',async()=>{
+ const workerRow=await worker('Unrelated');
+ let held!:()=>void,release!:()=>void;
+ const entered=new Promise<void>(r=>{held=r;}),free=new Promise<void>(r=>{release=r;});
+ const holding=db.$transaction(async(tx)=>{await lockWorkersForAssignment(tx,[workerRow.id]);held();await free;},{timeout:15000});
+ let operation:Promise<any>|undefined;let timer:ReturnType<typeof setTimeout>|undefined;
+ try{
+  await entered;
+  operation=batch([item({requirements:{role:'missing'}})],true).then(value=>({value}),error=>({error}));
+  const outcome=await Promise.race([operation,new Promise<{timeout:true}>(r=>{timer=setTimeout(()=>r({timeout:true}),5000);})]);
+  expect('timeout' in outcome).toBe(false);
+  if('timeout' in outcome)throw Error('unrelated worker lock blocked a non-matching batch');
+  expect(outcome.error).toBeUndefined();expect(outcome.value[0].assigneeWorkerId).toBeNull();
+  expect(outcome.value[0].matchPending).toBe(false);
+ }finally{if(timer)clearTimeout(timer);release();await Promise.allSettled([holding,...(operation?[operation]:[])]);}
+},20000);
+it('distinct option still rejects match with an explicit assignee or backlog before matching',async()=>{
+ const w=await worker();const before=await snapshot();
+ for(const bad of [{assignee:{worker:w.id}},{status:'BACKLOG'}]){
+  await expect(batch([item(),item({match:true,...bad})],true)).rejects.toMatchObject({extensions:{code:'BAD_USER_INPUT',position:2}});
+  expect(await snapshot()).toEqual(before);
+ }
+});
+
+it('a matched distinct batch takes every pool worker lock before inserting any task',async()=>{
+ const alpha=await worker('Alpha'),beta=await worker('Beta');
+ let held!:()=>void,release!:()=>void,entered!:(pid:number)=>void;
+ const ready=new Promise<void>(r=>{held=r;}),free=new Promise<void>(r=>{release=r;}),started=new Promise<number>(r=>{entered=r;});
+ const holding=db.$transaction(async(tx)=>{await lockWorkersForAssignment(tx,[beta.id]);held();await free;},{timeout:15000});
+ const observedDb=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (body:any,options:any)=>target.$transaction(async(tx:any)=>{
+   const [{pid}]=await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;entered(pid);return body(tx);
+  },options);
+  const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+ }});
+ let operation:Promise<any>|undefined;
+ try{
+  await ready;
+  operation=M.createAgentTasks({}, {appRef:app.id,distinctAssignees:true,tasks:[matched()]},{...ctx,db:observedDb})
+   .then((value:any)=>({value}),(error:any)=>({error}));
+  const pid=await started;let waiting=false;const deadline=Date.now()+2000;
+  while(Date.now()<deadline){
+   const [lock]=await db.$queryRaw<{waiting:boolean}[]>`
+    SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=${pid} AND locktype='advisory' AND NOT granted
+     AND mode='ExclusiveLock' AND objsubid=2
+     AND classid::bigint=(hashtext('agent-task-matcher:worker')::bigint&4294967295)
+     AND objid::bigint=(hashtext(${beta.id})::bigint&4294967295)) AS waiting`;
+   if(lock.waiting){waiting=true;break;}await new Promise(r=>setTimeout(r,10));
+  }
+  expect(waiting).toBe(true); // Beta is not selected: only the pool fence waits on it.
+  expect(await db.agentTask.count({where:{appId:app.id}})).toBe(0);
+  release();const result=await operation;expect(result.error).toBeUndefined();
+  expect(result.value[0].assigneeWorkerId).toBe(alpha.id);
+ }finally{release();await Promise.allSettled([holding,...(operation?[operation]:[])]);}
+},20000);
