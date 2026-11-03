@@ -144,6 +144,38 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
       expect(ids).not.toContain(f.pub.id);
     }
   });
+  it.each(['key', 'run'] as const)('node(ref) reads null by id and by URN for every memory the predicate refuses (%s)', async who => {
+    const principal = (who === 'key' ? f.keyPrincipal : f.runPrincipal) as Context;
+    const user = await db.user.create({ data: { id: generateId(), email: `n-${generateId().toLowerCase()}@example.test` } as never });
+    const refused: Array<{ id: string; urn: string }> = [f.orgVisible, f.appScoped, f.ownAppScoped, f.group, f.deleted];
+    for (const [slug, extra] of [['nodeowner', { ownerUserId: user.id }], ['nodeinstall', { isInstallMemory: true }]] as const) {
+      const row = await db.memory.create({
+        data: { name: slug, urn: `${f.orgB.urn}:${slug}`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.orgB.id, ...extra },
+      }).catch((err: unknown) => {
+        if (!/check constraint|chk_memory/i.test(String((err as Error)?.message))) throw err;
+        return null;
+      });
+      if (row) {
+        await db.node.create({ data: { memoryId: row.id, loc: LOC, name: `needle3306 ${slug}`, content: `secret ${slug}`, nodeType: 'record' } });
+        refused.push(row);
+      }
+    }
+    for (const m of refused) {
+      const node = await db.node.findFirst({ where: { memoryId: m.id, loc: LOC } });
+      expect(node).not.toBeNull();
+      expect(await Q.node({}, { ref: node!.id }, principal)).toBeNull();
+      expect(await Q.node({}, { ref: urn(m) }, principal)).toBeNull();
+    }
+    // the one admitted row still reads, so the null above is the predicate and not a broken fixture
+    expect(await Q.node({}, { ref: urn(f.pub) }, principal)).toMatchObject({ content: 'secret pub' });
+  });
+  it('a user-backed caller with an App gains no foreign non-PUBLIC read through node(ref)', async () => {
+    const user = await db.user.create({ data: { id: generateId(), email: `u-${generateId().toLowerCase()}@example.test` } as never });
+    const userCaller = { db, userId: user.id, appId: f.app.id, roles: [] } as unknown as Context;
+    const node = await db.node.findFirst({ where: { memoryId: f.orgVisible.id, loc: LOC } });
+    expect(await Q.node({}, { ref: node!.id }, userCaller)).toBeNull();
+    expect(await Q.node({}, { ref: urn(f.orgVisible) }, userCaller)).toBeNull();
+  });
   it('a PUBLIC knowledge row with an owner, a per-user agent holding or an install flag is not admitted', async () => {
     const user = await db.user.create({ data: { id: generateId(), email: `o-${generateId().toLowerCase()}@example.test` } as never });
     for (const [slug, extra] of [['ownerx', { ownerUserId: user.id }], ['installx', { isInstallMemory: true }]] as const) {
