@@ -106,11 +106,9 @@ async function raise(db: PrismaClient, app: App, late: Late, now: Date): Promise
   let chainEmpty = false;
   try {
     const eventId = await db.$transaction(async (tx): Promise<string | null> => {
-      // cor:agt:050:18 (Decided): the reporting line, nearest first; App managers only when there is no reporting line.
-      // Keep the reporting line when present; App managers are the empty-line fallback.
-      const full = await darkAlarmChain(tx, app, late.workerId);
-      const line = full.filter((p) => p.workerId);
-      const chain = line.length ? line : full;
+      // cor:agt:050:18 (Decided): the reporting line, nearest first; App managers only when there is no reporting line
+      // (`darkAlarmChain` is that rule since #3364).
+      const chain = await darkAlarmChain(tx, app, late.workerId);
       // The decision is re-derived HERE, inside the SERIALIZABLE transaction, so its reads are the ones Postgres checks for a
       // read-write cycle: an assignment, pause or lane change that commits between the pass's reads and this insert makes
       // one side abort (or is seen now), and nothing is published or woken on a stale decision.
