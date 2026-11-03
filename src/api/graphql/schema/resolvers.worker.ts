@@ -1,3 +1,6 @@
+import { requireInstructedAct, type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { readActInstruction } from './resolvers.instruction.js';
+import { appendWorkerSignatureInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // Workers — #974 (re-cut): the named casting of an installed Agent into an
 // App (cor:dmo:050:11, cor:agt:020:01/:02). A persona is universal DRESSING on
@@ -77,7 +80,7 @@ import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.j
 import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
-import { managesApp } from '../../../lib/auth/appManagement.js';
+import { managesApp, lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -118,6 +121,18 @@ type AppRow = {
   /** Honoured by requireWorkerReadAccess whenever the row carries it (#1347 review). */
   deletedAt?: Date | null;
 };
+
+/** #3307: both manager doors use one holder/instruction gate on their live transaction. */
+async function admitWorkerManagement(ctx: Context, appId: string, instruction?: ActInstruction | null): Promise<ActAdmission> {
+  const app = await ctx.db.app.findUniqueOrThrow({where:{id:appId}});
+  return requireInstructedAct(ctx, appId, instruction, () => managesApp(ctx, app), readActInstruction, forbidden);
+}
+
+/** Lock actor and subject in canonical assignment/row order; a hold release cannot pass the final check. */
+async function lockWorkerActRows(tx: Parameters<typeof lockWorkersForAssignment>[0], ids: string[], sessionId?: string) {
+  await tx.$queryRaw`SELECT id FROM workers WHERE id = ANY(${[...new Set(ids)].sort()}::text[]) ORDER BY id FOR UPDATE`;
+  if (sessionId) await tx.$queryRaw`SELECT id FROM sessions WHERE id = ${sessionId} FOR SHARE`;
+}
 
 const forbidden = (): GraphQLError =>
   new GraphQLError('You are not authorized to manage workers in this App.', {
@@ -1727,7 +1742,7 @@ export const workerMutations = {
    */
   updateWorker: async (
     _: unknown,
-    args: { workerRef: string; signature?: string | null; trailer?: string | null },
+    args: { workerRef: string; signature?: string | null; trailer?: string | null; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
@@ -1739,23 +1754,26 @@ export const workerMutations = {
         ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
         ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
       ];
+      let admission: ActAdmission;
       return withAuthorizedTx(ctx, anchors, async txCtx => {
-        const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
-        // H26 PROVISIONAL: bound workers do not exercise their holder's manager right.
-        // Headless agent/run callers and impersonation likewise cannot manage these fields.
-        const actor = currentActor();
-        const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
-        if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
+        admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
         for (const field of ['signature', 'trailer'] as const) {
           if (field in args) data[field] = normalizeWorkerSignature(args[field]);
         }
-      }, async tx => {
+      }, async (tx, txCtx) => {
+        const ids = [worker.id, ...(admission.kind === 'instructed-worker' ? [admission.workerId] : [])];
+        await lockWorkersForAssignment(tx, ids);
+        await lockAppManagerMemberships(tx, ctx.userId, app);
+        await lockWorkerActRows(tx, ids, ctx.sessionId);
+        admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
+
         const { count } = await tx.worker.updateMany({ where: { id: worker.id, retiredAt: null }, data });
         if (!count) {
           const still = await tx.worker.findUnique({ where: { id: worker.id } });
           if (!still) throw workerNotFound(args.workerRef);
           throw new GraphQLError('This worker is retired.', { extensions: { code: 'WORKER_RETIRED' } });
         }
+        await appendWorkerSignatureInstructionEvent(tx, {appId:app.id,workerId:worker.id,admission,fields:Object.keys(data)});
         return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
       });
     }
@@ -1773,9 +1791,10 @@ export const workerMutations = {
    * worker casts; its role follows the agent (never typed in). Name, slug, URN, signature, trailer, reporting line
    * and every past record stay; past sessions keep the agent and role they ran under (`Session.agentId`/`role`).
    *
-   * Who: whoever manages the App, as themselves. The gate is updateWorker's signature/trailer gate verbatim: a
-   * bound worker session (even one its manager holds, R113), a worker or agent actor, an impersonation and a
-   * refused session binding are all FORBIDDEN, decided on the live transaction context.
+   * #3307 / cor:dmo:050:12: an App manager acts as themselves, or their held worker carries a validated instruction.
+   * Both doors use the shared gate and record the instruction in the act transaction. Host-launched sessions,
+   * uninstructed workers, impersonation, App keys, runs and refused/ambiguous bindings are refused. The holder's
+   * managesApp predicate still decides, never a worker grant or a claimed role.
    *
    * To what: `assertCastable`, the one casting check the cast runs too, plus the new agent must have a role of its
    * own. A refused change changes nothing.
@@ -1789,13 +1808,14 @@ export const workerMutations = {
    * (`Session.agentId`/`role`). Reads that serve it (its register, briefing, matcher and context-reset settings)
    * resolve from the session (src/lib/sessionPlacement.ts); every other reader sees the new row at once.
    *
-   * Lock order: authority anchors, the App ticker lock (as retireWorker), the per-worker assignment lock, the old
-   * and new Agent rows FOR SHARE in id order, then the Worker row FOR UPDATE: the matcher and context reset take
-   * the assignment lock, then Agent, then Worker, so neither can cycle with this.
+   * Lock order: authority anchors, App ticker lock, caller/subject assignment locks in id order, deciding
+   * memberships FOR SHARE, old/new Agent rows FOR SHARE, caller/subject Worker rows FOR UPDATE in id order, then
+   * the session FOR SHARE. The final instruction/holder gate runs under these locks; the matcher and context
+   * reset use assignment → Agent → Worker too.
    */
   changeWorkerAgent: async (
     _: unknown,
-    args: { workerRef: string; agentRef: string },
+    args: { workerRef: string; agentRef: string; instruction?: ActInstruction | null },
     ctx: Context,
   ) => {
     const { worker, app } = await resolveReadableWorkerRef(ctx, args.workerRef);
@@ -1804,12 +1824,10 @@ export const workerMutations = {
       ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
       ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
     ];
+    let admission: ActAdmission;
     return withAuthorizedTx(ctx, anchors, async txCtx => {
-      const fresh = await txCtx.db.app.findUniqueOrThrow({ where: { id: app.id } });
-      const actor = currentActor();
-      const bound = txCtx.sessionId ? await txCtx.db.session.findUnique({ where: { id: txCtx.sessionId }, select: { workerId: true } }) : null;
-      if (bound?.workerId || txCtx.sessionBindingRefused || actor.workerId || actor.agentId || txCtx.impersonation || !(await managesApp(txCtx, fresh))) throw forbidden();
-    }, async tx => {
+      admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
+    }, async (tx, txCtx) => {
       // Only a caller who passed the gate learns whether the agent exists: absent and not installed are one answer.
       let toAgentId: string;
       try {
@@ -1818,11 +1836,15 @@ export const workerMutations = {
         if (e instanceof AgentNotFoundError) throw workerAgentNotInstalled(app.id);
         throw e;
       }
-      await lockWorkersForAssignment(tx, [worker.id]);
+      const actWorkerIds = [worker.id, ...(admission.kind === 'instructed-worker' ? [admission.workerId] : [])];
+      await lockWorkersForAssignment(tx, actWorkerIds);
+      await lockAppManagerMemberships(tx, ctx.userId, app);
       const before = await tx.worker.findUnique({ where: { id: worker.id }, select: { agentId: true } });
       if (!before) throw workerNotFound(args.workerRef);
       const agentIds = [...new Set([before.agentId, toAgentId])].sort();
       await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${agentIds}::text[]) ORDER BY id FOR SHARE`;
+      await lockWorkerActRows(tx, actWorkerIds, ctx.sessionId);
+      admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
       const [locked] = await tx.$queryRaw<Array<{ agent_id: string; role: string | null; retired_at: Date | null; name: string; boot_prompt_node_id: string | null }>>`
         SELECT agent_id, role, retired_at, name, boot_prompt_node_id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
       if (!locked) throw workerNotFound(args.workerRef);
@@ -1860,9 +1882,10 @@ export const workerMutations = {
         throw generatedTickerRefusal(e) ?? e;
       }
       await appendWorkerCastingEvent(tx, {
-        appId: app.id, actor: eventActor(ctx.userId), workerId: worker.id,
+        appId: app.id, actor: admission.kind === 'instructed-worker' ? {userId:admission.userId,workerId:admission.workerId,agentId:admission.agentId} : eventActor(ctx.userId), workerId: worker.id,
         fromAgentId: locked.agent_id, toAgentId: agent.id, fromRole: locked.role, toRole,
         clearedBootPromptNodeId: locked.boot_prompt_node_id,
+        instruction: admission.kind === 'instructed-worker' ? admission.instruction : undefined,
       });
       return tx.worker.findUniqueOrThrow({ where: { id: worker.id } });
     }, { afterLock: async (tx) => { await lockAppTickers(tx, app.id); } });
