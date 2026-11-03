@@ -269,3 +269,9 @@ it('#3307 refuses an App ownership scope different from its authority anchors',a
  const before=await snapshot();expect((await answer(calls.signature(live,bound({db:client})))).code).toBe('FORBIDDEN');expect(await snapshot()).toEqual(before);
  expect((await db.app.findUniqueOrThrow({where:{id:f.app.id}})).organizationId).toBe(f.org.id);
 });
+
+it('#3307 malformed live-chat references refuse before writing',async()=>{
+ const before=await snapshot();
+ for(const ref of ['instruction prose', 'bad\u0000ref', 'bad\ud800ref'])expect((await answer(calls.signature({kind:'LIVE_CHAT',ref}))).code).toBe('FORBIDDEN');
+ expect(await snapshot()).toEqual(before);
+});
