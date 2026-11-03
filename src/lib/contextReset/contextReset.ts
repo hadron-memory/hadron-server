@@ -429,18 +429,23 @@ export async function readContextResetForHost(tx: Prisma.TransactionClient, host
  * the reset row. Another App's or another host's reset reads as not found. The operation must have been collected by
  * this host (cor:agt:070:04): a host acts on what it collected, never on an id it guessed.
  */
-async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string, collectedTimestamp = false): Promise<ContextResetRow> {
+async function lockForHost(tx: Prisma.TransactionClient, host: ResetHost, resetId: string, options: {collectedTimestamp?:boolean;checkpointMemory?:boolean} = {}): Promise<ContextResetRow> {
   const notFound = () => new ContextResetError('CONTEXT_RESET_NOT_FOUND', 'Context reset not found.');
   if (typeof resetId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(resetId)) throw notFound();
   const head = await tx.contextReset.findUnique({ where: { id: resetId }, select: { workerId: true, appId: true, hostId: true } });
   if (!head || head.appId !== host.appId || head.hostId !== host.hostId) throw notFound();
   await lockWorkersForAssignment(tx, [head.workerId]);
+  // #3276: follow the shared worker-row → availability → reset-row order. These reads decide no refusal.
+  if (options.checkpointMemory) {
+    const [worker] = await tx.$queryRaw<{memoryId:string|null}[]>`SELECT memory_id AS "memoryId" FROM workers WHERE id=${head.workerId} FOR SHARE`;
+    if (worker?.memoryId) await tx.$queryRaw`SELECT id FROM memories WHERE id=${worker.memoryId} FOR SHARE`;
+  }
   await lockMark(tx, head.workerId);
   await tx.$queryRaw`SELECT id FROM context_resets WHERE id = ${resetId} FOR UPDATE`;
   const r = await tx.contextReset.findUniqueOrThrow({ where: { id: resetId } });
   const op = r.hostOperationId ? await tx.hostOperation.findUnique({ where: { id: r.hostOperationId }, select: { status: true, collectedAt: true } }) : null;
   if (!op) throw notFound();
-  if (collectedTimestamp ? !op.collectedAt : op.status === 'issued') {
+  if (options.collectedTimestamp ? !op.collectedAt : op.status === 'issued') {
     throw new ContextResetError('HOST_OPERATION_NOT_COLLECTED', 'Collect the reset\'s operation before acting on it.');
   }
   return r;
@@ -535,7 +540,9 @@ export async function registerContextResetRecovery(
   tx: Prisma.TransactionClient, host: ResetHost, resetId: string, epoch: unknown,
   ref: { checkpointNode?: unknown; checkpoint?: {title: string; content: string} | null; sessionId: unknown; taskId: unknown }, now: Date,
 ): Promise<ContextResetStep> {
-  const r = await lockForHost(tx, host, resetId, true);
+  const r = await lockForHost(tx, host, resetId, {collectedTimestamp:true,checkpointMemory:ref.checkpoint != null});
+  // The write's lease is judged after all potentially blocking admission locks, never from a pre-wait clock.
+  if (ref.checkpoint != null) now = new Date();
   requireEpoch(r, epoch);
   if (r.phase !== 'claimed') {
     const stored = (r.recoveryRef ?? null) as { checkpointNodeId?: string } | null;
@@ -548,13 +555,12 @@ export async function registerContextResetRecovery(
   if (ref.taskId !== r.taskId) throw invalid('The recovery reference names another task.');
   const writesCheckpoint = ref.checkpoint != null;
   if (writesCheckpoint === (ref.checkpointNode != null)) throw invalid('Supply exactly one of checkpointNode and checkpoint.');
-  const [worker] = await tx.$queryRaw<{memoryId:string|null}[]>`SELECT memory_id AS "memoryId" FROM workers WHERE id=${r.workerId} FOR SHARE`;
+  const worker = await tx.worker.findUnique({where:{id:r.workerId},select:{memoryId:true}});
   if (!worker?.memoryId) throw invalid('The worker has no working memory.');
   let nodeId: string | null = null;
   if (writesCheckpoint) {
     // Ruling0090A: deliberately not the generic node writer, nor any grant to that writer.
-    const [memory] = await tx.$queryRaw<{id:string;isEncrypted:boolean;deletedAt:Date|null}[]>`
-      SELECT id,is_encrypted AS "isEncrypted",deleted_at AS "deletedAt" FROM memories WHERE id=${worker.memoryId} FOR SHARE`;
+    const memory = await tx.memory.findUnique({where:{id:worker.memoryId},select:{id:true,isEncrypted:true,deletedAt:true}});
     if (!memory || memory.deletedAt) throw invalid('The working memory is unavailable.');
     if (memory.isEncrypted) throw new ContextResetError('CHECKPOINT_MEMORY_ENCRYPTED','A host key cannot unlock an encrypted working memory.');
     if (!host.appKeyId) throw invalid('A checkpoint is written only by the host key.');
@@ -572,11 +578,6 @@ export async function registerContextResetRecovery(
     }
     const [clock] = await tx.$queryRaw<{stamp:string}[]>`SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24MISS"Z"') AS stamp`;
     const loc = `sheds:auto-${clock!.stamp}`;
-    // Serialize this exact address against other checkpoint calls and check tombstones too.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${worker.memoryId + ':' + loc}, 3276))::text`;
-    // Memory/address lock waits may outlive the initially checked claim. No write uses that stale clock.
-    const writeNow = new Date();
-    if (claimLapsed(r, writeNow)) return endReset(tx,r,'CLAIM_LAPSED',writeNow).then(e=>step(e,'CLAIM_LAPSED'));
     if (await tx.node.findUnique({where:{loc_memoryId:{loc,memoryId:worker.memoryId}},select:{id:true}})) {
       throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
     }
@@ -584,7 +585,7 @@ export async function registerContextResetRecovery(
       nodeId = (await tx.node.create({data:{id:generateId(),memoryId:worker.memoryId,loc,name:ref.checkpoint!.title,
         content:ref.checkpoint!.content,nodeType:'info',role:null,isRunnable:false,tags:[],createdBy:host.appKeyId,updatedBy:host.appKeyId}})).id;
     } catch (e) {
-      // A generic writer need not use the checkpoint advisory lock. The unique constraint is the final fence.
+      // A generic writer may insert after the precheck. The unique constraint is the final fence.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         throw new ContextResetError('CHECKPOINT_LOC_TAKEN','The checkpoint address is already occupied.');
       }
