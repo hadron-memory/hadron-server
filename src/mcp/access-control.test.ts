@@ -23,7 +23,7 @@ import {
   canReadMemory,
   canWriteToMemory,
   getAccessibleMemoryIds,
-  getAppMemoryAccess,
+  getAppMemoryCandidates,
   getMemoryAccess,
 } from './access-control.js';
 
@@ -77,15 +77,15 @@ beforeEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// getAppMemoryAccess — App-keyed via App.agent_id direct FK
+// getAppMemoryCandidates — App-keyed via App.agent_id direct FK
 // ---------------------------------------------------------------------------
 
-describe('getAppMemoryAccess (App-key principal)', () => {
+describe('getAppMemoryCandidates (candidate inventory, not authority)', () => {
   it('returns the agent system memory + memoryItems (system always READ_ONLY)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-ro', orgId);
     await createDbAppAgent(db, app.id, agentId);
 
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryCandidates(db, app.id);
 
     expect(access.size).toBe(2);
     // 008: system memory is universally READ_ONLY from an App context.
@@ -99,7 +99,7 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     const { app } = await createDbAppWithKey(db, 'app-rw', orgId);
     await createDbAppAgent(db, app.id, agentId, { role: 'DEVELOP' });
 
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryCandidates(db, app.id);
 
     expect(access.get(systemMemoryId)).toBe('READ_ONLY');
     expect(access.get(knowledgeMemoryId)).toBe('READ_ONLY');
@@ -117,7 +117,7 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     const { app } = await createDbAppWithKey(db, 'app-rw', orgId);
     await createDbAppAgent(db, app.id, localAgentId);
 
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryCandidates(db, app.id);
 
     expect(access.get(localKnId)).toBe('READ_WRITE');
   });
@@ -130,15 +130,15 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: invalid.id, role: 'bogus' } });
     const auth: AuthContext = { appId: app.id, organizationId: orgId };
-    expect((await getAppMemoryAccess(db, app.id)).get(knowledgeMemoryId)).toBe('READ_ONLY');
-    expect((await getAppMemoryAccess(db, app.id)).has(invalid.id)).toBe(false);
+    expect((await getAppMemoryCandidates(db, app.id)).get(knowledgeMemoryId)).toBe('READ_ONLY');
+    expect((await getAppMemoryCandidates(db, app.id)).has(invalid.id)).toBe(false);
     expect(await canReadMemory(db, auth, invalid.id)).toBe(false);
   });
 
   it('returns an empty map when the App is orphan (agent_id IS NULL)', async () => {
     const { app } = await createDbAppWithKey(db, 'app-orphan', orgId);
 
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryCandidates(db, app.id);
 
     expect(access.size).toBe(0);
   });
@@ -148,7 +148,7 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     await createDbAppAgent(db, app.id, agentId);
     await db.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
 
-    const access = await getAppMemoryAccess(db, app.id);
+    const access = await getAppMemoryCandidates(db, app.id);
 
     expect(access.size).toBe(0);
   });
@@ -156,18 +156,18 @@ describe('getAppMemoryAccess (App-key principal)', () => {
   it('drops Agent reach when a retained AppAgent belongs to an uninstalled App', async () => {
     const { app } = await createDbAppWithKey(db, 'app-uninstalled', orgId);
     await createDbAppAgent(db, app.id, agentId);
-    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    expect((await getAppMemoryCandidates(db, app.id)).has(knowledgeMemoryId)).toBe(true);
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+    expect((await getAppMemoryCandidates(db, app.id)).size).toBe(0);
     expect(await canReadMemory(db, { appId: app.id, organizationId: orgId }, knowledgeMemoryId)).toBe(false);
   });
 
   it('drops a same-org install when its organization is soft-deleted', async () => {
     const { app } = await createDbAppWithKey(db, 'app-deleted-org', orgId);
     await createDbAppAgent(db, app.id, agentId);
-    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    expect((await getAppMemoryCandidates(db, app.id)).has(knowledgeMemoryId)).toBe(true);
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
-    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+    expect((await getAppMemoryCandidates(db, app.id)).size).toBe(0);
     expect(await canReadMemory(db, { appId: app.id, organizationId: orgId }, knowledgeMemoryId)).toBe(false);
   });
 
@@ -180,9 +180,9 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     await db.agentOrgGrant.create({
       data: { orgId: appOrg.id, agentId, activatedAt: new Date() },
     });
-    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    expect((await getAppMemoryCandidates(db, app.id)).has(knowledgeMemoryId)).toBe(true);
     await db.organization.update({ where: { id: orgId }, data: { deletedAt: new Date() } });
-    expect((await getAppMemoryAccess(db, app.id)).size).toBe(0);
+    expect((await getAppMemoryCandidates(db, app.id)).size).toBe(0);
   });
 
   it('does not fold a legacy per-user holding into a foreign App key through a PUBLIC Agent', async () => {
@@ -204,8 +204,8 @@ describe('getAppMemoryAccess (App-key principal)', () => {
     await db.agentOrgGrant.create({
       data: { orgId: foreignOrg.id, agentId, activatedAt: new Date() },
     });
-    expect((await getAppMemoryAccess(db, app.id)).has(knowledgeMemoryId)).toBe(true);
-    expect((await getAppMemoryAccess(db, app.id)).has(holding.id)).toBe(false);
+    expect((await getAppMemoryCandidates(db, app.id)).has(knowledgeMemoryId)).toBe(true);
+    expect((await getAppMemoryCandidates(db, app.id)).has(holding.id)).toBe(false);
     expect(await canReadMemory(db, { appId: app.id, organizationId: foreignOrg.id }, holding.id)).toBe(false);
   });
 
@@ -221,8 +221,8 @@ describe('getAppMemoryAccess (App-key principal)', () => {
       },
     });
     await db.agentMemoryItem.create({ data: { agentId, memoryId: scoped.id, role: 'read' } });
-    expect((await getAppMemoryAccess(db, appA.id)).has(scoped.id)).toBe(true);
-    expect((await getAppMemoryAccess(db, appB.id)).has(scoped.id)).toBe(false);
+    expect((await getAppMemoryCandidates(db, appA.id)).has(scoped.id)).toBe(true);
+    expect((await getAppMemoryCandidates(db, appB.id)).has(scoped.id)).toBe(false);
     expect(await canReadMemory(db, { appId: appB.id, organizationId: orgId }, scoped.id)).toBe(false);
   });
 });

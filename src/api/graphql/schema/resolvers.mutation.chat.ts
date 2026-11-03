@@ -73,7 +73,6 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
-import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -552,8 +551,8 @@ export const chatMutations = {
           orderBy: { createdAt: 'asc' },
           select: { memoryId: true, role: true, memory: { select: LINK_CAP_MEMORY_SELECT } },
         });
-        // #1376: an item is never a grant to a userless non-run key (cor:dmo:050:09).
-        targetMemoryId = !ctx.userId && !isRunPrincipal(ctx) ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
+        // #3292: an item never grants a userless principal, including an AppRun, a chat target (cor:dmo:050:09).
+        targetMemoryId = !ctx.userId ? null : writable.find((m) => linkWriteTargetAdmits(tenant, m.memory, m.role))?.memoryId ?? null;
       }
 
       // #3301 (refs #2895, Vera's ruling option a; cor:cht:010:02): an Agent's system memory is the Agent's
