@@ -10542,7 +10542,7 @@ export const typeDefs = `#graphql
     """
     recordAgentTaskProgress(taskId: ID!): AgentTask!
 
-    "#2663: task assigners only, including after finish; never an App key or impersonation. Records a new disposition value, never clears it; omitted/null reference means no reference on the new value. Unknown finding TASK_FINDING_NOT_FOUND; open task TASK_NOT_FINISHED; result unchanged (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
+    "#2663: finished tasks only, their assigners only; never an App key or impersonation. Records a new disposition value, never clears it; omitted/null reference means no reference on the new value. Unknown finding TASK_FINDING_NOT_FOUND; open task TASK_NOT_FINISHED; non-assigner TASK_NOT_OWNER; unreadable task TASK_NOT_FOUND; result unchanged (hrn:node:hadronmemory.com:specs:cor:agt:050:30)."
     disposeAgentTaskFinding(taskRef: ID!, findingId: String!, disposition: AgentTaskFindingDispositionCode!, reference: AgentTaskReferenceInput): AgentTask!
 
     """
@@ -10557,7 +10557,6 @@ export const typeDefs = `#graphql
     every finish. Both are judged after the assignee and status checks and before any write or event: the task
     stays started. With no set, any one word is accepted. The set is read only at finish.
     """
-
     finishAgentTask(taskId: ID!, result: AgentTaskResultInput!): AgentTask!
 
     """

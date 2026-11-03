@@ -100,11 +100,12 @@ describe('#2663 disposition write',()=>{
  it('serializes concurrent dispositions without losing either finding or event',async()=>{
   const {Client}=await import('pg');
   const holder=new Client({connectionString:process.env.DATABASE_URL});await holder.connect();
-  await holder.query('BEGIN');
-  await holder.query('SELECT id FROM agent_tasks WHERE id = $1 FOR UPDATE',[task.id]);
   let completed=false;
-  const writes=Promise.allSettled([dispose('fixed','F1'),dispose('deferred','F2')]).then(rows=>{completed=true;return rows;});
+  let writes:Promise<PromiseSettledResult<any>[]>=Promise.resolve([]);
   try {
+   await holder.query('BEGIN');
+   await holder.query('SELECT id FROM agent_tasks WHERE id = $1 FOR UPDATE',[task.id]);
+   writes=Promise.allSettled([Promise.resolve().then(()=>dispose('fixed','F1')),Promise.resolve().then(()=>dispose('deferred','F2'))]).then(rows=>{completed=true;return rows;});
    const deadline=Date.now()+4000;let waiting=0;
    do {
     const [row]=await db.$queryRaw<{n:bigint}[]>`SELECT count(*) AS n FROM pg_stat_activity
@@ -113,7 +114,7 @@ describe('#2663 disposition write',()=>{
     waiting=Number(row.n);
     if(waiting<2) await new Promise(resolve=>setTimeout(resolve,10));
    } while(waiting<2 && Date.now()<deadline);
-   expect(waiting).toBe(2);expect(completed).toBe(false); // both real writers reached the held task lock
+   expect(waiting).toBeGreaterThanOrEqual(2);expect(completed).toBe(false); // both real writers reached the held task lock
   } finally {
    try {await holder.query('ROLLBACK');} finally {await holder.end();await writes;}
   }

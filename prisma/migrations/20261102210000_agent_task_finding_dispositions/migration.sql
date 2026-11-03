@@ -38,6 +38,11 @@ DROP TRIGGER IF EXISTS agent_task_dispositions ON agent_tasks;
 CREATE TRIGGER agent_task_dispositions BEFORE INSERT OR UPDATE OF status, result_findings, finding_dispositions, unresolved_finding_ids ON agent_tasks
 FOR EACH ROW EXECUTE FUNCTION maintain_agent_task_dispositions();
 
--- Rebuild the projection for rows that predate these columns on BOTH deploy and post-push paths.
--- Results and current dispositions stay byte-identical; repeating this is safe and writes no history event.
-UPDATE agent_tasks SET finding_dispositions = finding_dispositions WHERE jsonb_typeof(result_findings) = 'array';
+-- Repair only stale projections on BOTH deploy and post-push paths.
+-- Already-correct open, fully disposed and empty-result rows acquire no update lock or tuple version.
+UPDATE agent_tasks AS task SET finding_dispositions = finding_dispositions
+WHERE task.unresolved_finding_ids IS DISTINCT FROM (
+  SELECT COALESCE(array_agg(f.value->>'id' ORDER BY f.ordinality), ARRAY[]::text[])
+  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(task.result_findings) = 'array' THEN task.result_findings ELSE '[]'::jsonb END) WITH ORDINALITY f
+  WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements(task.finding_dispositions) d WHERE d->>'findingId' = f.value->>'id')
+);
