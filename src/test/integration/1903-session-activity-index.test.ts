@@ -96,6 +96,21 @@ async function seedSkew(tx: Tx): Promise<void> {
   await tx.$executeRawUnsafe('ANALYZE usage_events');
 }
 
+/**
+ * #2577: the flake's condition, made deterministic. The incident shape's two index paths, the created_at walk and
+ * the session-activity index, are a near tie on a clone's statistics; a hosted clone can break it either way. Rows
+ * with counts_as_activity=false sit only in usage_events_created_at_idx (the activity index is partial), so
+ * bulking them up makes the walk the costlier path and the planner takes the activity index for the bare max too.
+ */
+async function steerPlannerToActivityIndex(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe(`
+    INSERT INTO usage_events (id, type, session_id, counts_as_activity, created_at)
+    SELECT 'ue-bulk-' || g, 'tool_call', 'sess-bulk-' || (g % 500), false,
+           timestamp '2026-08-01 00:00:00' + g * interval '1 second'
+    FROM generate_series(1, 20000) g`);
+  await tx.$executeRawUnsafe('ANALYZE usage_events');
+}
+
 /** A plan-assertion message that carries the plan, so a future failure is diagnosable from the log. */
 const withPlan = (plan: string) => `chosen plan:\n${plan}`;
 
@@ -140,9 +155,11 @@ describe('#1903 / #1952 roster liveness probe', () => {
     expect(plan, withPlan(plan)).toMatch(/usage_events_\w+_idx/);
   });
 
-  it('moves only the plan: the answer is identical to the bare max(created_at) under both plans', async () => {
+  for (const steered of [false, true]) {
+  it(`moves only the plan: the answer is identical to the bare max(created_at) under both plans${steered ? ' (planner steered to the activity index, #2577)' : ''}`, async () => {
     const result = await rolledBack(async (tx) => {
       await seedSkew(tx);
+      if (steered) await steerPlannerToActivityIndex(tx);
       // The heavy session and a spread of liveness cases, all in scope. Times
       // are naive UTC, as the columns are.
       await tx.$executeRaw(Prisma.sql`
@@ -196,4 +213,5 @@ describe('#1903 / #1952 roster liveness probe', () => {
     // ...and the answer is the same, row for row and field for field.
     expect(JSON.stringify(result.shipped)).toBe(JSON.stringify(result.incident));
   });
+  }
 });
