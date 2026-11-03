@@ -13802,7 +13802,7 @@ export const typeDefs = `#graphql
     per spec 008 FR-015 — it re-attaches if the user later re-joins.
     Bound workers require an instruction or their own live app.members grant
     (hrn:node:hadronmemory.com:specs:cor:dmo:050:12); successful instructed removals/no-ops record the claim.
-    Direct-person cleanup remains available for dead Apps.
+    Direct-person cleanup keeps the existing App reference-resolution behavior.
 
     Accepts the entity's ID or URN.
     """

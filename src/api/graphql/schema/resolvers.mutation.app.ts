@@ -243,6 +243,99 @@ async function provisionAppSharedMemory(
 
 
 
+async function removeAppMemberWithAdmission(
+  _: unknown,
+  {
+    appRef,
+    appId,
+    userRef,
+    userId,
+    instruction,
+  }: {
+    appRef?: string | null;
+    appId?: string | null;
+    userRef?: string | null;
+    userId?: string | null;
+    instruction?: ActInstruction | null;
+  },
+  ctx: Context,
+  expectedAdmission?: StaffActAdmission,
+): Promise<boolean> {
+  // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
+  // email. Evaluate the ROLE gate BEFORE resolving the target user, so an
+  // unauthorized caller can't turn user resolution into an existence
+  // oracle. A role-authorized caller may remove anyone; everyone else may
+  // remove ONLY themselves — and a self-only caller's target resolution
+  // maps any miss to the same Forbidden, with the resolved id required to
+  // be the caller, so an unknown handle/email is indistinguishable from a
+  // real user they can't remove.
+  const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+  const forbidRemove = () =>
+    forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
+
+  // #2448: a principal that is not the direct user is refused outright, the
+  // self-leave arm included, and before the target is resolved.
+  if (isRefusedPrincipal(ctx)) throw forbidRemove();
+  const initial = await admitMemberAct(ctx, app, instruction, forbidRemove, expectedAdmission);
+  let admission = initial;
+  const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
+  let resolvedUserId: string;
+  if (authorizedByRole) {
+    resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
+  } else {
+    resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId }).catch(
+      (e: unknown) => {
+        if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw forbidRemove();
+        throw e;
+      },
+    );
+    if (resolvedUserId !== ctx.userId) throw forbidRemove();
+  }
+
+  await withAuthorizedTx(
+    ctx,
+    [
+      { kind: 'app', id: resolvedAppId }, { kind: 'user', id: resolvedUserId },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+    ],
+    async (txCtx) => {
+      const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
+      if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
+        throw new Error('App ownership changed; retry member management');
+      }
+      if (isRefusedPrincipal(txCtx)) throw forbidRemove();
+      admission = await admitMemberAct(txCtx, app, instruction, forbidRemove, initial, true);
+      if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
+        throw forbidRemove();
+      }
+    },
+    async (tx) => {
+      // The row is held FOR UPDATE by afterLock, so the role read here is the one deleted.
+      const existing = await tx.appMember.findUnique({
+        where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
+        select: { role: true },
+      });
+      const { count } = await tx.appMember.deleteMany({ where: { appId: resolvedAppId, userId: resolvedUserId } });
+      // #2766: an idempotent no-op (no row) records nothing.
+      if (count > 0 && existing) {
+        await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: staffingActActor(admission), userId: resolvedUserId, role: existing.role, instruction: staffingInstruction(admission) });
+      } else {
+        await appendStaffingInstructionClaim(tx, { appId: resolvedAppId, admission, operation: 'member.remove', userId: resolvedUserId });
+      }
+    },
+    { lockMode: 'exclusive', afterLock: async (tx) => {
+      await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
+      await lockStaffingAct(tx, app, initial, ctx.sessionId);
+      await tx.$queryRaw`
+        SELECT user_id FROM app_members
+        WHERE app_id = ${resolvedAppId} AND user_id = ${resolvedUserId} FOR UPDATE`;
+    } },
+  );
+  return true;
+}
+
 export const appMutations = {
     regenerateAppKey: async (_: unknown, { appRef }: { appRef: string }, ctx: Context) => {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
@@ -1193,97 +1286,8 @@ export const appMutations = {
     // 008-agent-installation: removeAppMember. Idempotent — a missing row
     // returns true (no-op). Personal-class Memory at (appId, userId) is
     // retained as an orphan per FR-015.
-    removeAppMember: async (
-      _: unknown,
-      {
-        appRef,
-        appId,
-        userRef,
-        userId,
-        instruction,
-      }: {
-        appRef?: string | null;
-        appId?: string | null;
-        userRef?: string | null;
-        userId?: string | null;
-        instruction?: ActInstruction | null;
-      },
-      ctx: Context,
-    ) => {
-      // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
-      // email. Evaluate the ROLE gate BEFORE resolving the target user, so an
-      // unauthorized caller can't turn user resolution into an existence
-      // oracle. A role-authorized caller may remove anyone; everyone else may
-      // remove ONLY themselves — and a self-only caller's target resolution
-      // maps any miss to the same Forbidden, with the resolved id required to
-      // be the caller, so an unknown handle/email is indistinguishable from a
-      // real user they can't remove.
-      const resolvedAppId = await resolveAppRefArg(ctx.db, { ref: appRef, id: appId });
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      const forbidRemove = () =>
-        forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
-
-      // #2448: a principal that is not the direct user is refused outright, the
-      // self-leave arm included, and before the target is resolved.
-      if (isRefusedPrincipal(ctx)) throw forbidRemove();
-      const initial = await admitMemberAct(ctx, app, instruction, forbidRemove);
-      let admission = initial;
-      const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
-      let resolvedUserId: string;
-      if (authorizedByRole) {
-        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId });
-      } else {
-        resolvedUserId = await resolveUserRefArg(ctx.db, { ref: userRef, id: userId }).catch(
-          (e: unknown) => {
-            if (e instanceof GraphQLError && e.extensions?.code === 'NOT_FOUND') throw forbidRemove();
-            throw e;
-          },
-        );
-        if (resolvedUserId !== ctx.userId) throw forbidRemove();
-      }
-
-      await withAuthorizedTx(
-        ctx,
-        [
-          { kind: 'app', id: resolvedAppId }, { kind: 'user', id: resolvedUserId },
-          ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
-          ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
-        ],
-        async (txCtx) => {
-          const current = await txCtx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-          if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
-            throw new Error('App ownership changed; retry member management');
-          }
-          if (isRefusedPrincipal(txCtx)) throw forbidRemove();
-          admission = await admitMemberAct(txCtx, app, instruction, forbidRemove, initial, true);
-          if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
-            throw forbidRemove();
-          }
-        },
-        async (tx) => {
-          // The row is held FOR UPDATE by afterLock, so the role read here is the one deleted.
-          const existing = await tx.appMember.findUnique({
-            where: { appId_userId: { appId: resolvedAppId, userId: resolvedUserId } },
-            select: { role: true },
-          });
-          const { count } = await tx.appMember.deleteMany({ where: { appId: resolvedAppId, userId: resolvedUserId } });
-          // #2766: an idempotent no-op (no row) records nothing.
-          if (count > 0 && existing) {
-            await appendMemberRemovedEvent(tx, { appId: resolvedAppId, actor: staffingActActor(admission), userId: resolvedUserId, role: existing.role, instruction: staffingInstruction(admission) });
-          } else {
-            await appendStaffingInstructionClaim(tx, { appId: resolvedAppId, admission, operation: 'member.remove', userId: resolvedUserId });
-          }
-        },
-        { lockMode: 'exclusive', afterLock: async (tx) => {
-          await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
-          await lockStaffingAct(tx, app, initial, ctx.sessionId);
-          await tx.$queryRaw`
-            SELECT user_id FROM app_members
-            WHERE app_id = ${resolvedAppId} AND user_id = ${resolvedUserId} FOR UPDATE`;
-        } },
-      );
-      return true;
-    },
+    removeAppMember: async (_: unknown, args: Parameters<typeof removeAppMemberWithAdmission>[1], ctx: Context) =>
+      removeAppMemberWithAdmission(_, args, ctx),
 
     // 023-app-shape US2: self-service user-level install. The
     // currently-logged-in user joins the App as an AppMember.
@@ -1379,14 +1383,17 @@ export const appMutations = {
         });
       }
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appId);
-      const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      const admission = await admitMemberAct(ctx, app, instruction, () => forbiddenError('Forbidden: self-leave requires an instruction or own app.members grant'));
+      // Preserve legacy person cleanup: reference resolution already identified the App; no second existence probe.
+      // Worker admission is carried into the locked member-removal implementation below.
+      const admission = await requireInstructedAct(ctx, resolvedAppId, instruction, async () => true,
+        readActInstruction, () => forbiddenError('Forbidden: self-leave requires an instruction or own app.members grant'),
+        { name: 'app.members' });
       if (admission.kind === 'person') {
-        // Keep the legacy person cleanup path, including dead-App/idempotent behavior.
+        // Keep legacy person cleanup, including idempotency and the existing App reference resolution.
         await leaveApp(ctx.db, { appId: resolvedAppId, userId: ctx.userId });
       } else {
         // Reuse the locked member gate and canonical removal/no-op records for a worker's self-leave.
-        await appMutations.removeAppMember(_, { appId: resolvedAppId, userId: ctx.userId, instruction }, ctx);
+        await removeAppMemberWithAdmission(_, { appId: resolvedAppId, userId: ctx.userId, instruction }, ctx, admission);
       }
       return { appId: resolvedAppId, userId: ctx.userId };
     },
