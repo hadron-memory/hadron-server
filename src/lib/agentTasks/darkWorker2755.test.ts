@@ -456,6 +456,23 @@ describe('#3358 fallback is only for an empty live same-App reporting line', () 
     expect(await alarms('Liam')).toHaveLength(1);
   });
 
+  it('keeps the sealed line after every head retires, while a manager may still acknowledge', async () => {
+    await db.worker.update({ where: { id: w.Ada.id }, data: { reportsToWorkerId: w.Tove.id } });
+    await liamOverdue();
+    await evaluateDarkWorkers(db, NOW);
+    const original = (await alarms('Liam'))[0];
+    expect(original.chain).toEqual([{ workerId: w.Ada.id }, { workerId: w.Tove.id }]);
+    await db.worker.updateMany({ where: { id: { in: [w.Ada.id, w.Tove.id] } }, data: { retiredAt: at(1) } });
+    await evaluateDarkWorkers(db, NOW);
+    const [sealed] = await alarms('Liam');
+    expect(sealed.chain).toEqual(original.chain);
+    expect(await alarms('Liam')).toHaveLength(1);
+    const schedules = await db.agentTeamAlarmSchedule.findMany({ where: { eventId: sealed.id }, orderBy: { chainIndex: 'asc' } });
+    expect(schedules.map((row) => row.chainIndex)).toEqual([0, 1]);
+    const acked = await (resolvers.Mutation as any).acknowledgeAlarm({}, { eventId: sealed.id }, { db, userId: user.id, roles: ['READER'] });
+    expect(acked).toMatchObject({ acknowledgedByUserId: user.id });
+  });
+
   it('a manager sealed in the no-line fallback still prevents a user merge until acknowledgement', async () => {
     await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: null } });
     await liamOverdue(); await evaluateDarkWorkers(db, NOW);
