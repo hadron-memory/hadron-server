@@ -1,4 +1,5 @@
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
+import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { isWorkerResetting } from '../../../lib/contextReset/contextReset.js';
@@ -114,7 +115,7 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
-import { currentActor } from '../../../lib/requestActor.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -2556,7 +2557,8 @@ export const sessionMutations = {
         });
       }
       // An App run on behalf of the org's ADMIN carries both appId and userId; the grant is the App's, not theirs.
-      if (ctx.appId || currentActor().workerId) throw forbiddenError();
+      if (ctx.appId) throw forbiddenError();
+      await requirePersonAsThemselves(ctx, forbiddenError);
       const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
       if (surfaceRefusal) {
         throw new GraphQLError(
@@ -2579,7 +2581,7 @@ export const sessionMutations = {
           await requireOrgRole(ctx, orgId, 'ADMIN');
           throw new ConnectProviderNotConfiguredError(provider);
         }
-        const { nonce, expiresAt } = await issueConnectStart(cfg, {
+        const { nonce, expiresAt, flowId } = await issueConnectStart(cfg, {
           userId: ctx.userId,
           roles: ctx.roles,
           orgId,
@@ -2587,6 +2589,7 @@ export const sessionMutations = {
           origin: 'graphql',
         });
         return {
+          flowId,
           provider,
           orgId,
           authorizeUrl: `${getProjectBaseUrl()}/auth/${cfg.routeName}?nonce=${nonce}`,
@@ -3078,7 +3081,7 @@ export const sessionMutations = {
 
         const node = await ctx.db.node.findUnique({
           where: { loc_memoryId: { loc, memoryId: memory.id } },
-          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true } } },
+          include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true }, orderBy: edgeRunOrder() } },
         });
         if (!node) {
           throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {

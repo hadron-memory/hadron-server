@@ -36,8 +36,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@hadron-memory/urn-lib-js':
-        specifier: 0.0.17
-        version: 0.0.17
+        specifier: 0.0.18
+        version: 0.0.18
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.0
         version: 1.32.0(zod@4.3.6)
@@ -739,8 +739,8 @@ packages:
   '@hadron-memory/access-control@0.3.0':
     resolution: {integrity: sha512-rEMpsY2emeckMtrFpj9uPzJQgApnDHF+pBrNczrGmI6GYo6roahYGvPxtohtSuQzi9MSQXP3Pjnzy71WZrDzVw==}
 
-  '@hadron-memory/urn-lib-js@0.0.17':
-    resolution: {integrity: sha512-VI6wScJpaYDJwiyO5U2DSsqNOVnYrmLAT+8wQWseuNBpBBxvkkvyXzLUihHx3X9SY5PrmIZB13oy1HtlnudUEA==}
+  '@hadron-memory/urn-lib-js@0.0.18':
+    resolution: {integrity: sha512-L7Ucaq40sQ8h3BoFsg4MPAA0buURuYynVCIV03PZr8Rhh5Wl6edE2FPlpSE2up9fBl++g9waiRWxINh/kBebxg==}
 
   '@hexagon/base64@1.1.28':
     resolution: {integrity: sha512-lhqDEAvWixy3bZ+UOYbPwUbBkwBq5C1LAJ/xPC8Oi+lL54oyakv/npbA0aU2hgCsx/1NUd4IBvV03+aUBWxerw==}
@@ -1145,10 +1145,12 @@ packages:
   '@smithy/core@3.24.6':
     resolution: {integrity: sha512-wBXDRup6UU97VKyaiRo8AssnfStPtG0oAAfpq/bC0a1YYau8pM86YB4kM6ccoVi1mS8l/UHbn9oDM+7uozr/ug==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/core@3.29.1':
     resolution: {integrity: sha512-qoiY4nrk5OCu1+eIR1VB8l5DmON/oKiqrd5zZFAhXJXjJlLWQusKEW/SkBDAtGDcPaz86m9kfcE1lngU0GlM6A==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/credential-provider-imds@4.2.14':
     resolution: {integrity: sha512-Au28zBN48ZAoXdooGUHemuVBrkE+Ie6RPmGNIAJsFqj33Vhb6xAgRifUydZ2aY+M+KaMAETAlKk5NC5h1G7wpg==}
@@ -1285,6 +1287,7 @@ packages:
   '@smithy/smithy-client@4.12.13':
     resolution: {integrity: sha512-y/Pcj1V9+qG98gyu1gvftHB7rDpdh+7kIBIggs55yGm3JdtBV8GT8IFF3a1qxZ79QnaJHX9GXzvBG6tAd+czJA==}
     engines: {node: '>=18.0.0'}
+    deprecated: Deprecated due to a bug in custom logger data redaction. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/types@4.14.1':
     resolution: {integrity: sha512-59b5HtSVrVR/eYNei3BUj3DCPKD/G7EtDDe7OEJE7i7FtQFugYo6MxbotS8mVJkLNVf8gYaAlEBwwtJ9HzhWSg==}
@@ -3986,7 +3989,7 @@ snapshots:
 
   '@hadron-memory/access-control@0.3.0': {}
 
-  '@hadron-memory/urn-lib-js@0.0.17': {}
+  '@hadron-memory/urn-lib-js@0.0.18': {}
 
   '@hexagon/base64@1.1.28': {}
 

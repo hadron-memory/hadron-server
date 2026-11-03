@@ -97,7 +97,9 @@ function urlLines(text: string): string[] {
 function workerUrns(text: string): string[] {
   return text
     .split('\n')
-    .filter((line) => !/^\s*URL:/.test(line))
+    // #2969: the rendered signature/trailer lines carry the worker's link inside them (`](<origin>/app/u/<urn>)`), by
+    // design; they are not identifiers, like the `URL:` lines.
+    .filter((line) => !/^\s*URL:/.test(line) && !line.includes('/app/u/hrn:worker:'))
     .flatMap((line) => [...line.matchAll(/hrn:worker:[^\s)]+/g)].map((m) => m[0]));
 }
 

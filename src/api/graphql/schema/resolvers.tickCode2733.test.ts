@@ -55,6 +55,7 @@ it('files one fixed unmapped warning under the mutation alias after successful c
 });
 
 it('keeps template codes on generated copies across rename and deletion', async () => {
+  await db.agent.update({ where: { id: f.roleA.id }, data: { personaRole: 'test-worker' } });
   const template = await M.createAgentTickerTemplate({}, { agentRef: f.roleA.id, input: { name: 'Shared tick', cadenceSeconds: 600 } }, f.context());
   await M.castWorker({}, { appRef: f.app.id, agentRef: f.roleA.id, name: 'One' }, f.context());
   await M.castWorker({}, { appRef: f.app.id, agentRef: f.roleA.id, name: 'Two' }, f.context());

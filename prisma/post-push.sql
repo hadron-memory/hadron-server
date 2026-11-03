@@ -110,6 +110,8 @@ ALTER TABLE memories
 -- (app_id NULL) is exempt. (We deliberately do NOT couple app_id ⇔ agent: a
 -- legacy pre-008 row may have app_id NULL with an agent set, and the MCP gate
 -- has explicit handling + a regression test for that shape.)
+-- #422: supported account erasure deletes Apps (cascading to owned App-scoped
+-- memories) before Agents; relaxing Agent sharing must revisit this SET NULL/CHECK ordering.
 ALTER TABLE memories
   DROP CONSTRAINT IF EXISTS chk_memory_personal_agent_id;
 ALTER TABLE memories
@@ -178,6 +180,14 @@ ALTER TABLE ai_service_configs
 ALTER TABLE ai_service_configs
   ADD CONSTRAINT chk_ai_service_config_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, app_id, agent_id) = 1);
+
+-- ─── #2831 S1: a model group belongs to exactly one owner (Agent or App) ──
+-- Synced with the 20261031230000 migration.
+ALTER TABLE model_groups
+  DROP CONSTRAINT IF EXISTS chk_model_group_owner;
+ALTER TABLE model_groups
+  ADD CONSTRAINT chk_model_group_owner
+  CHECK (num_nonnulls(agent_id, app_id) = 1);
 
 -- ─── #696: secrets are ORG/USER-owned only ───────────────────────────────
 -- D-2026-07-15-006 narrows the #679 secret store to org/user owners (the flat
@@ -671,6 +681,12 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2484: an App's prefix-scoped write grant for userless runs, and its append-only events.
 \ir app-memory-write-grant-invariants.sql
 
+-- #2883: an automation's read grant, keyed to its trigger row, and its append-only events.
+\ir app-automation-read-grant-invariants.sql
+
+-- #2659: the append-only record of a deleted user API key.
+\ir user-api-key-deletion-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
@@ -678,11 +694,28 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- shared verbatim with migration 20261008010000_agent_tasks (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
+\ir agent-task-findings-invariants.sql
 
 -- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
 -- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
 \ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
+
+-- #2651: a task's latest hand-back (code, optional text, time). One source, shared verbatim with migration
+-- 20261101090000_agent_task_hand_back (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-hand-back-invariants.sql
+
+-- #2649: a task's references are one JSON array of at most 20 items. One source, shared verbatim with migration
+-- 20261101120000_agent_task_references (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-references-invariants.sql
+
+-- #3125 S1: an App's properties are a JSON object when set. One source, shared verbatim with migration
+-- 20261101150000_app_properties (pinned by src/api/graphql/schema/appProperties3125.test.ts).
+\ir app-properties-invariants.sql
+
+-- #3125 S2: a task's external id (1..512) and its per-App partial unique index. One source, shared verbatim with
+-- migration 20261101160000_agent_task_external_id (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-external-id-invariants.sql
 
 -- #1706: stall alarms (one per episode), alarm wakes, availability for work and
 -- per-App stall windows. One source, shared verbatim with migration
@@ -825,3 +858,5 @@ CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
+
+\ir agent-task-dispositions-invariants.sql

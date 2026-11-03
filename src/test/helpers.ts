@@ -32,7 +32,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // #1631: test-only cleanup bypasses row-delete guards, before deleting owners.
   // #1632: signature records reference passkeys and requests; both refuse a row
   // DELETE while their node exists, so they are truncated with them.
-  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits CASCADE');
+  await db.$executeRawUnsafe('TRUNCATE TABLE node_signatures, signing_requests, passkey_credentials, worker_reference_fences, user_deletion_audits, agent_clone_audits, user_api_key_deletions CASCADE');
   // Pending first-party login states (FK-free; keyed on the OAuth state).
   await db.pendingLoginState.deleteMany();
   // #1079 — the URN alias map. Deliberately FK-FREE: it must outlive the row it
@@ -70,6 +70,10 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   await db.appRun.deleteMany();
   await db.agentSchedule.deleteMany();
   await db.agentWebhook.deleteMany();
+  await db.rateLimitBucket.deleteMany();
+  await db.rateLimitPolicyAudit.deleteMany();
+  await db.rateLimitPolicy.deleteMany();
+  await db.rateLimitManifest.deleteMany();
   await db.quotaCounter.deleteMany();
   await db.actionTicket.deleteMany();
   // #1606 — comment nodes first: their governed edges refuse a delete while
@@ -84,7 +88,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE dark_worker_episodes, post_limit_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, agent_task_stop_holds, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE dark_worker_episodes, post_limit_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, agent_task_stop_holds, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -103,6 +107,13 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // Admin impersonation audit rows cascade from both User and Organization;
   // cleared explicitly before their parents to keep cleanup order predictable.
   await db.impersonationSession.deleteMany();
+  // #2965: invitations reference sender and org with onDelete SetNull, so
+  // deleting those parents left every invitation row (soft-deleted ones too)
+  // behind with its unique slug taken, and a reused serial base failed on
+  // fixed fixture slugs. Activations (Cascade from invitation and user) first,
+  // then the invitations, before the users and orgs they point at.
+  await db.userInvitationActivation.deleteMany();
+  await db.userInvitation.deleteMany();
   await db.orgMember.deleteMany();
   // Assets mostly cascade from Memory below — but a STAGED asset has
   // `memoryId: null` (uploaded, not yet attached), so it has no parent to

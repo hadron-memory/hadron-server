@@ -14,10 +14,11 @@ import { reservedTeamPrefix } from '../../../lib/teamTagSnapshot.js';
 // (`roles:<role>` nodes, `data.names`), read at CASTING time — and only when
 // the caller names no explicit worker name. Casting with an explicit name
 // needs no Team Agent at all.
+import { effectiveModelGroups, matchingModelGroupNames, type EffectiveModelGroup } from '../../../lib/agentTasks/modelGroups.js';
 import { servedPromptOwnerFields } from './resolvers.servedPrompt.js';
 import { renderLintWarnings } from '../../../lib/bootPromptLint.js';
 import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
-import { readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
+import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
@@ -58,7 +59,7 @@ import {
 } from '../../../lib/nodeCrypto.js';
 import { applyPlatformVariables, applyRecordedVariables, type PlatformVariableValues } from '../../../lib/personaDescription.js';
 // Spec 049 Phase 6 — the register block, derived data through one composition point.
-import { renderDerivedBlocks, resolveRegister } from '../../../lib/resolveRegister.js';
+import { renderDerivedBlocks, resolveRegister, type RegisterPageShare } from '../../../lib/resolveRegister.js';
 import {
   newestHandoff,
   handoffSessionId,
@@ -81,7 +82,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { resolveTaskActor, type TaskApp } from './resolvers.agentTask.js';
 import type { AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { appendWorkerCastEvent, appendWorkerCastingEvent, appendWorkerDeletedEvent, appendWorkerRetiredEvent, eventActor } from '../../../lib/agentTasks/events.js';
-import { assertCastable, provisionCastGrants, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
+import { assertCastable, provisionCastGrants, requireWorkerAgentRole, workerAgentNotInstalled } from '../../../lib/workerCasting.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { workerTerminalView, type StoredWorkerTerminal } from '../../../lib/workerTerminal.js';
 import {
@@ -880,7 +881,7 @@ type CastTarget = {
   appId: string;
   app: AppRow & { deletedAt: Date | null };
   agent: { id: string; name: string; personaRole: string | null };
-  workerRole: string | null;
+  workerRole: string;
   /** The role the caller passed (trimmed), or null: the cast re-checks it against the agent read in its transaction. */
   requestedRole: string | null;
   requestedName: string | null;
@@ -1000,7 +1001,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
     const matches = installed
       .map((r) => r.agent)
       .filter(
-        (a) => a && !a.deletedAt && (a.personaRole ?? '').toLowerCase() === roleNorm.toLowerCase(),
+        (a) => a && !a.deletedAt && (a.personaRole ?? '').trim().toLowerCase() === roleNorm.toLowerCase(),
       );
     if (matches.length === 0) {
       throw new GraphQLError(
@@ -1029,11 +1030,11 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
   // newly selected Agent's licence. The transaction was planned for the original.
   if (expectedAgentId !== undefined && agent.id !== expectedAgentId) throw castTargetChanged();
   // #2458 / R222: a cast takes its Agent's role; role selects, never overrides.
-  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').toLowerCase()) {
+  if (agentRef && agentRef.trim() !== '' && roleNorm !== null && roleNorm.toLowerCase() !== (agent.personaRole ?? '').trim().toLowerCase()) {
     throw roleOverrideRefused(appId, agent.personaRole ?? null, roleNorm);
   }
-  await assertCastable(ctx.db, app, agent.id);
-  const workerRole = agent.personaRole ?? null;
+  const { agent: castAgent } = await assertCastable(ctx.db, app, agent.id);
+  const workerRole = requireWorkerAgentRole(castAgent);
   return { appId, app: app as CastTarget['app'], agent, workerRole, requestedRole: roleNorm, requestedName, choice, reportingHeadId };
 }
 
@@ -1152,9 +1153,10 @@ export const workerMutations = {
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
             // #2458's deciding licence/role check, on the transaction. It only PLANS the missing same-org grants
             // (#2906); they are written below, once nothing that returns a value can still end the cast.
-            const { agent: castAgent, provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
-            const castRole = castAgent.personaRole ?? null;
-            if (requestedRole !== null && requestedRole.toLowerCase() !== (castRole ?? '').toLowerCase()) {
+            const { provisionGrantsFor } = await assertCastable(tx, freshApp, agent.id);
+            // #3256: resolveCastTarget just rechecked the role on this locked Agent, never the preflight role.
+            const castRole = freshTarget.workerRole;
+            if (requestedRole !== null && requestedRole.toLowerCase() !== castRole.toLowerCase()) {
               throw roleOverrideRefused(appId, castRole, requestedRole);
             }
             // Preserve PostgreSQL lower(name)'s existing typed refusal before
@@ -1841,14 +1843,7 @@ export const workerMutations = {
       }
       const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
       const { agent, provisionGrantsFor } = await assertCastable(tx, freshApp, toAgentId);
-      // "The role is the new agent's own role" (cor:dmo:050:11): an agent with none has no role to change TO, and a
-      // worker left role-less would silently lose its role tasks. Refused, not stored as null (Vera, #36796).
-      const toRole = (agent.personaRole ?? '').trim();
-      if (toRole === '') {
-        throw new GraphQLError('That agent has no role of its own, so a worker cannot change to it; give the agent a personaRole first.', {
-          extensions: { code: 'WORKER_AGENT_HAS_NO_ROLE', workerId: worker.id },
-        });
-      }
+      const toRole = requireWorkerAgentRole(agent, worker.id);
       // #2917: the plan above is a read made before this write, and the write is ON CONFLICT DO NOTHING, so a
       // concurrent revoked row would leave it stale; provisionCastGrants judges the licence again (as the cast does).
       await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
@@ -2024,7 +2019,10 @@ export const workerQueries = {
       }),
       ctx.db.worker.count({ where }),
     ]);
-    return { items, total };
+    // #2971: one memo per page resolution, carried on the rows it serves (never on ctx), so `prompt` on N items reads
+    // what the page shares once. Only `prompt` reads it.
+    const pageMemo = newWorkerPromptPageMemo(ctx);
+    return { items: items.map((row) => ({ ...row, [PAGE_MEMO]: pageMemo })), total };
   },
 
   /**
@@ -2147,7 +2145,7 @@ export const workerQueries = {
       );
     }
 
-    const previewRole = workerRole ?? agent.personaRole ?? '';
+    const previewRole = workerRole;
     // No worker row or session exists yet, so url / model / reports-to have nothing to fill.
     const values = withWorkerSignatures({
       'worker.name': name,
@@ -2458,6 +2456,66 @@ export async function loadAppWorkerCheckStatuses(
  * Memoized per request+App: one gate check covers a whole session page.
  */
 /**
+ * #2971 — what the workers of ONE `workers` page share while their `prompt` is composed. It is created by the page
+ * resolution, carried on that page's rows under a reserved string key (`PAGE_MEMO`), and unreachable from ctx, so it dies with the page: a mutation
+ * that edits a persona and then reads a page in the same request builds a new memo and reads the new Agent row, and no
+ * briefing is cached (cor:agt:020:01).
+ *
+ * SHARED (the same input for every worker of the page, read only AFTER that worker passed the worker read gate, which
+ * `composeWorkerPrompt` judges before it touches the memo): the Agent row by its placed id, the install- and Agent-level
+ * served prompt per (App, Agent) with a typed refusal kept as a refusal, and the viewer's and each holder's
+ * accessible-memory sets inside the register evaluation.
+ *
+ * PER WORKER, never memoized: the worker read gate, the open-session placement, the USER-owned Agent template gate
+ * (#1764), the worker's own boot-prompt pointer, the recorded revision and SESSION_UNRECORDED, the platform variables
+ * and the register itself (evaluated for the worker's own holder).
+ */
+export interface WorkerPromptPageMemo {
+  agent(ctx: Context, agentId: string): Promise<PromptAgentRow | null>;
+  served: PageServedMemo;
+  registerShare: RegisterPageShare;
+}
+export type PromptAgentRow = { personaRole: string | null; updatedAt: Date | null; ownerUserId: string | null; name: string; urn: string };
+
+/** The page memo's property on a served row (the `__heldWorkerActivity` precedent): a plain key, never ctx. */
+const PAGE_MEMO = '__workerPromptPageMemo' as const;
+
+function readPromptAgent(ctx: Context, agentId: string): Promise<PromptAgentRow | null> {
+  return ctx.db.agent.findUnique({
+    where: { id: agentId },
+    select: { personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
+  });
+}
+
+function newWorkerPromptPageMemo(viewer: Context): WorkerPromptPageMemo {
+  const agents = new Map<string, Promise<PromptAgentRow | null>>();
+  return {
+    agent(ctx, agentId) {
+      let held = agents.get(agentId);
+      if (!held) {
+        held = readPromptAgent(ctx, agentId);
+        agents.set(agentId, held);
+        held.catch(() => agents.delete(agentId));
+      }
+      return held;
+    },
+    served: new Map(),
+    registerShare: { viewer, sets: new Map(), participant: new Map() },
+  };
+}
+
+/** The memo a page row carries, honoured only for the caller the page was built for: another ctx composes alone. */
+function pageMemoOf(ctx: Context, worker: object): WorkerPromptPageMemo | null {
+  const memo = (worker as { [PAGE_MEMO]?: WorkerPromptPageMemo })[PAGE_MEMO];
+  return memo && memo.registerShare.viewer === ctx ? memo : null;
+}
+
+/** The worker's own pointer columns when the row carries them (a page's row does), else undefined: the serve reads them. */
+function pointerColumnsOf(worker: { bootPromptNodeId?: string | null; bootPromptUrn?: string | null }) {
+  return worker.bootPromptNodeId === undefined ? undefined : { bootPromptNodeId: worker.bootPromptNodeId ?? null, bootPromptUrn: worker.bootPromptUrn ?? null };
+}
+
+/**
  * #1090 — one composition of a worker's boot prompt, with the freshness facts
  * a holder needs to tell whether the text is current. `renderedAt` is stamped
  * once the text exists (an up-front clock could predate a concurrent template
@@ -2471,9 +2529,11 @@ export async function loadAppWorkerCheckStatuses(
  */
 export async function composeWorkerPrompt(
   ctx: Context,
-  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null },
+  worker: { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null; bootPromptNodeId?: string | null; bootPromptUrn?: string | null },
   opts?: { llmModel?: string | null },
 ): Promise<{ text: string | null; renderedAt: Date; roleAgentUpdatedAt: Date | null; refusal?: string | null }> {
+  // #2971: a row served by a `workers` page carries that page's memo; any other row composes alone, exactly as before.
+  const memo = pageMemoOf(ctx, worker);
   // Working-state path: the composed boot prompt embeds the agent's persona
   // template, which this loads WITHOUT the Agent read gate — so every caller
   // must sit behind the worker read gate itself (#983 review; see
@@ -2486,10 +2546,7 @@ export async function composeWorkerPrompt(
   const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
   // The spread is shallow on purpose: everything agent-derived below is re-read from `worker.agentId`/`role`.
   if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
-  const agent = await ctx.db.agent.findUnique({
-    where: { id: worker.agentId },
-    select: { personaRole: true, updatedAt: true, ownerUserId: true, name: true, urn: true },
-  });
+  const agent = memo ? await memo.agent(ctx, worker.agentId) : await readPromptAgent(ctx, worker.agentId);
   // #1764 (Riana P1): the App's participants now include a user-owned App's members, but a USER-owned Agent stays
   // owner-only (spec 047) — its template is read by the owner, or by whoever holds the worker cast from it (the person
   // driving the name), never by a member through this nested field. The gate above is App participation; this is the
@@ -2504,15 +2561,45 @@ export async function composeWorkerPrompt(
   // one composition point (`renderDerivedBlocks`), never authored prompt text
   // — evaluated for the Worker's durable holder, so an admin reading another
   // Worker's briefing sees that Worker's standing, not the admin's.
-  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE' }));
+  const derived = renderDerivedBlocks(await resolveRegister(ctx.db, { attendee: { workerId: worker.id }, actor: ctx, accessActor: 'ATTENDEE', shared: memo?.registerShare }));
   // #2047 (S10): the prompt is the pointed-to compiled node's approved revision, as-is (#2712 retired the serving switch
   // and the literal prompts). A refusal reads as no briefing with its code, so a read never throws where a bind would
   // have refused.
-  const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform);
+  const served = await readServedWorkerText(ctx, worker, agent?.name ?? '', platform, memo ? { memo: memo.served, workerPointer: pointerColumnsOf(worker) } : undefined);
   const text = served.text === null ? null : !derived ? served.text : `${served.text}\n\n${derived}`;
   // #1090 review (Andi, P2): stamp the render time AFTER the text exists, so renderedAt is a lower bound the printed
   // text and its Agent stamp both satisfy.
   return { text, renderedAt: new Date(), roleAgentUpdatedAt: agent?.updatedAt ?? null, refusal: served.refusal };
+}
+
+
+/**
+ * #2969 (cor:agt:040:04, the rendered-values bullet): the worker's signature and trailer, filled as the served boot
+ * prompt fills them. The gates are `composeWorkerPrompt`'s, step for step, so a reader gets a line exactly when the
+ * prompt that carries it would be served to them: worker internals, then (for a user-owned Agent) the owner-or-holder
+ * check, because a signature can hold `{{agent.name}}`. The session placement is the prompt's, so `{{worker.role}}`
+ * agrees with it after a role change, and the caller's own recorded bind keeps the values it was served (a rename does
+ * not rewrite a session's briefing). Null for both when any gate refuses; never a new refusal.
+ */
+type RenderableWorker = { id: string; appId: string; agentId: string; name: string; slug?: string; role: string | null; signature: string; trailer: string; reportsToWorkerId?: string | null };
+
+export async function renderWorkerLines(
+  ctx: Context,
+  worker: RenderableWorker,
+): Promise<{ signature: string; trailer: string } | null> {
+  if (!(await maySeeWorkerInternals(ctx, worker.appId))) return null;
+  const placed = ctx.sessionId ? await openSessionPlacement(ctx.db, worker.id, ctx.sessionId) : null;
+  if (placed) worker = { ...worker, agentId: placed.agentId, role: placed.role };
+  const memo = pageMemoOf(ctx, worker);
+  const agent = memo ? await memo.agent(ctx, worker.agentId) : await readPromptAgent(ctx, worker.agentId);
+  if (agent?.ownerUserId != null && !(await mayReadUserOwnedAgentTemplate(ctx, worker.id, agent.ownerUserId))) return null;
+  const role = worker.role ?? agent?.personaRole ?? '';
+  const platform = await workerPlatformValues(ctx, worker, agent, role, undefined);
+  const recorded = ctx.sessionId
+    ? await ctx.db.servedPrompt.findFirst({ where: { sessionId: ctx.sessionId, workerId: worker.id }, orderBy: { ordinal: 'desc' } })
+    : null;
+  const values = recorded ? { ...platform, ...((recorded.variables ?? {}) as Record<string, string>) } as PlatformVariableValues : platform;
+  return { signature: values['worker.signature'], trailer: values['worker.trailer'] };
 }
 
 
@@ -2527,6 +2614,7 @@ async function readServedWorkerText(
   worker: { id: string; appId: string; agentId: string },
   agentName: string,
   platform: PlatformVariableValues,
+  page?: Parameters<typeof resolveServedBootPrompt>[2],
 ): Promise<{ text: string | null; refusal: string | null }> {
   const where = { surface: 'bind' as const, agentName };
   try {
@@ -2547,13 +2635,21 @@ async function readServedWorkerText(
       const own = await ctx.db.session.findFirst({ where: { id: ctx.sessionId, workerId: worker.id, endedAt: null }, select: { id: true } });
       if (own) return { text: null, refusal: 'SESSION_UNRECORDED' };
     }
-    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
+    const served = await resolveServedBootPrompt(ctx.db, workerServeTarget(worker, agentName), page);
     return { text: applyPlatformVariables(served.content, platform), refusal: null };
   } catch (err) {
     const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
     if (typeof code === 'string' && code.startsWith('BOOT_PROMPT_')) return { text: null, refusal: code };
     throw err;
   }
+}
+
+/**
+ * #2708 — the serve target of a worker's NEXT bind: exactly what `serveBindInTransaction` passes for that worker (surface
+ * `bind`, its App, its Agent, its own pointer first). Shared by `describeServedWorker` and `Worker.bootPromptServe`.
+ */
+export function workerServeTarget(worker: { id: string; appId: string; agentId: string }, agentName: string): ServeTarget {
+  return { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id };
 }
 
 /**
@@ -2570,14 +2666,14 @@ export async function describeServedWorker(
   const agent = await ctx.db.agent.findUnique({ where: { id: worker.agentId }, select: { name: true } });
   const agentName = agent?.name ?? '';
   let line: string;
-  try {
-    const served = await resolveServedBootPrompt(ctx.db, { surface: 'bind', appId: worker.appId, agent: { id: worker.agentId, name: agentName }, workerId: worker.id });
+  // #2708: the same decision Worker.bootPromptServe returns, through the one seam (the bind's own resolver).
+  const outcome = await previewServedBootPrompt(ctx.db, workerServeTarget(worker, agentName));
+  if (outcome.served) {
+    const served = outcome.served;
     line = `\nServed boot prompt: ${served.pointerLevel} pointer, compiled node ${served.compiledNodeId}, revision ${served.servedRevSeq} (provenance from compile revision ${served.provenanceRevSeq}).`;
     line += '\nCurrent prompt lint (compile revision ' + served.provenanceRevSeq + '):' + (renderLintWarnings(await (await import('../../../lib/compiledBootPromptLint.js')).lintCompiledRevision(ctx, served.compiledNodeId, served.provenanceRevSeq)) || '\nNo lint warnings.');
-  } catch (err) {
-    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
-    if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) throw err;
-    line = `\nServed boot prompt: NOT SERVEABLE — ${code}. A bind would be refused.`;
+  } else {
+    line = `\nServed boot prompt: NOT SERVEABLE — ${outcome.refusal}. A bind would be refused.`;
   }
   const recorded = await servedPromptOwnerFields.workerServedPrompt(worker, {}, ctx);
   if (recorded) {
@@ -2601,7 +2697,7 @@ export async function serveBindInTransaction(
     tx.worker.findUniqueOrThrow({ where: { id: bind.workerId } }),
     tx.agent.findUniqueOrThrow({ where: { id: bind.agentId }, select: { name: true, urn: true, personaRole: true } }),
   ]);
-  const served = await resolveServedBootPrompt(tx, { surface: 'bind', appId: bind.appId, agent: { id: bind.agentId, name: agent.name }, workerId: bind.workerId });
+  const served = await resolveServedBootPrompt(tx, workerServeTarget({ id: bind.workerId, appId: bind.appId, agentId: bind.agentId }, agent.name));
   const role = worker.role ?? agent.personaRole ?? '';
   const variables = await workerPlatformValues({ ...ctx, db: tx as never }, worker, agent, role, bind.llmModel);
   await recordServedPrompt(tx, { kind: 'BIND', sessionId: bind.sessionId, appId: bind.appId, agentId: bind.agentId, workerId: bind.workerId }, served, { ...variables });
@@ -2649,6 +2745,25 @@ async function mayReadUserOwnedAgentTemplate(ctx: Context, workerId: string, age
   if (ctx.userId === agentOwnerUserId) return true;
   const w = await ctx.db.worker.findUnique({ where: { id: workerId }, select: { heldByUserId: true } });
   return w?.heldByUserId === ctx.userId;
+}
+
+/** Live group resolution, shared by Worker fields and the roster's repeatable-read snapshot. */
+export async function loadAppModelGroups(ctx: Context, appId: string, memoize = false): Promise<EffectiveModelGroup[]> {
+  type Cache = Map<string, Promise<EffectiveModelGroup[]>>;
+  const holder = ctx as Context & { workerModelGroupsCache?: Cache };
+  const cache = memoize ? (holder.workerModelGroupsCache ??= new Map()) : null;
+  const cached = cache?.get(appId);
+  if (cached) return cached;
+  const pending = (async () => {
+    let teamAgentId: string | null = null;
+    try { teamAgentId = (await locateTeamAgent(ctx, appId, undefined)).id; }
+    catch (error) {
+      if (!(error instanceof GraphQLError && error.extensions?.code === 'TEAM_AGENT_NOT_FOUND')) throw error;
+    }
+    return effectiveModelGroups(ctx.db, appId, teamAgentId);
+  })();
+  cache?.set(appId, pending);
+  return pending;
 }
 
 export async function maySeeWorkerInternals(ctx: Context, appId: string): Promise<boolean> {
@@ -3033,6 +3148,9 @@ export const workerFieldResolvers = {
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.signature : null,
     trailer: async (worker: { appId: string; trailer: string }, _: unknown, ctx: Context) =>
       (await maySeeWorkerInternals(ctx, worker.appId)) ? worker.trailer : null,
+    /** #2969: the lines as the served boot prompt fills them; the prompt's own gates (see renderWorkerLines). */
+    renderedSignature: async (worker: RenderableWorker, _: unknown, ctx: Context) => (await renderWorkerLines(ctx, worker))?.signature ?? null,
+    renderedTrailer: async (worker: RenderableWorker, _: unknown, ctx: Context) => (await renderWorkerLines(ctx, worker))?.trailer ?? null,
     /** #2048 S11c: current warnings of the stored signature and trailer, behind the same gate as the fields. */
     signatureLint: async (
       worker: { appId: string; slug?: string; signature: string; trailer: string },
@@ -3190,6 +3308,18 @@ export const workerFieldResolvers = {
       ctx: Context,
       info?: { operation?: { operation?: string } },
     ): Promise<string | null> => (await bindingModelOf(ctx, worker, info))?.bindingModel ?? null,
+    /** Live advisory membership uses the same newest-open model and working-state gate as `model`. */
+    modelGroups: async (
+      worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },
+      _: unknown,
+      ctx: Context,
+      info?: { operation?: { operation?: string } },
+    ): Promise<string[] | null> => {
+      if (!await maySeeWorkerInternals(ctx, worker.appId)) return null;
+      const activity = await bindingModelOf(ctx, worker, info);
+      if (!activity?.bindingModel) return [];
+      return matchingModelGroupNames(await loadAppModelGroups(ctx, worker.appId, info?.operation?.operation === 'query'), activity.bindingModel);
+    },
     /** #2252 — when that model was self-reported; null when the session never reported one. */
     modelReportedAt: async (
       worker: { id: string; appId: string; __heldWorkerActivity?: WorkerActivity },

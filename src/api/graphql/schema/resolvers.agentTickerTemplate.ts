@@ -19,12 +19,17 @@ import { TICKER_MAX_CADENCE_SECONDS } from '../../../lib/tickers/bounds.js';
 import { lockAgentTemplates, liveTemplates, type TemplateRow } from '../../../lib/tickers/agentTickerTemplates.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import {
+  type AgentManagementOp, absentAsWorkerRefusal, assertNoWorkerSessionAgentManagement, underWorkerSession,
+} from '../../../lib/auth/agentManagementWorkerSession.js';
 
 /** Most live templates one Agent declares. An Agent that wants more is describing something other than a heartbeat. */
 export const TICKER_TEMPLATES_MAX = 20;
 
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 const notFound = (id: string): GraphQLError => taskError('TICKER_TEMPLATE_NOT_FOUND', 'Ticker template not found.', { id });
+const isTemplateAbsent = (e: unknown): boolean => e instanceof GraphQLError && e.extensions?.code === 'TICKER_TEMPLATE_NOT_FOUND';
+const isAgentAbsent = (e: unknown): boolean => e instanceof AgentNotFoundError;
 
 type AgentGate = { id: string; organizationId: string | null; ownerUserId: string | null };
 
@@ -63,10 +68,15 @@ function patchFromInput(input: TemplatePatch): Prisma.AgentTickerTemplateUpdateI
   return data;
 }
 
-/** Run a template write as the Agent's editor, decided again inside the transaction under the Agent's anchors. */
+/**
+ * Run a template write as the Agent's editor, decided again inside the transaction under the Agent's anchors. A bound
+ * worker session is refused there, after the person gate and before the write callback's existence, revision and name
+ * checks (#3030, cor:agt:080:35).
+ */
 async function writeAsAgentEditor<T>(
   ctx: Context,
   agent: AgentGate,
+  op: AgentManagementOp,
   write: (tx: Prisma.TransactionClient, txCtx: Context) => Promise<T>,
 ): Promise<T> {
   return withAuthorizedTx(
@@ -83,6 +93,7 @@ async function writeAsAgentEditor<T>(
         throw new Error('Agent ownership changed; retry the template change');
       }
       await requireAgentAccess(txCtx, current, 'ADMIN');
+      assertNoWorkerSessionAgentManagement(op);
     },
     async (tx, txCtx) => {
       await lockAgentTemplates(tx, agent.id, 'exclusive');
@@ -130,7 +141,7 @@ export const agentTickerTemplateQueries = {
 
 export const agentTickerTemplateMutations = {
   createAgentTickerTemplate: async (_: unknown, { agentRef, input }: { agentRef: string; input: TemplateInput }, ctx: Context) => {
-    const agent = await resolveReadableAgentRef(ctx, agentRef);
+    const agent = await absentAsWorkerRefusal('createAgentTickerTemplate', () => resolveReadableAgentRef(ctx, agentRef), isAgentAbsent);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     const name = cleanName(input.name);
     const cadenceSeconds = checkCadence(input.cadenceSeconds);
@@ -138,7 +149,7 @@ export const agentTickerTemplateMutations = {
     const relevance = input.relevance == null ? 'ALL' : checkRelevance(input.relevance);
     const reasons = input.reasons == null ? ['read-team-channel'] : checkReasons(input.reasons);
     try {
-      return await writeAsAgentEditor(ctx, agent, async (tx, txCtx) => {
+      return await writeAsAgentEditor(ctx, agent, 'createAgentTickerTemplate', async (tx, txCtx) => {
         const live = await tx.agentTickerTemplate.count({ where: { agentId: agent.id, deletedAt: null } });
         if (live >= TICKER_TEMPLATES_MAX) {
           throw taskError(
@@ -164,12 +175,12 @@ export const agentTickerTemplateMutations = {
   updateAgentTickerTemplate: async (
     _: unknown, { id, expectedRevision, input }: { id: string; expectedRevision: number; input: TemplatePatch }, ctx: Context,
   ) => {
-    const { template: seen, agent } = await loadTemplate(ctx, id);
+    const { template: seen, agent } = await absentAsWorkerRefusal('updateAgentTickerTemplate', () => loadTemplate(ctx, id), isTemplateAbsent);
     await requireAgentAccess(ctx, agent, 'ADMIN');
     const data = patchFromInput(input);
     if (Object.keys(data).length === 0) throw badInput('Nothing to change: name at least one field.');
     try {
-      return await writeAsAgentEditor(ctx, agent, async (tx, txCtx) => {
+      return await writeAsAgentEditor(ctx, agent, 'updateAgentTickerTemplate', async (tx, txCtx) => {
         await tx.$queryRaw`SELECT id FROM agent_ticker_templates WHERE id = ${seen.id} FOR UPDATE`;
         const current = await tx.agentTickerTemplate.findUnique({ where: { id: seen.id } });
         if (!current || current.deletedAt || current.agentId !== agent.id) throw notFound(id);
@@ -192,9 +203,9 @@ export const agentTickerTemplateMutations = {
   },
 
   deleteAgentTickerTemplate: async (_: unknown, { id, expectedRevision }: { id: string; expectedRevision: number }, ctx: Context) => {
-    const { template: seen, agent } = await loadTemplate(ctx, id);
+    const { template: seen, agent } = await absentAsWorkerRefusal('deleteAgentTickerTemplate', () => loadTemplate(ctx, id), isTemplateAbsent);
     await requireAgentAccess(ctx, agent, 'ADMIN');
-    await writeAsAgentEditor(ctx, agent, async (tx, txCtx) => {
+    await writeAsAgentEditor(ctx, agent, 'deleteAgentTickerTemplate', async (tx, txCtx) => {
       await tx.$queryRaw`SELECT id FROM agent_ticker_templates WHERE id = ${seen.id} FOR UPDATE`;
       const current = await tx.agentTickerTemplate.findUnique({ where: { id: seen.id } });
       if (!current || current.deletedAt || current.agentId !== agent.id) throw notFound(id);
@@ -221,7 +232,9 @@ export const agentTickerTemplateFieldResolvers = {
       }
       return liveTemplates(ctx.db, agent.id);
     },
+    /** False under a worker session, whose writes refuse whatever its holder may do (#3030), so no surface offers them. */
     viewerMayEditTickerTemplates: async (agent: AgentGate, _: unknown, ctx: Context) => {
+      if (underWorkerSession()) return false;
       try {
         await requireAgentAccess(ctx, agent, 'ADMIN');
         return true;

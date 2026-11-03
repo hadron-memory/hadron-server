@@ -64,7 +64,8 @@ beforeEach(async () => {
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'sysgrant-app', urn: `${ORG_URN}::app` } })).id;
   graniterId = (await db.user.create({ data: { handle: 'sysgrant2716-manager' } })).id;
   await db.appMember.create({ data: { appId, userId: graniterId, role: 'owner' } });
-  flowId = (await db.memory.create({ data: { id: generateId(), organizationId: orgId, name: 'flow', urn: FLOW_URN, class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+  // #3278: keep the userless flow readable by its PUBLIC rule, not item admission.
+  flowId = (await db.memory.create({ data: { id: generateId(), organizationId: orgId, name: 'flow', urn: FLOW_URN, class: 'knowledge', visibility: 'PUBLIC' } })).id;
   systemId = (await db.memory.create({ data: { id: generateId(), organizationId: orgId, name: 'iris-system', urn: SYSTEM_URN, class: 'system' } as never })).id;
   sharedId = (await db.memory.create({ data: { id: generateId(), organizationId: orgId, name: 'shared', urn: SHARED_URN, class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
   const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'iris', urn: `${ORG_URN}:iris`, systemMemoryId: systemId } as never });

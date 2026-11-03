@@ -15,7 +15,8 @@
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import type { AuthContext } from '../../../middleware/auth.js';
-import { splitNodeUrn } from '../../urn.js';
+import { runHoldsReadGrant } from '../../automationReadGrant.js';
+import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
 import type { RunToolDef, RunToolContext } from './types.js';
 
@@ -82,8 +83,24 @@ export const hadronReadNode: RunToolDef = {
     // to probe node existence via error-message differences (PR-545 review,
     // Copilot). Memory resolution leaks nothing beyond org scoping.
     const { memoryUrn, loc } = splitNodeUrn(urn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
-    if (!(await canReadMemory(ctx.db, principalAuth(ctx), memory.id))) {
+    let memory: Awaited<ReturnType<typeof resolveFlowMemory>>;
+    let viaGrant = false;
+    try { memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn); }
+    catch (err) {
+      // #2883: a grant may name a memory outside the run's org (an Agent of another org, installed in this App). Only a
+      // live grant admits it; every other shape rethrows the org-scoped answer unchanged, so a missing memory and an
+      // ungranted foreign one stay indistinguishable.
+      const foreign = await ctx.db.memory.findFirst({
+        where: { urn: { in: [normalizeUrnForLookup(memoryUrn), legacyMemoryUrnToCanonical(normalizeUrnForLookup(memoryUrn))] }, deletedAt: null },
+        select: { id: true, urn: true, isEncrypted: true },
+      });
+      if (!foreign || foreign.isEncrypted || !(await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, foreign.id, loc))) throw err;
+      memory = foreign;
+      viaGrant = true;
+    }
+    if (!viaGrant && !(await canReadMemory(ctx.db, principalAuth(ctx), memory.id)) &&
+        // #2883: the automation's read grant, consulted here only (the run data read), after the shared gate refused.
+        !(await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, memory.id, loc))) {
       throw new Error(`Memory not readable for "${urn}" under the run principal.`);
     }
     const node = await ctx.db.node.findUnique({
@@ -100,7 +117,7 @@ export const hadronCreateNode: RunToolDef = {
   description:
     'Create a new Hadron node at the given fully-qualified URN (hrn:node:<root>:<memory>:<loc>). ' +
     'Fails if a node already exists there — use hadron_update_node to change one. ' +
-    'Set seq when appending ordered items (e.g. chat messages).',
+    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order.',
   inputSchema: {
     type: 'object',
     properties: WRITE_ARG_PROPERTIES,

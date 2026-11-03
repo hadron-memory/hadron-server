@@ -17,12 +17,14 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { actorManagesApp, inTaskWriteTx, loadApp, requireWritable, resolveTaskActor, taskError } from './resolvers.agentTask.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import { requirePersonOnlyAct, type PersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { APP_KEY_SCOPES, isAppKeyScope, type AppKeyScopeName } from '../../../lib/appKeyScopes/scopes.js';
 import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
 import { appKeyHostUses } from './resolvers.hostOperation.js';
 
 const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
+const scopeForbidden = () => taskError('FORBIDDEN', 'Only whoever manages this App can change what its keys may do.');
 
 /** The key and its App as the caller may see them: a key of an App they do not participate in does not exist. */
 async function resolveKey(ctx: Context, id: string) {
@@ -39,6 +41,8 @@ async function changeScope(
   scope: string,
   apply: (tx: Prisma.TransactionClient, keyId: string, scope: AppKeyScopeName, userId: string) => Promise<void>,
   hostId?: string | null,
+  /** #3277: `grant.give` for grantAppKeyScope (person-only, cor:dmo:050:12); revoke passes none and keeps its gate (S3b). */
+  personOnly?: PersonOnlyAct,
 ) {
   const { key, app, actor } = await resolveKey(ctx, id);
   requireWritable(ctx, app);
@@ -48,9 +52,11 @@ async function changeScope(
   if (hostId !== undefined) checkHostArg(scope, hostId);
   await inTaskWriteTx(ctx, app, actor, () => keyNotFound(id), async (tx, txCtx, fresh) => {
     // Whoever manages the App, as a person: not a worker's session, not a key, not an impersonation.
-    if (!(await actorManagesApp(txCtx, fresh, actor)) || actor.kind !== 'user') {
-      throw taskError('FORBIDDEN', 'Only whoever manages this App can change what its keys may do.');
-    }
+    if (!(await actorManagesApp(txCtx, fresh, actor)) || actor.kind !== 'user') throw scopeForbidden();
+    // #3277: giving a scope is giving a grant, person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling
+    // 0099 A): the one person gate also refuses a worker session found on the session row, an ambiguous actor and a
+    // run principal, which the actor check above does not see. Same refusal.
+    if (personOnly) await requirePersonOnlyAct(txCtx, personOnly, scopeForbidden);
     const live = await tx.appKey.findFirst({ where: { id: key.id, appId: fresh.id, revokedAt: null }, select: { id: true } });
     if (!live) throw keyNotFound(id);
     await apply(tx, key.id, scope, actor.userId);
@@ -71,7 +77,7 @@ export const appKeyScopeMutations = {
         );
       }
       if (!have) await tx.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope, grantedByUserId: userId, hostId } });
-    }, a.hostId ?? null),
+    }, a.hostId ?? null, 'grant.give'),
   revokeAppKeyScope: (_: unknown, a: { id: string; scope: string }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
       await tx.appKeyScope.updateMany({

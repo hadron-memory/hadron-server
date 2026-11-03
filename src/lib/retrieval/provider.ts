@@ -38,6 +38,8 @@ export interface NodeSqlFilter {
   /** #2175: caller-scoped recovery audience. When set, other memories' tombstones never reach ranking/paging. */
   tombstoneMemoryIds?: string[];
   nodeType?: string | null;
+  /** #3113 — an explicit, already validated list (`checkNodeTypesFilter`): `node_type = ANY(list)`. Never set together with `nodeType`. */
+  nodeTypes?: string[] | null;
   /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
   objectType?: string | null;
   isRunnable?: boolean | null;

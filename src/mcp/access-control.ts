@@ -108,6 +108,8 @@ export async function getAppMemoryAccess(
   appId: string,
   opts: {
     includeTeamSpace?: boolean;
+    /** #3233: runs obtain system definitions through the shared all-install own-definition fold instead. */
+    includeSystemMemories?: boolean;
     callerUserId?: string | null;
     allAgents?: boolean;
     memberAdmitted?: boolean;
@@ -172,7 +174,7 @@ export async function getAppMemoryAccess(
   const access = new Map<string, string>();
   for (const install of app.appAgents) {
     const agentAccess = getPrimaryAgentAccess(
-      { ...app, appAgents: [install] }, licensedAgentIds, liveSystemIds,
+      { ...app, appAgents: [install] }, licensedAgentIds, opts.includeSystemMemories === false ? new Set<string>() : liveSystemIds,
       // #1376 (R201): an item is a limit, never a grant, so a credential-only principal gets none of its Agent's items.
       !opts.credentialOnly,
     );
@@ -479,11 +481,12 @@ export async function getPrincipalAppMemoryAccess(
       appId: principal.appId,
       map: await getAppMemoryAccess(db, principal.appId, {
         includeTeamSpace: !sessionIsolated,
+        includeSystemMemories: !isRunPrincipal(principal),
         callerUserId: principal.userId ?? null,
         memberAdmitted: !principal.impersonation,
-        // An AppRun with no on-behalf-of user is also userless but is the App acting, not a credential: its reach
-        // keeps the fold until explicit App authority exists for unattended runs (#1376, tracked in the PR body).
-        credentialOnly: !principal.userId && !isRunPrincipal(principal),
+        // #3278 / cor:dmo:050:09: an item never admits a userless principal, including an AppRun.
+        // Runs keep installed system memories below and explicit read/write grants at their own gates.
+        credentialOnly: !principal.userId,
       }),
     });
   } else if (principal.userId) {
@@ -507,6 +510,11 @@ export async function getPrincipalAppMemoryAccess(
   );
   // #2206 case 3: and every installed, licensed Agent's own system memory of each App the user participates in.
   folds.push(...(await participantSystemMemoryFolds(db, principal)));
+  // #3233 (cor:acl:010:01): a run acts through THIS App, never through an on-behalf user's other Apps.
+  // Reuse #2233's licence/own-definition fold; its maps still pass admissibleFoldRows below.
+  if (isRunPrincipal(principal) && principal.appId && !principal.sessionId && !principal.impersonation) {
+    folds.push(...(await installedSystemMemoryFolds(db, [principal.appId])));
+  }
 
   const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds, !principal.impersonation);
 
@@ -603,8 +611,8 @@ async function participantTeamSpaceFolds(
  * member reached none of them. Each pointer must name the Agent's own definition (class, not an install, same tenant).
  *
  * System memories only: an Agent's item memories keep their install-role audience, and nothing here writes. Only the
- * user acting as themselves: no user (an App key, a session-isolated principal) and an AppRun (an App acting, with
- * at most an on-behalf-of user) keep the folds they had. Participation is the shared set ({@link participantAppIds}:
+ * user acting as themselves: no user (an App key, a session-isolated principal) and an AppRun do not derive user
+ * participation. #3233 calls the shared installed-system fold separately for the run's own App. Participation is the shared set ({@link participantAppIds}:
  * members, org CONTRIBUTOR+, a user-owned App's owner, bounded under impersonation), over live, installed Apps; a
  * soft-deleted Agent, an unlicensed install or a soft-deleted memory grants nothing. {@link admissibleFoldRows} then
  * applies the shared row rules (a user-owned Agent's memory stays its owner's).
@@ -615,6 +623,14 @@ export async function participantSystemMemoryFolds(
 ): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (!principal.userId || isRunPrincipal(principal)) return [];
   const ids = await participantAppIds(db, principal, { includeMemberships: true });
+  return installedSystemMemoryFolds(db, ids);
+}
+
+/** #2233/#3233: one licence + own-definition policy for participant and run system-memory reads. */
+async function installedSystemMemoryFolds(
+  db: PrismaClient,
+  ids: string[],
+): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (ids.length === 0) return [];
   const apps = await db.app.findMany({
     where: { id: { in: ids }, deletedAt: null, uninstalledAt: null },

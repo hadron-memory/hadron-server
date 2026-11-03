@@ -1,5 +1,6 @@
 import { GraphQLError } from 'graphql';
 import { BATCH_READ_MAX_EDGES } from '../../../lib/batchRead.js';
+import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import type { Context } from './resolvers.helpers.js';
 import type { Edge } from '../../../generated/prisma/index.js';
 import type { InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
@@ -74,6 +75,9 @@ export function batchReadEdges(parent: Parent, ctx: Context, direction: 'out' | 
     where: direction === 'out'
       ? { sourceId: parent.id, source: { memoryId: parent.memoryId, deletedAt: null } }
       : { targetId: parent.id, target: { memoryId: parent.memoryId, deletedAt: null } },
+    // #2967 — order before the take, so the overflow probe sees the same edges in the same order
+    // as the single `node` read (cor:api:040:01 parity).
+    orderBy: edgeDisplayOrder(),
     take: remaining + 1,
   })) ?? parent[field];
 }

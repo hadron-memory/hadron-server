@@ -1,4 +1,5 @@
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
+import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { createSystemMemoryGrantBatch, systemMemoryReadGrants, type SystemMemoryGrantBatch } from '../../../lib/auth/systemMemoryRead.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -40,6 +41,7 @@ import {
   isAgentInstalled,
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
+import { subscribedAgentMemoryAdmitted } from '../../../lib/auth/memorySubscriptionAccess.js';
 import { getOrgWritableMemoryIds } from '../../../lib/auth/orgWritableMemory.js';
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
@@ -90,6 +92,7 @@ import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/
 import { installWriteAllowed } from './installMemory.js';
 import { appPrincipalSessionWriteAllowed } from '../../../lib/sessionOwnership.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 
 /**
  * Marks a Node row whose `content` field answers with the STORED text unless a
@@ -103,13 +106,14 @@ import { unauthenticatedError } from '../../../lib/refusals.js';
 export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
+  limiterIdentity?: Readonly<import('../../../lib/rateLimit/identity.js').RateIdentity>;
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;
   /**
    * #2044: set ONLY by a door that re-runs its write gate on a transaction client holding the
-   * install memory's authority fence (writeNodeCore). On the pooled client an install memory's
+   * install memory's authority fence (writeNodeCore and the #2734 node-write doors). On the pooled client an install memory's
    * write gate otherwise answers NO: a writer that never rechecks in its own transaction
-   * (restoreNodeRevision, moveNode, deleteNode, ...) cannot hold the fence, so it fails closed.
+   * cannot hold the fence, so it fails closed.
    */
   installWritePreflight?: boolean;
   /**
@@ -686,9 +690,13 @@ function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<
  *    happens to reach it through. That is the "no cross-App shortcut";
  *  - **the target agent is installed in that App**, which is live (not deleted,
  *    not uninstalled, its org not soft-deleted);
- *  - **the caller is authorized for that App** by the gate `createMemoryInApp`
- *    uses to provision App knowledge (`requireOwnerOrOrgRole(app, 'ADMIN')`), so
- *    "appropriately authorized" means what it already means;
+ *  - **the caller manages that App** (#3254; ruling 0063 A, point 4;
+ *    hrn:node:hadronmemory.com:specs:cor:dmo:050:09 and :12): the shared
+ *    `managesApp` predicate, so an owner-role App member counts exactly as the
+ *    org's ADMINs/OWNERs and platform admins do. It is identity-scoped, so an
+ *    impersonated session never manages (cor:dmo:050:12), where the earlier
+ *    `requireOwnerOrOrgRole(app, 'ADMIN')` admitted an impersonated org admin
+ *    inside the shared org;
  *  - **knowledge / group only**, and never a user-owned row — never a
  *    strict-owner shape;
  *  - **`read` only**, mirroring provisioning, which links App knowledge `read`
@@ -772,14 +780,19 @@ async function sameAppAttachAdmitted(
     if (!license[0] || !isLifecycleActive(license[0])) return false;
   }
   // A licensed foreign Agent is permitted below for this App's read audience,
-  // so the caller must explicitly administer this App as well as the Agent.
-  try {
-    await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
-  } catch (error) {
-    if (!isAuthorizationDenial(error)) throw error;
-    return false;
+  // so the caller must explicitly manage this App as well as the Agent (#3254,
+  // hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Hold the deciding
+  // memberships first, then judge on this transaction: a removal or demotion
+  // that committed first is seen, and one arriving later waits for the grant
+  // (removeAppMember holds the member row FOR UPDATE). These are the last locks
+  // this gate takes; the attach's anchors are already held, as the removal's are.
+  if (ctx.userId && !ctx.impersonation) {
+    await ctx.db.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId} FOR SHARE`;
+    if (app.organizationId != null) {
+      await ctx.db.$queryRaw`SELECT 1 FROM org_members WHERE organization_id = ${app.organizationId} AND user_id = ${ctx.userId} FOR SHARE`;
+    }
   }
-  return true;
+  return managesApp(ctx, app);
 }
 
 /**
@@ -798,11 +811,11 @@ async function sameAppAttachAdmitted(
  *
  * 1. **Tenancy.** The memory must belong to the agent's own tenant (same org,
  *    or the same owning user for a spec-047 user-owned agent), be genuinely
- *    PUBLIC, or be the knowledge of an App where the Agent is live-installed
- *    and licensed. The latter two exceptions grant only `read`.
- *    Holger's ruling (2026-09-25) refuses a cross-tenant non-public attach even
- *    when the caller can read the memory, matching `attachMemoryToApp`'s
- *    `ORGANIZATION_MISMATCH` and the PUBLIC-only cross-org subscription rule.
+ *    PUBLIC, be the knowledge of an App where the Agent is live-installed
+ *    and licensed (both read-only), or carry a live subscription of the Agent
+ *    org up to its subscription role (#3253 / ruling0089 A).
+ *    Ruling0089 A extends the earlier cross-tenant refusal only to these
+ *    counted subscriptions; the ordinary tenant and same-App doors are unchanged.
  * 2. **Capability.** The caller must hold, on their own user principal, the
  *    capability being granted: the node-CONTENT read gate for `read`, and the
  *    memory write gate for `read-write`. The content gate (not the record gate)
@@ -901,7 +914,11 @@ export async function requireAgentMemoryGrant(
     !isExcludedFromCoveredSet(memory) &&
     memory.ownerUserId == null;
   const publicRead = role === 'read' && genuinelyPublic;
-  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead)) {
+  // #3253 / cor:dmo:050:09: a live subscription counts exactly as canonical read, capped by its role.
+  // It belongs to the Agent's org, never a different org the caller happens to administer. Other doors stay intact.
+  const subscribed = !sameTenant && !publicRead && !(role === 'read' && sameAppRead) &&
+    await subscribedAgentMemoryAdmitted(ctx.db, agent.organizationId, memory.id, role);
+  if (!sameTenant && !publicRead && !(role === 'read' && sameAppRead) && !subscribed) {
     throw new GraphQLError(
       genuinelyPublic
         ? 'A PUBLIC memory from another tenant can only be attached read-only — its audience is a read audience.'
@@ -934,14 +951,9 @@ export async function requireAgentMemoryGrant(
         { extensions: { code: 'FORBIDDEN', reason: 'PUBLIC_AGENT_READ_WRITE' } },
       );
     }
-    // Defense in depth, and a KNOWN mutation survivor (harness #7): no caller
-    // constructible today reaches this check without already holding write.
-    // Same tenant, everyone past the agent gate (an org ADMIN, or a user-owned
-    // agent's owner) can write what they can read — and App-scoped knowledge,
-    // which no user writes, is refused by the read gate above (the same-App
-    // branch admits `read` only). Cross tenant, the tenancy rule and the
-    // PUBLIC-is-read-only rule refuse first. It stays because those facts live
-    // in other files, and this is the check that states the actual invariant.
+    // The caller still needs independent write, even when the Agent org's subscription admits this link.
+    // #3253 pins this shared guard with an org READER: that principal cannot manage the Agent through the resolver,
+    // but must not gain write from a subscription cap when this helper is called. Outages are never read as denial.
     try {
       await requireMemoryWriteAccess(self, memory.id);
     } catch (error) {
@@ -2046,15 +2058,10 @@ export function clampListTake(limit?: number | null): number {
  * real total); a negative limit is 0; a limit over 200 is served as 200, never a
  * refusal. A negative or omitted offset is 0. Same default as `clampListTake` since #2211.
  */
-export const PAGE_ARGS_DEFAULT = 20;
-export const PAGE_ARGS_MAX = 200;
+export { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX };
 
 export function pageArgs(args: { limit?: number | null; offset?: number | null }): { take: number; skip: number } {
-  const limit = args.limit ?? PAGE_ARGS_DEFAULT;
-  return {
-    take: Math.min(PAGE_ARGS_MAX, Math.max(0, limit)),
-    skip: Math.max(0, args.offset ?? 0),
-  };
+  return { take: pageTake(args.limit), skip: Math.max(0, args.offset ?? 0) };
 }
 
 /** `{ items, total, hasMore }`: hasMore is whether rows remain past this page. */

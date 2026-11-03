@@ -4,6 +4,8 @@
  * for matching or authorization. Written by the cor:agt:050:09 set and by the task's assignee, nobody else.
  */
 import { createHash } from 'node:crypto';
+import Ajv from 'ajv';
+import * as workerResolvers from './resolvers.worker.js';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -518,5 +520,75 @@ describe('surfaces #2420', () => {
       await client.close();
       await server.close();
     }
+  });
+});
+
+
+// #2891: defensive branches left unpinned by #2877. No properties value or event may escape a refused update.
+describe('review follow-up pins #2891', () => {
+  it('dependencies values are schemas, so a nested uniqueItems keyword is unusable', async () => {
+    const before = { saved: 'keep me' };
+    await setProps(before);
+    await putSchema({ type: 'object', dependencies: { a: { properties: { b: { uniqueItems: true } } } } });
+    await expect(setProps({ a: true, b: [1, 2] })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+    expect((await stored()).properties).toEqual(before);
+    expect(await changed()).toHaveLength(1);
+  });
+
+  it('nested const data stays literal all the way down, even when its keys name guarded keywords', async () => {
+    const value = { x: { uniqueItems: true, pattern: '^(a+)+$', $ref: '#' } };
+    await putSchema({ type: 'object', const: value });
+    await setProps(value);
+    expect((await stored()).properties).toEqual(value);
+  });
+
+  it('G15b: an unexpected locateTeamAgent error propagates and preserves the previous value', async () => {
+    const before = { saved: 'locate error' };
+    await setProps(before);
+    const failure = new Error('synthetic team lookup failure #2891');
+    const locate = vi.spyOn(workerResolvers, 'locateTeamAgent').mockRejectedValue(failure);
+    try {
+      await expect(setProps({ replacement: true })).rejects.toBe(failure);
+      expect(locate).toHaveBeenCalled();
+      expect((await stored()).properties).toEqual(before);
+      expect(await changed()).toHaveLength(1);
+    } finally {
+      locate.mockRestore();
+    }
+  });
+
+  it('N12: an injected validate() throw becomes UNUSABLE and preserves the previous value', async () => {
+    const before = { saved: 'validator throw' };
+    await setProps(before);
+    // Fresh schema hash avoids the compiled-validator cache; the schema itself passes every pre-validation bound.
+    await putSchema({ type: 'object', description: `throw-probe-${generateId()}` });
+    const validate = vi.fn(() => { throw new RangeError('synthetic validator failure #2891'); });
+    const compile = vi.spyOn(Ajv.prototype, 'compile').mockReturnValue(validate as unknown as ReturnType<Ajv['compile']>);
+    try {
+      await expect(setProps({ replacement: true })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_UNUSABLE'));
+      expect(compile).toHaveBeenCalledOnce();
+      expect(validate).toHaveBeenCalledOnce();
+      expect((await stored()).properties).toEqual(before);
+      expect(await changed()).toHaveLength(1);
+    } finally {
+      compile.mockRestore();
+    }
+  });
+
+  it('a refused invalid or oversized replacement leaves an existing value and its event history unchanged', async () => {
+    const before = { saved: { key: 'existing value' } };
+    await setProps(before);
+    for (const [value, expected] of [
+      [[1], 'PROPERTIES_NOT_AN_OBJECT'],
+      [{ oversized: 'x'.repeat(16_384) }, 'PROPERTIES_TOO_LARGE'],
+    ] as const) {
+      await expect(setProps(value)).rejects.toMatchObject(code(expected));
+      expect((await stored()).properties).toEqual(before);
+      expect(await changed()).toHaveLength(1);
+    }
+    await putSchema({ type: 'object', required: ['requiredKey'] });
+    await expect(setProps({ replacement: true })).rejects.toMatchObject(code('PROPERTIES_SCHEMA_VIOLATION'));
+    expect((await stored()).properties).toEqual(before);
+    expect(await changed()).toHaveLength(1);
   });
 });

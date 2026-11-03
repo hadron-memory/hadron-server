@@ -16,7 +16,7 @@ import { newestApprovedRevisionOf } from '../nodeApproval.js';
 import { resolveBootPromptPointer, type StoredBootPromptPointer } from '../bootPromptPointer.js';
 import { readCompiledRevision, sha256Hex } from '../bootCompile/provenance.js';
 import { generateId } from '../id.js';
-import { bootPromptRefusal, type BootPromptSurface } from './refusal.js';
+import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal, type BootPromptRefusalCode, type BootPromptSurface } from './refusal.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -54,13 +54,14 @@ async function servingAppRequiresSignature(_db: Db, _appId: string): Promise<boo
   return false;
 }
 
-/** The pointer that decides, highest level first, or null when none is set anywhere. */
+/** The pointer that decides, highest level first, or null when none is set anywhere. `skipWorker`: the worker level was already judged. */
 async function decidingPointer(
   db: Db,
   t: ServeTarget,
+  skipWorker = false,
 ): Promise<{ level: ServedPointerLevel; stored: StoredBootPromptPointer } | null> {
   const select = { bootPromptNodeId: true, bootPromptUrn: true } as const;
-  if (t.workerId) {
+  if (t.workerId && !skipWorker) {
     const w = await db.worker.findUnique({ where: { id: t.workerId }, select });
     if (w?.bootPromptNodeId) return { level: 'WORKER', stored: w };
   }
@@ -71,10 +72,53 @@ async function decidingPointer(
   return null;
 }
 
-/** Resolve what to serve, or throw the typed refusal. Reads only; the caller records what it served. */
-export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<ServedBootPrompt> {
+/**
+ * #2971 — what the workers of ONE `workers` page share: the serve below the worker level (install, then Agent) is the
+ * same for every uncustomised worker of one (App, Agent), so one page resolves it once. The map holds the PROMISE of the
+ * outcome, a typed refusal included (R27: a deleted install target is a refusal for every worker below it, never a
+ * fall-through). It belongs to one page resolution and is dropped with its rows: a briefing is never cached
+ * (cor:agt:020:01), so nothing here may be attached to a request context or outlive the page.
+ */
+export type PageServedMemo = Map<string, Promise<ServedBootPrompt>>;
+
+/**
+ * Resolve what to serve, or throw the typed refusal. Reads only; the caller records what it served.
+ *
+ * With `page`, a worker's OWN pointer is still read and judged first, per worker (cor:agt:040:07: a customised worker
+ * is never answered with the install's or the Agent's text, and its own deleted target never falls through); only a worker
+ * with no pointer of its own shares the lower levels' outcome with the rest of the page. `workerPointer` is that worker's
+ * pointer columns when the caller already holds the row (a page does), else they are read.
+ */
+export async function resolveServedBootPrompt(
+  db: Db,
+  t: ServeTarget,
+  page?: { memo: PageServedMemo; workerPointer?: { bootPromptNodeId: string | null; bootPromptUrn: string | null } | null },
+): Promise<ServedBootPrompt> {
+  if (page && t.workerId) {
+    const own = page.workerPointer !== undefined
+      ? page.workerPointer
+      : await db.worker.findUnique({ where: { id: t.workerId }, select: { bootPromptNodeId: true, bootPromptUrn: true } });
+    if (!own?.bootPromptNodeId) {
+      const key = `${t.appId ?? ''}:${t.agent.id}`;
+      let outcome = page.memo.get(key);
+      if (!outcome) {
+        outcome = resolveFrom(db, t, true);
+        page.memo.set(key, outcome);
+        // A refusal is the answer and stays; anything else (a dropped connection) must not be served to the rest of the page.
+        outcome.catch((err) => {
+          const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+          if (typeof code !== 'string' || !code.startsWith('BOOT_PROMPT_')) page.memo.delete(key);
+        });
+      }
+      return outcome;
+    }
+  }
+  return resolveFrom(db, t, false);
+}
+
+async function resolveFrom(db: Db, t: ServeTarget, skipWorker: boolean): Promise<ServedBootPrompt> {
   const where = { surface: t.surface, agentName: t.agent.name };
-  const pointer = await decidingPointer(db, t);
+  const pointer = await decidingPointer(db, t, skipWorker);
   if (!pointer) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', where);
   const resolved = await resolveBootPromptPointer(db, pointer.stored);
   if (!resolved || resolved.deleted) throw bootPromptRefusal('BOOT_PROMPT_TARGET_DELETED', where);
@@ -116,6 +160,36 @@ export async function resolveServedBootPrompt(db: Db, t: ServeTarget): Promise<S
     provenance: revision.provenance.occurrences.map((o) => ({ nodeId: o.nodeId, revSeq: o.revNo, hash: o.hash })),
     content,
   };
+}
+
+/** The refusals a fresh serve can return (a recorded-revision refusal belongs to an open session, never to a new serve). */
+export type BootPromptServeRefusalCode = Exclude<BootPromptRefusalCode, 'BOOT_PROMPT_RECORDED_REVISION_DELETED'>;
+
+/** Exactly one of `served` and `refusal` is set. */
+export type BootPromptServeOutcome =
+  | { served: ServedBootPrompt; refusal: null }
+  | { served: null; refusal: BootPromptServeRefusalCode };
+
+const SERVE_REFUSALS: ReadonlySet<string> = new Set(
+  BOOT_PROMPT_REFUSAL_CODES.filter((c) => c !== 'BOOT_PROMPT_RECORDED_REVISION_DELETED'),
+);
+
+/**
+ * #2708 (cor:agt:040:10) — what a serve to `t` would decide NOW, as a value: the decision, or the typed code the serve
+ * would be refused with. It IS `resolveServedBootPrompt`, the resolver a bind, a chat and a run use, so it applies the
+ * same resolution rules and never substitutes a fallback. It is a preview of the CURRENT state: a later serve agrees
+ * with it only while that state is unchanged (a pointer edit or an approval in between can change the answer). Only the typed serve refusals are caught; anything
+ * else (a dropped connection) still throws. Reads only and records nothing. The CALLER gates: run it only for a caller
+ * who may see the target's pointer, so a masked caller learns nothing (not even NOT_SET).
+ */
+export async function previewServedBootPrompt(db: Db, t: ServeTarget): Promise<BootPromptServeOutcome> {
+  try {
+    return { served: await resolveServedBootPrompt(db, t), refusal: null };
+  } catch (err) {
+    const code = (err as { extensions?: { code?: unknown } }).extensions?.code;
+    if (typeof code === 'string' && SERVE_REFUSALS.has(code)) return { served: null, refusal: code as BootPromptServeRefusalCode };
+    throw err;
+  }
 }
 
 /** How many times the approved revision is re-selected when a concurrent edit moves it between selection and read. */

@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { db } from '../db/client.js';
@@ -18,6 +18,7 @@ const TOKEN_URL = SOURCE.replace('https://github.com/', `https://x-access-token:
 const GENERIC = 'Git command failed. Check the repository and branch, then retry.';
 type Fault = 'fetch' | 'checkout' | 'merge' | 'clone' | 'clone-early' | 'load' | null;
 const env = vi.hoisted(() => ({
+  restoreTimeouts: [] as Array<number | undefined>,
   root: '', bare: '', local: '', seed: '', fault: null as Fault,
   tokenInstalled: false, originAtFault: null as string | null,
   failRestore: false, restores: 0, insideLock: false, restoreInsideLock: false,
@@ -27,6 +28,8 @@ const env = vi.hoisted(() => ({
   // acquires the checkout lock, so it can only win the race if the lock is free.
   queueNextHolder: null as null | (() => Promise<string>),
   nextHolder: null as null | Promise<string>,
+  /** #3228: runs once as the graph loads, after every read-side git call and before restoreReadRemote starts. */
+  plantLock: null as null | (() => void),
 }));
 
 vi.mock('../../config.js', async original => ({
@@ -50,6 +53,7 @@ vi.mock('../localFs/loadGraphFromFs.js', async original => {
   const real = await original<typeof import('../localFs/loadGraphFromFs.js')>();
   return { ...real, loadGraphFromFs: async (...args: Parameters<typeof real.loadGraphFromFs>) => {
     await Promise.resolve();
+    { const plant = env.plantLock; env.plantLock = null; plant?.(); }
     if (env.fault === 'load') {
       env.originAtFault = env.readOrigin();
       throw new Error('synthetic-load-fault-2527');
@@ -62,6 +66,7 @@ vi.mock('./execGit.js', async original => {
   const invoke = async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv }, restore: boolean) => {
     if (restore) {
       env.restores++;
+      env.restoreTimeouts.push((options as { timeout?: number }).timeout);
       env.restoreInsideLock = env.insideLock;
       // #2571: yield to timers before the restore settles. An unawaited restore
       // lets the lock release first; a queued next holder then runs before it.
@@ -158,9 +163,9 @@ beforeEach(async () => {
   env.bare = mkdtempSync(join(tmpdir(), 'hadron-2527-bare-'));
   env.seed = mkdtempSync(join(tmpdir(), 'hadron-2527-seed-'));
   Object.assign(env, {
-    local: '', fault: null, tokenInstalled: false, originAtFault: null, failRestore: false, restores: 0,
+    restoreTimeouts: [], local: '', fault: null, tokenInstalled: false, originAtFault: null, failRestore: false, restores: 0,
     insideLock: false, restoreInsideLock: false, restoreSettledInsideLock: false, settled: false,
-    queueNextHolder: null, nextHolder: null,
+    queueNextHolder: null, nextHolder: null, plantLock: null,
   });
   logged = [];
   for (const level of ['error', 'warn', 'log'] as const) vi.spyOn(console, level).mockImplementation((...args) => { logged.push(args.map(String).join(' ')); });
@@ -170,6 +175,7 @@ afterEach(async () => {
   await env.nextHolder?.catch(() => undefined);
   vi.restoreAllMocks(); vi.unstubAllEnvs();
   for (const dir of [env.root, env.bare, env.seed]) rmSync(dir, { recursive: true, force: true });
+  for (const timeout of env.restoreTimeouts) expect(timeout, 'restore-only fixed deadline').toBe(10_000);
 });
 
 function assertNoCredentialSurface(result: unknown) {
@@ -219,8 +225,9 @@ describe('#2527 read sync restores origin under the checkout lock', () => {
       expect(env.restoreInsideLock).toBe(true);
       expect(env.restoreSettledInsideLock).toBe(true);
       expect(logged.join(' ')).toMatch(/may still hold an installation token until the next successful restore/);
-      // #2571: only the error's code reaches the log; its raw message never does.
-      expect(logged.join(' ')).toMatch(/until the next successful restore\. RESTORE_SENTINEL/);
+      // #2569: only allowlisted diagnostic fields reach the log; arbitrary code/path text never does.
+      expect(logged.join(' ')).not.toContain('RESTORE_SENTINEL');
+      expect(logged.join(' ')).not.toContain(env.local);
       assertNoCredentialSurface(result);
     });
   }
@@ -247,4 +254,39 @@ describe('#2571 restore boundaries', () => {
     expect(logged.join(' ')).not.toMatch(/Failed to restore the origin URL/);
     assertNoCredentialSurface(result);
   });
+});
+
+describe('#3228 a config.lock blocking the read restore is preserved', () => {
+  for (const checkout of ['existing', 'fresh'] as const) {
+    it.each([0, 20_000])(`${checkout}: a config.lock aged %dms survives byte for byte; the sync result stands`, async ageMs => {
+      await setup(checkout);
+      const lockPath = join(env.local, '.git', 'config.lock');
+      let originWhenPlanted: string | null = null;
+      env.plantLock = () => {
+        originWhenPlanted = env.readOrigin();
+        writeFileSync(lockPath, 'synthetic-owner-3228');
+        const stamp = new Date(Date.now() - ageMs);
+        utimesSync(lockPath, stamp, stamp);
+      };
+
+      const result = await syncGraphFromGithub(graph);
+
+      // The lock was planted after the git read and before the restore, with the token installed.
+      expect(originWhenPlanted).toBe(TOKEN_URL);
+      // The primary outcome is the sync, not the restore failure.
+      expect(result.error).toBeUndefined();
+      expect(await db.node.count({ where: { memoryId: graph.id, loc: 'topic' } })).toBe(1);
+      // One restore, refused by the real lock: the lock is untouched and origin still carries the token.
+      expect(env.restores).toBe(1);
+      expect(existsSync(lockPath)).toBe(true);
+      expect(readFileSync(lockPath, 'utf8')).toBe('synthetic-owner-3228');
+      expect(env.readOrigin()).toBe(TOKEN_URL);
+      const restoreLogs = vi.mocked(console.error).mock.calls
+        .filter(([message]) => String(message).includes('Failed to restore the origin URL'));
+      expect(restoreLogs).toHaveLength(1);
+      expect(restoreLogs[0][1]).toMatchObject({ phase: 'restore', class: 'REMOTE_RESTORE' });
+      expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(env.local);
+      assertNoCredentialSurface(result);
+    });
+  }
 });

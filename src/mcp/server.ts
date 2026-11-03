@@ -22,6 +22,7 @@ import { commentHitInfo, commentHitLabel } from '../lib/comments/hitLabel.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, softDeleteThreadsOfTargets } from '../lib/comments/lifecycle.js';
 import { decisionContainedError, decisionFamilyAmong, isDecisionFamilyRole, refuseDecisionFamily } from '../lib/decisions/index.js';
 import { assertLocWritable, LocProtectedError } from '../lib/protectedLoc.js';
+import { assertNoGenericMessageSeqWrite, isLegacyMessageSeqError } from '../lib/legacyMessageSeq.js';
 import {
   assertGovernedWrite,
   assertRoleDeclaredForWrite,
@@ -60,6 +61,8 @@ import {
   validateUrnType,
   normalizeUrnForLookup,
   hasSchemePrefix,
+  parseUrnV2,
+  composeUrnV2,
   UrnNotQualifiedError,
 } from '../lib/urn.js';
 import { composeWorkerUrn } from '../lib/entityRef/workerRef.js';
@@ -67,6 +70,8 @@ import { currentActorAmbiguity, publishActor, publishAmbiguousActor, publishUser
 import {
   emitEntityUrnV2,
   emitNodeUrnV2,
+  emitActionUrnV2,
+  registerEntryCode,
   nodeUrnRoundTrips,
   safeNodeUrnV2,
   safeNodeUrnV2Result,
@@ -77,6 +82,7 @@ import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
 import { registerAssetTools } from './assetTools.js';
+import { registerAutomationReadGrantTools } from './automationReadGrantTools.js';
 import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
@@ -151,6 +157,7 @@ import {
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
 import { refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
 import { tagsInputSchema } from './tagsInput.js';
 import { foreignIdentityScopedMemoryFilter } from '../lib/auth/memoryOwnership.js';
@@ -217,6 +224,7 @@ import {
 import { isId } from '../lib/entityRef/shape.js';
 import { resolveLegacyAlias } from '../lib/entityRef/legacyAlias.js';
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
+import { resolveAgentRef } from '../lib/entityRef/agentRef.js';
 import { resolveWorkerRef } from '../lib/entityRef/workerRef.js';
 import {
   AgentNotFoundError,
@@ -240,13 +248,14 @@ import { locateTeamChatChannel } from '../api/graphql/schema/resolvers.teamChat.
 // reconnect recovery admits exactly whom startSession admitted, rather than a
 // narrower member-row copy that would drift from it.
 import { resolveNodeContent } from '../lib/includes/resolveNodeContent.js';
+import { checkNodeTypesFilter, NodeTypesFilterError } from '../lib/retrieval/nodeTypeList.js';
 import { lintWarningPageForNodeId, renderLintWarnings } from '../lib/bootPromptLint.js';
 
 /** Most changed nodes whose lint one hadron_replace_text result checks; the rest are disclosed, never silently dropped. */
 const REPLACE_LINT_MAX_NODES = 100;
 import { safePlainPinWarnings, renderIncludePinWarnings, includePinWarningsFor } from '../lib/includes/plainPinWarnings.js';
 import { assertIncludesWritable, includeRefusalText, syncDerivedIncludesEdges } from '../lib/includes/writeIncludes.js';
-import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn } from '../api/graphql/schema/resolvers.helpers.js';
+import { isAppParticipant, getAccessibleMemoryIds as gqlAccessibleMemoryIds, safeCanonicalUrn, isOwnerOrOrgMember } from '../api/graphql/schema/resolvers.helpers.js';
 import { composeWorkerPrompt, describeServedWorker, loadAppWorkerActivity, loadAppWorkerCheckStatuses, maySeeWorkerInternals } from '../api/graphql/schema/resolvers.worker.js';
 import { renderCheckStatusLong, renderCheckStatusShort, type WorkerCheckStatus } from '../lib/workerCheckStatus.js';
 import { splitNodeUrnTolerant, nodeFragmentRefusal } from '../lib/splitNodeUrnTolerant.js';
@@ -300,6 +309,8 @@ import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOr
 import { GraphQLError as ScopeGraphQLError } from 'graphql';
 // Spec 049 Phase 3 — the search ladder on MCP.
 import { resolveSearchScope, canReadScope, resolveScopeByNameInApp, type SearchScopeResolution } from '../lib/scopes.js';
+import { admitOperationRate } from '../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
@@ -311,6 +322,7 @@ import {
   teamAttentionAvailable,
 } from '../lib/teamAttention.js';
 import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
+import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
 
@@ -1000,6 +1012,8 @@ class EdgeLocConflictError extends Error {}
 class NodeMovedDuringWriteError extends Error {}
 class MemoryEncryptionChangedDuringWriteError extends Error {}
 class MemoryWriteAccessChangedDuringWriteError extends Error {}
+/** #3052: the move's source stopped being readable between the preflight and the deciding transaction. */
+class MoveSourceBeyondReadError extends Error {}
 
 async function assertLockedMemoryWriteAccess(
   tx: Prisma.TransactionClient,
@@ -1551,8 +1565,8 @@ type ReadProjectionNode = {
 };
 
 const readProjectionInclude = {
-  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } } },
-  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } } },
+  outgoingEdges: { include: { target: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { target: { deletedAt: null } }, orderBy: edgeDisplayOrder() },
+  incomingEdges: { include: { source: { select: { id: true, loc: true, memoryId: true, name: true } } }, where: { source: { deletedAt: null } }, orderBy: edgeDisplayOrder() },
   memory: { select: { isEncrypted: true } },
 } as const;
 
@@ -1811,6 +1825,71 @@ async function concealUnreadableEdgeEnds<N extends {
   };
 }
 
+/**
+ * #2610 — the register entry's action address (`hrn:action:<root>:<agent-slug>:<code>`)
+ * for the read projection's `Action URN:` line. Non-null only for a `register:<code>`
+ * node in a LIVE Agent's system memory — the MCP spelling of Node.actionUrn
+ * (resolvers.types.ts), computed the same way so the two surfaces cannot drift:
+ * null, never a throw, on an unemittable stored code atom; a `register:` loc in a
+ * memory no live Agent holds names no entry.
+ *
+ * #2972 — entry-hood is `registerEntryCode`'s call: a NESTED `register:a:b` loc
+ * is a writable namespace loc, not an entry, and nulls QUIETLY (no repair warn);
+ * the null-and-log below is reachable only for a single-atom code the emitter
+ * refuses.
+ */
+async function actionUrnForRegisterLoc(loc: string, memoryId: string): Promise<string | null> {
+  const code = registerEntryCode(loc);
+  if (code === null) return null;
+  const agent = await db.agent.findFirst({
+    where: { systemMemoryId: memoryId, deletedAt: null },
+    select: { urn: true },
+  });
+  if (!agent) return null;
+  try {
+    return emitActionUrnV2(agent.urn, code);
+  } catch (err) {
+    console.warn(
+      `[Action URN:] register code ${JSON.stringify(code)} in memory ${memoryId} is not ` +
+        'emittable as an action URN; omitting the line. The STORED loc needs repair — this is ' +
+        'not a malformed caller request:',
+      err,
+    );
+    return null;
+  }
+}
+
+/**
+ * The batch's action addresses in ONE grouped agent lookup (the per-node
+ * `Action URN:` line needs the holding Agent's urn, and cor:api:040:01 makes the
+ * batch projection the same thing as the single read's). Absent from the map —
+ * like a null from the single-node path — means no line. #2972: only
+ * single-atom `register:` locs are entries (`registerEntryCode`); a nested
+ * `register:a:b` loc never reaches the emitter, so it can neither warn nor
+ * render a line.
+ */
+async function batchActionUrns(nodes: ReadProjectionNode[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const entries = nodes.filter((n) => registerEntryCode(n.loc) !== null);
+  if (!entries.length) return out;
+  const agents = await db.agent.findMany({
+    where: { systemMemoryId: { in: [...new Set(entries.map((n) => n.memoryId))] }, deletedAt: null },
+    select: { systemMemoryId: true, urn: true },
+  });
+  const urnByMemory = new Map(agents.map((a) => [a.systemMemoryId as string, a.urn]));
+  for (const n of entries) {
+    const agentUrn = urnByMemory.get(n.memoryId);
+    if (!agentUrn) continue; // no live Agent holds this memory — no line
+    const code = registerEntryCode(n.loc) as string; // non-null: the filter kept only entries
+    try {
+      out.set(n.id, emitActionUrnV2(agentUrn, code));
+    } catch {
+      out.set(n.id, null); // unemittable stored code — same posture as the single read
+    }
+  }
+  return out;
+}
+
 async function renderNodeReadProjection(
   node: ReadProjectionNode,
   scope: 'content' | 'abstract' | 'all',
@@ -1826,6 +1905,8 @@ async function renderNodeReadProjection(
       feedback: ReadonlyMap<string, CommentCounts>;
       /** #1632 — signature status per node, one batched load. */
       signatures?: ReadonlyMap<string, NodeSignatureStatusView>;
+      /** #2610 — action addresses per node, one batched agent lookup; absent = no line. */
+      actionUrns?: ReadonlyMap<string, string | null>;
     };
     memoryUrnOf?: (memoryId: string) => Promise<string>;
   } = {},
@@ -1903,6 +1984,15 @@ async function renderNodeReadProjection(
   // structure (`/`, `?`, `#`) into the href. Same rule as a malformed base
   // URL: a link that points somewhere other than the node is worse than none.
   const portalUrl = urnFellBack ? null : portalUrlForUrn(urn);
+
+  // #2610 — the entry's action address (`hrn:action:<root>:<agent-slug>:<code>`),
+  // when this row IS one: a `register:<code>` node in a live Agent's system
+  // memory. Address-class like the URL line (#1885 pin: content, served on an
+  // inherited read too, keyed on the row's own — the holding base Agent's —
+  // memory). Batched callers hand it in one grouped lookup (cor:api:040:01).
+  const actionUrn = opts.batch
+    ? (opts.batch.actionUrns?.get(node.id) ?? null)
+    : await actionUrnForRegisterLoc(node.loc, node.memoryId);
 
   // #1326: a source node may be readable while its author/validator task
   // lives in another tenant's memory. Resolve task addresses only after that
@@ -2032,6 +2122,7 @@ async function renderNodeReadProjection(
     `ID: ${node.id}`,
     `Revision: ${revision}`,
     portalUrl ? `URL: ${portalUrl}` : '',
+    actionUrn ? `Action URN: ${actionUrn}` : '',
     inheritedFrom
       ? `Inherited from: ${emitEntityUrnV2('agent', inheritedFrom.agentUrn)} (a base of the Agent read; its edges and records are not shown)`
       : '',
@@ -3645,6 +3736,7 @@ export function createMcpServerInstance(
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
   registerAssetTools(server, { db, auth });
+  registerAutomationReadGrantTools(server, { db, auth });
 
   // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
   registerSigningTools(server, { db, auth });
@@ -4319,7 +4411,15 @@ export function createMcpServerInstance(
     'hadron_find_nodes',
     'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeType, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
+      // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
+      // early return below, with the one validator the resolver also runs.
+      try {
+        checkNodeTypesFilter({ nodeType, nodeTypes }, 'hadron_find_nodes');
+      } catch (e) {
+        if (e instanceof NodeTypesFilterError) return refusalResult(e.message);
+        throw e;
+      }
       try {
         validateParentRel(parentRel);
       } catch (e) {
@@ -4504,6 +4604,7 @@ export function createMcpServerInstance(
         db,
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
+        limiterIdentity: auth.limiterIdentity,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
@@ -4525,6 +4626,14 @@ export function createMcpServerInstance(
         const inScope = new Set(scopeRes.memoryIds);
         filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
         if (filterMemoryIds.length === 0) {
+          // This valid empty result returns before the resolver. Charge it
+          // here once through the same admission engine, without turning an
+          // empty filter into an unscoped core retrieval.
+          try {
+            await admitOperationRate(ctx,db,'FAN_OUT_READS',auth.limiterIdentity ?? transportRateIdentity(auth));
+          } catch(error) {
+            return toolErrorResult(error,()=>error instanceof Error ? error.message : 'Search failed.','hadron_find_nodes');
+          }
           return textResult(`${scopeNoteLine(scopeRes)}\n\nFound 0 node(s) — ${memSelectors.length ? 'the memories you named are outside this scope' : 'this scope lists no memory you can read'}.`);
         }
       }
@@ -4552,6 +4661,7 @@ export function createMcpServerInstance(
               contentScope: nodeKind ?? undefined, // #1678: MCP nodeKind → GraphQL contentScope
               objectType: objectType ?? undefined,
               nodeType: nodeType ?? undefined, // #331: exact-match pass-through to NodeFilter.nodeType
+              nodeTypes: nodeTypes ?? undefined, // #3113: the explicit list, through the same resolver
               locPrefix: filterLocPrefix,
               childrenOf: childrenOf ?? undefined, // #2832: direct children only; '' is the top level
               // #719 — structured JSONB predicate; findNodes validates it and
@@ -4814,11 +4924,229 @@ export function createMcpServerInstance(
 
   // ── hadron_get_node ──────────────────────────────────────────────────────────
 
+  /** An action URN — a register entry's second address (#2610, cor:urn:010:01). */
+  const ACTION_REF_RE = /^(?:hrn|urn):action:/;
+
+  /**
+   * #2610 — resolve `hrn:action:<root>:<agent-slug>:<code>` to its register
+   * entry: the SAME steps as resolveUrn's action arm (resolvers.query.node.ts),
+   * with this surface's gate spellings. The root + slug name the ONE Agent whose
+   * system memory holds the entry at `register:<code>` — no nearest-first chain
+   * fallthrough (a child's override entry addresses under its own slug). The
+   * `agent` arm's gate verbatim (PUBLIC resolves for anyone, #551; otherwise
+   * owner-or-org-member), then the system memory's read gate, then the entry
+   * through resolveNodeRefForAuth so the live lookup, the rename alias heal
+   * (cor:urn:030:01) and ambiguity concealment are the SAME implementation the
+   * node form below uses. Returns null for EVERY refusal — other tenant,
+   * unreadable memory, unknown agent, missing or malformed code — the arm's
+   * uniform-refusal rule, worn here as the same single not-found message the
+   * node form serves. A globally-ambiguous historical entry address stays a
+   * LOUD refusal (AmbiguousLegacyUrnError escapes), exactly as in the arm.
+   * An operational fault in either lookup is not a refusal and propagates to
+   * the tool's error boundary as the generic internal-fault envelope (#2975,
+   * cor:api:260:01); an ambiguous AGENT alias stays the uniform refusal.
+   *
+   * `agentGate: false` (#2718, Vera's ruling (a), cor:agt:110:04) drops the
+   * `agent` arm's gate and keeps only the memory gates: the RUN surface applies
+   * the node-URN spelling's gate (`loadNodeForRun` -> `canReadMemory`), so a
+   * participant who reads the entry's memory runs it under either address. The
+   * default (true) is the READ surface's, unchanged.
+   */
+  const resolveActionEntryRef = async (
+    rawUrn: string,
+    opts: { agentGate?: boolean } = {},
+  ): Promise<{ id: string; memoryId: string; loc: string } | null> => {
+    let agentId: string;
+    let code: string;
+    try {
+      const parsed = parseUrnV2(rawUrn); // fixed 'action' arity: [agent-slug, code]
+      [code] = parsed.segments.slice(1);
+      ({ id: agentId } = await resolveAgentRef(
+        db,
+        composeUrnV2('agent', parsed.root, parsed.segments[0]!),
+      ));
+    } catch (error) {
+      // Malformed leaf (charset/length/arity) or an unknown/renamed-away agent
+      // — both name nothing (the arm's uniform refusal). A fault is not an
+      // absence and propagates (#2975, cor:api:260:01); an ambiguous agent
+      // alias stays concealed here, as in resolveUrn's arm (gate ruling (a)).
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+      return null;
+    }
+    const agent = await db.agent.findUnique({
+      where: { id: agentId },
+      select: { organizationId: true, visibility: true, ownerUserId: true, systemMemoryId: true },
+    });
+    if (!agent?.systemMemoryId) return null;
+    // D-1 (Rico §10 delta): carry impersonation into the gate — scopeCtx()
+    // alone omits it, so an impersonated session's org-membership check would
+    // admit what the GraphQL arm (ctx.impersonation-aware) refuses.
+    // recoveryCtx() is the established shape for this.
+    if (
+      opts.agentGate !== false &&
+      agent.visibility !== 'PUBLIC' &&
+      !(await isOwnerOrOrgMember({ ...scopeCtx(), impersonation: auth.impersonation ?? undefined }, agent))
+    ) {
+      return null;
+    }
+    if (!(await canReadMemory(db, auth, agent.systemMemoryId, EXPLICIT_REF))) return null;
+    // The DB read sits outside the catch below: a database fault is not an
+    // absence and must surface as a fault (cor:api:140:03), on the read and run
+    // surfaces alike (#2718 review).
+    const systemMemoryUrn = await loadMemoryUrn(agent.systemMemoryId);
+    let entryId: string;
+    try {
+      ({ id: entryId } = await resolveNodeRefForAuth(
+        emitNodeUrnV2(systemMemoryUrn, `register:${code}`),
+        auth,
+      ));
+    } catch (error) {
+      if (error instanceof AmbiguousLegacyUrnError) throw error;
+      // #2975: a fault in the entry lookup is not an absence (cor:api:260:01).
+      if (!refNamesNothing(error)) throw error;
+      return null;
+    }
+    const entry = await db.node.findFirst({
+      where: { id: entryId, deletedAt: null },
+      select: { id: true, memoryId: true, loc: true },
+    });
+    if (!entry) return null;
+    // The content gate on the memory the entry ACTUALLY lives in — an alias
+    // heal can cross memories (PR #2711 §10, P3-2): the caller reads where it
+    // lives, not the system memory the ref started from.
+    if (!(await canReadMemory(db, auth, entry.memoryId, EXPLICIT_REF))) return null;
+    return entry;
+  };
+
+  /**
+   * The read tail shared by hadron_get_node's two address forms — the node URN
+   * path and the #2610 action-URN path — so one projection, one reconcile, one
+   * usage event and one lint pass serve both of a node's addresses and cannot
+   * drift (the same rule cor:api:040:01 holds the batch to).
+   */
+  const serveNodeReadProjection = async (
+    node: { id: string; memoryId: string; loc: string },
+    o: {
+      rawUrn: string;
+      contentScope?: 'content' | 'abstract' | 'all';
+      raw?: boolean;
+      inheritedFrom?: InheritedFrom | null;
+      fragment?: string;
+      matchedLiteral?: boolean;
+    },
+  ) => {
+      // Spec 031 — contentScope-driven response shape. Default 'content'
+      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
+      // validates the same set at the MCP transport boundary, but direct-
+      // handler callers (createTestableMcpServer's _registeredTools shortcut)
+      // bypass that parsing, so re-validate here. InvalidContentScopeError is
+      // the single source of truth for the message (and any future GraphQL
+      // `extensions.code` mapping). MCP convention: return error text, not throw.
+      if (
+        o.contentScope !== undefined &&
+        o.contentScope !== 'content' &&
+        o.contentScope !== 'abstract' &&
+        o.contentScope !== 'all'
+      ) {
+        const err = new InvalidContentScopeError(String(o.contentScope));
+        return refusalResult(err.message);
+      }
+      const scope = o.contentScope ?? 'content';
+      // Reconcile + fetch under one row lock. The first lookup selects the
+      // address and authorizes its memory; it must not supply the body after a
+      // reconciliation advanced the counter.
+      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, o.inheritedFrom?.via ?? node.memoryId);
+      if (
+        !current ||
+        current.memoryId !== node.memoryId ||
+        current.loc !== node.loc ||
+        // An inherited node was admitted through the child's memory above.
+        (!o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
+      ) {
+        return refusalResult(`Node "${o.rawUrn}" not found.`);
+      }
+      // The version actually served must still be the child's to show
+      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
+      if (o.inheritedFrom && !(await stillInherited(db, o.inheritedFrom, current))) {
+        return refusalResult(`Node "${o.rawUrn}" not found.`);
+      }
+      if (o.inheritedFrom) markInherited([current], new Map([[current.memoryId, o.inheritedFrom]]));
+      // Spec 041: decrypt when this session holds the key; mark locked
+      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
+      const lockState = mcpDecryptOrMark(current);
+      // Shared with hadron_get_nodes (batch) so the per-node projection can never
+      // drift between the single-read and batch-read surfaces (cor:api:040:01).
+      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
+      const served = lockState === 'locked' || o.raw
+        ? current
+        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw: o.raw }) };
+      const projection = await renderNodeReadProjection(served, scope, {
+        locked: lockState === 'locked',
+        encryptedMemory: lockState !== 'plaintext',
+        auth,
+      });
+
+      // Record usage event (fire-and-forget), AFTER the projection is in hand:
+      // the defensive contentScope check above returns an error for a direct
+      // handler call with a bad scope, and recording first would count a read
+      // for content never returned (PR #1062 review — Copilot).
+      //
+      // #796: `memoryId` is attributed directly so the event stays counted for
+      // this memory after the node is deleted (nodeId is SetNull).
+      //
+      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
+      // bound session. `auth.sessionId` is a validated Session.id — an App-key
+      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
+      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
+      // MCP transport session id. It was hardcoded null in all five MCP usage
+      // writers, which meant MCP work produced no session heartbeat at all: the
+      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
+      // The residual this comment used to describe — "user-credential MCP
+      // callers cannot bind a session today" — was CLOSED by #934 four days
+      // after it was written: `bindSession` takes both principal shapes, and a
+      // user principal binds a session attributed to them. The real gap was
+      // narrower and outlived it: a desktop caller's session is created
+      // mid-conversation by `hadron_start_session`, so it can never reach an
+      // `X-Hadron-Session` header on a connection that already exists, leaving
+      // `auth.sessionId` null and every event here unattributed. #1081 gives
+      // that caller an explicit heartbeat instead (`heartbeatSession`).
+      //
+      // A LOCKED node still records: the projection is what crossed the
+      // boundary, and the caller did read this node's addressable state.
+      // An alias read names the node at its CURRENT address; never pair the
+      // historical input loc with the target memory in the usage event.
+      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
+
+      // #696: `#data` addresses the node's DATA, not the node — and before the
+      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
+      // read simply missed. Now it decomposes, and returning the parent's
+      // projection with no word said would answer a question the caller did not
+      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
+      // a read surface. This tool has no data view, so it serves the node and
+      // SAYS which resource that is; `resolveUrn` tags its result the same way.
+      // No notice when the LITERAL row matched: nothing was resolved away, the
+      // caller got exactly the loc they named.
+      // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
+      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
+      return textResult(noteFragment(projection, o.matchedLiteral ? undefined : o.fragment) + lint);
+  };
+
   server.tool(
     'hadron_get_node',
-    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give.",
+    "Read a node by its fully-qualified URN. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted — the register entry's SECOND address, resolved to that entry and served as the same projection. Optional `contentScope` selects what the response includes: 'content' (default) — meta block + body, with the abstract substituted into the body slot when content is null/empty (a `Source: abstract-fallback` line then appears in the meta block); 'abstract' — meta block + abstract, no body; 'all' — meta block + abstract + body. When the abstract is in the response and its origin hash disagrees with the current content's hash, the meta block also carries a `Source: abstract-stale` line — treat the abstract as a possibly-outdated preview (spec 032 FR-010; on encrypted memories only while unlocked — spec 041). It means the content changed after the abstract was written, NOT that the abstract is known to be wrong. To clear it: read both, then either rewrite the abstract, or — if it still describes the node — re-save the identical text via hadron_update_node (or assert `abstractStillAccurate`). Rewriting an abstract you have not first found inaccurate is the wrong move; the marker is a prompt to check, not a verdict. Spec 031 + 032. The meta block also carries a `URL:` line — the node's portal link. To refer a human to this node, COPY that URL verbatim; never build a link yourself and never put a bare `hrn:` URN in a markdown href (it renders as a link and resolves to nothing). When the line is absent this deployment has no portal configured, so there is no link to give. A node that is an action's register entry also carries an `Action URN:` line — its action address; cite THAT (not the node URN) when naming the action.",
     SHAPE_HADRON_GET_NODE,
     async ({ urn: rawUrn, contentScope, raw }) => {
+      // #2610 — an action URN is a register entry's SECOND address, not a node
+      // URN: the node-qualification gate below would refuse it as a wrong-kind
+      // prefix. Resolve it through the action arm's steps and serve the ENTRY's
+      // projection — one projection for both of a node's addresses, so the
+      // surfaces cannot drift.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const entry = await resolveActionEntryRef(rawUrn);
+        if (!entry) return refusalResult(`Node "${rawUrn}" not found.`);
+        return serveNodeReadProjection(entry, { rawUrn, contentScope, raw });
+      }
+
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4923,100 +5251,7 @@ export function createMcpServerInstance(
       }
       if (!node) return missing();
 
-      // Spec 031 — contentScope-driven response shape. Default 'content'
-      // preserves pre-spec output byte-for-byte. Defensive enum check: zod
-      // validates the same set at the MCP transport boundary, but direct-
-      // handler callers (createTestableMcpServer's _registeredTools shortcut)
-      // bypass that parsing, so re-validate here. InvalidContentScopeError is
-      // the single source of truth for the message (and any future GraphQL
-      // `extensions.code` mapping). MCP convention: return error text, not throw.
-      if (
-        contentScope !== undefined &&
-        contentScope !== 'content' &&
-        contentScope !== 'abstract' &&
-        contentScope !== 'all'
-      ) {
-        const err = new InvalidContentScopeError(String(contentScope));
-        return refusalResult(err.message);
-      }
-      const scope = contentScope ?? 'content';
-      // Reconcile + fetch under one row lock. The first lookup selects the
-      // address and authorizes its memory; it must not supply the body after a
-      // reconciliation advanced the counter.
-      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, inheritedFrom?.via ?? node.memoryId);
-      if (
-        !current ||
-        current.memoryId !== node.memoryId ||
-        current.loc !== node.loc ||
-        // An inherited node was admitted through the child's memory above.
-        (!inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
-      ) {
-        return refusalResult(`Node "${rawUrn}" not found.`);
-      }
-      // The version actually served must still be the child's to show
-      // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
-      if (inheritedFrom && !(await stillInherited(db, inheritedFrom, current))) {
-        return refusalResult(`Node "${rawUrn}" not found.`);
-      }
-      if (inheritedFrom) markInherited([current], new Map([[current.memoryId, inheritedFrom]]));
-      // Spec 041: decrypt when this session holds the key; mark locked
-      // otherwise (blanked fields + Locked meta line, never raw ciphertext).
-      const lockState = mcpDecryptOrMark(current);
-      // Shared with hadron_get_nodes (batch) so the per-node projection can never
-      // drift between the single-read and batch-read surfaces (cor:api:040:01).
-      // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
-      const served = lockState === 'locked' || raw
-        ? current
-        : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw }) };
-      const projection = await renderNodeReadProjection(served, scope, {
-        locked: lockState === 'locked',
-        encryptedMemory: lockState !== 'plaintext',
-        auth,
-      });
-
-      // Record usage event (fire-and-forget), AFTER the projection is in hand:
-      // the defensive contentScope check above returns an error for a direct
-      // handler call with a bad scope, and recording first would count a read
-      // for content never returned (PR #1062 review — Copilot).
-      //
-      // #796: `memoryId` is attributed directly so the event stays counted for
-      // this memory after the node is deleted (nodeId is SetNull).
-      //
-      // #930 (PR-933 Codex P1): the shared recorder attributes the event to the
-      // bound session. `auth.sessionId` is a validated Session.id — an App-key
-      // caller's X-Hadron-Session, checked in resolveAppKey for existence, App
-      // ownership, not-ended and not-past-expiry — so this is a real FK, not the
-      // MCP transport session id. It was hardcoded null in all five MCP usage
-      // writers, which meant MCP work produced no session heartbeat at all: the
-      // #930 reaper counts the latest attributed UsageEvent as liveness, so a
-      // The residual this comment used to describe — "user-credential MCP
-      // callers cannot bind a session today" — was CLOSED by #934 four days
-      // after it was written: `bindSession` takes both principal shapes, and a
-      // user principal binds a session attributed to them. The real gap was
-      // narrower and outlived it: a desktop caller's session is created
-      // mid-conversation by `hadron_start_session`, so it can never reach an
-      // `X-Hadron-Session` header on a connection that already exists, leaving
-      // `auth.sessionId` null and every event here unattributed. #1081 gives
-      // that caller an explicit heartbeat instead (`heartbeatSession`).
-      //
-      // A LOCKED node still records: the projection is what crossed the
-      // boundary, and the caller did read this node's addressable state.
-      // An alias read names the node at its CURRENT address; never pair the
-      // historical input loc with the target memory in the usage event.
-      recordNodeRead(db, { id: current.id, loc: current.loc, memoryId: current.memoryId }, auth);
-
-      // #696: `#data` addresses the node's DATA, not the node — and before the
-      // urn-lib-js 0.0.15 bump the fragment stayed glued to the loc, so such a
-      // read simply missed. Now it decomposes, and returning the parent's
-      // projection with no word said would answer a question the caller did not
-      // ask — the hadron-server#994 harm (resolving to the parent) arriving on
-      // a read surface. This tool has no data view, so it serves the node and
-      // SAYS which resource that is; `resolveUrn` tags its result the same way.
-      // No notice when the LITERAL row matched: nothing was resolved away, the
-      // caller got exactly the loc they named.
-      // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
-      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
-      return textResult(noteFragment(projection, matchedLiteral ? undefined : fragment) + lint);
+      return serveNodeReadProjection(node, { rawUrn, contentScope, raw, inheritedFrom, fragment, matchedLiteral });
     },
   );
 
@@ -5406,12 +5641,13 @@ export function createMcpServerInstance(
           .map((n) => n.id))
         : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
-      const [taskRefs, humanNames, feedback] = await Promise.all([
+      const [taskRefs, humanNames, feedback, actionUrns] = await Promise.all([
         batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
         batchHumanNames(visible, signerIds),
         openThreadCounts(db, visible.map((n) => n.id)),
+        batchActionUrns(visible),
       ]);
-      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures };
+      const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
       for (const metadata of visible) {
         if (truncated) {
@@ -5570,10 +5806,12 @@ export function createMcpServerInstance(
           outgoingEdges: {
             include: { target: true },
             where: { target: { deletedAt: null } },
+            orderBy: edgeDisplayOrder(),
           },
           incomingEdges: {
             include: { source: true },
             where: { source: { deletedAt: null } },
+            orderBy: edgeDisplayOrder(),
           },
         },
       });
@@ -6099,6 +6337,9 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic create makes or resurrects a comment.
         assertNotCommentWrite(governedProbe?.nodeType, nodeType, 'create');
+        // #2987 (V13): the seq gate for a create runs UNDER the lock, on the full locked row. It cannot run here:
+        // this probe selects no seq (a same-seq tombstone recreation would read as a change), and it would answer
+        // before the Channel gate, which lives in the lock helper (Beckett LOCAL review).
         assertBootPromptWriteAllowed(governedProbe, { nodeType, role: normalizeRole(role) }, 'create');
         assertGovernedWrite(
           governedProbe,
@@ -6124,6 +6365,7 @@ export function createMcpServerInstance(
         );
       } catch (e) {
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         throw e;
       }
 
@@ -6466,6 +6708,8 @@ export function createMcpServerInstance(
           await assertMemoryEncryptionStateForWrite(tx, memoryId, memEncRow?.isEncrypted ?? false, auth);
 
           const pre = await snapshotOverwrittenNode(tx);
+          // #2987 — re-judged on the locked tombstone, before anything is written.
+          assertNoGenericMessageSeqWrite(pre, nodeType, seq, 'create');
 
           // #1330 — H1 strict sub-roles, as writeNodeCore judges them (this
           // handler is its parity implementation, so the gate is repeated here).
@@ -6490,6 +6734,7 @@ export function createMcpServerInstance(
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
             await tx.nodeEmbedding.deleteMany({ where: { nodeId: pre.id } });
+            await tx.node.updateMany({ where: { id: pre.id }, data: { embeddingTruncatedChunks: null } });
           }
           // Invalidate an old in-flight embed before the asynchronous enqueue
           // restamps the marker after commit.
@@ -6539,6 +6784,7 @@ export function createMcpServerInstance(
           return refusalResult(`Node already exists at "${rawUrn}" — use hadron_update_node.`);
         }
         if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
         const writerRefusal = roleWriterRefusalText(e);
@@ -6661,6 +6907,8 @@ export function createMcpServerInstance(
       try {
         // #1606 (cor:dmo:110:04) — no generic update edits, makes or unmakes a comment.
         assertNotCommentWrite(existing?.nodeType, nodeType, 'update');
+        // #2987 (V13) — see hadron_create_node; judged only for a live row, a missing one is NODE_NOT_FOUND below.
+        if (existing && !existing.deletedAt) assertNoGenericMessageSeqWrite(existing, nodeType, seq, 'update');
         assertBootPromptWriteAllowed(existing, { nodeType, role: normalizeRole(role) }, 'update');
         assertGovernedWrite(
           existing,
@@ -6680,6 +6928,7 @@ export function createMcpServerInstance(
         );
       } catch (e) {
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
+        if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         throw e;
       }
 
@@ -6887,6 +7136,8 @@ export function createMcpServerInstance(
                 `[write_conflict] ${rawUrn} moved, was deleted or changed memory while this update waited — re-read it and retry.`,
               );
             }
+            // #2987 — re-judged on the locked row, before any write.
+            assertNoGenericMessageSeqWrite(current, nodeType, seq, 'update');
             // #1186 / cor:dmo:020:05 — omitted fields come from the locked
             // row, not the probe, and a refusal leaves no reconciliation.
             await validateNodeSchemaOnWrite(
@@ -6968,6 +7219,7 @@ export function createMcpServerInstance(
         } catch (e) {
           if (e instanceof NodeSchemaViolation) return refusalResult(`Schema violation: ${e.message}`);
           if (e instanceof LocProtectedError) return refusalResult(`[loc_protected] ${e.message}`);
+          if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
           if (e instanceof NodeMovedDuringWriteError) return refusalResult(e.message);
           if (e instanceof MemoryEncryptionChangedDuringWriteError) return refusalResult(e.message);
           if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
@@ -7952,6 +8204,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               }
               await assertLockedMemoryWriteAccess(tx, attemptAuth, fromMemory.id);
               await assertLockedMemoryWriteAccess(tx, attemptAuth, toMemory.id);
+              // #3052 (MCP twin of #3039/#3031): a move carries the source's content, so the preflight's content-read
+              // refusal is repeated here on the transaction client with the refreshed roles, after the authority wait
+              // and on every attempt. Same refusal as the preflight, byte for byte; install audiences stay in their own gate.
+              if (await isWriteBeyondRead(tx as never, attemptAuth, fromMemory.id)) throw new MoveSourceBeyondReadError();
             };
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
             await lockAgentDefinitionAuthority(tx, auth.userId ?? null, [fromMemory.id, toMemory.id]);
@@ -8169,6 +8425,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         linkWarnings = completed.linkWarnings;
       } catch (e) {
         if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
+        if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
@@ -8276,9 +8533,28 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   server.tool(
     'hadron_run_action',
-    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
+    'Load an action node and resolve its dependencies. Returns the action instructions with all referenced node content. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). An action URN (hrn:action:<root>:<agent-slug>:<code>) is also accepted: it is a register entry\'s second address, resolved to that entry and run exactly as by its node URN, under the same memory read gate (the action address additionally needs the Agent\'s system memory to be readable, so a refusal reads as not found).',
     SHAPE_HADRON_RUN_ACTION,
     async ({ urn: rawUrn, args }) => {
+      // #2718 — an action URN is a register entry's SECOND address. Resolve it
+      // with the memory gates only (no `agent` arm gate: ruling (a)), then run
+      // the entry through the SAME loader the node spelling uses, so the final
+      // gate and the rendered bundle are one implementation. Every refusal is
+      // ONE message naming nothing (cor:api:140:03): other tenant, unreadable
+      // memory, unknown Agent, missing or malformed code all read alike.
+      if (ACTION_REF_RE.test(rawUrn)) {
+        const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
+        const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
+        if (!entry) return unreadable();
+        // Carry the RESOLVED entry's id, never a re-emitted node URN: the emitted
+        // v2 URN is lossy (a compound memory and its prefix twin emit the same
+        // string), so re-parsing it can run a different node. Operational faults
+        // (the DB reads inside) are not caught: they surface as faults, not as
+        // not-found (cor:api:140:03).
+        const viaEntry = await loadRunNodeById(entry);
+        if ('error' in viaEntry) return unreadable();
+        return textResult(await renderRunNode(viaEntry.node, viaEntry.loc, args));
+      }
       // Spec 022 qualification + loading + rendering are shared with hadron_run_task
       // (cor:api:060) via loadNodeForRun / renderRunNode below.
       const loaded = await loadNodeForRun(rawUrn);
@@ -8317,8 +8593,33 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
       return { error: `Memory not found: "${memoryUrn}".` };
     }
-    const node = await db.node.findUnique({
-      where: { loc_memoryId: { loc, memoryId: memory.id } },
+    const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
+    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    return { node, loc };
+  }
+
+  // #2718 — the action spelling's loader: the entry is already RESOLVED (by id),
+  // so it is gated and fetched by that id through the SAME memory gate and the
+  // SAME node fetch the URN spelling uses, with no URN round trip.
+  async function loadRunNodeById(
+    entry: { id: string; memoryId: string },
+  ): Promise<{ node: RunNode; loc: string } | { error: string }> {
+    if (!(await canReadMemory(db, auth, entry.memoryId))) return { error: 'Node not readable.' };
+    // Pin the fetch to the GATED memory and the live row: an id-only fetch
+    // after the gate would serve a node moved away or soft-deleted in between.
+    const node = await findRunNode({
+      id: entry.id,
+      memoryId: entry.memoryId,
+      deletedAt: null,
+    });
+    if (!node) return { error: 'Node not found.' };
+    return { node, loc: node.loc };
+  }
+
+  // The run node with its live dependency edges, by either unique key.
+  async function findRunNode(where: Prisma.NodeWhereUniqueInput): Promise<RunNode | null> {
+    return db.node.findUnique({
+      where,
       // #1063 — the same edge filter the GraphQL `renderRunNode` query uses.
       // Without it a soft-deleted edge kept carrying its target, and a
       // soft-deleted NODE kept being served through any edge pointing at it —
@@ -8329,11 +8630,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         outgoingEdges: {
           where: { deletedAt: null, target: { deletedAt: null } },
           include: { target: true },
+          // #2967 — run resolution order (cor:dmo:060:03): priority, loc, id.
+          orderBy: edgeRunOrder(),
         },
       },
     });
-    if (!node) return { error: `Node "${rawUrn}" not found.` };
-    return { node, loc };
   }
 
   // {{arg}} substitution + inlined edge-linked node content + one action-run
@@ -10840,7 +11141,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
         // template changes, which is why the contract forbids caching it.
         // #1090: one composition supplies the text AND its freshness facts —
         // the stamps below describe exactly this rendering.
-        const [briefing, workerUrn, agent, continuity, signature, trailer, checkStatus] = await Promise.all([
+        const [briefing, workerUrn, agent, continuity, signature, trailer, renderedSignature, renderedTrailer, checkStatus] = await Promise.all([
           composeWorkerPrompt(ctx, worker),
           resolvers.Worker.urn(worker, {}, ctx),
           resolvers.Worker.agent(worker, {}, ctx),
@@ -10851,6 +11152,9 @@ function ageOf(at: Date, now: Date = new Date()): string {
           resolvers.Worker.continuity(worker, {}, ctx),
           resolvers.Worker.signature(worker, {}, ctx),
           resolvers.Worker.trailer(worker, {}, ctx),
+          // #2969: the filled lines, through the same field resolvers GraphQL serves.
+          resolvers.Worker.renderedSignature(worker, {}, ctx),
+          resolvers.Worker.renderedTrailer(worker, {}, ctx),
           // #2138 §3.4 — gated like hasLiveSession; null on deny.
           resolvers.Worker.checkStatus(worker, {}, ctx) as Promise<WorkerCheckStatus | null>,
         ]);
@@ -10981,6 +11285,8 @@ function ageOf(at: Date, now: Date = new Date()): string {
             // correct to be given back.
             (signature != null ? `\nSignature template:\n${signature}\n` : '') +
             (trailer != null ? `\nTrailer template:\n${trailer}\n` : '') +
+            (renderedSignature != null ? `\nRendered signature:\n${renderedSignature}\n` : '') +
+            (renderedTrailer != null ? `\nRendered trailer:\n${renderedTrailer}\n` : '') +
             (prompt
               ? `\nBoot briefing — adopt this for the rest of the session:` +
                 `\nrendered at: ${briefing.renderedAt.toISOString()}` +
@@ -11237,6 +11543,10 @@ function ageOf(at: Date, now: Date = new Date()): string {
             db,
             clientId: auth.clientId ?? undefined,
             userId: auth.userId ?? undefined,
+            // #3078: carry impersonation into the resolver, whose record gate refuses it and whose heartbeat (since #3078)
+            // would otherwise drive the impersonated user's session. /mcp rejects an impersonation JWT at init, so this
+            // is defence in depth, as in the other delegations that pass it.
+            impersonation: auth.impersonation ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
             sessionId: auth.sessionId ?? undefined,
@@ -11391,21 +11701,26 @@ function ageOf(at: Date, now: Date = new Date()): string {
       // findings typed.
       const report = await validateMemoryNodes(db, memory.id);
       const issues: string[] = [];
+      const informational: string[] = [];
       const memoryUrnOf = memoizedMemoryUrnLookup();
       for (const f of report.findings) {
-        issues.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
+        const lines = f.kind === 'INDEX_TRUNCATED' ? informational : issues;
+        lines.push(formatFindingLine(f, await nodeUrn(f.nodeLoc, memory.id, memoryUrnOf)));
       }
+      const informationalNote = report.totalInformational
+        ? `\n\nInformational findings (${report.totalInformational}):\n${informational.join('\n')}`
+        : '';
       // A skipped check is stated rather than silently omitted — a clean bill
       // of health that quietly skipped a check is worse than no report.
       const skippedNote = report.skippedChecks.length
         ? `\n\nSkipped checks:\n${report.skippedChecks.map((c) => `- ${c.check}: ${c.reason}`).join('\n')}`
         : '';
 
-      if (issues.length === 0) {
-        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${skippedNote}`);
+      if (report.totalFindings === 0) {
+        return textResult(`Validated ${report.nodesChecked} nodes. No issues found.${informationalNote}${skippedNote}`);
       }
       return textResult(
-        `Found ${issues.length} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${skippedNote}`,
+        `Found ${report.totalFindings} issue(s) in ${report.nodesChecked} nodes:\n\n${issues.join('\n')}${informationalNote}${skippedNote}`,
       );
     },
   );
@@ -12060,6 +12375,7 @@ async function handleKnownMcpSession(
     // Credential resolution re-reads the live user after the liveness check
     // above. A demotion between those reads must win before tool dispatch.
     active.auth.roles = presented.roles ?? [];
+    active.auth.limiterIdentity = presented.limiterIdentity;
     // #2123: every principal's session-sensitive consumers receive THIS
     // request's binding result, under the same credential/request lock through
     // dispatch. Keep initialization refusal and retained actor state intact.
@@ -12596,8 +12912,9 @@ const SHAPE_HADRON_FIND_NODES = {
   allMemories: z.boolean().optional().describe('Search across ALL memories you can read — the org-wide "does anyone know about X?" probe (stemmed + relevance-ranked in keyword mode). The explicit, self-documenting form of omitting a memory scope. Mutually exclusive with memoryUrn / memoryUrns.'),
   isRunnable: z.boolean().optional().describe('Filter by runnable status (applies in every mode). true = only task nodes (Node.isRunnable=true) — the canonical "tasks I can run" predicate hadron_run_task gates on. false = only nodes explicitly marked non-runnable (most nodes leave it NULL, so false does NOT include them). Omit to ignore runnable status. Spec cor:api:060.'),
   role: z.string().optional().describe('Filter by Node.role family in every mode. Segment-boundary prefix semantics: "spec" matches "spec" and dotted descendants such as "spec.rule", but never "special" or "specification" (#1322). Node.role remains an open string; this is a query filter, not role validation.'),
-  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system nodes stay excluded; "comment" searches comments as the engine documents. Negation and multi-value are not supported.'),
+  nodeType: z.string().optional().describe('#331 — exact-match node-type facet (free-form, e.g. "task" / "parent" / "info"): only nodes whose nodeType equals this. Applies in every mode; with query "*" it lists all nodes of one type. Orthogonal to objectType. Without it, system nodes stay excluded; "comment" searches comments as the engine documents. Negation and multi-value are not supported here; use nodeTypes for a list of types.'),
   objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
+  nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
   childrenOf: z.string().optional().describe('#2832 — list only the DIRECT children of this loc (GraphQL: NodeFilter.childrenOf). A direct child is a node whose loc is exactly this loc plus one more segment (no further colon); "" means the top-level nodes. It reads loc strings only (not edges, not parentRel), so a loc whose parent has no node of its own is still listed. Applies in every mode, with the same access and default exclusions as the rest of the search, and pairs with memoryUrn (loc is per memory). With no query and no sort the order is the sibling order (positioned nodes first, then by loc). Unlike parentRel, which scopes the WHOLE subtree.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
@@ -12610,7 +12927,7 @@ const SHAPE_HADRON_FIND_NODES = {
 };
 
 const SHAPE_HADRON_GET_NODE = {
-  urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted)'),
+  urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:architecture" (legacy :: forms still accepted), or an action URN "hrn:action:<root>:<agent-slug>:<code>" — the register entry\'s second address'),
   contentScope: z
     .enum(['content', 'abstract', 'all'])
     .optional()

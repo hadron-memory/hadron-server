@@ -24,6 +24,10 @@
 // grace, is src/lib/hostOperations/sessionEnd.ts.
 
 import { GraphQLError } from 'graphql';
+import { recordNodeWrite } from '../../../lib/usageRecorder.js';
+import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
+import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
+import type { CheckpointWrite } from '../../../lib/contextReset/contextReset.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import {
@@ -76,6 +80,7 @@ import {
   holdForStopLease,
   outstandingStopLease,
   claimContextReset,
+  readContextResetForHost,
   ContextResetError,
   onContextResetReported,
   registerContextResetRecovery,
@@ -631,7 +636,7 @@ export const hostOperationMutations = {
   }),
 
   // ── #2162 (cor:agt:050:27): a context reset's protocol steps, the host's own key only ──────────────────────
-  // Each names the reset and its epoch; each is idempotent; each is recorded as a `reset` use of the key.
+  // Each names the reset and epoch and is idempotent; checkpoint-writing registration has its own `checkpoint` use.
 
   /** Take the fence: the worker becomes `resetting` (§1.5). Refused steps end the reset and say why. */
   claimContextReset: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
@@ -640,17 +645,30 @@ export const hostOperationMutations = {
   /** Register the durable checkpoint before any process control (§3.4). */
   registerContextResetRecovery: (
     _: unknown,
-    { input }: { input: ResetStepInput & { checkpointNode: string; sessionId: string; taskId: string } },
+    { input }: { input: ResetStepInput & { checkpointNode?: string | null; checkpoint?: {title:string;content:string} | null; sessionId: string; taskId: string } },
     ctx: Context,
-  ) => resetStep(ctx, input, (tx, host, now) => registerContextResetRecovery(tx, host, input.resetId, input.epoch, input, now)),
+  ) => {
+    let write: CheckpointWrite | undefined;
+    return resetStep(ctx, input, (tx, host, now) => registerContextResetRecovery(
+      tx, host, input.resetId, input.epoch, input, now, captured => { write = captured; },
+    ), input?.checkpoint != null ? 'checkpoint' : 'reset', () => {
+      if (!write) return;
+      recordNodeWrite(ctx.db, { id: write.nodeId, loc: write.loc, memoryId: write.memoryId }, ctx);
+      void publishNodeWritten({ nodeId: write.nodeId, memoryId: write.memoryId, clientId: ctx.clientId });
+      void enqueueNodeEmbedding(ctx.db, {
+        nodeId: write.nodeId, memoryId: write.memoryId, workToken: write.workToken,
+        plaintext: { content: write.content, abstract: null },
+      });
+    });
+  },
 
   /** The single stop grant (§2.1): the host signals only within `stopLeaseMs` of its own send time. */
   authorizeContextResetStop: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
     resetStep(ctx, input, (tx, host, now) => authorizeContextResetStop(tx, host, input.resetId, input.epoch, input.process, now)),
 
   /** The old agent stopped: the mark now waits for the relaunched agent's first activity. */
-  reportContextResetAgentStopped: (_: unknown, { input }: { input: ResetStepInput }, ctx: Context) =>
-    resetStep(ctx, input, (tx, host, now) => reportContextResetAgentStopped(tx, host, input.resetId, input.epoch, now)),
+  reportContextResetAgentStopped: (_: unknown, { input }: { input: ResetStepInput & { lateStopMs?: number | null } }, ctx: Context) =>
+    resetStep(ctx, input, (tx, host, now) => reportContextResetAgentStopped(tx, host, input.resetId, input.epoch, now, input.lateStopMs)),
 
   /** The agent was relaunched under its wrapper, with the new process. */
   reportContextResetRelaunched: (_: unknown, { input }: { input: ResetStepInput & { process: unknown } }, ctx: Context) =>
@@ -672,20 +690,26 @@ async function resetStep(
   ctx: Context,
   input: ResetStepInput | null | undefined,
   run: (tx: Prisma.TransactionClient, host: ResetHost, now: Date) => Promise<ContextResetStep>,
+  action: HostKeyAction = 'reset',
+  afterCommit?: () => void,
 ) {
-  return recordingRefusal(ctx, 'reset', null, async () => {
+  return recordingRefusal(ctx, action, null, async () => {
     if (!input) throw badInput('input is required.');
     try {
       const out = await asHost(ctx, input.appRef, async (tx, app, host) => {
-        const result = await run(tx, { appId: app.id, hostId: host.hostId }, new Date());
-        await recordHostKeyUse(tx, host, 'reset', { operationId: result.reset.hostOperationId ?? undefined });
+        const result = await run(tx, { appId: app.id, hostId: host.hostId, appKeyId: host.appKeyId }, new Date());
+        await recordHostKeyUse(tx, host, action, {
+          operationId: result.reset.hostOperationId ?? undefined,
+          ...(action === 'checkpoint' && result.refused ? { refusedCode: result.refused } : {}),
+        });
         return result;
       });
+      afterCommit?.();
       // A refusal or failure may have released the worker; a queued task may now match (cor:agt:060:06).
       if (out.refused) await matchAfterChange(ctx.db, out.reset.appId);
       return out;
     } catch (e) {
-      if (e instanceof ContextResetError) throw taskError(e.code, e.message, { resetId: input.resetId });
+      if (e instanceof ContextResetError) throw taskError(e.code, e.message, e.code === 'CONTEXT_RESET_NOT_FOUND' && action === 'checkpoint' ? {} : { resetId: input.resetId });
       throw e;
     }
   });
@@ -795,6 +819,23 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
 }
 
 export const hostOperationQueries = {
+  /** #3273: one host-owned collected reset; audit use but never advance its protocol. */
+  contextReset: (_: unknown, a: { appRef: string; resetId: string }, ctx: Context) =>
+    recordingRefusal(ctx, 'read', null, async () => {
+      let reset;
+      try {
+        reset = await asHost(ctx, a.appRef, (tx, app, host) =>
+          readContextResetForHost(tx, { appId: app.id, hostId: host.hostId }, a.resetId));
+      } catch (e) {
+        // Unlike a step, this read must never echo the guessed reset id in its wire error.
+        if (e instanceof ContextResetError) throw taskError(e.code, e.message);
+        throw e;
+      }
+      const key = appKeyCaller(ctx)!; // asHost has admitted the current App key.
+      await recordHostKeyUseApart(ctx.db, key, 'read', { count: 1 });
+      return reset;
+    }),
+
   /** The App's host registrations: whoever reads its tasks and events (cor:agt:050:21), the App's own key included. */
   hostRegistrations: (_: unknown, a: { appRef: string }, ctx: Context) =>
     recordingRefusal(ctx, 'read', null, async () => {

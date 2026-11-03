@@ -21,6 +21,7 @@ import { mcpRequestSessionContext } from './requestSession.js';
  * refused here. Reads take an optional `session` for the same purpose: a
  * worker on an App key reads as itself through it.
  */
+import { rosterModelGroups } from '../api/graphql/schema/resolvers.agentTaskMatching.js';
 import { renderCheckStatusShort } from '../lib/workerCheckStatus.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
@@ -61,6 +62,8 @@ const QA = resolvers.Query as unknown as {
 };
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
 type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
+  appId: string;
+  modelGroups?: string[] | null;
   teamPlacement: import('../lib/agentTasks/roster.js').RosterEntry['teamPlacement'] | null;
   appUrn: string;
   currentTask?: import('../lib/agentTasks/rosterSummary.js').RosterTaskSummary | null;
@@ -143,6 +146,7 @@ export function renderRosterEntry(r: RosterRow, asOf: Date): string {
     r.checkStatus ? renderCheckStatusShort(r.checkStatus) : null,
     // #2223: already behind the working-state and name gates by the time it reaches a row.
     r.heldBy ? `held by ${r.heldBy.handle ? `@${r.heldBy.handle} (hrn:user:${r.heldBy.handle})` : `user ${r.heldBy.id}`}${r.heldBy.name ? ` ${r.heldBy.name}` : ''}` : null,
+    r.modelGroups === null ? 'model groups unavailable' : r.modelGroups ? `model groups ${r.modelGroups.length ? r.modelGroups.join('/') : 'none'}` : null,
   ].filter(Boolean);
   return `${r.name} — ${r.state}: ${facts.join('; ')}`;
 }
@@ -610,6 +614,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         const { workers, asOf } = await QA.teamRoster({}, { appRef }, ctx);
         if (!workers.length) return textResult('This App has no workers that are not retired.');
+        // read() supplies a fresh context per call, so recovered configuration is visible next time.
+        await Promise.all(workers.map(async (row) => {
+          try { row.modelGroups = await rosterModelGroups(row, ctx, true); }
+          catch { row.modelGroups = null; } // Explicit unavailable, never a fabricated empty membership.
+        }));
         return textResult([`Roster as of ${asOf.toISOString()}:`, ...workers.map((r) => renderRosterEntry(r, asOf))].join('\n'));
       }),
   );
@@ -640,7 +649,7 @@ const PROPERTIES_ARG = z.unknown().optional().describe(
 const SHAPE_HADRON_TASK_UPDATE = { taskId, input: z.object({
       title: z.string().nullable().optional(), description: z.string().nullable().optional(),
       tags: z.array(z.string()).nullable().optional(),
-      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
+      requirements: z.object({role:z.string().nullable().optional(),familyIn:z.array(z.string()).nullable().optional(),familyNotIn:z.array(z.string()).nullable().optional(),excludeWorkers:z.array(z.string()).nullable().optional(),minTier:z.enum(['low','mid','high']).nullable().optional(),modelGroupIn:z.array(z.string()).nullable().optional(),modelGroupNotIn:z.array(z.string()).nullable().optional()}).strict().nullable().optional(),
       startBy: z.string().nullable().optional(), closeSessionWhenDone: z.boolean().nullable().optional(),
       properties: PROPERTIES_ARG,
     }).strict().optional(), session: SESSION_WRITE };
@@ -661,7 +670,10 @@ const SHAPE_HADRON_TASK_CREATE = {
     familyIn: z.array(z.string()).optional(),
     familyNotIn: z.array(z.string()).optional(),
     excludeWorkers: z.array(z.string()).optional(),
-  }).optional().describe('For the platform\'s matcher.'),
+    minTier: z.enum(['low', 'mid', 'high']).optional().describe('#2252: the lowest model tier the assignee may run at (low < mid < high). A worker below it, or of unknown tier, is never matched; the lowest sufficient tier wins. There is no maximum.'),
+    modelGroupIn: z.array(z.string()).optional().describe('#2831: names of the App\'s model groups the assignee\'s model must be in at least one of. An unknown name is refused; a worker with no model never matches.'),
+    modelGroupNotIn: z.array(z.string()).optional().describe('#2831: names of the App\'s model groups the assignee\'s model must be in none of. An unknown name is refused; a worker with no model passes.'),
+  }).strict().optional().describe('For the platform\'s matcher.'),
   startBy: z.string().optional().describe('ISO date-time by which it should have started.'),
   tags: z.array(z.string()).optional(),
   properties: PROPERTIES_ARG,

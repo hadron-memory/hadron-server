@@ -190,6 +190,30 @@ describe('one refusal for every shape', () => {
     return { status: res.status, body: await res.text(), headers };
   }
 
+  it.each(['ADMIN', 'OWNER'] as const)('refuses a deleted org for a platform %s initiator on GET and POST (#2922)', async (role) => {
+    const initiator = await db.user.create({
+      data: { githubId: 292201, githubUsername: 'platform-connect-initiator', roles: [role] },
+    });
+    // No OrgMember row: the live control must exercise the platform-role bypass.
+    const liveNonce = await mint({ userId: initiator.id });
+    expect((await fetch(url(liveNonce), { redirect: 'manual' })).status).toBe(200);
+    expect((await post('gmail', { nonce: liveNonce, token: connectInterstitialToken('gmail', liveNonce, B) })).status).toBe(302);
+
+    const deletedOrg = await db.organization.create({
+      data: { name: 'deleted platform target', urn: 'deleted-platform-target', deletedAt: new Date() },
+    });
+    const nonce = await mint({ userId: initiator.id, orgId: deletedOrg.id });
+    const unknown = await snapshot(await fetch(url('unknown-platform-nonce'), { redirect: 'manual' }));
+    const get = await snapshot(await fetch(url(nonce), { redirect: 'manual' }));
+    const posted = await snapshot(await post('gmail', { nonce, token: connectInterstitialToken('gmail', nonce, B) }));
+    expect(unknown.status).toBe(400);
+    expect(unknown.body).toBe(JSON.stringify({ error: 'Invalid or expired nonce' }));
+    expect(get).toEqual(unknown);
+    expect(posted).toEqual(unknown);
+    const pending = await db.authHandoffCode.findMany({ where: { kind: { startsWith: 'exchange_start' }, redeemedAt: null } });
+    expect(pending).toHaveLength(1);
+  });
+
   it('unknown, expired, redeemed, wrong provider, deleted org, deleted user and ex-admin are byte-identical', async () => {
     const shapes: Record<string, () => Promise<string>> = {
       unknown: async () => 'nope',

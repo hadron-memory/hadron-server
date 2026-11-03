@@ -77,16 +77,16 @@ beforeEach(async () => {
     data: { id: generateId(), organizationId: orgId, name: 'flow-app', urn: `${ORG_URN}::flow-app` },
   });
   appId = app.id;
-  // Headless runs write an explicitly granted knowledge memory, not team space.
+  // #3278: items never grant a userless run read or write access. The fixture's
+  // flow is PUBLIC for reads; its known output/tool prefixes have explicit App write grants.
   const memory = await db.memory.create({
     data: {
       id: generateId(), organizationId: orgId, name: 'flowmem',
-      urn: MEM_URN, class: 'knowledge', visibility: 'ORGANIZATION',
+      urn: MEM_URN, class: 'knowledge', visibility: 'PUBLIC',
     },
   });
   memoryId = memory.id;
-  // The run principal's access rides the App's installed Agent's memory map
-  // (getAppMemoryAccess): Agent + AppAgent install + read-write AgentMemoryItem.
+  // The installed Agent's item discovers the PUBLIC memory read-only.
   const agent = await db.agent.create({
     data: { id: generateId(), organizationId: orgId, name: 'flow-agent', urn: `${ORG_URN}:flow-agent` },
   });
@@ -96,6 +96,12 @@ beforeEach(async () => {
   await db.agentMemoryItem.create({
     data: { agentId: agent.id, memoryId, role: 'read-write' },
   });
+  const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
+  await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
+  await db.appMemoryWriteGrant.createMany({ data: ['runs', 'flow', 'tasks', 'notes'].map(prefix => ({
+    appId, memoryId, prefix, grantedBy: grantor.userId,
+    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
+  })) });
 
   const classify = await makeNode('flow:classify', {
     content: 'Classify the report about {{topic}}. Score your confidence.',
@@ -336,7 +342,8 @@ describe('3-node flow through production deps (§10)', () => {
       const started = Date.now();
       await create.execute(
         { log: opts.log, db, run: r, principal: runContext(db, r) },
-        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', seq: 3, tags: ['urgent'] },
+        // #2987 (V13): the tool defaults nodeType to 'record', and a record outside a Channel refuses an explicit seq — name an ordinary type to keep the seq-parity assertion.
+        { urn: taskUrn, name: 'Investigate outage', content: 'Check MCP endpoint logs.', nodeType: 'info', seq: 3, tags: ['urgent'] },
       );
       opts.log('task node created');
       return {
@@ -437,7 +444,7 @@ describe('3-node flow through production deps (§10)', () => {
     const urn = `${ORG_URN}::flowmem::notes:standup`;
 
     await hadronCreateNode.execute(toolCtx, {
-      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, seq: 7,
+      urn, name: 'Standup note', content: 'first', data: { a: 1, b: 2 }, nodeType: 'info', seq: 7, // #2987: record + seq is refused outside a Channel
     });
     // Create on an occupied loc must point authors at update, not clobber.
     await expect(hadronCreateNode.execute(toolCtx, { urn, name: 'again' })).rejects.toThrow(/already exists/);

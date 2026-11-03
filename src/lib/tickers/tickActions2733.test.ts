@@ -285,6 +285,13 @@ it('withholds an unresolved loc when the current reader cannot read the entry', 
   await db.appMember.create({ data: { appId: f.app.id, userId: f.outside.id, role: 'owner' } });
   const original = memoryGate.canReadMemory;
   vi.spyOn(memoryGate, 'canReadMemory').mockImplementation((client, auth, id, opts) => auth.userId === f.outside.id && id === f.team.systemMemoryId ? Promise.resolve(false) : original(client, auth, id, opts));
+  // #3048: enrichment answers a principal's readability through the batch companion; refuse the same memory there.
+  const originalBatch = memoryGate.filterReadableMemoryIds;
+  vi.spyOn(memoryGate, 'filterReadableMemoryIds').mockImplementation(async (client, auth, ids, opts) => {
+    const readable = await originalBatch(client, auth, ids, opts);
+    if (auth.userId === f.outside.id) readable.delete(f.team.systemMemoryId);
+    return readable;
+  });
   const out = await computeDueWakes({ ctx: f.context(f.outside.id), app: f.app, reader: { manager: true, userId: f.outside.id }, requester: { userId: f.outside.id }, now: tickNow2733 });
   expect(action(out, w.id)).toEqual({ code: 'tick.shared', state: 'WITHHELD' });
   expect(JSON.stringify(out)).not.toContain(tickTaskLoc2733);

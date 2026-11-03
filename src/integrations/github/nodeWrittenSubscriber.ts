@@ -50,9 +50,9 @@ export async function handleNodeWrittenForGit(
   );
 }
 
-async function loadNodeForGit(
+export async function loadNodeForGit(
   db: PrismaClient,
-  evt: NodeWrittenEvent,
+  evt: Pick<NodeWrittenEvent, 'nodeId' | 'memoryId'>,
 ): Promise<NodeForGit | null> {
   const node = await db.node.findUnique({
     where: { id: evt.nodeId },

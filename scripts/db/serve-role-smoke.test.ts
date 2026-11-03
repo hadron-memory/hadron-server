@@ -20,8 +20,9 @@ const SERVE = `smk_serve_${suffix}`;
 const DB = `smk_db_${suffix}`;
 const PASSWORD = randomBytes(12).toString('hex');
 
-// The grants file refuses a superuser runner, so the owner is a real non-superuser role that owns a database
-// built from scratch (db push + post-push.sql), the way the CI lane builds its own.
+// The grants file refuses a serve role that is the role running it, is a superuser, or is a member of the owner
+// (or the reverse), and it must be run as the owner, not `postgres`. So the owner here is a real non-superuser
+// role that owns a database built from scratch (db push + post-push.sql), the way the CI lane builds its own.
 function urlFor(user: string, db: string): string {
   const u = new URL(maintenanceUrl());
   if (user !== u.username) {

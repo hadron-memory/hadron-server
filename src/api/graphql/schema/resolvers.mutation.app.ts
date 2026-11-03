@@ -2,7 +2,7 @@ import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { appendMemberRemovedEvent, appendMemberSetEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
+import { requireAppKeyIssuer, requireAppKeyManager, lockAppKeyManagerMemberships } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -73,9 +73,34 @@ import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { assertNoMintedCorpusCascade } from '../../../lib/mintedSpecPermanence.js';
 import { requireEndpointFor, requireKeyFor } from '../../../lib/aiEndpoint.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { isRefusedPrincipal } from './resolvers.appViewerManages.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
+
+/**
+ * cor:aut:010:02 rule 9: revoke one of `userId`'s keys and every recorded descendant, returning the ids it revoked
+ * (sorted). Run under the user's exclusive authority anchor, which serializes the traversal with every mint: a mint
+ * that wins is in this subtree, one that waits rechecks its now-revoked credential. Each existing revokedAt is kept.
+ * UNION (not UNION ALL) also ends on a corrupt cycle. Unknown legacy ancestry stays unknown; nothing is inferred.
+ * Shared by revokeUserApiKey and (#2659) deleteUserApiKey.
+ */
+async function revokeUserKeySubtree(tx: Prisma.TransactionClient, userId: string, id: string): Promise<string[]> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    WITH RECURSIVE subtree AS (
+      SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${userId}
+      UNION
+      SELECT child.id FROM user_api_keys child
+      JOIN subtree parent ON child.minted_by_key_id = parent.id
+      WHERE child.user_id = ${userId}
+    )
+    UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+    WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL
+    RETURNING id`;
+  return rows.map((r) => r.id).sort();
+}
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -125,41 +150,23 @@ async function assertNoInstallMemories(
 }
 
 /**
- * Can the caller manage this App's members by ROLE alone — independent of any
- * target user? Platform ADMIN/OWNER for an ORG-owned App, the user-owner of a
- * user-owned App, an org ADMIN/OWNER of the App's org, or an owner-role
- * AppMember. spec 047 (blocker 3): the platform-admin bypass applies ONLY to an
- * org-owned App (a user-owned App is strictly owner-only). Shared by
- * ensureAppMember + removeAppMember so the role gate is evaluated BEFORE the
- * target user is resolved — a non-authorized caller can't turn user-ref
- * resolution into an existence oracle (#816 review).
+ * Can the caller manage this App's members? The role logic is `managesApp`'s
+ * (user-owner, org ADMIN/OWNER, platform ADMIN/OWNER for an ORG-owned App only,
+ * an owner-role AppMember; spec 047 blocker 3), so it has one source. On top of
+ * it, a principal that is not the direct user is refused whatever its role: an
+ * impersonation, a run principal, an ambiguous actor, a refused session binding
+ * (#2448). A worker session is deliberately NOT decided here: it keeps its
+ * holder's answer until #2483 S2b. Shared by ensureAppMember + removeAppMember
+ * and evaluated BEFORE the target user is resolved, so a non-authorized caller
+ * can't turn user-ref resolution into an existence oracle (#816 review).
  */
 export async function callerManagesAppMembers(
   ctx: Context,
   app: { ownerUserId: string | null; organizationId: string | null },
   resolvedAppId: string,
 ): Promise<boolean> {
-  const isPlatformAdmin = ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER');
-  if (isPlatformAdmin && app.ownerUserId === null) return true;
-  const isAppOwnerUser = app.ownerUserId !== null && !!ctx.userId && ctx.userId === app.ownerUserId;
-  if (isAppOwnerUser) return true;
-  if (app.organizationId) {
-    const orgMember = await ctx.db.orgMember.findFirst({
-      where: {
-        organizationId: app.organizationId,
-        userId: ctx.userId ?? '',
-        ...LIVE_ORG_MEMBERSHIP,
-        role: { in: ['ADMIN', 'OWNER'] },
-      },
-    });
-    if (orgMember) return true;
-  }
-  const ownerMember = ctx.userId
-    ? await ctx.db.appMember.findUnique({
-        where: { appId_userId: { appId: resolvedAppId, userId: ctx.userId } },
-      })
-    : null;
-  return ownerMember?.role === 'owner';
+  if (isRefusedPrincipal(ctx)) return false;
+  return managesApp(ctx, { id: resolvedAppId, organizationId: app.organizationId, ownerUserId: app.ownerUserId });
 }
 
 /**
@@ -220,8 +227,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedId } = await resolveAppRef(ctx.db, appRef);
       const existing = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedId } });
-      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint, with the same audience.
-      await requireAppKeyManager(ctx, existing);
+      // #1744 / cor:dmo:050:05: rotation is one revoke plus mint. #3277: person-only (cor:dmo:050:12, ruling 0098 A).
+      await requireAppKeyIssuer(ctx, existing, 'app-key.rotate');
       const rawKey = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
       const keyHash = createHash('sha256').update(rawKey).digest('hex');
       return withAuthorizedTx(
@@ -234,7 +241,7 @@ export const appMutations = {
           if (current.organizationId !== existing.organizationId || current.ownerUserId !== existing.ownerUserId) {
             throw new Error('App ownership changed; retry key regeneration');
           }
-          await requireAppKeyManager(txCtx, current);
+          await requireAppKeyIssuer(txCtx, current, 'app-key.rotate');
         },
         async (tx) => {
           // Revocation and replacement are one atomic authority change.
@@ -1185,6 +1192,9 @@ export const appMutations = {
       const forbidRemove = () =>
         forbiddenError('Forbidden: only org admins, App owners, or the user themselves can remove members');
 
+      // #2448: a principal that is not the direct user is refused outright, the
+      // self-leave arm included, and before the target is resolved.
+      if (isRefusedPrincipal(ctx)) throw forbidRemove();
       const authorizedByRole = await callerManagesAppMembers(ctx, app, resolvedAppId);
       let resolvedUserId: string;
       if (authorizedByRole) {
@@ -1211,6 +1221,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry member management');
           }
+          if (isRefusedPrincipal(txCtx)) throw forbidRemove();
           if (!(await callerManagesAppMembers(txCtx, current, resolvedAppId)) && resolvedUserId !== txCtx.userId) {
             throw forbidRemove();
           }
@@ -1346,7 +1357,8 @@ export const appMutations = {
       // 007-entity-id-or-urn: appRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedAppId } = await resolveAppRef(ctx.db, appRef);
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
-      await requireAppKeyManager(ctx, app);
+      // #3277: minting is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0098 A).
+      await requireAppKeyIssuer(ctx, app, 'app-key.mint');
       // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
       const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
       const keyHash = hashAppKey(rawKey);
@@ -1361,7 +1373,7 @@ export const appMutations = {
           if (current.organizationId !== app.organizationId || current.ownerUserId !== app.ownerUserId) {
             throw new Error('App ownership changed; retry key creation');
           }
-          await requireAppKeyManager(txCtx, current);
+          await requireAppKeyIssuer(txCtx, current, 'app-key.mint');
         },
         (tx) => tx.appKey.create({
           data: {
@@ -1518,16 +1530,7 @@ export const appMutations = {
           // with every mint. A mint that wins is in this subtree; one that
           // waits rechecks its now-revoked credential before inserting.
           // UNION (rather than UNION ALL) also terminates on corrupt cycles.
-          await tx.$executeRaw`
-            WITH RECURSIVE subtree AS (
-              SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${ctx.userId}
-              UNION
-              SELECT child.id FROM user_api_keys child
-              JOIN subtree parent ON child.minted_by_key_id = parent.id
-              WHERE child.user_id = ${ctx.userId}
-            )
-            UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
-            WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL`;
+          await revokeUserKeySubtree(tx, ctx.userId!, id);
           return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
         },
         { lockMode: 'exclusive' },
@@ -1594,6 +1597,67 @@ export const appMutations = {
         });
       }
       return row;
+    },
+
+    /**
+     * #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03; rulings 0004 A, 0005 B, 0006 A, 0007 A): delete one of the
+     * caller's own API keys, live or revoked.
+     *  - Who (0006): the key's own user as themselves, on the one person gate: never an App key, impersonation, a
+     *    worker session in any shape, or a run principal. Unknown and foreign ids are NOT_FOUND, byte-identical, as
+     *    revokeUserApiKey answers.
+     *  - A live key is revoked first, with its live subtree (cor:aut:010:02 rule 9), in the same transaction, so a
+     *    delete never leaves a working credential behind (0004).
+     *  - The keys it minted are not deleted and do not refuse it: their link to it is cleared, so they stay, revoked,
+     *    with no parent (0005 B). The break is recorded once, in the deletion's record.
+     *  - The one append-only UserApiKeyDeletion row (0007): who, which key (id, masked preview), when; no secret, no hash.
+     * Serialized with mint, revoke and hide on the user's exclusive authority anchor, so no half state is observable.
+     */
+    deleteUserApiKey: async (
+      _: unknown,
+      { id }: { id: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'deleteUserApiKey requires a user-scoped credential; AppKey callers cannot delete user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const forbidden = () => new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      await requirePersonAsThemselves(ctx, forbidden);
+      if (ctx.appKeyId) throw forbidden();
+      const userId = ctx.userId;
+      const record = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== userId || txCtx.impersonation) throw forbidden();
+        },
+        async (tx) => {
+          const key = await tx.userApiKey.findFirst({ where: { id, userId }, select: { id: true, keyPreview: true } });
+          if (!key) return null;
+          const revokedKeyIds = await revokeUserKeySubtree(tx, userId, id);
+          // Every key it minted, whoever's row: the FK (NoAction) refuses the delete while any link remains.
+          const minted = await tx.$queryRaw<Array<{ id: string }>>`
+            UPDATE user_api_keys SET minted_by_key_id = NULL WHERE minted_by_key_id = ${id} RETURNING id`;
+          const row = await tx.userApiKeyDeletion.create({
+            data: {
+              userId,
+              keyId: key.id,
+              keyPreview: key.keyPreview,
+              revokedKeyIds,
+              mintedKeyIds: minted.map((m) => m.id).sort(),
+            },
+          });
+          await tx.userApiKey.delete({ where: { id: key.id } });
+          return row;
+        },
+        { lockMode: 'exclusive' },
+      );
+      if (!record) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+      }
+      return record;
     },
 
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

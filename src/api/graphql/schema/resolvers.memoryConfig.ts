@@ -378,9 +378,12 @@ export async function materializeConfig(tx: Prisma.TransactionClient, memoryId: 
   // #1400: taken BEFORE the row can exist, so a node write that found no
   // config either commits first or sees this memory's first rules.
   await lockMemoryConfigExclusive(tx, memoryId);
+  // #3196: created_at is written explicitly as UTC. The column is a naive
+  // timestamp holding UTC, and its DEFAULT CURRENT_TIMESTAMP would land as the
+  // session's wall time, hours off under a non-UTC session.
   await tx.$executeRaw`
-    INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by")
-    VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor})
+    INSERT INTO "memory_configs" ("id", "memory_id", "created_by", "updated_by", "created_at")
+    VALUES (${generateId()}, ${memoryId}, ${actor}, ${actor}, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::timestamp(3))
     ON CONFLICT ("memory_id") DO NOTHING`;
   const row = await tx.memoryConfig.findUniqueOrThrow({ where: { memoryId }, select: { id: true } });
   return row.id;

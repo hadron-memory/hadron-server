@@ -30,6 +30,8 @@ import {
   emitNodeUrnV2,
   emitEdgeUrnV2,
   emitAssetUrnV2,
+  emitActionUrnV2,
+  registerEntryCode,
   emitInstalledAgentUrnV2,
   bestEffortFlatNodeUrn,
 } from '../../../lib/urnEmit.js';
@@ -186,6 +188,46 @@ export async function resolveNodeUrnField(
     // on the same malformed value, defeating the serve-and-log posture of
     // this non-null field.
     return bestEffortFlatNodeUrn('node', memUrn, n.loc);
+  }
+}
+
+/**
+ * #2610 — `Node.actionUrn`: the register entry's action address
+ * (`hrn:action:<root>:<agent-slug>:<code>`), computed on read. Non-null only
+ * for a `register:<code>` node in a LIVE Agent's system memory — the memory the
+ * action URN keys on is the holding Agent's own (`Node.memoryId` here), so a
+ * `register:` loc anywhere else names no entry. Null, never a throw, on an
+ * unemittable stored code atom (charset/length): one bad row must not fail the
+ * query, and a wrong action URN is worse than none.
+ *
+ * #2972 — entry-hood is `registerEntryCode`'s call: a NESTED `register:a:b`
+ * loc is a writable namespace loc, not an entry, and nulls QUIETLY (no repair
+ * warn); the null-and-log below is reachable only for a single-atom code the
+ * emitter refuses — a real entry that needs repair.
+ */
+export async function resolveNodeActionUrnField(
+  n: { loc: string; memoryId: string },
+  ctx: Context,
+): Promise<string | null> {
+  const code = registerEntryCode(n.loc);
+  if (code === null) return null;
+  const agent = await ctx.db.agent.findFirst({
+    where: { systemMemoryId: n.memoryId, deletedAt: null },
+    select: { urn: true },
+  });
+  // No live Agent keys this memory (a plain memory, or a deleted Agent whose
+  // URN can no longer resolve): no action address exists for this node.
+  if (!agent) return null;
+  try {
+    return emitActionUrnV2(agent.urn, code);
+  } catch (err) {
+    console.warn(
+      `[Node.actionUrn] register code ${JSON.stringify(code)} in memory ${n.memoryId} is not ` +
+        'emittable as an action URN; serving null. The STORED loc needs repair — this is not a ' +
+        'malformed caller request:',
+      err,
+    );
+    return null;
   }
 }
 
@@ -967,6 +1009,11 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
+      const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
+        : (await ctx.db.node.findUnique({ where: { id: n.id }, select: { embeddingTruncatedChunks: true } }))?.embeddingTruncatedChunks;
+      return count != null && count > 0 ? { omittedChunks: count } : null;
+    },
     outgoingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'out'),
     incomingEdges: (n: { id: string; memoryId: string }, _: unknown, ctx: Context) => batchReadEdges(n, ctx, 'in'),
     /** #2048 — link lint, computed on read from the stored source and the caller's own reads; null when unavailable. */
@@ -1135,6 +1182,11 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => portalUrlForUrn(await resolveNodeUrnField(n, ctx)),
+    // #2610 — the action-register address for a register:<code> entry in an
+    // Agent system memory; null for every other node. A second address beside
+    // `urn` (which keeps resolving), computed from the holding Agent's own urn.
+    actionUrn: (n: { loc: string; memoryId: string }, _: unknown, ctx: Context) =>
+      resolveNodeActionUrnField(n, ctx),
     // #1885 — stamped by the effective-system-memory reads (markInherited);
     // absent everywhere else, which reads as not inherited.
     inheritedFrom: (n: { inheritedFrom?: InheritedFrom }) =>
@@ -2057,13 +2109,18 @@ export const typeResolvers = {
     // case (pre-merge duplicate triage) is a platform admin or the user
     // themselves, both of which this gate admits, so nothing is lost.
     //
-    // Legacy `githubId`/`githubUsername` and `avatarUrl` remain ungated.
     // `externalId` and other account metadata use the #384 gate as of #1522.
-    // Changing the legacy fields needs a separate consumer/contract audit.
     googleId: async (u: { id: string; googleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.googleId ?? null) : null,
     appleId: async (u: { id: string; appleId?: string | null }, _: unknown, ctx: Context) =>
       (await canSeeUserPersonalFields(ctx, u.id)) ? (u.appleId ?? null) : null,
+    // #2574 (Holger V28, hrn:node:hadronmemory.com:specs:cor:acl:070:01): the
+    // numeric GitHub id sits with name and email behind the SAME #384 gate;
+    // only admin duplicate triage uses it. `githubUsername` and `avatarUrl`
+    // are identity, so they stay default-resolved for any signed-in viewer
+    // and the username stays the public search key of cor:acl:070:02.
+    githubId: async (u: { id: string; githubId?: number | null }, _: unknown, ctx: Context) =>
+      (await canSeeUserPersonalFields(ctx, u.id)) ? (u.githubId ?? null) : null,
     // 008-agent-installation: User↔App memberships. Resolves to a non-empty
     // list only when the queried User is the authenticated user (mirrors
     // 005's User.agentSubscriptions resolver-side gate).

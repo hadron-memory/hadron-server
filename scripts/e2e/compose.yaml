@@ -24,6 +24,7 @@ services:
       FRONTEND_URL: http://localhost:${E2E_PORTAL_PORT:?set E2E_PORTAL_PORT}
       DEV_LOGIN_ENABLED: 'true'
       E2E_SEED: 'true'
+      RATE_LIMIT_KEYRING: ${E2E_RATE_LIMIT_KEYRING:-}
       DISABLE_RUN_WORKER: 'true'
       DISABLE_SCHEDULER: 'true'
       GRAPHS_PATH: /var/lib/hadron/graphs

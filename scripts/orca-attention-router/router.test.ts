@@ -2785,6 +2785,20 @@ describe('#2613 — the open-task line on every router wake', () => {
     expect(logs.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
   });
 
+  it('an empty result (the read answered, zero rows): no diagnostic, no open-task clause, the plain wake still delivers (#2641)', () => {
+    const c = cfg(['w-eli', 'Eli']);
+    fake.terminal('eli');
+    fake.attention.workers = [worker('w-eli', 'Eli', { mentions: 2, unread: 5 })];
+    fake.openTasks.set('w-eli', []);
+    const out = poll(c);
+    expect(fake.openTaskReads).toEqual([['hrn:app:x:team', 'w-eli', '0']]); // the read ran and answered empty
+    expect(out.nudged).toEqual(['Eli']);
+    expect(fake.sent).toHaveLength(1);
+    expect(fake.sent[0][1]).toBe(nudgeText(worker('w-eli', 'Eli', { mentions: 2, unread: 5 })));
+    expect(fake.sent[0][1]).not.toMatch(/open task|You have \d/);
+    expect(logs.filter((l) => l.includes('open-task count unknown'))).toEqual([]);
+  });
+
   it('pages: 201 open tasks read as 201, through two page reads', () => {
     const c = cfg(['w-eli', 'Eli']);
     fake.terminal('eli');

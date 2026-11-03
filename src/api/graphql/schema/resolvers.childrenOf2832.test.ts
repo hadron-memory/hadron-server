@@ -210,11 +210,11 @@ describe('#2832 the same rule in TypeScript (hydration re-check)', () => {
   });
 });
 
-describe('#2832 appNodes rejects the filter instead of ignoring it', () => {
-  it('names the unsupported filter', async () => {
+describe('#2832 App list forms reject the filter instead of ignoring it', () => {
+  it.each(['appNodes', 'appNodesPage'])('%s names the unsupported filter', async (field) => {
     const org = await db.organization.create({ data: { id: generateId(), name: 'org-2832', urn: 'org-2832.example' } });
     const app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'App', urn: 'org-2832.example:app' } });
-    await expect((resolvers.Query as any).appNodes(null, { appRef: app.id, filter: { childrenOf: 'x' } }, admin()))
+    await expect((resolvers.Query as any)[field](null, { appRef: app.id, filter: { childrenOf: 'x' } }, admin()))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 });

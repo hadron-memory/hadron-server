@@ -84,14 +84,32 @@ describe('#2871 org-member refusals are typed', () => {
     expect(formatted.message).toBe('User is not a member of this organization');
   });
 
-  it.each(['updateOrgMember', 'removeOrgMember'])('%s: a caller whose admin role is revoked while queued gets no typed target miss', async (mutation) => {
+  // #2876: both interleave pins assert FORBIDDEN exactly, not merely "not
+  // NOT_FOUND", so a masked internal error (a P2010-wrapped 40001 escaping the
+  // retry) fails them too; and each runs against a live-member target as well
+  // as a never-member, so the refusal can't come from the target's absence.
+  const interleaves = ['updateOrgMember', 'removeOrgMember'].flatMap(
+    (mutation) => (['never-member', 'live member'] as const).map((target) => [mutation, target] as const),
+  );
+  const targetId = async (target: 'never-member' | 'live member') => {
+    if (target === 'never-member') return strangerId;
+    await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: strangerId, role: 'READER' } });
+    return strangerId;
+  };
+  const targetRow = () => db.orgMember.findFirst({ where: { organizationId: orgId, userId: strangerId } });
+
+  it.each(interleaves)('%s (%s target): a caller whose admin role is revoked while queued gets FORBIDDEN', async (mutation, target) => {
     // The typed NOT_FOUND must not be thrown before the caller's live authority
     // is re-established: otherwise a just-revoked admin learns that the target
-    // is absent from the org.
+    // is absent from the org. The caller waits on the anchor while the revoke
+    // commits, so its locking read raises 40001 (P2010 from $queryRaw), which
+    // must be retried into the in-transaction FORBIDDEN (#2876).
     const adminId = (await db.user.create({
       data: { id: generateId(), githubId: 287190, githubUsername: `revoked-admin-${generateId()}` },
     })).id;
     await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: adminId, role: 'ADMIN' } });
+    const userId = await targetId(target);
+    const before = await targetRow();
     let release!: () => void;
     let held!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -107,26 +125,31 @@ describe('#2871 org-member refusals are typed', () => {
     await locked;
     let outcome: Promise<{ code?: string; message: string }> | undefined;
     try {
-      outcome = refusal(() => M[mutation](null, { orgId, userId: strangerId, role: 'READER' }, ctx(adminId)));
+      outcome = refusal(() => M[mutation](null, { orgId, userId, role: 'ADMIN' }, ctx(adminId)));
       await waitForLockWaiters(db, 1);
       release();
       await revoker;
       const result = await outcome;
-      expect(result.code).not.toBe('NOT_FOUND');
+      expect(result.code).toBe('FORBIDDEN');
       expect(result.message).not.toMatch(/not a member/);
+      expect(await targetRow()).toEqual(before);
     } finally {
       release();
       await Promise.allSettled([revoker, outcome]);
     }
   });
 
-  it.each(['updateOrgMember'])('%s: an admin revoked after the pre-check but before the transaction gets no typed target miss', async (mutation) => {
+  it.each(interleaves)('%s (%s target): an admin revoked after the pre-check but before the transaction gets FORBIDDEN', async (mutation, target) => {
     // Unqueued interleave: the revoke commits between the resolver's pre-check
-    // and the transaction. The miss must follow the in-transaction authorize.
+    // and the transaction. The miss must follow the in-transaction authorize,
+    // and with a live target only that re-check refuses: removeOrgMember's
+    // afterLock reads the caller's row without raising when it is gone (#2876).
     const adminId = (await db.user.create({
       data: { id: generateId(), githubId: 287191, githubUsername: `revoked-admin-${generateId()}` },
     })).id;
     await db.orgMember.create({ data: { id: generateId(), organizationId: orgId, userId: adminId, role: 'ADMIN' } });
+    const userId = await targetId(target);
+    const before = await targetRow();
     let revoked = false;
     const revokeOnce = async () => {
       if (revoked) return;
@@ -151,11 +174,12 @@ describe('#2871 org-member refusals are typed', () => {
       },
     });
     const result = await refusal(() => M[mutation](
-      null, { orgId, userRef: strangerId, role: 'READER' }, { ...ctx(adminId), db: racing } as Context,
+      null, { orgId, userRef: userId, role: 'ADMIN' }, { ...ctx(adminId), db: racing } as Context,
     ));
     expect(revoked).toBe(true);
-    expect(result.code).not.toBe('NOT_FOUND');
+    expect(result.code).toBe('FORBIDDEN');
     expect(result.message).not.toMatch(/not a member/);
+    expect(await targetRow()).toEqual(before);
   });
 
   it('controls: add, change role, remove, and a repeat removal of a revoked row all succeed', async () => {

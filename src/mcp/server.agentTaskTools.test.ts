@@ -239,3 +239,32 @@ describe('#2644 MCP blocker and priority parity', () => {
     } finally { await client.close(); await server.close(); }
   });
 });
+
+it('#2831 S3 roster renders current model-group names, including an explicit empty list', async () => {
+  await db.modelGroup.create({ data: { appId: app.id, name: 'custom', patterns: ['unknown-*'] } });
+  await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, userId: member.id, llmModel: 'unknown-model' } });
+  const result = text(await mcp(authOf(member.id)).callTool('hadron_team_roster', { appRef: app.id }));
+  expect(result.split('\n').find(line => line.startsWith('Anne —'))).toContain('model groups custom');
+  expect(result.split('\n').find(line => line.startsWith('Rook —'))).toContain('model groups none');
+});
+
+
+it('#2831 S3 keeps the MCP roster readable with explicit unavailable groups and recovers next read', async () => {
+  const installed: string[] = [];
+  for (const name of ['Team A', 'Team B']) {
+    const agent = await M.createAgent({}, { orgId: org.id, name }, { db, userId: admin.id, roles: ['READER'] });
+    await db.node.create({ data: { memoryId: agent.systemMemoryId, loc: 'roles:engineer', name: 'engineer', content: '' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    installed.push(agent.id);
+  }
+  await db.session.create({ data: { id: generateId(), appId: app.id, workerId: anne.id, agentId, userId: member.id, llmModel: 'unknown-model' } });
+  const s = mcp(authOf(member.id));
+  const first = text(await s.callTool('hadron_team_roster', { appRef: app.id }));
+  expect(first).toContain('Roster as of');
+  expect(first.split('\n').find(line => line.startsWith('Anne —'))).toContain('model groups unavailable');
+  expect(first.split('\n').find(line => line.startsWith('Rook —'))).toContain('model groups none');
+  await db.appAgent.deleteMany({ where: { appId: app.id, agentId: installed[1] } });
+  await db.modelGroup.create({ data: { appId: app.id, name: 'custom', patterns: ['unknown-*'] } });
+  const recovered = text(await s.callTool('hadron_team_roster', { appRef: app.id }));
+  expect(recovered.split('\n').find(line => line.startsWith('Anne —'))).toContain('model groups custom');
+});

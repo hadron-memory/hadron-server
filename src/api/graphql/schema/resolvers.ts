@@ -1,7 +1,9 @@
+import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
+import { automationReadGrantQueries, automationReadGrantMutations } from './resolvers.automationReadGrant.js';
 // GraphQL resolver map — thin assembler.
 //
 // The implementation was split out of this file (originally ~11k lines) into
@@ -71,8 +73,11 @@ import { teamAttentionMutations, teamAttentionQueries } from './resolvers.teamAt
 import { teamWorkMutations, teamWorkQueries } from './resolvers.teamWork.js';
 import { agentTaskMutations, agentTaskQueries, agentTaskFieldResolvers } from './resolvers.agentTask.js';
 import { tickerMutations, tickerQueries, tickerFieldResolvers } from './resolvers.ticker.js';
+import { modelGroupMutations, modelGroupQueries } from './resolvers.modelGroup.js';
 import { agentTickerTemplateFieldResolvers, agentTickerTemplateMutations, agentTickerTemplateQueries } from './resolvers.agentTickerTemplate.js';
 import { deliverySettingsQueries, deliverySettingsMutations } from './resolvers.deliverySettings.js';
+import { appPropertiesMutations, appPropertiesTypeResolvers } from './resolvers.appProperties.js';
+import { untrackedTaskItemMutations, untrackedTaskItemQueries } from './resolvers.untrackedTaskItems.js';
 import { wakeMutations, wakeQueries } from './resolvers.wake.js';
 import { stopSignalMutations, stopSignalQueries } from './resolvers.stopSignal.js';
 import { deliveryBatchMutations, deliveryBatchQueries } from './resolvers.deliveryBatch.js';
@@ -140,6 +145,8 @@ export const resolvers = {
   // `Agent` already has a block in typeResolvers; the register's field joins
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
+  // #3125 S1: the App's properties and their revision.
+  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers },
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
@@ -161,6 +168,8 @@ export const resolvers = {
   UnresolvedFeedback: commentFieldResolvers.UnresolvedFeedback,
   GraphNode: commentFieldResolvers.GraphNode,
   NodeRevision: { ...typeResolvers.NodeRevision, ...nodeAttributionFieldResolvers.NodeRevision },
+  // #1151: edge attribution, gated on the edge's own memory.
+  Edge: { ...typeResolvers.Edge, ...nodeAttributionFieldResolvers.Edge },
   NodeApproval: nodeApprovalFieldResolvers.NodeApproval,
   NodeMintStatus: nodeApprovalFieldResolvers.NodeMintStatus,
   MemoryConfig: memoryConfigFieldResolvers.MemoryConfig,
@@ -189,8 +198,10 @@ export const resolvers = {
     ...teamAttentionQueries,
     ...teamWorkQueries,
     ...agentTaskQueries,
+    ...untrackedTaskItemQueries,
     ...tickerQueries,
     ...agentTickerTemplateQueries,
+    ...modelGroupQueries,
     ...deliverySettingsQueries,
     ...wakeQueries,
     ...stopSignalQueries,
@@ -219,9 +230,11 @@ export const resolvers = {
     ...appRunQueries,
     ...automationPinQueries,
     ...appWriteGrantQueries,
+    ...automationReadGrantQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
     ...meteringQueries,
+    ...rateLimitQueries,
     ...impersonationQueries,
   },
   Mutation: {
@@ -232,7 +245,9 @@ export const resolvers = {
     ...appRunMutations,
     ...automationPinMutations,
     ...appWriteGrantMutations,
+    ...automationReadGrantMutations,
     ...meteringMutations,
+    ...rateLimitMutations,
     ...connectionGrantMutations,
     ...principalGrantMutations,
     ...importNodeMutations,
@@ -253,7 +268,10 @@ export const resolvers = {
     ...agentTaskMutations,
     ...tickerMutations,
     ...agentTickerTemplateMutations,
+    ...modelGroupMutations,
     ...deliverySettingsMutations,
+    ...appPropertiesMutations,
+    ...untrackedTaskItemMutations,
     ...stopSignalMutations,
     ...wakeMutations,
     ...deliveryBatchMutations,

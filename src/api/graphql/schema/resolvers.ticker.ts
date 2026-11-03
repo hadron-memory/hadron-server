@@ -89,6 +89,7 @@ import { isWorkerDormant } from '../../../lib/sessionActivity.js';
 import { loadWorkersActivity } from './resolvers.worker.js';
 import { nextFreeTickerSlug } from '../../../lib/tickers/tickerSlug.js';
 import { TickerNotFoundError, composeTickerUrn, resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import {
   GeneratedAgentNotInstalledError, GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
   applyAgentTickerTemplates,
@@ -125,7 +126,7 @@ function updatedStamp(ctx: Context) {
 }
 
 /** Run a write on an App under the shared transaction gate; a refusal is concealed as `refused()`. */
-async function writeInApp<T>(
+export async function writeInApp<T>(
   ctx: Context,
   app: TaskApp,
   actor: TaskActor,
@@ -1157,9 +1158,12 @@ async function changeGrant(
   const target = await loadWorkerOf(ctx, app.id, a.workerRef);
   return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     // Given and revoked only by whoever manages the App; no grant can give or take a grant.
-    if (!(await actorManagesApp(txCtx, fresh, actor))) {
-      throw taskError('APP_GRANT_FORBIDDEN', 'Only whoever manages this App can give or revoke a grant.');
-    }
+    const forbidden = () => taskError('APP_GRANT_FORBIDDEN', 'Only whoever manages this App can give or revoke a grant.');
+    if (!(await actorManagesApp(txCtx, fresh, actor))) throw forbidden();
+    // #3277: giving a grant is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0099 A), so a worker
+    // never gives a grant, to itself or another: the one person gate also refuses a worker session found on the session
+    // row, an ambiguous actor and a run principal. Same refusal. Revoking keeps its gate until S3b.
+    if (op === 'grant') await requirePersonOnlyAct(txCtx, 'grant.give', forbidden);
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id) throw workerNotFound(a.workerRef);
     // With no live row there is nothing for FOR UPDATE to lock, so two first grants

@@ -1,3 +1,4 @@
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 // orgMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { GraphQLError } from 'graphql';
 import { generateId } from '../../../lib/id.js';
@@ -47,6 +48,7 @@ import { AuthoritySnapshotStale } from '../../../lib/auth/authorityAnchors.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../../lib/auth/revokeOrgInvitations.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { assertInviteLimits, inviteExpiresAt, inviteMaxActivations } from '../../../lib/invitationLimits.js';
 
 /** #2871: expected org-member refusals are typed so the boundary does not mask them. */
 const orgMemberRefusal = (code: 'CONFLICT' | 'NOT_FOUND', message: string) =>
@@ -186,7 +188,7 @@ export const orgMutations = {
       requireRole(ctx, 'ADMIN');
       if (!ctx.userId || ctx.apiKeyId || ctx.sessionId || ctx.impersonation || ctx.appId) throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       const [s, t] = await Promise.all([resolveUserRef(ctx.db, source), resolveUserRef(ctx.db, target)]);
-      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId);
+      return beginUserMergeConsent(ctx.db, s.id, t.id, ctx.userId, ctx.limiterIdentity ?? transportRateIdentity(ctx));
     },
 
     approveMergeUsersConsent: async (_: unknown, { proof, source, target }: { proof: string; source: string; target: string }, ctx: Context) =>
@@ -239,6 +241,17 @@ export const orgMutations = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
+      // #3016 (cor:aut:020:03): only an OMITTED (or null) userRef means "me".
+      // A supplied ref that is empty after JS trim ('', spaces, a stray U+FEFF
+      // BOM, an empty template variable) names nobody, so it is refused here,
+      // before the principal check and before any target resolution. The
+      // refusal does not depend on role or on any user row, so it reveals
+      // nothing, and it can never fall through to erasing the caller.
+      if (userRef != null && !userRef.trim()) {
+        throw new GraphQLError('userRef is blank; omit it to delete your own account.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       const forbidden = () =>
         new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       // NON-throwing boolean principal check FIRST: the owner-or-self shape
@@ -248,7 +261,7 @@ export const orgMutations = {
       // (conventions:crud-mutation-naming, the deleteMemoryShare trap).
       const platformAdmin = isPlatformAdmin(ctx);
       let targetUserId: string;
-      if (!userRef?.trim()) {
+      if (userRef == null) {
         // Omitted target = "me" (the self-service path; needs no role — a
         // platform admin's own admin bit never blocks their own deletion).
         targetUserId = ctx.userId;
@@ -522,29 +535,30 @@ export const orgMutations = {
       // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
       const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
       const slug = generateId().slice(0, 16);
-      const expiresAt = expiresInDays
-        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
-        : null;
       const invite = await withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: resolvedOrgId }],
         (txCtx) => requireOrgRole(txCtx, resolvedOrgId, 'ADMIN'),
-        (tx) => tx.userInvitation.create({
-          data: {
-            id: generateId(),
-            slug,
-            senderUserId: ctx.userId ?? null,
-            organizationId: resolvedOrgId,
-            memberRole: (memberRole as Role) ?? 'READER',
-            name: name ?? null,
-            email: email ?? null,
-            githubUsername: githubUsername ?? null,
-            maxActivations: maxActivations ?? 1,
-            expiresAt,
-            createdBy: ctx.userId ?? ctx.clientId ?? null,
-          },
-          include: { sender: true, organization: true, activations: true },
-        }),
+        (tx) => {
+          // #2984: judged after the role gate, so a refused caller gets the same answer whatever the values.
+          assertInviteLimits({ expiresInDays, maxActivations });
+          return tx.userInvitation.create({
+            data: {
+              id: generateId(),
+              slug,
+              senderUserId: ctx.userId ?? null,
+              organizationId: resolvedOrgId,
+              memberRole: (memberRole as Role) ?? 'READER',
+              name: name ?? null,
+              email: email ?? null,
+              githubUsername: githubUsername ?? null,
+              maxActivations: inviteMaxActivations(maxActivations),
+              expiresAt: inviteExpiresAt(expiresInDays),
+              createdBy: ctx.userId ?? ctx.clientId ?? null,
+            },
+            include: { sender: true, organization: true, activations: true },
+          });
+        },
       );
       return { ...invite, activationCount: invite.activations.length };
     },
@@ -558,10 +572,8 @@ export const orgMutations = {
       ctx: Context,
     ) => {
       if (!ctx.userId) throw unauthenticatedError();
+      assertInviteLimits({ expiresInDays, maxActivations }); // #2984
       const slug = generateId().slice(0, 16);
-      const expiresAt = expiresInDays
-        ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000)
-        : null;
       const invite = await ctx.db.userInvitation.create({
         data: {
           id: generateId(),
@@ -572,8 +584,8 @@ export const orgMutations = {
           name: name ?? null,
           email: email ?? null,
           githubUsername: githubUsername ?? null,
-          maxActivations: maxActivations ?? 1,
-          expiresAt,
+          maxActivations: inviteMaxActivations(maxActivations),
+          expiresAt: inviteExpiresAt(expiresInDays),
           createdBy: ctx.userId,
         },
         include: { sender: true, organization: true, activations: true },

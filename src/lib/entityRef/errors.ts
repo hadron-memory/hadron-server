@@ -282,7 +282,8 @@ export const FR_026_DISCLOSURE = [
  * silently indexed; the caller affirms via `acknowledgeVectorInversionRisk`.
  * The CHECK constraint `chk_memory_vector_encrypted_ack` is the DB backstop.
  *
- * GraphQL `extensions.code: 'EncryptedVectorIndexNotAcknowledgedError'`.
+ * GraphQL `extensions.code: 'ENCRYPTED_VECTOR_INDEX_NOT_ACKNOWLEDGED'`, delivered
+ * by the class mapping in `api/graphql/formatError.ts` with `disclosure` and `memoryRef`.
  *
  * Carries the full four-point disclosure on `.disclosure` so a UI consumer
  * can render the same text the error message quotes.
