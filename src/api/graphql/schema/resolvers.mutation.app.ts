@@ -76,8 +76,31 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRefusedPrincipal } from './resolvers.appViewerManages.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
+
+/**
+ * cor:aut:010:02 rule 9: revoke one of `userId`'s keys and every recorded descendant, returning the ids it revoked
+ * (sorted). Run under the user's exclusive authority anchor, which serializes the traversal with every mint: a mint
+ * that wins is in this subtree, one that waits rechecks its now-revoked credential. Each existing revokedAt is kept.
+ * UNION (not UNION ALL) also ends on a corrupt cycle. Unknown legacy ancestry stays unknown; nothing is inferred.
+ * Shared by revokeUserApiKey and (#2659) deleteUserApiKey.
+ */
+async function revokeUserKeySubtree(tx: Prisma.TransactionClient, userId: string, id: string): Promise<string[]> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    WITH RECURSIVE subtree AS (
+      SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${userId}
+      UNION
+      SELECT child.id FROM user_api_keys child
+      JOIN subtree parent ON child.minted_by_key_id = parent.id
+      WHERE child.user_id = ${userId}
+    )
+    UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+    WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL
+    RETURNING id`;
+  return rows.map((r) => r.id).sort();
+}
 
 /**
  * #974 / cor:agt:020:02: a soft-deleted App keeps reserving its workers'
@@ -1507,16 +1530,7 @@ export const appMutations = {
           // with every mint. A mint that wins is in this subtree; one that
           // waits rechecks its now-revoked credential before inserting.
           // UNION (rather than UNION ALL) also terminates on corrupt cycles.
-          await tx.$executeRaw`
-            WITH RECURSIVE subtree AS (
-              SELECT id FROM user_api_keys WHERE id = ${id} AND user_id = ${ctx.userId}
-              UNION
-              SELECT child.id FROM user_api_keys child
-              JOIN subtree parent ON child.minted_by_key_id = parent.id
-              WHERE child.user_id = ${ctx.userId}
-            )
-            UPDATE user_api_keys SET revoked_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
-            WHERE id IN (SELECT id FROM subtree) AND revoked_at IS NULL`;
+          await revokeUserKeySubtree(tx, ctx.userId!, id);
           return tx.userApiKey.findFirst({ where: { id, userId: ctx.userId } });
         },
         { lockMode: 'exclusive' },
@@ -1583,6 +1597,67 @@ export const appMutations = {
         });
       }
       return row;
+    },
+
+    /**
+     * #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03; rulings 0004 A, 0005 B, 0006 A, 0007 A): delete one of the
+     * caller's own API keys, live or revoked.
+     *  - Who (0006): the key's own user as themselves, on the one person gate: never an App key, impersonation, a
+     *    worker session in any shape, or a run principal. Unknown and foreign ids are NOT_FOUND, byte-identical, as
+     *    revokeUserApiKey answers.
+     *  - A live key is revoked first, with its live subtree (cor:aut:010:02 rule 9), in the same transaction, so a
+     *    delete never leaves a working credential behind (0004).
+     *  - The keys it minted are not deleted and do not refuse it: their link to it is cleared, so they stay, revoked,
+     *    with no parent (0005 B). The break is recorded once, in the deletion's record.
+     *  - The one append-only UserApiKeyDeletion row (0007): who, which key (id, masked preview), when; no secret, no hash.
+     * Serialized with mint, revoke and hide on the user's exclusive authority anchor, so no half state is observable.
+     */
+    deleteUserApiKey: async (
+      _: unknown,
+      { id }: { id: string },
+      ctx: Context,
+    ) => {
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'deleteUserApiKey requires a user-scoped credential; AppKey callers cannot delete user keys.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const forbidden = () => new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
+      await requirePersonAsThemselves(ctx, forbidden);
+      if (ctx.appKeyId) throw forbidden();
+      const userId = ctx.userId;
+      const record = await withAuthorizedTx(
+        ctx,
+        [{ kind: 'user', id: userId }],
+        async (txCtx) => {
+          if (txCtx.userId !== userId || txCtx.impersonation) throw forbidden();
+        },
+        async (tx) => {
+          const key = await tx.userApiKey.findFirst({ where: { id, userId }, select: { id: true, keyPreview: true } });
+          if (!key) return null;
+          const revokedKeyIds = await revokeUserKeySubtree(tx, userId, id);
+          // Every key it minted, whoever's row: the FK (NoAction) refuses the delete while any link remains.
+          const minted = await tx.$queryRaw<Array<{ id: string }>>`
+            UPDATE user_api_keys SET minted_by_key_id = NULL WHERE minted_by_key_id = ${id} RETURNING id`;
+          const row = await tx.userApiKeyDeletion.create({
+            data: {
+              userId,
+              keyId: key.id,
+              keyPreview: key.keyPreview,
+              revokedKeyIds,
+              mintedKeyIds: minted.map((m) => m.id).sort(),
+            },
+          });
+          await tx.userApiKey.delete({ where: { id: key.id } });
+          return row;
+        },
+        { lockMode: 'exclusive' },
+      );
+      if (!record) {
+        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+      }
+      return record;
     },
 
     // 005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

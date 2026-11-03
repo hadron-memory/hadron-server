@@ -3754,8 +3754,11 @@ export const typeDefs = `#graphql
     """
     issuedVia: String
     """
-    Authenticated key that minted this key. Null for direct issuance or
-    unknown legacy ancestry; historical parents are never inferred.
+    Authenticated key that minted this key. Null for direct issuance,
+    unknown legacy ancestry, or a minting key its user has since deleted
+    (#2659, hrn:node:hadronmemory.com:specs:cor:dmo:070:03: the break is
+    recorded once, in that deletion's record); historical parents are never
+    inferred.
     """
     mintedByKeyId: ID
     """
@@ -3763,6 +3766,32 @@ export const typeDefs = `#graphql
     unrestricted portal/legacy key rather than an OAuth-scoped key.
     """
     oauthScopes: [String!]!
+  }
+
+  """
+  #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03, ruling 0007): the one
+  append-only record a user's deletion of their own API key leaves behind. Names
+  the key (its id and masked preview) and when; never its secret or its hash.
+  """
+  type UserApiKeyDeletion {
+    "The deletion record's id."
+    id: ID!
+    "The deleted key's id. The key itself no longer exists."
+    keyId: ID!
+    "The deleted key's masked preview (its last characters)."
+    keyPreview: String!
+    """
+    The keys this delete revoked: the key itself when it was live, with its live
+    subtree (hrn:node:hadronmemory.com:specs:cor:aut:010:02 rule 9). Empty when
+    the key was already revoked.
+    """
+    revokedKeyIds: [ID!]!
+    """
+    The keys the deleted key had minted. They were not deleted: they stay,
+    revoked, with no parent (mintedByKeyId null).
+    """
+    mintedKeyIds: [ID!]!
+    deletedAt: DateTime!
   }
 
   """
@@ -13934,6 +13963,21 @@ export const typeDefs = `#graphql
     revokeUserApiKey (own user only; unknown and foreign ids are NOT_FOUND).
     """
     setUserApiKeyHidden(id: ID!, hidden: Boolean!): UserApiKey!
+
+    """
+    #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03): delete one of the
+    caller's own API keys, live or revoked. A live key is revoked first, with
+    every key it minted, in the same step, so no working credential is left
+    behind. The keys it minted are not deleted and do not prevent the delete:
+    they stay, revoked, with no parent. The key then no longer authenticates and
+    is absent from myUserApiKeys whatever includeHidden says. Returns the one
+    append-only deletion record (no secret, no hash). Only the key's own user,
+    as themselves: FORBIDDEN under impersonation, from a worker session or a run;
+    UNAUTHENTICATED for AppKey-resolved callers. NOT_FOUND for both unknown and
+    foreign keys, as revokeUserApiKey answers. To tidy the list without deleting,
+    hide a revoked key with setUserApiKeyHidden instead.
+    """
+    deleteUserApiKey(id: ID!): UserApiKeyDeletion!
 
     """
     005-agent-subscription FR-023 + FR-028 + FR-029: revoke a user's

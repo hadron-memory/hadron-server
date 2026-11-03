@@ -10,6 +10,7 @@
  *  - One append-only record survives: who, which key (id and masked preview), when. Never the secret or its hash.
  *  - Delete serializes with revoke, hide and mint on the user's authority anchor: no half state.
  */
+import { readFileSync, readdirSync } from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request } from 'express';
 import { db } from '../../../integrations/db/client.js';
@@ -136,6 +137,13 @@ describe('deleteUserApiKey: the record of the deletion (ruling 0007)', () => {
     expect(text).not.toContain(parent.rawKey);
     expect(text).not.toContain(hashUserApiKey(parent.rawKey));
     expect(Object.keys(rows[0]).sort()).toEqual(['deletedAt', 'id', 'keyId', 'keyPreview', 'mintedKeyIds', 'revokedKeyIds', 'userId']);
+  });
+
+  it('the migration carries a byte-identical copy of the invariants file', () => {
+    const sql = readFileSync(new URL('../../../../prisma/user-api-key-deletion-invariants.sql', import.meta.url), 'utf8');
+    const dir = readdirSync(new URL('../../../../prisma/migrations', import.meta.url)).find((d) => d.endsWith('_user_api_key_deletions'));
+    expect(dir).toBeTruthy();
+    expect(readFileSync(new URL(`../../../../prisma/migrations/${dir}/migration.sql`, import.meta.url), 'utf8').endsWith(sql)).toBe(true);
   });
 
   it('the record is append-only: never updated, and never deleted while its user exists', async () => {

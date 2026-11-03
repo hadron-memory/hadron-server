@@ -427,6 +427,7 @@ model User {
   memoryMemberships             MemoryMember[]              @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
+  userApiKeyDeletions           UserApiKeyDeletion[]
   authCodes                     AuthCode[]
   passkeyCredentials            PasskeyCredential[]
   freshSignIns                  FreshSignIn[]
@@ -4068,6 +4069,8 @@ model MemoryMember {
 /// append-once with a single terminal state transition (revoked);
 /// `revokedAt` carries the lifecycle info, and there is no edit
 /// operation. Soft-delete is meaningless for a revocable credential.
+/// #2659 (cor:dmo:070:03): its user may HARD-delete a key
+/// (`deleteUserApiKey`); the trace is a separate UserApiKeyDeletion row.
 model UserApiKey {
   id          String    @id @default(cuid())
   userId      String    @map("user_id")
@@ -4097,7 +4100,9 @@ model UserApiKey {
   hiddenAt    DateTime? @map("hidden_at")
 
   /// Authenticated credential that minted this key (#1253). Null means
-  /// direct issuance or unknown legacy ancestry; never inferred/backfilled.
+  /// direct issuance, unknown legacy ancestry, or (#2659) a minting key its
+  /// user has since deleted, the break recorded once in that key's
+  /// UserApiKeyDeletion row; never inferred/backfilled.
   mintedByKeyId String?      @map("minted_by_key_id")
   mintedByKey   UserApiKey?  @relation("UserKeyLineage", fields: [mintedByKeyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   mintedKeys    UserApiKey[] @relation("UserKeyLineage")
@@ -4437,6 +4442,27 @@ model PasskeyCredential {
 
   @@index([ownerId])
   @@map("passkey_credentials")
+}
+
+/// #2659 (hrn:node:hadronmemory.com:specs:cor:dmo:070:03, ruling 0007 A): the one append-only trace of a user
+/// deleting one of their own API keys. Who (the key's own user: ruling 0006 lets no one else delete it), which key
+/// (its id and masked preview) and when; never its secret or its hash. `revokedKeyIds` names the keys the delete itself
+/// revoked (the key when live, and its live subtree, cor:aut:010:02 rule 9); `mintedKeyIds` names the keys it had
+/// minted, whose link to it broke (ruling 0005 B: they stay, revoked, with no parent). No FK to the key: it is gone.
+/// Never updated, and never deleted while its user row exists (prisma/user-api-key-deletion-invariants.sql).
+model UserApiKeyDeletion {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  keyId         String   @map("key_id")
+  keyPreview    String   @map("key_preview")
+  revokedKeyIds String[] @map("revoked_key_ids")
+  mintedKeyIds  String[] @map("minted_key_ids")
+  deletedAt     DateTime @default(now()) @map("deleted_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, deletedAt])
+  @@map("user_api_key_deletions")
 }
 
 /// #1897 / cor:aut:030:02 + R66: a completed, factor-protected sign-in. Its id is
