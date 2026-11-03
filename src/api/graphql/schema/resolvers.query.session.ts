@@ -10,7 +10,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { currentActor } from '../../../lib/requestActor.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { oauthSurfaceRefusal } from '../../../middleware/auth.js';
 import { CONNECTION_FLOW_TTL_MS } from '../../../integrations/mailboxConnect.js';
 import { z } from 'zod';
@@ -328,7 +328,8 @@ export const sessionQueries = {
           extensions: { code: 'UNAUTHENTICATED' },
         });
       }
-      if (ctx.appId || currentActor().workerId) throw authorizationDenied();
+      if (ctx.appId) throw authorizationDenied();
+      await requirePersonAsThemselves(ctx, authorizationDenied);
       if (oauthSurfaceRefusal(ctx, 'account')) throw authorizationDenied();
       const rows = await ctx.db.$queryRaw<{ connection_id: string | null; failure_code: string | null }[]>`
         SELECT connection_id, failure_code FROM connection_flows

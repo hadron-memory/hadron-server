@@ -85,20 +85,36 @@ export const CONNECTION_FLOW_TTL_MS = 60 * 60 * 1000;
 /** Flow rows are kept a day past their hour, then swept by the next start; nothing reads them after the hour. */
 const CONNECTION_FLOW_RETENTION_MS = 24 * 60 * 60 * 1000;
 
-/** Settle a flow once: the guard is the unsettled row, so a replayed callback or a second outcome changes nothing. */
+/** Where a settle writes: the shared client, or the transaction that also records the connection. */
+type FlowWriter = Pick<typeof db, 'connectionFlow'>;
+
+/**
+ * Settle a flow once: the guard is the unsettled row, so a replayed callback or a second outcome changes nothing.
+ * Inside a transaction (`client` given) a failed write throws, so the connection it would have announced is rolled
+ * back with it. Outside one, a failed write is retried once and then logged: the browser already has its answer.
+ */
 async function settleConnectionFlow(
   flowId: string | null | undefined,
   outcome: { connectionId: string } | { failureCode: string },
+  client?: FlowWriter,
 ): Promise<void> {
   if (!flowId) return;
-  try {
-    await db.connectionFlow.updateMany({
+  const write = () =>
+    (client ?? db).connectionFlow.updateMany({
       where: { id: flowId, settledAt: null },
       data: { ...outcome, settledAt: new Date() },
     });
-  } catch (err) {
-    // The browser already has its answer; a flow that cannot be settled stays PENDING until its hour ends.
-    console.error('connection flow settle failed:', err instanceof Error ? err.message : err);
+  if (client) {
+    await write();
+    return;
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await write();
+      return;
+    } catch (err) {
+      if (attempt === 1) console.error('connection flow settle failed:', err instanceof Error ? err.message : err);
+    }
   }
 }
 
@@ -482,6 +498,11 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
     const pending = pendingStates.get(state);
     pendingStates.delete(state);
 
+    if (pending && pending.expiresAt < Date.now() && pending.origin === 'graphql') {
+      // A known state that ran out is consumed and can never finish, so its flow ends here instead of reading
+      // PENDING until its hour is up. An unknown state names no flow and settles nothing.
+      await settleConnectionFlow(pending.flowId, { failureCode: 'state_expired' });
+    }
     if (!pending || pending.expiresAt < Date.now()) {
       res.status(400).json({ error: 'Invalid or expired state' });
       return;
@@ -562,46 +583,52 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
         void deleteToolConnection(existing.provider, existing.toolConnectionId);
       }
 
-      const connection = await db.exchangeConnection.upsert({
-        where: {
-          organizationId_provider_mailboxEmail: {
-            organizationId: pending.orgId,
-            provider: cfg.provider,
-            mailboxEmail: identity.mailboxEmail,
+      const minted = identity;
+      const connection = await db.$transaction(async (tx) => {
+        const row = await tx.exchangeConnection.upsert({
+          where: {
+            organizationId_provider_mailboxEmail: {
+              organizationId: pending.orgId,
+              provider: cfg.provider,
+              mailboxEmail: minted.mailboxEmail,
+            },
           },
-        },
-        create: {
-          organizationId: pending.orgId,
-          userId: pending.userId,
-          mailboxEmail: identity.mailboxEmail,
-          displayName: identity.displayName,
-          provider: identity.provider,
-          toolConnectionId: identity.id,
-          syncStatus: 'OK',
-          lastSyncAt: new Date(),
-          createdBy: pending.userId,
-        },
-        update: {
-          displayName: identity.displayName,
-          provider: identity.provider,
-          toolConnectionId: identity.id,
-          // Reconnect transfers OWNERSHIP: mail operations are owner-only,
-          // and the initiator just proved control of the mailbox via OAuth
-          // (and passed the #506 org-ADMIN gate). Without this, a reconnect
-          // by a different user would strand the row on the old owner.
-          userId: pending.userId,
-          // A reconnect also REVIVES a previously-disconnected row —
-          // otherwise the flow reports success while the row stays
-          // soft-deleted and invisible.
-          deletedAt: null,
-          deletedBy: null,
-          // The legacy core-held token (if any) is superseded by the tool's.
-          refreshTokenEncrypted: null,
-          syncStatus: 'OK',
-          lastSyncAt: new Date(),
-          lastError: null,
-          updatedBy: pending.userId,
-        },
+          create: {
+            organizationId: pending.orgId,
+            userId: pending.userId,
+            mailboxEmail: minted.mailboxEmail,
+            displayName: minted.displayName,
+            provider: minted.provider,
+            toolConnectionId: minted.id,
+            syncStatus: 'OK',
+            lastSyncAt: new Date(),
+            createdBy: pending.userId,
+          },
+          update: {
+            displayName: minted.displayName,
+            provider: minted.provider,
+            toolConnectionId: minted.id,
+            // Reconnect transfers OWNERSHIP: mail operations are owner-only,
+            // and the initiator just proved control of the mailbox via OAuth
+            // (and passed the #506 org-ADMIN gate). Without this, a reconnect
+            // by a different user would strand the row on the old owner.
+            userId: pending.userId,
+            // A reconnect also REVIVES a previously-disconnected row —
+            // otherwise the flow reports success while the row stays
+            // soft-deleted and invisible.
+            deletedAt: null,
+            deletedBy: null,
+            // The legacy core-held token (if any) is superseded by the tool's.
+            refreshTokenEncrypted: null,
+            syncStatus: 'OK',
+            lastSyncAt: new Date(),
+            lastError: null,
+            updatedBy: pending.userId,
+          },
+        });
+        // The flow settles in the same transaction as the connection it announces: both land or neither does.
+        if (pending.origin === 'graphql') await settleConnectionFlow(pending.flowId, { connectionId: row.id }, tx);
+        return row;
       });
 
       // Subscribe the inbox to provider change notifications (the event
@@ -625,7 +652,6 @@ export function mountMailboxConnectRoutes(app: Express, cfg: MailboxConnectConfi
       // (Microsoft-era names, kept for compatibility); `provider` tells the
       // portal WHICH connect flow this outcome belongs to.
       if (pending.origin === 'graphql') {
-        await settleConnectionFlow(pending.flowId, { connectionId: connection.id });
         const org = await db.organization
           .findUnique({ where: { id: pending.orgId }, select: { name: true } })
           .catch(() => null);

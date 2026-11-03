@@ -115,7 +115,7 @@ import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/au
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError } from '../../../lib/refusals.js';
-import { currentActor } from '../../../lib/requestActor.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { oauthSurfaceRefusal, oauthSurfaceRefusalMessage } from '../../../middleware/auth.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -2557,7 +2557,8 @@ export const sessionMutations = {
         });
       }
       // An App run on behalf of the org's ADMIN carries both appId and userId; the grant is the App's, not theirs.
-      if (ctx.appId || currentActor().workerId) throw forbiddenError();
+      if (ctx.appId) throw forbiddenError();
+      await requirePersonAsThemselves(ctx, forbiddenError);
       const surfaceRefusal = oauthSurfaceRefusal(ctx, 'account');
       if (surfaceRefusal) {
         throw new GraphQLError(
