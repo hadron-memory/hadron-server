@@ -105,9 +105,13 @@ describe('#3273 ContextReset read', () => {
     const key = await db.appKey.create({ data: { appId: foreign.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) } });
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(f.manager.id));
     await same(s.resetId, { db, appId: foreign.id, appKeyId: key.id, roles: [] }, foreign.id);
-    // No FK: model exactly the missing-row condition the protocol must distinguish from an issued op.
-    await db.hostOperation.delete({ where: { id: s.operationId } });
-    await same(s.resetId);
+    // Operation history is append-only and reset identity immutable. Insert a separate synthetic reset;
+    // there is deliberately no operation FK, so an absent-operation row can be modelled without disabling guards.
+    const missing = await db.contextReset.create({ data: {
+      id: generateId(), appId: f.app.id, workerId: f.kit.id, sessionId: f.session.id,
+      taskId: generateId(), hostId: 'orca1', hostOperationId: generateId(), phase: 'requested', requestedAt: new Date(),
+    } });
+    await same(missing.id);
   });
 
   it('user session and never-host App key follow the protocol key gate without use records', async () => {
@@ -129,5 +133,25 @@ describe('#3273 ContextReset read', () => {
     await M.revokeAppKeyScope({}, { id: f.orca1.id, scope: 'host:operate' }, ctx(f.manager.id));
     const revoked = await recorded(s.resetId, 'APP_KEY_SCOPE_REQUIRED');
     expect(revoked.data).toBeNull();
+  });
+
+  it('rechecks host authority inside the deciding transaction after a committed scope revocation', async () => {
+    const s = await f.collectedReset();
+    let injected = 0;
+    const client = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key !== '$transaction') return Reflect.get(target, key, receiver);
+        return async (fn: any, options: any) => {
+          if (injected++ === 0) {
+            await M.revokeAppKeyScope({}, { id: f.orca1.id, scope: 'host:operate' }, ctx(f.manager.id));
+          }
+          return target.$transaction(fn, options);
+        };
+      },
+    });
+    const answer = await recorded(s.resetId, 'APP_KEY_SCOPE_REQUIRED', { ...f.keyCtx(), db: client });
+    expect(injected).toBe(1);
+    expect(answer.data).toBeNull();
+    expect(answer.errors?.[0].extensions.code).toBe('APP_KEY_SCOPE_REQUIRED');
   });
 });

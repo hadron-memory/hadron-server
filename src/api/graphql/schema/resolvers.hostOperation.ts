@@ -76,6 +76,7 @@ import {
   holdForStopLease,
   outstandingStopLease,
   claimContextReset,
+  readContextResetForHost,
   ContextResetError,
   onContextResetReported,
   registerContextResetRecovery,
@@ -795,6 +796,23 @@ async function loadRegistrationViews(ctx: Context, appId: string, hostId?: strin
 }
 
 export const hostOperationQueries = {
+  /** #3273: one host-owned collected reset; audit use but never advance its protocol. */
+  contextReset: (_: unknown, a: { appRef: string; resetId: string }, ctx: Context) =>
+    recordingRefusal(ctx, 'read', null, async () => {
+      let reset;
+      try {
+        reset = await asHost(ctx, a.appRef, (tx, app, host) =>
+          readContextResetForHost(tx, { appId: app.id, hostId: host.hostId }, a.resetId));
+      } catch (e) {
+        // Unlike a step, this read must never echo the guessed reset id in its wire error.
+        if (e instanceof ContextResetError) throw taskError(e.code, e.message);
+        throw e;
+      }
+      const key = appKeyCaller(ctx)!; // asHost has admitted the current App key.
+      await recordHostKeyUseApart(ctx.db, key, 'read', { count: 1 });
+      return reset;
+    }),
+
   /** The App's host registrations: whoever reads its tasks and events (cor:agt:050:21), the App's own key included. */
   hostRegistrations: (_: unknown, a: { appRef: string }, ctx: Context) =>
     recordingRefusal(ctx, 'read', null, async () => {
