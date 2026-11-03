@@ -1,3 +1,4 @@
+import { rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import { RUN_CLIENT_PREFIX, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { finishFindings, countFindings, type TaskFinding } from '../../../lib/agentTasks/findings.js';
@@ -179,7 +180,7 @@ const forbidden = (message = 'You are not a participant of this App.'): GraphQLE
 
 const APP_SELECT = {
   id: true, name: true, urn: true, organizationId: true, ownerUserId: true,
-  uninstalledAt: true, deletedAt: true, runTeamSnapshotEnabled: true,
+  uninstalledAt: true, deletedAt: true,
 } as const;
 export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
 type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
@@ -308,13 +309,25 @@ async function keyMayReadApp(ctx: Context, app: TaskApp): Promise<boolean> {
 
 /** #2925 / ruling0112: read-only own-App run arm, evaluated again inside the read's anchors. */
 export async function runMayReadTeam(ctx: Context, app: TaskApp): Promise<boolean> {
-  if (!isRunPrincipal(ctx) || ctx.impersonation || app.deletedAt || !app.runTeamSnapshotEnabled || ctx.appId !== app.id) return false;
+  if (!isRunPrincipal(ctx) || ctx.impersonation || app.deletedAt || ctx.appId !== app.id) return false;
   if (!ctx.organizationId || !await ctx.db.organization.findFirst({ where: { id: ctx.organizationId, deletedAt: null }, select: { id: true } })) return false;
   const rows = await ctx.db.$queryRaw<Array<{ app_id: string; status: string; organization_id: string; user_id: string | null }>>`
     SELECT app_id, status::text AS status, organization_id, user_id FROM app_runs WHERE id = ${ctx.clientId!.slice(RUN_CLIENT_PREFIX.length)} FOR SHARE`;
   const run = rows[0];
-  return rows.length === 1 && run!.app_id === app.id && run!.status === 'RUNNING'
+  const bound = rows.length === 1 && run!.app_id === app.id && run!.status === 'RUNNING'
     && (app.organizationId === null || app.organizationId === run!.organization_id) && run!.organization_id === ctx.organizationId && (run!.user_id ?? undefined) === (ctx.userId ?? undefined);
+  if (!bound) return false;
+  const root = await rootTriggerOfRun(ctx.db, ctx.clientId!.slice(RUN_CLIENT_PREFIX.length));
+  if (!root) return false;
+  // A locking read detects a revoke/delete committed while this RepeatableRead reader waited for anchors.
+  // Advisory exclusion alone does not refresh an already-established snapshot (#3350).
+  const trigger = root.kind === 'SCHEDULE'
+    ? await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agent_schedules WHERE id = ${root.id} AND app_id = ${app.id} AND deleted_at IS NULL FOR SHARE`
+    : await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM agent_webhooks WHERE id = ${root.id} AND app_id = ${app.id} AND deleted_at IS NULL FOR SHARE`;
+  if (trigger.length !== 1) return false;
+  const grants = await ctx.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM app_automation_team_snapshot_grants
+    WHERE app_id = ${app.id} AND trigger_kind = ${root.kind} AND trigger_id = ${root.id} AND revoked_at IS NULL FOR SHARE`;
+  return grants.length === 1;
 }
 
 /** The callback projection stays under shared authority anchors in one coherent view; later GraphQL fields re-gate separately. */

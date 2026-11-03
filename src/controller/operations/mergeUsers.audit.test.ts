@@ -38,6 +38,10 @@ const EXEMPT_AUDIT_COLUMNS = new Set([
   'app_automation_read_grants.granted_by',
   'app_automation_read_grants.revoked_by',
   'app_automation_read_grant_events.actor_user_id',
+  // #3350 — team-snapshot grants have the same sealed actor history. A giver merge does not change admission.
+  'app_automation_team_snapshot_grants.granted_by',
+  'app_automation_team_snapshot_grants.revoked_by',
+  'app_automation_team_snapshot_grant_events.actor_user_id',
   // #1632 — signing requests and signature records are guarded history (a
   // trigger refuses any change to a request's pins and any update of a
   // record): who asked, who was named and who signed are sealed. A merged-away
@@ -79,6 +83,8 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'app_memory_write_grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'app_automation_read_grants' AND column_name = 'granted_by')
           OR (table_name = 'app_automation_read_grant_events' AND column_name = 'actor_user_id')
+          OR (table_name = 'app_automation_team_snapshot_grants' AND column_name = 'granted_by')
+          OR (table_name = 'app_automation_team_snapshot_grant_events' AND column_name = 'actor_user_id')
           OR (table_name = 'signing_requests' AND column_name IN ('requester_user_id', 'named_signer_id'))
           OR (table_name = 'node_signatures' AND column_name = 'signer_id'))
     `;

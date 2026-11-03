@@ -3115,8 +3115,6 @@ export const typeDefs = `#graphql
     properties: JSON
     "#3125 S1: the revision setAppProperties checks expectedRevision against. 0 until the first changing write; each changing write adds 1. Null for a caller who may not read properties."
     propertiesRevision: Int
-    "Ruling0112: default-off permission for this App's own running automations to read its team roster and tasks. Only a managing person may change it. Null for a caller who may not read this App."
-    runTeamSnapshotEnabled: Boolean
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
     "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
@@ -8164,6 +8162,8 @@ export const typeDefs = `#graphql
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
     "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App may list them, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0111 A: one team event per admitted instructed call, never a grant id); a grant on a personal or private memory is listed to the holder alone, when they own it. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AppMemoryWriteGrant!]!
+    "#3350: only this App's managers list its team snapshot grants; includeRevoked defaults false. Worker instruction arm is not yet built, not ruled refused."
+    automationTeamSnapshotGrants(appRef: ID!, includeRevoked: Boolean, limit: Int, offset: Int): AutomationTeamSnapshotGrantPage!
     "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of."
     automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false): [AutomationReadGrant!]!
 
@@ -10376,6 +10376,24 @@ export const typeDefs = `#graphql
     ref: String!
   }
 
+  "#3350: terminal per-automation read-only team snapshot grant; no App-wide permission. hrn:node:hadronmemory.com:specs:cor:agt:050:23"
+  type AutomationTeamSnapshotGrantPage {
+    items: [AutomationTeamSnapshotGrant!]!
+    total: Int!
+    hasMore: Boolean!
+  }
+  "#3350: automation team snapshot grant history. Revocation is terminal."
+  type AutomationTeamSnapshotGrant {
+    id: ID!
+    appId: ID!
+    triggerKind: String!
+    triggerId: ID!
+    grantedBy: ID!
+    createdAt: DateTime!
+    revokedAt: DateTime
+    revokedBy: ID
+  }
+
   type Mutation {
     "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."
     setRateLimitPolicy(input: SetRateLimitPolicyInput!): RateLimitPolicy!
@@ -10391,6 +10409,10 @@ export const typeDefs = `#graphql
     setAppMemoryWriteGrant(appRef: String!, memoryRef: String!, prefix: String!, registerNodeUrn: String): AppMemoryWriteGrant!
     "#2484: end a grant; the next write by the App's run is refused. Whoever manages the App may revoke, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0109 A; one team event, never the grant id). The row stays with its end time; revoking a revoked grant changes nothing and records nothing. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     revokeAppMemoryWriteGrant(id: ID!, instruction: ActInstructionInput): AppMemoryWriteGrant!
+    "#3350: App managers, as people acting as themselves, give this live schedule/webhook a read-only own-App team snapshot grant, off until given; identical repeat returns the live row. hrn:node:hadronmemory.com:specs:cor:agt:050:23"
+    setAutomationTeamSnapshotGrant(appRef: ID!, triggerKind: String!, triggerId: ID!): AutomationTeamSnapshotGrant!
+    "#3350: terminal revoke, App managers only. Worker instruction arm is not yet built (not a person-only ruling)."
+    revokeAutomationTeamSnapshotGrant(id: ID!): AutomationTeamSnapshotGrant!
     "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise, as a person (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A refusal is the same Forbidden as an unknown App, trigger or memory."
     setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
     "#2883: end an automation read grant. The App's managers or the target's manager. Terminal."
@@ -10529,8 +10551,6 @@ export const typeDefs = `#graphql
     setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
     "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
     setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
-    "Ruling0112: opt this App's own running automations into read-only team snapshots, or revoke that permission. Person managing the App only; no worker, key, run or impersonation."
-    setAppRunTeamSnapshotEnabled(appRef: ID!, enabled: Boolean!): App!
     """
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
     or an empty object clears them. Whoever manages the App only, as a person acting as themselves (a worker session,
