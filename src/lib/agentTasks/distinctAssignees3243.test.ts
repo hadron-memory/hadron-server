@@ -1,3 +1,4 @@
+import * as launchModule from '../hostOperations/launch.js';
 /** #3243, ruling0084 A: distinct batch matching is all-or-none, named workers count. */
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
@@ -6,7 +7,7 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
 
-import { matchQueuedTasks } from './matcher.js';
+
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const M = resolvers.Mutation as any, Q = resolvers.Query as any;
@@ -98,4 +99,23 @@ it('GraphQL accepts distinctAssignees and exposes typed positioned rollback refu
  expect(response.body.singleResult.errors?.[0].extensions).toMatchObject({code:'TASK_MATCH_FAILED',position:2,reason:'NOBODY_FREE'});
  expect(await db.agentTask.count({where:{appId:app.id}})).toBe(0);
  }finally{await api.stop();}
+});
+
+it('a full 25-task distinct batch succeeds with 25 eligible workers',async()=>{
+ const workers=[];for(let i=0;i<25;i++)workers.push(await worker(`Reviewer${String(i).padStart(2,'0')}`));
+ const tasks=await batch(Array.from({length:25},()=>matched()),true);
+ expect(new Set(tasks.map((t:any)=>t.assigneeWorkerId))).toEqual(new Set(workers.map(w=>w.id)));
+ expect(tasks).toHaveLength(25);
+});
+it('each role/family/min-tier constraint is still judged per task in a distinct batch',async()=>{
+ const a=await worker('Alpha','engineer'),b=await worker('Beta','reviewer');
+ const tasks=await batch([matched({role:'engineer',familyIn:['claude'],minTier:'mid'}),matched({role:'reviewer',familyNotIn:['codex']})],true);
+ expect(tasks.map((t:any)=>t.assigneeWorkerId)).toEqual([a.id,b.id]);
+});
+
+it('post-commit launch receives the family selected by the atomic match',async()=>{
+ await worker(); const spy=vi.spyOn(launchModule,'launchForAssignment');
+ try {const [task]=await batch([matched({familyIn:['claude']})],true);
+ expect(spy.mock.calls.filter(call=>call[1].taskId===task.id).map(call=>call[1].family)).toEqual(['claude']);
+ }finally{spy.mockRestore();}
 });
