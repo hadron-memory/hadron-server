@@ -3674,7 +3674,7 @@ export const typeDefs = `#graphql
   type HostKeyUse {
     id: ID!
     hostId: String!
-    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation."
+    "register, collect, report, availability, read, (#1969) session: a refused session write (updateSession, endSession), or (#1981) issue: a refused issueHostOperation; checkpoint: registerContextResetRecovery with checkpoint input (including replay/refusal)."
     action: String!
     "The operation a report was about."
     operationId: ID
@@ -10543,7 +10543,15 @@ export const typeDefs = `#graphql
     RESETTING, or the reset is refused SESSION_CHANGED, OTHER_WORK, UNAVAILABLE, PAUSED, SETTING_OFF or WORKER_GONE.
     """
     claimContextReset(input: ClaimContextResetInput!): ContextResetStep!
-    "#2162 — register the durable checkpoint before any process control. A wrong reference is RECOVERY_REF_INVALID and changes nothing."
+    """
+    #3276 / ruling 0090 A, hrn:node:hadronmemory.com:specs:cor:agt:050:27 part 3 and
+    hrn:node:hadronmemory.com:specs:cor:agt:070:04: register a live checkpointNode or atomically write checkpoint,
+    exactly one. Host key only; generic node writes stay refused. Refusal order: CONTEXT_RESET_NOT_FOUND,
+    HOST_OPERATION_NOT_COLLECTED, STALE_EPOCH, CONTEXT_RESET_WRONG_PHASE, CLAIM_LAPSED, RECOVERY_REF_INVALID,
+    CHECKPOINT_MEMORY_ENCRYPTED, CHECKPOINT_LOC_TAKEN. Replay of registered non-ended phases returns the stored node
+    without writing, even if checkpoint differs. DB UTC stamp: sheds:auto-YYYY-MM-DDTHHMMSSZ (seconds); occupied live
+    or deleted address refuses with phase still claimed, no suffix/overwrite/parent/edge. Encrypted memory refused.
+    """
     registerContextResetRecovery(input: RegisterContextResetRecoveryInput!): ContextResetStep!
     """
     #2162 — the single stop grant per claim; a replay returns the same grant. The host signals only within stopLeaseMs of
@@ -15347,12 +15355,21 @@ export const typeDefs = `#graphql
     process: ObservedProcessInput!
   }
 
+  input ContextResetCheckpointInput {
+    "Nonblank after trim; at most 200 Unicode characters (CHECKPOINT_TITLE_MAX_CHARS); stored verbatim."
+    title: String!
+    "At most 65536 UTF-8 bytes (CHECKPOINT_CONTENT_MAX_BYTES); bounds refused RECOVERY_REF_INVALID after reset admission."
+    content: String!
+  }
+
   input RegisterContextResetRecoveryInput {
     appRef: String!
     resetId: ID!
     epoch: Int!
     "The checkpoint node the host wrote: its id or full URN, in the worker's own working memory."
-    checkpointNode: String!
+    checkpointNode: String
+    "#3276: atomically write one plain checkpoint in the reset worker working memory; exactly one of checkpointNode/checkpoint."
+    checkpoint: ContextResetCheckpointInput
     "The reset's own session and task."
     sessionId: ID!
     taskId: ID!

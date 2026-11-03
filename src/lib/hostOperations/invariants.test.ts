@@ -49,7 +49,11 @@ describe('the invariants file', () => {
   it('the migration carries a byte-identical copy, and post-push includes it after the file whose token function it uses', () => {
     const source = readFileSync(new URL('../../../prisma/host-operation-invariants.sql', import.meta.url), 'utf8');
     const migration = readFileSync(new URL('../../../prisma/migrations/20261029200000_worker_terminal/migration.sql', import.meta.url), 'utf8');
-    expect(migration.endsWith(`\n${source}`)).toBe(true);
+    // The new migration widens only the CHECK; all other canonical DDL still matches the old migration.
+    expect(migration.endsWith(`\n${source.replaceAll(", 'checkpoint'", '')}`)).toBe(true);
+    const checkpoint = readFileSync(new URL('../../../prisma/migrations/20261103014500_host_checkpoint_use_action/migration.sql', import.meta.url),'utf8');
+    const check = source.slice(source.indexOf('ALTER TABLE host_key_uses DROP CONSTRAINT'),source.indexOf('CREATE OR REPLACE FUNCTION host_key_use_append_only')).trim();
+    expect(checkpoint.trim().endsWith(check)).toBe(true);
     const post = readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8');
     const at = post.indexOf('\\ir host-operation-invariants.sql');
     expect(at).toBeGreaterThan(post.indexOf('\\ir agent-task-matching-invariants.sql'));
