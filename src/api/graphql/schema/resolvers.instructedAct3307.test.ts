@@ -58,12 +58,14 @@ describe('#3307 instructed acts',()=>{
   it(`${door}: direct person succeeds without instruction record`,async()=>{
    await call(null,ctx());expect(await instructionEvents()).toHaveLength(0);
   });
-  for(const kind of ['no-instruction','host-launch','unheld','other-holder','plain-member','impersonation','app-key','refused-binding','ambiguous','run'] as const) {
+  for(const kind of ['no-instruction','host-launch','unheld','other-holder','ended-session','retired-worker','plain-member','impersonation','app-key','refused-binding','ambiguous','run'] as const) {
    it(`${door}: ${kind} refuses byte-identically and writes nothing`,async()=>{
     let c=bound();let claim:unknown=live;
     if(kind==='no-instruction')claim=null;
     if(kind==='host-launch')await db.session.update({where:{id:f.session.id},data:{launchOperationId:generateId(),launchHostId:generateId(),launchIssuedBy:'manager'}});
     if(kind==='unheld'||kind==='other-holder')await db.worker.update({where:{id:f.worker.id},data:{heldByUserId:kind==='unheld'?null:f.other.id}});
+    if(kind==='ended-session')await db.session.update({where:{id:f.session.id},data:{endedAt:new Date()}});
+    if(kind==='retired-worker')await db.worker.update({where:{id:f.worker.id},data:{retiredAt:new Date()}});
     if(kind==='plain-member')await db.appMember.update({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}},data:{role:'member'}});
     if(kind==='impersonation')c=bound({impersonation:{sessionId:generateId(),actorUserId:f.other.id,orgId:f.org.id,expiresAt:new Date('2099-01-01')}} as any);
     if(kind==='app-key')c={db,appId:f.app.id,roles:[]} as Context;
@@ -203,7 +205,7 @@ it('#3307 a refused mixed signature update records no instruction or partial cha
  const before=await snapshot();expect((await answer(M.updateWorker({}, {workerRef:f.target.id,signature:'new',trailer:null,instruction:live},bound()))).code).toBe('BAD_USER_INPUT');expect(await snapshot()).toEqual(before);
 });
 
-it('#3307 holds the live manager membership while waiting for its worker row',async()=>{
+for(const door of ['signature','agent']) it('#3307 '+door+' holds the live manager membership while waiting for its worker row',async()=>{
  let held!:()=>void, release!:()=>void;
  let blockerPid!:number;
  let publishActPid!:(pid:number)=>void;
@@ -217,7 +219,7 @@ it('#3307 holds the live manager membership while waiting for its worker row',as
   },options);
   const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
  }});
- const call=answer(calls.signature(live,bound({db:client})));
+ const call=answer(calls[door](live,bound({db:client})));
  let outcome:any;
  try {
   const actPid=await Promise.race([actPidReady,call.then(()=>{throw new Error('worker act did not publish its backend PID');})]);
@@ -231,6 +233,24 @@ it('#3307 holds the live manager membership while waiting for its worker row',as
   expect(denied).toBe(true);
  }finally{release();await side;outcome=await call;}
  expect(outcome.code).toBe('RESOLVED');expect(await instructionEvents()).toHaveLength(1);
+});
+
+for (const door of ['signature', 'agent']) it(`#3314 ${door}: a worker held in another App cannot carry its holder's target-App manager right`, async () => {
+  const foreign = await db.app.create({ data: { organizationId: f.org.id, name: 'Foreign team', urn: 'instruct3307.test:foreign-team' } });
+  await db.appMember.create({ data: { appId: foreign.id, userId: f.holder.id, role: 'owner' } });
+  await db.appAgent.create({ data: { appId: foreign.id, agentId: f.agent.id } });
+  const worker = await db.worker.create({ data: {
+    ...WORKER_SIGNATURE_DEFAULTS, appId: foreign.id, agentId: f.agent.id,
+    name: 'Foreign caller', slug: 'foreign-caller', heldByUserId: f.holder.id,
+  } });
+  const session = await db.session.create({ data: {
+    id: generateId(), appId: foreign.id, agentId: f.agent.id, workerId: worker.id, userId: f.holder.id,
+  } });
+  const before = await snapshot();
+  const result = await runAsActor({ workerId: worker.id, agentId: f.agent.id }, () =>
+    answer(calls[door](live, ctx({ sessionId: session.id }))));
+  expect(result.code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
 });
 
 it('#3307 task instructions reuse the caller task-read gate even at the right App',async()=>{
