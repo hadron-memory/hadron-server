@@ -8132,7 +8132,8 @@ export const typeDefs = `#graphql
     The host-key gate runs first, as for the protocol steps: HOST_KEY_REQUIRED (not an App key), APP_NOT_FOUND
     (not the key's live App), APP_KEY_SCOPE_REQUIRED (no live host scope), APP_KEY_SESSION_BOUND (session carried).
     Then CONTEXT_RESET_NOT_FOUND for malformed/unknown reset id, another App/host, or a missing operation, all
-    with identical message and extensions and no echoed id; then HOST_OPERATION_NOT_COLLECTED for an issued operation.
+    with identical message and extensions and no echoed id; then HOST_OPERATION_NOT_COLLECTED when collectedAt is null,
+    even if settlement already failed the operation. A collected operation's failed/ended reset stays readable.
     Changes no reset, event, availability or alarm. Each host-key read/refusal is recorded (hrn:node:hadronmemory.com:specs:cor:agt:070:07).
     """
     contextReset(appRef: String!, resetId: ID!): ContextReset!
