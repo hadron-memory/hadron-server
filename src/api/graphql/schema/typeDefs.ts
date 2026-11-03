@@ -8231,6 +8231,8 @@ export const typeDefs = `#graphql
       parentTaskId: ID
       rootsOnly: Boolean
       queued: Boolean
+      "True: only single-shot match failures; false: unmarked tasks. Does not change who may read."
+      matchFailed: Boolean
       limit: Int
       offset: Int
     ): [AgentTask!]!
@@ -10295,6 +10297,9 @@ export const typeDefs = `#graphql
     """
     createAgentTask(input: CreateAgentTaskInput!): AgentTask!
     """
+    Items with match:true each get one post-commit match attempt in list order; failure marks that task, not a call refusal.
+    A match item blocked after all links refuses the whole call as BAD_USER_INPUT with its position, before any commit or attempt.
+    This does not ask for different workers or all-or-none matching. With no match items the ordinary batch behavior is unchanged.
     #2653 (hrn:node:hadronmemory.com:specs:cor:agt:050:06, creating several at once; ruling 0011 A): create 1 to 25
     tasks in the App appRef, all or none, in one transaction. Each task is judged exactly as createAgentTask judges it
     alone (the same gates, owner rules, refusals and warnings); the first refusal refuses the whole call, creates and
@@ -10650,7 +10655,7 @@ export const typeDefs = `#graphql
     """
     #1754 — make a backlog task ready to be worked
     (hrn:node:hadronmemory.com:specs:cor:agt:050:02): BACKLOG becomes PENDING and the task enters
-    the queue. Whoever may assign a task may make it ready: its owner, a worker
+    the queue. Clears any match failure and held-back match reservation; regular matching resumes, without a second match-now attempt. Whoever may assign a task may make it ready: its owner, a worker
     the owner reports to, directly or up the reportsTo chain, or whoever manages the App
     (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Refusals: TASK_NOT_FOUND, TASK_NOT_OWNER,
     TASK_ENDED, TASK_INVALID_TRANSITION (not backlog), SESSION_NOT_BOUND, APP_UNINSTALLED.
@@ -14147,6 +14152,10 @@ export const typeDefs = `#graphql
 
   "What the platform's matcher must respect when it chooses an assignee (plan design:agent-tasks section 3.1; consumed by T3)."
   type AgentTaskRequirements {
+    "Any one listed role suffices; null retains the single-role requirement."
+    roles: [String!]
+    "Optional matching team lead; never an authorization grant."
+    teamWorkerId: ID
     role: String
     familyIn: [String!]
     familyNotIn: [String!]
@@ -14160,6 +14169,10 @@ export const typeDefs = `#graphql
   }
 
   input AgentTaskRequirementsInput {
+    "Any one listed role suffices. Empty sets are refused. Give role or roles, not both."
+    roles: [String!]
+    "Lead worker (id, URN or name) of this App. Pool: lead, descendants and workers reporting to nobody."
+    team: String
     role: String
     "Model families the assignee must run as. Give this or familyNotIn, not both."
     familyIn: [String!]
@@ -14894,6 +14907,12 @@ export const typeDefs = `#graphql
 
   type AgentTaskDependencyPage { items: [AgentTask!]!, total: Int!, hasMore: Boolean! }
 
+  "Single-shot failure (hrn:node:hadronmemory.com:specs:cor:agt:050:01): assigning clears it; cancellation clears it."
+  type AgentTaskMatchFailure {
+    reason: String!
+    failedAt: DateTime!
+  }
+
   """
   One piece of work a team App has assigned, or wants assigned
   (hrn:node:hadronmemory.com:specs:cor:agt:050:01). The platform records who holds it, since when and how it
@@ -14901,6 +14920,8 @@ export const typeDefs = `#graphql
   workers acting through their sessions included (hrn:node:hadronmemory.com:specs:cor:agt:050:21).
   """
   type AgentTask {
+    "Null unless an opt-in single-shot match failed. No assignment-unassignable alarm is raised for it."
+    matchFailure: AgentTaskMatchFailure
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — priority1 is highest; range1..5, default1. Matching only, never authority."
     priority: Int!
     "Whether at least one blocker remains open. Never a status; manual assignment is preserved."
@@ -15927,6 +15948,8 @@ export const typeDefs = `#graphql
   parent's assignee may create one, and it owns it (hrn:node:hadronmemory.com:specs:cor:agt:050:07).
   """
   input CreateAgentTaskInput {
+    "Run one blocking match. Failure is marked and skipped by automatic runs. Assignment, cancellation, or park then ready clears it. Only for pending, unblocked tasks without an assignee; a blocked create refuses BAD_USER_INPUT atomically. Batch items run requested attempts in list order after the whole commit; a blocked match item refuses the whole call before commit, with its position. No distinct-workers guarantee."
+    match: Boolean
     "#2644 — naming priority or blockers requires the task assigner authority; otherwise creation refuses atomically."
     priority: Int
     blockedBy: [ID!]

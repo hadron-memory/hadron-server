@@ -113,7 +113,7 @@ import {
   type EventActor,
   type TaskParty,
 } from '../../../lib/agentTasks/events.js';
-import { loadAppModelGroups, matchAfterChange } from '../../../lib/agentTasks/matcher.js';
+import { loadAppModelGroups, matchAfterChange, matchTaskNow } from '../../../lib/agentTasks/matcher.js';
 import { normalizeModelGroupName } from '../../../lib/agentTasks/modelGroups.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint, type PropertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { checkOutcomeInTeamSet } from '../../../lib/agentTasks/outcomeSet.js';
@@ -773,9 +773,11 @@ function normalizeTags(tags: readonly string[] | null | undefined): string[] {
   return out;
 }
 
-const REQUIREMENT_KEYS = new Set(['role', 'familyIn', 'familyNotIn', 'excludeWorkers', 'minTier', 'modelGroupIn', 'modelGroupNotIn']);
+const REQUIREMENT_KEYS = new Set(['role', 'roles', 'team', 'familyIn', 'familyNotIn', 'excludeWorkers', 'minTier', 'modelGroupIn', 'modelGroupNotIn']);
 
 type RequirementsInput = {
+  roles?: string[] | null;
+  team?: string | null;
   role?: string | null;
   familyIn?: string[] | null;
   familyNotIn?: string[] | null;
@@ -806,6 +808,23 @@ async function normalizeRequirements(
   const unknown = Object.keys(input).filter((k) => !REQUIREMENT_KEYS.has(k));
   if (unknown.length) throw badInput(`requirements has no field ${unknown.map((k) => `"${k}"`).join(', ')}${unknown.includes('maxTier') ? ' (a task names a minimum tier, minTier, never a maximum)' : ''}.`);
   const role = optionalText(input.role, 128, 'requirements.role');
+  let roles: string[] | undefined;
+  if (input.roles != null) {
+    if (!Array.isArray(input.roles) || input.roles.length === 0 || input.roles.length > TASK_REQUIREMENT_LIST_MAX
+      || input.roles.some(r => typeof r !== 'string' || !r.trim() || r.trim().length > 128)) {
+      throw badInput('requirements.roles must contain 1 to 32 nonblank roles, each at most 128 characters.');
+    }
+    if (role) throw badInput('Name requirements.role or requirements.roles, not both.');
+    roles = [...new Set(input.roles.map(r => r.trim().toLowerCase()))];
+  }
+  let teamWorkerId: string | undefined;
+  if (input.team != null) {
+    if (typeof input.team !== 'string' || !input.team.trim()) throw badInput('requirements.team must name a live worker of this App.');
+    const id = await resolveTaskWorkerId(ctx, app.id, input.team);
+    const lead = id ? await ctx.db.worker.findFirst({ where: { id, appId: app.id, retiredAt: null }, select: { id: true } }) : null;
+    if (!lead) throw badInput('requirements.team must name a live worker of this App.');
+    teamWorkerId = lead.id;
+  }
   const list = (xs: string[] | null | undefined, field: string): string[] | null => {
     if (!xs) return null;
     const out = [...new Set(xs.map((x) => (x ?? '').trim()).filter((x) => x !== ''))];
@@ -859,6 +878,8 @@ async function normalizeRequirements(
   }
   const out: Prisma.InputJsonObject = {
     ...(role ? { role } : {}),
+    ...(roles ? { roles } : {}),
+    ...(teamWorkerId ? { teamWorkerId } : {}),
     ...(familyIn ? { familyIn } : {}),
     ...(familyNotIn ? { familyNotIn } : {}),
     ...(excludeWorkerIds ? { excludeWorkerIds } : {}),
@@ -1119,6 +1140,7 @@ function refuseEnded(task: TaskRow): void {
 type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'parentTaskId'>>;
 
 type CreateInput = {
+  match?: boolean | null;
   appRef?: string | null;
   parentTaskId?: string | null;
   title: string;
@@ -1165,6 +1187,7 @@ async function insertTask(
     status?: 'backlog' | 'pending';
     /** #2553: make a top-level PROJECT (numbered from the App's project counter) instead of a child of AT0. */
     project?: boolean;
+    matchPending?: boolean;
     /** #2646: the task a clone was made from; set only here, at creation, and named in the one task.created event. */
     clonedFromId?: string | null;
   },
@@ -1224,6 +1247,7 @@ async function insertTask(
       parentTaskId: parentId,
       clonedFromId: a.clonedFromId ?? null,
       requirements: a.requirements ?? Prisma.DbNull,
+      matchPending: a.matchPending ?? false,
       properties: a.properties ?? Prisma.DbNull,
       ...partyColumns('owner', a.owner),
       ...partyColumns('assignee', a.assignee),
@@ -1633,6 +1657,8 @@ async function prepareTaskCreate(ctx: Context, input: CreateInput, inApp?: { app
   const closeSessionWhenDone = input.closeSessionWhenDone ?? false;
   // #1754: backlog or pending — and a backlog task carries no assignee.
   const status = normalizeCreateStatus(input.status);
+  if (input.match != null && typeof input.match !== 'boolean') throw badInput('match must be a boolean.');
+  if (input.match && (status !== 'pending' || input.assignee)) throw badInput('match requires a pending task with no explicit assignee.');
   if (status === 'backlog' && input.assignee) {
     throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
   }
@@ -1723,7 +1749,7 @@ async function resolveCreateParties(tx: Prisma.TransactionClient, txCtx: Context
  */
 async function applyTaskCreate(
   tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, p: PreparedCreate,
-  withinCall: (selfId: string) => string[] = () => [], namesCallBlockers = false,
+  withinCall: (selfId: string) => string[] = () => [], namesCallBlockers = false, deferMatchBlockerCheck = false,
 ): Promise<{ id: string; queued: boolean; row: TaskRow }> {
   const { input, actor, parentRef, parentTaskId } = p;
   if (parentRef) {
@@ -1755,10 +1781,14 @@ async function applyTaskCreate(
     app, parentId: parentTaskId, project: input.project === true, title: p.title, description: p.description, source: p.source,
     externalId: p.externalId, tags: p.tags, references: p.references, startBy: p.startBy, finishBy: p.finishBy,
     closeSessionWhenDone: p.closeSessionWhenDone, requirements, properties, owner, assignee, status: p.status, priority: keepPriority ? p.priority : undefined, clonedFromId: p.clone?.sourceId ?? null,
-    created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId),
+    created: createdStamp(txCtx), assigned: assignedStamp(txCtx, new Date()), evActor: eventActor(txCtx.userId), matchPending: input.match === true,
   });
   const row = await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } });
   await applyTaskCreateBlockers(tx, txCtx, app, p, row, withinCall(row.id), namesCallBlockers);
+  // A match-now create refuses actual open blockers inside the same transaction.
+  if (!deferMatchBlockerCheck && input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: made.id } })).blocked) {
+    throw badInput('A blocked task cannot be matched now.');
+  }
   await checkFinishByAtDbClock(tx, p.finishBy, p.startBy);
   return { ...made, row };
 }
@@ -1913,7 +1943,8 @@ export const agentTaskMutations = {
       { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
-    if (made.queued) await matchAfterChange(ctx.db, p.app.id);
+    if (input.match) await matchTaskNow(ctx.db, made.id, new Date());
+    else if (made.queued) await matchAfterChange(ctx.db, p.app.id);
     const created = await afterTaskCreate(ctx, info, made.id, p.warn);
     // #2694 (cor:agt:020:11 r3): creating a task is the one task write outside `mutateTask`; same rule as there.
     if (p.actor.kind === 'worker' && ctx.sessionId) await touchSessionIfLive(ctx.db as never, ctx.sessionId, p.actor.workerId);
@@ -1983,7 +2014,7 @@ export const agentTaskMutations = {
         try {
           out.push(await applyTaskCreate(tx, txCtx, app, p,
             (selfId) => withinCall[i]!.filter(n => n <= i + 1).map(n => (n === i + 1 ? selfId : out[n - 1]!.id)),
-            withinCall[i]!.length > 0));
+            withinCall[i]!.length > 0, true));
         } catch (e) {
           throw atPosition(e, i + 1);
         }
@@ -2000,9 +2031,30 @@ export const agentTaskMutations = {
           }
         }
       }
+      // Match-now judges the final derived blocker state, including forward-position links.
+      // A refusal rolls back the whole batch before any post-commit attempt or wake can run.
+      for (const [i, p] of prepared.entries()) {
+        if (p.input.match && (await tx.agentTask.findUniqueOrThrow({ where: { id: out[i]!.id } })).blocked) {
+          throw atPosition(badInput('A blocked task cannot be matched now.'), i + 1);
+        }
+      }
       return out;
     }, { lockWorkerIds: prepared.map(p => p.lockedAssignee), taskGraph: 'exclusive' });
-    if (made.some(m => m.queued)) await matchAfterChange(ctx.db, inApp.app.id);
+    // Each requested match gets its single attempt in list order after the complete commit.
+    // Ordinary failures mark only that task; distinct/all-or-none matching is separate (#3243).
+    const matchErrors: unknown[] = [];
+    for (const [i, m] of made.entries()) {
+      if (!prepared[i]!.input.match) continue;
+      try {
+        await matchTaskNow(ctx.db, m.id, new Date());
+      } catch (error) {
+        // A committed sibling still owns its one attempt even when an earlier attempt throws.
+        // Do not clear the throwing task's reservation: that could cause an automatic retry.
+        matchErrors.push(error);
+      }
+    }
+    if (matchErrors.length) throw matchErrors[0];
+    if (made.some((m, i) => m.queued && !prepared[i]!.input.match)) await matchAfterChange(ctx.db, inApp.app.id);
     const key = info?.path?.key;
     const created = [];
     for (const [i, m] of made.entries()) {
@@ -2123,6 +2175,7 @@ export const agentTaskMutations = {
         },
         data: {
           ...partyColumns('assignee', party),
+          matchPending: false, matchFailedAt: null, matchFailedReason: null,
           ...(fromBacklog ? { status: 'pending' as const } : {}),
           closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx),
         },
@@ -2200,7 +2253,7 @@ export const agentTaskMutations = {
       // typed, so the append-only stream never takes a duplicate pair.
       const n = await tx.agentTask.updateMany({
         where: { id: task.id, appId: app.id, status: 'backlog' },
-        data: { status: 'pending', ...updatedStamp(ctx) },
+        data: { status: 'pending', matchPending: false, matchFailedAt: null, matchFailedReason: null, ...updatedStamp(ctx) },
       });
       if (n.count === 0) {
         throw taskError('TASK_INVALID_TRANSITION', 'Only a backlog task is made ready to be worked.', { taskId });
@@ -2254,7 +2307,7 @@ export const agentTaskMutations = {
       const close = closeSessionWhenDone ?? task.closeSessionWhenDone;
       await tx.agentTask.update({
         where: { id: task.id },
-        data: { ...partyColumns('assignee', party), closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx) },
+        data: { ...partyColumns('assignee', party), matchPending: false, matchFailedAt: null, matchFailedReason: null, closeSessionWhenDone: close, ...assignedStamp(ctx, new Date()), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
@@ -2400,7 +2453,7 @@ export const agentTaskMutations = {
       if (openChildCount > 0) warn.push('task.cancel.open-children');
       await tx.agentTask.update({
         where: { id: task.id },
-        data: { status: 'cancelled', cancelledAt: new Date(), ...updatedStamp(ctx) },
+        data: { status: 'cancelled', cancelledAt: new Date(), matchPending: false, matchFailedAt: null, matchFailedReason: null, ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
@@ -2536,6 +2589,7 @@ async function launchAssignee(db: Context['db'], t: TaskRow): Promise<void> {
 // ── Queries ───────────────────────────────────────────────────────────────
 
 type ListArgs = {
+  matchFailed?: boolean | null;
   appRef: string;
   status?: string[] | null;
   owner?: PartyInput;
@@ -2591,6 +2645,7 @@ export const agentTaskQueries = {
     withReadableApp(ctx, args.appRef, async (c, app) => {
     // Narrow only after the existing App read gate. All filters run in SQL before paging.
     const filters: Prisma.AgentTaskWhereInput[] = [];
+    if (args.matchFailed != null) filters.push({ matchFailedAt: args.matchFailed ? { not: null } : null });
     for (const [name, tags] of [['tagsAny', args.tagsAny], ['tagsAll', args.tagsAll]] as const) {
       // #2696: the bounds a task's own tags obey, so the read and write limits cannot drift.
       if (tags && tags.length > TASK_TAGS_MAX) throw badInput(`${name} takes at most ${TASK_TAGS_MAX} tags.`);
@@ -2959,6 +3014,7 @@ export const agentTaskFieldResolvers = {
     },
   },
   AgentTask: {
+    matchFailure: (t: TaskRow) => t.matchFailedAt && t.matchFailedReason ? { reason: t.matchFailedReason, failedAt: t.matchFailedAt } : null,
     /** #2663: current dispositions, in immutable finding order, separate from the finished result. */
     findingDispositions: (t: TaskRow, args: { limit?: number | null; offset?: number | null }) => {
       const rows = t.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
@@ -3005,6 +3061,8 @@ export const agentTaskFieldResolvers = {
       if (!r) return null;
       return {
         role: (r.role as string) ?? null,
+        roles: (r.roles as string[]) ?? null,
+        teamWorkerId: (r.teamWorkerId as string) ?? null,
         familyIn: (r.familyIn as string[]) ?? null,
         familyNotIn: (r.familyNotIn as string[]) ?? null,
         excludeWorkerIds: (r.excludeWorkerIds as string[]) ?? null,
