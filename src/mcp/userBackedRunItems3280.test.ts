@@ -137,10 +137,10 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     for (const a of [f.agent, f.second]) expect(await canReadMemory(db, backed.principal, a.systemMemoryId)).toBe(true);
     expect(await canReadMemory(db, backed.principal, f.team.id)).toBe(true);
   });
-  it('plain user session still retains App-member item reach under0105 A', async () => {
+  it('#3305: plain user session also refuses App-member-only item reach under0108', async () => {
     const user = { ...ctx(f.user.id), appId: f.app.id };
-    expect(await canReadMemory(db, user, f.read.id)).toBe(true);
-    expect(await canWriteToMemory(db, user, f.write.id)).toBe(true);
+    expect(await canReadMemory(db, user, f.read.id)).toBe(false);
+    expect(await canWriteToMemory(db, user, f.write.id)).toBe(false);
   });
   it('userless App key retains non-PUBLIC refusal and PUBLIC read-only', async () => {
     const key = { appId: f.app.id, roles: [], clientId: 'app-key' };
