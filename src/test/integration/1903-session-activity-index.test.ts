@@ -111,6 +111,16 @@ async function steerPlannerToActivityIndex(tx: Tx): Promise<void> {
   await tx.$executeRawUnsafe('ANALYZE usage_events');
 }
 
+/**
+ * #2577: the incident's condition by construction rather than by the planner's mood. Without the two session-keyed
+ * indexes (the state production was in before #1903) the bare max(created_at) has exactly one index path left, the
+ * created_at walk, whatever the statistics say. The shipped shape has no path to it either way.
+ */
+async function removeSessionKeyedIndexes(tx: Tx): Promise<void> {
+  await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
+  await tx.$executeRawUnsafe('DROP INDEX usage_events_session_id_idx');
+}
+
 /** A plan-assertion message that carries the plan, so a future failure is diagnosable from the log. */
 const withPlan = (plan: string) => `chosen plan:\n${plan}`;
 
@@ -138,12 +148,14 @@ describe('#1903 / #1952 roster liveness probe', () => {
     expect(plan, withPlan(plan)).not.toContain(WALK);
   });
 
-  it('the skew pin is not vacuous: the bare max(created_at) walks the created_at index under that skew', async () => {
-    const plan = await rolledBack(async (tx) => {
+  it('the skew pin is not vacuous: where the session-keyed indexes are gone, the bare max(created_at) walks the created_at index and the probe does not', async () => {
+    const plans = await rolledBack(async (tx) => {
       await seedSkew(tx);
-      return explain(tx, incidentShape(roster()));
+      await removeSessionKeyedIndexes(tx);
+      return { incident: await explain(tx, incidentShape(roster())), shipped: await explain(tx, roster()) };
     });
-    expect(plan, withPlan(plan)).toContain(WALK);
+    expect(plans.incident, withPlan(plans.incident)).toContain(WALK);
+    expect(plans.shipped, withPlan(plans.shipped)).not.toContain(WALK);
   });
 
   it('the index pin is not vacuous: without the index the probe plans elsewhere', async () => {
@@ -194,15 +206,19 @@ describe('#1903 / #1952 roster liveness probe', () => {
       const incident = incidentShape(shipped);
       const read = (sql: Prisma.Sql) =>
         tx.$queryRaw<Record<string, unknown>[]>(Prisma.sql`SELECT * FROM (${sql}) r ORDER BY r."workerId"`);
+      const shippedPlan = await explain(tx, shipped);
+      const shippedRows = await read(shipped);
+      // The incident shape is read where it MUST walk created_at (#2577), not where the planner happens to.
+      await removeSessionKeyedIndexes(tx);
       return {
-        shippedPlan: await explain(tx, shipped),
+        shippedPlan,
         incidentPlan: await explain(tx, incident),
-        shipped: await read(shipped),
+        shipped: shippedRows,
         incident: await read(incident),
       };
     });
 
-    // Two genuinely different plans were compared...
+    // Two genuinely different plans were compared (by construction for the incident's, #2577)...
     expect(result.incidentPlan, withPlan(result.incidentPlan)).toContain(WALK);
     expect(result.shippedPlan, withPlan(result.shippedPlan)).not.toContain(WALK);
     // ...over a fixture that exercises the probe, not an empty roster...
