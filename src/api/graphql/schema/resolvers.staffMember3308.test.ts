@@ -324,3 +324,22 @@ it('#3308 admission stability cast: ownership drift after the deciding membershi
  expect(await snapshot()).toEqual(before);
  expect((await db.app.findUniqueOrThrow({ where: { id: f.app.id } })).organizationId).toBe(f.org.id);
 });
+
+
+describe('#3308 leaveApp self-leave narrowing', () => {
+ it('grantless bound worker refuses and retains membership', async () => {
+  const before = await snapshot();
+  expect((await answer(M.leaveApp({}, {appId:f.app.id}, bound()))).code).toBe('FORBIDDEN');
+  expect(await snapshot()).toEqual(before);
+ });
+ it('instructed bound worker records the self-removal', async () => {
+  await M.leaveApp({}, {appId:f.app.id,instruction:live}, bound());
+  expect(await db.appMember.findUnique({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}})).toBeNull();
+  expect(await instructionEvents()).toHaveLength(1);
+ });
+ it('direct person retains self-service cleanup', async () => {
+  await M.leaveApp({}, {appId:f.app.id}, ctx());
+  expect(await db.appMember.findUnique({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}})).toBeNull();
+  expect(await instructionEvents()).toHaveLength(0);
+ });
+});
