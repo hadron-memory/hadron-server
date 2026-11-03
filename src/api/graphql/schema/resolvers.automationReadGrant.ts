@@ -20,7 +20,7 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { managesAgent, managesApp } from '../../../lib/auth/appManagement.js';
-import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
+import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { READ_GRANT_MEMORY_SELECT, readGrantTargetRefusal, type ReadGrantTriggerKind } from '../../../lib/automationReadGrant.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
@@ -117,7 +117,8 @@ export const automationReadGrantMutations = {
   ) => {
     const triggerKind = parseKind(input.triggerKind);
     const prefix = parsePrefix(input.prefix);
-    const actorId = await requirePersonAsThemselves(ctx, denied);
+    // #3277: giving a grant is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0099 A).
+    const actorId = await requirePersonOnlyAct(ctx, 'grant.give', denied);
     const { id: appId } = await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef));
     const { id: memoryId } = await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef));
     const triggerId = input.triggerId;
