@@ -177,3 +177,23 @@ it('the deploy migration widens only the audit CHECK and keeps append-only prote
   await expect(db.hostKeyUse.delete({where:{id:row.id}})).rejects.toThrow();
  }finally{try{await client.query(migration);}finally{await client.end();}}
 });
+it('a claim that expires while waiting on the memory lock writes no checkpoint',async()=>{
+ const {Client}=await import('pg');const holder=new Client({connectionString:process.env.DATABASE_URL});await holder.connect();
+ const s=await claimed(),n=await nodeCount();
+ let pending:Promise<any>|undefined;
+ try{
+  await holder.query('BEGIN');await holder.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE',[f.kitMemory.id]);
+  const until=Date.now()+2000;
+  await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(until-5*60_000)}});
+  pending=call(s);
+  const deadline=Date.now()+1500;let waiting=false;
+  do{
+   const rows=await db.$queryRaw<{n:bigint}[]>`SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query ILIKE '%FROM memories%FOR SHARE%'`;
+   waiting=Number(rows[0]!.n)>0;if(!waiting)await new Promise(r=>setTimeout(r,10));
+  }while(!waiting&&Date.now()<deadline);
+  expect(waiting).toBe(true);
+  await new Promise(r=>setTimeout(r,Math.max(0,until-Date.now()+50)));
+  await holder.query('ROLLBACK');
+  expect(await pending).toMatchObject({refused:'CLAIM_LAPSED'});expect(await nodeCount()).toBe(n);
+ }finally{try{await holder.query('ROLLBACK');}finally{await holder.end();await pending;}}
+},15000);
