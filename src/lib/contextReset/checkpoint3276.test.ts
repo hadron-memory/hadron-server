@@ -8,15 +8,18 @@ import { resolvers } from '../../api/graphql/schema/resolvers.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { generateId } from '../id.js';
 import { publishNodeWritten } from '../events/nodeWritten.js';
+import { recordNodeWrite } from '../usageRecorder.js';
+vi.mock('../usageRecorder.js',async original=>({...await original<typeof import('../usageRecorder.js')>(),recordNodeWrite:vi.fn()}));
 import { enqueueNodeEmbedding } from '../../services/embedding/enqueue.js';
 vi.mock('../events/nodeWritten.js',async original=>({...await original<typeof import('../events/nodeWritten.js')>(),publishNodeWritten:vi.fn(async()=>{})}));
 vi.mock('../../services/embedding/enqueue.js',async original=>({...await original<typeof import('../../services/embedding/enqueue.js')>(),enqueueNodeEmbedding:vi.fn(async()=>{})}));
 import { sweepUnreportedHostOperations } from '../hostOperations/settle.js';
+import { CLAIM_LEASE_MS } from './types.js';
 import { sweepContextResets, registerContextResetRecovery } from './contextReset.js';
 vi.mock('../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../bus/index.js',()=>({getBusClient:vi.fn(async()=>null)}));
 let f:ResetFixture;
-beforeEach(async()=>{f=await setUpResetFixture();vi.mocked(publishNodeWritten).mockClear();vi.mocked(enqueueNodeEmbedding).mockClear();});
+beforeEach(async()=>{f=await setUpResetFixture();vi.mocked(publishNodeWritten).mockClear();vi.mocked(enqueueNodeEmbedding).mockClear();vi.mocked(recordNodeWrite).mockClear();});
 const nodeCount=()=>db.node.count();
 async function claimed(){const s=await f.collectedReset();await f.step('claimContextReset',{resetId:s.resetId,epoch:0,process:PROC});return s;}
 function input(s:{resetId:string;taskId:string},extra={}){return {resetId:s.resetId,epoch:1,sessionId:f.session.id,taskId:s.taskId,checkpoint:{title:'Recovery',content:'private checkpoint'},...extra};}
@@ -78,7 +81,7 @@ it.each(['epoch','phase','lease','collected','host','app','missing','malformed',
  expect(await nodeCount()).toBe(n);
  if(auditKey){const records=await db.hostKeyUse.findMany({where:{appKeyId:auditKey,action:'checkpoint'}});expect(records).toHaveLength(1);expect(records[0]?.refusedCode).toBe(expected);}
 });
-it('keeps the legacy checkpoint-node input and rejects memory redirection on the new input',async()=>{
+it('keeps the legacy checkpoint-node input',async()=>{
  const s=await claimed();const node=await f.checkpoint();
  expect(await call(s,{checkpoint:undefined,checkpointNode:node.id})).toMatchObject({reset:{phase:'checkpointed'}});
 });
@@ -129,7 +132,7 @@ it.each([
 ] as const)('checkpoint bounds %s',async(_name,content,title,ok)=>{
  const s=await claimed(),n=await nodeCount();const p=call(s,{checkpoint:{title,content}});
  if(ok){expect(await p).toMatchObject({reset:{phase:'checkpointed'}});expect(await nodeCount()).toBe(n+1);}
- else {expect(await code(p)).toBe('RECOVERY_REF_INVALID');expect(publishNodeWritten).not.toHaveBeenCalled();expect(enqueueNodeEmbedding).not.toHaveBeenCalled();expect(await nodeCount()).toBe(n);expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');}
+ else {expect(await code(p)).toBe('RECOVERY_REF_INVALID');expect(publishNodeWritten).not.toHaveBeenCalled();expect(enqueueNodeEmbedding).not.toHaveBeenCalled();expect(recordNodeWrite).not.toHaveBeenCalled();expect(await nodeCount()).toBe(n);expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');}
 });
 
 it('GraphQL admits only the narrow input and conceals all unknown targets identically',async()=>{
@@ -150,10 +153,10 @@ it('GraphQL admits only the narrow input and conceals all unknown targets identi
 });
 it('registration failure rolls back its new checkpoint as well',async()=>{
  const s=await claimed(),n=await nodeCount();
- await db.$executeRawUnsafe(`CREATE FUNCTION checkpoint3276_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.phase='checkpointed' THEN RAISE EXCEPTION 'injected register failure'; END IF; RETURN NEW; END $$`);
+ await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION checkpoint3276_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.phase='checkpointed' THEN RAISE EXCEPTION 'injected register failure'; END IF; RETURN NEW; END $$`);
  await db.$executeRawUnsafe('CREATE TRIGGER checkpoint3276_fail BEFORE UPDATE ON context_resets FOR EACH ROW EXECUTE FUNCTION checkpoint3276_fail()');
  try {await expect(call(s)).rejects.toThrow('injected register failure');expect(await nodeCount()).toBe(n);expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');}
- finally {await db.$executeRawUnsafe('DROP TRIGGER checkpoint3276_fail ON context_resets');await db.$executeRawUnsafe('DROP FUNCTION checkpoint3276_fail()');}
+ finally {await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS checkpoint3276_fail ON context_resets');await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS checkpoint3276_fail()');}
 });
 
 it('checkpoint audit obeys the real closed CHECK and append-only trigger',async()=>{
@@ -193,7 +196,7 @@ it('a claim that expires while waiting on the memory lock writes no checkpoint',
  try{
   await holder.query('BEGIN');await holder.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE',[f.kitMemory.id]);
   const until=Date.now()+2000;
-  await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(until-5*60_000)}});
+  await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(until-CLAIM_LEASE_MS)}});
   pending=call(s);
   const deadline=Date.now()+1500;let waiting=false;
   do{
@@ -238,6 +241,7 @@ it('an indexed working-memory checkpoint owns a durable embedding obligation',as
  const s=await claimed();await db.memory.update({where:{id:f.kitMemory.id},data:{vectorIndexEnabled:true}});
  const out=await call(s);const node=await db.node.findUniqueOrThrow({where:{id:out.reset.recoveryRef.checkpointNodeId}});
  expect(node.embeddingPendingAt).toBeInstanceOf(Date);expect(node.embeddingWorkToken).toMatch(/^[0-9a-f-]{36}$/);
+ expect(vi.mocked(enqueueNodeEmbedding).mock.calls.at(-1)?.[1].workToken).toBe(node.embeddingWorkToken);
 });
 
 it('explicit null checkpoint retains the legacy reset audit action',async()=>{
@@ -265,14 +269,18 @@ it('a soft-deleted working memory cannot receive a checkpoint',async()=>{
 
 it('publishes checkpoint effects once after commit, never on replay or refusal',async()=>{
  const s=await claimed();vi.mocked(publishNodeWritten).mockClear();vi.mocked(enqueueNodeEmbedding).mockClear();
- vi.mocked(publishNodeWritten).mockImplementationOnce(async event=>{
+ let committed:Promise<void>|undefined;
+ vi.mocked(publishNodeWritten).mockImplementationOnce(event=>{
+  committed=(async()=>{
   expect(await db.node.findUnique({where:{id:event.nodeId}})).not.toBeNull();
   expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('checkpointed');
+  })();return committed;
  });
- const out=await call(s);const id=out.reset.recoveryRef.checkpointNodeId;
+ const out=await call(s);const id=out.reset.recoveryRef.checkpointNodeId;await committed;
+ expect(recordNodeWrite).toHaveBeenCalledOnce();
  expect(publishNodeWritten).toHaveBeenCalledExactlyOnceWith({nodeId:id,memoryId:f.kitMemory.id,clientId:f.keyCtx().clientId});
  expect(enqueueNodeEmbedding).toHaveBeenCalledOnce();
  expect(vi.mocked(enqueueNodeEmbedding).mock.calls[0]?.[1]).toMatchObject({nodeId:id,memoryId:f.kitMemory.id,plaintext:{content:'private checkpoint',abstract:null}});
  await call(s);await code(call(s,{epoch:0}));
- expect(publishNodeWritten).toHaveBeenCalledTimes(1);expect(enqueueNodeEmbedding).toHaveBeenCalledTimes(1);
+ expect(publishNodeWritten).toHaveBeenCalledTimes(1);expect(enqueueNodeEmbedding).toHaveBeenCalledTimes(1);expect(recordNodeWrite).toHaveBeenCalledTimes(1);
 });
