@@ -598,6 +598,35 @@ describe('executeAppRun — edge-walking loop (plan-multi-node)', () => {
       .toBe('TOOL_FAILED');
   });
 
+  it('#2925: a refused required team snapshot fails the real tool loop and saves no report', async () => {
+    const { MockLanguageModelV4 } = await import('ai/test');
+    const { generateWithTools } = await import('../lib/llm/index.js');
+    const { resolveRunTools } = await import('../lib/runner/tools/index.js');
+    const { runContext } = await import('./appRunDeps.js');
+    const tool = resolveRunTools(['hadron_team_snapshot']);
+    expect(tool.unknown).toEqual([]);
+    let asked = 0;
+    sdkModel.model = new MockLanguageModelV4({ doGenerate: async () => {
+      asked++;
+      return { content: [{ type: 'tool-call', toolCallId: 'snapshot', toolName: 'hadron_team_snapshot',
+        input: JSON.stringify({ since: '2026-10-20T00:00:00Z', until: '2026-10-21T00:00:00Z' }) }],
+        finishReason: { unified: 'tool-calls', raw: 'x' }, warnings: [],
+        usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 2, text: 2, reasoning: 0 } } } as never;
+    } });
+    const run = await mint(); // Existing App defaults off; no report may be saved.
+    const d = deps({
+      loadNodeSpec: vi.fn(async () => ({ extractionSpec: null, hasOutput: false, tools: ['hadron_team_snapshot'] })),
+      resolveConfig: vi.fn(async () => ({ ownerType: 'HADRON_SERVER', config: { provider: 'anthropic', model: 'test' } }) as never),
+      llmTools: async (r, resolved, req, _names, opts) => generateWithTools(resolved, req, tool.tools, {
+        onToolCall: opts.onToolCall, toolCtx: { log: opts.log, db, run: r, principal: runContext(db, r) },
+      }),
+    });
+    expect(await executeAppRun(db, run.id, d)).toBe('failed');
+    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure).toMatchObject({ code: 'TOOL_FAILED' });
+    expect(d.writeOutput).not.toHaveBeenCalled();
+    expect(asked).toBe(1);
+  });
+
   it.each([
     ['hadron_fail', 'AUTHOR_FAIL'],
     ['denied', 'ACTIVATION_DENIED'],

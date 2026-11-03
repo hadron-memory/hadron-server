@@ -1,3 +1,4 @@
+import { runTeamSnapshotMutations, runTeamSnapshotAppResolvers } from './resolvers.runTeamSnapshot.js';
 import { rateLimitQueries, rateLimitMutations } from './resolvers.rateLimit.js';
 import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
@@ -147,7 +148,7 @@ export const resolvers = {
   // it rather than replacing it (a bare spread would clobber the AI-config
   // and relation fields).
   // #3125 S1: the App's properties and their revision.
-  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers },
+  App: { ...typeResolvers.App, ...appPropertiesTypeResolvers, ...runTeamSnapshotAppResolvers },
   Agent: { ...typeResolvers.Agent, ...registerFieldResolvers.Agent, ...agentExtendedByFieldResolvers.Agent, ...agentClonedFromFieldResolvers.Agent, ...agentOfferReadinessFieldResolvers.Agent, ...bootPromptPointerFieldResolvers.Agent, ...agentTickerTemplateFieldResolvers.Agent },
   // #2045: the boot-prompt pointer read fields join the existing blocks.
   AppAgent: { ...typeResolvers.AppAgent, ...bootPromptPointerFieldResolvers.AppAgent },
@@ -273,6 +274,7 @@ export const resolvers = {
     ...modelGroupMutations,
     ...deliverySettingsMutations,
     ...appPropertiesMutations,
+    ...runTeamSnapshotMutations,
     ...untrackedTaskItemMutations,
     ...stopSignalMutations,
     ...wakeMutations,

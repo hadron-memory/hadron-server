@@ -3349,6 +3349,8 @@ model App {
   /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
   /// Its own column, not `updatedAt`, which every other App write moves.
   propertiesRevision                Int                  @default(0) @map("properties_revision")
+  /// Ruling0112: only a managing person may opt this App’s runs into read-only roster/task access.
+  runTeamSnapshotEnabled            Boolean              @default(false) @map("run_team_snapshot_enabled")
   /// **Deprecated** — superseded by `surfaces`. Scheduled for removal
   /// in a follow-up cleanup spec (per 008 R-4); kept in place to
   /// avoid spurious portal churn.
