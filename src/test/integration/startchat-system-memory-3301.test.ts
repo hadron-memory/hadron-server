@@ -125,14 +125,17 @@ describe('#3301 — an Agent\'s system memory is refused as a startChat target o
     expect(await footprint(f.systemId)).toEqual(before);
   });
 
-  it('legacy fixture control: the same run-principal shape DOES start a chat into an org knowledge memory it is linked to', async () => {
+  it('#3292 parity: a hypothetical userless run is refused for linked org knowledge too', async () => {
     const f = await fixture();
     const knowledge = await db.memory.create({
       data: { id: generateId(), urn: `org-${suffix}:k-${generateId()}`, name: 'k', organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION' } as never,
     });
     await db.agentMemoryItem.create({ data: { id: generateId(), agentId: f.agentId, memoryId: knowledge.id, role: 'read-write' } as never });
-    expect(await start(f.agentId, { appId: f.appId, clientId: `run:${generateId()}` })).toBeNull();
-    expect(await db.node.count({ where: { memoryId: knowledge.id } })).toBeGreaterThan(0);
+    // #3292 deliberately removes the old hypothetical run exception; no run transport is exercised here.
+    const before = await footprint(f.systemId);
+    expect(await start(f.agentId, { appId: f.appId, clientId: `run:${generateId()}` })).toMatch(/No target memory available/);
+    expect(await footprint(f.systemId)).toEqual(before);
+    expect(await db.node.count({ where: { memoryId: knowledge.id } })).toBe(0);
   });
 
   it('refusal is byte-identical across branches and to the unreadable-target answer', async () => {
