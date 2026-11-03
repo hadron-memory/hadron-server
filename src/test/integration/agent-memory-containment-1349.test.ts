@@ -526,7 +526,15 @@ describe('#2895 — optional pins from the #2885 review (refs #1376)', () => {
     // byte-identical to the refusal for an item-linked org memory named in Session.memoryId (Diego's P1 case)
     const other = await db.session.create({ data: { id: generateId(), appId: link.appId, agentId: link.agentId, memoryId: mem.homeOrg!.id } as never });
     const unreadable = await startChatInSession(link, other.id);
-    expect(unreadable.errors?.[0]?.message).toMatch(/No target memory available/);
-    expect(refused.errors).toEqual(unreadable.errors);
+    expect(unreadable.errors?.length, JSON.stringify(unreadable)).toBe(1);
+    // the envelope carries a per-request id, so compare everything else
+    const shape = (b: { errors?: Array<{ message: string; extensions?: Record<string, unknown> }> }) =>
+      b.errors?.map(({ message, extensions }) => ({ message, ...extensions, requestId: undefined }));
+    expect(shape(refused)).toEqual(shape(unreadable));
+    // and at the resolver, where HTTP masks the text, both are the same "No target memory" refusal
+    const direct = (sessionId: string) => resolvers.Mutation.startChat({}, { agentId: link.agentId }, { db, appId: link.appId, sessionId, roles: ['READER'] } as never)
+      .then(() => null, (e: Error) => e.message);
+    expect(await direct(session.id)).toMatch(/No target memory available/);
+    expect(await direct(session.id)).toBe(await direct(other.id));
   });
 });
