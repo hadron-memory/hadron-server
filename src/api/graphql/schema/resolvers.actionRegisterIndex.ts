@@ -44,14 +44,20 @@ type Entry = { code: string; taskLoc: string | null; link: Link; loc: string };
 /** Ruling 0060's answer, and the answer whenever the whole-chain gate fails (ruling 0107). */
 const emptyPage = (): ActionRegisterIndexPage => ({ entries: [], total: 0, hasMore: false });
 
+/** One installed-or-live-cast predicate for both asking paths (#3359, ruling 0120 A). */
+async function requireAskingAgentInApp(c: Context, appId: string, id: string, ref: string): Promise<void> {
+  const [installed, cast] = await Promise.all([
+    c.db.appAgent.findUnique({ where: { appId_agentId: { appId, agentId: id } }, select: { agentId: true } }),
+    c.db.worker.findFirst({ where: { appId, agentId: id, retiredAt: null }, select: { id: true } }),
+  ]);
+  if (!installed && !cast) throw new AgentNotFoundError(ref);
+}
+
 /**
- * The asking Agent (ruling 0106 A, cor:agt:110:03 "Applies to"): `agentRef`
- * must name a live Agent the caller can read that is installed in this App or
- * is the Agent of a worker cast in it. Every other ref (unknown, unreadable,
- * readable but outside this App, readable only through another tenant) is the
- * same `AgentNotFoundError(ref)`; nothing falls back to the caller's own Agent.
- * With no `agentRef`, the caller's own Agent (a worker session or an Agent
- * run); a caller with none is refused BAD_USER_INPUT.
+ * Rulings 0106/0120 A, cor:agt:110:03: both the named and implicit asking
+ * Agent must be installed or live-cast in this App. A named Agent must also
+ * be readable. The implicit refusal uses the authenticated Agent's emitted
+ * URN, never its raw id. No Agent and no ref remains BAD_USER_INPUT.
  */
 async function askingAgentId(c: Context, appId: string, agentRef: string | null | undefined): Promise<string> {
   if (agentRef == null) {
@@ -61,6 +67,8 @@ async function askingAgentId(c: Context, appId: string, agentRef: string | null 
         extensions: { code: 'BAD_USER_INPUT', argumentName: 'agentRef' },
       });
     }
+    const row = await c.db.agent.findUniqueOrThrow({ where: { id: own }, select: { urn: true } });
+    await requireAskingAgentInApp(c, appId, own, emitEntityUrnV2('agent', row.urn));
     return own;
   }
   const { id } = await resolveAgentRef(c.db, agentRef);
@@ -68,11 +76,7 @@ async function askingAgentId(c: Context, appId: string, agentRef: string | null 
     where: { id }, select: { visibility: true, deletedAt: true, organizationId: true, ownerUserId: true },
   });
   await requireReadableAgent(c, row, agentRef);
-  const [installed, cast] = await Promise.all([
-    c.db.appAgent.findUnique({ where: { appId_agentId: { appId, agentId: id } }, select: { agentId: true } }),
-    c.db.worker.findFirst({ where: { appId, agentId: id, retiredAt: null }, select: { id: true } }),
-  ]);
-  if (!installed && !cast) throw new AgentNotFoundError(agentRef);
+  await requireAskingAgentInApp(c, appId, id, agentRef);
   return id;
 }
 

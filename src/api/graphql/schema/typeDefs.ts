@@ -3097,7 +3097,9 @@ export const typeDefs = `#graphql
     member, a live ADMIN or OWNER of its organization, or a platform admin for an
     organization-owned App. A known fact for an App the caller can read, so false
     is an answer and not a refusal. False for an App key, an impersonated
-    session, a headless run and a request bound to a worker session. This is not
+    session, a headless run and a request bound to a worker session: this nested
+    read names no instruction, so no worker carries its holder's right on it
+    (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). This is not
     permission to perform every task or worker operation: each operation checks
     its own authority.
     """
@@ -8382,7 +8384,9 @@ export const typeDefs = `#graphql
     an Agent run). agentRef must name an Agent the caller can read that is installed in this App
     or is a cast worker's Agent; any other ref (unknown, unreadable, outside the App, readable only
     through another tenant) is refused AGENT_NOT_FOUND identically, never resolved through another
-    Agent. A caller with no Agent and no agentRef is refused BAD_USER_INPUT.
+    Agent. The implicit Agent must also be installed or be a live cast worker's Agent in this App
+    (ruling 0120 A, hrn:node:hadronmemory.com:specs:cor:agt:110:03); otherwise AGENT_NOT_FOUND
+    carries its own Agent URN. A caller with no Agent and no agentRef is refused BAD_USER_INPUT.
 
     Read as the caller, all or nothing (ruling 0107 A): unless the caller can read every system
     memory on the Team Agent's chain and on the asking Agent's chain, through the base, the answer
@@ -11553,9 +11557,13 @@ export const typeDefs = `#graphql
     """
     #1667 — switch an asset's anonymous public link on or off. Only whoever
     manages the asset's memory; a refused request changes
-    nothing. Returns the asset.
+    nothing. Returns the asset. On an App memory, a worker session acts only on a validated
+    instruction, judged on its holder (hrn:node:hadronmemory.com:specs:cor:dmo:050:12): the holder must manage
+    the App, exactly as for the holder as a person. Without an instruction a worker session is refused. An
+    admitted instructed call that changes the flag writes one team event, ids only (no asset id). Other memory
+    classes keep their own rules and ignore instruction.
     """
-    setAssetPublicLink(assetRef: ID!, enabled: Boolean!): Asset!
+    setAssetPublicLink(assetRef: ID!, enabled: Boolean!, instruction: ActInstructionInput): Asset!
     softDeleteAsset(assetId: ID!): Asset!
     restoreAsset(assetId: ID!): Asset!
 
@@ -15273,7 +15281,7 @@ export const typeDefs = `#graphql
   type AgentTeamEvent {
     id: ID!
     appId: ID!
-    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
+    "e.g. task.created, task.assigned, task.reassigned, task.started, task.progress, task.finished, task.cancelled, task.handed-back (#2651: its payload is the reason code only, never the reason text); the alarms stall.not-started, stall.no-progress, stall.owner-unreactive, assignment.unassignable, stall.finish-by (#2648), alarm.dark-worker (#2755: task-less, subjectWorker is the worker gone dark), alarm.coordinator-cadence (#2763: task-less, subjectWorker is the coordinator that stopped assigning); availability.changed; assignment.queued, assignment.matched (the platform's assignment, hrn:node:hadronmemory.com:specs:cor:agt:060:06); host.registered, host.lost; host.operation.succeeded, host.operation.failed (hrn:node:hadronmemory.com:specs:cor:agt:070:02)."
     type: String!
     taskId: ID
     "Who acted: the Worker when the request was bound to a worker session, else the person."
