@@ -168,3 +168,23 @@ describe('#3277 out of scope: list and revoke keep their gates (S3b)', () => {
     expect((await db.appKey.findUniqueOrThrow({ where: { id: f.key.id } })).revokedAt).toBeNull();
   });
 });
+
+// #3307 S1: an instruction is a claim, never a bypass of these person-only doors.
+describe('#3307 instructed worker remains refused at person-only doors', () => {
+ const instruction = {kind:'LIVE_CHAT',ref:'client:turn-17'};
+ const instructed: Record<string,(c:Context)=>Promise<unknown>> = {
+ createAppKey:c=>M.createAppKey({}, {appRef:f.app.id,label:'new',instruction},c),
+ regenerateAppKey:c=>M.regenerateAppKey({}, {appRef:f.app.id,instruction},c),
+ grantAppKeyScope:c=>M.grantAppKeyScope({}, {id:f.key.id,scope:'attention:deliver',instruction},c),
+ grantApp:c=>M.grantApp({}, {appRef:f.app.id,workerRef:f.target.id,name:'TICKER_SUBSCRIBE_WORKERS',instruction},c),
+ setAppMemoryWriteGrant:c=>M.setAppMemoryWriteGrant({}, {appRef:f.app.id,memoryRef:f.dest.id,prefix:'reports:x',instruction},c),
+ setAutomationReadGrant:c=>M.setAutomationReadGrant({}, {appRef:f.app.id,triggerKind:'SCHEDULE',triggerId:f.schedule.id,memoryRef:f.dest.id,prefix:'tasks',instruction},c),
+ startImpersonation:c=>M.startImpersonation({}, {orgRef:f.org.id,userRef:f.mgr.id,reason:'fixture',instruction},c),
+ };
+ for(const [name,call] of Object.entries(instructed)) it(name+' refuses instruction byte-identically, no writes',async()=>{
+  const before={writes:await writes(),events:await db.agentTeamEvent.findMany({where:{appId:f.app.id}}),support:await db.impersonationSession.findMany()};
+  const plain=name==='startImpersonation'?(c:Context)=>M.startImpersonation({}, {orgRef:f.org.id,userRef:f.mgr.id,reason:'fixture'},c):DOORS[name];
+  expect(await answer(CLASSES.sessionRowWorker(call))).toEqual(await answer(CLASSES.sessionRowWorker(plain)));
+  expect({writes:await writes(),events:await db.agentTeamEvent.findMany({where:{appId:f.app.id}}),support:await db.impersonationSession.findMany()}).toEqual(before);
+ });
+});
