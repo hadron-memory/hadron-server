@@ -37,7 +37,7 @@ export async function requireInstructedAct(
 
   let instruction: ActInstruction | undefined;
   if (claim != null) {
-    if (typeof claim.ref !== 'string' || !claim.ref
+    if (typeof claim.ref !== 'string' || !claim.ref || /[\uD800-\uDFFF]/u.test(claim.ref)
       || (claim.kind === 'LIVE_CHAT' && claim.ref.length > INSTRUCTION_REF_MAX)
       || !['TEAM_CHAT_MESSAGE', 'TASK', 'LIVE_CHAT'].includes(claim.kind)) throw refuse();
     instruction = { kind: claim.kind, ref: claim.ref };

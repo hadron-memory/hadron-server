@@ -274,4 +274,5 @@ it('#3307 malformed live-chat references refuse before writing',async()=>{
  const before=await snapshot();
  for(const ref of ['instruction prose', 'bad\u0000ref', 'bad\ud800ref'])expect((await answer(calls.signature({kind:'LIVE_CHAT',ref}))).code).toBe('FORBIDDEN');
  expect(await snapshot()).toEqual(before);
+ await calls.signature({kind:'LIVE_CHAT',ref:'client:😀'});expect((await instructionEvents())[0].payload).toMatchObject({instruction:{kind:'LIVE_CHAT',ref:'client:😀'}});
 });

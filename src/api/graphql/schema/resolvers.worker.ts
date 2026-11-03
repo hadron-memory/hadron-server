@@ -123,9 +123,20 @@ type AppRow = {
 };
 
 /** #3307: both manager doors use one holder/instruction gate on their live transaction. */
-async function admitWorkerManagement(ctx: Context, appId: string, instruction?: ActInstruction | null): Promise<ActAdmission> {
-  const app = await ctx.db.app.findUniqueOrThrow({where:{id:appId}});
-  return requireInstructedAct(ctx, appId, instruction, () => managesApp(ctx, app), readActInstruction, forbidden);
+async function admitWorkerManagement(
+  ctx: Context,
+  scope: { id: string; organizationId: string | null; ownerUserId: string | null },
+  instruction?: ActInstruction | null,
+  expected?: ActAdmission,
+): Promise<ActAdmission> {
+  const app = await ctx.db.app.findUniqueOrThrow({ where: { id: scope.id } });
+  // The authority/membership lock set belongs to this ownership scope; a transfer must be retried with new anchors.
+  if (app.organizationId !== scope.organizationId || app.ownerUserId !== scope.ownerUserId) throw forbidden();
+  const admission = await requireInstructedAct(ctx, app.id, instruction, () => managesApp(ctx, app), readActInstruction, forbidden);
+  // The lock set came from the first admission. Never adopt a different principal after those locks were taken.
+  if (expected && (expected.kind !== admission.kind || expected.userId !== admission.userId
+    || (expected.kind === 'instructed-worker' && admission.kind === 'instructed-worker' && (expected.workerId !== admission.workerId || expected.agentId !== admission.agentId)))) throw forbidden();
+  return admission;
 }
 
 /** Lock actor and subject in canonical assignment/row order; a hold release cannot pass the final check. */
@@ -1756,7 +1767,7 @@ export const workerMutations = {
       ];
       let admission: ActAdmission;
       return withAuthorizedTx(ctx, anchors, async txCtx => {
-        admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
+        admission = await admitWorkerManagement(txCtx, app, args.instruction);
         for (const field of ['signature', 'trailer'] as const) {
           if (field in args) data[field] = normalizeWorkerSignature(args[field]);
         }
@@ -1765,7 +1776,7 @@ export const workerMutations = {
         await lockWorkersForAssignment(tx, ids);
         await lockAppManagerMemberships(tx, ctx.userId, app);
         await lockWorkerActRows(tx, ids, ctx.sessionId);
-        admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
+        admission = await admitWorkerManagement(txCtx, app, args.instruction, admission);
 
         const { count } = await tx.worker.updateMany({ where: { id: worker.id, retiredAt: null }, data });
         if (!count) {
@@ -1826,7 +1837,7 @@ export const workerMutations = {
     ];
     let admission: ActAdmission;
     return withAuthorizedTx(ctx, anchors, async txCtx => {
-      admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
+      admission = await admitWorkerManagement(txCtx, app, args.instruction);
     }, async (tx, txCtx) => {
       // Only a caller who passed the gate learns whether the agent exists: absent and not installed are one answer.
       let toAgentId: string;
@@ -1844,7 +1855,7 @@ export const workerMutations = {
       const agentIds = [...new Set([before.agentId, toAgentId])].sort();
       await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${agentIds}::text[]) ORDER BY id FOR SHARE`;
       await lockWorkerActRows(tx, actWorkerIds, ctx.sessionId);
-      admission = await admitWorkerManagement(txCtx, app.id, args.instruction);
+      admission = await admitWorkerManagement(txCtx, app, args.instruction, admission);
       const [locked] = await tx.$queryRaw<Array<{ agent_id: string; role: string | null; retired_at: Date | null; name: string; boot_prompt_node_id: string | null }>>`
         SELECT agent_id, role, retired_at, name, boot_prompt_node_id FROM workers WHERE id = ${worker.id} FOR UPDATE`;
       if (!locked) throw workerNotFound(args.workerRef);
