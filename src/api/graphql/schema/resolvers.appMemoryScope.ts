@@ -135,9 +135,26 @@ export async function resolveAppNodeScope(ctx: Context, appRef: string): Promise
   const scopedAuth = {
     userId: ctx.userId, appId: resolvedAppId, roles: ctx.roles, impersonation: ctx.impersonation,
   } as AuthContext;
-  const agentMemoryIds = [...await filterReadableMemoryIds(
-    ctx.db as never, scopedAuth, installedAccess.keys(), { access: installedAccess },
-  )];
+  // #3305: installedAccess is candidate scope/provenance, not the user's
+  // authority. Let the canonical batch filter compute its principal map,
+  // including the shared independent-item ceiling and valid App-class paths.
+  const canonicalIds = await filterReadableMemoryIds(
+    ctx.db as never, scopedAuth, installedAccess.keys(),
+    // No user: preserve the existing key/run lens; #3305 narrows sessions.
+    ctx.userId ? {} : { access: installedAccess },
+  );
+  // The explicit App lens historically admits every licensed Agent's system
+  // definition to an org-authorized reader, even without App participation.
+  // Preserve that system-only audience; never reuse its raw map for knowledge
+  // items (the #3305 leak). The class check is on stored rows, not provenance.
+  const systemRows = !ctx.userId || installedAccess.size === 0 ? [] : await ctx.db.memory.findMany({
+    where: { id: { in: [...installedAccess.keys()] }, class: 'system', deletedAt: null },
+    select: { id: true },
+  });
+  const lensSystemIds = await filterReadableMemoryIds(
+    ctx.db as never, scopedAuth, systemRows.map(row => row.id), { access: installedAccess },
+  );
+  const agentMemoryIds = [...new Set([...canonicalIds, ...lensSystemIds])];
 
   // #1031 — the App's own TEAM SPACE, which is structurally unreachable
   // through the installed-agent walk above: it is an app-class memory keyed

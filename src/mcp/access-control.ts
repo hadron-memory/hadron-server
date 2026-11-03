@@ -484,6 +484,11 @@ export async function getPrincipalAppMemoryAccess(
   },
 ): Promise<Map<string, string>> {
   const folds: Array<{ appId: string; map: Map<string, string> }> = [];
+  // #3280/#3305 / cor:dmo:050:09: neither a run nor a session gains item
+  // authority through App membership. Compute the same independent-user
+  // ceiling once, including when an unselected user folds several Apps.
+  const itemUserAccess = principal.userId
+    ? await independentUserItemAccess(db, principal.userId) : undefined;
 
   if (principal.appId) {
     const sessionIsolated = Boolean(principal.sessionId) && !principal.userId;
@@ -497,14 +502,15 @@ export async function getPrincipalAppMemoryAccess(
         // #3278 / cor:dmo:050:09: an item never admits a userless principal, including an AppRun.
         // Runs keep installed system memories below and explicit read/write grants at their own gates.
         credentialOnly: !principal.userId,
-        itemUserAccess: isRunPrincipal(principal) && principal.userId
-          ? await independentUserItemAccess(db, principal.userId) : undefined,
+        itemUserAccess,
       }),
     });
   } else if (principal.userId) {
     const apps = await resolveUserApps(principal.userId, db);
     const maps = await Promise.all(
-      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId, memberAdmitted: !principal.impersonation })),
+      apps.map((app) => getAppMemoryAccess(db, app.id, {
+        callerUserId: principal.userId, memberAdmitted: !principal.impersonation, itemUserAccess,
+      })),
     );
     apps.forEach((app, i) => folds.push({ appId: app.id, map: maps[i] }));
   }
