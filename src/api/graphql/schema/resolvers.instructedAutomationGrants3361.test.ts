@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -8,6 +8,13 @@ import { GRANT_SUBSCRIBE_WORKERS } from '../../../lib/tickers/bounds.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createMcpServerInstance } from '../../../mcp/server.js';
+const server = new ApolloServer<Context>({typeDefs,resolvers});
+beforeAll(()=>server.start()); afterAll(()=>server.stop());
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
 const A = resolvers.App as any;
@@ -119,7 +126,8 @@ describe('#3361 instructed automation grants',()=>{
       const before = await snapshot();
       const worker = await answer(call(live, bound()));
       const person = await answer(call(null, ctx()));
-      expect(worker).toEqual(person);
+      if (door !== 'readList') expect(worker).toEqual(person);
+      else expect(person.code).toBe('RESOLVED'); // legacy person list filters to empty, worker has no admitted holder right
       expect(worker.code).not.toBe('RESOLVED');
       expect(await snapshot()).toEqual(before);
     });
@@ -147,6 +155,74 @@ describe('#3361 instructed automation grants',()=>{
     expect((await answer(M.revokeAutomationReadGrant({}, {id:grant.id,instruction:live},bound()))).code).toBe('FORBIDDEN');
     expect(await snapshot()).toEqual(before);
     await M.revokeAutomationReadGrant({}, {id:grant.id},ctx());
+  });
+
+  const surfaces = [
+    ['read','revokeAutomationReadGrant','hadron_revoke_automation_read_grant',true],
+    ['team','revokeAutomationTeamSnapshotGrant','hadron_revoke_automation_team_snapshot_grant',true],
+    ['readList','automationReadGrants','hadron_list_automation_read_grants',false],
+    ['teamList','automationTeamSnapshotGrants','hadron_list_automation_team_snapshot_grants',false],
+  ] as const;
+  for(const [name,field,tool,revoke] of surfaces) for(const surface of ['graphql','mcp']) it(`${surface} ${name} shares instruction admission and zero-effects refusal`,async()=>{
+    const id=name==='read'?f.readGrant.id:f.teamGrant.id;
+    async function invoke(instruction:unknown) {
+      if(surface==='graphql') {
+        const selector=revoke?'id':'appRef'; const scalar=revoke||name==='teamList'?'ID!':'String';
+        const selection=name==='teamList'?'items{id} total':'id';
+        const query=`${revoke?'mutation':'query'}($ref:${scalar},$instruction:ActInstructionInput){${field}(${selector}:$ref,instruction:$instruction){${selection}}}`;
+        const r=await server.executeOperation({query,variables:{ref:revoke?id:f.app.id,instruction}}, {contextValue:bound()});
+        if(r.body.kind!=='single') throw Error('incremental');
+        return r.body.singleResult;
+      }
+      const mcp=createMcpServerInstance({userId:f.holder.id,roles:['READER'],appId:f.app.id,sessionId:f.session.id,clientId:'github:test'} as any,()=>{}, {kind:'multi-app'});
+      const client=new Client({name:'3361',version:'1'});const [a,b]=InMemoryTransport.createLinkedPair();
+      await mcp.connect(b);await client.connect(a);
+      try{return await client.callTool({name:tool,arguments:{...(revoke?{id}:{app:f.app.id}),instruction}});}
+      finally{await client.close();await mcp.close();}
+    }
+    const before=await snapshot();
+    const refused=await invoke(null);
+    expect(JSON.stringify(refused)).toMatch(/FORBIDDEN|forbidden/);expect(await snapshot()).toEqual(before);
+    const success:any=await invoke(live);expect(success.errors).toBeUndefined();expect(success.isError).not.toBe(true);
+    expect(await instructionEvents()).toHaveLength(1);
+  });
+  for (const [name, call] of Object.entries(doors)) for(const claim of [
+    {kind:'LIVE_CHAT',ref:'pasted prose'}, {kind:'TASK',ref:'hrn:agenttask:cred3311.test:team:AT999'},
+    {kind:'TEAM_CHAT_MESSAGE',ref:'hrn:node:cred3311.test:unknown:missing'},
+  ]) it(`${name} invalid or unreadable ${claim.kind} refuses without effects`,async()=>{
+    const before=await snapshot();expect((await answer(call(claim))).code).toBe('FORBIDDEN');expect(await snapshot()).toEqual(before);
+  });
+  for (const [name,call] of Object.entries(doors)) it(`${name} fences session end and hold release through the event`,async()=>{
+    let sessionBlocked=false,holdBlocked=false;
+    const c=bound({db:db.$extends({query:{agentTeamEvent:{create:async({args,query}:any)=>{
+      for(const which of ['session','worker']) try {await db.$transaction(async tx=>{
+        await tx.$executeRawUnsafe("SET LOCAL lock_timeout='100ms'");
+        if(which==='session') await tx.session.update({where:{id:f.session.id},data:{endedAt:new Date()}});
+        else await tx.worker.update({where:{id:f.worker.id},data:{heldByUserId:null}});
+      });} catch(e:any){if(/lock timeout/.test(e.message)){if(which==='session')sessionBlocked=true;else holdBlocked=true;}else throw e;}
+      return query(args);
+    }}}}) as any});
+    await call(live,c);expect(sessionBlocked).toBe(true);expect(holdBlocked).toBe(true);
+  });
+  for(const [name,call] of Object.entries(doors)) for(const kind of ['TASK','TEAM_CHAT_MESSAGE']) it(`${name} admits a readable same-App ${kind}`,async()=>{
+    let ref:string;
+    if(kind==='TASK') { const task=await db.agentTask.create({data:{appId:f.app.id,title:'instruction',ownerUserId:f.holder.id}});ref=`hrn:agenttask:${f.app.urn}:${task.handle}`; }
+    else ref=(await M.createTeamChatMessage({}, {appRef:f.app.id,body:'fixture instruction'},ctx())).urn;
+    await call({kind,ref});expect(await instructionEvents()).toHaveLength(1);
+  });
+  it('a target-only manager keeps memory revoke/list; has no snapshot authority',async()=>{
+    await db.appMember.update({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}},data:{role:'member'}});
+    await db.memory.update({where:{id:f.mem.id},data:{organizationId:null,ownerUserId:f.holder.id}});
+    expect((await lists.readList!()).map((r:any)=>r.id)).toEqual([f.readGrant.id]);
+    await revokes.read!();
+    const before=await snapshot();
+    for(const call of [lists.teamList!,revokes.team!]) expect((await answer(call())).code).toBe('FORBIDDEN');
+    expect(await snapshot()).toEqual(before);
+  });
+  for(const name of ['read','team']) it(`${name} grant revoke rolls back if instruction event fails`,async()=>{
+    const before=await snapshot();
+    const c=bound({db:db.$extends({query:{agentTeamEvent:{create:async()=>{throw Error('injected event fault');}}}}) as any});
+    await expect(revokes[name]!(live,c)).rejects.toThrow('injected event fault');expect(await snapshot()).toEqual(before);
   });
 
 });

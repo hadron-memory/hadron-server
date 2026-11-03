@@ -28,6 +28,11 @@ import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireMemoryManageAccess, safeCanonicalUrn, type Context } from './resolvers.helpers.js';
 
+import { requireInstructedAct, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor } from './automationGrantInstruction.js';
+import { callerIsWorkerSession, readActInstruction } from './resolvers.instruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
+
 const denied = () => authorizationDenied();
 const badInput = (message: string) => new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
 
@@ -157,31 +162,37 @@ export const automationReadGrantMutations = {
     return project(row, memory);
   },
 
-  revokeAutomationReadGrant: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    const actorId = await requirePersonAsThemselves(ctx, denied);
+  revokeAutomationReadGrant: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const existing = await ctx.db.appAutomationReadGrant.findUnique({ where: { id }, include: { app: { select: APP_SELECT } } });
     if (!existing) throw denied();
     const app0 = existing.app;
+    const target0 = await ctx.db.memory.findFirst({ where: { id: existing.memoryId, deletedAt: null }, select: TARGET_SELECT });
+    const allows = async (c: Context) => {
+      const app = await c.db.app.findUnique({ where: { id: app0.id }, select: APP_SELECT });
+      if (!app) return false;
+      if (await managesApp(c, app)) return true;
+      const memory = await c.db.memory.findFirst({ where: { id: existing.memoryId, deletedAt: null }, select: TARGET_SELECT });
+      if (memory && target0 && (memory.organizationId !== target0.organizationId || memory.ownerUserId !== target0.ownerUserId)) return false;
+      return !!memory && await managesReadGrantTarget(c, memory);
+    };
+    let admission = await automationGrantAdmission(ctx, app0, instruction, allows);
     await withAuthorizedTx(
       ctx,
       anchorsOf(app0, existing.memoryId),
-      async (txCtx) => {
-        const app = await txCtx.db.app.findUnique({ where: { id: app0.id }, select: APP_SELECT });
-        if (!app) throw denied();
-        if (await managesApp(txCtx, app)) return;
-        const memory = await txCtx.db.memory.findFirst({ where: { id: existing.memoryId, deletedAt: null }, select: TARGET_SELECT });
-        if (memory && (await managesReadGrantTarget(txCtx, memory))) return;
-        throw denied();
-      },
-      async (tx) => {
+      async c => { admission = await automationGrantAdmission(c, app0, instruction, allows, admission); },
+      async (tx, c) => {
+        admission = await finalAutomationGrantAdmission(c, app0, instruction, allows, admission);
+        const actorId = admission.userId;
         // Terminal: a second revoke matches nothing and records nothing.
         const ended = await tx.appAutomationReadGrant.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date(), revokedBy: actorId } });
         if (ended.count === 1) {
           await tx.appAutomationReadGrantEvent.create({
             data: { appId: existing.appId, triggerKind: existing.triggerKind, triggerId: existing.triggerId, memoryId: existing.memoryId, grantId: id, prefix: existing.prefix, action: 'REVOKE', actorUserId: actorId },
           });
+          await appendCredentialInstructionEvent(tx, { appId: existing.appId, admission, act: 'automation-read-grant.revoke' });
         }
       },
+      { afterLock: tx => lockAutomationGrantActor(tx, admission, app0, target0?.organizationId ? [target0.organizationId] : []) },
     );
     const row = await ctx.db.appAutomationReadGrant.findUniqueOrThrow({ where: { id } });
     const memory = await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } });
@@ -189,10 +200,8 @@ export const automationReadGrantMutations = {
   },
 };
 
-export const automationReadGrantQueries = {
-  automationReadGrants: async (_: unknown, input: { appRef?: string | null; memoryRef?: string | null; includeRevoked?: boolean | null }, ctx: Context) => {
-    await requirePersonAsThemselves(ctx, denied);
-    if (!input.appRef && !input.memoryRef) throw badInput('appRef or memoryRef is required.');
+type ListInput = { appRef?: string | null; memoryRef?: string | null; includeRevoked?: boolean | null; instruction?: ActInstruction | null };
+async function readGrantRows(input: ListInput, ctx: Context) {
     // An unknown ref and a ref the caller cannot see are the one answer, the empty list (as the rows below are filtered
     // by what the caller manages), so the list is no existence oracle for an App or a memory.
     let appId: string | undefined;
@@ -233,5 +242,49 @@ export const automationReadGrantQueries = {
       out.push(project(row, memory));
     }
     return out;
+}
+export const automationReadGrantQueries = {
+  automationReadGrants: async (_: unknown, input: ListInput, ctx: Context) => {
+    if (!await callerIsWorkerSession(ctx)) {
+      // Preserve the direct-person filtering and cross-App target-manager reach.
+      await requirePersonAsThemselves(ctx, denied);
+      if (!input.appRef && !input.memoryRef) throw badInput('appRef or memoryRef is required.');
+      // Validate a supplied person claim under the same protocol, without recording it.
+      if (input.instruction != null) {
+        const appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : undefined;
+        await requireInstructedAct(ctx, appId ?? '', input.instruction, async () => true,
+          readActInstruction, denied);
+      }
+      return readGrantRows(input, ctx);
+    }
+    if (!input.appRef && !input.memoryRef) throw badInput('appRef or memoryRef is required.');
+    // #3361 FIT: the session's App, never a target-manager's other Apps, binds an instructed memory-only list.
+    const session = ctx.sessionId ? await ctx.db.session.findUnique({ where: { id: ctx.sessionId }, select: { appId: true } }) : null;
+    if (!session?.appId) throw denied();
+    const appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : session.appId;
+    if (appId !== session.appId) throw denied();
+    const app = await ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
+    if (!app) throw denied();
+    const memoryId = input.memoryRef ? (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id : undefined;
+    const targets = await ctx.db.memory.findMany({ where: memoryId ? { id: memoryId, deletedAt: null } : {
+      deletedAt: null, automationReadGrants: { some: { appId } },
+    }, select: TARGET_SELECT });
+    const allows = async (c: Context) => {
+      if (await managesApp(c, app)) return true;
+      for (const observed of targets) {
+        const m = await c.db.memory.findFirst({ where: { id: observed.id, deletedAt: null }, select: TARGET_SELECT });
+        if (m && m.organizationId === observed.organizationId && m.ownerUserId === observed.ownerUserId && await managesReadGrantTarget(c, m)) return true;
+      }
+      return false;
+    };
+    let admission = await automationGrantAdmission(ctx, app, input.instruction, allows);
+    return withAuthorizedTx(ctx, [...anchorsOf(app), ...targets.map(m => ({kind:'memory' as const,id:m.id}))],
+      async c => { admission = await automationGrantAdmission(c, app, input.instruction, allows, admission); },
+      async (tx, c) => {
+        admission = await finalAutomationGrantAdmission(c, app, input.instruction, allows, admission);
+        const rows = await readGrantRows({ ...input, appRef: app.id }, c);
+        await appendCredentialInstructionEvent(tx, { appId, admission, act: 'automation-read-grant.list' });
+        return rows;
+      }, { afterLock: tx => lockAutomationGrantActor(tx, admission, app, targets.flatMap(m => m.organizationId ? [m.organizationId] : [])) });
   },
 };

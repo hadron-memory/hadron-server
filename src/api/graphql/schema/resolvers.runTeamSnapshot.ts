@@ -9,6 +9,9 @@ import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/au
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { Context } from './resolvers.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor } from './automationGrantInstruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
 const denied = () => authorizationDenied();
 const APP_SELECT = { id: true, organizationId: true, ownerUserId: true } as const;
@@ -20,7 +23,7 @@ const anchors = (app: App) => [
 ];
 async function person(ctx: Context, giving = false) {
   if (ctx.appKeyId) throw denied();
-  // Revoke/list worker refusal is AS BUILT, NOT RULED: same instruction-arm gap as the memory read grant.
+  // Giving remains person-only; revoke/list use the shared instructed-act protocol below.
   return giving ? requirePersonOnlyAct(ctx, 'grant.give', denied) : requirePersonAsThemselves(ctx, denied);
 }
 async function appOf(ctx: Context, ref: string) {
@@ -68,24 +71,33 @@ export const runTeamSnapshotMutations = {
       return row;
     }, { lockMode: 'exclusive' });
   },
-  revokeAutomationTeamSnapshotGrant: async (_: unknown, { id }: { id: string }, ctx: Context) => {
-    const actorUserId = await person(ctx);
+  revokeAutomationTeamSnapshotGrant: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const row = await ctx.db.appAutomationTeamSnapshotGrant.findUnique({ where: { id }, include: { app: { select: APP_SELECT } } });
     if (!row) throw denied();
-    return withAuthorizedTx(ctx, anchors(row.app), async c => { await person(c); await manager(c, row.app); }, async tx => {
+    const allows = async (c: Context) => { await manager(c, row.app); return true; };
+    let admission = await automationGrantAdmission(ctx, row.app, instruction, allows);
+    return withAuthorizedTx(ctx, anchors(row.app), async c => { admission = await automationGrantAdmission(c, row.app, instruction, allows, admission); }, async (tx, c) => {
+      admission = await finalAutomationGrantAdmission(c, row.app, instruction, allows, admission);
+      const actorUserId = admission.userId;
       const ended = await tx.appAutomationTeamSnapshotGrant.updateMany({ where: { id, revokedAt: null }, data: { revokedAt: new Date(), revokedBy: actorUserId } });
-      if (ended.count === 1) await tx.appAutomationTeamSnapshotGrantEvent.create({ data: {
+      if (ended.count === 1) {
+        await tx.appAutomationTeamSnapshotGrantEvent.create({ data: {
         appId: row.appId, triggerKind: row.triggerKind, triggerId: row.triggerId, grantId: id, action: 'REVOKE', actorUserId,
       } });
+        await appendCredentialInstructionEvent(tx, { appId: row.appId, admission, act: 'automation-team-snapshot-grant.revoke' });
+      }
       return tx.appAutomationTeamSnapshotGrant.findUniqueOrThrow({ where: { id } });
-    }, { lockMode: 'exclusive' });
+    }, { lockMode: 'exclusive', afterLock: tx => lockAutomationGrantActor(tx, admission, row.app) });
   },
 };
 export const runTeamSnapshotQueries = {
-  automationTeamSnapshotGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null; limit?: number | null; offset?: number | null }, ctx: Context) => {
-    await person(ctx);
+  automationTeamSnapshotGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null; limit?: number | null; offset?: number | null; instruction?: ActInstruction | null }, ctx: Context) => {
     const app = await appOf(ctx, input.appRef);
-    return withAuthorizedTx(ctx, anchors(app), async c => { await person(c); await manager(c, app); }, async tx => {
+    const allows = async (c: Context) => { await manager(c, app); return true; };
+    let admission = await automationGrantAdmission(ctx, app, input.instruction, allows);
+    return withAuthorizedTx(ctx, anchors(app), async c => { admission = await automationGrantAdmission(c, app, input.instruction, allows, admission); }, async (tx, c) => {
+      admission = await finalAutomationGrantAdmission(c, app, input.instruction, allows, admission);
+      await appendCredentialInstructionEvent(tx, { appId: app.id, admission, act: 'automation-team-snapshot-grant.list' });
       const where = { appId: app.id, ...(input.includeRevoked ? {} : { revokedAt: null }) };
       const take = pageTake(input.limit), skip = Math.max(0, input.offset ?? 0);
       const total = await tx.appAutomationTeamSnapshotGrant.count({ where });
@@ -93,6 +105,6 @@ export const runTeamSnapshotQueries = {
         where, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take, skip,
       });
       return { items, total, hasMore: skip + items.length < total };
-    });
+    }, { afterLock: tx => lockAutomationGrantActor(tx, admission, app) });
   },
 };
