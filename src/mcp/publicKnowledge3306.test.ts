@@ -128,9 +128,35 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
     it.each(['hadron_get_node', 'hadron_find_nodes', 'hadron_list_nodes'] as const)('RED 0114B: MCP %s accepts a named PUBLIC target inside a session', async tool => {
       const mcp = createTestableMcpServer(f.confined as never);
       const args = tool === 'hadron_get_node' ? { urn: urn(f.pub) }
-        : { memoryUrn: `hrn:mem:${f.pub.urn}`, ...(tool === 'hadron_find_nodes' ? { query: 'needle3306', mode: 'keyword' } : {}) };
+        : { memoryUrn: `hrn:mem:${f.pub.urn}`, ...(tool === 'hadron_find_nodes' ? { query: 'needle3306', mode: 'keyword' } : { depth: 2 }) };
       expect(await mcp.callToolText(tool, args)).toContain(tool === 'hadron_get_node' ? 'secret pub' : 'needle3306 pub');
     }, 20_000);
+    it.each(['hadron_find_nodes', 'hadron_list_nodes'] as const)('0114B: %s parent selectors use the same named PUBLIC gate', async tool => {
+      const mcp = createTestableMcpServer(f.confined as never);
+      const text = await mcp.callToolText(tool, { parentRel: urn(f.pub, 'docs'), depth: 2, ...(tool === 'hadron_find_nodes' ? { query: 'needle3306', mode: 'keyword' } : {}) });
+      expect(text).toContain('needle3306 pub');
+    }, 20_000);
+    it('0114B never permits an MCP write, even with a read-write item', async () => {
+      const mcp = createTestableMcpServer(f.confined as never);
+      const before = await mcp.callToolText('hadron_update_node', { urn: urn(f.pub), content: 'changed' });
+      const agent = await db.agent.create({ data: { id: generateId(), organizationId: f.orgA.id, urn: `${f.orgA.urn}:session-item`, name: 'Session item' } });
+      await db.appAgent.create({ data: { appId: f.app.id, agentId: agent.id } });
+      await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: f.pub.id, role: 'read-write' } });
+      expect(await mcp.callToolText('hadron_update_node', { urn: urn(f.pub), content: 'changed' })).toBe(before);
+      expect(await db.node.findFirst({ where: { memoryId: f.pub.id, loc: LOC } })).toMatchObject({ content: 'secret pub' });
+    }, 20_000);
+    it('RED: a PUBLIC node does not lend the session-less App reach to its cross-memory asset', async () => {
+      const team = await db.memory.create({ data: { name: 'asset team', urn: `${f.orgA.urn}:asset-team`, class: 'app', appId: f.app.id, organizationId: f.orgA.id } });
+      const asset = await db.asset.create({ data: { memoryId: team.id, filename: 'hidden.txt', mimeType: 'text/plain', sizeBytes: 1, storageKey: `private/${team.id}` } });
+      await db.node.update({ where: { loc_memoryId: { memoryId: f.pub.id, loc: LOC } }, data: { data: { asset: { id: asset.id } } } });
+      const node = await Q.node({}, { ref: urn(f.pub) }, f.confined);
+      expect(node).not.toBeNull();
+      expect(await canReadMemory(db, f.confined as never, team.id)).toBe(false);
+      expect(await (resolvers.Node as any).asset(node, {}, f.confined)).toBeNull();
+      // An asset in another PUBLIC knowledge memory is independently readable.
+      await db.asset.update({ where: { id: asset.id }, data: { memoryId: f.pub.id } });
+      expect(await (resolvers.Node as any).asset(node, {}, f.confined)).toMatchObject({ id: asset.id });
+    });
     it('0114B does not hand a session-bound key its own App team space', async () => {
       const team = await db.memory.create({ data: { name: 'team', urn: `${f.orgA.urn}:team`, class: 'app', appId: f.app.id, organizationId: f.orgA.id } });
       await db.node.create({ data: { memoryId: team.id, loc: LOC, name: 'team private', content: 'not public', nodeType: 'record' } });
@@ -248,6 +274,19 @@ describe('#3306 the shared predicate itself', () => {
       expect((await publicKnowledgeAmong(db, [row.id])).has(row.id)).toBe(false);
       expect(await canReadMemory(db, f.keyPrincipal as never, row.id)).toBe(false);
     }
+  });
+  it.each(['key', 'run', 'session'] as const)('named discovery is capped at 200 and pages the 201st node (%s)', async who => {
+    await db.node.createMany({ data: Array.from({ length: 200 }, (_, i) => ({ memoryId: f.pub.id, loc: `cap:${String(i).padStart(3, '0')}`, name: 'needle3306 cap', content: 'cap', nodeType: 'record' })) });
+    const principal = who === 'key' ? f.keyPrincipal : who === 'run' ? f.runPrincipal : f.confined;
+    const page = (limit: number, offset = 0) => Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit, offset, filter: { memoryIds: [f.pub.id, f.orgVisible.id, f.appScoped.id] } }, { ...principal });
+    const at = await page(200);
+    const over = await page(201);
+    const next = await page(200, 200);
+    expect(at.hits).toHaveLength(200);
+    expect(over.hits.map((h: any) => h.node.id)).toEqual(at.hits.map((h: any) => h.node.id));
+    expect(next.hits).toHaveLength(1);
+    expect(new Set([...at.hits, ...next.hits].map((h: any) => h.node.id)).size).toBe(201);
+    expect([...at.hits, ...next.hits].every((h: any) => h.node.memoryId === f.pub.id)).toBe(true);
   });
   it('a node search names its PUBLIC targets: no id-less PUBLIC lookup, however many PUBLIC memories exist', async () => {
     const extra: string[] = [];
