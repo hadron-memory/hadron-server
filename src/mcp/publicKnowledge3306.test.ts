@@ -1,11 +1,12 @@
 /**
- * #3306 / ruling 0104 (cor:acl:010:01, cor:dmo:050:09): a principal with no user (an App key that is not
- * session-confined, or an AppRun with no on-behalf user) reads PUBLIC knowledge with `app_id` null read-only, with
+ * #3306 / ruling 0104 (cor:acl:010:01, cor:dmo:050:09): a principal with no user (an App key,
+ * session-bound or not, or an AppRun with no on-behalf user) reads PUBLIC knowledge with `app_id` null read-only, with
  * no item. Everything else keeps today's rules. Discovery choice: point reads and node searches admit it; memory
  * listing (`hadron_list_memories`, the access map) never enumerates it.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
+import { createTestableMcpServer } from './server.js';
 import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
@@ -114,11 +115,40 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
     it('an App-scoped PUBLIC memory of the principal\'s OWN App is not opened by this rule either', async () => {
       expect(await canReadMemory(db, f.keyPrincipal as never, f.ownAppScoped.id)).toBe(false);
     });
-    it('a session-confined App key is refused PUBLIC knowledge outside its session, like an unknown memory', async () => {
-      expect(await canReadMemory(db, f.confined as never, f.pub.id)).toBe(false);
-      expect(await Q.node({}, { ref: urn(f.pub) }, f.confined)).toBeNull();
+    it('RED 0114B: session-bound App keys read named PUBLIC knowledge outside the session read-only', async () => {
+      expect(await canReadMemory(db, f.confined as never, f.pub.id)).toBe(true);
+      expect(await canWriteToMemory(db, f.confined as never, f.pub.id)).toBe(false);
+      expect(await Q.node({}, { ref: urn(f.pub) }, f.confined)).toMatchObject({ content: 'secret pub' });
       expect(await getAccessibleMemoryIds(f.confined)).not.toContain(f.pub.id);
+      expect(await getAccessibleMemoryIds(f.confined, f.pub.id)).toEqual([f.pub.id]);
+      const out = await Q.findNodes({}, { query: 'needle3306', mode: 'keyword', limit: 10, filter: { memoryIds: [f.pub.id] } }, { ...f.confined });
+      expect(out.hits.map((h: { node: { memoryId: string } }) => h.node.memoryId)).toEqual([f.pub.id]);
+      expect(await filterReadableMemoryIds(db, f.confined as never, [f.pub.id, f.orgVisible.id])).toEqual(new Set([f.pub.id]));
     });
+    it.each(['hadron_get_node', 'hadron_find_nodes', 'hadron_list_nodes'] as const)('RED 0114B: MCP %s accepts a named PUBLIC target inside a session', async tool => {
+      const mcp = createTestableMcpServer(f.confined as never);
+      const args = tool === 'hadron_get_node' ? { urn: urn(f.pub) }
+        : { memoryUrn: `hrn:mem:${f.pub.urn}`, ...(tool === 'hadron_find_nodes' ? { query: 'needle3306', mode: 'keyword' } : {}) };
+      expect(await mcp.callToolText(tool, args)).toContain(tool === 'hadron_get_node' ? 'secret pub' : 'needle3306 pub');
+    }, 20_000);
+    it('0114B does not hand a session-bound key its own App team space', async () => {
+      const team = await db.memory.create({ data: { name: 'team', urn: `${f.orgA.urn}:team`, class: 'app', appId: f.app.id, organizationId: f.orgA.id } });
+      await db.node.create({ data: { memoryId: team.id, loc: LOC, name: 'team private', content: 'not public', nodeType: 'record' } });
+      expect(await canReadMemory(db, f.confined as never, team.id)).toBe(false);
+      expect(await Q.node({}, { ref: urn(team) }, f.confined)).toBeNull();
+      expect(await getAccessibleMemoryIds(f.confined, team.id)).toEqual([]);
+      expect(await canWriteToMemory(db, f.confined as never, team.id)).toBe(false);
+    });
+    it.each(['orgVisible', 'appScoped', 'group', 'deleted'] as const)('0114B keeps %s outside-session reads concealed and writes refused', async name => {
+      expect(await canReadMemory(db, f.confined as never, f[name].id)).toBe(false);
+      expect(await Q.node({}, { ref: urn(f[name]) }, f.confined)).toBeNull();
+      const mcp = createTestableMcpServer(f.confined as never);
+      const hidden = await mcp.callToolText('hadron_get_node', { urn: urn(f[name]) });
+      const missing = await mcp.callToolText('hadron_get_node', { urn: `hrn:node:${f.orgB.urn}:nosuchmemory:${LOC}` });
+      expect(hidden.replaceAll(f[name].urn, 'X')).toBe(missing.replaceAll(`${f.orgB.urn}:nosuchmemory`, 'X'));
+      expect(await canWriteToMemory(db, f.confined as never, f[name].id)).toBe(false);
+    }, 20_000);
+
   });
 
   describe('discovery: PUBLIC memories are not enumerated', () => {
@@ -198,10 +228,10 @@ describe('#3306 PUBLIC knowledge for a principal with no user', () => {
 });
 
 describe('#3306 the shared predicate itself', () => {
-  it('names only a credential with an App, no user, no session and no impersonation', () => {
+  it('names a credential with an App and no user or impersonation, with or without a session', () => {
     expect(readsPublicKnowledgeWithoutUser({ appId: 'a' })).toBe(true);
     expect(readsPublicKnowledgeWithoutUser({ appId: 'a', userId: 'u' })).toBe(false);
-    expect(readsPublicKnowledgeWithoutUser({ appId: 'a', sessionId: 's' })).toBe(false);
+    expect(readsPublicKnowledgeWithoutUser({ appId: 'a', sessionId: 's' })).toBe(true);
     expect(readsPublicKnowledgeWithoutUser({ appId: 'a', impersonation: { orgId: 'o' } })).toBe(false);
     expect(readsPublicKnowledgeWithoutUser({})).toBe(false);
   });
