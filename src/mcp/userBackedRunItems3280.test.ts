@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
+import { loadFlowNode } from '../lib/runner/loadFlowNode.js';
+import { makeProdRunDeps } from '../jobs/appRunDeps.js';
+import { hadronStoreFile } from '../lib/runner/tools/storeTools.js';
+import { putObject } from '../integrations/r2/client.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
 import { createTestableMcpServer } from './server.js';
@@ -13,6 +17,7 @@ import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
 const M = resolvers.Mutation as any;
 const Q = resolvers.Query as any;
 const LOC = 'docs:entry';
@@ -181,6 +186,20 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     expect((await independentUserItemAccess(db, f.user.id)).get(owned.id)).toBe('READ_WRITE');
     await db.memory.update({ where: { id: owned.id }, data: { deletedAt: new Date() } });
     expect((await independentUserItemAccess(db, f.user.id)).has(owned.id)).toBe(false);
+  });
+
+  it('item-only user-backed flow loading is refused', async () => {
+    expect(await rejection(loadFlowNode(db, urn(f.read), f.org.id, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
+  });
+  it('item-only user-backed file write is refused before object storage', async () => {
+    vi.mocked(putObject).mockClear();
+    expect(await rejection(hadronStoreFile.execute(backed, { urn: urn(f.write, 'docs:file'), filename: 'report.txt', content: 'no upload' }))).not.toBeNull();
+    expect(putObject).not.toHaveBeenCalled();
+  });
+  it('user-backed output refuses an item-only destination with a readable PUBLIC flow', async () => {
+    await db.node.update({ where: { loc_memoryId: { memoryId: f.publicMemory.id, loc: LOC } }, data: { data: { output: { writeTo: urn(f.write, 'docs:output') } } } });
+    expect(await rejection(makeProdRunDeps(db).writeOutput(backed.run, urn(f.publicMemory), 'not published'))).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId: f.write.id, loc: 'docs:output' } })).toBe(0);
   });
 
 });
