@@ -97,6 +97,7 @@ it('answers the stored pointer through all seven doors and every registered repl
   expect(await pointer(s)).toBeNull();
   const claim = await accepted('claimContextReset', { resetId: s.resetId, epoch: 0, process: PROC });
   expect(claim.reset.checkpointNode).toBeNull();
+  expect(await pointer(s)).toBeNull();
   const first = await accepted('registerContextResetRecovery', registration(s));
   const expected = first.reset.checkpointNode;
   expect(expected).toMatch(/^hrn:node:/);
@@ -115,7 +116,9 @@ it('answers the stored pointer through all seven doors and every registered repl
   expect((await accepted('reportContextResetRelaunched', { resetId: s.resetId, epoch: 1, process: NEW_PROC })).reset.checkpointNode).toBe(expected);
   await replay();
   await M.reportHostOperation({}, { input: { appRef: f.app.id, id: s.operationId, outcome: 'SUCCEEDED' } }, f.keyCtx());
-  expect(await pointer(s)).toBe(expected); // ended done
+  const done = await read(s);
+  expect(done.errors).toBeUndefined();
+  expect(done.data.contextReset).toMatchObject({ phase: 'done', checkpointNode: expected });
 });
 
 it.each(['before-registration', 'after-registration'])('ended failure %s retains only a registered pointer', async when => {
@@ -202,4 +205,31 @@ it.each(['person', 'plain-key', 'session-bound', 'revoked', 'other-app', 'not-co
   const answer = await read(s, context, appRef);
   expect(answer.data).toBeNull();
   expect(answer.errors?.[0].extensions.code).toBe(expected);
+});
+
+it('a refused claim that never registered returns null through mutation and query', async () => {
+  const s = await f.collectedReset();
+  await db.agent.update({ where: { id: f.agentId }, data: { resetContextAfterTask: false } });
+  const out = await accepted('claimContextReset', { resetId: s.resetId, epoch: 0, process: PROC });
+  expect(out).toMatchObject({ refused: 'SETTING_OFF', reset: { phase: 'refused', checkpointNode: null } });
+  expect(await pointer(s)).toBeNull();
+});
+
+it('a failure at commit rolls back both the pointer registration and its new node', async () => {
+  const s = await claimed();
+  const before = await db.node.count();
+  await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION checkpoint3300_abort() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.recovery_registered_at IS NOT NULL THEN RAISE EXCEPTION 'checkpoint3300 injected commit failure'; END IF; RETURN NEW; END $$`);
+  await db.$executeRawUnsafe('CREATE CONSTRAINT TRIGGER checkpoint3300_abort AFTER UPDATE ON context_resets DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION checkpoint3300_abort()');
+  try {
+    const answer = await step('registerContextResetRecovery', registration(s));
+    expect(answer.data).toBeNull();
+    expect(answer.errors?.[0].extensions.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(await db.node.count()).toBe(before);
+    expect(await db.contextReset.findUniqueOrThrow({ where: { id: s.resetId } })).toMatchObject({ phase: 'claimed', recoveryRef: null, recoveryRegisteredAt: null });
+    expect(await pointer(s)).toBeNull();
+  } finally {
+    await db.$executeRawUnsafe('DROP TRIGGER IF EXISTS checkpoint3300_abort ON context_resets');
+    await db.$executeRawUnsafe('DROP FUNCTION IF EXISTS checkpoint3300_abort()');
+  }
 });
