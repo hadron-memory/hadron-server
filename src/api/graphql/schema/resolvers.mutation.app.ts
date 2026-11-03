@@ -1409,8 +1409,9 @@ export const appMutations = {
         // A worker session never learns whether the key exists; a person keeps the not-found answer of before.
         if (await callerIsWorkerSession(ctx)) throw authorizationDenied();
         await ctx.db.appKey.findUniqueOrThrow({ where: { id }, include: { app: true } });
+        throw authorizationDenied();
       }
-      const target = key!;
+      const target = key;
       let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction);
       await withAuthorizedTx(
         ctx,

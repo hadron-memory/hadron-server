@@ -23,7 +23,7 @@ import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
 import { appKeyHostUses } from './resolvers.hostOperation.js';
 import { requireInstructedAct, type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
+import { admitAppManagement, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
 const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
@@ -50,17 +50,19 @@ async function changeScope(
   /** #3311: revoking a scope is allowed on a holder's instruction (S6); only the revoke passes this. */
   revoke?: { instruction?: ActInstruction | null },
 ) {
-  // A worker session never learns whether a key exists, so a malformed scope answers as a missing key does.
-  if (revoke && !isAppKeyScope(scope) && await callerIsWorkerSession(ctx)) throw scopeForbidden();
   let resolved: Awaited<ReturnType<typeof resolveKey>>;
   try {
     resolved = await resolveKey(ctx, id);
   } catch (e) {
     // A worker session never learns whether a key exists: a missing key and one it may not act on answer alike.
-    if (revoke && await callerIsWorkerSession(ctx)) throw scopeForbidden();
+    // Only the not-found answer is converted; an outage stays an outage.
+    if (revoke && (e as { extensions?: { code?: string } }).extensions?.code === 'APP_KEY_NOT_FOUND' && await callerIsWorkerSession(ctx)) throw scopeForbidden();
     throw e;
   }
   const { key, app, actor } = resolved;
+  // A worker session is admitted (or refused) before anything else about the key is told: an unknown scope or an
+  // uninstalled App answers a refused worker as a missing key does.
+  if (revoke && await callerIsWorkerSession(ctx)) await admitAppManagement(ctx, app, scopeForbidden, revoke.instruction);
   requireWritable(ctx, app);
   if (!isAppKeyScope(scope)) {
     throw new GraphQLError(`Unknown scope "${scope}". The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });

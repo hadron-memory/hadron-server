@@ -101,7 +101,7 @@ export async function admitCredentialList(
     {
       afterLock: async (tx) => {
         await lockWorkersForAssignment(tx, [(admission as { workerId: string }).workerId]);
-        await lockAppManagerMemberships(tx, ctx.userId, app);
+        await lockAppManagerMemberships(tx, (admission as { userId: string }).userId, app);
       },
     },
   );

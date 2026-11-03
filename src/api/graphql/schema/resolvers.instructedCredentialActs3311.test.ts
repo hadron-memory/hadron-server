@@ -117,6 +117,7 @@ describe('#3311 instructed revokes and lists', () => {
         const invoke = () => call(claim, c);
         const got = await answer(kind === 'ambiguous' ? requestActorStorage.run({ workerId: null, agentId: null, ambiguousSessionIds: ['a', 'b'] }, invoke) : invoke());
         expect(got.code).not.toBe('RESOLVED');
+        expect(got.code).toBeDefined(); // a refusal, never a crash
         expect(await snapshot()).toEqual(before);
       });
     }
@@ -140,11 +141,46 @@ describe('#3311 instructed revokes and lists', () => {
     expect(await instructionEvents()).toHaveLength(Object.keys(revokes).length);
   });
 
-  it('an invalid scope does not tell an uninstructed worker whether the key exists', async () => {
-    const missing = await answer(M.revokeAppKeyScope({}, { id: generateId(), scope: 'not-a-scope', instruction: null }, bound()));
-    const present = await answer(M.revokeAppKeyScope({}, { id: f.key.id, scope: 'not-a-scope', instruction: null }, bound()));
-    expect(missing.code).not.toBe('RESOLVED');
-    expect(present).toEqual(missing);
+  it('an unknown scope or an uninstalled App does not tell a refused worker whether the key exists', async () => {
+    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
+    const call = (id: string, scope: string, instruction: unknown) => answer(M.revokeAppKeyScope({}, { id, scope, instruction }, bound()));
+    for (const instruction of [live, null]) {
+      const missing = await call(generateId(), 'not-a-scope', instruction);
+      expect(missing.code).toBe('FORBIDDEN');
+      expect(await call(f.key.id, 'not-a-scope', instruction)).toEqual(missing);
+    }
+    await db.app.update({ where: { id: f.app.id }, data: { uninstalledAt: new Date() } });
+    const missing = await call(generateId(), 'attention:deliver', null);
+    expect(missing.code).toBe('FORBIDDEN');
+    expect(await call(f.key.id, 'attention:deliver', null)).toEqual(missing);
+  });
+
+  for (const [kind, extra] of [
+    ['impersonation', () => ({ impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } })],
+    ['run principal', () => ({ clientId: 'run:test', appId: f.app.id })],
+  ] as const) {
+    it(`a person under ${kind} (no session) is refused at every revoke and list door`, async () => {
+      const before = await snapshot();
+      for (const [door, call] of Object.entries(doors)) {
+        const got = await answer(call(null, ctx(extra() as any)));
+        expect(got.code, door).not.toBe('RESOLVED');
+        expect(got.code, door).toBeDefined();
+      }
+      expect(await snapshot()).toEqual(before);
+    });
+  }
+
+  it('an instructed revoke is attributed to the holder on the rows it ends', async () => {
+    await revokes.grant!(); await revokes.writeGrant!(); await revokes.scope!();
+    expect((await db.appGrant.findFirstOrThrow({ where: { appId: f.app.id } })).revokedBy).toBe(f.holder.id);
+    expect((await db.appMemoryWriteGrant.findUniqueOrThrow({ where: { id: f.writeGrant.id } })).revokedBy).toBe(f.holder.id);
+    expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: f.key.id } })).revokedByUserId).toBe(f.holder.id);
+  });
+
+  it('an admitted instructed list returns the rows', async () => {
+    expect((await lists.appKeys!()).map((k: any) => k.id)).toContain(f.key.id);
+    expect((await lists.appKeysPage!()).items.map((k: any) => k.id)).toContain(f.key.id);
+    expect((await lists.appMemoryWriteGrants!()).map((g: any) => g.id)).toContain(f.writeGrant.id);
   });
 
   // The session row is fenced through commit: a session-end writer cannot commit between the judgement and the write.
@@ -196,11 +232,10 @@ describe('#3311 instructed revokes and lists', () => {
     }
   });
 
-  it('App.keys refuses a worker session with and without an instruction', async () => {
+  it('App.keys refuses a worker session', async () => {
     const app = await db.app.findUniqueOrThrow({ where: { id: f.app.id } });
-    for (const c of [bound(), bound({ ...{} })]) {
-      expect((await answer(A.keys(app, {}, c))).code).toBe('FORBIDDEN');
-    }
+    // A nested field carries no instruction: a worker session is refused outright.
+    expect((await answer(A.keys(app, {}, bound()))).code).toBe('FORBIDDEN');
   });
 
   it('person-only acts stay person-only for an instructed worker', async () => {
