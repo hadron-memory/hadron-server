@@ -14425,10 +14425,14 @@ export const typeDefs = `#graphql
     OFF
   }
 
-  "#1747 — the closed list of named App grants."
+  "#1747, #3308 — the closed list of named App grants (hrn:node:hadronmemory.com:specs:cor:agt:080:24). Giving any grant stays person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12)."
   enum AppGrantName {
     "Subscribe and unsubscribe OTHER workers of the App, at any cadence."
     TICKER_SUBSCRIBE_WORKERS
+    "Named permission for headless casting, retiring and deleting workers; the holder's own staffing rights still apply. Provisioned before the separate #3308 enforcement rollout."
+    WORKERS_STAFF
+    "Named permission for headless App-member add/remove; the holder's own member-management rights still apply. Provisioned before the separate #3308 enforcement rollout."
+    APP_MEMBERS
   }
 
   enum DueWakeStatus {
