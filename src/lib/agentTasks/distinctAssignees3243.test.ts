@@ -1,3 +1,4 @@
+import { matchQueuedTasks } from './matcher.js';
 import * as launchModule from '../hostOperations/launch.js';
 /** #3243, ruling0084 A: distinct batch matching is all-or-none, named workers count. */
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
@@ -119,3 +120,40 @@ it('post-commit launch receives the family selected by the atomic match',async()
  expect(spy.mock.calls.filter(call=>call[1].taskId===task.id).map(call=>call[1].family)).toEqual(['claude']);
  }finally{spy.mockRestore();}
 });
+
+it('automatic matcher holds graph shared before a distinct batch takes its pool locks; both finish without double assignment',async()=>{
+ const queued=await create({requirements:{role:'reviewer'}});
+ const alpha=await worker('Alpha'), beta=await worker('Beta');
+ const latch=<T,>()=>{let resolve!:(value:T)=>void;const promise=new Promise<T>(r=>{resolve=r;});return{promise,resolve};};
+ const paused=latch<void>(),release=latch<void>(),entered=latch<number>();
+ const observedDb=new Proxy(db,{get(target,key){
+  if(key==='$transaction')return (body:any,options:any)=>target.$transaction(async(tx:any)=>{
+   const [{pid}]=await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;entered.resolve(pid);return body(tx);
+  },options);
+  const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
+ }});
+ const automatic=matchQueuedTasks(db,new Date(),{appId:app.id,hooks:{afterWorkerCheck:async()=>{paused.resolve();await release.promise;}}});
+ let batchRun:Promise<any>|undefined;
+ try {
+  await paused.promise;
+  batchRun=M.createAgentTasks({}, {appRef:app.id,distinctAssignees:true,tasks:[matched({role:'reviewer'})]}, {...ctx,db:observedDb})
+   .then((value:any)=>({value}),(error:any)=>({error}));
+  const pid=await entered.promise;
+  let graphWait=false;const deadline=Date.now()+2000;
+  while(Date.now()<deadline){
+   const [lock]=await db.$queryRaw<{waiting:boolean}[]>`
+    SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=${pid} AND locktype='advisory' AND NOT granted
+     AND mode='ExclusiveLock' AND objsubid=1
+     AND classid::bigint=((hashtextextended(${'task-blockers:'+app.id},0)>>32)&4294967295)
+     AND objid::bigint=(hashtextextended(${'task-blockers:'+app.id},0)&4294967295)) AS waiting`;
+   if(lock.waiting){graphWait=true;break;}await new Promise(r=>setTimeout(r,10));
+  }
+  expect(graphWait).toBe(true); // waits at graph, not on a worker held by the matcher
+  release.resolve();
+  expect((await automatic).map(r=>r.workerId)).toEqual([alpha.id]);
+  const result=await batchRun;expect(result.error).toBeUndefined();
+  expect(result.value[0].assigneeWorkerId).toBe(beta.id);
+  expect((await row(queued.id)).assigneeWorkerId).toBe(alpha.id);
+  expect(await db.agentTeamEvent.count({where:{appId:app.id,type:'assignment.matched'}})).toBe(2);
+ }finally{release.resolve();await Promise.allSettled([automatic,...(batchRun?[batchRun]:[])]);}
+},15000);
