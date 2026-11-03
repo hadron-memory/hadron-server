@@ -9,7 +9,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { resolveRunTools } from '../../../lib/runner/tools/index.js';
-import { loadApp, mayReadAppTasks, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
+import { inRunTeamReadTx, loadApp, mayReadAppTasks, resolveTaskActor, withReadableApp } from './resolvers.agentTask.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
@@ -117,6 +117,19 @@ it('an enabled own-App run reads tasks without becoming an actor; other Apps rem
   expect(page.map((t: { id: string }) => t.id)).toContain(taskId);
   await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
   expect(await Q.agentTask({}, { id: taskId }, principal)).toMatchObject({ id: taskId });
+});
+it('an opted-in foreign App remains concealed on every run team read', async () => {
+  await enable();
+  await enable(otherAppId);
+  const foreign = await db.agentTask.create({ data: { appId: otherAppId, title: 'Foreign task', ownerUserId: manager, status: 'pending' } });
+  const foreignApp = await db.app.findUniqueOrThrow({ where: { id: otherAppId } });
+  expect(foreign.handle).not.toBeNull();
+  const principal = runContext(db, await mintRun());
+  await denied(Q.agentTasks({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
+  await denied(Q.teamRoster({}, { appRef: otherAppId }, principal), 'APP_NOT_FOUND');
+  await denied(Q.workers({}, { appRef: otherAppId }, principal), 'FORBIDDEN');
+  expect(await Q.agentTask({}, { id: foreign.id }, principal)).toBeNull();
+  expect(await Q.agentTask({}, { id: `hrn:agenttask:${foreignApp.urn}:${foreign.handle}` }, principal)).toBeNull();
 });
 it('a userless run cannot use the new read arm for generic create/update/assign writes', async () => {
   await enable();
@@ -258,12 +271,16 @@ it('rechecks a manager demotion after waiting for the setting write lock', async
 it('a source failure is typed and never returns a partial snapshot or echoes database diagnostics', async () => {
   await enable();
   const roster = await import('../../../lib/agentTasks/roster.js');
-  const spy = vi.spyOn(roster, 'loadTeamRoster').mockRejectedValueOnce(new Error('private-source-sentinel'));
+  const original = new Error('private-source-sentinel');
+  const spy = vi.spyOn(roster, 'loadTeamRoster').mockRejectedValueOnce(original);
+  const privateLog = vi.spyOn(console, 'error').mockImplementation(() => {});
   try {
     const err = await snapshotTool().execute(toolCtx(await mintRun()), WINDOW).then(() => null, e => e);
     expect(err?.extensions?.code).toBe('TEAM_SNAPSHOT_SOURCE_FAILED');
     expect(err.message).not.toContain('private-source-sentinel');
-  } finally { spy.mockRestore(); }
+    expect(JSON.stringify(err)).not.toContain('private-source-sentinel');
+    expect(privateLog).toHaveBeenCalledWith('[run-tool] internal_fault', expect.objectContaining({ error: original, requestId: expect.any(String), site: 'hadron_team_snapshot' }));
+  } finally { spy.mockRestore(); privateLog.mockRestore(); }
 });
 it('an oversized roster is explicitly non-continuable, never an empty complete roster', async () => {
   await enable();
@@ -278,6 +295,7 @@ it('preserves a user-backed run’s existing TaskActor, task write and S3b scope
   const principal = runContext(db, await mintRun(manager));
   expect(await resolveTaskActor(principal, (await loadApp(principal, appId))!)).toMatchObject({ kind: 'user', userId: manager });
   expect(await mayReadAppTasks(principal, appId)).toBe(true); // default-off is not a new denial on its legacy person arm.
+  expect((await Q.agentTasks({}, { appRef: appId }, principal)).map((task: { id: string }) => task.id)).toContain(taskId);
   const created = await M.createAgentTask({}, { input: { appRef: appId, title: 'Legacy user-backed write' } }, principal);
   await M.updateAgentTask({}, { taskId: created.id, input: { title: 'Legacy edit' } }, principal);
   expect((await db.agentTask.findUniqueOrThrow({ where: { id: created.id } })).title).toBe('Legacy edit');
@@ -298,4 +316,25 @@ it('an outage in the new userless worker read gate propagates instead of becomin
     return Reflect.get(target, prop, receiver);
   } });
   await expect(Q.worker({}, { ref: workerId }, principal)).rejects.toThrow('synthetic run-read outage');
+});
+
+it('keeps the longer transaction budget confined to run team reads', async () => {
+  await enable();
+  const transact = vi.spyOn(db, '$transaction');
+  try {
+    await withReadableApp(ctx(undefined, { appId, appKeyId: keyId }), appId, async () => true);
+    expect(transact).toHaveBeenCalled();
+    for (const call of transact.mock.calls) expect(call[1]?.timeout).toBeUndefined();
+    transact.mockClear();
+    await inRunTeamReadTx(runContext(db, await mintRun()), appId, () => false, async () => true);
+    expect(transact).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ timeout: 20_000 }));
+  } finally { transact.mockRestore(); }
+});
+it('reads one coherent run-team view while concurrent task state changes', async () => {
+  await enable();
+  await inRunTeamReadTx(runContext(db, await mintRun()), appId, () => { throw new Error('unexpected refusal'); }, async c => {
+    const count = await c.db.agentTask.count({ where: { appId } });
+    await db.agentTask.create({ data: { appId, title: 'Concurrent task', ownerUserId: manager, status: 'pending' } });
+    expect(await c.db.agentTask.count({ where: { appId } })).toBe(count);
+  });
 });
