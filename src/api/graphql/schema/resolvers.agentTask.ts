@@ -2323,8 +2323,9 @@ export const agentTaskMutations = {
    * Start a task: the assignee only (cor:agt:050:08). Explicit start only —
    * 050:02's inferred start is an open question (#1705 interim).
    */
-  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  startAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
+    const started = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee starts it.", { taskId });
       }
@@ -2335,16 +2336,29 @@ export const agentTaskMutations = {
       if (task.blocked) throw taskError('TASK_BLOCKED', 'This task has an open blocker.', { taskId });
       // #2162: unreachable while the claim requires no open task, and asserted here as a guard, not a path.
       await refuseResettingAssignee(tx, app.id, task.assigneeWorkerId);
+      // #3267: advice, decided from the locked row in this transaction; starting still succeeds. A worker assignee
+      // that already holds another STARTED task in this App, and a parent that has already ended.
+      if (task.assigneeWorkerId && (await tx.agentTask.count({
+        where: { appId: app.id, assigneeWorkerId: task.assigneeWorkerId, status: 'started' }, // this task is pending, so never counted
+      })) > 0) warn.push('task.start.other-started');
+      if (task.parentTaskId) {
+        const parent = await tx.agentTask.findUnique({ where: { id: task.parentTaskId }, select: { status: true } });
+        if (parent && ENDED.includes(parent.status)) warn.push('task.start.parent-ended');
+      }
       await tx.agentTask.update({
         where: { id: task.id },
         data: { status: 'started', startedAt: new Date(), ...updatedStamp(ctx) },
       });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.started' } });
-    }, { assignee: true }),
+    }, { assignee: true });
+    await emitTaskWarnings(ctx, info, started.appId, { codes: warn });
+    return started;
+  },
 
   /** Record progress on a started task: the assignee only (cor:agt:050:08). Carries no text (050:11). */
-  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
-    mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
+  recordAgentTaskProgress: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+    const warn: TaskWarningCode[] = [];
+    const recorded = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!isAssignee(actor, task)) {
         throw taskError('TASK_NOT_ASSIGNEE', "Only the task's assignee records progress on it.", { taskId });
       }
@@ -2352,9 +2366,16 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before recording progress.', { taskId, status: task.status });
       }
+      // #3267: advice from the locked row's children, in this transaction: it has children and none is still
+      // unended (backlog, pending or started), so its own finish is probably due. Recording still succeeds.
+      if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { notIn: [...ENDED] } } })) === 0
+        && (await tx.agentTask.count({ where: { parentTaskId: task.id } })) > 0) warn.push('task.progress.children-ended');
       await tx.agentTask.update({ where: { id: task.id }, data: { ...updatedStamp(ctx) } });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.progress' } });
-    }),
+    });
+    await emitTaskWarnings(ctx, info, recorded.appId, { codes: warn });
+    return recorded;
+  },
 
   /** #2663 / hrn:node:hadronmemory.com:specs:cor:agt:050:30: assigners dispose a finished finding, never its result. */
   disposeAgentTaskFinding: async (
