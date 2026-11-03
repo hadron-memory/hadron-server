@@ -155,6 +155,52 @@ it('WEBHOOK root grant survives edit/re-adoption of that row and ends at revoke 
   await db.agentWebhook.update({ where: { id: hook.id }, data: { deletedAt: new Date() } });
   expect(await mayReadAppTasks(principal, appId)).toBe(false);
 });
+it('#3375: a trigger deleted after root resolution refuses the non-transactional read when its locking read returns zero rows', async () => {
+  await enable();
+  const run = await mintRun();
+  const principal = runContext(db, run);
+  expect(await mayReadAppTasks(principal, appId)).toBe(true);
+
+  // dueWakes uses this boolean gate without the anchored RepeatableRead wrapper.
+  const transactions = vi.spyOn(db, '$transaction');
+  const readRoot = db.agentSchedule.findFirst.bind(db.agentSchedule);
+  let resolvedRoot: string | undefined;
+  let lockedRows: unknown;
+  const rootRead = vi.spyOn(db.agentSchedule, 'findFirst').mockImplementationOnce(async args => {
+    const live = await readRoot(args);
+    expect(live?.id).toBe(run.triggerId);
+    resolvedRoot = live!.id;
+    await db.agentSchedule.update({ where: { id: live!.id }, data: { deletedAt: new Date() } });
+    return live; // the real root was live when read; its deletion has now committed.
+  });
+  const observedDb = new Proxy(db, { get(target, key) {
+    if (key === '$queryRaw') return async (...args: Parameters<typeof db.$queryRaw>) => {
+      const rows = await db.$queryRaw(...args);
+      const sql = 'sql' in args[0] ? args[0].sql : args[0].join('?');
+      if (sql.includes('FROM agent_schedules') && sql.includes('FOR SHARE')) {
+        expect(resolvedRoot).toBe(run.triggerId);
+        lockedRows = rows;
+      }
+      return rows;
+    };
+    const value = Reflect.get(target, key);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  try {
+    const admitted = await mayReadAppTasks({ ...principal, db: observedDb }, appId);
+    expect(rootRead).toHaveBeenCalledTimes(1);
+    expect(lockedRows).toEqual([]); // not a fabricated empty result: the actual DB row was deleted.
+    expect(transactions).not.toHaveBeenCalled();
+    expect(await db.appAutomationTeamSnapshotGrant.count({ where: { appId, triggerId: run.triggerId!, revokedAt: null } })).toBe(1);
+    expect(admitted).toBe(false);
+  } finally {
+    rootRead.mockRestore();
+    transactions.mockRestore();
+  }
+  await db.agentSchedule.update({ where: { id: run.triggerId! }, data: { deletedAt: null } });
+  expect(await mayReadAppTasks(principal, appId)).toBe(true);
+});
+
 it('manager gives/lists/revokes with one event per change and stable bounded pages including revoked history', async () => {
   await enable();
   await enable();
