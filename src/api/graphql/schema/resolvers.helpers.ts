@@ -42,7 +42,7 @@ import {
 } from '../../../lib/appAgent.js';
 import { getOrgReadableMemoryIds } from '../../../lib/auth/orgReadableMemory.js';
 import { subscribedAgentMemoryAdmitted } from '../../../lib/auth/memorySubscriptionAccess.js';
-import { getOrgWritableMemoryIds, getSubscribedWritableMemoryIds } from '../../../lib/auth/orgWritableMemory.js';
+import { getOrgWritableMemoryIds } from '../../../lib/auth/orgWritableMemory.js';
 import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
@@ -2809,7 +2809,20 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // A subscription grants writes only to ordinary shared knowledge. Group
   // membership stays the exclusive group-write arm (cor:acl:010:01).
   if (memory.class === 'knowledge' && memory.userMemoryOfAgentId === null) {
-    if ((await getSubscribedWritableMemoryIds(ctx.db, ctx.userId, memoryId)).includes(memoryId)) return;
+    const userOrgs = await ctx.db.orgMember.findMany({
+      where: {
+        userId: ctx.userId,
+        ...LIVE_ORG_MEMBERSHIP,
+        role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] as any },
+      },
+      select: { organizationId: true },
+    });
+    for (const uo of userOrgs) {
+      const memorySub = await ctx.db.memorySubscription.findUnique({
+        where: { memoryId_organizationId: { memoryId, organizationId: uo.organizationId } },
+      });
+      if (memorySub && memorySub.deletedAt === null && (ROLE_ORDER[memorySub.role] ?? -1) >= ROLE_ORDER['CONTRIBUTOR']) return;
+    }
   }
 
   throw memoryWriteForbidden();

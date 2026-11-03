@@ -12,7 +12,8 @@ import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.
 import { createTestableMcpServer } from './server.js';
 import { canReadMemory, canWriteToMemory, getMemoryAccess, getPrincipalAppMemoryAccess } from './access-control.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
+import { getAccessibleMemoryIds, requireMemoryWriteAccess } from '../api/graphql/schema/resolvers.helpers.js';
+import { getSubscribedWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
 import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 
@@ -166,6 +167,44 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     expect((await getPrincipalAppMemoryAccess(db, backed.principal)).get(f.write.id)).toBe(role === 'CONTRIBUTOR' && userRole === 'CONTRIBUTOR' ? 'READ_WRITE' : 'READ_ONLY');
     await db.memorySubscription.update({ where: { id: sub.id }, data: { deletedAt: new Date() } });
     expect((await getPrincipalAppMemoryAccess(db, backed.principal)).has(f.write.id)).toBe(false);
+  });
+  it('a subscription write grant on one memory does not authorize an unrelated target', async () => {
+    const subscriber = await db.organization.create({ data: { name: 'subscriber', urn: `point-${generateId().toLowerCase()}.example` } });
+    await db.orgMember.create({ data: { userId: f.user.id, organizationId: subscriber.id, role: 'CONTRIBUTOR' } });
+    await db.memorySubscription.create({ data: { memoryId: f.read.id, organizationId: subscriber.id, role: 'CONTRIBUTOR' } });
+    expect(await getSubscribedWritableMemoryIds(db, f.user.id, f.read.id)).toEqual([f.read.id]);
+    expect(await getSubscribedWritableMemoryIds(db, f.user.id, f.write.id)).toEqual([]);
+    await expect(requireMemoryWriteAccess(ctx(f.user.id), f.read.id)).resolves.toBeUndefined();
+    await expect(requireMemoryWriteAccess(ctx(f.user.id), f.write.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+  it.each(['app-scoped', 'user-owned', 'deleted', 'revoked', 'reader', 'non-member'] as const)('the independent subscription WRITE helper excludes %s authority', async shape => {
+    const subscriber = await db.organization.create({ data: { name: 'subscriber', urn: `shape-${generateId().toLowerCase()}.example` } });
+    if (shape !== 'non-member') await db.orgMember.create({ data: { userId: f.user.id, organizationId: subscriber.id, role: 'CONTRIBUTOR' } });
+    await db.memorySubscription.create({ data: { memoryId: f.read.id, organizationId: subscriber.id, role: shape === 'reader' ? 'READER' : 'CONTRIBUTOR', deletedAt: shape === 'revoked' ? new Date() : null } });
+    if (shape === 'app-scoped') await db.memory.update({ where: { id: f.read.id }, data: { appId: f.app.id } });
+    if (shape === 'user-owned') await db.memory.update({ where: { id: f.read.id }, data: { organizationId: null, ownerUserId: f.admin.id } });
+    if (shape === 'deleted') await db.memory.update({ where: { id: f.read.id }, data: { deletedAt: new Date() } });
+    expect(await getSubscribedWritableMemoryIds(db, f.user.id, f.read.id)).toEqual([]);
+    // GraphQL's legacy direct gate is unchanged in this slice; liveness is
+    // judged by its callers, not newly imposed here through an extraction.
+    if (shape !== 'deleted') await expect(requireMemoryWriteAccess(ctx(f.user.id), f.read.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
+  });
+  it.each(['membership', 'organization'] as const)('a revoked subscriber %s cannot retain WRITE through a PUBLIC read', async revoked => {
+    const subscriber = await db.organization.create({ data: { name: 'subscriber', urn: `live-${generateId().toLowerCase()}.example` } });
+    await db.orgMember.create({ data: { userId: f.user.id, organizationId: subscriber.id, role: 'CONTRIBUTOR' } });
+    await db.memorySubscription.create({ data: { memoryId: f.publicMemory.id, organizationId: subscriber.id, role: 'CONTRIBUTOR' } });
+    expect((await independentUserItemAccess(db, f.user.id)).get(f.publicMemory.id)).toBe('READ_WRITE');
+    expect(await canWriteToMemory(db, backed.principal, f.publicMemory.id)).toBe(true);
+    if (revoked === 'membership') {
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: subscriber.id, userId: f.user.id } }, data: { deletedAt: new Date() } });
+    } else {
+      await db.organization.update({ where: { id: subscriber.id }, data: { deletedAt: new Date() } });
+    }
+    expect(await getSubscribedWritableMemoryIds(db, f.user.id, f.publicMemory.id)).toEqual([]);
+    expect((await independentUserItemAccess(db, f.user.id)).get(f.publicMemory.id)).toBe('READ_ONLY');
+    expect((await getPrincipalAppMemoryAccess(db, backed.principal)).get(f.publicMemory.id)).toBe('READ_ONLY');
+    expect(await canWriteToMemory(db, backed.principal, f.publicMemory.id)).toBe(false);
+    await expect(requireMemoryWriteAccess(ctx(f.user.id), f.publicMemory.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
   it('automation node-read grant is unchanged for an independently admitted user', async () => {
     await db.orgMember.create({ data: { userId: f.user.id, organizationId: f.org.id, role: 'READER' } });

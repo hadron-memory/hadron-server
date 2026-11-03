@@ -54,7 +54,7 @@ export async function getOrgWritableMemoryIds(
   return [...knowledge, ...groups].map((m: { id: string }) => m.id);
 }
 
-/** #3280: the independent subscription WRITE arm already used by the GraphQL user gate. */
+/** #3280: independent subscription WRITE on live item-eligible rows, matching the GraphQL user gate's role rule. */
 export async function getSubscribedWritableMemoryIds(
   db: PrismaClient, userId: string, onlyMemoryId?: string,
 ): Promise<string[]> {
