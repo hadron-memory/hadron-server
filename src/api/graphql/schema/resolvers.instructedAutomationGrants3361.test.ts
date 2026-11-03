@@ -174,7 +174,7 @@ describe('#3361 instructed automation grants',()=>{
         if(r.body.kind!=='single') throw Error('incremental');
         return r.body.singleResult;
       }
-      const mcp=createMcpServerInstance({userId:f.holder.id,roles:['READER'],appId:f.app.id,sessionId:f.session.id,clientId:'github:test'} as any,()=>{}, {kind:'multi-app'});
+      const mcp=createMcpServerInstance({userId:f.holder.id,roles:['READER'],appId:f.app.id,sessionId:f.session.id,clientId:'github:test'} as any,()=>undefined, {kind:'multi-app'});
       const client=new Client({name:'3361',version:'1'});const [a,b]=InMemoryTransport.createLinkedPair();
       await mcp.connect(b);await client.connect(a);
       try{return await client.callTool({name:tool,arguments:{...(revoke?{id}:{app:f.app.id}),instruction}});}
