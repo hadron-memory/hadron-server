@@ -28,6 +28,8 @@ import { ApolloServer } from '@apollo/server';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { runAsActor } from '../../lib/requestActor.js';
+import { generateId } from '../../lib/id.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 
 let server: Server | undefined;
 let baseUrl: string;
@@ -196,6 +198,57 @@ describe('#2913 connectionFlow', () => {
     expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'connection_failed' });
   });
 
+  it('a callback that arrives after its state expired settles the flow FAILED state_expired (not left PENDING)', async () => {
+    const s = await start();
+    const res = await confirmConnect(s.authorizeUrl);
+    const state = new URL(res.headers.get('location')!).searchParams.get('state')!;
+    const real = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(real + 11 * 60 * 1000);
+    try {
+      const cb = await fetch(`${baseUrl}/auth/gmail/callback?code=c1&state=${state}`, { redirect: 'manual' });
+      expect(cb.status).toBe(400);
+    } finally {
+      spy.mockRestore();
+    }
+    const r = await gql(FLOW(s.flowId), adminId);
+    expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'state_expired' });
+  });
+
+  it('a callback for an unknown state still answers 400 and settles nothing', async () => {
+    const s = await start();
+    const cb = await fetch(`${baseUrl}/auth/gmail/callback?code=c1&state=nope`, { redirect: 'manual' });
+    expect(cb.status).toBe(400);
+    const r = await gql(FLOW(s.flowId), adminId);
+    expect(r.data!.connectionFlow.status).toBe('PENDING');
+  });
+
+  it('a settle that cannot be written never leaves a recorded connection behind a PENDING flow', async () => {
+    const s = await start();
+    mockTool('settle-fail@example.com', 'tool-settle-fail');
+    // Only a CONNECTED settle violates this, so the failure settle that follows can still be written.
+    await db.$executeRawUnsafe('ALTER TABLE connection_flows ADD CONSTRAINT t_no_connected CHECK (connection_id IS NULL)');
+    try {
+      await consentAndCallback(s.authorizeUrl);
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE connection_flows DROP CONSTRAINT t_no_connected');
+    }
+    expect(await db.exchangeConnection.count({ where: { mailboxEmail: 'settle-fail@example.com' } })).toBe(0);
+    const r = await gql(FLOW(s.flowId), adminId);
+    expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'connection_failed' });
+  });
+
+  it('a failure settle that fails once is retried, so the flow does not stay PENDING', async () => {
+    const s = await start();
+    const spy = vi.spyOn(db.connectionFlow, 'updateMany').mockRejectedValueOnce(new Error('blip'));
+    try {
+      await consentAndCallback(s.authorizeUrl, 'error=access_denied');
+    } finally {
+      spy.mockRestore();
+    }
+    const r = await gql(FLOW(s.flowId), adminId);
+    expect(r.data!.connectionFlow).toEqual({ status: 'FAILED', connectionId: null, failureCode: 'access_denied' });
+  });
+
   it('a settled flow never changes again (a replayed callback cannot rewrite it)', async () => {
     const s = await start();
     mockTool('once@flow.example', 'tool-once');
@@ -310,5 +363,21 @@ describe('#2913 connectionFlow: credentials that may never read a flow (resolver
     expect(codes(await run({ userId: adminId, roles: ['READER'], oauthScopes: ['mcp'] }, flowId))).toEqual(['FORBIDDEN']);
     // An App key with no user.
     expect(codes(await run({ appId: 'app-1', roles: [] }, flowId))).toEqual(['UNAUTHENTICATED']);
+  });
+
+  it('a worker-bound session found only on the session row is refused the read and the start', async () => {
+    const { flowId } = await start();
+    const app = await db.app.create({ data: { organizationId: orgId, name: 'Flow App', urn: 'flow-org:app' } });
+    const agent = await db.agent.create({ data: { organizationId: orgId, name: 'Flow Agent', urn: 'flow-org:agent' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Flow Worker', slug: 'flow-worker', heldByUserId: adminId } });
+    const workerSession = await db.session.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, workerId: worker.id, userId: adminId, tool: 'vitest' } });
+    const personSession = await db.session.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, userId: adminId, tool: 'vitest' } });
+    expect(codes(await run({ userId: adminId, roles: ['READER'], sessionId: workerSession.id }, flowId))).toEqual(['FORBIDDEN']);
+    // A session with no worker is still a person.
+    expect(codes(await run({ userId: adminId, roles: ['READER'], sessionId: personSession.id }, flowId))).toBeUndefined();
+    const startRes = await apollo.executeOperation({ query: START }, { contextValue: { db, userId: adminId, roles: ['READER'], sessionId: workerSession.id } as Context });
+    if (startRes.body.kind !== 'single') throw new Error('unexpected');
+    expect(startRes.body.singleResult.errors?.map((e) => e.extensions?.code)).toEqual(['FORBIDDEN']);
   });
 });
