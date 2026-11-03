@@ -1,7 +1,7 @@
 /** #3278 / cor:dmo:050:09: an item limits reach; it never grants a userless run access. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../test/helpers.js';
+import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { runAuthContext } from '../lib/auth/runPrincipal.js';
 import { hadronReadNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
@@ -47,8 +47,8 @@ async function fixture() {
     await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: m.id, role } });
   }
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, class: 'app', appId: app.id, organizationId: org.id } });
-  const schedule = await db.agentSchedule.create({ data: { organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${publicMemory.urn}:${LOC}` } });
-  const run = await db.appRun.create({ data: { organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
+  const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${publicMemory.urn}:${LOC}` } });
+  const run = await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, userId: null, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn } });
   const principal = { db, ...runAuthContext(run) } as Context;
   const tool: RunToolContext = { db, run, principal, log: () => undefined };
   return { org, app, agent, second, admin, user, read, write, publicMemory, granted, team, schedule, run, principal, tool };
@@ -122,7 +122,7 @@ describe('#3278 userless run item admission', () => {
     // An App member with NO org membership: this deliberately exposes the pre-existing user-layer residual,
     // which #3278 asks us to report rather than fix. It is not desired product law.
     const userOnly = { ...ctx(f.user.id) };
-    const backedRun = await db.appRun.create({ data: { organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
+    const backedRun = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.run.entryNodeUrn } });
     const onBehalf = { db, ...runAuthContext(backedRun) } as Context;
     const selectedUser = { ...userOnly, appId: f.app.id };
     expect(await getAccessibleMemoryIds(userOnly, f.read.id, { excludeAppDerived: true })).not.toContain(f.read.id);
