@@ -15,15 +15,15 @@ const claim = { kind: 'LIVE_CHAT', ref: 'synthetic3382:turn' } as const;
 const context = (userId: string, extra: Partial<Context> = {}): Context => ({ db, userId, roles: ['READER'], ...extra });
 beforeEach(async () => { await cleanDb(db); });
 
-async function fixture(n: number) {
+async function fixture(n: number, orgCount = 3) {
   // Stable UUIDv7-shaped synthetic ids let the author compare pre/post JSON bytes directly.
   let serial = 0;
   const id = () => '019000000000700080000000' + (++serial).toString(16).padStart(8, '0');
   const holder = await db.user.create({ data: { id: id(), handle: 'batch-holder', roles: ['READER'] } });
   const owner = await db.user.create({ data: { id: id(), handle: 'batch-app-owner', roles: ['READER'] } });
   const appOrg = await db.organization.create({ data: { id: id(), name: 'App org', urn: 'batch3382-app.test' } });
-  const orgs = await Promise.all([0, 1, 2].map(i => db.organization.create({ data: { id: id(), name: 'Target org', urn: 'batch3382-target' + i + '.test' } })));
-  await db.orgMember.createMany({ data: orgs.map((o, i) => ({ organizationId: o.id, userId: holder.id, role: i < 2 ? 'ADMIN' as const : 'READER' as const })) });
+  const orgs = await Promise.all(Array.from({ length: orgCount }, (_, i) => i).map(i => db.organization.create({ data: { id: id(), name: 'Target org', urn: 'batch3382-target' + i + '.test' } })));
+  await db.orgMember.createMany({ data: orgs.map((o, i) => ({ organizationId: o.id, userId: holder.id, role: i % 3 < 2 ? 'ADMIN' as const : 'READER' as const })) });
   await db.orgMember.create({ data: { organizationId: appOrg.id, userId: holder.id, role: 'CONTRIBUTOR' } });
   const apps = await Promise.all(['a', 'b'].map(name => db.app.create({ data: { id: id(), name, organizationId: appOrg.id, urn: appOrg.urn + ':' + name } })));
   await db.appMember.createMany({ data: apps.map(a => ({ appId: a.id, userId: owner.id, role: 'owner' })) });
@@ -33,7 +33,7 @@ async function fixture(n: number) {
   const memories: Array<Awaited<ReturnType<typeof db.memory.create>>> = [];
   const agents = [];
   for (let i = 0; i <= n; i++) {
-    const org = orgs[i === n ? 0 : i % 3];
+    const org = orgs[i === n ? 0 : i % orgs.length];
     const m = await db.memory.create({ data: { id: id(), name: 'Target', urn: org.urn + ':target-' + i, class: 'system', organizationId: org.id } });
     const a = await db.agent.create({ data: { id: id(), name: 'Target', urn: org.urn + ':agent-' + i, organizationId: org.id, systemMemoryId: m.id } });
     await db.appAgent.createMany({ data: apps.map(app => ({ appId: app.id, agentId: a.id })) });
@@ -78,7 +78,7 @@ const forbidden = (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ ext
 
 describe('#3382 batch-only list contract', () => {
   for (const n of [3, 36]) it('exact rows/order and numeric census with ' + n + ' distinct active targets', async () => {
-    const f = await fixture(n);
+    const f = await fixture(n, n === 36 ? 36 : 3);
     const metrics = [];
     let audit = 0;
     for (const includeRevoked of [false, true]) {
@@ -107,7 +107,7 @@ describe('#3382 batch-only list contract', () => {
         allRows: f.rows.filter(r => r.appId === app.id).length,
         activeTargets: new Set(f.rows.filter(r => r.appId === app.id && !r.revokedAt).map(r => r.memoryId)).size,
         allTargets: new Set(f.rows.filter(r => r.appId === app.id).map(r => r.memoryId)).size })), metrics };
-    console.info('3382 SYNTHETIC CENSUS', JSON.stringify(census));
+    process.stdout.write('3382 SYNTHETIC CENSUS ' + JSON.stringify(census) + '\n');
     expect(census.active).toBe(3 * n);
     expect(census.revoked).toBe(n + 1);
     for (const metric of metrics) expect(metric.queries, JSON.stringify(metric)).toBeLessThanOrEqual(metric.mode === 'worker' ? 24 : 8);
