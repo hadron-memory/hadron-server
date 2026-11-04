@@ -172,6 +172,36 @@ it('a claimant superseded mid-attempt cannot record a failure either', async () 
   expect(await row(t.id)).toMatchObject({ matchPending: false, matchFailedReason: 'NO_ROLE' });
 });
 
+// ── the create-time attempt holds the UNCLAIMED state (Atilla's local P2 on #3417) ──
+it('the create-time attempt (no claim) does not start once a sweep has claimed the task', async () => {
+  await worker();
+  const t = await interrupted({ requirements: { role: 'reviewer' }, matchClaimedAt: at(BOUND) });
+  await matchTaskNow(db, t.id, at(BOUND + 1000)); // the original three-argument call
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: null, matchPending: true, matchFailedAt: null, matchClaimedAt: at(BOUND) });
+  expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'assignment.matched' } })).toBe(0);
+});
+
+it('a create-time attempt that a sweep claims mid-attempt cannot assign', async () => {
+  await worker();
+  const t = await interrupted({ requirements: { role: 'reviewer' } });
+  await matchTaskNow(supersededMidAttempt(t.id, at(BOUND)), t.id, at(BOUND + 1000));
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: null, matchPending: true, matchClaimedAt: at(BOUND) });
+  expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'assignment.matched' } })).toBe(0);
+});
+
+it('a create-time attempt that a sweep claims mid-attempt cannot record a failure', async () => {
+  const t = await interrupted({ requirements: { role: 'nobody' } });
+  await matchTaskNow(supersededMidAttempt(t.id, at(BOUND)), t.id, at(BOUND + 1000));
+  expect(await row(t.id)).toMatchObject({ matchPending: true, matchFailedAt: null, matchFailedReason: null, matchClaimedAt: at(BOUND) });
+});
+
+it('and the create-time attempt still wins an unclaimed reservation, as before', async () => {
+  const w = await worker();
+  const t = await interrupted({ requirements: { role: 'reviewer' } });
+  await matchTaskNow(db, t.id, at(1000));
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: w.id, matchPending: false });
+});
+
 it('the sweep itself carries its claim: a reclaim landing mid-attempt stops the sweep\'s attempt from writing', async () => {
   await worker();
   const t = await interrupted({ requirements: { role: 'reviewer' } });

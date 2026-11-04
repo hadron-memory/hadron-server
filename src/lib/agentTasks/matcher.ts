@@ -492,7 +492,8 @@ async function tryAssign(
   /** The monotonic half of `now`'s sample (`anchorNow`), from the pass; by default taken here, beside a fresh `now`. */
   anchor: number = anchorNow(),
   matchNow = false,
-  /** #3246: the recovery sweep's claim; the write lands only while this attempt still holds it. */
+  /** #3246: the recovery sweep's claim, or none for the create-time attempt; a match-now write lands only while its
+   *  claim state is the one this attempt began with (the sweep's claim, or still unclaimed). */
   claim?: Date,
 ): Promise<AttemptOutcome> {
   return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow, claim));
@@ -526,7 +527,7 @@ async function tryAssignInTx(
   await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
   const n = await tx.agentTask.updateMany({
     where: { id: task.id, appId: task.appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
-      matchPending: matchNow, matchFailedAt: null, ...(claim ? { matchClaimedAt: claim } : {}),
+      matchPending: matchNow, matchFailedAt: null, ...(matchNow ? { matchClaimedAt: claim ?? null } : {}),
       requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
     data: {
       assigneeWorkerId: workerId,
@@ -731,9 +732,10 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
   const anchor = anchorNow();
   const task = await db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   if (!task.matchPending || task.status !== 'pending' || task.assigneeWorkerId || task.assigneeUserId) return;
-  // #3246: the recovery sweep passes the claim it wrote. An attempt whose claim was superseded (its own was slow or
-  // died, and a later sweep reclaimed the task) neither starts nor writes: the later claimant is the one attempt.
-  if (claim && task.matchClaimedAt?.getTime() !== claim.getTime()) return;
+  // #3246: the recovery sweep passes the claim it wrote; the create-time attempt passes none and so holds the
+  // UNCLAIMED state. An attempt whose claim state moved (a sweep took the task from the create-time attempt, or a later
+  // sweep reclaimed it from a slow or dead one) neither starts nor writes: the current claimant is the one attempt.
+  if ((task.matchClaimedAt?.getTime() ?? null) !== (claim?.getTime() ?? null)) return;
   const outcome = await chooseMatchNow(db, task, now, async (workerId, family) =>
     tryAssign(db, task, workerId, family, now, {}, anchor, true, claim));
   if ('workerId' in outcome) {
@@ -742,7 +744,7 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, 
   }
   const { reason } = outcome;
   await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
-    ...(claim ? { matchClaimedAt: claim } : {}) },
+    matchClaimedAt: claim ?? null },
     data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
 }
 
