@@ -9,8 +9,9 @@
  *
  * Who may set or clear: the existing updateApp gate, unchanged (`requireOwnerOrOrgRole(ctx, app,
  * 'ADMIN')`): an org ADMIN (or platform ADMIN) for an org-owned App, the owner for a user-owned App
- * (`chk_app_owner_xor`: an App has exactly one of the two). Whether to tighten that is an open
- * ruling on the issue; this build exposes the argument under the existing gate.
+ * (`chk_app_owner_xor`: an App has exactly one of the two). Ruling 0135 chose that gate as built, and
+ * cor:acl:040:07 states it. The platform-ADMIN arm on an org-owned App is as built with no ruling of
+ * its own (that rule's Edge Cases).
  */
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -27,15 +28,15 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
 const server = new ApolloServer({ typeDefs, resolvers });
 afterAll(async () => { await server.stop(); });
 
-const ctx = (userId: string): Context => ({ db, roles: ['READER'], userId }) as Context;
+const ctx = (userId: string, roles: string[] = ['READER']): Context => ({ db, roles, userId }) as Context;
 
 const UPDATE = `mutation($ref: ID!, $policy: JSON, $name: String) {
   updateApp(ref: $ref, policy: $policy, name: $name) { id policy }
 }`;
 const UPDATE_NAME_ONLY = `mutation($ref: ID!, $name: String) { updateApp(ref: $ref, name: $name) { id } }`;
 
-async function run(query: string, variables: Record<string, unknown>, userId: string) {
-  const res = await server.executeOperation({ query, variables }, { contextValue: ctx(userId) });
+async function run(query: string, variables: Record<string, unknown>, userId: string, roles?: string[]) {
+  const res = await server.executeOperation({ query, variables }, { contextValue: ctx(userId, roles) });
   const body = (res.body as { kind: 'single'; singleResult: { data?: any; errors?: any[] } }).singleResult;
   return body;
 }
@@ -148,5 +149,105 @@ describe('#3423 updateApp(policy) through the real schema', () => {
     expect(update?.type.toString()).toBe('JSON');
     expect(update?.description).toMatch(/Explicit null clears; omitted preserves/);
     expect(create?.description ?? '').not.toMatch(/omitted preserves/);
+  });
+});
+
+/**
+ * #3428: the three P3 pins the #3425 seats asked for (Beckett BLIND, Rodolfo §10, Bruno LOCAL).
+ * Test-only; the gate and the resolver are untouched. Same real-schema path as above: Apollo
+ * `executeOperation` over `typeDefs`, so variable coercion is the server's, not a direct call.
+ */
+describe('#3428 updateApp(policy): variables, platform ADMIN, refusal order', () => {
+  const STORED = { allow: ['run.execute'] };
+  let platformAdmin: { id: string };
+  beforeEach(async () => {
+    // A platform ADMIN who is in no org and owns nothing: whatever it can do here comes from the
+    // platform role alone.
+    platformAdmin = await db.user.create({ data: { id: generateId(), handle: 'platform3428' } });
+  });
+
+  describe('pin 1: the nullable JSON variable', () => {
+    it('a $policy object sets the link', async () => {
+      const out = await run(UPDATE, { ref: orgApp.id, policy: { allow: ['memory.*'] } }, orgAdmin.id);
+      expect(out.errors).toBeUndefined();
+      expect(await policyOf(orgApp.id)).toEqual({ allow: ['memory.*'] });
+    });
+
+    it('$policy: null clears the link (the variable, not a literal)', async () => {
+      await db.app.update({ where: { id: orgApp.id }, data: { policy: STORED } });
+      const out = await run(UPDATE, { ref: orgApp.id, policy: null }, orgAdmin.id);
+      expect(out.errors).toBeUndefined();
+      expect(out.data.updateApp.policy).toBeNull();
+      expect(await policyOf(orgApp.id)).toBeNull();
+    });
+
+    it('$policy declared in the document but omitted from the variables preserves the link', async () => {
+      await db.app.update({ where: { id: orgApp.id }, data: { policy: STORED } });
+      // UPDATE declares $policy; the variables carry no policy key at all.
+      const out = await run(UPDATE, { ref: orgApp.id, name: 'renamed' }, orgAdmin.id);
+      expect(out.errors).toBeUndefined();
+      expect(out.data.updateApp.policy).toEqual(STORED);
+      expect(await policyOf(orgApp.id)).toEqual(STORED);
+      expect((await db.app.findUniqueOrThrow({ where: { id: orgApp.id } })).name).toBe('renamed');
+    });
+  });
+
+  describe('pin 2: a platform ADMIN (platform role, no org membership)', () => {
+    // Two arms admit here: requireOwnerOrOrgRole's platform bypass and requireOrgRole's own platform
+    // short-circuit. Removing either alone leaves the other admitting (equivalent mutants); removing
+    // both turns this red.
+    it('sets and clears an org-owned App\'s link (as built, no ruling of its own: cor:acl:040:07 Edge Cases)', async () => {
+      const set = await run(UPDATE, { ref: orgApp.id, policy: STORED }, platformAdmin.id, ['ADMIN']);
+      expect(set.errors).toBeUndefined();
+      expect(await policyOf(orgApp.id)).toEqual(STORED);
+      const cleared = await run(UPDATE, { ref: orgApp.id, policy: null }, platformAdmin.id, ['ADMIN']);
+      expect(cleared.errors).toBeUndefined();
+      expect(await policyOf(orgApp.id)).toBeNull();
+    });
+
+    // BUILT-AS, NOT LAW (hadron-server#1734). cor:dmo:050:12 (Decided) counts platform admins among
+    // those who manage a user-owned App too; its Built line records that as not built, tracked in
+    // #1734, and cor:acl:040:07 lists whether a platform admin may write this link as open to change.
+    // Today requireOwnerOrOrgRole runs spec 047's strict owner-only branch before the platform bypass,
+    // so the platform ADMIN is refused. This pins that built boundary so a change to it is deliberate:
+    // whoever builds #1734 (or a later ruling that changes the gate) flips this expectation knowingly.
+    // It is not a guard on a platform rule.
+    it('is refused on someone else\'s user-owned App, policy unchanged (gate as built under #1734)', async () => {
+      await db.app.update({ where: { id: soloApp.id }, data: { policy: STORED } });
+      const baseline = await run(UPDATE_NAME_ONLY, { ref: soloApp.id, name: 'x' }, platformAdmin.id, ['ADMIN']);
+      expect(baseline.errors?.length).toBe(1);
+      expect(baseline.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+      for (const policy of [{ allow: ['*'] }, null]) {
+        const out = await run(UPDATE, { ref: soloApp.id, policy }, platformAdmin.id, ['ADMIN']);
+        expect(shape(out.errors)).toBe(shape(baseline.errors));
+      }
+      expect(await policyOf(soloApp.id)).toEqual(STORED);
+    });
+  });
+
+  describe('pin 3: refusal before shape validation (no shape oracle; the cor:dmo:050:20 pattern)', () => {
+    const MALFORMED = [{ allow: 'oops' }, { deny: ['x'] }, ['run.execute'], 'run.execute', 7];
+    for (const [who, app] of [['orgMember', 'org'], ['outsider', 'org'], ['outsider', 'solo'], ['orgAdmin', 'solo']] as const) {
+      it(`${who} sending a malformed link to the ${app}-owned App gets FORBIDDEN, never BAD_USER_INPUT, nothing stored`, async () => {
+        const caller = { orgMember, outsider, orgAdmin }[who].id;
+        const target = app === 'org' ? orgApp : soloApp;
+        await db.app.update({ where: { id: target.id }, data: { policy: STORED } });
+        const baseline = await run(UPDATE_NAME_ONLY, { ref: target.id, name: 'x' }, caller);
+        expect(baseline.errors?.[0]?.extensions?.code).toBe('FORBIDDEN');
+        for (const policy of MALFORMED) {
+          const out = await run(UPDATE, { ref: target.id, policy }, caller);
+          expect(shape(out.errors)).toBe(shape(baseline.errors));
+        }
+        expect(await policyOf(target.id)).toEqual(STORED);
+      });
+    }
+
+    it('CONTROL: the same malformed links from an authorized caller are BAD_USER_INPUT (so the pins above are not vacuous)', async () => {
+      for (const policy of MALFORMED) {
+        const out = await run(UPDATE, { ref: orgApp.id, policy }, orgAdmin.id);
+        expect(out.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+      }
+      expect(await policyOf(orgApp.id)).toBeNull();
+    });
   });
 });

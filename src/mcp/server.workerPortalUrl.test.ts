@@ -99,8 +99,10 @@ function workerUrns(text: string): string[] {
   return text
     .split('\n')
     // #2969: the rendered signature/trailer lines carry the worker's link inside them (`](<origin>/app/u/<urn>)`), by
-    // design; they are not identifiers, like the `URL:` lines.
-    .filter((line) => !/^\s*URL:/.test(line) && !line.includes('/app/u/hrn:worker:'))
+    // design; they are not identifiers, like the `URL:` lines. #3140: only that link span is dropped, so a worker URN
+    // printed ELSEWHERE on the same line still counts as an identifier.
+    .filter((line) => !/^\s*URL:/.test(line))
+    .map((line) => line.replace(/\]\([^\s)]*\/app\/u\/hrn:worker:[^\s)]+\)/g, ']()'))
     .flatMap((line) => [...line.matchAll(/hrn:worker:[^\s)]+/g)].map((m) => m[0]));
 }
 
@@ -116,6 +118,19 @@ function expectLinkForEveryUrn(out: string): void {
   expect(urns.length).toBeGreaterThan(0);
   expect(urlLines(out)).toEqual(urns.map((u) => `${PORTAL}/app/u/${u}`));
 }
+
+describe('#3140 — the workerUrns oracle drops only the link span', () => {
+  const link = (urn: string) => `[Anna, engineer](${PORTAL}/app/u/${urn})`;
+  it('a line holding only the link span yields no identifier', () => {
+    expect(workerUrns(`— ${link('hrn:worker:o:t:anna')} · model`)).toEqual([]);
+  });
+  it('a bare URN on the same line as a link span is still counted, alone', () => {
+    expect(workerUrns(`— ${link('hrn:worker:o:t:anna')} see hrn:worker:o:t:berta`)).toEqual(['hrn:worker:o:t:berta']);
+  });
+  it('a URL: line is still excluded and a bare URN line is still counted', () => {
+    expect(workerUrns(`URL: ${PORTAL}/app/u/hrn:worker:o:t:anna\nhrn:worker:o:t:berta`)).toEqual(['hrn:worker:o:t:berta']);
+  });
+});
 
 describe('#1026 — a worker URN never appears without its link', () => {
   // #3082: hadron_get_worker / list_workers / cast_worker / start_session no longer register over MCP. The worker link
