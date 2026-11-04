@@ -1,3 +1,4 @@
+import { orgAgentLicenseUsable } from './auth/orgAgentInstallLicense.js';
 import { loadAppInstallationPage, listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
  * AppAgent convenience and license helpers. Installation membership includes
@@ -165,7 +166,15 @@ export async function listLicensedAppInstallations(db: Db, appId: string) {
   const app = apps[0];
   if (!app || app.deletedAt || app.uninstalledAt) return [];
   const licensed = await activeAgentInstallLicenseIds(db, app, rows.map(row => row.agent));
-  return rows.filter(row => licensed.has(row.agentId));
+  // Keep legacy ROW readers unchanged. DERIVED entries obey cast's rule:
+  // own-org may provision a missing grant, but never revive an inactive row.
+  const ownDerivedIds=rows.filter(row=>row.installationKind==='DERIVED' && row.agent.organizationId===app.organizationId).map(row=>row.agentId);
+  const ownGrants=app.organizationId && ownDerivedIds.length
+    ? await db.agentOrgGrant.findMany({where:{orgId:app.organizationId,agentId:{in:ownDerivedIds}}}) : [];
+  const ownById=new Map(ownGrants.map(grant=>[grant.agentId,grant]));
+  return rows.filter(row => licensed.has(row.agentId) &&
+    !(row.installationKind==='DERIVED' && app.organizationId && row.agent.organizationId===app.organizationId &&
+      !orgAgentLicenseUsable(app.organizationId,row.agent.organizationId,ownById.get(row.agentId)??null)));
 }
 
 /** A retained AppAgent pointer is authority only while its install is live. */
@@ -178,7 +187,12 @@ export async function isAgentInstalledAndLicensed(
   if (!install) return false;
   const app = await db.app.findUnique({where:{id:appId},select:{organizationId:true,ownerUserId:true,deletedAt:true,uninstalledAt:true}});
   if (!app || app.deletedAt || app.uninstalledAt) return false;
-  return hasActiveAgentInstallLicense(db, app, install.agent);
+  if (!(await hasActiveAgentInstallLicense(db, app, install.agent))) return false;
+  if (install.installationKind==='DERIVED' && app.organizationId && install.agent.organizationId===app.organizationId) {
+    const grant=await db.agentOrgGrant.findUnique({where:{orgId_agentId:{orgId:app.organizationId,agentId}}});
+    return orgAgentLicenseUsable(app.organizationId,install.agent.organizationId,grant);
+  }
+  return true;
 }
 
 /** Primary is an audit-order convenience over physical rows, not an installation-membership test. */
