@@ -40,6 +40,7 @@ async function wire(query:string,variables:Record<string,unknown>,full=false){
  return response.body.singleResult.data as any;
 }
 const rosterQuery='query($ref:ID!){app(ref:$ref){appAgents{agent{id} createdAt createdBy updatedAt updatedBy}}}';
+const agentsQuery='query($ref:ID!){app(ref:$ref){agents{id} appAgents{agent{id}}}}';
 for(const importDay of [1,7]){
  it(`withheld t5/t9/t${importDay} entries share the App date and sort only by Agent id`,async()=>{
   await db.agentImport.updateMany({data:{createdAt:T(importDay)}});
@@ -49,6 +50,17 @@ for(const importDay of [1,7]){
   expect(rows.map((row:any)=>row.agent?.id??HIDDEN)).toEqual([BETA,GAMMA,HIDDEN]);
   for(const row of rows)expect(row).toMatchObject({createdBy:null,updatedAt:null,updatedBy:null});
  });
+ for(const full of [false,true]) {
+  it(`App.agents t5/t9/t${importDay} follows the served installation order (full=${full})`,async()=>{
+   await db.agentImport.updateMany({data:{createdAt:T(importDay)}});
+   const app=(await wire(agentsQuery,{ref:appId},full)).app;
+   const expected=[{id:HIDDEN,date:T(5)},{id:GAMMA,date:T(9)},{id:BETA,date:T(Math.max(5,importDay))}]
+    .sort((a,b)=>(full?a.date.getTime()-b.date.getTime():0)||a.id.localeCompare(b.id))
+    .filter(row=>full||row.id!==HIDDEN).map(row=>row.id);
+   expect(app.agents.map((agent:any)=>agent.id)).toEqual(expected);
+   expect(app.agents.map((agent:any)=>agent.id)).toEqual(app.appAgents.filter((row:any)=>row.agent!==null).map((row:any)=>row.agent.id));
+  });
+ }
  it(`full t5/t9/t${importDay} entries retain per-entry dates and sort across kinds`,async()=>{
   await db.agentImport.updateMany({data:{createdAt:T(importDay)}});
   const rows=(await wire(rosterQuery,{ref:appId},true)).app.appAgents;
@@ -59,8 +71,10 @@ for(const importDay of [1,7]){
  });
 }
 it.each([false,true])('the reverse Agent.appAgents route applies the same date gate (full=%s)',async(full)=>{
- const data=await wire('query($ref:ID!){agent(ref:$ref){appAgents{createdAt}}}',{ref:GAMMA},full);
- expect(data.agent.appAgents).toEqual([{createdAt:T(full?9:2).toISOString()}]);
+ const data=await wire('query($ref:ID!){agent(ref:$ref){appAgents{createdAt createdBy updatedAt updatedBy}}}',{ref:GAMMA},full);
+ const row=await db.appAgent.findUniqueOrThrow({where:{appId_agentId:{appId,agentId:GAMMA}}});
+ expect(data.agent.appAgents).toEqual([{createdAt:T(full?9:2).toISOString(),
+  createdBy:full?row.createdBy:null,updatedAt:full?row.updatedAt?.toISOString()??null:null,updatedBy:full?row.updatedBy:null}]);
 });
 it.each([false,true])('a newly created install returns its real date but a later read applies the gate (full=%s)',async(full)=>{
  await db.agent.create({data:{id:DELTA,name:'Delta',urn:`dates-${generateId().toLowerCase()}.example:delta`,organizationId:orgId,visibility:'ORGANIZATION'}});
@@ -72,4 +86,12 @@ it.each([false,true])('a newly created install returns its real date but a later
  const listed=(await wire(rosterQuery,{ref:appId},full)).app.appAgents;
  const delta=listed.find((entry:any)=>entry.agent?.id===DELTA);
  expect(delta.createdAt).toBe((full?row.createdAt:T(2)).toISOString());
+});
+
+it.each([false,true])('a fresh physical install does not sort ahead of a derived entry by kind (full=%s)',async(full)=>{
+ await db.agent.create({data:{id:DELTA,name:'Delta',urn:`dates-${generateId().toLowerCase()}.example:delta`,organizationId:orgId,visibility:'ORGANIZATION'}});
+ await db.appAgent.create({data:{appId,agentId:DELTA,createdAt:T(11)}});
+ const app=(await wire(agentsQuery,{ref:appId},full)).app;
+ expect(app.agents.map((agent:any)=>agent.id)).toEqual(full?[HIDDEN,BETA,GAMMA,DELTA]:[BETA,GAMMA,DELTA]);
+ expect(app.agents.map((agent:any)=>agent.id)).toEqual(app.appAgents.filter((row:any)=>row.agent!==null).map((row:any)=>row.agent.id));
 });
