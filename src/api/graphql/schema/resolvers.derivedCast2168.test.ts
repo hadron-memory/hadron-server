@@ -9,7 +9,7 @@ import { resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { resolveRegister } from '../../../lib/resolveRegister.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { lockAppInstallation, listUnfilteredAppInstallations } from '../../../lib/appInstallations.js';
+import { lockAppInstallation, listUnfilteredAppInstallations, readInstallBootPrompt } from '../../../lib/appInstallations.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -962,5 +962,13 @@ it('same-App attach refuses an Agent after its last installation witness is remo
  const agent=await db.agent.findUniqueOrThrow({where:{id:role.id}});
  await db.agentImport.deleteMany({});
  await expect(db.$transaction(tx=>requireAgentMemoryGrant({...ctx(),db:tx} as Context,agent,memory,'read',memory.id)))
-  .rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+  .rejects.toMatchObject({code:'MEMORY_NOT_FOUND'});
+});
+
+it('a saved derived pointer is unavailable once the Agent is no longer installed',async()=>{
+ await db.appAgentCustomization.create({data:{appId:app.id,agentId:role.id,bootPromptNodeId:null,bootPromptUrn:null}});
+ expect(await readInstallBootPrompt(db,app.id,role.id)).toEqual({bootPromptNodeId:null,bootPromptUrn:null});
+ await db.agentImport.deleteMany({});
+ expect(await readInstallBootPrompt(db,app.id,role.id)).toBeNull();
+ expect(await db.appAgentCustomization.count({where:{appId:app.id,agentId:role.id}})).toBe(1);
 });

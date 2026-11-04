@@ -3417,7 +3417,10 @@ export async function uninstallAgentFromAppCore(
       await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
       // #3435: the delete is row-keyed. An Agent that is STILL installed by derivation (a direct import of an installed
       // Agent, #2168) has not left the App, so the App's own register rows naming it stay.
-      if (!(await lockAppInstallation(tx, resolvedAppId, resolvedAgentId)))
+      // Hold the raw witnesses, then judge whether the App still has a usable
+      // installation. A revoked derived witness must not retain register rows.
+      await lockAppInstallation(tx, resolvedAppId, resolvedAgentId);
+      if (!(await resolveAppInstallation(tx, resolvedAppId, resolvedAgentId)))
         await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
