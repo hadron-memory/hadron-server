@@ -15,7 +15,8 @@
  *
  * Who may see (090:07, Proposed): a person who participates in the App sees every signal; a worker through its own
  * session sees the live signals that cover it; a host key sees the signals on its own host. An absent signal and one
- * the caller may not see answer the same STOP_SIGNAL_NOT_FOUND.
+ * the caller may not see answer the same STOP_SIGNAL_NOT_FOUND. A worker's session is refused before any lookup, so
+ * the two answer alike there too.
  *
  * Each write runs in one transaction: authority anchors, then the App's stop fence EXCLUSIVE (before the reportsTo
  * graph lock: `inTaskWriteTx`'s `stopFence`), then the rights re-checked under them, so a manager demoted or a key
@@ -302,9 +303,13 @@ async function liftSignal(appRef: string, id: string, ctx: Context, instruction?
   }
   const { app, actor } = await managerEntry(ctx, appRef, instruction);
   const out = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
+    // A worker is judged before the lookup: it can't read another worker's signal (090:07), so a refusal after it would
+    // say the signal exists. A person reads them all, and keeps the not-found answer for a missing one.
+    const manages = await actorManagesApp(txCtx, fresh, actor, actor.instructed);
+    if (!manages && actor.kind === 'worker') throw managerRequired();
     const s = await signalInApp(tx, fresh.id, id);
     if (!s) throw notFound();
-    if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) throw managerRequired();
+    if (!manages) throw managerRequired();
     const now = new Date();
     const r = await liftStopSignal(tx, s.id, stopActor(actor), now);
     if (r.changed) await recordInstructedManagerAct(tx, fresh.id, actor, 'stop.lift', { signalId: s.id });
