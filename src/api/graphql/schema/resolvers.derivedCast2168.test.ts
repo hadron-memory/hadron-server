@@ -61,6 +61,15 @@ const refuse = async () => {
   await expect(cast()).rejects.toMatchObject({
     extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
   });
+  await expect(
+    (resolvers.Query as any).castWorkerPreview(
+      {},
+      { appRef: app.id, agentRef: role.id, name: 'Derived' },
+      ctx(),
+    ),
+  ).rejects.toMatchObject({
+    extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
+  });
   expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
 };
 beforeEach(async () => {
@@ -547,6 +556,66 @@ it.each(['node', 'memory'] as const)(
         agent: own,
         surface: 'bind',
       }),
-    ).rejects.toMatchObject({ code: 'BOOT_PROMPT_TARGET_DELETED' });
+    ).rejects.toMatchObject({
+      extensions: { code: 'BOOT_PROMPT_TARGET_DELETED' },
+    });
   },
 );
+
+it('changes an existing Worker to a derived Agent through the same castability source', async () => {
+  const w = await cast({ agentRef: parent.id });
+  await M.changeWorkerAgent({}, { workerRef: w.id, agentRef: role.id }, ctx());
+  expect(await db.worker.findUnique({ where: { id: w.id } })).toMatchObject({
+    agentId: role.id,
+    role: 'engineer',
+  });
+  expect(
+    await db.appAgent.count({ where: { appId: app.id, agentId: role.id } }),
+  ).toBe(0);
+});
+it('never treats saved customisation state as installation authority after import removal', async () => {
+  await M.createNode(
+    {},
+    {
+      input: {
+        install: { appRef: app.id, agentRef: role.id },
+        loc: 'boot:source',
+        name: 'Source',
+        content: 'Custom',
+        role: 'boot-prompt',
+      },
+    },
+    ctx(),
+  );
+  await compileBootPrompt(ctx(), {
+    kind: 'APP_AGENT',
+    appId: app.id,
+    agentId: role.id,
+  });
+  expect(
+    await db.appAgentCustomization.count({
+      where: { appId: app.id, agentId: role.id },
+    }),
+  ).toBe(1);
+  await db.agentImport.deleteMany({});
+  await refuse();
+});
+it('gives an absent Agent and an existing non-imported one the same refusal JSON', async () => {
+  await db.agentImport.deleteMany({});
+  const answer = async (agentRef: string) => {
+    try {
+      await cast({ agentRef });
+      throw new Error('unexpected success');
+    } catch (error) {
+      const e = error as { message: string; extensions: unknown };
+      return { message: e.message, extensions: e.extensions };
+    }
+  };
+  const known = await answer(role.id);
+  expect(await answer(generateId())).toEqual(known);
+  expect(known).toEqual({
+    message:
+      'agentRef must name an Agent installed in this App — casting requires the agent on the roster at cast time.',
+    extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
+  });
+});
