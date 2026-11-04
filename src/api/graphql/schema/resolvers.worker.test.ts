@@ -537,10 +537,11 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     const mutation = { operation: { operation: 'mutation' } };
 
     const shared = ctx(admin.id);
-    let spy = vi.spyOn(db.appAgent, 'findMany');
+    let spy = vi.spyOn(db.app, 'findMany');
     try {
       expect(await W.repos(a, {}, shared, query)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0); // the shared roster page actually ran
       expect(await W.repos(b, {}, shared, query)).toEqual(['acme/api']);
       expect(spy.mock.calls.length).toBe(afterFirst); // memoized
     } finally {
@@ -548,10 +549,11 @@ describe('#1024 — Worker.repos (resolved role affinity)', () => {
     }
 
     const inMutation = ctx(admin.id);
-    spy = vi.spyOn(db.appAgent, 'findMany');
+    spy = vi.spyOn(db.app, 'findMany');
     try {
       expect(await W.repos(a, {}, inMutation, mutation)).toEqual(['acme/api']);
       const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0); // the shared roster page actually ran
       expect(await W.repos(b, {}, inMutation, mutation)).toEqual(['acme/api']);
       // Re-read, deliberately: a mutation must not serve its own stale answer.
       expect(spy.mock.calls.length).toBeGreaterThan(afterFirst);
