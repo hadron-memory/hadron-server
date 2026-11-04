@@ -101,3 +101,9 @@ it.each([false,true])('App.agents uses the served key when visible date order op
  const app=(await wire(agentsQuery,{ref:appId},full)).app;
  expect(app.agents.map((agent:any)=>agent.id)).toEqual(full?[GAMMA,HIDDEN,BETA]:[BETA,GAMMA]);
 });
+
+it.each([BETA,GAMMA])('setAppAgentBootPrompt returns a complete readable Agent for %s',async(agentId)=>{
+ const agent=await db.agent.findUniqueOrThrow({where:{id:agentId}});
+ const data=await wire('mutation($app:String!,$agent:String!){setAppAgentBootPrompt(appRef:$app,agentRef:$agent,nodeRef:null){agent{id createdAt} bootPromptRef}}',{app:appId,agent:agentId});
+ expect(data.setAppAgentBootPrompt).toEqual({agent:{id:agentId,createdAt:agent.createdAt.toISOString()},bootPromptRef:null});
+});

@@ -929,3 +929,38 @@ it('held installation witnesses fence App lifecycle writes until the deciding tr
     await update;
   }
 },20000);
+
+it('customisation of a non-installed Agent refuses before creating any memory or node',async()=>{
+ await db.agentImport.deleteMany({});
+ const before={memories:await db.memory.count(),nodes:await db.node.count(),pointers:await db.appAgentCustomization.count()};
+ await expect(M.createNode({}, {input:{install:{appRef:app.id,agentRef:role.id},loc:'custom:refused',name:'Refused',content:'no write'}},ctx()))
+  .rejects.toMatchObject({extensions:{code:'AGENT_NOT_INSTALLED'}});
+ expect({memories:await db.memory.count(),nodes:await db.node.count(),pointers:await db.appAgentCustomization.count()}).toEqual(before);
+});
+
+it.each(['ROW','DERIVED'] as const)('the same-App attach gate holds the %s installation witness until its grant commits',async(kind)=>{
+ const {requireAgentMemoryGrant}=await import('./resolvers.helpers.js');
+ if(kind==='ROW')await db.appAgent.create({data:{appId:app.id,agentId:role.id}});
+ const memory=await db.memory.create({data:{organizationId:org.id,appId:app.id,class:'knowledge',name:'Attach fence',urn:`attach-${generateId().toLowerCase()}.example:knowledge`}});
+ const agent=await db.agent.findUniqueOrThrow({where:{id:role.id}});
+ let removal='';
+ await db.$transaction(async(tx)=>{
+  expect(await requireAgentMemoryGrant({...ctx(),db:tx} as Context,agent,memory,'read',memory.id)).toBe('read');
+  removal=await db.$transaction(async(other)=>{
+   await other.$executeRaw`SET LOCAL lock_timeout = '150ms'`;
+   if(kind==='ROW')await other.appAgent.delete({where:{appId_agentId:{appId:app.id,agentId:role.id}}});
+   else await other.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+   return 'committed';
+  }).then(String,(e:Error)=>e.message);
+ },{timeout:15000});
+ expect(removal).toMatch(/lock timeout|canceling statement/i);
+});
+
+it('same-App attach refuses an Agent after its last installation witness is removed',async()=>{
+ const {requireAgentMemoryGrant}=await import('./resolvers.helpers.js');
+ const memory=await db.memory.create({data:{organizationId:org.id,appId:app.id,class:'knowledge',name:'Not installed',urn:`attach-${generateId().toLowerCase()}.example:knowledge`}});
+ const agent=await db.agent.findUniqueOrThrow({where:{id:role.id}});
+ await db.agentImport.deleteMany({});
+ await expect(db.$transaction(tx=>requireAgentMemoryGrant({...ctx(),db:tx} as Context,agent,memory,'read',memory.id)))
+  .rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+});
