@@ -261,7 +261,7 @@ export const typeDefs = `#graphql
     updatedBefore: String
     "Include soft-deleted nodes (default false)."
     includeDeleted: Boolean
-    "Structured predicate over the node's properties/data JSONB (#719)."
+    "Structured predicate over the node's properties/data JSONB (#719). Not supported by appNodes (refused with BAD_USER_INPUT); use findNodes (#3427)."
     where: NodeWhereInput
     "#1591 — only nodes in this approval state (read from the stored revision; a node changed outside a revisioned writer is reconciled on its next read)."
     approvalState: NodeApprovalState
@@ -9446,6 +9446,7 @@ export const typeDefs = `#graphql
     Accepts the App's ID or fully qualified URN. NodeFilter narrows node fields,
     including objectType, approvalState and minted. Nonempty memoryIds or
     memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
+    where and childrenOf are rejected with BAD_USER_INPUT too (#3427, #2832); use findNodes.
     Unlike findNodes, system-node types are not excluded by default. Deleted
     content remains subject to recovery authority. NodeFilter.contentScope
     COMMENTS or ALL can select comments. When contentScope is omitted,
@@ -9461,7 +9462,7 @@ export const typeDefs = `#graphql
     but total counts every node appNodes would return for the filter and hasMore says whether rows
     remain past this page. Ordered by loc, then id, so the order is stable across the App's memories.
     Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200,
-    a negative offset is 0. The filter's memoryIds and memoryClasses are refused, as on appNodes.
+    a negative offset is 0. The filter's memoryIds, memoryClasses, where and childrenOf are refused, as on appNodes.
 
     Accepts the App's ID or URN.
     """
