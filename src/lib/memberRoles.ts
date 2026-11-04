@@ -1,3 +1,4 @@
+import { listAppInstallations, lockAppInstallations } from './appInstallations.js';
 /**
  * #2171 (R211, cor:dmo:050:04 "Which roles an App offers"): member roles stay
  * per Agent, an Agent's managers edit them, and an App offers the UNION of the
@@ -61,11 +62,7 @@ export async function loadOfferedMemberRoles(
   /** Restrict the union to these Agents: the ones an admission actually locked (see lockOfferedMemberRoleRows). */
   onlyAgentIds?: readonly string[],
 ): Promise<{ installed: boolean; roles: string[] }> {
-  const installs = await db.appAgent.findMany({
-    where: { appId, agent: { deletedAt: null }, ...(onlyAgentIds ? { agentId: { in: [...onlyAgentIds] } } : {}) },
-    orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
-    select: { agent: { select: { installationPolicy: true } } },
-  });
+  const installs = (await listAppInstallations(db, appId)).filter(row => !onlyAgentIds || onlyAgentIds.includes(row.agentId));
   const roles: string[] = [];
   for (const i of installs) {
     for (const r of rolesOfPolicy(i.agent.installationPolicy)) if (!roles.includes(r)) roles.push(r);
@@ -87,13 +84,7 @@ export async function loadOfferedMemberRoles(
  * (caller), then join rows, then agents; the editor takes only the agent row.
  */
 export async function lockOfferedMemberRoleRows(tx: Prisma.TransactionClient, appId: string): Promise<string[]> {
-  const rows = await tx.$queryRaw<{ agent_id: string }[]>`
-    SELECT agent_id FROM app_agents WHERE app_id = ${appId} ORDER BY agent_id FOR SHARE
-  `;
-  const ids = rows.map((r) => r.agent_id);
-  if (ids.length === 0) return ids;
-  await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
-  return ids;
+  return (await lockAppInstallations(tx,appId)).map(row=>row.agentId);
 }
 
 /**

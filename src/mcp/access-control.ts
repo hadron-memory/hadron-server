@@ -1,3 +1,4 @@
+import { listAppInstallations } from '../lib/appInstallations.js';
 /**
  * MCP access-control: which memories can the caller read/write?
  *
@@ -155,12 +156,14 @@ async function buildAppMemoryMap(
       ownerUserId: true,
       deletedAt: true,
       uninstalledAt: true,
-      appAgents: {
-        orderBy: { createdAt: 'asc' },
-        ...(opts.allAgents ? {} : { take: 1 }),
-        select: {
-          agent: {
-            select: {
+
+    },
+  });
+  if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
+
+  const installs = await listAppInstallations(db,appId);
+  const selected = opts.allAgents ? installs : installs.slice(0,1);
+  const agents = await db.agent.findMany({where:{id:{in:selected.map(row=>row.agentId)}},select:{
               id: true,
               organizationId: true,
               ownerUserId: true,
@@ -177,17 +180,8 @@ async function buildAppMemoryMap(
                   } },
                 },
               },
-            },
-          },
-        },
-      },
-    },
-  });
-  if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
-
-  const agents = app.appAgents
-    .map((install) => install.agent)
-    .filter((agent): agent is NonNullable<typeof agent> => agent !== null && agent.deletedAt === null);
+            }});
+  const appInstalls = agents.map(agent=>({agent}));
   const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);
   const systemIds = agents
     .filter((agent) => licensedAgentIds.has(agent.id) && agent.systemMemoryId !== null)
@@ -205,7 +199,7 @@ async function buildAppMemoryMap(
       ? await loadItemUserAccess() : new Map<string, string>())
     : undefined;
   const access = new Map<string, string>();
-  for (const install of app.appAgents) {
+  for (const install of appInstalls) {
     const agentAccess = getPrimaryAgentAccess(
       { ...app, appAgents: [install] }, licensedAgentIds, opts.includeSystemMemories === false ? new Set<string>() : liveSystemIds,
       // #1376 (R201): an item is a limit, never a grant, so a credential-only principal gets none of its Agent's items.
@@ -686,11 +680,12 @@ async function installedSystemMemoryFolds(
     where: { id: { in: ids }, deletedAt: null, uninstalledAt: null },
     select: {
       id: true, organizationId: true, ownerUserId: true,
-      appAgents: { select: { agent: { select: { id: true, organizationId: true, ownerUserId: true, systemMemoryId: true, deletedAt: true } } } },
+
     },
   });
+  const installations = await listAppInstallations(db,ids);
   const perApp = await Promise.all(apps.map(async (app) => {
-    const agents = app.appAgents.map((install) => install.agent).filter((agent) => agent !== null && agent.deletedAt === null);
+    const agents = installations.filter(row=>row.appId===app.id).map(row=>row.agent);
     const licensed = await activeAgentInstallLicenseIds(db, app, agents);
     return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && a.systemMemoryId !== null) };
   }));
@@ -1439,10 +1434,7 @@ export async function filterReadableMemoryIds(
       ),
     ];
     const installed = legacyAgentIds.length
-      ? await db.appAgent.findMany({
-          where: { appId: auth.appId, agentId: { in: legacyAgentIds } },
-          select: { agentId: true },
-        })
+      ? (await listAppInstallations(db,auth.appId)).filter(row=>legacyAgentIds.includes(row.agentId))
       : [];
     installedAgentIds = new Set(installed.map((row) => row.agentId));
 

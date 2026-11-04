@@ -1,3 +1,4 @@
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -373,7 +374,7 @@ export const chatMutations = {
           where: {
             userId: ctx.userId,
             app: {
-              appAgents: { some: { agentId: resolvedAgentId } },
+              ...appInstallationWhere(resolvedAgentId),
               deletedAt: null,
             },
           },
@@ -492,7 +493,7 @@ export const chatMutations = {
             ownerOrgIds.length > 0
               ? await ctx.db.app.findFirst({
                   where: {
-                    appAgents: { some: { agentId: resolvedAgentId } },
+                    ...appInstallationWhere(resolvedAgentId),
                     organizationId: { in: ownerOrgIds },
                     deletedAt: null,
                   },

@@ -3206,8 +3206,9 @@ export const typeDefs = `#graphql
     agentSessionsExpire: Boolean!
     anonymousTtlDays: Int!
     """
-    023-app-shape US1: Agents installed in this App, via the AppAgent
-    N:M join. Multiple Agents can be installed; one App credential
+    Agents installed in this App, by a physical row or derived from a direct
+    import of a physically installed Agent (#2168). installationKind distinguishes
+    the two; derived installations do not write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
     """
     appAgents: [AppAgent!]!
@@ -3232,7 +3233,11 @@ export const typeDefs = `#graphql
   read-only to every App) and per FR-001 it carries NO trainingMode
   column (training mode is per-App, on App.trainingMode).
   """
+  enum AppAgentInstallationKind { ROW DERIVED }
+
   type AppAgent {
+    "Whether this App installs the Agent by a row or derives it from a direct import; no row is written for DERIVED."
+    installationKind: AppAgentInstallationKind!
     "The App when this caller may read it; strict user ownership still applies."
     app: App
     "The installed Agent when this caller may read its definition; an installation license alone does not grant that read."

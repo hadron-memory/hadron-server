@@ -1,3 +1,4 @@
+import { resolveAppInstallation, listAppInstallations } from '../../../lib/appInstallations.js';
 /**
  * App-scoped memory mutations — add a memory to an App.
  *
@@ -141,10 +142,7 @@ async function resolveInstalledAgent(
   }
   // One query does the install check AND fetches the agent's urn (via the
   // AppAgent join) instead of isAgentInstalled + a separate agent read.
-  const appAgent = await ctx.db.appAgent.findUnique({
-    where: { appId_agentId: { appId, agentId } },
-    select: { agent: { select: { id: true, urn: true } } },
-  });
+  const appAgent = await resolveAppInstallation(ctx.db, appId, agentId);
   if (!appAgent) throw notInstalled();
   return appAgent.agent;
 }
@@ -240,9 +238,7 @@ export const appMemoryMutations = {
       await requireAppMemoryCreator(txCtx, current);
       // Uninstall takes the App anchor exclusively. Its committed removal is
       // observed here after any wait, and cannot pass this writer until commit.
-      const installed = await txCtx.db.appAgent.findFirst({
-        where: { appId: id, agent: { deletedAt: null } }, select: { agentId: true },
-      });
+      const installed = (await listAppInstallations(txCtx.db, id))[0];
       if (!installed) throw new GraphQLError('This App has no Agent installed.', {
         extensions: { code: 'AGENT_NOT_INSTALLED' },
       });

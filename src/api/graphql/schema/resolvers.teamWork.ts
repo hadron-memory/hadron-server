@@ -1,3 +1,4 @@
+import { listAppInstallations } from '../../../lib/appInstallations.js';
 // Team-worklog operations — #947: recordTeamWork + teamWorkItems as platform
 // operations (team logic lives server-side; CLI/MCP/portal are thin surfaces —
 // the #936/#941/#944 sibling pattern).
@@ -315,10 +316,7 @@ async function bootstrapWorklog(ctx: Context, app: AppRow): Promise<WorklogRootR
     teamAgent = await locateTeamAgent(ctx, app.id, null);
   } catch (e) {
     if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId: app.id },
-      select: { agent: { select: { id: true, name: true, urn: true, deletedAt: true } } },
-    });
+    const installed = await listAppInstallations(ctx.db, app.id);
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length !== 1) throw e;
     teamAgent = live[0];

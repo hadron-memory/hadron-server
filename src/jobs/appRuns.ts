@@ -1,3 +1,5 @@
+import { agentInstallationWhere } from '../lib/appInstallations.js';
+import { listAppInstallations, resolveAppInstallation } from '../lib/appInstallations.js';
 import { renderScriptArgs, ScriptVariableMissingError } from '../lib/runner/scriptArgs.js';
 import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
@@ -434,10 +436,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // review, Codex P1). Checked here (defense in depth) and at trigger
   // creation.
   if (args.agentId) {
-    const installed = await db.appAgent.findFirst({
-      where: { appId: args.appId, agentId: args.agentId },
-      select: { agentId: true },
-    });
+    const installed = await resolveAppInstallation(db,args.appId,args.agentId);
     if (!installed) {
       throw new RunLaunchDeniedError(
         'agentId is not installed in this App.',
@@ -458,7 +457,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
         where: {
           userId: args.userId,
           revokedAt: null,
-          agent: { appAgents: { some: { appId: args.appId } } },
+          agent: agentInstallationWhere(args.appId),
         },
         select: { userId: true },
       });

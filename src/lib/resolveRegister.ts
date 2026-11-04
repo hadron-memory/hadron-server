@@ -1,3 +1,4 @@
+import { resolveAppInstallation, listAppInstallations } from './appInstallations.js';
 /**
  * Spec 049 Phase 6 — `resolveRegister` (plan §4.3, D5 local / D-2026-09-13-007)
  * and `renderDerivedBlocks` (the ONE composition point for the briefing's
@@ -133,7 +134,7 @@ async function attendeeColumns(
   const [agent, app, install] = await Promise.all([
     db.agent.findFirst({ where: { id: attendee.agentId, deletedAt: null }, select: { urn: true } }),
     db.app.findFirst({ where: { id: attendee.appId, deletedAt: null }, select: { organizationId: true } }),
-    db.appAgent.findUnique({ where: { appId_agentId: { appId: attendee.appId, agentId: attendee.agentId } }, select: { agentId: true } }),
+    resolveAppInstallation(db, attendee.appId, attendee.agentId),
   ]);
   if (!agent || !app || !install) return null;
   return {

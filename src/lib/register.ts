@@ -1,3 +1,4 @@
+import { listAppInstallations, appInstallationWhere } from './appInstallations.js';
 /**
  * Spec 049 Phase 5 — the chat register's gates and reference resolution
  * (D-2026-09-13-007, §14 corrections 1–2; plan §3.5, §8.3, §8.6).
@@ -213,12 +214,10 @@ export async function resolveRegisterAttendee(
   } catch {
     throw refuse();
   }
-  const install = await ctx.db.appAgent.findFirst({
-    where: owner.appId
-      ? { appId: owner.appId, agentId }
-      : { agentId, app: { organizationId: owner.organizationId, deletedAt: null } },
-    select: { agentId: true },
-  });
+  const candidates = owner.appId ? [owner.appId] : (await ctx.db.app.findMany({
+    where:{organizationId:owner.organizationId,deletedAt:null,...appInstallationWhere(agentId)},select:{id:true},
+  })).map(app=>app.id);
+  const install = (await listAppInstallations(ctx.db,candidates,agentId))[0];
   if (!install) throw refuse();
   return { attendeeWorkerId: null, attendeeAgentId: agentId };
 }

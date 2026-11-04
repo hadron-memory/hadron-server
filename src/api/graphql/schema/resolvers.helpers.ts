@@ -1,3 +1,4 @@
+import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization } from '../../../lib/appInstallations.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
@@ -758,10 +759,8 @@ async function sameAppAttachAdmitted(
   // that re-activates if the agent is reinstalled. The lock makes that delete
   // wait for this transaction instead. No deadlock: uninstall takes no memory
   // or agent lock.
-  const installed = await ctx.db.$queryRaw<{ app_id: string }[]>`
-    SELECT app_id FROM app_agents WHERE app_id = ${app.id} AND agent_id = ${agent.id} FOR KEY SHARE
-  `;
-  if (installed.length === 0) return false;
+  const installed = await lockAppInstallation(ctx.db as Prisma.TransactionClient,app.id,agent.id);
+  if (!installed) return false;
   // The join can outlive a revoked/expired install license. Lock that row and
   // evaluate the same lifecycle predicate as the App access fold, so a revoke
   // cannot commit between this decision and the attached grant.
@@ -3328,10 +3327,16 @@ export async function installAgentIntoAppCore(
           data: { trainingMode: args.trainingMode, updatedBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
         });
       }
+      await lockAppAgentCustomization(tx,resolvedAppId,resolvedAgentId);
+      const prior = await lockAppInstallation(tx,resolvedAppId,resolvedAgentId);
+      const inheritedPointer = prior?.installationKind === 'DERIVED'
+        ? await readInstallBootPrompt(tx,resolvedAppId,resolvedAgentId) : null;
       let installed;
       try {
         installed = await tx.appAgent.create({
-          data: { appId: resolvedAppId, agentId: resolvedAgentId, createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null },
+          data: { appId: resolvedAppId, agentId: resolvedAgentId, createdBy: ctx.userId ?? ctx.appId ?? ctx.clientId ?? null,
+            ...(inheritedPointer ? {bootPromptNodeId:inheritedPointer.bootPromptNodeId,bootPromptUrn:inheritedPointer.bootPromptUrn}:{}),
+          },
           include: { app: true, agent: { include: AGENT_INCLUDE } },
         });
       } catch (e) {

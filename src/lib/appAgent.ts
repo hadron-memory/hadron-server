@@ -1,26 +1,8 @@
+import { listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
- * AppAgent helpers — spec 023-app-shape Phase 2b.
- *
- * After spec 023 dropped `App.agentId` in favor of the N:M `AppAgent`
- * join, code that previously read "the App's Agent" needs a new path.
- * Until US1's `installAgentIntoApp` ships the multi-Agent UI flows,
- * each App still has exactly one installed Agent in practice — the
- * defensive backfill in `20260517004132_023_drop_app_agent_id` made
- * sure of that for existing rows.
- *
- * These helpers wrap the lookup so callers don't reach into the join
- * table directly:
- *
- *   - `getPrimaryAgentId(db, appId)` — returns the first installed
- *     Agent's id, or null if the App has no Agents installed.
- *   - `getPrimaryAgent(db, appId, args?)` — returns the first
- *     installed Agent record with optional `include`.
- *
- * "Primary" is a v1 convenience: there is no business concept of a
- * "primary" Agent yet. Multi-Agent semantics (returning a list, or
- * resolving by URN from the request context) ship with the US1
- * resolvers in their own PR. Callers that need the full list should
- * use `db.appAgent.findMany({ where: { appId } })` directly.
+ * AppAgent convenience and license helpers. Installation membership includes
+ * one-hop imports through appInstallations.ts. "Primary" remains the oldest
+ * physical install: an audit-order convenience, never a membership test.
  */
 
 import type { PrismaClient, Prisma } from '../generated/prisma/index.js';
@@ -118,13 +100,12 @@ export async function activeAppInstallLicenseIdsForAgent(
 ): Promise<Set<string>> {
   const licensed = new Set<string>();
   if (appIds.length === 0) return licensed;
-  const installs = await db.appAgent.findMany({
-    where: { agentId, appId: { in: appIds } },
-    select: {
-      appId: true,
-      app: { select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } },
-      agent: { select: { organizationId: true, ownerUserId: true, deletedAt: true } },
-    },
+  const rows = await listAppInstallations(db, appIds, agentId);
+  const apps = await db.app.findMany({where:{id:{in:rows.map(row=>row.appId)}},select:{id:true,organizationId:true,ownerUserId:true,deletedAt:true,uninstalledAt:true}});
+  const byId = new Map(apps.map(app=>[app.id,app]));
+  const installs = rows.flatMap(row=>{
+    const app = byId.get(row.appId);
+    return app ? [{...row,app}] : [];
   });
   if (installs.length === 0 || installs[0]!.agent.deletedAt !== null) return licensed;
   const agent = installs[0]!.agent;
@@ -183,17 +164,14 @@ export async function isAgentInstalledAndLicensed(
   appId: string,
   agentId: string,
 ): Promise<boolean> {
-  const install = await db.appAgent.findUnique({
-    where: { appId_agentId: { appId, agentId } },
-    select: {
-      app: { select: { organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true } },
-      agent: { select: { organizationId: true, ownerUserId: true, deletedAt: true } },
-    },
-  });
-  if (!install || install.app.deletedAt || install.app.uninstalledAt || install.agent.deletedAt) return false;
-  return hasActiveAgentInstallLicense(db, install.app, { id: agentId, ...install.agent });
+  const install = await resolveAppInstallation(db, appId, agentId);
+  if (!install) return false;
+  const app = await db.app.findUnique({where:{id:appId},select:{organizationId:true,ownerUserId:true,deletedAt:true,uninstalledAt:true}});
+  if (!app || app.deletedAt || app.uninstalledAt) return false;
+  return hasActiveAgentInstallLicense(db, app, install.agent);
 }
 
+/** Primary is an audit-order convenience over physical rows, not an installation-membership test. */
 export async function getPrimaryAgentId(
   db: Pick<PrismaClient, 'appAgent'>,
   appId: string,
@@ -227,13 +205,9 @@ export async function getPrimaryAgent<
  * Check whether a specific Agent is installed in an App. Fast PK lookup.
  */
 export async function isAgentInstalled(
-  db: Pick<PrismaClient, 'appAgent'>,
+  db: InstallationDb,
   appId: string,
   agentId: string,
 ): Promise<boolean> {
-  const row = await db.appAgent.findUnique({
-    where: { appId_agentId: { appId, agentId } },
-    select: { appId: true },
-  });
-  return row !== null;
+  return (await resolveAppInstallation(db, appId, agentId)) !== null;
 }

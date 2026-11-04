@@ -1,3 +1,4 @@
+import { agentInstallationWhere } from '../appInstallations.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 
 /**
@@ -24,7 +25,7 @@ export async function hasAppRelationship(
       activatedAt: { not: null },
       revokedAt: null,
       OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-      agent: { appAgents: { some: { appId } } },
+      agent: agentInstallationWhere(appId),
     },
     select: { userId: true },
   });

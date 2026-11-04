@@ -1,3 +1,4 @@
+import { lockAppInstallation } from '../appInstallations.js';
 // Agent ticker templates — #2024 (S8), hrn:node:hadronmemory.com:specs:cor:agt:080:33 (Proposed).
 //
 // An Agent declares the tickers its workers should have. Casting a worker from the Agent into an App turns every
@@ -170,10 +171,8 @@ export async function instantiateAgentTickerTemplates(
   await lockAgentTemplates(tx, args.agentId, 'shared');
   // The installation was read before this transaction and the locks above can wait; re-decide it now, and hold
   // the rows FOR SHARE so an uninstall or Agent removal waits for this cast instead of racing it.
-  const installed = await tx.$queryRaw<Array<{ ok: number }>>`
-    SELECT 1 AS ok FROM app_agents aa JOIN agents a ON a.id = aa.agent_id
-    WHERE aa.app_id = ${args.appId} AND aa.agent_id = ${args.agentId} AND a.deleted_at IS NULL FOR SHARE OF aa, a`;
-  if (installed.length === 0) throw new GeneratedAgentNotInstalledError(args.appId);
+  const installed = await lockAppInstallation(tx, args.appId, args.agentId);
+  if (!installed) throw new GeneratedAgentNotInstalledError(args.appId);
   const plans = await planGeneratedTickers(tx, { appId: args.appId, agentId: args.agentId, workerName: args.worker.name });
   return writeGeneratedTickers(tx, { appId: args.appId, worker: args.worker, createdBy: args.createdBy, plans });
 }
@@ -227,10 +226,8 @@ export async function applyAgentTickerTemplates(
   args: { appId: string; agentId: string; worker: { id: string; name: string }; createdBy: string | null },
 ): Promise<{ created: Array<{ tickerId: string; subscriptionId: string; plan: PlannedTicker }>; alreadyPresent: TemplateRow[] }> {
   await lockAgentTemplates(tx, args.agentId, 'shared');
-  const installed = await tx.$queryRaw<Array<{ ok: number }>>`
-    SELECT 1 AS ok FROM app_agents aa JOIN agents a ON a.id = aa.agent_id
-    WHERE aa.app_id = ${args.appId} AND aa.agent_id = ${args.agentId} AND a.deleted_at IS NULL FOR SHARE OF aa, a`;
-  if (installed.length === 0) throw new GeneratedAgentNotInstalledError(args.appId);
+  const installed = await lockAppInstallation(tx, args.appId, args.agentId);
+  if (!installed) throw new GeneratedAgentNotInstalledError(args.appId);
   const templates = await liveTemplates(tx, args.agentId);
   const have = new Set(
     (await tx.ticker.findMany({

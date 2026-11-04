@@ -669,6 +669,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir comment-invariants.sql
 \ir boot-prompt-invariants.sql
 \ir boot-prompt-pointer-invariants.sql
+\ir derived-install-prompt-pointer-invariants.sql
 \ir compiled-prompt-revision-invariants.sql
 \ir boot-prompt-approval-invariants.sql
 

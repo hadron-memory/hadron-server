@@ -1,3 +1,4 @@
+import { listAppInstallations, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
 import { captureSetupConsent } from '../../../lib/automation/pins.js';
@@ -386,7 +387,7 @@ async function resolveManualRunAgent(
 ): Promise<string | null> {
   const named = await resolveInstalledAgent(ctx, appId, agentRef);
   if (named) return named;
-  const installed = await ctx.db.appAgent.findMany({ where: { appId }, select: { agentId: true }, take: 2 });
+  const installed = (await listAppInstallations(ctx.db,appId)).slice(0,2);
   if (installed.length > 1) {
     throw new GraphQLError('This App has several installed Agents: pass agentRef to name the one the run is served as.', {
       extensions: { code: 'RUN_AGENT_REQUIRED' },
@@ -491,10 +492,7 @@ async function resolveInstalledAgent(
     if (e instanceof AgentNotFoundError) throw notInstalled();
     throw e;
   }
-  const installed = await ctx.db.appAgent.findFirst({
-    where: { appId, agentId },
-    select: { agentId: true },
-  });
+  const installed = await resolveAppInstallation(ctx.db,appId,agentId);
   if (!installed) throw notInstalled();
   return agentId;
 }

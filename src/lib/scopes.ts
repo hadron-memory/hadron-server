@@ -1,3 +1,4 @@
+import { listAppInstallations } from './appInstallations.js';
 /**
  * Spec 049 Phase 2 — named search scopes ("lenses"), D-2026-09-13-001.
  *
@@ -202,13 +203,12 @@ export async function appContextIfReadable(
       id: true,
       organizationId: true,
       ownerUserId: true,
-      appAgents: { where: { agent: { deletedAt: null } }, select: { agentId: true } },
     },
   });
   if (!app) return null;
   const admitted = ctx.userId ? await isAppParticipant(ctx, app) : ctx.appId === app.id;
   if (!admitted) return null;
-  return { id: app.id, organizationId: app.organizationId, agentIds: app.appAgents.map((a) => a.agentId) };
+  return { id: app.id, organizationId: app.organizationId, agentIds: (await listAppInstallations(ctx.db,app.id)).map(row=>row.agentId) };
 }
 
 /** An App key's scope reach: its App, its App's org, its App's installed Agents. */
@@ -221,12 +221,12 @@ async function appKeyScopeReach(
     // Live Agents only: deleteAgent soft-deletes and leaves the AppAgent row,
     // and a dead Agent's scope must neither be readable nor shadow a live one
     // (Codex on PR #1160).
-    select: { organizationId: true, appAgents: { where: { agent: { deletedAt: null } }, select: { agentId: true } } },
+    select: { organizationId: true },
   });
   return {
     appId,
     organizationId: app?.organizationId ?? null,
-    agentIds: app?.appAgents.map((a) => a.agentId) ?? [],
+    agentIds: app ? (await listAppInstallations(ctx.db,appId)).map(row=>row.agentId) : [],
   };
 }
 
@@ -484,28 +484,19 @@ export async function appScopeMemoryIds(db: Context['db'], appId: string): Promi
     select: {
       organizationId: true,
       ownerUserId: true,
-      appAgents: {
-        orderBy: { createdAt: 'asc' },
-        select: {
-          agent: {
-            select: {
-              id: true,
-              organizationId: true,
-              deletedAt: true,
-              memoryItems: {
-                where: { deletedAt: null, memory: { deletedAt: null, class: { not: 'system' } } },
-                orderBy: { createdAt: 'asc' },
-                select: { memoryId: true, memory: { select: { appId: true, ownerUserId: true } } },
-              },
-            },
-          },
-        },
-      },
+
     },
   });
   if (!app) return [];
+  const installs = await listAppInstallations(db,appId);
+  const agents = await db.agent.findMany({where:{id:{in:installs.map(row=>row.agentId)}},select:{
+    id:true,organizationId:true,deletedAt:true,memoryItems:{
+      where:{deletedAt:null,memory:{deletedAt:null,class:{not:'system'}}},orderBy:{createdAt:'asc'},
+      select:{memoryId:true,memory:{select:{appId:true,ownerUserId:true}}},
+    },
+  }});
   const ids: string[] = [];
-  for (const row of app.appAgents) {
+  for (const row of agents.map(agent=>({agent}))) {
     if (!row.agent || row.agent.deletedAt) continue;
     // The same three admissibility rules the gate applies to an install
     // (`getPrimaryAgentAccess` / `admissibleFoldRows`, Copilot on PR #1161):

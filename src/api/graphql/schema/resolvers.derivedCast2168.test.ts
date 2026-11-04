@@ -670,41 +670,123 @@ it.each(['org-member', 'platform-admin'] as const)(
 );
 
 it('serialises an explicit install with a concurrent clear of the derived App prompt', async () => {
-  const own=await db.agent.findUniqueOrThrow({where:{id:role.id}});
-  await db.node.create({data:{memoryId:own.systemMemoryId!,loc:'boot:source',name:'Source',content:'Custom',role:'boot-prompt'}});
-  const compiled=await compileBootPrompt(ctx(),{kind:'APP_AGENT',appId:app.id,agentId:role.id});
-  let release!:()=>void, ready!:()=>void;
-  const held=new Promise<void>(r=>{release=r}); const staged=new Promise<void>(r=>{ready=r});
-  let installerPid=0;
-  const hookedDb=new Proxy(db,{get(target,key){
-    if(key==='$transaction') return (work:any,options:any)=>db.$transaction(async tx=>{
-      const wrapped=new Proxy(tx,{get(transaction,model){
-        if(model==='appAgent') return new Proxy(tx.appAgent,{get(delegate,method){
-          if(method==='create') return async (args:any)=>{
-            installerPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
-            ready();await held;return tx.appAgent.create(args);
-          };
-          const value=Reflect.get(delegate,method,delegate);return typeof value==='function'?value.bind(delegate):value;
-        }});
-        const value=Reflect.get(transaction,model,transaction);return typeof value==='function'?value.bind(transaction):value;
-      }});
-      return work(wrapped);
-    },options);
-    const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
-  }});
-  const installing=M.installAgentIntoApp({}, {appRef:app.id,agentRef:role.id},{...ctx(),db:hookedDb});
-  await Promise.race([staged,installing.then(()=>{throw new Error('install never reached the controlled insert')})]);
-  let settled=false;
-  const clearing=M.setAppAgentBootPrompt({}, {appRef:app.id,agentRef:role.id,nodeRef:null},ctx())
-    .then((value:unknown)=>{settled=true;return {value}},(error:unknown)=>{settled=true;return {error}});
+  const own = await db.agent.findUniqueOrThrow({ where: { id: role.id } });
+  await db.node.create({
+    data: {
+      memoryId: own.systemMemoryId!,
+      loc: 'boot:source',
+      name: 'Source',
+      content: 'Custom',
+      role: 'boot-prompt',
+    },
+  });
+  const compiled = await compileBootPrompt(ctx(), {
+    kind: 'APP_AGENT',
+    appId: app.id,
+    agentId: role.id,
+  });
+  let release!: () => void, ready!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const staged = new Promise<void>((r) => {
+    ready = r;
+  });
+  let installerPid = 0;
+  const hookedDb = new Proxy(db, {
+    get(target, key) {
+      if (key === '$transaction')
+        return (work: any, options: any) =>
+          db.$transaction(async (tx) => {
+            const wrapped = new Proxy(tx, {
+              get(transaction, model) {
+                if (model === 'appAgent')
+                  return new Proxy(tx.appAgent, {
+                    get(delegate, method) {
+                      if (method === 'create')
+                        return async (args: any) => {
+                          installerPid = (
+                            await tx.$queryRaw<
+                              Array<{ pid: number }>
+                            >`SELECT pg_backend_pid() AS pid`
+                          )[0].pid;
+                          ready();
+                          await held;
+                          return tx.appAgent.create(args);
+                        };
+                      const value = Reflect.get(delegate, method, delegate);
+                      return typeof value === 'function'
+                        ? value.bind(delegate)
+                        : value;
+                    },
+                  });
+                const value = Reflect.get(transaction, model, transaction);
+                return typeof value === 'function'
+                  ? value.bind(transaction)
+                  : value;
+              },
+            });
+            return work(wrapped);
+          }, options);
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const installing = M.installAgentIntoApp(
+    {},
+    { appRef: app.id, agentRef: role.id },
+    { ...ctx(), db: hookedDb },
+  );
+  await Promise.race([
+    staged,
+    installing.then(() => {
+      throw new Error('install never reached the controlled insert');
+    }),
+  ]);
+  let settled = false;
+  const clearing = M.setAppAgentBootPrompt(
+    {},
+    { appRef: app.id, agentRef: role.id, nodeRef: null },
+    ctx(),
+  ).then(
+    (value: unknown) => {
+      settled = true;
+      return { value };
+    },
+    (error: unknown) => {
+      settled = true;
+      return { error };
+    },
+  );
   try {
-    await vi.waitFor(async()=>{
-      const waiting=await db.$queryRaw<Array<{pid:number}>>`SELECT pid FROM pg_stat_activity WHERE ${installerPid} = ANY(pg_blocking_pids(pid))`;
-      expect(settled||waiting.length>0).toBe(true);
-    },{timeout:5000,interval:10});
-  } finally {release();await installing;}
-  const cleared=await clearing;if('error' in cleared) throw cleared.error;
-  expect((await db.appAgent.findUniqueOrThrow({where:{appId_agentId:{appId:app.id,agentId:role.id}}})).bootPromptNodeId).toBeNull();
-  expect((await db.appAgentCustomization.findUniqueOrThrow({where:{appId_agentId:{appId:app.id,agentId:role.id}}})).bootPromptNodeId).toBeNull();
+    await vi.waitFor(
+      async () => {
+        const waiting = await db.$queryRaw<
+          Array<{ pid: number }>
+        >`SELECT pid FROM pg_stat_activity WHERE ${installerPid} = ANY(pg_blocking_pids(pid))`;
+        expect(settled || waiting.length > 0).toBe(true);
+      },
+      { timeout: 5000, interval: 10 },
+    );
+  } finally {
+    release();
+    await installing;
+  }
+  const cleared = await clearing;
+  if ('error' in cleared) throw cleared.error;
+  expect(
+    (
+      await db.appAgent.findUniqueOrThrow({
+        where: { appId_agentId: { appId: app.id, agentId: role.id } },
+      })
+    ).bootPromptNodeId,
+  ).toBeNull();
+  expect(
+    (
+      await db.appAgentCustomization.findUniqueOrThrow({
+        where: { appId_agentId: { appId: app.id, agentId: role.id } },
+      })
+    ).bootPromptNodeId,
+  ).toBeNull();
   expect(compiled.nodeId).toBeTruthy();
-},20000);
+}, 20000);

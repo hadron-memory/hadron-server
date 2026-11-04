@@ -1,3 +1,4 @@
+import { resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
  * #1885 slice 2 — an Agent's effective system memory (cor:dmo:050:14).
  *
@@ -25,7 +26,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { AGENT_BASE_CHAIN_CAP } from './agentBase.js';
 import { COMMENT_NODE_TYPE } from './comments/index.js';
 
-type Db = Pick<PrismaClient, '$queryRaw'> | Prisma.TransactionClient;
+type Db = (Pick<PrismaClient, '$queryRaw'> & InstallationDb) | Prisma.TransactionClient;
 
 /** The role family a base never passes down (cor:dmo:050:14 ruling 2). */
 export const NOT_INHERITED_ROLE = 'boot-prompt';
@@ -497,19 +498,20 @@ export async function resolveInheritedEdges(
  * A full node URN names exactly that node and never goes through this chain.
  */
 export async function compileChain(
-  db: Db,
+  db: Db & InstallationDb,
   target: { appId: string; agentId: string },
 ): Promise<{ links: ChainLink[]; exemptThrough: number; installMemoryId: string | null }> {
   const agent = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ urn: string; system_memory_id: string | null }>>`
     SELECT urn, system_memory_id FROM agents WHERE id = ${target.agentId} AND deleted_at IS NULL`;
   const own = agent[0];
   if (!own) return { links: [], exemptThrough: 0, installMemoryId: null };
-  const install = await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string }>>`
+  const installed = await resolveAppInstallation(db,target.appId,target.agentId);
+  const install = installed ? await (db as Pick<PrismaClient, '$queryRaw'>).$queryRaw<Array<{ id: string }>>`
     SELECT m.id FROM memories m JOIN apps a ON a.id = m.app_id
     WHERE m.app_id = ${target.appId} AND m.install_of_agent_id = ${target.agentId}
       AND m.class = 'system' AND m.deleted_at IS NULL
       AND a.deleted_at IS NULL AND a.uninstalled_at IS NULL
-      AND EXISTS (SELECT 1 FROM app_agents aa WHERE aa.app_id = a.id AND aa.agent_id = ${target.agentId})`;
+      ` : [];
   const links: ChainLink[] = [];
   if (install[0]) links.push({ agentId: target.agentId, agentUrn: own.urn, memoryId: install[0].id });
   const base = own.system_memory_id ? await systemMemoryChain(db, own.system_memory_id) : [];
