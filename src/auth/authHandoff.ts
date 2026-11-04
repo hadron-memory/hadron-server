@@ -180,6 +180,8 @@ export interface IssueExchangeStartArgs {
    * portal start (`POST /auth/{provider}/start`), whose rows keep the kind they always had.
    */
   origin?: ExchangeStartOrigin;
+  /** #2913: the ConnectionFlow this nonce starts (GraphQL origin only); carried to the callback so it can settle that flow. */
+  flowId?: string;
 }
 
 /** Who started a mailbox-connect flow (#2897). */
@@ -204,6 +206,7 @@ export async function issueExchangeStartNonce(args: IssueExchangeStartArgs): Pro
       userId: args.userId,
       orgId: args.orgId,
       redirect: args.redirect,
+      flowId: args.flowId ?? null,
       expiresAt: new Date(Date.now() + HANDOFF_TTL_MS),
     },
   });
@@ -215,6 +218,8 @@ export interface RedeemedExchangeStart {
   orgId: string;
   redirect: string;
   origin: ExchangeStartOrigin;
+  /** #2913: the flow this start belongs to; null for a portal start. */
+  flowId: string | null;
 }
 
 /** Redeem an `exchange_start` nonce (atomic single-use + expiry, bound to
@@ -240,6 +245,7 @@ export async function redeemExchangeStartNonce(
     orgId: row.orgId,
     redirect: row.redirect ?? '/',
     origin: row.kind === kinds[1] ? 'graphql' : 'portal',
+    flowId: row.flowId,
   };
 }
 
@@ -262,6 +268,7 @@ export async function peekExchangeStartNonce(
     orgId: row.orgId,
     redirect: row.redirect ?? '/',
     origin: row.kind === kinds[1] ? 'graphql' : 'portal',
+    flowId: row.flowId,
   };
 }
 

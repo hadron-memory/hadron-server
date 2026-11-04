@@ -33,10 +33,12 @@ import { activeAgentInstallLicenseIds, isAgentInstalled, isGrantedAgentMemoryRol
 import { isAppSelectableBy, resolveUserApps } from '../auth/user-app-resolution.js';
 import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { getOrgWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
+import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
 import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
@@ -103,19 +105,46 @@ export function foldAgentIntoAccessMap(agent: AgentLike): Map<string, string> {
 /** #2190: which installed Agent put a memory into an App's access map, and whether as its system memory. */
 export type AgentProvenance = { agentId: string; system: boolean };
 
+type AppMemoryAccessOptions = {
+  includeTeamSpace?: boolean;
+  /** #3233: runs obtain system definitions through the shared all-install own-definition fold instead. */
+  includeSystemMemories?: boolean;
+  callerUserId?: string | null;
+  allAgents?: boolean;
+  memberAdmitted?: boolean;
+  /** Userless principals, including App keys and AppRuns, receive no item-derived authority. */
+  credentialOnly?: boolean;
+  /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
+  provenance?: Map<string, AgentProvenance[]>;
+};
+type ItemUserAccessLoader = () => Promise<ReadonlyMap<string, string>>;
+
+/** Direct authority callers default to credential-only without a user; known users receive the independent item ceiling. */
 export async function getAppMemoryAccess(
   db: PrismaClient,
   appId: string,
-  opts: {
-    includeTeamSpace?: boolean;
-    callerUserId?: string | null;
-    allAgents?: boolean;
-    memberAdmitted?: boolean;
-    /** #1376: the principal is a bare App key (no user, not an AppRun): the Agent's items admit it nothing. */
-    credentialOnly?: boolean;
-    /** #2190: filled, per memory, with the Agents whose fold granted it (install order). */
-    provenance?: Map<string, AgentProvenance[]>;
-  } = {},
+  opts: AppMemoryAccessOptions & { loadItemUserAccess?: ItemUserAccessLoader } = {},
+): Promise<Map<string, string>> {
+  const loadItemUserAccess = opts.loadItemUserAccess ?? (opts.callerUserId
+    ? () => independentUserItemAccess(db, opts.callerUserId!)
+    : undefined);
+  return buildAppMemoryMap(db, appId, { ...opts, credentialOnly: opts.credentialOnly ?? !opts.callerUserId }, loadItemUserAccess);
+}
+
+/** Candidate/provenance inventory only: callers must independently authorize every returned memory. */
+export async function getAppMemoryCandidates(
+  db: PrismaClient,
+  appId: string,
+  opts: AppMemoryAccessOptions = {},
+): Promise<Map<string, string>> {
+  return buildAppMemoryMap(db, appId, opts);
+}
+
+async function buildAppMemoryMap(
+  db: PrismaClient,
+  appId: string,
+  opts: AppMemoryAccessOptions,
+  loadItemUserAccess?: ItemUserAccessLoader,
 ): Promise<Map<string, string>> {
   const app = await db.app.findUnique({
     where: { id: appId },
@@ -169,12 +198,18 @@ export async function getAppMemoryAccess(
       })
     : [];
   const liveSystemIds = new Set(liveSystemRows.map((row) => row.id));
+  // No item can contribute without a licensed live Agent carrying one. Keep
+  // system/team-only reads on their existing query budget (#3048/#2608).
+  const itemUserAccess = loadItemUserAccess
+    ? (agents.some(agent => licensedAgentIds.has(agent.id) && agent.memoryItems.length > 0)
+      ? await loadItemUserAccess() : new Map<string, string>())
+    : undefined;
   const access = new Map<string, string>();
   for (const install of app.appAgents) {
     const agentAccess = getPrimaryAgentAccess(
-      { ...app, appAgents: [install] }, licensedAgentIds, liveSystemIds,
+      { ...app, appAgents: [install] }, licensedAgentIds, opts.includeSystemMemories === false ? new Set<string>() : liveSystemIds,
       // #1376 (R201): an item is a limit, never a grant, so a credential-only principal gets none of its Agent's items.
-      !opts.credentialOnly,
+      !opts.credentialOnly, itemUserAccess,
     );
     for (const [memoryId, level] of agentAccess) {
       if (level === 'READ_WRITE' || !access.has(memoryId)) access.set(memoryId, level);
@@ -360,6 +395,7 @@ function getPrimaryAgentAccess(
   liveSystemIds: ReadonlySet<string>,
   /** False for a credential-only principal (#1376): the Agent's own system memory folds, its items do not. */
   itemsAdmitted: boolean,
+  itemUserAccess?: ReadonlyMap<string, string>,
 ): Map<string, string> {
   const primary = app.appAgents[0]?.agent ?? null;
   if (!primary || primary.deletedAt) return new Map();
@@ -408,7 +444,13 @@ function getPrimaryAgentAccess(
         item.memory!,
         item.role,
       );
-      return level === null ? [] : [{ memoryId: item.memoryId, role: level === 'READ_WRITE' ? 'read-write' : 'read' }];
+      if (level === null) return [];
+      // #3280 / ruling0105 A: intersect BEFORE folding so an independent
+      // system/team authority path for this same memory is never removed.
+      const userLevel = itemUserAccess?.get(item.memoryId);
+      if (itemUserAccess && !userLevel) return [];
+      const effective = itemUserAccess && userLevel !== 'READ_WRITE' ? 'READ_ONLY' : level;
+      return [{ memoryId: item.memoryId, role: effective === 'READ_WRITE' ? 'read-write' : 'read' }];
     });
 
   return foldAgentIntoAccessMap({ systemMemoryId, memoryItems });
@@ -472,6 +514,13 @@ export async function getPrincipalAppMemoryAccess(
   },
 ): Promise<Map<string, string>> {
   const folds: Array<{ appId: string; map: Map<string, string> }> = [];
+  // #3280/#3305 / cor:dmo:050:09: neither a run nor a session gains item
+  // authority through App membership. Compute the same independent-user
+  // ceiling once, including when an unselected user folds several Apps.
+  let independentItems: Promise<Map<string, string>> | undefined;
+  const loadItemUserAccess = principal.userId
+    ? () => independentItems ??= independentUserItemAccess(db, principal.userId!)
+    : undefined;
 
   if (principal.appId) {
     const sessionIsolated = Boolean(principal.sessionId) && !principal.userId;
@@ -479,17 +528,21 @@ export async function getPrincipalAppMemoryAccess(
       appId: principal.appId,
       map: await getAppMemoryAccess(db, principal.appId, {
         includeTeamSpace: !sessionIsolated,
+        includeSystemMemories: !isRunPrincipal(principal),
         callerUserId: principal.userId ?? null,
         memberAdmitted: !principal.impersonation,
-        // An AppRun with no on-behalf-of user is also userless but is the App acting, not a credential: its reach
-        // keeps the fold until explicit App authority exists for unattended runs (#1376, tracked in the PR body).
-        credentialOnly: !principal.userId && !isRunPrincipal(principal),
+        // #3278 / cor:dmo:050:09: an item never admits a userless principal, including an AppRun.
+        // Runs keep installed system memories below and explicit read/write grants at their own gates.
+        credentialOnly: !principal.userId,
+        loadItemUserAccess,
       }),
     });
   } else if (principal.userId) {
     const apps = await resolveUserApps(principal.userId, db);
     const maps = await Promise.all(
-      apps.map((app) => getAppMemoryAccess(db, app.id, { callerUserId: principal.userId, memberAdmitted: !principal.impersonation })),
+      apps.map((app) => getAppMemoryAccess(db, app.id, {
+        callerUserId: principal.userId, memberAdmitted: !principal.impersonation, loadItemUserAccess,
+      })),
     );
     apps.forEach((app, i) => folds.push({ appId: app.id, map: maps[i] }));
   }
@@ -507,6 +560,11 @@ export async function getPrincipalAppMemoryAccess(
   );
   // #2206 case 3: and every installed, licensed Agent's own system memory of each App the user participates in.
   folds.push(...(await participantSystemMemoryFolds(db, principal)));
+  // #3233 (cor:acl:010:01): a run acts through THIS App, never through an on-behalf user's other Apps.
+  // Reuse #2233's licence/own-definition fold; its maps still pass admissibleFoldRows below.
+  if (isRunPrincipal(principal) && principal.appId && !principal.sessionId && !principal.impersonation) {
+    folds.push(...(await installedSystemMemoryFolds(db, [principal.appId])));
+  }
 
   const admitted = await admissibleFoldRows(db, principal.userId ?? null, folds, !principal.impersonation);
 
@@ -603,8 +661,8 @@ async function participantTeamSpaceFolds(
  * member reached none of them. Each pointer must name the Agent's own definition (class, not an install, same tenant).
  *
  * System memories only: an Agent's item memories keep their install-role audience, and nothing here writes. Only the
- * user acting as themselves: no user (an App key, a session-isolated principal) and an AppRun (an App acting, with
- * at most an on-behalf-of user) keep the folds they had. Participation is the shared set ({@link participantAppIds}:
+ * user acting as themselves: no user (an App key, a session-isolated principal) and an AppRun do not derive user
+ * participation. #3233 calls the shared installed-system fold separately for the run's own App. Participation is the shared set ({@link participantAppIds}:
  * members, org CONTRIBUTOR+, a user-owned App's owner, bounded under impersonation), over live, installed Apps; a
  * soft-deleted Agent, an unlicensed install or a soft-deleted memory grants nothing. {@link admissibleFoldRows} then
  * applies the shared row rules (a user-owned Agent's memory stays its owner's).
@@ -615,6 +673,14 @@ export async function participantSystemMemoryFolds(
 ): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (!principal.userId || isRunPrincipal(principal)) return [];
   const ids = await participantAppIds(db, principal, { includeMemberships: true });
+  return installedSystemMemoryFolds(db, ids);
+}
+
+/** #2233/#3233: one licence + own-definition policy for participant and run system-memory reads. */
+async function installedSystemMemoryFolds(
+  db: PrismaClient,
+  ids: string[],
+): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (ids.length === 0) return [];
   const apps = await db.app.findMany({
     where: { id: { in: ids }, deletedAt: null, uninstalledAt: null },
@@ -1182,6 +1248,8 @@ interface MemoryReadRowOptions extends MemoryGateOptions {
   workerMemoryIds?: ReadonlySet<string>;
   installedAgentIds?: ReadonlySet<string>;
   subscriptionsByAgentId?: ReadonlyMap<string, SubscriptionReadRow>;
+  /** #3306: the PUBLIC knowledge among a batch's candidates, looked up once for a principal with no user. */
+  publicKnowledgeIds?: ReadonlySet<string>;
 }
 
 /** Apply the canonical MCP memory-read gate to a row that is already loaded. */
@@ -1267,7 +1335,11 @@ async function canReadMemoryRow(
   // auth, nothing more — a caller checking many memories at once would
   // otherwise rebuild the whole App fold per memory.
   const access = opts.access ?? (await getMemoryAccess(db, auth));
-  return access.has(memory.id);
+  if (access.has(memory.id)) return true;
+  // #3306 / ruling 0104: PUBLIC knowledge is read-only for a principal with no user, whatever its items. A point
+  // answer only: the access map above never carries it, so no listing enumerates it.
+  if (!readsPublicKnowledgeWithoutUser(auth)) return false;
+  return (opts.publicKnowledgeIds ?? await publicKnowledgeAmong(db, [memory.id])).has(memory.id);
 }
 
 /**
@@ -1344,6 +1416,8 @@ export async function filterReadableMemoryIds(
   const access = sessionBoundKey
     ? await getMemoryAccess(db, auth)
     : opts.access ?? (isPlatformAdmin ? undefined : await getMemoryAccess(db, auth));
+  const publicKnowledgeIds = readsPublicKnowledgeWithoutUser(auth)
+    ? await publicKnowledgeAmong(db, memories.map((memory) => memory.id)) : undefined;
   const workerMemoryIds = memories.some((memory) =>
     memory.class === 'app' && memory.ownerUserId !== null && memory.ownerUserId !== auth.userId)
     ? new Set(await getWorkerMemoryAccess(db, auth)) : undefined;
@@ -1402,6 +1476,7 @@ export async function filterReadableMemoryIds(
         workerMemoryIds,
         installedAgentIds,
         subscriptionsByAgentId,
+        publicKnowledgeIds,
       })
     ) {
       readable.add(memory.id);

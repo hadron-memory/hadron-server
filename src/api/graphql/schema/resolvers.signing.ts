@@ -11,6 +11,7 @@ import {
   createSigningRequestInTransaction, effectiveRequestState, SigningRefusal, withdrawSigningRequestInTransaction,
   type SigningRequester,
 } from '../../../lib/signing/requests.js';
+import { signingCeremonyUrl } from '../../../lib/signing/ceremonyUrl.js';
 import { loadSignatureStatuses, type NodeSignatureStatusView, type SignatureView } from '../../../lib/signing/status.js';
 
 /**
@@ -219,6 +220,8 @@ export const signingFieldResolvers = {
       return node ? resolveNodeUrnField(node, ctx) : null;
     },
     state: (r: SigningRequestRow) => effectiveRequestState(r, new Date()).toUpperCase(),
+    /** cor:dmo:130:08: the server-hosted page's link; the id is its only parameter. */
+    ceremonyUrl: (r: SigningRequestRow) => signingCeremonyUrl(r.id),
     endedAt: (r: SigningRequestRow) =>
       effectiveRequestState(r, new Date()) === 'expired' && r.state === 'open' ? r.expiresAt : r.endedAt,
     namedSigner: (r: SigningRequestRow, _: unknown, ctx: Context) =>

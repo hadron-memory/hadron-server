@@ -1,4 +1,5 @@
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
+import { registerAutomationTeamSnapshotGrantTools } from './automationTeamSnapshotGrantTools.js';
 import { appendDeliveryPending } from '../lib/tickers/deliveryPending.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
@@ -83,6 +84,7 @@ import { portalUrlForUrn } from '../lib/portalUrl.js';
 import { userUrn } from '../lib/userHandle.js';
 import { registerCommentTools } from './commentTools.js';
 import { registerAssetTools } from './assetTools.js';
+import { registerAutomationReadGrantTools } from './automationReadGrantTools.js';
 import { signingSurfacePolicy, switchCapabilities } from '../lib/signing/surface.js';
 import { registerSigningTools } from './signingTools.js';
 import { registerAgentTaskTools } from './agentTaskTools.js';
@@ -3735,6 +3737,8 @@ export function createMcpServerInstance(
   // ── #1609 — comment nodes (cor:dmo:110): thin over the GraphQL comment resolvers ──
   registerCommentTools(server, { db, auth });
   registerAssetTools(server, { db, auth });
+  registerAutomationReadGrantTools(server, { db, auth });
+  registerAutomationTeamSnapshotGrantTools(server, { db, auth });
 
   // ── #1632 — signing requests (cor:dmo:130): request and read, never sign ──
   registerSigningTools(server, { db, auth });
@@ -4409,7 +4413,7 @@ export function createMcpServerInstance(
     'hadron_find_nodes',
     'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeType, nodeTypes, nodeKind, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
       // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
       // early return below, with the one validator the resolver also runs.
       try {
@@ -4661,6 +4665,7 @@ export function createMcpServerInstance(
               nodeType: nodeType ?? undefined, // #331: exact-match pass-through to NodeFilter.nodeType
               nodeTypes: nodeTypes ?? undefined, // #3113: the explicit list, through the same resolver
               locPrefix: filterLocPrefix,
+              childrenOf: childrenOf ?? undefined, // #2832: direct children only; '' is the top level
               // #719 — structured JSONB predicate; findNodes validates it and
               // throws BAD_USER_INPUT on a malformed/oversized tree (surfaced as
               // tool-error text by the catch below).
@@ -9936,7 +9941,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
 
   off(
     'hadron_cast_worker',
-    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole, and the compiled boot prompt every casting of it is served); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later.',
+    'Cast a Worker (#974, spec cor:agt:020 / cor:dmo:050:11): create a named AI team member — the casting of an agent already installed in the team App under a name ("Iris"). The agent carries the persona dressing (personaRole, and the compiled boot prompt every casting of it is served); the Worker is the local named identity that does attributable work. Pass agent to cast a specific installed agent, or role to pick the single installed agent with that personaRole. The name is REQUIRED (#1050): a worker\'s name is permanent within the App, so it is chosen, never derived — a nameless cast refuses WORKER_NAME_REQUIRED rather than inventing a permanent identifier nobody picked. Names are unique per App, case-insensitively, FOREVER (two Apps may each have an Iris; a name already taken here — including a retired worker\'s — refuses with WORKER_NAME_TAKEN). NFKC-normalized Unicode 16 UTS #39 skeletons (original-case and caseless) must also be distinct here, retired workers included: WORKER_NAME_CONFUSABLE names the colliding worker; display spelling is preserved. Returns the worker\'s id, name, URN (hrn:worker:<root>:<app-slug>:<slug>, #991) and resolved prompt — print the prompt as the worker\'s boot briefing, and pass the URN (or the id) as workerRef when starting sessions. Casting is a one-time mint, so record the URN: it is the ref that gets you back to this worker later. MCP accepts no instruction argument: a worker session is headless here and needs its own live workers.staff grant, with no wider right than its holder (#3308).',
     SHAPE_HADRON_CAST_WORKER,
     async ({ role, name, agent, app, reportsTo, noTeam, session }) => {
       // #1081 — the caller just drove this session, so it is alive. The
@@ -11317,7 +11322,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
   // #1162: one eligibility implementation across transports.
   off(
     'hadron_delete_worker',
-    'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts.',
+    'Remove a never-used miscast only. Empty ended and released stints alone do not count as work. Any persisted reference blocks deletion; retire workers with history. You must first verify no signed commit, trailer, PR, comment, review or published artifact attributes work to this identity and explicitly confirm. Database checks cannot establish external absence; known or uncertain history means retire. This does not scan external hosts. MCP accepts no instruction argument: a worker session is headless here and needs its own live workers.staff grant, with no wider right than its holder (#3308).',
     SHAPE_HADRON_DELETE_WORKER,
     async ({ workerRef, confirmNoExternalAttribution }) => {
       const ctx: Context = {
@@ -11340,7 +11345,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   off(
     'hadron_update_worker',
-    "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only; worker-session edits provisionally refused under H26). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
+    "Amend a worker's signature and trailer templates (#1010). A worker's boot prompt is not edited here: it is the worker's own compiled boot source, changed by compile and approve (#2712). signature and trailer edit the per-worker signing templates (App managers only. This tool takes no instruction claim, so worker-session edits remain headless and refused; instructed signature edits use GraphQL updateWorker). Omit to preserve; null is refused; blank stores empty text. The name is permanent; to change the worker's agent (and with it its role) use hadron_change_worker_agent. Refuses for a retired worker.",
     SHAPE_HADRON_UPDATE_WORKER,
     async ({ workerRef, signature, trailer, app, session }) => {
       // This tool owns `session`, so the common actor gate leaves invalid names to us.
@@ -11423,7 +11428,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
 
   off(
     'hadron_change_worker_agent',
-    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves: a worker session is refused, even one its manager holds. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
+    "Change the agent a worker casts (#2458, cor:dmo:050:11). The worker's role follows the new agent; it is never typed in. Name, slug, URN, signature, trailer, reporting line and all past records stay, and past sessions keep the agent and role they ran under. App managers only, acting as themselves. This tool takes no instruction claim, so a worker session stays headless and refused; instructed changes use GraphQL changeWorkerAgent. The new agent must be installed in the App, and the App must hold the grants for it and for every Agent its boot prompt includes from. A complete change: the worker's own boot-prompt pointer is cleared, the old agent's generated tickers end and the new agent's are made, and one worker.casting event is written. It takes effect at the worker's next bind: an open session finishes under the agent and role it was bound with. A refused change changes nothing.",
     SHAPE_HADRON_CHANGE_WORKER_AGENT,
     async ({ workerRef, agent, app, session }) => {
       if (session !== undefined && !(await validateSessionBinding(db, auth, session))) {
@@ -12924,6 +12929,7 @@ const SHAPE_HADRON_FIND_NODES = {
   objectType: z.string().optional().describe('#725 — collection facet: only nodes whose objectType equals this (the domain-object discriminator, e.g. "competitor" / "insight"). Orthogonal to nodeType. Composes with query/mode + where.'),
   nodeTypes: z.array(z.string()).nullish().describe('#3113 — an explicit LIST of node types (GraphQL: NodeFilter.nodeTypes; null is the same as omitted), a union: only nodes whose nodeType is one of them. Applies in every mode. It narrows, ANDs the other filters and, being explicit, replaces the default that leaves out system nodes; it never lifts the memory-class default, access, deleted rows or inheritance. Values are exact and case-sensitive; an unknown value matches nothing. Refused: an empty list, nodeType together with nodeTypes, more than 20 entries (counted before duplicates are dropped), and a list containing "comment" (search comments with nodeType or nodeKind). Vector and hybrid keep their bounded, widening candidate window.'),
   nodeKind: z.enum(['CONTENT', 'COMMENTS', 'ALL']).optional().describe('#1608/#1678 — which KIND of node to search (GraphQL: NodeFilter.contentScope). CONTENT (default): content nodes only. COMMENTS: comment nodes only (feedback about other nodes), found exhaustively in every mode before ranking and limits. ALL: both. A comment hit is labelled COMMENT and is never content of, or verified fact about, its target. Not hadron_get_node\'s contentScope, which picks the parts of one node to return.'),
+  childrenOf: z.string().optional().describe('#2832 — list only the DIRECT children of this loc (GraphQL: NodeFilter.childrenOf). A direct child is a node whose loc is exactly this loc plus one more segment (no further colon); "" means the top-level nodes. It reads loc strings only (not edges, not parentRel), so a loc whose parent has no node of its own is still listed. Applies in every mode, with the same access and default exclusions as the rest of the search, and pairs with memoryUrn (loc is per memory). With no query and no sort the order is the sibling order (positioned nodes first, then by loc). Unlike parentRel, which scopes the WHOLE subtree.'),
   scope: z.string().optional().describe('Spec 049: search under a named scope — a scope id, a scope NAME (resolved in the active App\'s context), "app" (the active App\'s attached memories), or "global" (your active organization\'s view). Omitted with no memory selector: the ladder applies (active scope › active App › active organization), and the result says which. An explicit memoryUrn / memoryUrns / allMemories outranks the ambient scope but still intersects with one named here.'),
   brief: z.boolean().optional().describe('Return index info only: name, description, edges'),
   limit: z.number().int().optional().describe('Max primary results: integer clamped to 1–200 (default 10 for a query; 20 for survey mode "*"/""). Expansion neighbors are additional.'),

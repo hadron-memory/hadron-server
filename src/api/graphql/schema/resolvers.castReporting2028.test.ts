@@ -19,7 +19,7 @@ beforeEach(async () => {
   user = await db.user.create({ data: { githubId: 2028001, githubUsername: 's12-owner' } });
   const org = await db.organization.create({ data: { name: 'S12', urn: `s12-${generateId()}.com` } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
-  agent = await M.createAgent({}, { orgId: org.id, name: 'S12 agent' }, ctx());
+  agent = await M.createAgent({}, { orgId: org.id, name: 'S12 agent', personaRole: 'test-worker' }, ctx());
   app = await db.app.create({ data: { organizationId: org.id, name: 'S12 app', urn: `s12-${generateId()}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await serveEveryAgent(db); // #2712: binds need a served prompt

@@ -9,6 +9,10 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { GraphQLError } from 'graphql';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
+import { oauthSurfaceRefusal } from '../../../middleware/auth.js';
+import { CONNECTION_FLOW_TTL_MS } from '../../../integrations/mailboxConnect.js';
 import { z } from 'zod';
 import { Prisma } from '../../../generated/prisma/index.js';
 import {
@@ -308,6 +312,34 @@ export const sessionQueries = {
         ctx.db.usageEvent.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take, skip }),
       ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
       return pageEnvelope(items, total, skip);
+    },
+
+    /**
+     * #2913 — where one connect flow is (cor:dmo:080:04 "Finding the connection a flow made"). Only the user who
+     * started the flow reads it, for CONNECTION_FLOW_TTL_MS from the start; an unknown, expired or another user's id
+     * is ONE refusal, decided by one statement (id AND starter AND the hour, on the database clock) so the answer
+     * cannot tell the three apart. Same callers as `startConnection`: a person acting as themselves, never an App
+     * key, a worker session, an impersonated request or an MCP-only OAuth credential. Writes nothing.
+     */
+    connectionFlow: async (_: unknown, { flowId }: { flowId: string }, ctx: Context) => {
+      if (ctx.impersonation) throw authorizationDenied();
+      if (!ctx.userId) {
+        throw new GraphQLError('Reading a connection flow needs a signed-in user.', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
+      if (ctx.appId) throw authorizationDenied();
+      await requirePersonAsThemselves(ctx, authorizationDenied);
+      if (oauthSurfaceRefusal(ctx, 'account')) throw authorizationDenied();
+      const rows = await ctx.db.$queryRaw<{ connection_id: string | null; failure_code: string | null }[]>`
+        SELECT connection_id, failure_code FROM connection_flows
+        WHERE id = ${flowId} AND user_id = ${ctx.userId}
+          AND started_at > (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(secs => ${CONNECTION_FLOW_TTL_MS / 1000})`;
+      const row = rows[0];
+      if (!row) throw authorizationDenied();
+      if (row.connection_id) return { status: 'CONNECTED', connectionId: row.connection_id, failureCode: null };
+      if (row.failure_code) return { status: 'FAILED', connectionId: null, failureCode: row.failure_code };
+      return { status: 'PENDING', connectionId: null, failureCode: null };
     },
 
     exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {

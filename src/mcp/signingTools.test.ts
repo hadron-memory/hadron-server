@@ -35,7 +35,7 @@ async function signAs(requestId: string, label: string, userId = writer.id) {
   const req = await db.signingRequest.findUniqueOrThrow({ where: { id: requestId } });
   const key = softPasskey();
   await insertSoftPasskey(db, userId, key, { label });
-  const payload = signaturePayloadBytes('hadron-signature-v1', req);
+  const payload = signaturePayloadBytes('hadron-signature-v3', { nodeId: req.nodeId, approvalHash: req.approvalHash, requestId: req.id });
   await db.$transaction((tx) => completeSigningRequestInTransaction(tx, req.id, {
     memoryId: memory.id, signerId: userId, credentialId: key.credentialId,
     assertion: key.assert({ payload, origin: ORIGIN, rpId: RP }), mayWrite: maySignInMemory(db),

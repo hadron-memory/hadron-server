@@ -129,12 +129,12 @@ import { afterWaits, anchorNow, lockStopFence } from '../stopSignals/state.js';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 const TASK_SELECT = {
-  id: true, appId: true, status: true, parentTaskId: true, blocked: true, releasedAt: true,
+  id: true, appId: true, status: true, matchFailedAt: true, parentTaskId: true, blocked: true, releasedAt: true,
   ownerWorkerId: true, ownerUserId: true, assigneeWorkerId: true, assigneeUserId: true,
   startBy: true, finishBy: true, assignedAt: true, startedAt: true, createdAt: true,
 } as const;
 type SelectedTaskState = Prisma.AgentTaskGetPayload<{ select: typeof TASK_SELECT }>;
-type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy'>>;
+type TaskState = Omit<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy' | 'matchFailedAt'> & Partial<Pick<SelectedTaskState, 'blocked' | 'releasedAt' | 'finishBy' | 'matchFailedAt'>>;
 
 /** Everything one task's rules read. */
 export type StallInputs = {
@@ -454,7 +454,7 @@ export function stallCandidates(
   // stint would share the first alarm's episode key and be silenced. Rows with
   // no queue event (seeded past the resolvers) fall back to creation, the
   // pre-#1754 start.
-  if (task.status === 'pending' && !assignee) {
+  if (task.status === 'pending' && !assignee && !task.matchFailedAt) {
     const queuedAt = floor(inputs.queuedAt ?? task.createdAt);
     add('unassignable', queuedAt, countedDueAt(queuedAt, windows.assignmentMinutes * MINUTE, inputs.stopHolds), {}, inputs.stopHolds);
   }
@@ -847,6 +847,12 @@ export async function wakeDueOwners(db: PrismaClient, now = new Date()): Promise
     const darkIds = due.filter((d) => d.type === 'alarm.dark-worker').map((d) => d.eventId);
     if (darkIds.length) {
       const over = await tx.darkWorkerEpisode.findMany({ where: { eventId: { in: darkIds }, endedAt: { not: null } }, select: { eventId: true } });
+      for (const e of over) endedEvents.add(e.eventId);
+    }
+    // #2763: the same for a coordinator-cadence alarm, whose episode ends at the coordinator's next counted assignment.
+    const cadenceIds = due.filter((d) => d.type === 'alarm.coordinator-cadence').map((d) => d.eventId);
+    if (cadenceIds.length) {
+      const over = await tx.coordinatorCadenceEpisode.findMany({ where: { eventId: { in: cadenceIds }, endedAt: { not: null } }, select: { eventId: true } });
       for (const e of over) endedEvents.add(e.eventId);
     }
     if (endedEvents.size) {

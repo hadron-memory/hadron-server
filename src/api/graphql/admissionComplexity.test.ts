@@ -22,6 +22,9 @@ const REVIEWED_PAGED_FIELDS = [
   "Agent.extendedBy",
   "AgentTask.blockedBy", // #2644: pageArgs default20, cap200; common omitted bound100 is conservative.
   "AgentTask.blocks", // Same shared dependency page resolver.
+  "AgentTask.clones", // #2646: the same shared page resolver as blocks/blockedBy (pageArgs default 20, cap 200).
+  "AgentTask.findingDispositions", // #2663: pageArgs default20/cap200.
+  "AgentTaskResult.findings", // #2662: pageArgs default20/cap200; result itself is bounded at100 findings.
   "AppKey.hostUses",
   "Chat.servedPrompts",
   "CompiledBootPrompt.lintWarnings", // #2048: default 50, cap 100; shared pageLintWarnings.
@@ -30,6 +33,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Node.lintWarnings",
   "Node.signingRequests",
   "NodeApprovalReceipt.lintWarnings",
+  "Query.actionRegisterIndex", // #3287: pageArgs, default 20, cap 200; below the common 100, so omission overestimates.
   "Query.actionTickets",
   "Query.agentAssets",
   "Query.agentSchedules",
@@ -44,10 +48,12 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.appKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.appMemoryScope",
   "Query.appNodes",
+  "Query.appNodesPage",
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
   "Query.automationApprovals",
+  "Query.automationTeamSnapshotGrants", // #3350: pageTake default20/cap200; common omitted100 is conservative.
   "Query.calendarEvents",
   "Query.channelMessageSearch", // #2299: default 20, cap 50, scan 1,000 (teamChatSearch.ts); under the shared 100 default.
   "Query.channelMessages",
@@ -84,6 +90,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.memoryNodes",
   "Query.myAgentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.myChats",
+  "Query.myChatsPage", // #2212 A3: pageArgs, default 20, cap 200.
   "Query.myUserApiKeysPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.nodeEdgeRemovals",
   "Query.nodeRevisions",
@@ -102,6 +109,8 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.sessions",
   "Query.sessionsPage",
   "Query.slackConnections",
+  "Query.specBacklinksPage", // #3222 (#2213 S3): pageArgs, default 20, cap 200; in PAGE_ARGS_FIELDS.
+  "Query.specUnresolvedReferencesPage", // #3222: as specBacklinksPage.
   "Query.teamAttentionPage",
   "Query.teamAttentionPreviewPage",
   "Query.teamChatMessages",
@@ -307,6 +316,14 @@ describe('cost (graphql-query-complexity), enforce', () => {
     }
     expect(found.sort()).toEqual(REVIEWED_PAGED_FIELDS);
     for (const key of Object.keys(OMITTED_PAGE_SIZE)) expect(REVIEWED_PAGED_FIELDS).toContain(key);
+  });
+
+  it('#2662 findings admission charges the clamped page for literals and variables', () => {
+    const q = (n: string) => `{ agentTask(id: "x") { result { findings(limit: ${n}) { items { id severity text } total hasMore } } } }`;
+    const variables = 'query($n:Int){agentTask(id:"x"){result{findings(limit:$n){items{id severity text} total hasMore}}}}';
+    expect(cost(q('2147483647'))).toBe(cost(q('200')));
+    expect(cost(variables, {n:2147483647})).toBe(cost(q('200')));
+    expect(cost(q('0'))).toBeLessThan(cost(q('200')));
   });
 
   it('saturates: a huge page size cannot wrap around or go non-finite', () => {

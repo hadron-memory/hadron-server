@@ -46,6 +46,7 @@ import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
 import { Prisma } from '../../../generated/prisma/index.js';
 import { sortSiblings } from '../../../lib/siblingOrder.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
+import { isDirectChildLoc } from '../../../lib/childLoc.js';
 import {
   parseUrnInput,
   parseUrnV2,
@@ -106,6 +107,7 @@ import { approvalStatePrismaWhere, mintedPrismaWhere, type NodeApprovalState } f
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
+import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 
 /**
  * #3113 — the validated `filter.nodeTypes` list (or null), refused as
@@ -141,6 +143,8 @@ export interface FindNodesArgs {
     isRunnable?: boolean | null;
     role?: string | null;
     locPrefix?: string | null;
+    /** #2832 — direct children of this loc only ("" = top level); null/absent = no filter. */
+    childrenOf?: string | null;
     createdBy?: string | null;
     updatedAfter?: string | null;
     updatedBefore?: string | null;
@@ -159,6 +163,147 @@ export interface FindNodesArgs {
   orgId?: string | null;
   limit?: number | null;
   offset?: number | null;
+}
+
+type AppNodesFilter = {
+    // Memory-scope fields — NOT supported by appNodes (the App's scope is
+    // authoritative). Present only so we can reject them explicitly.
+    memoryIds?: string[] | null;
+    memoryClasses?: string[] | null;
+    nodeType?: string | null;
+    /** #3113 */
+    nodeTypes?: string[] | null;
+    objectType?: string | null;
+    tags?: string[] | null;
+    isRunnable?: boolean | null;
+    role?: string | null;
+    locPrefix?: string | null;
+    /** #2832 — findNodes only; rejected by both App list forms. */
+    childrenOf?: string | null;
+    createdBy?: string | null;
+    updatedAfter?: string | null;
+    updatedBefore?: string | null;
+    includeDeleted?: boolean | null;
+    /** #1591 */
+    approvalState?: NodeApprovalState | null;
+    /** #1591 */
+    minted?: boolean | null;
+};
+
+/**
+ * The admission, validation and `where` shared by `appNodes` and `appNodesPage` (#2212 A2): ONE
+ * computation, so the list and the page cannot disagree about who may read what. An unknown or malformed
+ * App ref and an unauthorized caller THROW from `resolveAppNodeScope`, exactly as `appNodes` always has;
+ * `null` is returned only for its existing empty arms (a soft-deleted organization, an empty accessible
+ * scope). The one `where` serves both the rows and `total`, so `total` counts exactly the rows the old
+ * field would return without a limit (cor:api:120:04).
+ */
+async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter | null | undefined) {
+  // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
+  // computation, shared with appMemoryScope: a second copy would drift.
+  // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
+  // #2832: reject an unsupported narrowing filter before any App lookup, in both list forms.
+  if (filter?.childrenOf != null) {
+    throw new GraphQLError('appNodes: filter.childrenOf is not supported. Use findNodes to read direct children.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
+  const scope = await resolveAppNodeScope(ctx, appRef);
+  if (!scope) return null;
+  const { inheritance } = scope;
+  const memoryIds = inheritance.memoryIds;
+
+  // #525 — optional node-level NodeFilter, pushed server-side so callers
+  // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
+  // without fetching everything and filtering client-side. The App's memory
+  // scope stays authoritative, and unlike findNodes we do NOT impose the
+  // default `nodeType != 'system'` exclusion — appNodes deliberately
+  // surfaces the system memory (#524).
+  const f = filter ?? {};
+  const badInput = (msg: string) =>
+    new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
+  // #526 review — NodeFilter carries memory-scope fields that appNodes can't
+  // honor (its scope is the App's memories). Reject rather than silently
+  // ignore them, so a caller who assumed they scoped fails fast instead of
+  // getting a surprising superset. Use findNodes for cross-memory scoping.
+  if (f.memoryIds?.length || f.memoryClasses?.length) {
+    throw badInput(
+      'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+        "the App's installed-agent memories are the authoritative scope. " +
+        'Use findNodes for cross-memory scoping.',
+    );
+  }
+  if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
+    throw badInput('appNodes filter.updatedAfter must be a valid date string.');
+  }
+  if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
+    throw badInput('appNodes filter.updatedBefore must be a valid date string.');
+  }
+
+  const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
+  const where: Prisma.NodeWhereInput = {
+    memoryId: { in: memoryIds },
+    ...(f.includeDeleted ? {} : { deletedAt: null }),
+    ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : {}),
+    ...(f.objectType ? { objectType: f.objectType } : {}),
+    ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
+    ...(f.role != null
+      ? {
+          OR: [
+            { role: f.role },
+            { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
+          ],
+        }
+      : {}),
+    ...(f.tags?.length ? tagsFilter(f.tags) : {}),
+    ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
+    ...(f.createdBy ? { createdBy: f.createdBy } : {}),
+    ...((f.updatedAfter || f.updatedBefore)
+      ? { updatedAt: {
+          ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
+          ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
+        } }
+      : {}),
+    ...approvalStatePrismaWhere(f.approvalState, ctx.db),
+    // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
+    // #1607 + #1608 — no comments in status sets; content, comments or
+    // both by contentScope (CONTENT by default, cor:dmo:110:08).
+    AND: [
+      ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
+      ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
+      ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
+      ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
+      ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
+    ],
+  };
+  return { where, inheritance };
+}
+
+/** Everything a returned `appNodes` / `appNodesPage` row carries. */
+const APP_NODES_INCLUDE = {
+  outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
+  incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
+  memory: { select: { id: true, urn: true, name: true, organizationId: true } },
+} satisfies Prisma.NodeInclude;
+
+/** A row as `appNodes` / `appNodesPage` read it: the node plus `APP_NODES_INCLUDE`. */
+type AppNodeRow = Prisma.NodeGetPayload<{ include: typeof APP_NODES_INCLUDE }>;
+
+/**
+ * Re-check what was read against the effective set now (P2-1), then decrypt, mark inherited and record
+ * the reads, for the rows RETURNED only. Splices the dropped rows out of `rows`.
+ */
+async function finishAppNodes(
+  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2],
+): Promise<AppNodeRow[]> {
+  // The exclusion list was a snapshot: re-check what was read (P2-1).
+  const kept = new Set((await retainEffective(ctx.db, rows, inheritance)).map((r) => r.id));
+  for (let i = rows.length - 1; i >= 0; i--) if (!kept.has(rows[i]!.id)) rows.splice(i, 1);
+  await decryptNodesBatch(ctx.db, rows);
+  markInherited(rows, inheritance.inheritedFrom);
+  // #1061 — the App-scoped node list returns full node projections, so each one is a read. Scope is the
+  // App's installed-agent memories, established by `appNodesRead`.
+  recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
+  return rows;
 }
 
 /**
@@ -892,12 +1037,16 @@ export const nodeQueries = {
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
-      const allowed = (memoryId: string): boolean => {
+      const allowedByList = (memoryId: string): boolean => {
         if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
           return (access.memoryId.in as string[]).includes(memoryId);
         }
         return true;
       };
+      // #3306: a pure App key / userless run also reads PUBLIC knowledge, one named row at a time (no id list).
+      const allowed = async (memoryId: string): Promise<boolean> =>
+        allowedByList(memoryId)
+        || (readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId));
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
@@ -922,7 +1071,7 @@ export const nodeQueries = {
           current.deletedAt ||
           current.memoryId !== selected.memoryId ||
           current.loc !== selected.loc ||
-          (!inheritedFrom && !allowed(current.memoryId))
+          (!inheritedFrom && !(await allowed(current.memoryId)))
         ) return null;
         // An inherited selection is re-checked on the version actually served:
         // a base node turned boot prompt, or a child override added, since
@@ -951,7 +1100,7 @@ export const nodeQueries = {
       // (findUnique can't carry deletedAt in its where, so guard post-fetch).
       if (isId(ref)) {
         const node = await ctx.db.node.findUnique({ where: { id: ref }, include });
-        if (!node || node.deletedAt || !allowed(node.memoryId)) return null;
+        if (!node || node.deletedAt || !(await allowed(node.memoryId))) return null;
         return finish(node);
       }
 
@@ -971,7 +1120,7 @@ export const nodeQueries = {
           return null;
         }
         const memory = await resolveMemoryRef(ctx.db, parts.memoryUrn).catch(() => null);
-        if (!memory || !allowed(memory.id)) return null;
+        if (!memory || !(await allowed(memory.id))) return null;
         const effective = await findEffectiveNodeIdByLoc(ctx.db, memory.id, parts.loc);
         if (!effective?.inheritedFrom) return null;
         const inherited = await ctx.db.node.findUnique({ where: { id: effective.id }, include });
@@ -986,7 +1135,7 @@ export const nodeQueries = {
           throw e;
         }
         const selected = await ctx.db.node.findUnique({ where: { id }, include });
-        return selected && !selected.deletedAt && allowed(selected.memoryId)
+        return selected && !selected.deletedAt && (await allowed(selected.memoryId))
           ? finish(selected)
           : null;
       };
@@ -1010,7 +1159,7 @@ export const nodeQueries = {
         // the node-content gate this resolver already computed, so the
         // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!allowed(scopedMemoryId)) throw new MemoryNotFoundError(memoryRef);
+        if (!(await allowed(scopedMemoryId))) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
@@ -1043,7 +1192,7 @@ export const nodeQueries = {
           select: { id: true },
         });
         if (memory) {
-          if (allowed(memory.id)) {
+          if (await allowed(memory.id)) {
             const node = await ctx.db.node.findFirst({
               where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
               include,
@@ -1298,8 +1447,18 @@ export const nodeQueries = {
       }
 
       // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-      const accessible = await getAccessibleMemoryIds(ctx);
       const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+      // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
+      // only those, never every PUBLIC memory.
+      const requestedIds = explicitIds
+        ? (await Promise.all(
+            f.memoryIds!.map((ref) =>
+              isId(ref)
+                ? Promise.resolve(ref)
+                : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
+          )).filter((id): id is string => id !== null)
+        : [];
+      const accessible = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: requestedIds });
       const memClassClause: unknown =
         f.memoryClasses && f.memoryClasses.length > 0
           ? { in: f.memoryClasses }
@@ -1321,13 +1480,7 @@ export const nodeQueries = {
 
       let scopeIds: string[];
       if (explicitIds) {
-        const resolved = await Promise.all(
-          f.memoryIds!.map((ref) =>
-            isId(ref)
-              ? Promise.resolve(ref)
-              : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
-        );
-        const requested = resolved.filter((id): id is string => id !== null);
+        const requested = requestedIds;
         const allowed = accessible === null ? null : new Set(accessible);
         scopeIds = allowed === null ? requested : requested.filter((id) => allowed.has(id));
         // Query only when a class or org filter must be applied to the requested
@@ -1413,6 +1566,11 @@ export const nodeQueries = {
         outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       } as const;
+      // #2832: every path re-reads its candidates by id through the Prisma `structuredWhere`, which cannot express the
+      // direct-children rule. Re-assert it on the rows read back, so a node that moved or was renamed between ranking
+      // and hydration is never returned against the filter, and an id list from any ranker stays exact.
+      const childrenOnly = <T extends { loc: string }>(rows: T[]): T[] =>
+        f.childrenOf == null ? rows : rows.filter((n) => isDirectChildLoc(n.loc, f.childrenOf!));
 
       const hasQuery = typeof query === 'string' && query.trim() !== '';
 
@@ -1428,6 +1586,7 @@ export const nodeQueries = {
         role: f.role ?? null,
         tags: f.tags ?? null,
         locPrefix: f.locPrefix ?? null,
+        childrenOf: f.childrenOf ?? null,
         createdBy: f.createdBy ?? null,
         updatedAfter: f.updatedAfter ?? null,
         updatedBefore: f.updatedBefore ?? null,
@@ -1467,9 +1626,12 @@ export const nodeQueries = {
         // property-path sort (an ORDER BY over a JSON path Prisma can't express)
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
         // browse (no where, no property sort) keeps the Prisma path below.
-        if (f.where != null || sortProperty != null) {
+        // #2832: the direct-children filter is a SQL expression Prisma cannot write, so it takes this path too.
+        // Order A (pending Holger, rulings item 7): a children read is a sibling list, so unless the caller names a sort it
+        // comes in cor:dmo:020:01 order (Node.seq first, then loc). A different ruling changes only this default.
+        if (f.where != null || sortProperty != null || f.childrenOf != null) {
           const browseSort: BrowseSort | undefined =
-            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : undefined;
+            sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : (sort == null || sort === 'relevance') && f.childrenOf != null ? 'seq' : undefined;
           const ids = await provider.filterSearch({
             db: ctx.db, memoryIds: scopeIds, filter: sqlFilter,
             includeDeleted: !!f.includeDeleted, sort: browseSort,
@@ -1483,10 +1645,10 @@ export const nodeQueries = {
           // #1345 review (@copilot): the structured filters too, not only scope,
           // so a node that stopped matching (e.g. its role changed) between the
           // SQL filter and this read is not returned against the filter.
-          const rows = await ctx.db.node.findMany({
+          const rows = childrenOnly(await ctx.db.node.findMany({
             where: { id: { in: ids }, memoryId: { in: scopeIds }, ...structuredWhere },
             include: nodeInclude,
-          });
+          }));
           await decryptNodesBatch(ctx.db, rows);
           const byId = new Map(rows.map((n) => [n.id, n]));
           const ordered = ids.map((id) => byId.get(id)).filter((n): n is NonNullable<typeof n> => !!n);
@@ -1524,7 +1686,7 @@ export const nodeQueries = {
       // A selective structured filter can drop many ranked candidates, so over-fetch
       // from the retrieval layer to keep the page full after post-filtering + offset.
       const hasStructuredFilters = !!(
-        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix ||
+        f.nodeType || nodeTypes || f.objectType || f.isRunnable != null || f.role != null || f.tags?.length || f.locPrefix || f.childrenOf != null ||
         f.createdBy || f.updatedAfter || f.updatedBefore || f.includeDeleted || f.where || f.approvalState || f.minted != null
       );
       const page = off + finalLimit;
@@ -1544,10 +1706,10 @@ export const nodeQueries = {
             tombstoneMemoryIds: recoverableIds,
           });
         }
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: candidates }, memoryId: { in: scopeIds }, ...structuredWhere },
-          select: { id: true },
-        });
+          select: { id: true, loc: true },
+        }));
         return new Set(rows.map((r) => r.id));
       };
 
@@ -1614,10 +1776,10 @@ export const nodeQueries = {
         // #1345 review (@copilot): re-assert the memory scope at hydration. The
         // candidates were scoped when RANKED, in a separate query; a node moved
         // to another memory in between must not come back from outside scope.
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: candidateIds }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
-        });
+        }));
         await decryptNodesBatch(ctx.db, rows);
         // #719 — a property-path sort re-orders the ranked candidate WINDOW in
         // memory (the vector/hybrid query ranks against node_embeddings, not the
@@ -1692,10 +1854,10 @@ export const nodeQueries = {
         // structured filters when RANKING; re-assert them at hydration, as
         // buildResult does, so a node whose role (or memory, or deletion) changed
         // in between is not returned against the filter it no longer meets.
-        const rows = await ctx.db.node.findMany({
+        const rows = childrenOnly(await ctx.db.node.findMany({
           where: { id: { in: ranked.map((r) => r.nodeId) }, memoryId: { in: scopeIds }, ...structuredWhere },
           include: nodeInclude,
-        });
+        }));
         await decryptNodesBatch(ctx.db, rows);
         const byId = new Map(rows.map((n) => [n.id, n]));
         const pageRows = ranked
@@ -1891,7 +2053,7 @@ export const nodeQueries = {
             }),
           );
         }
-        const parents = await ctx.db.node.findMany({
+        const parents = childrenOnly(await ctx.db.node.findMany({
           where: {
             id: { in: whereAllowed ? candidateParentIds.filter((id) => whereAllowed!.has(id)) : candidateParentIds },
             // @copilot: re-assert scope at hydration, as buildResult does.
@@ -1899,7 +2061,7 @@ export const nodeQueries = {
             ...structuredWhere,
           },
           include: { memory: { select: { urn: true } } },
-        });
+        }));
         // #1885 (Diego, #1891 P2-1, chunk mode): the scope's exclusions were a
         // snapshot, so re-check every hydrated parent against the effective
         // set now, before eligibility, paging, usage and passage text. A base
@@ -2487,125 +2649,55 @@ export const nodeQueries = {
 
     appNodes: async (
       _: unknown,
-      { appRef, filter, limit }: {
-        appRef: string;
-        filter?: {
-          // Memory-scope fields — NOT supported by appNodes (the App's scope is
-          // authoritative). Present only so we can reject them explicitly.
-          memoryIds?: string[] | null;
-          memoryClasses?: string[] | null;
-          nodeType?: string | null;
-          /** #3113 */
-          nodeTypes?: string[] | null;
-          objectType?: string | null;
-          tags?: string[] | null;
-          isRunnable?: boolean | null;
-          role?: string | null;
-          locPrefix?: string | null;
-          createdBy?: string | null;
-          updatedAfter?: string | null;
-          updatedBefore?: string | null;
-          includeDeleted?: boolean | null;
-          /** #1591 */
-          approvalState?: NodeApprovalState | null;
-          /** #1591 */
-          minted?: boolean | null;
-        } | null;
-        limit?: number;
-      },
+      { appRef, filter, limit }: { appRef: string; filter?: AppNodesFilter | null; limit?: number },
       ctx: Context,
     ) => {
-      // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE
-      // computation, shared with appMemoryScope: a second copy would drift.
-      // #3113 — validated before the scope, so an unknown or denied App refuses a bad list the same way.
-      const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
-      const scope = await resolveAppNodeScope(ctx, appRef);
-      if (!scope) return [];
-      const { inheritance } = scope;
-      const memoryIds = inheritance.memoryIds;
-
-      // #525 — optional node-level NodeFilter, pushed server-side so callers
-      // (e.g. an App's runnable-task picker) can request `{ isRunnable: true }`
-      // without fetching everything and filtering client-side. The App's memory
-      // scope stays authoritative, and unlike findNodes we do NOT impose the
-      // default `nodeType != 'system'` exclusion — appNodes deliberately
-      // surfaces the system memory (#524).
-      const f = filter ?? {};
-      const badInput = (msg: string) =>
-        new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
-      // #526 review — NodeFilter carries memory-scope fields that appNodes can't
-      // honor (its scope is the App's memories). Reject rather than silently
-      // ignore them, so a caller who assumed they scoped fails fast instead of
-      // getting a surprising superset. Use findNodes for cross-memory scoping.
-      if (f.memoryIds?.length || f.memoryClasses?.length) {
-        throw badInput(
-          'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
-            "the App's installed-agent memories are the authoritative scope. " +
-            'Use findNodes for cross-memory scoping.',
-        );
-      }
-      if (f.updatedAfter && Number.isNaN(Date.parse(f.updatedAfter))) {
-        throw badInput('appNodes filter.updatedAfter must be a valid date string.');
-      }
-      if (f.updatedBefore && Number.isNaN(Date.parse(f.updatedBefore))) {
-        throw badInput('appNodes filter.updatedBefore must be a valid date string.');
-      }
-
-      const recoverableAppMemoryIds = f.includeDeleted ? await recoveryMemoryIds(ctx, memoryIds) : [];
+      // #2190 (cor:dmo:050:17) — admission and the memory scope are ONE computation, shared with
+      // appMemoryScope and (#2212 A2) appNodesPage: a second copy would drift.
+      const read = await appNodesRead(ctx, appRef, filter);
+      if (!read) return [];
       const results = await ctx.db.node.findMany({
-        where: {
-          memoryId: { in: memoryIds },
-          ...(f.includeDeleted ? {} : { deletedAt: null }),
-          ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : {}),
-          ...(f.objectType ? { objectType: f.objectType } : {}),
-          ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
-          ...(f.role != null
-            ? {
-                OR: [
-                  { role: f.role },
-                  { role: { startsWith: escapePrismaLikePattern(`${f.role}.`) } },
-                ],
-              }
-            : {}),
-          ...(f.tags?.length ? tagsFilter(f.tags) : {}),
-          ...(f.locPrefix ? { loc: { startsWith: f.locPrefix } } : {}),
-          ...(f.createdBy ? { createdBy: f.createdBy } : {}),
-          ...((f.updatedAfter || f.updatedBefore)
-            ? { updatedAt: {
-                ...(f.updatedAfter ? { gte: new Date(f.updatedAfter) } : {}),
-                ...(f.updatedBefore ? { lte: new Date(f.updatedBefore) } : {}),
-              } }
-            : {}),
-          ...approvalStatePrismaWhere(f.approvalState, ctx.db),
-          // #1607 (cor:dmo:110:06) — approval and mint status sets never contain comments.
-          // #1607 + #1608 — no comments in status sets; content, comments or
-          // both by contentScope (CONTENT by default, cor:dmo:110:08).
-          AND: [
-            ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableAppMemoryIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
-            ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
-            ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
-            ...((sw) => (sw ? [sw] : []))(contentScopeWhere(effectiveContentScope(f))),
-            ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
-          ],
-        },
+        where: read.where,
         orderBy: { loc: 'asc' },
         take: limit ?? 20,
-        include: {
-          outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() },
-          incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
-          memory: { select: { id: true, urn: true, name: true, organizationId: true } },
-        },
+        include: APP_NODES_INCLUDE,
       });
-      // The exclusion list was a snapshot: re-check what was read (P2-1).
-      const kept = new Set((await retainEffective(ctx.db, results, inheritance)).map((r) => r.id));
-      for (let i = results.length - 1; i >= 0; i--) if (!kept.has(results[i]!.id)) results.splice(i, 1);
-      await decryptNodesBatch(ctx.db, results);
-      markInherited(results, inheritance.inheritedFrom);
-      // #1061 — the App-scoped node list returns full node projections, so each
-      // one is a read. Scope is the App's installed-agent memories, established
-      // above.
-      recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(results), ctx);
-      return results;
+      return finishAppNodes(ctx, results, read.inheritance);
+    },
+
+    /**
+     * #2212 A2 (cor:api:120:04) — `appNodes` as a page. The SAME admission, filter validation and `where`
+     * (`appNodesRead`), so every refusal is the old field's and `total` counts exactly the rows the old
+     * field would return without a limit. Order is `loc, id`: `loc` alone is not unique across the App's
+     * memories, so ties would repeat or skip rows between pages. `hasMore` comes from the RAW rows read,
+     * before the post-read `retainEffective` re-check, so a dropped row never ends paging early.
+     * Count-only (`limit: 0`) reads no rows, so it decrypts, marks and records nothing.
+     */
+    appNodesPage: async (
+      _: unknown,
+      args: { appRef: string; filter?: AppNodesFilter | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => {
+      const { take, skip } = pageArgs(args);
+      const read = await appNodesRead(ctx, args.appRef, args.filter);
+      if (!read) return { items: [], total: 0, hasMore: false };
+      if (take === 0) {
+        const total = await ctx.db.node.count({ where: read.where });
+        return { items: [], total, hasMore: skip < total };
+      }
+      const [total, rows] = await ctx.db.$transaction([
+        ctx.db.node.count({ where: read.where }),
+        ctx.db.node.findMany({
+          where: read.where,
+          orderBy: [{ loc: 'asc' }, { id: 'asc' }],
+          take,
+          skip,
+          include: APP_NODES_INCLUDE,
+        }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+      const rawRows = rows.length;
+      const items = await finishAppNodes(ctx, rows, read.inheritance);
+      return { items, total, hasMore: skip + rawRows < total };
     },
 
 };

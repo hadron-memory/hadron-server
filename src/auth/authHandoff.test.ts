@@ -130,6 +130,7 @@ describe('exchange-start nonces', () => {
       orgId: 'org_123',
       redirect: '/app/orgs/org_123/integrations',
       origin: 'portal',
+      flowId: null, // #2913: only a GraphQL start has a flow
     });
     // Single use.
     expect(await redeemExchangeStartNonce(nonce)).toBeNull();
@@ -149,6 +150,7 @@ describe('exchange-start nonces', () => {
       orgId: 'org_123',
       redirect: '/',
       origin: 'graphql',
+      flowId: null, // #2913: no flow was named at issue time
     });
     expect(await redeemExchangeStartNonce(nonce, 'gmail')).toBeNull();
   });

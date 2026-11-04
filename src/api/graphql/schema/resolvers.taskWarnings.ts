@@ -43,6 +43,11 @@ export const TASK_WARNING_CODES = [
   'task.assign.assignee-unavailable',
   'task.assign.assignee-busy',
   'task.assign.assignee-paused',
+  // #3267 (action register phase 3, S1): advice on start and progress. The first and last describe worker or
+  // other-task state, so they sit behind the roster gate (GATED_CODES); parent-ended is about the task's own parent.
+  'task.start.other-started',
+  'task.start.parent-ended',
+  'task.progress.children-ended',
   'task.finish.open-children',
   // #2607 (action register phase 3): ungated, fixed text, about the caller's own act.
   'task.cancel.open-children',
@@ -57,6 +62,9 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
   'task.assign.assignee-unavailable': 'The assignee is marked unavailable for work, so the task may wait.',
   'task.assign.assignee-busy': 'The assignee already has an open task.',
   'task.assign.assignee-paused': 'The assignee has paused itself, so the task may wait.',
+  'task.start.other-started': 'You already have another task started; starting this one does not end it.',
+  'task.start.parent-ended': "This task's parent has already ended.",
+  'task.progress.children-ended': 'Every child of this task has ended, so it may be ready to finish.',
   'task.finish.open-children': 'This task still has open child tasks.',
   'task.cancel.open-children': 'This task still has open child tasks; cancelling it does not end them.',
   'alarm.ack.outside-chain': 'You acknowledged an alarm outside its chain, as a manager of the App.',
@@ -83,14 +91,28 @@ export const MAX_WARNINGS_PER_RESPONSE = 20;
 export const REGISTER_STATEMENT_TIMEOUT_MS = 300;
 export const REGISTER_TOTAL_BUDGET_MS = 1000;
 
-const ASSIGNEE_FACT_CODES: readonly TaskWarningCode[] = [
+/**
+ * The codes that describe a worker's or another task's state: filed only to a caller who passes the roster's own read
+ * gate (`maySeeWorkerInternals`), and dropped, never degraded, for anyone else. #3267 adds the start/progress pair.
+ */
+const GATED_CODES: readonly TaskWarningCode[] = [
   'task.assign.assignee-unavailable', 'task.assign.assignee-busy', 'task.assign.assignee-paused',
+  'task.start.other-started', 'task.progress.children-ended',
 ];
 
 /** The key a mutation's warnings are filed under: its response key (alias or name); MCP calls have no `info`. */
 export function warningPath(info?: Pick<GraphQLResolveInfo, 'path'> | null): string {
   const key = info?.path?.key;
   return typeof key === 'string' ? key : 'mcp';
+}
+
+/**
+ * Whether a warning's path belongs to a mutation that errored. #2653: a createAgentTasks call files each task's
+ * warnings under `<response key>.<position>`, and an error names the response key alone, so the key before the first
+ * dot decides (a GraphQL response key never contains one).
+ */
+function erroredPath(path: string, erroredPaths: ReadonlySet<string>): boolean {
+  return erroredPaths.has(path) || erroredPaths.has(path.split('.')[0]!);
 }
 
 /** Order by the fixed code order and cap; drops duplicates. */
@@ -145,7 +167,7 @@ export type TaskWarningState = {
 /** All the enrichment a request may spend, summed over its operations; past it, only fixed code + text is filed. */
 export const REQUEST_READ_BUDGET_MS = 2000;
 
-const isFactCode = (c: TaskWarningCode): boolean => ASSIGNEE_FACT_CODES.includes(c);
+const isFactCode = (c: TaskWarningCode): boolean => GATED_CODES.includes(c);
 
 /**
  * Run `fn` in ONE short transaction: Postgres cancels any statement after {@link REGISTER_STATEMENT_TIMEOUT_MS}
@@ -254,7 +276,7 @@ export type TaskWarningHistory = { appId: string; taskId: string; path: string; 
  */
 export async function flushTaskWarningHistory(ctx: Context, erroredPaths: ReadonlySet<string> = new Set()): Promise<void> {
   const pending = ctx.taskWarningHistory?.splice(0) ?? [];
-  const successful = pending.filter(h => !erroredPaths.has(h.path));
+  const successful = pending.filter(h => !erroredPath(h.path, erroredPaths));
   if (successful.length === 0) return;
   try {
     // Budgets (statement, deadline, transaction, pool wait) all come from boundedRead; see the JSDoc above.
@@ -348,7 +370,7 @@ export function shapeResponseWarnings(
   const perPath = new Map<string, number>();
   const out: { path: string; code: TaskWarningCode; text: string; register?: TaskWarningRegister }[] = [];
   for (const { path, warning } of collected) {
-    if (erroredPaths.has(path)) continue;
+    if (erroredPath(path, erroredPaths)) continue;
     const n = perPath.get(path) ?? 0;
     if (n >= MAX_WARNINGS_PER_OPERATION || out.length >= MAX_WARNINGS_PER_RESPONSE) continue;
     perPath.set(path, n + 1);

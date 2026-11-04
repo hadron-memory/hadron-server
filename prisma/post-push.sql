@@ -445,6 +445,11 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
 
 CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
 
+-- #2832: direct-children read (NodeFilter.childrenOf). Mirrors prisma/migrations/20261030100000_nodes_parent_loc_index
+-- (keep in lockstep). The expression is PARENT_LOC_SQL in src/lib/childLoc.ts; a filter must compare it unchanged.
+CREATE INDEX IF NOT EXISTS nodes_memory_parent_loc_idx
+  ON nodes (memory_id, (regexp_replace(loc, '(^|:)[^:]*$', '')));
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
@@ -676,6 +681,12 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2484: an App's prefix-scoped write grant for userless runs, and its append-only events.
 \ir app-memory-write-grant-invariants.sql
 
+-- #2883: an automation's read grant, keyed to its trigger row, and its append-only events.
+\ir app-automation-read-grant-invariants.sql
+
+-- #2659: the append-only record of a deleted user API key.
+\ir user-api-key-deletion-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
@@ -683,6 +694,7 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- shared verbatim with migration 20261008010000_agent_tasks (pinned by
 -- src/lib/agentTasks/invariants.test.ts).
 \ir agent-task-invariants.sql
+\ir agent-task-findings-invariants.sql
 
 -- #2553: the hierarchical task handle (counters, number-filling and permanence triggers, the reserved AT0, NOT NULL). One source,
 -- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
@@ -835,6 +847,9 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
+-- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
+\ir coordinator-cadence-invariants.sql
+
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
 
@@ -846,3 +861,7 @@ CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
+
+\ir agent-task-dispositions-invariants.sql
+
+\ir app-automation-team-snapshot-grant-invariants.sql

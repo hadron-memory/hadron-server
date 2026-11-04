@@ -8,7 +8,7 @@ import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { runAsActor } from '../../../lib/requestActor.js';
+import { currentActor, runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -18,7 +18,9 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGrap
 const M = resolvers.Mutation as any;
 const STAFFING_EVENT_TYPES = ['member.added', 'member.role-changed', 'member.removed', 'worker.cast', 'worker.retired', 'worker.deleted'] as const;
 
-const ctxOf = (userId: string): Context => ({ db, userId, roles: ['READER'], clientId: `user:${userId}` });
+const ctxOf = (userId: string): Context => ({ db, userId, roles: ['READER'], clientId: `user:${userId}`,
+  get sessionId() { return currentActor()?.workerId === caster?.id ? casterSessionId : undefined; },
+});
 const events = (type?: string) => db.agentTeamEvent.findMany({
   where: { appId: app.id, type: type ?? { in: [...STAFFING_EVENT_TYPES] } }, orderBy: { createdAt: 'asc' },
 });
@@ -32,6 +34,7 @@ let outsider: { id: string };
 let target: { id: string; email: string | null; name: string | null };
 let holder: { id: string };
 let caster: { id: string };
+let casterSessionId: string;
 
 /** Run as `caster` acting through its session, with `holder` (the person who holds it) behind the request. */
 const asWorker = (fn: () => Promise<any>): Promise<any> => runAsActor({ workerId: caster.id, agentId }, fn);
@@ -53,6 +56,9 @@ beforeEach(async () => {
   roleAgent = { id: role.id };
   await db.appAgent.create({ data: { appId: app.id, agentId: roleAgent.id } });
   caster = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId, name: 'Caster', slug: 'caster', heldByUserId: holder.id } });
+  casterSessionId = (await db.session.create({ data: { id: generateId(), appId: app.id, agentId, workerId: caster.id, userId: holder.id, tool: 'vitest' } })).id;
+  // #3308: these existing event-shape cases exercise the admitted headless arm.
+  for (const name of ['WORKERS_STAFF', 'APP_MEMBERS']) await M.grantApp({}, { appRef: app.id, workerRef: caster.id, name }, ctxOf(admin.id));
 });
 
 afterEach(async () => {
@@ -231,6 +237,9 @@ describe('#2766 admission is unchanged: the census treats the cast\'s own events
     await asWorker(() => ensure(ctxOf(admin.id), target.id, 'member'));
     await asWorker(() => removeMember(ctxOf(admin.id), target.id));
     expect((await events()).filter((e) => e.actorWorkerId === caster.id).length).toBeGreaterThan(0);
+    // Only event history is under test: the real session/grants introduced by #3308 are independent uses.
+    await db.session.delete({ where: { id: casterSessionId } });
+    await db.appGrant.deleteMany({ where: { granteeWorkerId: caster.id } });
     await expect(M.deleteWorker({}, { workerRef: caster.id, confirmNoExternalAttribution: true }, ctxOf(admin.id))).resolves.toBe(true);
   });
 

@@ -114,6 +114,12 @@ beforeEach(async () => {
   await createDbAppMember(db, appReader.id, appMember.id);
   await createDbAppMember(db, appContributor.id, appMember.id);
 
+  // #3305: independently admit the user's read/write level via a subscribing
+  // third org, retaining the two Agent-item caps rather than a home-org bypass.
+  const subscriber = await db.organization.create({ data: { name: 'app-member-subscriber', urn: 'app-member-subscriber' } });
+  await db.orgMember.create({ data: { organizationId: subscriber.id, userId: appMember.id, role: 'CONTRIBUTOR' } });
+  await db.memorySubscription.create({ data: { organizationId: subscriber.id, memoryId: graphA.id, role: 'CONTRIBUTOR' } });
+
   // Seed nodes
   await createDbNode(db, { loc: 'org-a.repo.nodeA', memoryId: graphA.id });
   await createDbNode(db, { loc: 'org-b.repo.nodeB', memoryId: graphB.id });

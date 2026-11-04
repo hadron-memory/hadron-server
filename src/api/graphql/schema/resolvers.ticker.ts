@@ -36,6 +36,10 @@
 // (tick and dormancy are decided once, in src/lib/tickers). NOT BUILT: the owner
 // succession of cor:agt:080:18 (Proposed).
 
+import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { admitAppManagement, requireInstructedActKeepingRuns, callerIsWorkerSession, lockCallerSession, readActInstruction } from './resolvers.instruction.js';
+import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { s7Available } from '../../../lib/tickers/s7Availability.js';
 import { GraphQLError, type GraphQLResolveInfo } from 'graphql';
 import { RegisterLookup, type RegisterEntry } from '../../../lib/actionRegister/lookup.js';
@@ -89,6 +93,7 @@ import { isWorkerDormant } from '../../../lib/sessionActivity.js';
 import { loadWorkersActivity } from './resolvers.worker.js';
 import { nextFreeTickerSlug } from '../../../lib/tickers/tickerSlug.js';
 import { TickerNotFoundError, composeTickerUrn, resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import {
   GeneratedAgentNotInstalledError, GeneratedNameTooLongError, GeneratedTickerLimitError, GeneratedTickerNameTakenError,
   applyAgentTickerTemplates,
@@ -131,7 +136,7 @@ export async function writeInApp<T>(
   actor: TaskActor,
   refused: () => GraphQLError,
   write: (tx: Prisma.TransactionClient, txCtx: Context, fresh: TaskApp, actor: TaskActor) => Promise<T>,
-  options: { lockMode?: 'shared' | 'exclusive' } = {},
+  options: { lockMode?: 'shared' | 'exclusive'; lockWorkerIds?: readonly (string | null | undefined)[] } = {},
 ): Promise<T> {
   requireWritable(ctx, app);
   return inTaskWriteTx(ctx, app, actor, refused, (tx, txCtx, fresh) => write(tx, txCtx, fresh, actor), options);
@@ -1141,25 +1146,37 @@ const wakeAndGrantMutations = {
   // ── The may-subscribe-workers grant (cor:agt:080:24) ──────────────────────
 
   grantApp: (_: unknown, a: { appRef: string; workerRef: string; name: string }, ctx: Context) => changeGrant(ctx, a, 'grant'),
-  revokeAppGrant: (_: unknown, a: { appRef: string; workerRef: string; name: string }, ctx: Context) => changeGrant(ctx, a, 'revoke'),
+  revokeAppGrant: (_: unknown, a: { appRef: string; workerRef: string; name: string; instruction?: ActInstruction | null }, ctx: Context) => changeGrant(ctx, a, 'revoke'),
 };
 
 export const tickerMutations = { ...crudMutations, ...subscriptionMutations, ...wakeAndGrantMutations };
 
 async function changeGrant(
   ctx: Context,
-  a: { appRef: string; workerRef: string; name: string },
+  a: { appRef: string; workerRef: string; name: string; instruction?: ActInstruction | null },
   op: 'grant' | 'revoke',
 ) {
   const name: AppGrantName | undefined = GRANT_ENUM_TO_NAME[a.name];
   if (!name || !(APP_GRANT_NAMES as readonly string[]).includes(name)) throw badInput('Unknown grant name.');
   const { app, actor } = await resolveParticipatedApp(ctx, a.appRef);
+  const forbidden = () => taskError('APP_GRANT_FORBIDDEN', 'Only whoever manages this App can give or revoke a grant.');
+  // #3311: a worker session that is not admitted learns nothing about the grantee or the grant: admission comes first.
+  if (op === 'revoke' && await callerIsWorkerSession(ctx)) await admitAppManagement(ctx, app, forbidden, a.instruction);
   const target = await loadWorkerOf(ctx, app.id, a.workerRef);
   return writeInApp(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     // Given and revoked only by whoever manages the App; no grant can give or take a grant.
-    if (!(await actorManagesApp(txCtx, fresh, actor))) {
-      throw taskError('APP_GRANT_FORBIDDEN', 'Only whoever manages this App can give or revoke a grant.');
-    }
+    let admission: ActAdmission | null = null;
+    if (op === 'revoke') {
+      // #3311: a person as themselves, or their held worker on a validated instruction (cor:dmo:050:12 S6, ruling
+      // 0109 A); the manager predicate is the holder's, evaluated here under the App's anchors.
+      // The session row is fenced before the judgement, so a session end cannot commit between it and the write.
+      await lockCallerSession(tx, txCtx.sessionId);
+      admission = await requireInstructedActKeepingRuns(txCtx, fresh.id, a.instruction, () => managesApp(txCtx, fresh), readActInstruction, forbidden);
+    } else if (!(await actorManagesApp(txCtx, fresh, actor))) throw forbidden();
+    // #3277: giving a grant is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0099 A), so a worker
+    // never gives a grant, to itself or another: the one person gate also refuses a worker session found on the session
+    // row, an ambiguous actor and a run principal. Same refusal.
+    if (op === 'grant') await requirePersonOnlyAct(txCtx, 'grant.give', forbidden);
     const w = await lockWorker(tx, target.id);
     if (!w || w.appId !== fresh.id) throw workerNotFound(a.workerRef);
     // With no live row there is nothing for FOR UPDATE to lock, so two first grants
@@ -1178,8 +1195,10 @@ async function changeGrant(
       return tx.appGrant.create({ data: { appId: fresh.id, granteeWorkerId: w.id, name, grantedBy: by } });
     }
     if (!liveId) throw taskError('APP_GRANT_NOT_FOUND', 'That worker does not hold this grant.');
-    return tx.appGrant.update({ where: { id: liveId }, data: { revokedAt: new Date(), revokedBy: by } });
-  });
+    const ended = await tx.appGrant.update({ where: { id: liveId }, data: { revokedAt: new Date(), revokedBy: by } });
+    if (admission) await appendCredentialInstructionEvent(tx, { appId: fresh.id, admission, act: 'app-grant.revoke' });
+    return ended;
+  }, { ...(actor.kind === 'worker' ? { lockWorkerIds: [actor.workerId] } : {}) });
 }
 
 // ── Field resolvers ───────────────────────────────────────────────────────

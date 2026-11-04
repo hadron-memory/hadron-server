@@ -53,6 +53,7 @@ import { mintProviderNonce, nonceExpectation, recordNonceRefusal } from './auth/
 import { failLoginCallback, type LoginFailureReason } from './auth/login-error.template.js';
 import { mountDevLoginRoutes } from './auth/devLogin.js';
 import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
+import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { beginPasskeySignIn, mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
 import { completeCeremonyLeg, mountFreshSignInRoutes } from './api/freshSignInRoutes.js';
@@ -1103,6 +1104,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // NODE_ENV + localhost Host; otherwise indistinguishable from a 404).
   mountDevLoginRoutes(app, db);
   mountPasskeyCeremonyRoutes(app);
+  // #1632 S2b-2 (cor:dmo:130:08): the signing ceremony page; mounted only when the signing switch is on (#1895).
+  mountSigningCeremonyRoutes(app);
   mountPasskeySignInRoutes(app);
   mountFreshSignInRoutes(app, { emailSendPerIpRateLimit, emailRecipientRateLimit });
 

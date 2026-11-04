@@ -1,6 +1,7 @@
 /**
  * #1632 — pure pins for signature-state derivation (cor:dmo:130:04) and the
- * v1 payload builder against the S0 conformance fixture (#1629).
+ * S0 conformance fixture's approval hashes (#1629). The v1 payload it also carries is no longer built or
+ * accepted (R80, #1632 S2b-2): the v3 bytes are pinned in payloadV3_1632.test.ts.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -74,7 +75,7 @@ describe('roll-up and display order (cor:dmo:130:06)', () => {
   });
 });
 
-describe('signaturePayloadBytes v1 matches the S0 fixture byte for byte (#1629)', () => {
+describe('the S0 fixture still pins the approval hash, and its v1 payload is no longer built (#1629, R80)', () => {
   const fixture = JSON.parse(readFileSync('src/lib/signaturePayload.fixture.json', 'utf8')) as {
     cases: Array<{ name: string; input: { nodeId: string; fields: { title: string | null; abstract: string | null; content: string | null } };
       approvalHash: string; canonical: string; challengeHex: string }>;
@@ -83,16 +84,18 @@ describe('signaturePayloadBytes v1 matches the S0 fixture byte for byte (#1629)'
     it(c.name, () => {
       const approvalHash = computeApprovalHash(c.input.fields as never);
       expect(approvalHash).toBe(c.approvalHash);
-      const bytes = signaturePayloadBytes('hadron-signature-v1', { nodeId: c.input.nodeId, approvalHash });
-      expect(bytes.toString('base64')).toBe(c.canonical);
-      expect(signatureChallenge(bytes).toString('hex')).toBe(c.challengeHex);
+      // The v1 bytes are the fixture's own literal framing: still the S0 contract, no longer produced by the server.
+      const v1 = Buffer.from(`hadron-signature-v1\nnode ${c.input.nodeId}\napproval-hash ${approvalHash}\n`, 'utf8');
+      expect(v1.toString('base64')).toBe(c.canonical);
+      expect(signatureChallenge(v1).toString('hex')).toBe(c.challengeHex);
+      expect(() => signaturePayloadBytes('hadron-signature-v1', { nodeId: c.input.nodeId, approvalHash })).toThrow(UnsupportedSignaturePayloadError);
     });
   }
-  it('refuses v2 (retired) and v3 (S2b-2) loudly, and malformed input', () => {
-    const ok = { nodeId: 'n', approvalHash: 'a'.repeat(64) };
+  it('refuses v1 (R80) and v2 (retired) loudly, and malformed input', () => {
+    const ok = { nodeId: 'n', approvalHash: 'a'.repeat(64), requestId: 'AAAAAAAAAAAAAAAAAAAAAA' };
+    expect(() => signaturePayloadBytes('hadron-signature-v1', ok)).toThrow(UnsupportedSignaturePayloadError);
     expect(() => signaturePayloadBytes('hadron-signature-v2', ok)).toThrow(UnsupportedSignaturePayloadError);
-    expect(() => signaturePayloadBytes('hadron-signature-v3', ok)).toThrow(UnsupportedSignaturePayloadError);
-    expect(() => signaturePayloadBytes('hadron-signature-v1', { ...ok, approvalHash: 'A'.repeat(64) })).toThrow();
-    expect(() => signaturePayloadBytes('hadron-signature-v1', { ...ok, nodeId: 'a\nb' })).toThrow();
+    expect(() => signaturePayloadBytes('hadron-signature-v3', { ...ok, approvalHash: 'A'.repeat(64) })).toThrow();
+    expect(() => signaturePayloadBytes('hadron-signature-v3', { ...ok, nodeId: 'a\nb' })).toThrow();
   });
 });

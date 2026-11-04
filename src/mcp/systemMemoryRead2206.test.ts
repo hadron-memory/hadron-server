@@ -1,7 +1,7 @@
 /**
  * #2206 case 3 — App participants (members, org CONTRIBUTOR+) read the system memory of EVERY Agent installed and
  * licensed in the App, read-only, not only the first-installed one (cor:acl:010:01, Vera 6319156558). Nothing else
- * widens: no write, no item memories, no run or App-key reach, no unlicensed or uninstalled Agent.
+ * widens: no write, no item memories, no App-key reach (#3233 adds the run-only App fold), no unlicensed or uninstalled Agent.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -68,10 +68,11 @@ describe('#2206 case 3: the App participant read fold', () => {
     expect(await systemMemoryReadGrants(db, { userId: reader.id, roles: ['READER'] }, second.systemMemoryId)).toEqual([]);
   });
 
-  it('no reach for non-participants, runs, or App keys; the item memory is not widened', async () => {
+  it('no reach for non-participants or App keys; runs read definitions only through their App (#3233)', async () => {
     for (const who of [reader, outsider]) expect(await canReadMemory(db, authOf(who.id), second.systemMemoryId)).toBe(false);
     const run = { userId: member.id, appId: app.id, roles: [], clientId: `run:${generateId()}` } as AuthContext;
-    expect(await canReadMemory(db, run, second.systemMemoryId)).toBe(false);
+    expect(await canReadMemory(db, run, second.systemMemoryId)).toBe(true);
+    expect(await canWriteToMemory(db, run, second.systemMemoryId)).toBe(false);
     const appKey = { appId: app.id, roles: [], clientId: 'app' } as AuthContext;
     expect(await canReadMemory(db, appKey, second.systemMemoryId)).toBe(false);
     const contributorItem = await canReadMemory(db, authOf(contributor.id), item.id);

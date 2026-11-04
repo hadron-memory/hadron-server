@@ -190,11 +190,11 @@ describe('#1092 memory read gates agree per principal shape', () => {
       expect(await enumerateGate(ctxOf(), fx.teamSpaceId)).toBe(true);
     });
 
-    it('reads the installed agent memories through every gate', async () => {
+    it('reads installed system definitions but not org knowledge items through every gate (#3305)', async () => {
       expect(await mcpGate(authOf(), fx.systemMemoryId)).toBe(true);
       expect(await enumerateGate(ctxOf(), fx.systemMemoryId)).toBe(true);
-      expect(await mcpGate(authOf(), fx.agentItemMemoryId)).toBe(true);
-      expect(await enumerateGate(ctxOf(), fx.agentItemMemoryId)).toBe(true);
+      expect(await mcpGate(authOf(), fx.agentItemMemoryId)).toBe(false);
+      expect(await enumerateGate(ctxOf(), fx.agentItemMemoryId)).toBe(false);
     });
 
     it('does NOT reach an org memory the App does not carry — membership is of the App, not the org', async () => {
@@ -250,7 +250,7 @@ describe('#1092 memory read gates agree per principal shape', () => {
 
   it('resolves BOTH endpoints of a cross-memory edge for an external AppMember (#1093 P2)', async () => {
     // The parity failure's user-visible face, and the test the issue asked for.
-    // `appNodes` serves the external member nodes from BOTH memories, then
+    // `appNodes` serves the external member team + system nodes, then
     // `Edge.source`/`Edge.target` re-authorize each endpoint through
     // `isMemoryReadableCached` → `getAccessibleMemoryIds`, which had no App arm
     // for this principal. Both endpoints came back NULL inside a response that
@@ -260,7 +260,7 @@ describe('#1092 memory read gates agree per principal shape', () => {
       data: { id: generateId(), memoryId: fx.teamSpaceId, loc: 'x:src', isLink: false, name: 'src', tags: [] },
     });
     const tgt = await db.node.create({
-      data: { id: generateId(), memoryId: fx.agentItemMemoryId, loc: 'x:tgt', isLink: false, name: 'tgt', tags: [] },
+      data: { id: generateId(), memoryId: fx.systemMemoryId, loc: 'x:tgt', isLink: false, name: 'tgt', tags: [] },
     });
     const edge = await db.edge.create({
       data: {
@@ -280,6 +280,15 @@ describe('#1092 memory read gates agree per principal shape', () => {
     const memberCtx = { db, roles: ['READER'], userId: externalMemberId } as Context;
     expect((await E.source(edge, {}, memberCtx))?.id).toBe(src.id);
     expect((await E.target(edge, {}, memberCtx))?.id).toBe(tgt.id);
+    const itemTarget = await db.node.create({
+      data: { id: generateId(), memoryId: fx.agentItemMemoryId, loc: 'x:item-only', isLink: false, name: 'item-only', tags: [] },
+    });
+    const itemEdge = await db.edge.create({
+      data: { id: generateId(), memoryId: fx.teamSpaceId, loc: 'x:src:relation:x:item-only', sourceId: src.id, targetId: itemTarget.id, name: 'relation' },
+    });
+    expect((await E.source(itemEdge, {}, memberCtx))?.id).toBe(src.id);
+    expect(await E.target(itemEdge, {}, memberCtx)).toBeNull();
+
 
     // …and the gate still CLOSES on the far side for someone outside the App:
     // the cross-memory endpoint check is doing its job, not switched off.
@@ -448,8 +457,7 @@ describe('#1092 memory read gates agree per principal shape', () => {
         organizationId: fx.orgId,
       },
     });
-    // App-INTERNAL memory of the FIRST App (#653: an app-scoped knowledge row is
-    // reachable only through its own App's surface, never org-wide).
+    // App-scoped knowledge stays outside App membership authority (#653/#3305).
     const appAInternal = await db.memory.create({
       data: {
         id: generateId(),
@@ -480,17 +488,19 @@ describe('#1092 memory read gates agree per principal shape', () => {
     expect(await mcpGate(bAuth, appAInternal.id)).toBe(false);
     expect(await enumerateGate(bCtx, appAInternal.id)).toBe(false);
 
-    // A member of App A still reaches it — the scope rule narrows to the App
-    // whose fold is being built, not to nothing.
+    // Neither App membership admits App-scoped knowledge; App-class team
+    // space remains independently available to the member of its own App.
     const aCtx = { db, roles: ['READER'], userId: externalMemberId } as Context;
     const aAuth = { userId: externalMemberId, roles: ['READER'] } as AuthContext;
-    expect(await mcpGate(aAuth, appAInternal.id)).toBe(true);
-    expect(await enumerateGate(aCtx, appAInternal.id)).toBe(true);
+    expect(await mcpGate(aAuth, appAInternal.id)).toBe(false);
+    expect(await enumerateGate(aCtx, appAInternal.id)).toBe(false);
+    expect(await mcpGate(aAuth, fx.teamSpaceId)).toBe(true);
+    expect(await enumerateGate(aCtx, fx.teamSpaceId)).toBe(true);
+    expect(await enumerateGate(bCtx, fx.teamSpaceId)).toBe(false);
 
-    // And a non-app-scoped memoryItem (appId NULL — an ordinary org knowledge
-    // memory the agent carries) stays reachable from BOTH Apps: the filter is
-    // about app-scoped rows, not about memoryItems in general.
-    expect(await enumerateGate(bCtx, fx.agentItemMemoryId)).toBe(true);
+    // #3305: neither App membership independently admits ordinary org knowledge,
+    // even when its item is not App-scoped.
+    expect(await enumerateGate(bCtx, fx.agentItemMemoryId)).toBe(false);
   });
 
   describe('stranger (no org role, no App membership)', () => {

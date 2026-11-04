@@ -44,7 +44,7 @@ function appKeyAuth(): AuthContext {
   return { appId: fx.appId, organizationId: undefined };
 }
 
-// A principal with a user behind it (an AppMember) keeps the item fold — the reach semantics under test.
+// The positive user control has independent home-org read authority (#3305).
 function memberAuth(): AuthContext {
   return { appId: fx.appId, userId: fx.userId, organizationId: undefined };
 }
@@ -97,6 +97,8 @@ beforeEach(async () => {
 
   const user = await db.user.create({ data: { id: generateId(), name: 'aknoses-member' } });
   await createDbAppMember(db, app.id, user.id, 'member');
+  // #3305: the search's positive user control has its own home-org read.
+  await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'READER' } });
 
   await createDbNode(db, {
     memoryId: linkedMemory.id,

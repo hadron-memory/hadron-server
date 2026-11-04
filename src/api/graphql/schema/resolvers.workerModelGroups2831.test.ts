@@ -155,6 +155,62 @@ describe('#2831 S3 current model groups', () => {
     expect(await F.Worker.modelGroups({ id: w.Anne.id, appId: app.id }, {}, ctx(mia.id))).toEqual([]);
   });
 
+  it('#3059 resolves groups once for several model-bearing roster rows and rereads the next request after a mutation', async () => {
+    await group('all', ['model-*']);
+    await group('alpha', ['model-alpha']);
+    for (const [name, model] of [['Anne', 'model-alpha'], ['Rook', 'model-beta'], ['Kit', 'model-gamma']]) {
+      await session(name, { llmModel: model });
+    }
+    const groupAppIds: Array<string | undefined> = [];
+    const traced = db.$extends({ query: { modelGroup: { findMany: async ({ args, query }) => {
+      groupAppIds.push(args.where?.appId as string | undefined);
+      return query(args);
+    } } } });
+    const read = async () => {
+      groupAppIds.length = 0;
+      // A fresh request context: only rows of THIS query may share its group-resolution promise.
+      const result = await server.executeOperation({
+        query: 'query RosterGroups($app: ID!) { teamRoster(appRef: $app) { workers { worker { id name } model modelGroups } } }',
+        variables: { app: app.id },
+      }, { contextValue: { ...ctx(mia.id), db: traced as unknown as Context['db'] } });
+      if (result.body.kind !== 'single') throw new Error('unexpected incremental result');
+      expect(result.body.singleResult.errors).toBeUndefined();
+      // No Team Agent is installed in this fixture, so each resolution has one App-group list query.
+      expect(groupAppIds).toEqual([app.id]);
+      return (result.body.singleResult.data as any).teamRoster.workers;
+    };
+    const initial = await read();
+    expect(initial.map((row: any) => ({ name: row.worker.name, model: row.model, groups: row.modelGroups }))).toEqual([
+      { name: 'Anne', model: 'model-alpha', groups: ['all', 'alpha'] },
+      { name: 'Kit', model: 'model-gamma', groups: ['all'] },
+      { name: 'Rook', model: 'model-beta', groups: ['all'] },
+    ]);
+
+    w.Extra = await db.worker.create({
+      data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Extra', slug: 'extra', heldByUserId: mia.id },
+      select: { id: true },
+    });
+    await session('Extra', { llmModel: 'model-delta' });
+    const grown = await read();
+    expect(grown.map((row: any) => row.worker.name)).toEqual(['Anne', 'Extra', 'Kit', 'Rook']);
+    expect(grown.every((row: any) => row.model && row.modelGroups.includes('all'))).toBe(true);
+
+    const changed = await server.executeOperation({
+      query: 'mutation ChangeGroups($app: ID!) { setAppModelGroup(appRef: $app, name: "all", patterns: ["model-alpha"]) { name patterns } }',
+      variables: { app: app.id },
+    }, { contextValue: ctx(admin.id) });
+    if (changed.body.kind !== 'single') throw new Error('unexpected incremental result');
+    expect(changed.body.singleResult.errors).toBeUndefined();
+    expect((changed.body.singleResult.data as any).setAppModelGroup).toMatchObject({ name: 'all', patterns: ['model-alpha'] });
+    const after = await read();
+    expect(after.map((row: any) => ({ name: row.worker.name, groups: row.modelGroups }))).toEqual([
+      { name: 'Anne', groups: ['all', 'alpha'] },
+      { name: 'Extra', groups: [] },
+      { name: 'Kit', groups: [] },
+      { name: 'Rook', groups: [] },
+    ]);
+  });
+
   it('uses one group resolution for roster growth and leaves work decisions untouched', async () => {
     await group('all', ['*']);
     await session('Anne', { llmModel: 'model' });
