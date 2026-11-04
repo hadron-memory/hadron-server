@@ -43,12 +43,13 @@ async function readerFor(
   const concealed = () => taskError('APP_NOT_FOUND', 'App not found.');
   // Concealed like any App the caller cannot reach: no oracle, and no key or impersonated session reads wakes here.
   // Nor does a worker's session on its own: it is the worker, not the person behind it, and a holder's reading right is
-  // theirs as a person (cor:agt:080:22). It never acknowledges either (080:17), so it cannot silence the workers it reads.
+  // theirs as a person (cor:agt:080:22). It never acknowledges (080:17), so it cannot silence the workers it reads.
   if (!ctx.userId || ctx.impersonation) throw concealed();
   if (actor.kind === 'worker') {
     if (instruction == null) throw concealed();
     // #3321 (cor:dmo:050:12): the manager scope on the holder's right and an instruction, one record per admitted call,
-    // an empty page included. A holder who does not manage the App gets the refusal, never their personal scope.
+    // an empty page included. The holder's own read is a holder arm, which stays the person's (ask 3; Vera #72951): a
+    // worker whose holder does not manage the App gets what it gets with no instruction, and nothing is written.
     await admitInstructedRead(ctx, app, concealed, instruction, (tx, admission) =>
       appendManagerInstructionEvent(tx, { appId: app.id, admission, act: 'wake.read', subject: {} }));
     return { manager: true, userId: ctx.userId };

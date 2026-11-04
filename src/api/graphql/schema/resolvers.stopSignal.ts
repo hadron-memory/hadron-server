@@ -4,7 +4,7 @@
  *
  * Who may (cor:agt:090:06, Holger plan r2 R1; Vera's receipt §2):
  * - **Whoever manages the App** (`managesApp`, through `actorManagesApp`): any level at any scope, and lift any signal.
- *   A person acting as themselves only: impersonation never manages.
+ *   A person acting as themselves, or their held worker on an instruction: impersonation never manages.
  * - **A host key** (`host:operate`, cor:agt:070:04): a `halt` on its OWN host only, the host taken from the key's
  *   binding and never from the request (a named host that isn't the key's refuses); and lift a `halt` on its own
  *   host (Proposed). Every call is recorded as a host-key use with action `stop`, refusals included (cor:agt:070:07).

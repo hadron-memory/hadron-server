@@ -16,7 +16,8 @@
 // re-gates inside its transaction (`inTaskWriteTx`): the authority anchors
 // SHARED, the actor re-resolved on the transaction client, then the decision
 // below on rows locked in that transaction. `managesApp` counts a person acting
-// as themselves only.
+// as themselves only; #3321: `actorManagesApp` judges it on the holder for a
+// worker that brings a clear instruction (cor:dmo:050:12), and records the act.
 //
 // AUTHORIZATION (src/lib/tickers/policy.ts holds the pure matrix):
 //   create          any App participant, or a session bound to a worker of the
@@ -1068,7 +1069,7 @@ const subscriptionMutations = {
   /**
    * #2096 (R97 B, R92 A): apply the Agent's CURRENT ticker templates to ONE existing worker, creating only the
    * template tickers it is missing (the repair for workers cast before the templates existed). Whoever manages the
-   * App, a person acting as themselves: not the worker, not its holder as such, not a reportsTo chain, never an
+   * App, as themselves or through their held worker on an instruction (#3321): not the worker on its own, not its holder as such, not a reportsTo chain, never an
    * impersonation or a bare App key (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :33).
    *
    * Lock order, the one retireWorker and every ticker write take: the shared transaction gate (authority anchors),
