@@ -20,6 +20,7 @@ import {
 import {
   computeRevisionStateHash,
   createNodeRevision,
+  diffNodeChanges,
   buildNodeRevisionSnapshot,
   editorFromAuth,
   revisionStateHashRefreshMarker,
@@ -28,7 +29,7 @@ import { decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCr
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { assertAuthoring, authoringFromRequest, type AuthoredWith } from '../../../lib/authoringAttestation.js';
-import { clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
@@ -71,6 +72,8 @@ interface ChangedNode {
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
+  /** #1328 — a match is not a change: replacing a text with itself authors nothing. */
+  authoredChange: boolean;
   total: number;
   fields: Array<{ field: 'content' | 'abstract'; matches: number }>;
 }
@@ -283,6 +286,7 @@ export async function searchReplaceInSpecNodes(
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
+        authoredChange: false,
         total: 0,
         fields: [],
       };
@@ -312,6 +316,7 @@ export async function searchReplaceInSpecNodes(
           replacement.fields.push({ field: 'abstract', matches: next.count });
         }
       }
+      replacement.authoredChange = authoredContentChanged(diffNodeChanges(pt, replacement.changed));
       if (replacement.total > 0) changed.push(replacement);
     }
 
@@ -384,7 +389,7 @@ export async function searchReplaceInSpecNodes(
       // #1328 — a spec's role rule answers to the same claim as any other writer.
       const authoredStamp = await assertAuthoring(tx, memoryId, {
         priorRole: node.raw.role, priorRunnable: node.raw.isRunnable,
-        role: node.raw.role, runnable: node.raw.isRunnable, authoredChange: true,
+        role: node.raw.role, runnable: node.raw.isRunnable, authoredChange: node.authoredChange,
       }, authoringFromRequest(ctx, input.authoredWith));
       await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
         revLabel: input.reason,
@@ -407,7 +412,7 @@ export async function searchReplaceInSpecNodes(
         data.abstractOriginHash = computeContentHash(node.plaintext.content);
       }
       data.revisionContentHash = revisionStateHashRefreshMarker();
-      Object.assign(data, authoredStamp ?? clearNodeAuthorship());
+      if (node.authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
       await tx.node.update({ where: { id: node.raw.id }, data });
       if (node.contentChanged || node.abstractChanged) {
         node.raw.embeddingWorkToken = await stampEmbeddingObligation(tx, node.raw.id, memoryId);

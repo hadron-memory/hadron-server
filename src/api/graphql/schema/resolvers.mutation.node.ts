@@ -2882,6 +2882,8 @@ export const nodeMutations = {
         total: number;
         abstractChanged: boolean;
         contentChanged: boolean;
+        /** #1328 — a match is not a change: replacing a text with itself authors nothing. */
+        authoredChange: boolean;
         ownerRepo: string;
       }
       const plans: Plan[] = [];
@@ -3007,6 +3009,10 @@ export const nodeMutations = {
             total,
             abstractChanged,
             contentChanged,
+            authoredChange: authoredContentChanged(diffNodeChanges(pt, {
+              ...changed,
+              ...('tags' in changed ? { tags: serializeTags(changed.tags as string[]) } : {}),
+            })),
             ownerRepo: (raw as { ownerRepo?: string | null }).ownerRepo ?? '',
           });
         }
@@ -3147,11 +3153,13 @@ export const nodeMutations = {
               { extensions: { code: 'NODE_WRITE_CONFLICT', loc: p.raw.loc, memoryId: p.raw.memoryId } },
             );
           }
-          // #1328 — one claim for the batch, judged per changed row on its
-          // locked state; one refusal refuses the batch, like every check here.
+          // #1328 — one claim for the batch, judged per row on its locked state
+          // and on what the row changes (compared on plaintext in the plan, which
+          // the check above just proved current); one refusal refuses the batch,
+          // like every check here.
           authoredStamps.set(p.raw.id, await assertAuthoring(tx, p.raw.memoryId, {
             priorRole: locked.role, priorRunnable: locked.isRunnable,
-            role: locked.role, runnable: locked.isRunnable, authoredChange: true,
+            role: locked.role, runnable: locked.isRunnable, authoredChange: p.authoredChange,
           }, authoring));
         }
         for (const p of plans) {
@@ -3197,7 +3205,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
-          Object.assign(data, authoredStamps.get(raw.id) ?? clearNodeAuthorship());
+          if (p.authoredChange) Object.assign(data, authoredStamps.get(raw.id) ?? clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
           if (p.contentChanged || p.abstractChanged) {
             raw.embeddingWorkToken = await stampEmbeddingObligation(tx, raw.id, raw.memoryId);
