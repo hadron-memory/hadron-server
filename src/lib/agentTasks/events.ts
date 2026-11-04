@@ -672,7 +672,15 @@ export type ManagerAct =
   | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
   | 'task.finding-dispose' | 'task.priority' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
   | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
-  | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties';
+  | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
+  // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
+  | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
+  | 'stop.set' | 'stop.lift' | 'ticker.update' | 'ticker.delete' | 'ticker.subscribe' | 'ticker.unsubscribe'
+  | 'ticker.templates-apply' | 'worker.wake-settings' | 'worker.isolate' | 'worker.isolation-clear'
+  | 'app.ticker-settings' | 'app.delivery-settings' | 'team.pause' | 'team.resume' | 'wake.read';
+
+/** The ids an instructed App-manager act concerns; never content (cor:agt:050:11). */
+export type ManagerActSubject = { taskId?: string; workerId?: string; eventId?: string; tickerId?: string; signalId?: string };
 
 /**
  * #3323 (S4a of #2483): one record per admitted instructed App-manager act, in the act's transaction. Names the worker,
@@ -682,7 +690,7 @@ export type ManagerAct =
  */
 export async function appendManagerInstructionEvent(
   tx: Prisma.TransactionClient,
-  args: { appId: string; admission: ActAdmission; act: ManagerAct; subject: { taskId?: string; workerId?: string; eventId?: string } },
+  args: { appId: string; admission: ActAdmission; act: ManagerAct; subject: ManagerActSubject },
 ): Promise<void> {
   if (args.admission.kind !== 'instructed-worker') return;
   const a = args.admission;

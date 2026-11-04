@@ -541,8 +541,9 @@ describe('#3323 callers not wired in this slice keep refusing a worker (acceptan
       const key = await db.appKey.create({ data: { appId: f.app.id, keyHash: generateId(), keyPreview: 'abcd', label: 'K' } });
       return M.grantAppKeyScope({}, { id: key.id, scope: 'attention:deliver', instruction: live }, c);
     },
-    setTeamStopSignal: (c) => M.setTeamStopSignal({}, { input: { appRef: f.app.id, level: 'PAUSE', scope: 'WORKER', worker: f.target.id }, instruction: live }, c),
-    setAppTickerSettings: (c) => M.setAppTickerSettings({}, { appRef: f.app.id, input: { wakeDailyBudget: 5 }, instruction: live }, c),
+    // #3321 wired these two: on an instruction they admit (pinned there), so here they stand for a worker that brings none.
+    setTeamStopSignal: (c) => M.setTeamStopSignal({}, { input: { appRef: f.app.id, level: 'PAUSE', scope: 'WORKER', worker: f.target.id } }, c),
+    setAppTickerSettings: (c) => M.setAppTickerSettings({}, { appRef: f.app.id, input: { wakeDailyBudget: 5 } }, c),
   };
   for (const [name, call] of Object.entries(unwired)) {
     it(`${name}: a worker held by an App manager is refused, nothing written`, async () => {

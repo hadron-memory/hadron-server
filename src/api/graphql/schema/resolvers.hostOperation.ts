@@ -33,6 +33,8 @@ import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import {
   actorManagesApp,
+  recordInstructedManagerAct,
+  withInstruction,
   inTaskWriteTx,
   loadApp,
   requireWritable,
@@ -64,7 +66,8 @@ import {
   HOST_ID_PATTERN,
   HOST_LAPSE_CHECK_INS_DEFAULT,
 } from '../../../lib/agentTasks/hosts.js';
-import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR } from '../../../lib/agentTasks/events.js';
+import { appendAvailabilityEvent, appendHostOperationEvent, eventActor, PLATFORM_ACTOR, type ManagerAct } from '../../../lib/agentTasks/events.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { recordInEffect } from '../../../lib/agentTasks/availability.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { fenceHostDecision, insertWorkerStart, LaunchRefusal, liveRegistrationsFor, lockStartableWorker, mintLaunchGrants } from '../../../lib/hostOperations/launch.js';
@@ -547,7 +550,7 @@ export const hostOperationMutations = {
    */
   issueHostOperation: async (
     _: unknown,
-    { input }: { input: { appRef: string; hostId: string; worker: string; type: string; args?: Record<string, unknown> | null } },
+    { input, instruction }: { input: { appRef: string; hostId: string; worker: string; type: string; args?: Record<string, unknown> | null }; instruction?: ActInstruction | null },
     ctx: Context,
   ) => recordingRefusal(ctx, 'issue', null, async () => {
     if (!input) throw badInput('input is required.');
@@ -575,7 +578,10 @@ export const hostOperationMutations = {
     }
     const hostId = (input.hostId ?? '').trim();
     if (!HOST_ID_PATTERN.test(hostId)) throw badInput('hostId is a host token.');
-    const { app, actor } = await resolveParticipatedApp(ctx, input.appRef);
+    const participated = await resolveParticipatedApp(ctx, input.appRef);
+    const { app } = participated;
+    // #3321 (cor:dmo:050:12): the manager arm on an instruction; the other arms below need none.
+    const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
     const workerId = await resolveTaskWorkerId(ctx, app.id, input.worker);
     const workerNotFound = () => taskError('WORKER_NOT_FOUND', 'Worker not found.', { worker: input.worker });
@@ -594,7 +600,7 @@ export const hostOperationMutations = {
       if (target.retiredAt) throw taskError('WORKER_RETIRED', 'This worker is retired.', { workerId });
       if (validated.type === 'worker.end') {
         // Starting or ending a worker is whoever manages the App's (070:05); worktree authority alone is not enough.
-        if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+        if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
           throw taskError('HOST_OPERATION_NOT_PERMITTED', "Only whoever manages the App ends a worker's session through its host.");
         }
         const [session] = await tx.$queryRaw<{ workerId: string | null; endedAt: Date | null; deletedAt: Date | null }[]>`
@@ -633,6 +639,7 @@ export const hostOperationMutations = {
           ...issuer(ctx, actor),
         },
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, `host-operation.${validated.type}` as ManagerAct, { workerId });
     });
     return ctx.db.hostOperation.findUniqueOrThrow({ where: { id } });
   }),
@@ -728,7 +735,7 @@ async function issueWorkerStart(
   let id = '';
   try {
     await inTaskWriteTx(ctx, app, actor, () => appNotFound(appRef), async (tx, txCtx, freshApp) => {
-      if (!(await actorManagesApp(txCtx, freshApp, actor))) {
+      if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('HOST_OPERATION_NOT_PERMITTED', 'Only whoever manages the App starts a worker through its host.');
       }
       const now = new Date();
@@ -752,8 +759,12 @@ async function issueWorkerStart(
       const e = issuer(ctx, actor);
       id = await insertWorkerStart(tx, {
         appId: freshApp.id, hostId, workerId, worktree: args.worktree!, family: args.family!, taskId: args.taskId ?? null,
-        issuer: { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId }, hold,
+        issuer: actor.kind === 'worker'
+          ? { issuedBy: 'worker', issuedByUserId: e.issuedByUserId, issuedByWorkerId: actor.workerId, issuedByAgentId: e.issuedByAgentId }
+          : { issuedBy: 'user', issuedByUserId: e.issuedByUserId!, issuedByAgentId: e.issuedByAgentId },
+        hold,
       });
+      await recordInstructedManagerAct(tx, freshApp.id, actor, 'host-operation.worker.start', { workerId });
     });
   } catch (e) {
     if (e instanceof LaunchRefusal) throw taskError(e.code, e.message, { workerId });
@@ -769,9 +780,9 @@ async function mayIssueWorktreeOp(
   actor: TaskActor,
   target: { heldByUserId: string | null; reportsToWorkerId: string | null },
 ): Promise<boolean> {
-  if (actor.kind === 'worker') return target.reportsToWorkerId !== null && target.reportsToWorkerId === actor.workerId;
-  if (target.heldByUserId !== null && target.heldByUserId === actor.userId) return true;
-  return actorManagesApp(txCtx, app, actor);
+  if (actor.kind === 'worker' && target.reportsToWorkerId !== null && target.reportsToWorkerId === actor.workerId) return true;
+  if (actor.kind === 'user' && target.heldByUserId !== null && target.heldByUserId === actor.userId) return true;
+  return actorManagesApp(txCtx, app, actor, actor.instructed);
 }
 
 function issuer(ctx: Context, actor: TaskActor) {
