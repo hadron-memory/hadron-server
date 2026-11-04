@@ -150,7 +150,11 @@ async function buildAppMemoryMap(
   const { apps, installations } = await loadAppInstallationPage(db, appId, true);
   const app = apps[0];
   if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
-  const selected = opts.allAgents ? installations : installations.slice(0, 1);
+  // Primary-only callers retain the oldest physical row, even when its
+  // Agent is dead. Filtering it away must not silently promote another row.
+  const primaryAgentId = app.appAgents[0]?.agentId;
+  const selected = opts.allAgents ? installations : installations.filter(row =>
+    row.installationKind === 'ROW' && row.agentId === primaryAgentId);
   const agents = selected.map(row => ({ ...row.agent, memoryItems: row.agent.memoryItems ?? [] }));
   const appInstalls = agents.map(agent=>({agent}));
   const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);

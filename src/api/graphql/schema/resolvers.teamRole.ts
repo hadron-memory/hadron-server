@@ -36,6 +36,7 @@ import {
   ROLES_BRANCH_PREFIX,
 } from './resolvers.worker.js';
 import { writeNodeCore, nodeMutations } from './resolvers.mutation.node.js';
+import { authoringFromRequest } from '../../../lib/authoringAttestation.js';
 import {
   type Context,
   requireMemoryWriteAccess,
@@ -403,6 +404,8 @@ async function writeTeamRole(
       ? { ...mergeBase, repos: parseRepoAffinity(args.repos) }
       : undefined;
 
+    // #1328: a role node is authored by its caller; these mutations take no claim, so a governed one refuses.
+    const authoring = authoringFromRequest(ctx);
     try {
       await writeNodeCore(
         {
@@ -428,6 +431,7 @@ async function writeTeamRole(
         mode,
         mode === 'update'
           ? {
+              authoring,
               targetNodeId: existing!.id,
               // Only when this write carries data. A description-only edit stays
               // last-write-wins like any other node field, as it was before
@@ -443,7 +447,7 @@ async function writeTeamRole(
             // The refusal itself is correct; the residue is an audit artifact.
             ...(wantsRepoWrite ? { guardRevSeq: existing!.revSeq } : {}),
             }
-          : undefined,
+          : { authoring },
       );
     } catch (e) {
       // #1024: the guard fired. Translate rather than leak the generic node

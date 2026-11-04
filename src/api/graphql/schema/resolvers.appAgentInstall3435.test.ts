@@ -125,3 +125,28 @@ it('control: an unreadable installed Agent that imports nothing also nulls every
   for (const row of r.rows) expect(row).toMatchObject({ installMethod: null, importer: null });
   expect(r.withheld()).toHaveLength(1);
 });
+
+// P3 pins (Andi, Dorian): a non-App.appAgents route to an AppAgent answers null for the pair; the withheld read shares one time.
+it('a non-roster route to an AppAgent (installAgentIntoApp payload) answers installMethod and importer null', async () => {
+  const a = await agent('Alpha');
+  const out = await wire(`mutation($appRef: ID!, $agentRef: ID!) { installAgentIntoApp(appRef: $appRef, agentRef: $agentRef) { appAgent { installMethod importer { id } } } }`,
+    { appRef: app.id, agentRef: a.id });
+  expect(out.errors).toBeUndefined();
+  expect((out.data as any).installAgentIntoApp.appAgent).toEqual({ installMethod: null, importer: null });
+});
+
+it('multiple importers: the derived entry names the earliest witness, and a withheld read shows every entry the same App createdAt', async () => {
+  const [a, c, b] = [await agent('Alpha'), await agent('Gamma'), await agent('Beta')];
+  await db.appAgent.create({ data: { appId: app.id, agentId: a.id, createdAt: T(3) } });
+  await db.appAgent.create({ data: { appId: app.id, agentId: c.id, createdAt: T(5) } });
+  await importEdge(a.id, b.id, T(2));
+  await importEdge(c.id, b.id, T(6));
+  const full = await rosterWire();
+  expect(full.by(b.id)).toMatchObject({ installMethod: 'DERIVED' });
+  expect(new Date(full.by(b.id).createdAt).getTime()).toBe(T(3).getTime()); // earliest of (importer install, import) over importers
+  const f = await foreignAgent('Hidden');
+  await db.appAgent.create({ data: { appId: app.id, agentId: f.agent.id } });
+  const part = await rosterWire();
+  const times = new Set(part.rows.map((r) => new Date(r.createdAt).getTime()));
+  expect(times.size).toBe(1);
+});

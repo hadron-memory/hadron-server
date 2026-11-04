@@ -31,6 +31,7 @@
 
 import { GraphQLError } from 'graphql';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
+import { attestedAuthoring } from '../../authoringAttestation.js';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { logAssetEvent } from '../../asset/audit.js';
 import { assertMemoryAcceptsUploads } from '../../asset/gate.js';
@@ -219,6 +220,7 @@ export const hadronStoreFile: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
+        { authoring: attestedAuthoring(null) },
       );
     } catch (err) {
       // Compensate: no asset without its reference node, no bytes without

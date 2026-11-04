@@ -21,6 +21,7 @@
  *    personal and private: only by the memory's owner, who also manages the
  *    App; encrypted: never.
  */
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -71,9 +72,9 @@ const grant = (f: F, memory: { id: string }, ctx: unknown = f.ctx, prefix = PREF
   M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: memory.id, prefix, registerNodeUrn: REGISTER }, ctx);
 const revoke = (id: string, ctx: unknown) => M.revokeAppMemoryWriteGrant({}, { id }, ctx);
 const create = (ctx: unknown, memory: { id: string }, loc: string) =>
-  writeNodeCore({ memoryId: memory.id, loc, name: loc.split(':').pop()!, nodeType: 'record', content: 'body' } as never, ctx as never, 'create');
+  writeNodeCore({ memoryId: memory.id, loc, name: loc.split(':').pop()!, nodeType: 'record', content: 'body' } as never, ctx as never, 'create', { authoring: attestedAuthoring(null) });
 const update = (ctx: unknown, memory: { id: string }, loc: string) =>
-  writeNodeCore({ memoryId: memory.id, loc, content: 'changed' } as never, ctx as never, 'update');
+  writeNodeCore({ memoryId: memory.id, loc, content: 'changed' } as never, ctx as never, 'update', { authoring: attestedAuthoring(null) });
 const refused = (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
 /** Refused by some gate before the effect; the caller also asserts the state did not change. */
 const notDone = (p: Promise<unknown>) => expect(p).rejects.toBeTruthy();
@@ -248,7 +249,7 @@ describe('what a userless run of the App may write', () => {
     await grant(f, f.dest);
     const outside = await db.node.create({ data: { memoryId: f.dest.id, loc: 'reports:other', name: 'other', content: 'keep' } });
     // The write door's own moved-node guard stops it (NODE_WRITE_CONFLICT) before any write.
-    await expect(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:x`, content: 'overwritten' } as never, f.runCtx() as never, 'update', { targetNodeId: outside.id }))
+    await expect(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:x`, content: 'overwritten' } as never, f.runCtx() as never, 'update', { authoring: attestedAuthoring(null), targetNodeId: outside.id }))
       .rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: outside.id } })).content).toBe('keep');
   });
@@ -335,8 +336,8 @@ describe('what a userless run of the App may write', () => {
     await notDone(M.createEdge({}, { sourceRef: a.id, targetRef: outside.id, name: 'x' }, run));
     await notDone(M.updateMemory({}, { id: f.dest.id, name: 'renamed' }, run));
     // inline edges ride the node write but reach past the prefix, so a write that carries any is not a grant write
-    await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [{ targetId: outside.id, name: 'x' }] } as never, run as never, 'create'));
-    await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [] } as never, run as never, 'create'));
+    await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [{ targetId: outside.id, name: 'x' }] } as never, run as never, 'create', { authoring: attestedAuthoring(null) }));
+    await refused(writeNodeCore({ memoryId: f.dest.id, loc: `${PREFIX}:b`, name: 'b', edges: [] } as never, run as never, 'create', { authoring: attestedAuthoring(null) }));
     expect(await db.node.findUnique({ where: { loc_memoryId: { loc: `${PREFIX}:b`, memoryId: f.dest.id } } })).toBeNull();
     const { STORE_TOOLS } = await import('../../../lib/runner/tools/storeTools.js');
     // #2712 (R74): a run is minted for an Agent, served its prompt.
@@ -358,7 +359,7 @@ describe('what a userless run of the App may write', () => {
     await grant(f, team);
     const run = f.runCtx();
     const plan = await db.node.create({ data: { memoryId: team.id, loc: 'secrets:plan', name: 'plan', content: 'secret' } });
-    await notDone(writeNodeCore({ memoryId: team.id, loc: `${PREFIX}:r1`, name: 'r1', nodeType: 'record', content: 'see {{> secrets:plan}}' } as never, run as never, 'create'));
+    await notDone(writeNodeCore({ memoryId: team.id, loc: `${PREFIX}:r1`, name: 'r1', nodeType: 'record', content: 'see {{> secrets:plan}}' } as never, run as never, 'create', { authoring: attestedAuthoring(null) }));
     expect(await db.node.findUnique({ where: { loc_memoryId: { loc: `${PREFIX}:r1`, memoryId: team.id } } })).toBeNull();
     expect(await db.edge.count({ where: { targetId: plan.id } })).toBe(0);
     // the same grant still takes plain content
@@ -398,7 +399,7 @@ describe('an authority change serializes with a granted write (§10, both orderi
     const after: Array<() => void> = [];
     const done = db.$transaction(async tx => {
       await writeNodeCore({ memoryId: memory.id, loc, name: 'held', nodeType: 'record', content: 'x' } as never, run as never, 'create',
-        { transaction: { tx, pooledDb: db, afterCommit: (fn: () => void) => { after.push(fn); } } } as never);
+        { authoring: attestedAuthoring(null), transaction: { tx, pooledDb: db, afterCommit: (fn: () => void) => { after.push(fn); } } } as never);
       entered();
       await hold;
     }, { timeout: 20000 }).then(() => after.forEach(fn => fn()));

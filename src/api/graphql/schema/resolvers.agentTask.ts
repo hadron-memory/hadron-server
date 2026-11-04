@@ -1,3 +1,8 @@
+import { hasUnstorableJsonText } from '../../../lib/agentTasks/references.js';
+import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
+import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
+import { requireAppActionCode } from '../../../lib/actionRegister/appCode.js';
+import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
 import { rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
 import { retryOnSerializationFailure } from '../../../lib/serializableRetry.js';
 import { RUN_CLIENT_PREFIX, isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
@@ -1987,6 +1992,41 @@ function atPosition(e: unknown, position: number): unknown {
 type CreateBatchItem = { task: CreateInput; blockedByPositions?: number[] | null };
 
 export const agentTaskMutations = {
+  /** #3449: root-task creator authority, re-judged under the App's anchors before recording. */
+  recordAppAction: async (_: unknown, args: { appRef: string; code: string; taskRef?: string | null; payload?: unknown }, ctx: Context) => {
+    const { app, actor } = await resolveParticipatedApp(ctx, args.appRef);
+    requireWritable(ctx, app);
+    requireAppActionCode(app.urn, args.code);
+    const payload = args.payload === undefined ? {} : args.payload;
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw badInput('payload must be a JSON object of at most 4096 bytes.');
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(payload, (key, value) => {
+        // PostgreSQL jsonb cannot represent NUL or an unpaired surrogate in a key/string.
+        if (hasUnstorableJsonText(key) || (typeof value === 'string' && hasUnstorableJsonText(value))) throw new Error('Unstorable JSON text');
+        return value;
+      });
+    } catch { throw badInput('payload must be a JSON object of at most 4096 bytes.'); }
+    if (Buffer.byteLength(serialized, 'utf8') > 4096) throw badInput('payload must be a JSON object of at most 4096 bytes.');
+    const value = JSON.parse(serialized) as Prisma.InputJsonObject;
+    const eventId = await inTaskWriteTx(ctx, app, actor, () => appNotFound(args.appRef), async (tx, txCtx, fresh) => {
+      requireAppActionCode(fresh.urn, args.code);
+      let taskId: string | null = null;
+      if (args.taskRef != null) {
+        const id = await resolveTaskRef(txCtx, args.taskRef, fresh.id);
+        const task = id ? await tx.agentTask.findFirst({ where: { id, appId: fresh.id }, select: { id: true } }) : null;
+        if (!task) throw notFound(args.taskRef);
+        taskId = task.id;
+      }
+      return appendAppActionEvent(tx, {
+        appId: fresh.id, taskId, code: args.code, payload: value,
+        actor: eventActor(txCtx.userId),
+      });
+    });
+    const action = await resolveActionAnswer(ctx, app.id, args.code, currentActor().agentId);
+    return { eventId, action };
+  },
+
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
   updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
@@ -2995,7 +3035,7 @@ export const agentTaskQueries = {
    */
   agentTeamEvents: async (
     _: unknown,
-    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
+    args: { appRef: string; since?: unknown; after?: string | null; types?: string[] | null; codePrefix?: string | null; alarmsOnly?: boolean | null; taskId?: string | null; limit?: number | null },
     ctx: Context,
   ) => withReadableApp(ctx, args.appRef, async (c, app) => {
     const since = args.since == null ? null : parseStartBy(args.since);
@@ -3021,7 +3061,7 @@ export const agentTaskQueries = {
         appId: app.id,
         ...afterWhere,
         ...(since ? { createdAt: { gt: since } } : {}),
-        ...(args.types?.length ? { type: { in: args.types } } : {}),
+        ...((args.types?.length || args.codePrefix != null) ? { type: { ...(args.types?.length ? { in: args.types } : {}), ...(args.codePrefix != null ? { startsWith: escapePrismaLikePattern(args.codePrefix) } : {}) } } : {}),
         ...(args.alarmsOnly ? { severity: 'alarm' } : {}),
         ...(args.taskId ? { taskId: (await resolveTaskRef(c, args.taskId, app.id)) ?? args.taskId } : {}),
       },

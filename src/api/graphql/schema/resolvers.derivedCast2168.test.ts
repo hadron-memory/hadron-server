@@ -9,6 +9,7 @@ import { resolveServedBootPrompt } from '../../../lib/bootPrompt/serve.js';
 import { resolveRegister } from '../../../lib/resolveRegister.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
+import { lockAppInstallation, listUnfilteredAppInstallations } from '../../../lib/appInstallations.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -388,7 +389,11 @@ it('compiles and serves an App-level prompt for a derived Agent, retaining it on
 });
 
 for (const removal of ['import', 'importer-install'] as const) {
-  it(`does not cast from a stale witness when ${removal} removal wins the row-lock race`, async () => {
+ for (const operation of ['cast', 'change'] as const) {
+  it(`does not ${operation} from a stale witness when ${removal} removal wins the row-lock race`, async () => {
+    const existing = operation === 'change'
+      ? await M.castWorker({}, {appRef:app.id,agentRef:parent.id,name:'Before'},ctx()) : null;
+    const initialCount = existing ? 1 : 0;
     let release!: () => void, ready!: () => void;
     const wait = new Promise<void>((r) => {
       release = r;
@@ -418,7 +423,8 @@ for (const removal of ['import', 'importer-install'] as const) {
       { timeout: 15000 },
     );
     await started;
-    const pending = cast().then(
+    const pending = (existing
+      ? M.changeWorkerAgent({}, {workerRef:existing.id,agentRef:role.id},ctx()) : cast()).then(
       (value: unknown) => ({ value }),
       (error: unknown) => ({ error }),
     );
@@ -432,7 +438,7 @@ for (const removal of ['import', 'importer-install'] as const) {
         },
         { timeout: 5000, interval: 10 },
       );
-      expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
+      expect(await db.worker.count({ where: { appId: app.id } })).toBe(initialCount);
     } finally {
       release();
       await removing;
@@ -440,8 +446,10 @@ for (const removal of ['import', 'importer-install'] as const) {
     expect(await pending).toMatchObject({
       error: { extensions: { code: 'WORKER_AGENT_NOT_INSTALLED' } },
     });
-    expect(await db.worker.count({ where: { appId: app.id } })).toBe(0);
+    expect(await db.worker.count({ where: { appId: app.id } })).toBe(initialCount);
+    if (existing) expect((await db.worker.findUniqueOrThrow({where:{id:existing.id}})).agentId).toBe(parent.id);
   });
+ }
 }
 
 it('uses the App org license, never the importing org license', async () => {
@@ -790,3 +798,134 @@ it('serialises an explicit install with a concurrent clear of the derived App pr
   ).toBeNull();
   expect(compiled.nodeId).toBeTruthy();
 }, 20000);
+
+it('refuses cast when the old import disappears before the edge fence and a replacement commits after that fence', async () => {
+  const transaction = db.$transaction.bind(db) as any;
+  let removed = false, inserted = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (callback: any, options: any) => {
+    if (typeof callback !== 'function') return transaction(callback, options);
+    return transaction((tx: any) => callback(new Proxy(tx, {
+      get(target, property) {
+        if (property !== '$queryRaw') return Reflect.get(target, property);
+        return async (parts: TemplateStringsArray, ...values: unknown[]) => {
+          const result = await target.$queryRaw(parts, ...values);
+          const sql = Array.from(parts).join('?');
+          if (!removed && sql.includes('FROM app_agents aa WHERE')) {
+            await db.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+            removed = true;
+          } else if (removed && !inserted && sql.includes('SELECT parent_agent_id,imported_agent_id FROM agent_imports')) {
+            expect(result).toEqual([]);
+            // A separate committed transaction creates an otherwise valid
+            // same-Agent witness after the deciding edge set was captured.
+            await db.agentImport.create({data:{parentAgentId:parent.id,importedAgentId:role.id,
+              position:100,required:true,agentOrgGrantOrgId:org.id,agentOrgGrantAgentId:role.id}});
+            inserted = true;
+          }
+          return result;
+        };
+      },
+    })), options);
+  }) as any);
+  try {
+    await expect(cast()).rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_INSTALLED'}});
+    expect(removed).toBe(true);
+    expect(inserted).toBe(true);
+    expect(await db.agentImport.count({where:{parentAgentId:parent.id,importedAgentId:role.id}})).toBe(1);
+    expect(await db.worker.count({where:{appId:app.id}})).toBe(0);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+for (const operation of ['cast','change'] as const) {
+ it(`holds the imported witness through the ${operation} write`,async()=>{
+  const existing = operation==='change'
+    ? await M.castWorker({}, {appRef:app.id,agentRef:parent.id,name:'BeforeWrite'},ctx()) : null;
+  const transaction = db.$transaction.bind(db) as any;
+  let removing:Promise<unknown>|undefined;
+  let checked=false;
+  const spy=vi.spyOn(db,'$transaction').mockImplementation((async(callback:any,options:any)=>{
+    if(typeof callback!=='function')return transaction(callback,options);
+    return transaction((tx:any)=>callback(new Proxy(tx,{
+      get(target,property){
+        if(property!=='worker')return Reflect.get(target,property);
+        return new Proxy(target.worker,{
+          get(delegate,method){
+            if(method!==(existing?'update':'create'))return Reflect.get(delegate,method);
+            return async(args:any)=>{
+              if(!checked && args.data?.agentId===role.id){
+                const writerPid=(await target.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid;
+                let ready!:()=>void;
+                const started=new Promise<void>(resolve=>{ready=resolve;});
+                let removerPid=0;
+                removing=transaction(async(remover:any)=>{
+                  removerPid=(await remover.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid;
+                  ready();
+                  await remover.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+                },{timeout:15000});
+                await started;
+                await vi.waitFor(async()=>{
+                  const rows=await db.$queryRaw<Array<{blocked:boolean}>>`
+                    SELECT ${writerPid}=ANY(pg_blocking_pids(${removerPid}::int)) AS blocked`;
+                  expect(rows[0].blocked).toBe(true);
+                },{timeout:2000,interval:10});
+                checked=true;
+              }
+              return Reflect.get(delegate,method)(args);
+            };
+          },
+        });
+      },
+    })),options);
+  }) as any);
+  try{
+    const call=existing?M.changeWorkerAgent({}, {workerRef:existing.id,agentRef:role.id},ctx()):cast();
+    await expect(call).resolves.toMatchObject({agentId:role.id});
+    expect(checked).toBe(true);
+  }finally{
+    spy.mockRestore();
+    if(removing)await removing;
+  }
+  expect(await db.agentImport.count({where:{parentAgentId:parent.id,importedAgentId:role.id}})).toBe(0);
+ },20000);
+}
+
+it.each(['deleted-app','uninstalled-app','deleted-org'] as const)('raw witnesses do not derive membership through a %s',async(state)=>{
+  expect((await listUnfilteredAppInstallations(db,app.id)).map(row=>row.agentId)).toContain(role.id);
+  if(state==='deleted-app')await db.app.update({where:{id:app.id},data:{deletedAt:new Date()}});
+  else if(state==='uninstalled-app')await db.app.update({where:{id:app.id},data:{uninstalledAt:new Date()}});
+  else await db.organization.update({where:{id:org.id},data:{deletedAt:new Date()}});
+  expect((await listUnfilteredAppInstallations(db,app.id)).map(row=>row.agentId)).not.toContain(role.id);
+});
+
+it('held installation witnesses fence App lifecycle writes until the deciding transaction ends',async()=>{
+  let release!:()=>void,held!:()=>void,started!:()=>void;
+  const wait=new Promise<void>(resolve=>{release=resolve;});
+  const ready=new Promise<void>(resolve=>{held=resolve;});
+  const updating=new Promise<void>(resolve=>{started=resolve;});
+  let holderPid=0,updaterPid=0;
+  const holding=db.$transaction(async(tx)=>{
+    holderPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    expect(await lockAppInstallation(tx,app.id,role.id)).not.toBeNull();
+    held();
+    await wait;
+  },{timeout:15000});
+  await ready;
+  const update=db.$transaction(async(tx)=>{
+    updaterPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    started();
+    await tx.app.update({where:{id:app.id},data:{deletedAt:new Date()}});
+  },{timeout:15000});
+  await updating;
+  try{
+    await vi.waitFor(async()=>{
+      const rows=await db.$queryRaw<Array<{blocked:boolean}>>`
+        SELECT ${holderPid}=ANY(pg_blocking_pids(${updaterPid}::int)) AS blocked`;
+      expect(rows[0].blocked).toBe(true);
+    },{timeout:2000,interval:10});
+  }finally{
+    release();
+    await holding;
+    await update;
+  }
+},20000);

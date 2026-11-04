@@ -7,6 +7,7 @@
  * the waiter is the real resolver. The duplicate-seq assertion runs on old main AND the fixed head (red/green by VALUE,
  * never by a missing-K timeout); the K-waiter observation is fixed-head-only and bounded.
  */
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { setImmediate } from 'node:timers/promises';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -273,7 +274,7 @@ describe('reserve seam and the one-use handoff #443', () => {
     // Real seam, shared transaction: a nested decision-style create then a root create through the GraphQL write core.
     const { writeNodeCore } = await import('./resolvers.mutation.node.js');
     await expect(db.$transaction(async (tx) => {
-      const opts = { transaction: { tx, pooledDb: db, afterCommit: () => {} } } as never;
+      const opts = { authoring: attestedAuthoring(null), transaction: { tx, pooledDb: db, afterCommit: () => {} } } as never;
       const c = { ...ctx(), db: tx } as Context;
       await writeNodeCore({ memoryId, loc: 'n1:child', name: 'n1:child' } as never, c, 'create', opts);
       await writeNodeCore({ memoryId, loc: 'rootafter', name: 'rootafter' } as never, c, 'create', opts);

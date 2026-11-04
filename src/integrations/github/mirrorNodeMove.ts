@@ -214,6 +214,7 @@ function toNodeForGit(
     abstractOriginHash: string | null; contentHash: string | null; content: string | null;
     tags: string[] | string; seq: number | null; data: unknown; properties: unknown;
     role?: string | null; isRunnable?: boolean | null; isPlaceholder?: boolean;
+    authorshipKind?: string | null; authoredByTask?: string | null; authoredByRevision?: number | null;
     outgoingEdges?: NodeForGit['outgoingEdges'];
   },
 ): NodeForGit {
@@ -238,6 +239,9 @@ function toNodeForGit(
     role: row.role ?? null,
     isRunnable: row.isRunnable ?? null,
     isPlaceholder: row.isPlaceholder ?? false,
+    authorshipKind: row.authorshipKind ?? null,
+    authoredByTask: row.authoredByTask ?? null,
+    authoredByRevision: row.authoredByRevision ?? null,
     outgoingEdges: row.outgoingEdges ?? [],
   };
 }

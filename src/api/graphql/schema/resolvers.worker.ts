@@ -1,4 +1,4 @@
-import { listAppInstallations, resolveAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
+import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { requireInstructedAct, sameActPrincipal, type ActAdmission, type StaffActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
@@ -986,7 +986,14 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       throw e;
     }
     const row = await resolveAppInstallation(ctx.db, appId, id);
-    if (!row || row.agent.deletedAt) throw notInstalled();
+    if (!row || row.agent.deletedAt) {
+      if (expectedAgentId !== undefined && id !== expectedAgentId) throw castTargetChanged();
+      // Raw membership may preserve the existing typed license refusal, but
+      // must never supply identity metadata to an ordinary cast decision.
+      const witness = await resolveUnfilteredAppInstallation(ctx.db, appId, id);
+      if (witness?.installationKind === 'DERIVED') await assertCastable(ctx.db, app, id);
+      throw notInstalled();
+    }
     agent = row.agent;
   } else {
     if (!roleNorm) {

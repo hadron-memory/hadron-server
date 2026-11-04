@@ -6,7 +6,11 @@ import { cleanDb, createDbAppWithKey, createDbAgentOrgGrant, createDbAgentSubscr
 import { generateId } from '../../../lib/id.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { appContextIfReadable } from '../../../lib/scopes.js';
+import { appContextIfReadable, appScopeMemoryIds, readableScopesWhere } from '../../../lib/scopes.js';
+import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation } from '../../../lib/appInstallations.js';
+import { canReadMemory, canWriteToMemory, filterReadableMemoryIds, getAppMemoryAccess } from '../../../mcp/access-control.js';
+import { locateTeamAgent } from './resolvers.worker.js';
+import { chatCarrierApps } from './agentChatAccess.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isAgentInstalled, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { mintAppRun } from '../../../jobs/appRuns.js';
@@ -38,7 +42,7 @@ beforeEach(async () => {
   const memory = await db.memory.create({data:{name:'Entry',urn:`${holder.id}:entry`,class:'app',appId:app.id,organizationId:holder.id}});
   await db.node.create({data:{memoryId:memory.id,loc:'flow:entry',name:'Entry',content:'Run',nodeType:'record'}});
   entry = `hrn:node:${holder.id}:entry:flow:entry`;
-  expect(await isAgentInstalled(db,app.id,target.id)).toBe(true);
+  expect(await resolveUnfilteredAppInstallation(db,app.id,target.id)).not.toBeNull();
   expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
 });
 const mint = () => mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
@@ -98,11 +102,157 @@ it.each(['inactive','revoked','expired'] as const)('same-org derived entries can
  expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(true);
  await db.agentOrgGrant.update({where:{orgId_agentId:{orgId:holder.id,agentId:target.id}},data:
   state==='inactive'?{activatedAt:null}:state==='revoked'?{revokedAt:new Date()}:{expiresAt:new Date(0)}});
- expect(await isAgentInstalled(db,app.id,target.id)).toBe(true);
+ expect(await resolveUnfilteredAppInstallation(db,app.id,target.id)).not.toBeNull();
  expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
  expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(false);
  expect((await loadOfferedMemberRoles(db,app.id)).roles).not.toContain('foreign-role');
  expect((await appContextIfReadable(ctx(),app.id))!.agentIds).not.toContain(target.id);
  await expect(mint()).rejects.toMatchObject({code:'AGENT_NOT_INSTALLED'});
  await expect(session()).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+});
+
+// Operation doors historically accept a physical ROW without an App-holder
+// license. The same target reached only by an import must not inherit that.
+it.each(['mint', 'manual', 'session'] as const)('preserves physical ROW membership at the %s operation door', async (surface) => {
+  const call = () => surface === 'mint' ? mint() : surface === 'manual'
+    ? assertManualRunAllowed(ctx(), {appRef:app.id,entryNodeUrn:entry,agentRef:target.id}) : session();
+  await expect(call()).rejects.toBeDefined();
+  await db.appAgent.create({data:{appId:app.id,agentId:target.id}});
+  expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
+  await expect(call()).resolves.toMatchObject({agentId:target.id});
+});
+
+// #2168 changes the installation source, not mint's pre-existing subscriber
+// lifecycle predicate. Shared manual/trigger relationship gates stay stricter.
+it.each(['unactivated', 'expired'] as const)('preserves mint subscriber semantics for a physical ROW with an %s subscription', async (state) => {
+  await db.appAgent.create({data:{appId:app.id,agentId:target.id}});
+  await createDbAgentSubscription(db,stranger.id,target.id);
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:
+    state === 'unactivated' ? {activatedAt:null} : {expiresAt:new Date(0)}});
+  expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(false);
+  const run = await mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
+    triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
+  expect(run.userId).toBe(stranger.id);
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{revokedAt:new Date()}});
+  await expect(mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
+    triggerKind:'MANUAL',entryNodeUrn:entry,publish:false})).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
+});
+
+it('mint on-behalf membership uses the App holder license for DERIVED entries without tightening subscriber activation', async () => {
+  await createDbAgentSubscription(db,stranger.id,target.id);
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{activatedAt:null}});
+  const installedParent = await db.appAgent.findFirstOrThrow({where:{appId:app.id},select:{agentId:true}});
+  const input = {organizationId:holder.id,appId:app.id,agentId:installedParent.agentId,userId:stranger.id,triggerKind:'MANUAL' as const,
+    entryNodeUrn:entry,publish:false};
+  await expect(mintAppRun(db,input)).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(mintAppRun(db,input)).resolves.toMatchObject({userId:stranger.id});
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{revokedAt:new Date()}});
+  await expect(mintAppRun(db,input)).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
+});
+
+it('default installation readers exclude unlicensed DERIVED entries and admit their own live license', async () => {
+  expect(await isAgentInstalled(db,app.id,target.id)).toBe(false);
+  expect(await resolveAppInstallation(db,app.id,target.id)).toBeNull();
+  expect((await listAppInstallations(db,app.id)).map(row=>row.agentId)).not.toContain(target.id);
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  expect(await isAgentInstalled(db,app.id,target.id)).toBe(true);
+  expect((await listAppInstallations(db,app.id)).map(row=>row.agentId)).toContain(target.id);
+});
+
+it('the App member config picker uses licensed derived membership', async () => {
+  await db.appMember.create({data:{appId:app.id,userId:stranger.id,role:'member'}});
+  const memberCtx = {db,userId:stranger.id,roles:['READER']} as Context;
+  const query = () => (resolvers.Query as any).resolveAiServiceConfigs({}, {appRef:app.id,agentRef:target.id}, memberCtx);
+  await expect(query()).rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(query()).resolves.toEqual(expect.any(Array));
+});
+
+it('legacy personal memory read, write and batch gates reject unlicensed derived membership', async () => {
+  await createDbAgentSubscription(db,stranger.id,target.id);
+  const memory = await db.memory.create({data:{name:'Legacy',urn:`${generateId().toLowerCase()}:legacy`,class:'personal',
+    userId:stranger.id,userMemoryOfAgentId:target.id,organizationId:owner.id}});
+  const auth = {userId:stranger.id,appId:app.id,roles:['READER' as const]};
+  const check = async (allowed:boolean) => {
+    expect(await canReadMemory(db,auth,memory.id)).toBe(allowed);
+    expect(await canWriteToMemory(db,auth,memory.id)).toBe(allowed);
+    expect((await filterReadableMemoryIds(db,auth,[memory.id])).has(memory.id)).toBe(allowed);
+  };
+  await check(false);
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await check(true);
+});
+
+it('unlicensed imports cannot become the inferred Team Agent or create role ambiguity', async () => {
+  const imported = await db.agent.findUniqueOrThrow({where:{id:target.id}});
+  await db.node.create({data:{memoryId:imported.systemMemoryId!,loc:'roles',name:'Roles',content:'roles'}});
+  await expect(locateTeamAgent(ctx(),app.id,null)).rejects.toMatchObject({extensions:{code:'TEAM_AGENT_NOT_FOUND'}});
+  const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id},include:{agent:true}});
+  await db.node.create({data:{memoryId:physical.agent.systemMemoryId!,loc:'roles',name:'Roles',content:'roles'}});
+  await expect(locateTeamAgent(ctx(),app.id,null)).resolves.toMatchObject({id:physical.agentId});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(locateTeamAgent(ctx(),app.id,null)).rejects.toMatchObject({extensions:{code:'TEAM_AGENT_AMBIGUOUS'}});
+});
+
+it('the default manual-run Agent ignores unlicensed derived candidates', async () => {
+  const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id}});
+  await expect(assertManualRunAllowed(ctx(),{appRef:app.id,entryNodeUrn:entry})).resolves.toMatchObject({agentId:physical.agentId});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(assertManualRunAllowed(ctx(),{appRef:app.id,entryNodeUrn:entry})).rejects.toMatchObject({extensions:{code:'RUN_AGENT_REQUIRED'}});
+});
+
+it('retained own-org derived grants control memory folds, carrier reach and both scope readers', async () => {
+  const own = await M.createAgent({}, {orgId:holder.id,name:'Own',personaRole:'own'},ctx());
+  const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id},include:{agent:true}});
+  await createDbAgentOrgGrant(db,physical.agent.organizationId!,own.id);
+  await createDbAgentImport(db,physical.agentId,own.id,{position:101});
+  await createDbAgentOrgGrant(db,holder.id,own.id);
+  const memory = await db.memory.create({data:{name:'Scoped',urn:`${generateId().toLowerCase()}:scoped`,class:'knowledge',
+    organizationId:holder.id,visibility:'ORGANIZATION'}});
+  await db.agentMemoryItem.create({data:{agentId:own.id,memoryId:memory.id,role:'read'}});
+  const scope = await db.scope.create({data:{name:'own-scope',agentId:own.id}});
+  const keyCtx = {db,appId:app.id,organizationId:holder.id,roles:[]} as Context;
+  const ownRow = await db.agent.findUniqueOrThrow({where:{id:own.id}});
+  const check = async (allowed:boolean) => {
+    expect((await getAppMemoryAccess(db,app.id,{allAgents:true,includeTeamSpace:false,credentialOnly:true})).has(ownRow.systemMemoryId!)).toBe(allowed);
+    expect((await getAppMemoryAccess(db,app.id,{allAgents:true,includeTeamSpace:false,credentialOnly:false})).has(memory.id)).toBe(allowed);
+    expect((await chatCarrierApps(keyCtx,own.id)).length>0).toBe(allowed);
+    expect((await appScopeMemoryIds(db,app.id)).includes(memory.id)).toBe(allowed);
+    const visible = await db.scope.findMany({where:await readableScopesWhere(keyCtx,[]),select:{id:true}});
+    expect(visible.some(row=>row.id===scope.id)).toBe(allowed);
+  };
+  await check(true);
+  await db.agentOrgGrant.update({where:{orgId_agentId:{orgId:holder.id,agentId:own.id}},data:{revokedAt:new Date()}});
+  await check(false);
+});
+
+it('teamRoles indexes only licensed derived role Agents', async () => {
+  const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id},include:{agent:true}});
+  await db.node.create({data:{memoryId:physical.agent.systemMemoryId!,loc:'roles:reviewer',name:'Reviewer',content:'review'}});
+  const query = () => (resolvers.Query as any).teamRoles({}, {appRef:app.id,teamAgentRef:physical.agentId},ctx());
+  const before = await query();
+  expect(before.items.find((row:any)=>row.role==='reviewer').roleAgent).toBeNull();
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  const after = await query();
+  expect(after.items.find((row:any)=>row.role==='reviewer').roleAgent.id).toBe(target.id);
+});
+
+it('unlicensed matching imports neither appear in role ambiguity nor prevent a licensed cast', async () => {
+  const physical = await db.appAgent.findFirstOrThrow({where:{appId:app.id},include:{agent:true}});
+  const second = await M.createAgent({}, {orgId:owner.id,name:'Second',personaRole:'reviewer'},ctx());
+  await createDbAgentOrgGrant(db,physical.agent.organizationId!,second.id);
+  await createDbAgentImport(db,physical.agentId,second.id,{position:101});
+  await expect(M.castWorker({}, {appRef:app.id,role:'reviewer',name:'Selected'},ctx()))
+    .rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_FOUND'}});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(M.castWorker({}, {appRef:app.id,role:'reviewer',name:'Selected'},ctx()))
+    .resolves.toMatchObject({agentId:target.id});
+});
+
+it('an explicit derived cast validates its license before role-mismatch metadata',async()=>{
+  const input={appRef:app.id,agentRef:target.id,role:'other-role',name:'CheckedRole'};
+  await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_INSTALLED'}});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_ROLE_OVERRIDE_REFUSED'}});
 });

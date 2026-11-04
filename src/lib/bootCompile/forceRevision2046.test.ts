@@ -2,6 +2,7 @@
  * #2046 (S9-4) — the compile's writer option `forceRevision`: an identical-content
  * save still leaves one revision, but only inside withCompileWrite.
  */
+import { attestedAuthoring } from '../authoringAttestation.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -25,7 +26,7 @@ beforeEach(async () => {
 
 const revCount = (nodeId: string) => db.nodeRevision.count({ where: { nodeId } });
 const resave = (loc: string, force: boolean) =>
-  writeNodeCore({ memoryId, loc, name: 'N', content: 'same' } as never, ctx, 'update', { forceRevision: force });
+  writeNodeCore({ memoryId, loc, name: 'N', content: 'same' } as never, ctx, 'update', { authoring: attestedAuthoring(null), forceRevision: force });
 
 describe('#2046 S9-4 — forceRevision', () => {
   it('inside the compile an identical save leaves one more revision and advances revSeq', async () => {

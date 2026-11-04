@@ -478,6 +478,8 @@ export function makeTmpDir(): { dir: string; cleanup: () => void } {
 
 interface NodeMeta {
   id?: string;
+  /** #1328 — an untrusted `task@revision` claim, as a mirrored file carries it. */
+  authoredWith?: unknown;
   name: string;
   description?: string;
   summary?: string;

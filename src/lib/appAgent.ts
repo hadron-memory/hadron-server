@@ -1,5 +1,5 @@
 import { orgAgentLicenseUsable } from './auth/orgAgentInstallLicense.js';
-import { loadAppInstallationPage, listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
+import { listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
  * AppAgent convenience and license helpers. Installation membership includes
  * one-hop imports through appInstallations.ts. "Primary" remains the oldest
@@ -163,21 +163,7 @@ export async function activeAppInstallLicenseIdsForAgent(
  * entries additionally require the App holder's license, never the importer's.
  * Readers that already required licenses for ROW must retain that stricter gate. */
 export async function listAppInstallationsWithDerivedLicense(db: Db, appId: string) {
-  const {apps, installations:rows} = await loadAppInstallationPage(db, appId);
-  const derived=rows.filter(row=>row.installationKind==='DERIVED');
-  if (!derived.length) return rows;
-  const app = apps[0];
-  if (!app || app.deletedAt || app.uninstalledAt) return rows.filter(row=>row.installationKind==='ROW');
-  const licensed = await activeAgentInstallLicenseIds(db, app, derived.map(row => row.agent));
-  // Keep legacy ROW readers unchanged. DERIVED entries obey cast's rule:
-  // own-org may provision a missing grant, but never revive an inactive row.
-  const ownDerivedIds=rows.filter(row=>row.installationKind==='DERIVED' && row.agent.organizationId===app.organizationId).map(row=>row.agentId);
-  const ownGrants=app.organizationId && ownDerivedIds.length
-    ? await db.agentOrgGrant.findMany({where:{orgId:app.organizationId,agentId:{in:ownDerivedIds}}}) : [];
-  const ownById=new Map(ownGrants.map(grant=>[grant.agentId,grant]));
-  return rows.filter(row => row.installationKind==='ROW' || (licensed.has(row.agentId) &&
-    !(app.organizationId && row.agent.organizationId===app.organizationId &&
-      !orgAgentLicenseUsable(app.organizationId,row.agent.organizationId,ownById.get(row.agentId)??null))));
+  return listAppInstallations(db, appId);
 }
 
 /** A retained AppAgent pointer is authority only while its install is live. */

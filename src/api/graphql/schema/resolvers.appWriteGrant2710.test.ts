@@ -7,6 +7,7 @@
  * succeeds and a userless run writes `boot:source`. Both halves of the ruling are pinned: making the grant is refused,
  * and a grant that already exists (written before the rule) authorizes no write, with no data migration.
  */
+import { attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -40,7 +41,7 @@ async function fixture() {
 }
 
 const create = (ctx: unknown, memoryId: string, loc: string) =>
-  writeNodeCore({ memoryId, loc, name: loc.split(':').pop()!, nodeType: 'record', content: 'You are {{worker.name}}.' } as never, ctx as never, 'create');
+  writeNodeCore({ memoryId, loc, name: loc.split(':').pop()!, nodeType: 'record', content: 'You are {{worker.name}}.' } as never, ctx as never, 'create', { authoring: attestedAuthoring(null) });
 
 describe('#2710 a write grant never covers a class=system memory', () => {
   it('setting a grant on an Agent system memory is refused, and nothing is recorded', async () => {

@@ -3262,7 +3262,7 @@ export const typeDefs = `#graphql
     only when the caller may read EVERY Agent installed in the App, row installs and derived ones alike. Otherwise it is
     null on EVERY entry, ROW ones included: a per-entry answer would show, by elimination, which installs derive from an
     Agent the caller cannot read (that the App runs one, and never which). Null is therefore not proof of anything, and
-    also what an AppAgent reached through another field returns. createdAt (below) is a computed time, never a row audit.
+    also what an AppAgent reached through another field returns. createdAt (below) follows the same gate.
     """
     installMethod: InstallMethod
     """
@@ -3270,10 +3270,7 @@ export const typeDefs = `#graphql
     entry and whenever installMethod is null (same whole-App read gate), so a DERIVED entry always has a readable importer.
     """
     importer: Agent
-    """
-    A ROW entry's creation time. A DERIVED entry has no row: it is the earliest, across the importers it derives from, of
-    the later of that importer's install in this App and the import itself.
-    """
+    """When every installed Agent is readable: physical row creation time, or the computed earliest install/import witness time for a derived entry. Otherwise every entry shares the App creation time. The newly created install mutation payload retains its real row time. App.appAgents sorts by the served time, then Agent id."""
     createdAt: DateTime!
     """
     Row audit fields are visible only when the caller may read EVERY installed Agent in this App.
@@ -6236,6 +6233,23 @@ export const typeDefs = `#graphql
   }
 
   """
+  #1328 — an authoring attestation. The writer states which task it worked from
+  and that task's current revision (Node.revSeq). The server compares both with
+  the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
+  AUTHORING_ATTESTATION_WRONG_TASK, AUTHORING_ATTESTATION_STALE, or
+  AUTHOR_TASK_BROKEN when the rule's task is gone. A match records a TASK stamp.
+  This does not prove the task was read or followed. With no applicable rule
+  the claim is ignored. People in the portal are exempt, derived from their
+  sign-in; no client field selects that.
+  """
+  input AuthoredWithInput {
+    "The task's id or canonical URN."
+    task: ID!
+    "The task's current revision."
+    revision: Int!
+  }
+
+  """
   Outgoing edge on a node, used in NodeInput.edges
   """
   input NodeEdgeInput {
@@ -6324,6 +6338,11 @@ export const typeDefs = `#graphql
   loc) rejects with NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
   input CreateNodeInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
     id: String
     """
@@ -6376,6 +6395,11 @@ export const typeDefs = `#graphql
   Every content field is optional: omitted = preserved (D4).
   """
   input UpdateNodeInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). XOR with memoryId+loc."
     id: String
     "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
@@ -6441,6 +6465,11 @@ export const typeDefs = `#graphql
   exactly one of 'url' | 'content'.
   """
   input ImportNodeInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Target memory (ID or fully-qualified URN), with 'loc'. XOR with 'nodeUrn'."
     memoryId: String
     "Target loc within 'memoryId'. XOR with 'nodeUrn'."
@@ -6794,6 +6823,51 @@ export const typeDefs = `#graphql
     scopeRef: ID
   }
 
+  "#3457: what a schedule would do, asked before it exists. The inputs create takes that the pin or the timing sentence depend on; the schedule's own name, policy and scope never do. Resolved exactly as createAgentSchedule resolves them."
+  input PreviewAgentScheduleInput {
+    budgetTokens: Int
+    budgetActions: Int
+    "App the run would execute as - ref: PK or fully-qualified URN."
+    appRef: String!
+    "Recurring: 5-field cron, evaluated in timezone (default UTC). Provide exactly one of cron / runAt."
+    cron: String
+    "One-shot: ISO-8601 instant. Provide exactly one of cron / runAt."
+    runAt: String
+    timezone: String
+    "Fully-qualified URN of the prompt node to run."
+    entryNodeUrn: String!
+    "Agent - ref: PK or URN; must be installed in the App."
+    agentRef: String
+    runAsSelf: Boolean
+    "Static payload; only its __aiConfigName entry can change what is previewed."
+    eventData: JSON
+    aiConfigName: String
+    enabled: Boolean
+  }
+
+  enum AgentSchedulePreviewOutcome {
+    "The automation can be adopted: summary and hash are set, reason is null."
+    ADOPTABLE
+    "Create would store this schedule UNADOPTED: summary and hash are null and reason says which kind."
+    CANNOT_BE_ADOPTED
+  }
+
+  enum AgentSchedulePreviewReason {
+    "The entry or something it routes to is missing or not readable by you or by the run. A missing entry and an unreadable one answer identically."
+    MEMORY_UNREADABLE
+    "Readable, but the graph is encrypted, outside the organization or over the consent bounds."
+    OTHER
+  }
+
+  "#3457: the preview of a schedule that does not exist yet. A snapshot, not a promise: if the graph changes before Create, the hash differs. summary.schedule carries the raw cron, so a plain-language UI renders its own timing."
+  type AgentSchedulePreview {
+    outcome: AgentSchedulePreviewOutcome!
+    "The pin hash the created schedule's automationApproval.hash shows while the graph is unchanged. Null when CANNOT_BE_ADOPTED."
+    hash: String
+    summary: AutomationSummary
+    reason: AgentSchedulePreviewReason
+  }
+
   input UpdateAgentScheduleInput {
     "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
     budgetTokens: Int
@@ -7050,6 +7124,11 @@ export const typeDefs = `#graphql
   Set 'dryRun: true' to get per-node/per-field match counts WITHOUT writing.
   """
   input SearchReplaceInNodesInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Text (literal) or RegExp source (regex mode) to find. Must be non-empty."
     oldText: String!
     "Replacement. May be empty (deletes the matched text). Regex mode honors dollar-sign backrefs."
@@ -7087,6 +7166,8 @@ export const typeDefs = `#graphql
   Generic replacement keeps its governed-node protections.
   """
   input SpecSearchReplaceInput {
+    "#1328 — one claim for every changed spec. See AuthoredWithInput."
+    authoredWith: AuthoredWithInput
     memoryRef: ID!
     nodeIds: [ID!]!
     oldText: String!
@@ -7191,6 +7272,11 @@ export const typeDefs = `#graphql
   }
 
   input MergeNodesInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Source node — ID or fully-qualified URN. Folded into 'target'."
     source: String!
     "Target node — ID or fully-qualified URN. The surviving node."
@@ -8187,6 +8273,8 @@ export const typeDefs = `#graphql
     recoveryEdges(memoryRef: ID!, edgeIds: [ID!], limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
+    "#3457: what a schedule would do before it exists (org ADMIN of the App, checked first; writes nothing). Admin, App, Agent and timing refusals are createAgentSchedule's errors; an entry create would store UNADOPTED is the typed outcome CANNOT_BE_ADOPTED."
+    previewAgentSchedule(input: PreviewAgentScheduleInput!): AgentSchedulePreview!
     "#2441: the schedules and webhooks of an App that the caller may adopt, with their adoption state. Authorization first, then ordered by (name, kind, id) and paged: limit defaults to 20, maximum 50; after is the previous page's nextCursor. MANUAL triggers are never listed (consent is per run); omitted says so. Only an adopter sees any row."
     automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
     "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
@@ -8368,6 +8456,8 @@ export const typeDefs = `#graphql
       "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
       after: ID
       types: [String!]
+      "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
+      codePrefix: String
       alarmsOnly: Boolean
       taskId: ID
       limit: Int
@@ -10487,7 +10577,23 @@ export const typeDefs = `#graphql
     already see it on the roster.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
+
     createAgentTask(input: CreateAgentTaskInput!, instruction: ActInstructionInput): AgentTask!
+
+    """
+    #3449: App action app.<current-app-slug>.<name>, lower-case legal URN atom, at most 64 characters.
+    Same creator authority as createAgentTask (hrn:node:hadronmemory.com:specs:cor:agt:050:06).
+    taskRef must name a readable task in this App; unknown and foreign refs answer TASK_NOT_FOUND.
+    An omitted payload becomes {}; explicit null, non-objects, NUL or an unpaired surrogate in a JSON key/value refuse BAD_USER_INPUT.
+    payload is a JSON object of at most 4096 UTF-8 bytes, readable by EVERY App participant and the App's own key,
+    with or without taskRef, and must contain nothing secret (hrn:node:hadronmemory.com:specs:cor:agt:050:23).
+    Each successful call appends a new event (retries are not deduplicated), type = code, payload = {payload}.
+    Task-bound actions are passive: they never
+    acknowledge assignment/child-finished wakes. APP_ACTION_CODE_INVALID refuses invalid codes and foreign slugs.
+    The register answer reads as the caller (hrn:node:hadronmemory.com:specs:cor:agt:110:03), never authorization.
+    A caller without an Agent receives WITHHELD with code only, no task loc/URN and no register lookup.
+    """
+    recordAppAction(appRef: ID!, code: String!, taskRef: ID, payload: JSON): RecordAppActionResult!
     """
     Default matching (distinctAssignees omitted, null or false): items with match:true each get one post-commit
     match attempt in list order; failure marks that task, not a call refusal. Different workers and all-or-none
@@ -11244,7 +11350,7 @@ export const typeDefs = `#graphql
     invariants as updateNode (per-memory write auth, encryption, revision
     history, git mirror). Returns the updated node.
     """
-    updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
+    updateNodeData(nodeRef: ID!, data: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #742 - Shallow-merge a JSON patch into a node's structured 'properties'
@@ -11273,7 +11379,7 @@ export const typeDefs = `#graphql
     (per-memory write auth, an active session on an encrypted memory, revision
     history, git mirror). Returns the updated node.
     """
-    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String): Node!
+    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #745 — Object store: the legible sugar surface over structured storage.
@@ -14744,13 +14850,18 @@ export const typeDefs = `#graphql
     MAPPED
     "No mapping in the fully readable Team Agent chain, or no single Team Agent."
     UNMAPPED
-    "The readable entry's loc has no usable task in the worker's chain."
+    "The readable entry's loc has no usable task in the lookup chain."
     UNRESOLVED
     "Code-only guidance: resolve the task yourself. Includes failed reads."
     WITHHELD
   }
+  "#3449: App action and caller-readable register answer (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  type RecordAppActionResult {
+    eventId: ID!
+    action: TickAction!
+  }
   type TickAction {
-    "Permanent tick code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
+    "Permanent action code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
     code: String!
     state: TickActionState!
     "The readable entry's loc, including when no usable task was found."

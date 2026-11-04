@@ -39,7 +39,7 @@ let seed: string;
 let graph: MemoryWithOrg;
 const commit = () => { git(seed, 'add', '-A'); git(seed, 'commit', '--allow-empty', '-m', 'fixture'); git(seed, 'push', 'origin', 'main'); };
 const file = (loc: string, nodeType: string, data: Prisma.InputJsonValue = payload) => writeNodeFile(seed, {
-  id: generateId(), loc, name: loc, nodeType, data, content: null, tags: [], role: null, isRunnable: null, isPlaceholder: false, outgoingEdges: [],
+  id: generateId(), loc, name: loc, nodeType, data, content: null, tags: [], role: null, isRunnable: null, isPlaceholder: false, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
 });
 
 beforeEach(async () => {

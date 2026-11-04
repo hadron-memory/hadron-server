@@ -1,5 +1,4 @@
-import { isAgentInstalledForAppOperation } from '../lib/appAgent.js';
-import { hasAppRelationship } from '../lib/auth/appRelationship.js';
+import { isAgentInstalledForAppOperation, listAppInstallationsWithDerivedLicense } from '../lib/appAgent.js';
 import { renderScriptArgs, ScriptVariableMissingError } from '../lib/runner/scriptArgs.js';
 import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
@@ -444,14 +443,31 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
       );
     }
   }
-  // On-behalf-of relationship re-verified at launch, not only at trigger
-  // creation (cor:agt:010:01): AppMember OR an active AgentSubscription to
-  // any of the App's agents.
-  if (args.userId && !(await hasAppRelationship(db, args.appId, args.userId))) {
-    throw new RunLaunchDeniedError(
-      'The on-behalf-of user has no live relationship with this App.',
-      'RELATIONSHIP_MISSING',
-    );
+  // Preserve mint's existing AppMember OR non-revoked subscription gate.
+  // #2168 changes installation membership, not subscriber activation/expiry;
+  // manual/trigger pre-checks retain their stricter hasAppRelationship gate.
+  if (args.userId) {
+    const member = await db.appMember.findFirst({
+      where: { appId: args.appId, userId: args.userId },
+      select: { userId: true },
+    });
+    if (!member) {
+      const installs = await listAppInstallationsWithDerivedLicense(db, args.appId);
+      const sub = installs.length ? await db.agentSubscription.findFirst({
+        where: {
+          userId: args.userId,
+          revokedAt: null,
+          agentId: { in: installs.map(row => row.agentId) },
+        },
+        select: { userId: true },
+      }) : null;
+      if (!sub) {
+        throw new RunLaunchDeniedError(
+          'The on-behalf-of user has no live relationship with this App.',
+          'RELATIONSHIP_MISSING',
+        );
+      }
+    }
   }
   // Encrypted-memory guard (spec 041, D-2026-07-06-B): headless runs are
   // UNAVAILABLE on encrypted memories — the server never holds the key, and
