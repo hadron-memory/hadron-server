@@ -8341,6 +8341,8 @@ export const typeDefs = `#graphql
       "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
       after: ID
       types: [String!]
+      "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
+      codePrefix: String
       alarmsOnly: Boolean
       taskId: ID
       limit: Int
@@ -10460,7 +10462,23 @@ export const typeDefs = `#graphql
     already see it on the roster.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
+
     createAgentTask(input: CreateAgentTaskInput!, instruction: ActInstructionInput): AgentTask!
+
+    """
+    #3449: App action app.<current-app-slug>.<name>, lower-case legal URN atom, at most 64 characters.
+    Same creator authority as createAgentTask (hrn:node:hadronmemory.com:specs:cor:agt:050:06).
+    taskRef must name a readable task in this App; unknown and foreign refs answer TASK_NOT_FOUND.
+    An omitted payload becomes {}; explicit null, non-objects, NUL or an unpaired surrogate in a JSON key/value refuse BAD_USER_INPUT.
+    payload is a JSON object of at most 4096 UTF-8 bytes, readable by EVERY App participant and the App's own key,
+    with or without taskRef, and must contain nothing secret (hrn:node:hadronmemory.com:specs:cor:agt:050:23).
+    Each successful call appends a new event (retries are not deduplicated), type = code, payload = {payload}.
+    Task-bound actions are passive: they never
+    acknowledge assignment/child-finished wakes. APP_ACTION_CODE_INVALID refuses invalid codes and foreign slugs.
+    The register answer reads as the caller (hrn:node:hadronmemory.com:specs:cor:agt:110:03), never authorization.
+    A caller without an Agent receives WITHHELD with code only, no task loc/URN and no register lookup.
+    """
+    recordAppAction(appRef: ID!, code: String!, taskRef: ID, payload: JSON): RecordAppActionResult!
     """
     Default matching (distinctAssignees omitted, null or false): items with match:true each get one post-commit
     match attempt in list order; failure marks that task, not a call refusal. Different workers and all-or-none
@@ -14717,13 +14735,18 @@ export const typeDefs = `#graphql
     MAPPED
     "No mapping in the fully readable Team Agent chain, or no single Team Agent."
     UNMAPPED
-    "The readable entry's loc has no usable task in the worker's chain."
+    "The readable entry's loc has no usable task in the lookup chain."
     UNRESOLVED
     "Code-only guidance: resolve the task yourself. Includes failed reads."
     WITHHELD
   }
+  "#3449: App action and caller-readable register answer (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  type RecordAppActionResult {
+    eventId: ID!
+    action: TickAction!
+  }
   type TickAction {
-    "Permanent tick code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
+    "Permanent action code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
     code: String!
     state: TickActionState!
     "The readable entry's loc, including when no usable task was found."

@@ -126,7 +126,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
       WHERE l.subject_worker_id = t.assignee_worker_id
         AND ${liveApp('t')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = t.id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
+                        WHERE x.task_id = t.id AND x.actor_worker_id = l.subject_worker_id AND x.created_at >= l.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('l.subject_worker_id', 'l.id', '0')}`),
     // A child's finish, for its owner, while the parent is open and the owner has not acted on the parent since.
     // An owner who finished the child itself already knows.
@@ -140,7 +140,7 @@ export async function pendingTaskWakes(db: Db, workerIds: string[], now: Date): 
         AND e.actor_worker_id IS DISTINCT FROM c.owner_worker_id
         AND ${liveApp('c')}
         AND NOT EXISTS (SELECT 1 FROM agent_team_events x
-                        WHERE x.task_id = p.id AND x.actor_worker_id = c.owner_worker_id AND x.created_at >= e.created_at AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
+                        WHERE x.task_id = p.id AND x.actor_worker_id = c.owner_worker_id AND x.created_at >= e.created_at AND x.type NOT LIKE 'app.%' AND x.type NOT IN (${Prisma.join([...PASSIVE_EVENT_TYPES])}))
         AND ${undelivered('c.owner_worker_id', 'e.id', '0')}`),
     // An unacknowledged alarm's highest woken chain position, when that position names one of these workers.
     db.$queryRaw<(Row & { chainIndex: number; episodeStart: Date | null })[]>(Prisma.sql`
