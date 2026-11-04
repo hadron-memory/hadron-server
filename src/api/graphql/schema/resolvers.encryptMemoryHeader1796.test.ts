@@ -262,6 +262,16 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
       expect((await row(memory.id)).isEncrypted).toBe(true);
     });
 
+    it.each(['toString', 'constructor', 'hasOwnProperty'])('a variable named %s is not supplied by Object.prototype', async (name) => {
+      const reply = await send(
+        `mutation($${name}: ID! = "${memory.id}") { encryptMemory(memoryId: $${name}) { id isEncrypted } }`,
+        {},
+        { keys: [{ memory: memory.id, dataKey }] },
+      );
+      expect(reply.errors).toBeUndefined();
+      expect((await row(memory.id)).isEncrypted).toBe(true);
+    });
+
     it('a supplied variable wins over the default', async () => {
       const reply = await send(DEFAULTED(other.id), { id: memory.id }, { keys: [{ memory: other.id, dataKey }] });
       expect(code(reply)).toBe('NOT_ENCRYPTED');
