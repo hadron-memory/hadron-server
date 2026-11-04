@@ -12,10 +12,11 @@ import { compileBootPromptMutations } from './resolvers.mutation.compileBootProm
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const ctx = (userId: string, roles: Context['roles'] = []): Context => ({ db, userId, roles, clientId: `user:${userId}` });
 const direct = (id: string, caller: Context) => resolvers.Query.node({}, { ref: id, raw: true }, caller);
+// Isolate the returned node: pointer validation has its own read gate and is outside this row.
 const compile = (id: string, caller: Context) => compileBootPromptMutations.compileAgentBootPrompt({}, { agentRef: id, setPointer: false }, caller);
 
 async function fixture() {
-  const user = (name: string, roles: string[] = []) => db.user.create({ data: { id: generateId(), name, roles } });
+  const user = (name: string, roles: Context['roles'] = []) => db.user.create({ data: { id: generateId(), name, roles } });
   const owner = await user('owner');
   const admin = await user('org-admin');
   const member = await user('non-manager');
