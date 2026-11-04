@@ -8,7 +8,8 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { automationReadGrantQueries as Q } from './resolvers.automationReadGrant.js';
-import type { Context } from './resolvers.helpers.js';
+import { requireOrgRole, type Context } from './resolvers.helpers.js';
+import { managesAgent } from '../../../lib/auth/appManagement.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 const claim = { kind: 'LIVE_CHAT', ref: 'synthetic3382:turn' } as const;
@@ -65,11 +66,21 @@ async function fixture(n: number, orgCount = 3) {
 const predicateModels = new Set(['Memory', 'Agent', 'OrgMember', 'AppMember']);
 function measured() {
   const counts: Record<string, number> = {};
+  let largestIn = 0;
+  const visit = (value: unknown) => {
+    if (value && typeof value === 'object') for (const [key, v] of Object.entries(value)) {
+      if (key === 'in' && Array.isArray(v)) largestIn = Math.max(largestIn, v.length);
+      visit(v);
+    }
+  };
   const client = db.$extends({ query: { $allModels: { $allOperations: async ({ model, operation, args, query }) => {
-    if (predicateModels.has(model) && operation.startsWith('find')) counts[model + '.' + operation] = (counts[model + '.' + operation] ?? 0) + 1;
+    if (predicateModels.has(model) && operation.startsWith('find')) {
+      counts[model + '.' + operation] = (counts[model + '.' + operation] ?? 0) + 1;
+      visit(args);
+    }
     return query(args);
   } } } });
-  return { client: client as unknown as Context['db'], counts, // Memory.findUnique includes the unchanged per-anchor liveness reads (and legacy URN lookups).
+  return { client: client as unknown as Context['db'], counts, maxIn: () => largestIn, // Memory.findUnique includes the unchanged per-anchor liveness reads (and legacy URN lookups).
     // Publish them, but do not claim to batch/bound anchors in a predicate-only optimization.
     total: () => Object.entries(counts).filter(([key]) => key !== 'Memory.findUnique').reduce((a, [, b]) => a + b, 0) };
 }
@@ -98,7 +109,7 @@ describe('#3382 batch-only list contract', () => {
           JSON.stringify({ n, mode, includeRevoked, rows: out }) + '\n');
         if (mode === 'worker') audit++;
         expect(await events()).toBe(audit);
-        metrics.push({ mode, includeRevoked, rows: out.length, queries: m.total(), anchorOrUrnReads: m.counts['Memory.findUnique'] ?? 0, detail: m.counts });
+        metrics.push({ mode, includeRevoked, rows: out.length, queries: m.total(), maxIn: m.maxIn(), anchorOrUrnReads: m.counts['Memory.findUnique'] ?? 0, detail: m.counts });
       }
     }
     const census = { active: f.rows.filter(r => !r.revokedAt).length, revoked: f.rows.filter(r => !!r.revokedAt).length,
@@ -110,8 +121,29 @@ describe('#3382 batch-only list contract', () => {
     process.stdout.write('3382 SYNTHETIC CENSUS ' + JSON.stringify(census) + '\n');
     expect(census.active).toBe(3 * n);
     expect(census.revoked).toBe(n + 1);
-    for (const metric of metrics) expect(metric.queries, JSON.stringify(metric)).toBeLessThanOrEqual(metric.mode === 'worker' ? 24 : 8);
+    for (const metric of metrics) {
+      expect(metric.maxIn, JSON.stringify(metric)).toBeLessThanOrEqual(32);
+      const batches = Math.ceil((n + 1) / 32);
+      const bound = metric.mode === 'worker' ? 9 + 12 * batches : metric.mode === 'cross-app-memory' ? 6 : 2 + 3 * batches;
+      expect(metric.queries, JSON.stringify(metric)).toBeLessThanOrEqual(bound);
+    }
   }, 30_000);
+
+  it('unbatched shared gates retain results/query counts and the list leaves its caller context untouched', async () => {
+    const f = await fixture(1);
+    const m = measured();
+    const c = context(f.holder.id, { db: m.client });
+    const check = async () => {
+      expect(await managesAgent(c, { organizationId: f.orgs[0].id, ownerUserId: null })).toBe(true);
+      await requireOrgRole(c, f.orgs[0].id, 'ADMIN');
+    };
+    await check();
+    expect(m.counts['OrgMember.findFirst']).toBe(2);
+    await Q.automationReadGrants({}, { appRef: f.apps[0].id }, c);
+    expect(c).not.toHaveProperty('managerOrgRoleCache');
+    await check();
+    expect(m.counts['OrgMember.findFirst']).toBe(4);
+  });
 
   it('preserves historical deleted-target URNs for App managers while target-only lists omit them', async () => {
     const f = await fixture(3);
