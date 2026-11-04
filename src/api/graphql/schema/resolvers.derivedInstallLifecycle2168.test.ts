@@ -225,7 +225,7 @@ it('uninstall holds the surviving import witness until its register decision com
   try {
     await vi.waitFor(async()=>{
       expect(removerPid).toBeGreaterThan(0);
-      const rows=await db.$queryRaw<Array<{blocked:boolean}>>`SELECT ${writerPid}=ANY(pg_blocking_pids(${removerPid})) AS blocked`;
+      const rows=await db.$queryRaw<Array<{blocked:boolean}>>`SELECT ${writerPid}=ANY(pg_blocking_pids(${removerPid}::int)) AS blocked`;
       expect(rows[0].blocked).toBe(true);
     },{timeout:5000,interval:10});
   } finally {release();await Promise.all([uninstall,removing]);}
