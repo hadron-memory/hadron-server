@@ -52,6 +52,10 @@ export interface NodeForGit {
   isRunnable: boolean | null;
   /** Required so every incremental producer decides the server-set marker. */
   isPlaceholder: boolean;
+  /** #1328 — required for the #1218 reason: the incremental path must not silently drop a verified claim. */
+  authorshipKind: string | null;
+  authoredByTask: string | null;
+  authoredByRevision: number | null;
   outgoingEdges: Array<{
     /** `INCLUDE` edges are derived from content and never mirrored (#2040). */
     governedKind?: string | null;

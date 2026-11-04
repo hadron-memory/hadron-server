@@ -63,6 +63,7 @@ import {
   oauthSurfaceRefusalMessage,
   hasCurrentPlatformAdminRole,
   resolveAuthContext,
+  portalHumanUserId,
 } from './middleware/auth.js';
 import { initCloudflareIps } from './auth/cloudflare-ips.js';
 import { startRateBucketCleanupLoop } from './lib/rateLimit/maintenance.js';
@@ -1316,7 +1317,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           }
           throw err;
         });
-        return { db, ...auth };
+        const portalHuman = portalHumanUserId(auth);
+        return { db, ...auth, ...(portalHuman ? { portalHumanUserId: portalHuman } : {}) };
       },
     }),
   );

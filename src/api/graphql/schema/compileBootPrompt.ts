@@ -413,6 +413,7 @@ async function decide(
       txCtx,
       existing ? 'update' : 'create',
       {
+        authoring: { kind: 'platform', record: 'boot-prompt-compile' },
         transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         ...(existing ? { targetNodeId: existing.id } : {}),
         forceRevision: true,

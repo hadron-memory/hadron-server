@@ -51,6 +51,8 @@ export interface AuthContext {
   /** #1897: the live factor-protected sign-in this credential descends from (JWT `sid` or key root). */
   signInId?: string;
   apiKeyId?: string;       // UserApiKey.id — set when a user authenticated via an hdr_user_ key (not JWTs)
+  /** #1328: the credential is a person's sign-in JWT, the one the portal holds. Never an impersonation JWT. */
+  signInCredential?: true;
   /**
    * OAuth scopes bound to the presented `hdr_user_` key. Absent for JWTs,
    * App keys, and legacy/portal user keys whose empty scope list deliberately
@@ -460,6 +462,20 @@ async function resolveUserApiKey(
 }
 
 /**
+ * #1328 — the trusted portal human: the user id behind a sign-in JWT, on a
+ * request with no key, App, worker session or impersonation. D-2026-09-24-004:
+ * the exemption follows the surface, so the CLI and MCP attest. The /graphql
+ * Apollo context is the ONLY caller; an MCP transport holding the same JWT never
+ * reaches this. Limit, accepted by that ruling: an agent driving the browser, or
+ * anyone replaying their own JWT, reads as the person.
+ */
+export function portalHumanUserId(auth: AuthContext): string | undefined {
+  if (auth.signInCredential !== true || !auth.userId) return undefined;
+  if (auth.apiKeyId || auth.appId || auth.sessionId || auth.sessionBindingRefused || auth.impersonation) return undefined;
+  return auth.userId;
+}
+
+/**
  * Single insert path for `UserApiKey` rows (spec 025 FR-015). Both the
  * portal-side `createUserApiKey` GraphQL resolver and the OAuth
  * `POST /oauth/token` handler call this so the hashing primitive,
@@ -586,6 +602,7 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
       clientId,
       userId: payload.sub,
       login: payload.login,
+      signInCredential: true,
       ...(payload.sid ? { signInId: payload.sid } : {}),
       roles: validatedUserRoles(user.roles),
     };

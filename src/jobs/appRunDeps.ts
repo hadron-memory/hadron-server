@@ -24,6 +24,7 @@ import { verifyAutomationPin, checkAutomationRevisions, assertPinnedAiIdentity, 
 import type { PrismaClient, AppRun } from '../generated/prisma/index.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
+import { attestedAuthoring } from '../lib/authoringAttestation.js';
 import { resolveAiConfigWithFallback, type ResolvedAiConfig } from '../lib/aiConfig.js';
 import { generateText, generateExtraction, generateWithTools, type ExtractionField } from '../lib/llm/index.js';
 import { validateExtractionSpec } from '../lib/edge-conditions/reserved-names.js';
@@ -322,6 +323,8 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         } as never,
         ctx,
         exists ? 'update' : 'create',
+        // #1328: generated output states no task, so a governed target refuses.
+        { authoring: attestedAuthoring(null) },
       );
       return written.id as string;
     },
