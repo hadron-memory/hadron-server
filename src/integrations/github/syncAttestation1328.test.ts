@@ -112,6 +112,75 @@ describe('#1328 git sync', () => {
     expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: taskId });
   });
 
+  describe('an edit that changes only the collection (Andi P2, PR #3433)', () => {
+    const seed = async (extra: Record<string, unknown> = {}) => {
+      writeFrontmatterNode(join(repo(), 'a.md'), { name: 'A', role: 'guide', authoredWith: `${taskId}@1`, ...extra }, 'body');
+      await sync();
+      return (await stored('a')).id;
+    };
+    const reportOf = async () => JSON.parse((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).lastSyncReport ?? '{"entries":[]}');
+
+    it('a missing, stale, wrong or malformed claim keeps the collection and the stamp; a current claim writes and stamps it', async () => {
+      const id = await seed();
+      await db.node.update({ where: { id: taskId }, data: { revSeq: 2 } });
+      for (const [authoredWith, code] of [
+        [undefined, 'AUTHORING_ATTESTATION_MISSING'],
+        [`${taskId}@1`, 'AUTHORING_ATTESTATION_STALE'],
+        [`${generateId()}@2`, 'AUTHORING_ATTESTATION_WRONG_TASK'],
+        ['not a claim', 'AUTHORING_ATTESTATION_MISSING'],
+      ] as const) {
+        writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: 'guide', objectType: 'changed', ...(authoredWith ? { authoredWith } : {}) }, 'body');
+        expect((await sync()).error).toBeUndefined();
+        expect(await stored('a')).toMatchObject({ id, deletedAt: null, objectType: null, authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1 });
+        expect((await reportOf()).entries).toContainEqual(expect.objectContaining({ kind: 'attestation_refused', loc: 'a', code }));
+      }
+      writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: 'guide', objectType: 'changed', authoredWith: `${taskId}@2` }, 'body');
+      expect((await sync()).error).toBeUndefined();
+      expect(await stored('a')).toMatchObject({ objectType: 'changed', authoredByTask: taskId, authoredByRevision: 2 });
+    });
+
+    it('the collection the row already has is no change: no claim asked, the stamp stays', async () => {
+      const id = await seed({ objectType: 'kept' });
+      writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: 'guide', objectType: 'kept' }, 'body');
+      expect((await sync()).error).toBeUndefined();
+      expect(await stored('a')).toMatchObject({ objectType: 'kept', authoredByTask: taskId, authoredByRevision: 1 });
+      expect((await reportOf()).entries.filter((e: { kind: string }) => e.kind === 'attestation_refused')).toEqual([]);
+    });
+
+    it('a collection the schema refuses is not written, so it asks no claim, keeps the stamp and is reported once', async () => {
+      const id = await seed();
+      await db.memory.update({ where: { id: memoryId }, data: { schema: { objectTypes: { note: { fields: { topic: { type: 'text' } } } } } } });
+      writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: 'guide', objectType: 'bogus' }, 'body');
+      const result = await sync();
+      expect(result.error).toBeUndefined();
+      expect(result.skippedObjectTypes).toEqual([expect.stringMatching(/^a \(bogus\): /)]);
+      expect(await stored('a')).toMatchObject({ objectType: null, authoredByTask: taskId, authoredByRevision: 1 });
+      const entries = (await reportOf()).entries as Array<{ kind: string }>;
+      expect(entries.filter((e) => e.kind === 'object_type_rejected')).toHaveLength(1);
+      expect(entries.filter((e) => e.kind === 'attestation_refused')).toEqual([]);
+    });
+
+    it("the collection is judged against the row's own properties: one its properties satisfy needs a claim", async () => {
+      const id = await seed();
+      await db.memory.update({ where: { id: memoryId }, data: { schema: { objectTypes: { competitor: { fields: { url: { type: 'text', required: true } } } } } } });
+      await db.node.update({ where: { id }, data: { properties: { url: 'https://x' } } });
+      writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: 'guide', objectType: 'competitor' }, 'body');
+      expect((await sync()).error).toBeUndefined();
+      expect((await stored('a')).objectType).toBeNull();
+      expect((await reportOf()).entries).toContainEqual(expect.objectContaining({ kind: 'attestation_refused', loc: 'a', code: 'AUTHORING_ATTESTATION_MISSING' }));
+    });
+
+    it('a claimless edit with a schema-refused collection is refused as an edit, and the collection is not reported', async () => {
+      const id = await seed();
+      await db.memory.update({ where: { id: memoryId }, data: { schema: { objectTypes: { note: { fields: { topic: { type: 'text' } } } } } } });
+      writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: 'guide', objectType: 'bogus' }, 'edited');
+      const result = await sync();
+      expect(result.skippedObjectTypes).toEqual([]);
+      expect((await stored('a')).content).not.toContain('edited');
+      expect((await reportOf()).entries).toContainEqual(expect.objectContaining({ kind: 'attestation_refused', loc: 'a', code: 'AUTHORING_ATTESTATION_MISSING' }));
+    });
+  });
+
   it('a verified task stamp exports as task@revision; a HUMAN stamp never does', () => {
     const base = { id: 'n', name: 'N', tags: [], role: 'guide', isRunnable: null, isPlaceholder: false } as never;
     const task = buildNodeFrontmatter({ ...(base as object), authorshipKind: 'TASK', authoredByTask: 't', authoredByRevision: 3 } as never, []);
