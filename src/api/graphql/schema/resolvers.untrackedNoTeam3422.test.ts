@@ -346,6 +346,21 @@ describe('the run tools take no malformed form of the filter (their arguments ar
       expect(r.code).toBe('APP_NOT_FOUND');
       expect(calls).toBe(0);
     });
+
+    // Reachable from JSON: no string form exists, so converting the value throws. That must not happen before the gate.
+    it.each([[{ toString: null }], [[{ toString: null }]]])('a team %j that has no string form is the same refusal', async (team) => {
+      const r = await refusal(surface({ noTeam: true, team }));
+      expect(r.code).toBe('BAD_USER_INPUT');
+      expect(calls).toBe(0);
+      expect(await claimedCount()).toBe(0);
+    });
+
+    it('a finished run answers APP_NOT_FOUND for a team with no string form too', async () => {
+      const run = await mintRun(app.id, { status: 'COMPLETED' });
+      const r = await refusal(surface({ noTeam: true, team: { toString: null } }, run));
+      expect(r.code).toBe('APP_NOT_FOUND');
+      expect(calls).toBe(0);
+    });
   });
 });
 
