@@ -49,6 +49,14 @@ describe('App-defined actions', () => {
   it.each([{ x: '\0' }, { nested: [{ x: '\0' }] }, { ['bad\0key']: true }])('refuses PostgreSQL-incompatible NUL in payload %# before insertion', async payload => {
     await refused({ payload }, 'BAD_USER_INPUT');
   });
+  it.each([{ x: '\ud800' }, { x: '\udc00' }, { nested: [{ x: '\ud800' }] }, { ['bad\ud800key']: true }, { nested: { ['bad\udc00key']: true } }])('refuses lone surrogate payload %# before insertion', async payload => {
+    await refused({ payload }, 'BAD_USER_INPUT');
+  });
+  it('preserves well-formed surrogate pairs in nested JSON keys and values', async () => {
+    const payload = { ['key😀']: [{ value: '😀' }] };
+    const result = await record({ payload });
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: result.eventId } })).payload).toEqual({ payload });
+  });
   it('preserves a literal backslash-u0000 string as ordinary JSON data', async () => {
     const payload = { x: String.raw`\u0000` };
     const result = await record({ payload });
