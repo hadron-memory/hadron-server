@@ -311,6 +311,13 @@ export async function wholeAppInstallationReadable(ctx:Context, appId:string):Pr
   for(const row of installations) if(!(await readableNestedAgent(ctx,row.agent))) return false;
   return true;
 }
+// A3/A3.2: partial readers receive one App date for every installation;
+// full readers keep the actual per-entry dates. No public roster groups by kind.
+function servedInstallationOrder(readable:boolean) {
+  return (left:{createdAt:Date;agentId:string},right:{createdAt:Date;agentId:string}) =>
+    (readable ? left.createdAt.getTime()-right.createdAt.getTime() : 0) ||
+      left.agentId.localeCompare(right.agentId);
+}
 function installationAuditField(field:'createdBy'|'updatedBy'|'updatedAt') {
   return async(row:InstallationAuditRow,_:unknown,ctx:Context)=>{
     const decision=row._installationAuditRead?.get(ctx);
@@ -1823,7 +1830,11 @@ export const typeResolvers = {
       const byId = new Map(agents.map(agent=>[agent.id,agent]));
       const rows = installs.map(row=>({...row,agent:byId.get(row.agentId)!}));
       const visible = await Promise.all(rows.map((r) => readableNestedAgent(ctx, r.agent)));
-      return visible.filter((ag): ag is NonNullable<typeof ag> => ag !== null);
+      const wholeAppReadable = visible.every(agent=>agent!==null);
+      return rows.map((row,index)=>({...row,agent:visible[index]}))
+        .sort(servedInstallationOrder(wholeAppReadable))
+        .map(row=>row.agent)
+        .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
@@ -1927,8 +1938,7 @@ export const typeResolvers = {
       return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId),
         _installationAppCreatedAt:appCreatedAt,
         _installationAuditRead:new WeakMap([[ctx,wholeAppReadable]])}))
-        .sort((left,right)=>(wholeAppReadable ? left.createdAt.getTime()-right.createdAt.getTime() : 0) ||
-          left.agentId.localeCompare(right.agentId));
+        .sort(servedInstallationOrder(wholeAppReadable));
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
