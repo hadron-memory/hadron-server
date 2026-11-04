@@ -12,6 +12,7 @@ import { AUTOMATION_GRANT_INSTRUCTION } from './automationGrantInstructionShape.
 export const SHAPE_SET_TEAM_SNAPSHOT_GRANT = {
   app: z.string().min(1), triggerKind: z.enum(['SCHEDULE', 'WEBHOOK']), triggerId: z.string().min(1),
 };
+export const SHAPE_GET_TEAM_SNAPSHOT_GRANT = { id: z.string().min(1) };
 export const SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT = { id: z.string().min(1), instruction: AUTOMATION_GRANT_INSTRUCTION };
 export const SHAPE_LIST_TEAM_SNAPSHOT_GRANTS = {
   instruction: AUTOMATION_GRANT_INSTRUCTION,
@@ -35,6 +36,9 @@ export function registerAutomationTeamSnapshotGrantTools(server: McpServer, { db
   server.tool('hadron_revoke_automation_team_snapshot_grant',
     'Revoke one automation team snapshot grant, terminal and recorded. App managers only. A held worker may act on its holder\'s instruction within its own App.',
     SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT, ({ id, instruction: claim }) => call(() => runTeamSnapshotMutations.revokeAutomationTeamSnapshotGrant(null, { id, instruction: claim }, ctx())));
+  server.tool('hadron_get_automation_team_snapshot_grant',
+    'Read one team snapshot grant by id, including revoked rows, as a person managing its App. Returns eight metadata fields. Unknown and unauthorized ids both refuse NOT_FOUND; no worker instruction arm (cor:agt:050:23).',
+    SHAPE_GET_TEAM_SNAPSHOT_GRANT, ({ id }) => call(() => runTeamSnapshotQueries.automationTeamSnapshotGrant(null, { id }, ctx())));
   server.tool('hadron_list_automation_team_snapshot_grants',
     'Page the App team snapshot grants as its manager. includeRevoked defaults false; limit defaults20, capped200, zero counts only; offset defaults0. A held worker may list on an instruction within its own App; each admitted instructed list records one ids-only team event.',
     SHAPE_LIST_TEAM_SNAPSHOT_GRANTS, ({ app, ...args }) => call(() => runTeamSnapshotQueries.automationTeamSnapshotGrants(null, { appRef: app, ...args }, ctx())));

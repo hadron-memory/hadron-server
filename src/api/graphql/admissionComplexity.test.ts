@@ -261,6 +261,24 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ __typename }')).toBe(0);
   });
 
+  it('#3381 HTTP admission refuses over-budget metadata before the resolver', async () => {
+    const query = '{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }';
+    const spy = vi.spyOn(Query, 'automationTeamSnapshotGrant').mockResolvedValue({
+      id: 'g', appId: 'a', triggerKind: 'SCHEDULE', triggerId: 't', grantedBy: 'u',
+      createdAt: new Date('2026-11-01T00:00:00Z'), revokedAt: null, revokedBy: null,
+    });
+    try {
+      const tight = await boot({ GRAPHQL_MAX_COST: '8' });
+      const refused = await post(tight, { query });
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).errors[0].extensions.code).toBe(QUERY_TOO_COMPLEX);
+      expect(spy).not.toHaveBeenCalled();
+      const allowed = await boot({ GRAPHQL_MAX_COST: '9' });
+      expect((await (await post(allowed, { query })).json()).errors).toBeUndefined();
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally { spy.mockRestore(); }
+  });
+
   it('#3381 single grant metadata costs one object plus eight leaves, not a page', () => {
     expect(cost('{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }')).toBe(9);
   });

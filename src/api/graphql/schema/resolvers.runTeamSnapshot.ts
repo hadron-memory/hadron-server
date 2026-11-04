@@ -1,3 +1,4 @@
+import { GraphQLError } from 'graphql';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { assertFullyQualifiedUrn, parseUrnInput } from '../../../lib/urn.js';
@@ -5,7 +6,7 @@ import { pageTake } from '../pageBounds.js';
 /** #3350 / ruling 0112 amended: one automation's team snapshot grant, never an App-wide permission. */
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { Context } from './resolvers.js';
@@ -91,6 +92,39 @@ export const runTeamSnapshotMutations = {
   },
 };
 export const runTeamSnapshotQueries = {
+  /**
+   * #3381 / cor:agt:050:23: metadata visible only to a person managing the row's App.
+   * Principal admission precedes even a missing-id lookup; all trusted authorization
+   * refusals have the same public answer as a missing row, including revoked rows.
+   * The authority transaction rechecks the live manager; database faults stay faults.
+   */
+  automationTeamSnapshotGrant: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+    const missing = () => new GraphQLError('Not found', { extensions: { code: 'NOT_FOUND' } });
+    const person = async (c: Context) => {
+      if (c.appKeyId) throw missing();
+      await requirePersonAsThemselves(c, missing);
+    };
+    await person(ctx);
+    const row = await ctx.db.appAutomationTeamSnapshotGrant.findUnique({ where: { id }, include: { app: { select: APP_SELECT } } });
+    if (!row) throw missing();
+    try {
+      return await withAuthorizedTx(ctx, anchors(row.app), async c => {
+        await person(c);
+        await manager(c, row.app);
+      }, async tx => {
+        // Select exactly the public metadata, never the App relation or other columns.
+        const grant = await tx.appAutomationTeamSnapshotGrant.findUnique({ where: { id }, select: {
+          id: true, appId: true, triggerKind: true, triggerId: true, grantedBy: true,
+          createdAt: true, revokedAt: true, revokedBy: true,
+        } });
+        if (!grant) throw missing();
+        return grant;
+      });
+    } catch (error) {
+      if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') throw missing();
+      throw error;
+    }
+  },
   automationTeamSnapshotGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null; limit?: number | null; offset?: number | null; instruction?: ActInstruction | null }, ctx: Context) => {
     refuseAutomationGrantPrincipal(ctx);
     const app = await appOf(ctx, input.appRef);
