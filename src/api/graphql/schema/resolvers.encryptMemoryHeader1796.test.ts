@@ -336,6 +336,11 @@ describe('#1796 acceptance 4: an entry on a plaintext memory, on anything but en
     notEncrypted(await send('query { __type(name: "encryptMemory") { name } }', {}, { keys: [{ memory: memory.id, dataKey }] }));
   });
 
+  it('a query whose root field is spelled encryptMemory is not the mutation', async () => {
+    notEncrypted(await send(`query { encryptMemory(memoryId: "${memory.id}") { id } }`, {}, { keys: [{ memory: memory.id, dataKey }] }));
+    expect((await row(memory.id)).isEncrypted).toBe(false);
+  });
+
   it('a document that does not parse', async () => {
     notEncrypted(await send('mutation { encryptMemory(', {}, { keys: [{ memory: memory.id, dataKey }] }));
   });

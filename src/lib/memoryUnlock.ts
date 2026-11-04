@@ -20,6 +20,7 @@
  */
 
 import { scrypt as scryptCb, randomBytes, type ScryptOptions } from 'crypto';
+import { Kind, getOperationAST, parse, type DocumentNode } from 'graphql';
 
 // promisify() picks the options-less overload; wrap by hand.
 function scrypt(
@@ -42,7 +43,7 @@ import {
   isCiphertext,
   type EncryptionKey,
 } from './crypto.js';
-import { setRequestKey } from './requestKeys.js';
+import { hasRequestFirstEncryption, setRequestFirstEncryption, setRequestKey } from './requestKeys.js';
 import { resolveMemoryRef } from './entityRef/memoryRef.js';
 
 const KEY_CHECK_PLAINTEXT = 'hadron-key-check:v1';
@@ -192,6 +193,67 @@ export interface RequestKeyEntry {
 export const REQUEST_KEYS_HEADER = 'x-hadron-memory-keys';
 
 /**
+ * #1796: the memory ref of the one `encryptMemory` this GraphQL request runs, or null.
+ *
+ * The header is staged in Apollo's context, before the operation is parsed, so this reads the body
+ * itself. It is called only for an owner's entry on a plaintext memory, so no other request pays for
+ * the parse. It is deliberately narrow: a mutation whose ONLY root selection is an undirected
+ * `encryptMemory`. Anything else (another root field, a fragment, a directive, a query, a batch, a
+ * body that doesn't parse) is null, and the entry gets the header's ordinary NOT_ENCRYPTED.
+ */
+export function encryptMemoryTargetRef(body: unknown): string | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const { query, operationName, variables } = body as Record<string, unknown>;
+  if (typeof query !== 'string') return null;
+  let document: DocumentNode;
+  try {
+    document = parse(query, { noLocation: true });
+  } catch {
+    return null;
+  }
+  const operation = getOperationAST(document, typeof operationName === 'string' ? operationName : undefined);
+  if (operation?.operation !== 'mutation') return null;
+  const [field, ...rest] = operation.selectionSet.selections;
+  if (rest.length > 0 || field?.kind !== Kind.FIELD || field.name.value !== 'encryptMemory' || field.directives?.length) {
+    return null;
+  }
+  const value = field.arguments?.find((argument) => argument.name.value === 'memoryId')?.value;
+  if (value?.kind === Kind.STRING) return value.value;
+  if (value?.kind !== Kind.VARIABLE || !variables || typeof variables !== 'object') return null;
+  const supplied = (variables as Record<string, unknown>)[value.name.value];
+  return typeof supplied === 'string' ? supplied : null;
+}
+
+/** The request facts staging needs beyond the header, for #1796's first-encryption entry. */
+export interface StageRequestKeysOptions {
+  /** The session is an impersonation: `userId` is then the TARGET, who owns nothing here. */
+  impersonated?: boolean;
+  /** Lazily, the ref `encryptMemory` runs on in this request. See {@link encryptMemoryTargetRef}. */
+  encryptMemoryTarget?: () => string | null;
+}
+
+/**
+ * Validate a first-encryption entry: exactly one of dataKey or passphrase, as the argument demands,
+ * and a well-formed key. Nothing is derived here. The operation's own gates run first (spec: only the
+ * strict owner), and the derivation is deliberately expensive.
+ */
+function firstEncryptionEntry(entry: RequestKeyEntry): { dataKey: string } | { passphrase: string } {
+  const { dataKey, passphrase } = entry;
+  const exactlyOne = new MemoryUnlockError('Provide exactly one of dataKey or passphrase.', 'BAD_UNLOCK_INPUT');
+  if ((dataKey !== undefined && typeof dataKey !== 'string') || (passphrase !== undefined && typeof passphrase !== 'string')) {
+    throw exactlyOne;
+  }
+  if (!!dataKey === !!passphrase) throw exactlyOne;
+  if (passphrase) return { passphrase };
+  try {
+    parseDataKey(dataKey as string);
+  } catch (e) {
+    throw new MemoryUnlockError(String((e as Error).message), 'BAD_UNLOCK_INPUT');
+  }
+  return { dataKey: dataKey as string };
+}
+
+/**
  * Stage per-request unlock keys from the raw header value into the CURRENT
  * request's AsyncLocalStorage store (src/lib/requestKeys.ts) — never the
  * global cache, so concurrent requests can't observe them and an aborted
@@ -210,6 +272,7 @@ export async function stageRequestMemoryKeys(
   db: PrismaClient,
   headerValue: string | string[] | undefined,
   userId: string | null | undefined,
+  options: StageRequestKeysOptions = {},
 ): Promise<void> {
   if (!headerValue) return;
   // Unlock requires an authenticated USER (PR-514 review, Copilot): without
@@ -247,6 +310,15 @@ export async function stageRequestMemoryKeys(
       'BAD_UNLOCK_INPUT',
     );
   }
+  // Lazy and remembered: only an owner's entry that could be a first encryption pays for the parse.
+  let encryptMemoryTargetId: string | null | undefined;
+  const targetedByEncryptMemory = async (memoryId: string): Promise<boolean> => {
+    if (encryptMemoryTargetId === undefined) {
+      const ref = options.encryptMemoryTarget?.() ?? null;
+      encryptMemoryTargetId = ref === null ? null : (await resolveMemoryRef(db, ref).catch(() => null))?.id ?? null;
+    }
+    return encryptMemoryTargetId === memoryId;
+  };
   for (const entry of entries) {
     if (!entry || typeof entry.memory !== 'string') {
       throw new MemoryUnlockError('Each header entry needs a memory ref.', 'BAD_UNLOCK_INPUT');
@@ -277,9 +349,23 @@ export async function stageRequestMemoryKeys(
           keyVerifier: true,
         },
       });
-      if (memory && memory.userId === userId) {
+      // #1796: on encryptMemory an impersonation's target owns nothing. Falling through gives it the
+      // missing-memory answer before the encryption state below can show (cor:sec:040:04).
+      const impersonatedOnEncrypt = !!options.impersonated && memory?.userId === userId &&
+        await targetedByEncryptMemory(memoryId);
+      if (memory && memory.userId === userId && !impersonatedOnEncrypt) {
         if (!memory.isEncrypted) {
-          throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+          // #1796 (ruling 0145): a first encryption's secret establishes the verifier, so there is
+          // nothing to verify it against. It waits for encryptMemory, whose gates still decide, and
+          // only on that operation for this memory: every other request answers as it always has.
+          if (!await targetedByEncryptMemory(memoryId)) {
+            throw new MemoryUnlockError('Memory is not encrypted.', 'NOT_ENCRYPTED');
+          }
+          if (hasRequestFirstEncryption(memoryId)) {
+            throw new MemoryUnlockError('Provide exactly one of dataKey or passphrase.', 'BAD_UNLOCK_INPUT');
+          }
+          setRequestFirstEncryption(memoryId, firstEncryptionEntry(entry));
+          continue;
         }
         // Verified before staging; partial staging on a later failure is
         // harmless — the store is request-local and dies with the request.

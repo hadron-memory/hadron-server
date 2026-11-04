@@ -104,11 +104,12 @@ import { stopEmbeddingPublisher } from './services/embedding/enqueue.js';
 import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubscriber.js';
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
+  encryptMemoryTargetRef,
   stageRequestMemoryKeys,
   MemoryUnlockError,
   REQUEST_KEYS_HEADER,
 } from './lib/memoryUnlock.js';
-import { requestKeyStorage } from './lib/requestKeys.js';
+import { requestFirstEncryptionStorage, requestKeyStorage } from './lib/requestKeys.js';
 import { OPERATION_KEY_HEADER, requestOperationKeyStorage, stageRequestOperationKey } from './lib/requestOperationKey.js';
 import { emptyActor, requestActorStorage } from './lib/requestActor.js';
 import { isEmbeddingConfigured } from './lib/embedding/index.js';
@@ -1277,6 +1278,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     // context — aborted responses included (PR-514 review, Codex P1 ×2).
     bindRequestId,
     (_req, _res, next) => requestKeyStorage.run(new Map(), next),
+    (_req, _res, next) => requestFirstEncryptionStorage.run(new Map(), next),
     (_req, _res, next) => requestOperationKeyStorage.run({}, next),
     // #1610: the Worker / Agent behind this request's writes, filled by
     // resolveAuthContext from the validated session binding.
@@ -1304,6 +1306,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           db,
           req.headers[REQUEST_KEYS_HEADER],
           (auth as { userId?: string | null }).userId,
+          {
+            impersonated: !!(auth as { impersonation?: unknown }).impersonation,
+            encryptMemoryTarget: () => encryptMemoryTargetRef(req.body),
+          },
         ).catch((err) => {
           if (err instanceof MemoryUnlockError) {
             throw new GraphQLError(err.message, { extensions: { code: err.code } });
