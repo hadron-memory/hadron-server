@@ -32,7 +32,7 @@ describe('#2391 shared body-framing fixture', () => {
   it.each(written.map((c) => [c.name, c] as const))('%s: the real writer frames stored content as the fixture body', async (_name, c) => {
     writeNodeFile(root, {
       id: generateId(), loc: 'node', name: 'fixture', nodeType: 'info', content: c.stored ?? null,
-      tags: [], role: null, isRunnable: null, isPlaceholder: false, outgoingEdges: [],
+      tags: [], role: null, isRunnable: null, isPlaceholder: false, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
     });
     const text = readFileSync(join(root, 'node.md'), 'utf-8');
     const close = text.indexOf('\n---\n');

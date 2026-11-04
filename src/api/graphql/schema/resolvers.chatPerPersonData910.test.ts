@@ -13,6 +13,8 @@ import { generateId } from '../../../lib/id.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
+import { computeRevisionStateHash } from '../../../lib/nodeRevisionSnapshot.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -25,6 +27,7 @@ let org: { id: string; urn: string };
 let alice: { id: string };
 let bob: { id: string };
 let outsider: { id: string };
+let adminId: string;
 let agent: { id: string };
 let systemMemoryId: string;
 
@@ -40,6 +43,7 @@ beforeEach(async () => {
   bob = await db.user.create({ data: { githubId: 9102, githubUsername: 'bob-910', roles: ['READER'] } });
   outsider = await db.user.create({ data: { githubId: 9103, githubUsername: 'outsider-910', roles: ['READER'] } });
   const admin = await db.user.create({ data: { githubId: 9100, githubUsername: 'admin-910', roles: ['ADMIN'] } });
+  adminId = admin.id;
   for (const u of [admin, alice, bob]) {
     await db.orgMember.create({ data: { organizationId: org.id, userId: u.id, role: u === admin ? 'ADMIN' : 'CONTRIBUTOR' } });
   }
@@ -362,5 +366,121 @@ describe('#910 — single-human hosts keep the flat bag', () => {
     expect(await promptFor(alice.id, chat.chatId)).toContain('industry=A-construction;');
     const layer = await buildPrismaMemoryLayer(db, 'user-memory', memoryId, '');
     expect(await layer.read('industry')).toEqual({ ok: true, value: 'A-construction' });
+  });
+});
+
+describe('#1328 — extraction into a data node a rule governs', () => {
+  async function governedDataNode(chatId: string) {
+    const { memoryId } = await dataNodeOf(chatId);
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'author-task', name: 'Author task', isRunnable: true, content: 'how' },
+    });
+    const config = await db.memoryConfig.upsert({
+      where: { memoryId }, update: {}, create: { id: generateId(), memoryId },
+    });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    await db.node.update({ where: { loc_memoryId: { loc: 'data', memoryId } }, data: { role: 'guide' } });
+  }
+
+  it('a turn that extracts what is already stored is no authored change: no claim needed', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU', industry: 'A-construction' });
+    const before = (await dataNodeOf(chat.chatId)).data;
+    await governedDataNode(chat.chatId);
+
+    await expect(extract(alice.id, chat.chatId, { region: 'EU', industry: 'A-construction' })).resolves.toBeDefined();
+    expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
+  });
+
+  it('a turn that changes the data needs a claim extraction cannot state: refused, nothing written', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    const before = (await dataNodeOf(chat.chatId)).data;
+    await governedDataNode(chat.chatId);
+
+    const refused = await extract(alice.id, chat.chatId, { region: 'US' }).then(() => null, (e) => e);
+    expect(refused?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+    expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
+  });
+
+  it('a change the rulebook no longer governs clears the stamp, which no longer describes the content', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    await db.node.update({ where, data: { authorshipKind: 'TASK', authoredByTask: 'hrn:node:x:y:task', authoredByRevision: 3, authoredAt: new Date() } });
+
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    expect((await db.node.findUniqueOrThrow({ where })).authoredByRevision).toBe(3);
+    await extract(alice.id, chat.chatId, { region: 'US' });
+    expect((await db.node.findUniqueOrThrow({ where })).authoredByRevision).toBeNull();
+    // That stamp was set outside a writer, so it is drift: history must not repeat it as true.
+    expect(await db.nodeRevision.count({ where: { authoredByRevision: 3 } })).toBe(0);
+  });
+
+  it('a role committed while the turn waits on the row governs it: judged on the locked row', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    await governedDataNode(chat.chatId);
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    await db.node.update({ where, data: { role: null } });
+    const before = (await dataNodeOf(chat.chatId)).data;
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.node.update({ where, data: { role: 'guide' } });
+      held();
+      await gate;
+    });
+    await holding;
+    const turn = extract(alice.id, chat.chatId, { region: 'US' }).then(() => null, (e) => e);
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    release();
+    await writer;
+    expect((await turn)?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+    expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
+  });
+
+  it('a change that clears a real stamp keeps the stamped predecessor in history, with no later drift', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    await governedDataNode(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    const task = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'author-task', memoryId } } });
+    const authored = { region: 'EU', extra: 'stamped' };
+    await resolvers.Mutation.updateNode({}, {
+      input: { memoryId, loc: 'data', data: authored, authoredWith: { task: task.id, revision: task.revSeq } },
+    } as never, { db, roles: ['ADMIN'], userId: adminId });
+    const stamped = await db.node.findUniqueOrThrow({ where });
+    expect(stamped.authoredByTask).toBe(task.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    expect(await db.node.findUniqueOrThrow({ where })).toMatchObject({ authoredByTask: task.id, authoredByRevision: task.revSeq });
+    await db.nodeRoleRule.deleteMany({ where: { role: 'guide' } });
+    const revisions = await db.nodeRevision.count({ where: { nodeId: stamped.id } });
+
+    await extract(alice.id, chat.chatId, { region: 'US' });
+    const live = await db.node.findUniqueOrThrow({ where });
+    expect(live.authoredByTask).toBeNull();
+    const history = await db.nodeRevision.findMany({ where: { nodeId: stamped.id, authoredByTask: task.id } });
+    expect(history.map((r) => r.data)).toContainEqual(stamped.data);
+    expect(await db.nodeRevision.count({ where: { nodeId: stamped.id } })).toBe(revisions + 1);
+    expect(live.revisionContentHash).toBe(await computeRevisionStateHash(db, stamped.id));
+  });
+
+  it('a turn that changes nothing writes nothing: the row and its history stay as they were', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    const before = await db.node.findUniqueOrThrow({ where });
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    expect((await db.node.findUniqueOrThrow({ where })).updatedAt).toEqual(before.updatedAt);
   });
 });
