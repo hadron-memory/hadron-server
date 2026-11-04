@@ -3,7 +3,7 @@
  * private-database mutant run found unpinned (Riana, #3402 comment 6623472050):
  *
  *   w08  the worker rows are locked in id order (`ORDER BY id`),
- *   w09  the host registration row is held FOR SHARE through the answer,
+ *   w09  the host registration row is held FOR SHARE through the answer (CONTROLS ONLY, see below),
  *   w10  the helper takes the App's `wakebudget` lock before the worker rows.
  *
  * Every pin runs REAL code on two or three connections with explicit barriers, and asserts only OUTCOMES: nobody deadlocks
@@ -11,6 +11,12 @@
  * admitted App-key read leaves exactly one record, and the App never spends past its daily budget (cor:agt:080:15). Which
  * side of a race wins is never asserted, and lock order is evidence of the guard here, not law (Victor's FIT, #3411
  * comment 6624598618). Blocking is proven from pg_stat_activity / pg_blocking_pids, never by sleeping.
+ *
+ * w09 is deliberately NOT a kill pin (gate disposition #3420 comment 6625648001, option 2). The answer's content is computed
+ * before the deciding transaction, so a wholly earlier-state answer is valid whatever order the commits land in; commit order
+ * alone cannot invalidate it, and the cor:agt:080:22 outcome (one registration state, never a mix) is satisfied with or without the
+ * registration FOR SHARE. The w09 tests are therefore controls: either state is accepted, the change always commits, one record per
+ * admitted read. The registration-SHARE mutant is unpinned by these controls, by design; it is not claimed equivalent or removable.
  *
  * Pure-`.sort()` removal on `ids` is deliberately not a separate target: the statement's own `ORDER BY id` decides the lock
  * order, the JavaScript sort only fixes the IN-list text, so it cannot change an outcome (equivalent mutant, w08 below).
@@ -190,30 +196,31 @@ describe('w08: overlapping worker sets lock in id order', () => {
       held.release();
       await gate.promise;
     }).then(() => null, (e: unknown) => e);
-    await barrier('E holds the low worker row', held.promise);
-    let rPid = 0;
-    const reading = settle(due(keyCtx(w.hostKeyId)));
+    let reading: Promise<{ value: unknown; error: unknown }> | undefined;
+    let registering: Promise<{ value: unknown; error: unknown }> | undefined;
     try {
-      rPid = await until('the read to be parked on the low worker row', () => blockedBy(ePid));
-      const registering = settle(register('hy', [lo, hi]));
+      await barrier('E holds the low worker row', held.promise, blocker);
+      reading = settle(due(keyCtx(w.hostKeyId)));
+      const rPid = await until('the read to be parked on the low worker row', () => blockedBy(ePid));
+      registering = settle(register('hy', [lo, hi]));
       let finished = false;
       void registering.then(() => { finished = true; });
       // Either side of the register is fine: it completes alone, or it waits on the read. Both are proven, never slept on.
       await until('registerHost to finish or to wait on the read', async () => finished || (await blockedBy(rPid)) !== null);
+    } finally {
       gate.release();
-      const [r, h, e] = await Promise.all([reading, registering, blocker]);
-      expect(e, 'blocker transaction').toBeNull();
-      expect(errText(h.error), 'registerHost must commit, not deadlock').toBe('null');
-      expect(errText(r.error), 'the read must be answered, not deadlock').toBe('null');
-      expect(await readRecords(w.hostKeyId)).toBe(1);
-      expect(await db.hostRegistrationWorker.count({ where: { registration: { hostId: 'hy' } } })).toBe(2);
-    } finally { gate.release(); await Promise.all([reading, blocker]); }
+      await Promise.all([reading, registering, blocker]); // drain every started participant on every exit
+    }
+    const [r, h, e] = await Promise.all([reading, registering, blocker]);
+    expect(e, 'blocker transaction').toBeNull();
+    expect(errText(h?.error), 'registerHost must commit, not deadlock').toBe('null');
+    expect(errText(r?.error), 'the read must be answered, not deadlock').toBe('null');
+    expect(await readRecords(w.hostKeyId)).toBe(1);
+    expect(await db.hostRegistrationWorker.count({ where: { registration: { hostId: 'hy' } } })).toBe(2);
   }, 30_000);
 });
 
-describe('w09: the host registration is held through the deciding answer', () => {
-  // `loss` has no worker lock at all and `removal` is an empty worker list, so neither is fenced by the worker rows: the registration
-  // FOR SHARE is the only thing between the read's decision and its commit. The rule asserted is only that the answer matches ONE state.
+describe('w09: controls for a host loss or removal that overlaps a read (no kill pin, see the header)', () => {
   it.each(['loss', 'removal'] as const)('a read decided before a host %s is answered from one registration state', async (change) => {
     const target = generateId();
     await build({ workerIds: [target], watch: true, hostKey: true });
@@ -223,29 +230,27 @@ describe('w09: the host registration is held through the deciding answer', () =>
     const decided = latch(), resume = latch();
     let rPid = 0;
     const reader = settle(due(keyCtx(w.hostKeyId, { db: traced({ beforeRecord: async (pid) => { rPid = pid; decided.release(); await resume.promise; } }) })));
-    let changeDone = false;
     let changing: Promise<{ value: unknown; error: unknown }> | undefined;
     try {
       await barrier('the read passed its deciding authorization', decided.promise, reader);
       changing = settle<unknown>(change === 'loss' ? sweepLostHosts(db, new Date()) : register(HOST, []));
+      let changeDone = false;
       void changing.then(() => { changeDone = true; });
-      // The change either lands now (and the read must then refuse) or waits on the read. Neither side is required to win.
+      // The change either lands now or waits on the read; neither side is required to win.
       await until('the change to finish or to wait on the read', async () => changeDone || (await blockedBy(rPid)) !== null);
     } finally {
-      const committedBeforeRead = changeDone;
       resume.release();
-      const [r, c] = await Promise.all([reader, changing ?? Promise.resolve({ value: null, error: null })]);
-      expect(errText(c.error), `${change} must commit`).toBe('null');
-      const answered = r.error === null;
-      const listsTarget = answered && (r.value as any).wakes.some((x: any) => x.worker.id === target);
-      if (committedBeforeRead) {
-        expect(listsTarget, `an answer committed after the ${change} must not list the host's worker (a mix of two states)`).toBe(false);
-        expect(await readRecords(w.hostKeyId)).toBe(answered ? 1 : 0);
-      } else {
-        expect(r.error, 'a read decided before the change is answered from the earlier state').toBeNull();
-        expect(listsTarget).toBe(true);
-        expect(await readRecords(w.hostKeyId)).toBe(1);
-      }
+      await Promise.all([reader, changing]); // drain every started participant on every exit
+    }
+    const [r, c] = await Promise.all([reader, changing]);
+    expect(errText(c.error), `${change} must commit`).toBe('null');
+    // Either state is a valid answer: the earlier one lists the host's worker, a refusal is the later one. Never a partial list.
+    if (r.error === null) {
+      expect((r.value as any).wakes.map((x: any) => x.worker.id)).toEqual([target]);
+      expect(await readRecords(w.hostKeyId)).toBe(1);
+    } else {
+      expect(codeOf(r.error)).toBe('APP_KEY_SCOPE_REQUIRED');
+      expect(await readRecords(w.hostKeyId)).toBe(0);
     }
     // The change is real, and a read after it sees only the later state.
     const after = await settle(due(keyCtx(w.hostKeyId)));
@@ -287,23 +292,27 @@ describe('w10: issuance takes the budget lock before the worker rows', () => {
       when: (sql) => sql.includes('FROM workers') && sql.includes('FOR NO KEY UPDATE'),
       run: async (pid) => { rPid = pid; locked.release(); await resume.promise; },
     } };
-    const reading = settle(due(keyCtx(w.keyId, { db: traced(hooks) })));
+    let reading: Promise<{ value: unknown; error: unknown }> | undefined;
+    let acking: Promise<{ value: unknown; error: unknown }> | undefined;
     try {
+      reading = settle(due(keyCtx(w.keyId, { db: traced(hooks) })));
       await barrier('the issue locked its workers', locked.promise, reading);
-      const acking = settle(M.acknowledgeWakes({}, { proofs: [proof] }, keyCtx(w.keyId)));
+      acking = settle(M.acknowledgeWakes({}, { proofs: [proof] }, keyCtx(w.keyId)));
       await until('the acknowledgement to wait on the issue', async () => (await blockedBy(rPid)) !== null);
+    } finally {
       resume.release();
-      const [r, k] = await Promise.all([reading, acking]);
-      expect(errText(r.error), 'the issue must commit, not deadlock').toBe('null');
-      expect(errText(k.error), 'the acknowledgement must commit, not deadlock').toBe('null');
-      const ids = (r.value as any).wakes.map((x: any) => x.worker.id);
-      expect(ids).toContain(b);
-      expect((k.value as any).acknowledged + (k.value as any).unchanged).toBe(1);
-      // cor:agt:080:15: nothing past the daily budget, and every admitted read is recorded once.
-      const day = await db.appWakeDay.findMany({ where: { appId: w.appId } });
-      const reserved = await db.appWakeReservation.count({ where: { appId: w.appId } });
-      expect(day.reduce((n, d) => n + d.wakes, 0) + reserved).toBeLessThanOrEqual(5);
-      expect(await readRecords(w.keyId)).toBe(2);
-    } finally { resume.release(); await reading; }
+      await Promise.all([reading, acking]); // drain every started participant on every exit
+    }
+    const [r, k] = await Promise.all([reading, acking]);
+    expect(errText(r?.error), 'the issue must commit, not deadlock').toBe('null');
+    expect(errText(k?.error), 'the acknowledgement must commit, not deadlock').toBe('null');
+    const ids = (r!.value as any).wakes.map((x: any) => x.worker.id);
+    expect(ids).toContain(b);
+    expect((k!.value as any).acknowledged + (k!.value as any).unchanged).toBe(1);
+    // cor:agt:080:15: nothing past the daily budget, and every admitted read is recorded once.
+    const day = await db.appWakeDay.findMany({ where: { appId: w.appId } });
+    const reserved = await db.appWakeReservation.count({ where: { appId: w.appId } });
+    expect(day.reduce((n, d) => n + d.wakes, 0) + reserved).toBeLessThanOrEqual(5);
+    expect(await readRecords(w.keyId)).toBe(2);
   }, 30_000);
 });
