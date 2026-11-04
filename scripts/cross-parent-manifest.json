@@ -816,7 +816,7 @@
     "CompiledBootPrompt.node": {
       "target": "Node",
       "class": "open",
-      "evidence": "issue: the compiling manager's direct read of the returned node is not shown for every reachable principal; tracked in a private follow-up (#3238 step 3), details not recorded here"
+      "evidence": "Public #1734 known gap under cor:dmo:050:13: a platform admin compiling a user-owned Agent receives the node while the direct read refuses. Required manager/non-manager parity is pinned in src/api/graphql/schema/resolvers.compiledBootPrompt3238.test.ts; gap pin: src/api/graphql/schema/resolvers.compiledBootPrompt3238.test.ts::#1734 known gap: a platform admin receives the user-owned Agent compiled node while the direct read refuses. Keep open until #1734 lands and reclassifies this row."
     },
     "ConnectionGrantsPage.items": {
       "class": "parent-implies-child",
