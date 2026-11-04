@@ -3117,7 +3117,11 @@ export const typeDefs = `#graphql
     propertiesRevision: Int
     "Spec 049 Phase 4: the App's default Channel — the row its team chat became (null until provisioned)."
     defaultChannel: Channel
-    "App-layer action-policy link (cor:acl:040:02, #510). Null = no restriction. Org-admin-authored via updateApp."
+    """
+    App-layer action-policy link (hrn:node:hadronmemory.com:specs:cor:acl:040:02, #510). Null = no restriction.
+    Set at createApp and changed or cleared with updateApp(policy:), under updateApp's own gate: an org ADMIN
+    (or a platform ADMIN) for an org-owned App, the owner for a user-owned App (#3423).
+    """
     policy: JSON
     organizationId: String
     "The owning Organization when the caller may read that Organization; an App read alone does not grant it."
@@ -13204,7 +13208,7 @@ export const typeDefs = `#graphql
       identifyUserMethod: IdentifyUserMethod
       sessionTimeoutSeconds: Int
       anonymousTtlDays: Int
-      "App-layer action-policy link (cor:acl:040:02, #510). Explicit null clears; omitted preserves."
+      "App-layer action-policy link (hrn:node:hadronmemory.com:specs:cor:acl:040:02, #510). Null or omitted = no restriction."
       policy: JSON
     ): App!
 
@@ -13236,6 +13240,11 @@ export const typeDefs = `#graphql
       "Ruling DY-3: see App.agentSessionsExpire."
       agentSessionsExpire: Boolean
       anonymousTtlDays: Int
+      """
+      #3423: the App-layer action-policy link (hrn:node:hadronmemory.com:specs:cor:acl:040:02, #510), shaped
+      { allow: [String!] }. Explicit null clears; omitted preserves. Same gate as every other updateApp field.
+      """
+      policy: JSON
     ): App!
 
     """
