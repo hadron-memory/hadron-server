@@ -35,7 +35,7 @@ describe('#2325 isolateWorker names the refusal ordering the resolver implements
     const body = src('resolvers.ticker.ts');
     const fn = body.slice(body.indexOf('async function writeWorkerIsolation'));
     const at = (needle: string) => fn.indexOf(needle);
-    const steps = ['workerForRead(', "actor.kind !== 'user'", '!s7Available()', 'writeInApp(', 'actorManagesApp('].map(at);
+    const steps = ['workerForRead(', "resolved.kind !== 'user'", '!s7Available()', 'writeInApp(', 'actorManagesApp('].map(at);
     expect(steps.every(i => i > 0)).toBe(true);
     expect([...steps].sort((a, b) => a - b)).toEqual(steps);
     expect(src('resolvers.agentTask.ts')).toMatch(/Impersonation sessions are read-only/);

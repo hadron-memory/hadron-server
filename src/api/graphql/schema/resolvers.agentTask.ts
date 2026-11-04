@@ -93,7 +93,7 @@ import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { appendManagerInstructionEvent, type ManagerAct } from '../../../lib/agentTasks/events.js';
+import { appendManagerInstructionEvent, type ManagerAct, type ManagerActSubject } from '../../../lib/agentTasks/events.js';
 import { lockCallerSession, readActInstruction, requireInstructedActKeepingRuns } from './resolvers.instruction.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -217,7 +217,7 @@ export function withInstruction<A extends TaskActor>(actor: A, claim: ActInstruc
  */
 export async function recordInstructedManagerAct(
   tx: Prisma.TransactionClient, appId: string, actor: TaskActor, act: ManagerAct,
-  subject: { taskId?: string; workerId?: string; eventId?: string } = {},
+  subject: ManagerActSubject = {},
 ): Promise<void> {
   const admission = actor.instructed?.admitted;
   if (admission) await appendManagerInstructionEvent(tx, { appId, admission, act, subject });
@@ -675,11 +675,32 @@ class ManagerArmRefused extends Error {}
 export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor, instructed?: ManagerInstruction): Promise<boolean> {
   if (ctx.impersonation) return false;
   if (!instructed) return actor.kind === 'user' && managesApp(ctx, app);
+  return admitOnHolderRight(ctx, app, actor, instructed, () => managesApp(ctx, app));
+}
+
+/**
+ * #3321: the manager arm of a door whose own arms need no instruction (the ticker's owner, the worker itself, a grant).
+ * Those decide first for a worker, so a worker admitted on its own arm spends no instruction and writes no record
+ * (acceptance 5). A person is asked as before: whether they manage decides which authority a door reports.
+ */
+export async function managerArmAfterOwn(ctx: Context, app: TaskApp, actor: TaskActor, ownArm: () => boolean): Promise<boolean> {
+  if (actor.kind === 'worker' && ownArm()) return false;
+  return actorManagesApp(ctx, app, actor, actor.instructed);
+}
+
+/**
+ * #3307's check for one right of the holder: `holderRight` is judged on the holder, never on a worker grant. Sets
+ * `instructed.admitted` only for the same worker the door is acting as.
+ */
+export async function admitOnHolderRight(
+  ctx: Context, app: TaskApp, actor: TaskActor, instructed: ManagerInstruction, holderRight: () => boolean | Promise<boolean>,
+): Promise<boolean> {
+  if (ctx.impersonation) return false;
   await lockCallerSession(ctx.db as Prisma.TransactionClient, ctx.sessionId);
   let admission: ActAdmission;
   try {
     admission = await requireInstructedActKeepingRuns(
-      ctx, app.id, instructed.claim, () => managesApp(ctx, app), readActInstruction, () => new ManagerArmRefused(),
+      ctx, app.id, instructed.claim, async () => holderRight(), readActInstruction, () => new ManagerArmRefused(),
     );
   } catch (e) {
     if (e instanceof ManagerArmRefused) return false;

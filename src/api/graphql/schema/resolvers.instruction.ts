@@ -110,6 +110,21 @@ export async function admitCredentialList(
   act: CredentialAct,
   keepRuns = false,
 ): Promise<ActAdmission> {
+  return admitInstructedRead(ctx, app, refuse, instruction, (tx, admission) => appendCredentialInstructionEvent(tx, { appId: app.id, admission, act }), keepRuns);
+}
+
+/**
+ * #3321: {@link admitCredentialList}'s admission for any manager-scope read; `record` writes the door's one record in
+ * the admitted call's own transaction, after the final judgement on the locked worker and session.
+ */
+export async function admitInstructedRead(
+  ctx: Context,
+  app: { id: string; organizationId: string | null; ownerUserId: string | null },
+  refuse: () => Error,
+  instruction: ActInstruction | null | undefined,
+  record: (tx: Prisma.TransactionClient, admission: ActAdmission) => Promise<void>,
+  keepRuns = false,
+): Promise<ActAdmission> {
   let admission = await admitAppManagement(ctx, app, refuse, instruction, undefined, keepRuns);
   if (admission.kind !== 'instructed-worker') return admission;
   await withAuthorizedTx(
@@ -124,7 +139,7 @@ export async function admitCredentialList(
       // The last lock the act takes: the holder's worker and session rows, then the final judgement on them.
       await lockInstructedActRows(tx, [(admission as { workerId: string }).workerId], ctx.sessionId);
       admission = await admitAppManagement(txCtx, app, refuse, instruction, admission, keepRuns);
-      await appendCredentialInstructionEvent(tx, { appId: app.id, admission, act });
+      await record(tx, admission);
     },
     {
       afterLock: async (tx) => {

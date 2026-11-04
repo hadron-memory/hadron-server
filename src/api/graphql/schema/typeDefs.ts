@@ -8205,8 +8205,9 @@ export const typeDefs = `#graphql
     the unhosted lane) for STOP_CONSUMER_FRESH_SECONDS (default 600), but only when it read the lane from its start to its end in one call:
     no workerRefs, no after, and no next page (ask for first: 200; a lane larger than a page cannot declare). A worker whose host is lost has no serving lane until the host returns. Setting a stop signal is refused (STOP_SIGNAL_UNAVAILABLE)
     while any worker it would cover is on a lane with no fresh declaration.
+    #3321: the manager's held worker reads the manager scope on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event per admitted call, ids only; it never reads its holder's personal scope, and never acknowledges.
     """
-    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!]): DueWakePage!
+    dueWakes(appRef: String!, workerRefs: [String!], first: Int, after: String, accepts: [WakeKind!], instruction: ActInstructionInput): DueWakePage!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:07) — an App's stop signals, oldest set first. A person in the App sees
     every signal (worker narrows to those covering that worker now); a worker's session sees the live ones covering it; a
@@ -10537,22 +10538,23 @@ export const typeDefs = `#graphql
     "#2024 — remove a template (it stays as history; its name may be reused). expectedRevision as for update. Tickers already generated from it are untouched."
     deleteAgentTickerTemplate(id: ID!, expectedRevision: Int!): Boolean!
 
-    "#1747 — change a ticker. Its owner, the holder of its owning worker, or whoever manages the App. The slug never changes."
-    updateTicker(ref: String!, input: TickerPatch!): Ticker!
+    "#1747 — change a ticker. Its owner, the holder of its owning worker, or whoever manages the App. The slug never changes. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    updateTicker(ref: String!, input: TickerPatch!, instruction: ActInstructionInput): Ticker!
 
-    "#1747 — delete a ticker. Its live subscriptions end with reason TICKER_DELETED; its name may be reused, its slug never."
-    deleteTicker(ref: String!): Boolean!
+    "#1747 — delete a ticker. Its live subscriptions end with reason TICKER_DELETED; its name may be reused, its slug never. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    deleteTicker(ref: String!, instruction: ActInstructionInput): Boolean!
 
     """
     #1747 — change an App ticker settings (hrn:node:hadronmemory.com:specs:cor:agt:080:05, :19). Whoever manages the App only.
     Refusals: TICKER_SETTINGS_OUT_OF_RANGE, TICKER_SETTINGS_CONFLICT (a floor above a live ticker cadence),
     DELIVERY_SETTINGS_CONFLICT (the shared cadence floor must keep stuckWindowSeconds greater than busyDelaySeconds + minCadenceSeconds).
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!): AppTickerSettings!
-    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19)."
-    setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!): AppDeliverySettings!
-    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED)."
-    setTeamPause(appRef: String!, paused: Boolean!): TeamPause!
+    setAppTickerSettings(appRef: String!, input: AppTickerSettingsInput!, instruction: ActInstructionInput): AppTickerSettings!
+    "App managers only; omitted preserves, null refuses. Standby activation is unavailable until S7 (hrn:node:hadronmemory.com:specs:cor:agt:080:19). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    setAppDeliverySettings(appRef: String!, input: AppDeliverySettingsInput!, instruction: ActInstructionInput): AppDeliverySettings!
+    "#2138: pause or resume the whole team, as whoever manages the App. Separate from each worker's own pause: a worker cannot lift it, and ending it clears no self-pause. While paused, no worker is nudged and every worker's check status is PENDING (TEAM_PAUSED). #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    setTeamPause(appRef: String!, paused: Boolean!, instruction: ActInstructionInput): TeamPause!
     """
     #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:20) — replace the App's properties with this JSON object; null
     or an empty object clears them. Whoever manages the App only: as themselves, or through their held worker's
@@ -10575,13 +10577,15 @@ export const typeDefs = `#graphql
     #2173/#2169 (R95): setting ANY signal is refused with STOP_SIGNAL_UNAVAILABLE while a worker it would cover is on a lane with
     no fresh stop-consumer declaration (a worker would be stopped without being told; the extensions name the worker count and the
     lanes). A consumer declares a lane by polling dueWakes with accepts: [STOP]. Lifting and listing are unaffected.
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    setTeamStopSignal(input: SetTeamStopSignalInput!): StopSignal!
+    setTeamStopSignal(input: SetTeamStopSignalInput!, instruction: ActInstructionInput): StopSignal!
     """
     #2022 (hrn:node:hadronmemory.com:specs:cor:agt:090:05, :06) — lift a stop signal. Whoever manages the App, any; a host key, a HALT on its own host.
     Lifting one never ends another. changed is false when it had already ended. Refusals as setTeamStopSignal.
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    liftTeamStopSignal(appRef: String!, id: ID!): LiftStopSignalResult!
+    liftTeamStopSignal(appRef: String!, id: ID!, instruction: ActInstructionInput): LiftStopSignalResult!
 
     """
     #1747 — subscribe a worker to a ticker (hrn:node:hadronmemory.com:specs:cor:agt:080:20, :25). Its holder and whoever manages
@@ -10589,40 +10593,44 @@ export const typeDefs = `#graphql
     (SUBSCRIBE_CADENCE_NEEDS_HOLDER); a worker holding the may-subscribe-workers grant, with a person
     behind the call, for OTHER workers only. Idempotent for a live subscription. A grant use is announced
     to the team chat, best-effort: announcement says POSTED or FAILED, and the subscription stands either way.
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    subscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
+    subscribeWorker(tickerRef: String!, workerRef: String!, instruction: ActInstructionInput): SubscribeResult!
 
     """
     #2096 — apply the Agent's current ticker templates to ONE existing worker (the repair for workers cast before the
-    templates existed; hrn:node:hadronmemory.com:specs:cor:agt:080:33, :20). Whoever manages the App, acting as themselves:
-    not the worker, not its holder as such, not a reportsTo chain. Creates only the template tickers the worker is missing,
+    templates existed; hrn:node:hadronmemory.com:specs:cor:agt:080:33, :20). Whoever manages the App:
+    not the worker on its own, not its holder as such, not a reportsTo chain. Creates only the template tickers the worker is missing,
     each owned by and subscribed to it, and never edits or deletes any existing ticker or subscription; a template the
     worker already has a live ticker for is reported under alreadyPresent and left as it is. A template below the App's
     cadence floor is created at the floor; if the App's live-ticker cap cannot take every missing ticker, or a generated
     name is already a live ticker's, the whole call is refused and nothing is created. Never automatic, never across workers.
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    applyAgentTickerTemplates(workerRef: String!): ApplyAgentTickerTemplatesResult!
+    applyAgentTickerTemplates(workerRef: String!, instruction: ActInstructionInput): ApplyAgentTickerTemplatesResult!
 
-    "#1747 — end a worker subscription. The same callers as subscribeWorker, and the worker itself, always."
-    unsubscribeWorker(tickerRef: String!, workerRef: String!): SubscribeResult!
+    "#1747 — end a worker subscription. The same callers as subscribeWorker, and the worker itself, always. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    unsubscribeWorker(tickerRef: String!, workerRef: String!, instruction: ActInstructionInput): SubscribeResult!
 
     """
     #1747 — change a worker wake settings (hrn:node:hadronmemory.com:specs:cor:agt:080:03, :21): the worker itself, its holder, or whoever manages
     the App, in either direction. Never the may-subscribe-workers grant.
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!): WorkerWakeSettings!
+    setWorkerWakeSettings(workerRef: String!, input: WorkerWakeSettingsInput!, instruction: ActInstructionInput): WorkerWakeSettings!
     """
     S7 (#2023, R85) — isolate a worker until a time (default 2 hours, at most 7 days; a later time extends, an earlier one shortens).
-    Only a person managing the App or holding the worker, acting as themselves. Refusals, in the order they are checked:
-    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND; a worker session (even a
-    manager's) is WORKER_ISOLATION_FORBIDDEN; while S7 activation is off, setting an isolation is WORKER_ISOLATION_UNAVAILABLE
+    Only a person managing the App or holding the worker, as themselves or, on their instruction, through their held worker
+    (hrn:node:hadronmemory.com:specs:cor:agt:080:29, ruling 0118), recorded as one app.manager-act event, ids only. Refusals, in the order they are checked:
+    an unknown worker, or one the caller cannot read (a pure App key among them), is WORKER_NOT_FOUND; a worker session with no
+    instruction (even a manager's) is WORKER_ISOLATION_FORBIDDEN; while S7 activation is off, setting an isolation is WORKER_ISOLATION_UNAVAILABLE
     (clearing is unaffected), so an ordinary person gets this before the manager/holder check; an impersonation that reaches the
     write is refused FORBIDDEN (read-only); a participant who neither manages the App nor holds the worker is
     WORKER_ISOLATION_FORBIDDEN. Never touches the worker's own pause.
     """
-    isolateWorker(workerRef: String!, until: DateTime): WorkerWakeSettings!
-    "S7 — lift an isolation (same audience). Clearing when none is set changes nothing."
-    clearWorkerIsolation(workerRef: String!): WorkerWakeSettings!
+    isolateWorker(workerRef: String!, until: DateTime, instruction: ActInstructionInput): WorkerWakeSettings!
+    "S7 — lift an isolation (same audience). Clearing when none is set changes nothing. #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
+    clearWorkerIsolation(workerRef: String!, instruction: ActInstructionInput): WorkerWakeSettings!
     "#1748 — record that wakes were delivered (hrn:node:hadronmemory.com:specs:cor:agt:080:16). Never moves a read position."
     acknowledgeWakes(proofs: [String!]!): AcknowledgeWakesResult!
     """
@@ -10685,8 +10693,9 @@ export const typeDefs = `#graphql
     not issued yet, HOST_OPERATION_NOT_ISSUABLE until a host has a delivery path for it (hadron-cli#829).
     worker.reset-context is HOST_OPERATION_NOT_ISSUABLE here: the platform issues it when a task ends (#2162). An App key
     issues nothing (FORBIDDEN). An unregistered host is HOST_NOT_FOUND.
+    #3321: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
-    issueHostOperation(input: IssueHostOperationInput!): HostOperation!
+    issueHostOperation(input: IssueHostOperationInput!, instruction: ActInstructionInput): HostOperation!
 
     """
     #2162 — a context reset's protocol (hrn:node:hadronmemory.com:specs:cor:agt:050:27), for the host its

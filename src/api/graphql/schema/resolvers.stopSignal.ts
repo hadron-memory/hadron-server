@@ -10,7 +10,8 @@
  *   host (Proposed). Every call is recorded as a host-key use with action `stop`, refusals included (cor:agt:070:07).
  * - **Only where a consumer serves (#2173/#2169, R95):** setting a signal answers STOP_SIGNAL_UNAVAILABLE while any worker it
  *   would cover is on a lane with no fresh stop-consumer declaration.
- * - **A worker's session** acts with the worker's own rights, never its holder's (H26 reading A, Proposed): refused.
+ * - **A worker's session** acts with the worker's own rights (H26 reading A, Proposed): refused, unless it brings its
+ *   holder's clear instruction and that holder manages the App (#3321, cor:dmo:050:12), recorded.
  *
  * Who may see (090:07, Proposed): a person who participates in the App sees every signal; a worker through its own
  * session sees the live signals that cover it; a host key sees the signals on its own host. An absent signal and one
@@ -26,12 +27,13 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import {
-  actorManagesApp, inTaskWriteTx, resolveParticipatedApp, resolveTaskActor, resolveTaskWorkerId, taskError,
+  actorManagesApp, inTaskWriteTx, recordInstructedManagerAct, resolveParticipatedApp, resolveTaskActor, resolveTaskWorkerId, taskError, withInstruction,
   type TaskActor, type TaskApp,
 } from './resolvers.agentTask.js';
 import { hostKeyEntry, recordingRefusal } from './resolvers.hostOperation.js';
 import { appKeyCaller } from '../../../lib/appKeyScopes/scopes.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
+import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { matchAfterChange } from '../../../lib/agentTasks/matcher.js';
 import { keyHostId, recordHostKeyUse } from '../../../lib/hostOperations/hostKey.js';
 import { currentActor } from '../../../lib/requestActor.js';
@@ -183,11 +185,21 @@ async function targetHost(tx: Prisma.TransactionClient, appId: string, hostId: s
   return reg.id;
 }
 
-/** The person path's gate: a person in the App, never a worker's session (H26 A). */
-async function personEntry(ctx: Context, appRef: string): Promise<{ app: TaskApp; actor: Extract<TaskActor, { kind: 'user' }> }> {
+/**
+ * The person path's gate: a person in the App, never a worker's session (H26 A). #3321 (cor:dmo:050:12): a worker that
+ * brings an instruction goes on to the manager check, which judges its holder; with none it stops here, as before.
+ */
+async function managerEntry(ctx: Context, appRef: string, instruction: ActInstruction | null | undefined): Promise<{ app: TaskApp; actor: TaskActor }> {
   const { app, actor } = await resolveParticipatedApp(ctx, appRef);
-  if (actor.kind !== 'user' || currentActor().workerId) throw workerSession();
-  return { app, actor };
+  const instructedWorker = actor.kind === 'worker' && instruction != null;
+  if (!instructedWorker && (actor.kind !== 'user' || currentActor().workerId)) throw workerSession();
+  return { app, actor: withInstruction(actor, instruction) };
+}
+
+/** Who set or lifted a signal: the person whose right it was, and the worker in the event's actor when one acted for them. */
+function stopActor(actor: TaskActor): StopActor {
+  const userId = actor.userId as string; // actorManagesApp admitted it: a person, or a worker's holder
+  return { userId, actor: eventActor(userId) };
 }
 
 async function afterCommit(ctx: Context, appId: string): Promise<void> {
@@ -196,10 +208,10 @@ async function afterCommit(ctx: Context, appId: string): Promise<void> {
 
 export const stopSignalMutations = {
   /** cor:agt:090:01, :06 — set a stop signal. Refusals: see the file header. */
-  setTeamStopSignal: (_: unknown, a: { input: SetTeamStopSignalInput }, ctx: Context): Promise<StopSignalView> =>
-    keyRecorded(ctx, 'stop', () => setSignal(a.input, ctx)),
-  liftTeamStopSignal: (_: unknown, a: { appRef: string; id: string }, ctx: Context): Promise<{ signal: StopSignalView; changed: boolean }> =>
-    keyRecorded(ctx, 'stop', () => liftSignal(a.appRef, a.id, ctx)),
+  setTeamStopSignal: (_: unknown, a: { input: SetTeamStopSignalInput; instruction?: ActInstruction | null }, ctx: Context): Promise<StopSignalView> =>
+    keyRecorded(ctx, 'stop', () => setSignal(a.input, ctx, a.instruction)),
+  liftTeamStopSignal: (_: unknown, a: { appRef: string; id: string; instruction?: ActInstruction | null }, ctx: Context): Promise<{ signal: StopSignalView; changed: boolean }> =>
+    keyRecorded(ctx, 'stop', () => liftSignal(a.appRef, a.id, ctx, a.instruction)),
 };
 
 /**
@@ -211,7 +223,7 @@ function keyRecorded<T>(ctx: Context, action: 'stop' | 'read', fn: () => Promise
 }
 
 /** cor:agt:090:01, :06 — set a stop signal. Refusals: see the file header. */
-async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<StopSignalView> {
+async function setSignal(input: SetTeamStopSignalInput, ctx: Context, instruction?: ActInstruction | null): Promise<StopSignalView> {
   const level = parseLevel(input?.level);
   const scope = parseScope(input?.scope);
   const workerRef = trimmed(input?.worker);
@@ -246,16 +258,16 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
   if (scope === 'host' ? !hostRef : !workerRef) {
     throw badInput(scope === 'host' ? 'A host signal names its host.' : 'A worker or team signal names its worker.');
   }
-  const { app, actor } = await personEntry(ctx, input.appRef);
+  const { app, actor } = await managerEntry(ctx, input.appRef, instruction);
   const view = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
-    if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
+    if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) throw managerRequired();
     const now = new Date();
     const until = parseUntil(input.until, now);
     const targetWorkerId = scope === 'host' ? null : await targetWorker(txCtx, fresh.id, workerRef as string);
     const targetHostRegistrationId = scope === 'host' ? await targetHost(tx, fresh.id, hostRef as string) : null;
-    const by: StopActor = { userId: actor.userId, actor: eventActor(actor.userId) };
-    const s = await setStopSignal(tx, { appId: fresh.id, level, scope, targetWorkerId, targetHostRegistrationId, until, by }, now);
+    const s = await setStopSignal(tx, { appId: fresh.id, level, scope, targetWorkerId, targetHostRegistrationId, until, by: stopActor(actor) }, now);
     await requireNoticeLane(tx, fresh.id, s.id, now); // #2173/#2169: after the manager gate and the target checks
+    await recordInstructedManagerAct(tx, fresh.id, actor, 'stop.set', { signalId: s.id });
     return viewOf(tx, s, now);
   }, { stopFence: 'exclusive' });
   await afterCommit(ctx, app.id);
@@ -266,7 +278,7 @@ async function setSignal(input: SetTeamStopSignalInput, ctx: Context): Promise<S
  * cor:agt:090:05, :06 — lift a signal. `changed` is false when it had already ended: nothing is written and nobody
  * gets a second notice. Lifting one signal never ends another (R69).
  */
-async function liftSignal(appRef: string, id: string, ctx: Context): Promise<{ signal: StopSignalView; changed: boolean }> {
+async function liftSignal(appRef: string, id: string, ctx: Context, instruction?: ActInstruction | null): Promise<{ signal: StopSignalView; changed: boolean }> {
   if (typeof id !== 'string' || !id.trim()) throw badInput('id is required.');
   if (appKeyCaller(ctx)) {
     return (async () => {
@@ -288,13 +300,14 @@ async function liftSignal(appRef: string, id: string, ctx: Context): Promise<{ s
       return out;
     })();
   }
-  const { app, actor } = await personEntry(ctx, appRef);
+  const { app, actor } = await managerEntry(ctx, appRef, instruction);
   const out = await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, fresh) => {
     const s = await signalInApp(tx, fresh.id, id);
     if (!s) throw notFound();
-    if (!(await actorManagesApp(txCtx, fresh, actor))) throw managerRequired();
+    if (!(await actorManagesApp(txCtx, fresh, actor, actor.instructed))) throw managerRequired();
     const now = new Date();
-    const r = await liftStopSignal(tx, s.id, { userId: actor.userId, actor: eventActor(actor.userId) }, now);
+    const r = await liftStopSignal(tx, s.id, stopActor(actor), now);
+    if (r.changed) await recordInstructedManagerAct(tx, fresh.id, actor, 'stop.lift', { signalId: s.id });
     return { signal: await viewOf(tx, r.signal, now), changed: r.changed };
   }, { stopFence: 'exclusive' });
   if (out.changed) await afterCommit(ctx, app.id);
