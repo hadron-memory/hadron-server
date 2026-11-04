@@ -320,6 +320,78 @@ describe('refusing the filter with a team (cor:agt:120:03)', () => {
   });
 });
 
+describe('a run tool refuses a team that is not text (#3471, cor:agt:120:03)', () => {
+  // A tool's arguments reach execute() as the model wrote them. A team that read as absent would turn a claim for one
+  // lane into an unfiltered one, handing out another lane's item.
+  const MESSAGE = 'team must be a worker id, URN or name.';
+  const allTasks = () => db.agentTask.count({ where: { appId: app.id } });
+
+  describe.each([
+    ['the run list tool', runList],
+    ['the run claim tool', runClaim],
+  ])('on %s', (_name, surface) => {
+    it.each([[5], [0], [true], [false], [{}], [[]], [['team-a']], [{ toString: null }]])('team %j is BAD_USER_INPUT with fixed text: no tracker request, no task', async (team) => {
+      const r = await refusal(surface({ team }));
+      expect(r).toEqual({ code: 'BAD_USER_INPUT', message: MESSAGE });
+      expect(calls).toBe(0);
+      expect(await allTasks()).toBe(0);
+    });
+
+    it.each([[false], [null]])('noTeam %j does not excuse it', async (noTeam) => {
+      expect(await refusal(surface({ noTeam, team: 5 }))).toEqual({ code: 'BAD_USER_INPUT', message: MESSAGE });
+      expect(calls).toBe(0);
+    });
+
+    it('with noTeam true, "not both" still wins', async () => {
+      expect(await refusal(surface({ noTeam: true, team: 5 }))).toEqual({ code: 'BAD_USER_INPUT', message: 'Ask for no team or for a team, not both.' });
+      expect(calls).toBe(0);
+    });
+
+    it('a malformed noTeam is judged first', async () => {
+      expect(await refusal(surface({ noTeam: 'true', team: 5 }))).toEqual({ code: 'BAD_USER_INPUT', message: 'noTeam must be true or false.' });
+    });
+
+    it('a blank team keeps TASK_INTEGRATION_TEAM_UNKNOWN', async () => {
+      expect((await refusal(surface({ team: '' }))).code).toBe('TASK_INTEGRATION_TEAM_UNKNOWN');
+      expect((await refusal(surface({ team: '   ' }))).code).toBe('TASK_INTEGRATION_TEAM_UNKNOWN');
+      expect(calls).toBe(0);
+    });
+
+    it('a finished run, an unknown integration and an unconnected repository each answer first', async () => {
+      const run = await mintRun(app.id, { status: 'COMPLETED' });
+      expect((await refusal(surface({ team: 5 }, run))).code).toBe('APP_NOT_FOUND');
+      expect((await refusal(surface({ integration: 'nope', team: 5 }))).code).toBe('TASK_INTEGRATION_NOT_FOUND');
+      expect((await refusal(surface({ repository: 'acme/other', team: 5 }))).code).toBe('TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED');
+      expect(calls).toBe(0);
+    });
+
+    it("a run of another App naming this App is APP_NOT_FOUND, not the team's refusal", async () => {
+      const run = await mintRun(otherApp.id);
+      expect((await refusal(surface({ appRef: app.id, team: 5 }, run))).code).toBe('APP_NOT_FOUND');
+      expect(calls).toBe(0);
+    });
+  });
+
+  it.each([['absent', {}], ['null', { team: null }]])('a %s team stays no filter', async (_name, form) => {
+    expect(numbers(await runList(form))).toEqual([1, 2, 3, 4, 5]);
+    expect(claimedUrls(await runClaim(form))).toEqual([url('widgets', 1)]);
+  });
+
+  it('a team named as text still filters, by id and with spaces around it', async () => {
+    expect(numbers(await runList({ team: anne.id }))).toEqual([1, 3]);
+    expect(numbers(await runList({ team: ` ${liam.id} ` }))).toEqual([2, 3]);
+    expect(claimedUrls(await runClaim({ team: liam.id }))).toEqual([url('widgets', 2)]);
+  });
+
+  it('GraphQL is not touched: an ID argument arrives as text, so a number there is an unknown team', async () => {
+    await wire(async (run) => {
+      const r = await run(`query($a:ID!){untrackedTaskItems(appRef:$a,integration:"gh",team:5){${LIST}}}`);
+      expect(r.errors?.[0]?.extensions?.code).toBe('TASK_INTEGRATION_TEAM_UNKNOWN');
+    });
+    expect(calls).toBe(0);
+  });
+});
+
 describe('the run tools take no malformed form of the filter (their arguments are not schema-checked)', () => {
   // GraphQL refuses these at validation; a model's tool call reaches execute() as written. A value that read as absent
   // would turn a no-team claim into an unfiltered one, taking another lane's item.
