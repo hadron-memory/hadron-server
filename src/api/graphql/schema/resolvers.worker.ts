@@ -1,4 +1,4 @@
-import { listAppInstallations, resolveAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
+import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { requireInstructedAct, sameActPrincipal, type ActAdmission, type StaffActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
@@ -985,7 +985,7 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       if (e instanceof AgentNotFoundError) throw notInstalled();
       throw e;
     }
-    const row = await resolveAppInstallation(ctx.db, appId, id);
+    const row = await resolveUnfilteredAppInstallation(ctx.db, appId, id);
     if (!row || row.agent.deletedAt) throw notInstalled();
     agent = row.agent;
   } else {

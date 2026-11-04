@@ -104,7 +104,7 @@ export type ReadGrantTargetRefusal =
  *    ({@link independentReach}, Q7e): a group memory, or a knowledge memory outside the tenant's reach, is refused.
  */
 export async function readGrantTargetRefusal(
-  db: Pick<PrismaClient, 'agent' | 'appAgent' | 'app' | 'agentImport'>,
+  db: Pick<PrismaClient, 'agent' | 'appAgent' | 'app' | 'agentImport' | 'organization' | 'agentOrgGrant'>,
   app: ReadGrantApp,
   memory: ReadGrantMemory,
 ): Promise<ReadGrantTargetRefusal | null> {

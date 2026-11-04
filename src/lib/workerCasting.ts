@@ -12,7 +12,7 @@
  * Read-only: it returns the grants a caller must provision and never writes, so the preview can run it too. A caller
  * that writes runs it again inside its deciding transaction and provisions with `provisionCastGrants`.
  */
-import { resolveAppInstallation, readInstallBootPrompt } from './appInstallations.js';
+import { resolveUnfilteredAppInstallation, readInstallBootPrompt } from './appInstallations.js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
@@ -133,7 +133,7 @@ export async function assertCastable(
   if (app.uninstalledAt) {
     throw refusal('APP_UNINSTALLED', 'Cannot cast a worker in an uninstalled App.', { appId: app.id });
   }
-  const row = await resolveAppInstallation(db, app.id, agentId);
+  const row = await resolveUnfilteredAppInstallation(db, app.id, agentId);
   if (!row || row.agent.deletedAt) throw workerAgentNotInstalled(app.id);
   const provisionGrantsFor: string[] = [];
   if (await planLicence(db, app, agentId, false)) provisionGrantsFor.push(agentId);

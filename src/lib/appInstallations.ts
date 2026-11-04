@@ -1,3 +1,4 @@
+import { orgAgentLicenseUsable } from './auth/orgAgentInstallLicense.js';
 import { LINK_CAP_MEMORY_SELECT } from './auth/agentMemoryLinkCap.js';
 /** #2168 / cor:dmo:050:06,:11: the single source of App installation membership.
  * A physical row wins. Direct imports of physically installed, live Agents count
@@ -9,10 +10,8 @@ import type {
   PrismaClient,
   AppAgent,
 } from '../generated/prisma/index.js';
-export type InstallationDb = Pick<
-  PrismaClient,
-  'app' | 'appAgent' | 'agentImport'
->;
+export type UnfilteredInstallationDb = Pick<PrismaClient, 'app' | 'appAgent' | 'agentImport'>;
+export type InstallationDb = UnfilteredInstallationDb & Pick<PrismaClient, 'organization' | 'agentOrgGrant'>;
 const INSTALL_AGENT_SELECT = {
   id: true,
   name: true,
@@ -41,8 +40,8 @@ export type AppInstallation = AppAgent & {
  * Optional Agent fields are selected only by callers whose contract needs them;
  * all installation membership still folds through the same function below.
  */
-export async function loadAppInstallationPage(
-  db: InstallationDb,
+export async function loadUnfilteredAppInstallationPage(
+  db: UnfilteredInstallationDb,
   appId: string | readonly string[],
   includeMemoryItems = false,
   agentId?: string,
@@ -67,7 +66,6 @@ export async function loadAppInstallationPage(
       deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } },
       appAgents: {
-        where: { agent: { deletedAt: null } },
         orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
         include: { agent: { select: {
           ...agentSelect,
@@ -95,7 +93,7 @@ export async function loadAppInstallationPage(
   const installations: Array<AppInstallation & { agent: AgentRow }> = [];
   for (const app of apps) {
     const physical = app.appAgents.filter(row =>
-      (!agentId || row.agentId === agentId) && (!witnesses || witnesses.rows.includes(row.agentId)));
+      !row.agent.deletedAt && (!agentId || row.agentId === agentId) && (!witnesses || witnesses.rows.includes(row.agentId)));
     installations.push(...physical.map(row => ({
       ...row, agent: row.agent as unknown as AgentRow, installationKind: 'ROW' as const, importerAgentId: null,
     })));
@@ -103,7 +101,8 @@ export async function loadAppInstallationPage(
     const seen = new Set(physical.map(row => row.agentId));
     const derived = new Map<string, AppInstallation & { agent: AgentRow }>();
     // Sort across all physical importers; tie-breaking remains deterministic.
-    const edges = app.appAgents.flatMap(parent => parent.agent.imports.map(edge => ({ parent, edge })))
+    const edges = app.appAgents.filter(parent => !parent.agent.deletedAt)
+      .flatMap(parent => parent.agent.imports.map(edge => ({ parent, edge })))
       .sort((a, b) => a.edge.createdAt.getTime() - b.edge.createdAt.getTime()
         || a.edge.parentAgentId.localeCompare(b.edge.parentAgentId)
         || a.edge.importedAgentId.localeCompare(b.edge.importedAgentId));
@@ -125,14 +124,65 @@ export async function loadAppInstallationPage(
   return { apps, installations };
 }
 /** Also accepts an App page; never one query per row or per chain depth. */
-export async function listAppInstallations(
-  db: InstallationDb,
+export async function listUnfilteredAppInstallations(
+  db: UnfilteredInstallationDb,
   appId: string | readonly string[],
   agentId?: string,
   witnesses?: { rows: string[]; imports: Array<{ parent_agent_id: string; imported_agent_id: string }> },
 ): Promise<AppInstallation[]> {
-  return (await loadAppInstallationPage(db, appId, false, agentId, witnesses)).installations;
+  return (await loadUnfilteredAppInstallationPage(db, appId, false, agentId, witnesses)).installations;
 }
+/** Ordinary installation readers preserve ROW membership but admit DERIVED
+ * entries only under the App holder's usable license. Raw witness/pointer reads
+ * must opt in to the explicitly unfiltered helpers below. No recursive fold. */
+export async function loadAppInstallationPage(
+  db: InstallationDb,
+  appId: string | readonly string[],
+  includeMemoryItems = false,
+  agentId?: string,
+) {
+  const page = await loadUnfilteredAppInstallationPage(db, appId, includeMemoryItems, agentId);
+  const derived = page.installations.filter(row => row.installationKind === 'DERIVED');
+  if (!derived.length) return page;
+  const apps = new Map(page.apps.map(app => [app.id, app]));
+  const pairs = new Map<string, {orgId:string;agentId:string}>();
+  const orgIds = new Set<string>();
+  for (const row of derived) {
+    const app = apps.get(row.appId);
+    if (app?.organizationId) {
+      pairs.set(`${app.organizationId}:${row.agentId}`, {orgId:app.organizationId,agentId:row.agentId});
+      orgIds.add(app.organizationId);
+    }
+    if (row.agent.organizationId) orgIds.add(row.agent.organizationId);
+  }
+  const [orgs, grants] = await Promise.all([
+    db.organization.findMany({where:{id:{in:[...orgIds]},deletedAt:null},select:{id:true}}),
+    pairs.size ? db.agentOrgGrant.findMany({where:{OR:[...pairs.values()]}}) : [],
+  ]);
+  const liveOrgs = new Set(orgs.map(org => org.id));
+  const byPair = new Map(grants.map(grant => [`${grant.orgId}:${grant.agentId}`,grant]));
+  const now = new Date();
+  const installations = page.installations.filter(row => {
+    if (row.installationKind === 'ROW') return true;
+    const app = apps.get(row.appId);
+    return !!app?.organizationId && !app.deletedAt && !app.uninstalledAt && liveOrgs.has(app.organizationId)
+      && (!row.agent.organizationId || liveOrgs.has(row.agent.organizationId))
+      && orgAgentLicenseUsable(app.organizationId,row.agent.organizationId,
+        byPair.get(`${app.organizationId}:${row.agentId}`) ?? null,now);
+  });
+  return {...page, installations};
+}
+
+export async function listAppInstallations(db:InstallationDb,appId:string|readonly string[],agentId?:string):Promise<AppInstallation[]> {
+  return (await loadAppInstallationPage(db,appId,false,agentId)).installations;
+}
+
+export async function resolveAppInstallation(db:InstallationDb,appId:string,agentId:string):Promise<AppInstallation|null> {
+  const row = await db.appAgent.findUnique({where:{appId_agentId:{appId,agentId}},include:{agent:{select:INSTALL_AGENT_SELECT}}});
+  if (row && !row.agent.deletedAt) return {...row,installationKind:'ROW',importerAgentId:null};
+  return (await listAppInstallations(db,appId,agentId))[0] ?? null;
+}
+
 /** Candidate App filter for reverse lookups. The source resolver still judges
  * liveness and returns the installation kind; this only bounds candidate Apps. */
 export function appInstallationWhere(agentId: string): Prisma.AppWhereInput {
@@ -158,8 +208,8 @@ export function appInstallationWhere(agentId: string): Prisma.AppWhereInput {
   // Do not replace a caller's tenant/owner OR when this filter is spread.
   return { AND: [membership] };
 }
-export async function resolveAppInstallation(
-  db: InstallationDb,
+export async function resolveUnfilteredAppInstallation(
+  db: UnfilteredInstallationDb,
   appId: string,
   agentId: string,
 ): Promise<AppInstallation | null> {
@@ -171,7 +221,7 @@ export async function resolveAppInstallation(
   });
   if (row && !row.agent.deletedAt)
     return { ...row, installationKind: 'ROW', importerAgentId: null };
-  return (await listAppInstallations(db, appId, agentId))[0] ?? null;
+  return (await listUnfilteredAppInstallations(db, appId, agentId))[0] ?? null;
 }
 /** Fence the deciding witness, not a preflight snapshot. Deletion of either a
  * join or an import conflicts with these row locks. Re-read after waits, under
@@ -206,7 +256,7 @@ export async function lockAppInstallations(
   await tx.$queryRaw`SELECT id FROM agents WHERE id = ANY(${ids}) ORDER BY id FOR SHARE`;
   // No witness introduced after the fences can contribute to the decision.
   // Re-read only these exact held rows/edges after all waits and lifecycle locks.
-  const installs = await listAppInstallations(tx, appId, undefined, {
+  const installs = await listUnfilteredAppInstallations(tx, appId, undefined, {
     rows: rowIds,
     imports: edges,
   });
@@ -226,7 +276,7 @@ export async function lockAppInstallation(
  * independently of its target memory, so hard-deleting a target cannot erase
  * the deciding pointer and silently fall through to the Agent's prompt. */
 export async function readInstallBootPrompt(
-  db: InstallationDb & Pick<PrismaClient, 'appAgentCustomization'>,
+  db: UnfilteredInstallationDb & Pick<PrismaClient, 'appAgentCustomization'>,
   appId: string,
   agentId: string,
 ): Promise<{
@@ -240,7 +290,7 @@ export async function readInstallBootPrompt(
     select: { bootPromptNodeId: true, bootPromptUrn: true },
   });
   if (physical) return physical;
-  const install = await resolveAppInstallation(db, appId, agentId);
+  const install = await resolveUnfilteredAppInstallation(db, appId, agentId);
   if (!install) return null;
   if (install.installationKind === 'ROW') return install;
   return (

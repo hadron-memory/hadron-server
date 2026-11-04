@@ -6,7 +6,7 @@ import { parse, Kind } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
-import { listAppInstallations, loadAppInstallationPage } from '../../../lib/appInstallations.js';
+import { listAppInstallations, loadAppInstallationPage, loadUnfilteredAppInstallationPage } from '../../../lib/appInstallations.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -183,7 +183,7 @@ it('an empty held-import set cannot admit a later edge in the witness-restricted
   await db.appAgent.create({data:{appId:app.id,agentId:a.id}});
   await importEdge(a.id,b.id,T(2));
   expect((await listAppInstallations(db,app.id)).map(row=>row.agentId)).toContain(b.id);
-  const {installations} = await loadAppInstallationPage(db,app.id,false,undefined,{rows:[a.id],imports:[]});
+  const {installations} = await loadUnfilteredAppInstallationPage(db,app.id,false,undefined,{rows:[a.id],imports:[]});
   expect(installations.map(row=>row.agentId)).toEqual([a.id]);
 });
 
