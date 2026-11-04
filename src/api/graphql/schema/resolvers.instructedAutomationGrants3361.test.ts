@@ -50,6 +50,24 @@ const lists: Record<string, (instruction?: unknown, c?: Context) => Promise<any>
   teamList: (instruction = live, c = bound()) => Q.automationTeamSnapshotGrants({}, { appRef: f.app.id, instruction }, c),
 };
 const doors = { ...revokes, ...lists };
+
+/** Real committed writes at named transaction boundaries; no authorization result is mocked. */
+function atGrantBoundary(beforeTransaction?: () => Promise<void>, beforeSessionLock?: () => Promise<void>): Context['db'] {
+  return new Proxy(db, { get(client, key) {
+    if (key !== '$transaction') return Reflect.get(client, key);
+    return async (body: any, options: any) => {
+      await beforeTransaction?.();
+      return db.$transaction(async tx => body(new Proxy(tx, { get(transaction, method) {
+        if (method !== '$queryRaw') return Reflect.get(transaction, method);
+        return async (...args: any[]) => {
+          const sql = Array.isArray(args[0]) ? args[0].join('?') : '';
+          if (sql.includes('FROM sessions') && sql.includes('FOR SHARE')) await beforeSessionLock?.();
+          return (transaction.$queryRaw as any)(...args);
+        };
+      } })), options);
+    };
+  } }) as Context['db'];
+}
 const isList = (door: string) => door in lists;
 beforeEach(async () => {
   await cleanDb(db);
@@ -437,4 +455,87 @@ describe('#3361 instructed automation grants', () => {
     }
   });
 
+});
+
+describe('#3385 admission interleaves', () => {
+  it('target-only manager gets identical unknown/foreign refusals without losing the named-target control', async () => {
+    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
+    await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
+    const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'pins3385.foreign' } });
+    const foreign = await db.memory.create({ data: { name: 'Foreign', urn: 'pins3385.foreign:memory', class: 'knowledge', organizationId: foreignOrg.id } });
+    const before = await snapshot();
+    const answers = [];
+    for (const memoryRef of [`hrn:mem:${foreign.urn}`, 'hrn:mem:pins3385.foreign:unknown']) {
+      answers.push(await answer(Q.automationReadGrants({}, { memoryRef, instruction: live }, bound())));
+      expect(await snapshot()).toEqual(before);
+    }
+    expect(answers[0].code).toBe('FORBIDDEN'); expect(answers[1]).toEqual(answers[0]);
+    expect((await Q.automationReadGrants({}, { memoryRef: f.mem.id, instruction: live }, bound())).map((r: any) => r.id)).toEqual([f.readGrant.id]);
+    expect(await instructionEvents()).toHaveLength(1);
+  });
+
+  for (const [name, call] of Object.entries(doors)) {
+    if (!isList(name)) it(`${name}: a session gaining a worker between admissions refuses without effects`, async () => {
+      await db.session.update({ where: { id: f.session.id }, data: { workerId: null } });
+      let changed = 0;
+      const c = bound({ db: atGrantBoundary(async () => {
+        changed++;
+        await db.session.update({ where: { id: f.session.id }, data: { workerId: f.worker.id } });
+      }) });
+      const before = await snapshot();
+      // Lists inspect the session to choose their branch; a person list is deliberately non-transactional.
+      // Revokes admit a person first, then must detect the changed principal in the authority transaction.
+      expect((await answer(call(live, c))).code).toBe('FORBIDDEN');
+      expect(changed).toBe(1); expect(await snapshot()).toEqual(before);
+      await call(live, bound()); expect(await instructionEvents()).toHaveLength(1);
+    });
+
+    it(`${name}: session end committed after authorize but before the row fence refuses`, async () => {
+      let ended = 0;
+      const c = bound({ db: atGrantBoundary(undefined, async () => {
+        ended++;
+        await db.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
+      }) });
+      const before = await snapshot();
+      expect((await answer(call(live, c))).code).toBe('FORBIDDEN');
+      expect(ended).toBe(1); expect(await snapshot()).toEqual(before);
+      await db.session.update({ where: { id: f.session.id }, data: { endedAt: null } });
+      await call(live, bound()); expect(await instructionEvents()).toHaveLength(1);
+    });
+
+    it(`${name}: App org drift before anchor acquisition refuses even with continuing manager rights`, async () => {
+      const next = await db.organization.create({ data: { name: 'Next', urn: 'pins3385.next' } });
+      let moved = 0;
+      const c = bound({ db: atGrantBoundary(async () => {
+        moved++;
+        await db.app.update({ where: { id: f.app.id }, data: { organizationId: next.id } });
+      }) });
+      const before = await snapshot();
+      expect((await answer(call(live, c))).code).toBe('FORBIDDEN');
+      expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
+      await db.app.update({ where: { id: f.app.id }, data: { organizationId: f.org.id } });
+      await call(live, bound()); expect(await instructionEvents()).toHaveLength(1);
+    });
+  }
+
+  for (const name of ['read', 'readList']) it(`${name}: target org drift before anchors refuses even when holder manages both orgs`, async () => {
+    const next = await db.organization.create({ data: { name: 'Next', urn: 'pins3385.next' } });
+    await db.orgMember.create({ data: { organizationId: next.id, userId: f.holder.id, role: 'ADMIN' } });
+    await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'ADMIN' } });
+    // Separate App's org so its org-admin route cannot mask the target-only predicate.
+    const appOrg = await db.organization.create({ data: { name: 'App', urn: 'pins3385.app' } });
+    await db.app.update({ where: { id: f.app.id }, data: { organizationId: appOrg.id } });
+    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
+    await db.memory.update({ where: { id: f.mem.id }, data: { visibility: 'PUBLIC' } });
+    let moved = 0;
+    const c = bound({ db: atGrantBoundary(async () => {
+      moved++;
+      await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: next.id } });
+    }) });
+    const before = await snapshot();
+    expect((await answer(doors[name]!(live, c))).code).toBe('FORBIDDEN');
+    expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
+    await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: f.org.id } });
+    await doors[name]!(live, bound()); expect(await instructionEvents()).toHaveLength(1);
+  });
 });
