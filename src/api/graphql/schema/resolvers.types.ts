@@ -1918,7 +1918,6 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
-    installationKind: (row: {installationKind?: string}) => row.installationKind ?? 'ROW',
     // #3435: set only by App.appAgents, after the whole-App read gate; any other route to an AppAgent answers null.
     installMethod: (row: {exposedInstallMethod?: string | null}) => row.exposedInstallMethod ?? null,
     importer: (row: {exposedImporter?: unknown}) => row.exposedImporter ?? null,

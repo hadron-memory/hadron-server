@@ -261,7 +261,7 @@ export const typeDefs = `#graphql
     updatedBefore: String
     "Include soft-deleted nodes (default false)."
     includeDeleted: Boolean
-    "Structured predicate over the node's properties/data JSONB (#719)."
+    "Structured predicate over the node's properties/data JSONB (#719). Not supported by appNodes (refused with BAD_USER_INPUT); use findNodes (#3427)."
     where: NodeWhereInput
     "#1591 — only nodes in this approval state (read from the stored revision; a node changed outside a revisioned writer is reconciled on its next read)."
     approvalState: NodeApprovalState
@@ -3207,8 +3207,8 @@ export const typeDefs = `#graphql
     anonymousTtlDays: Int!
     """
     Agents installed in this App, by a physical row or derived from a direct
-    import of a physically installed Agent (#2168). installationKind distinguishes
-    the two; derived installations do not write an AppAgent row. One App credential
+    import of a physically installed Agent (#2168). Derived installations do not
+    write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
     """
     appAgents: [AppAgent!]!
@@ -3233,11 +3233,7 @@ export const typeDefs = `#graphql
   read-only to every App) and per FR-001 it carries NO trainingMode
   column (training mode is per-App, on App.trainingMode).
   """
-  enum AppAgentInstallationKind { ROW DERIVED }
-
   type AppAgent {
-    "Whether this App installs the Agent by a row or derives it from a direct import; no row is written for DERIVED."
-    installationKind: AppAgentInstallationKind!
     "The App when this caller may read it; strict user ownership still applies."
     app: App
     "The installed Agent when this caller may read its definition; an installation license alone does not grant that read."
@@ -9432,6 +9428,7 @@ export const typeDefs = `#graphql
     Accepts the App's ID or fully qualified URN. NodeFilter narrows node fields,
     including objectType, approvalState and minted. Nonempty memoryIds or
     memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
+    where and childrenOf are rejected with BAD_USER_INPUT too (#3427, #2832); use findNodes.
     Unlike findNodes, system-node types are not excluded by default. Deleted
     content remains subject to recovery authority. NodeFilter.contentScope
     COMMENTS or ALL can select comments. When contentScope is omitted,
@@ -9447,7 +9444,7 @@ export const typeDefs = `#graphql
     but total counts every node appNodes would return for the filter and hasMore says whether rows
     remain past this page. Ordered by loc, then id, so the order is stable across the App's memories.
     Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200,
-    a negative offset is 0. The filter's memoryIds and memoryClasses are refused, as on appNodes.
+    a negative offset is 0. The filter's memoryIds, memoryClasses, where and childrenOf are refused, as on appNodes.
 
     Accepts the App's ID or URN.
     """

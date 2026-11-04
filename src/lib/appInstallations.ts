@@ -1,3 +1,4 @@
+import { LINK_CAP_MEMORY_SELECT } from './auth/agentMemoryLinkCap.js';
 /** #2168 / cor:dmo:050:06,:11: the single source of App installation membership.
  * A physical row wins. Direct imports of physically installed, live Agents count
  * only in a live org App. Never recurse, and never borrow the importer's grant:
@@ -36,119 +37,101 @@ export type AppInstallation = AppAgent & {
   importerAgentId: string | null;
   agent: InstallationAgent;
 };
-/** Also accepts an App page: all lookups stay bounded rather than one query per row. */
-export async function listAppInstallations(
+/** Read one App page and its physical/import witnesses in one Prisma operation.
+ * Optional Agent fields are selected only by callers whose contract needs them;
+ * all installation membership still folds through the same function below.
+ */
+export async function loadAppInstallationPage(
   db: InstallationDb,
   appId: string | readonly string[],
+  includeMemoryItems = false,
   agentId?: string,
   witnesses?: {
     rows: string[];
     imports: Array<{ parent_agent_id: string; imported_agent_id: string }>;
   },
-): Promise<AppInstallation[]> {
+) {
   const ids = typeof appId === 'string' ? [appId] : [...appId];
-  if (ids.length === 0) return [];
+  const memoryItems = {
+    where: { deletedAt: null, memory: { deletedAt: null } },
+    select: {
+      memoryId: true, role: true,
+      memory: { select: { ...LINK_CAP_MEMORY_SELECT, workerOf: { select: { id: true } } } },
+    },
+  } as const;
+  const agentSelect = { ...INSTALL_AGENT_SELECT, memoryItems: includeMemoryItems ? memoryItems : false } as const;
   const apps = await db.app.findMany({
     where: { id: { in: ids } },
     select: {
-      id: true,
-      organizationId: true,
-      deletedAt: true,
-      uninstalledAt: true,
+      id: true, organizationId: true, ownerUserId: true,
+      deletedAt: true, uninstalledAt: true,
       organization: { select: { deletedAt: true } },
-    },
-  });
-  const liveIds = apps.map((app) => app.id);
-  const orgIds = apps
-    .filter(
-      (app) =>
-        app.organizationId &&
-        !app.organization?.deletedAt &&
-        !app.deletedAt &&
-        !app.uninstalledAt,
-    )
-    .map((app) => app.id);
-  if (!liveIds.length) return [];
-  const rows = await db.appAgent.findMany({
-    where: {
-      appId: { in: liveIds },
-      ...(agentId ? { agentId } : {}),
-      ...(witnesses ? { AND: [{ agentId: { in: witnesses.rows } }] } : {}),
-      agent: { deletedAt: null },
-    },
-    include: { agent: { select: INSTALL_AGENT_SELECT } },
-    orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }, { appId: 'asc' }],
-  });
-  const result: AppInstallation[] = rows.map((row) => ({
-    ...row,
-    installationKind: 'ROW',
-    importerAgentId: null,
-  }));
-  if (!orgIds.length || (agentId && result.length === liveIds.length))
-    return result;
-  const key = (appId: string, agentId: string) => `${appId}/${agentId}`;
-  const seen = new Set(rows.map((row) => key(row.appId, row.agentId)));
-  const imports = await db.agentImport.findMany({
-    where: {
-      ...(agentId ? { importedAgentId: agentId } : {}),
-      ...(witnesses
-        ? {
-            OR: witnesses.imports.map((edge) => ({
-              parentAgentId: edge.parent_agent_id,
-              importedAgentId: edge.imported_agent_id,
-            })),
-          }
-        : {}),
-      parentAgent: {
-        deletedAt: null,
-        appAgents: { some: { appId: { in: orgIds } } },
-      },
-      importedAgent: { deletedAt: null },
-    },
-    include: {
-      importedAgent: { select: INSTALL_AGENT_SELECT },
-      parentAgent: {
-        select: {
-          appAgents: {
-            where: { appId: { in: orgIds } },
-            select: { appId: true, createdAt: true },
+      appAgents: {
+        where: { agent: { deletedAt: null } },
+        orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
+        include: { agent: { select: {
+          ...agentSelect,
+          imports: {
+            where: {
+              ...(agentId ? { importedAgentId: agentId } : {}),
+              ...(witnesses ? { OR: witnesses.imports.map(edge => ({
+                parentAgentId: edge.parent_agent_id,
+                importedAgentId: edge.imported_agent_id,
+              })) } : {}),
+              importedAgent: { deletedAt: null },
+            },
+            orderBy: [{ createdAt: 'asc' }, { parentAgentId: 'asc' }, { importedAgentId: 'asc' }],
+            include: { importedAgent: { select: agentSelect } },
           },
-        },
+        } } },
       },
     },
-    orderBy: [
-      { createdAt: 'asc' },
-      { parentAgentId: 'asc' },
-      { importedAgentId: 'asc' },
-    ],
   });
-  // #3435: a derived install's createdAt is the EARLIEST, across the importers it derives from, of the later of that
-  // importer's install in the App and the import itself; the importer it names is the one that gives that moment
-  // (the first on a tie, in import order). Never the first importer's value merely because its edge came first.
-  const derived = new Map<string, AppInstallation>();
-  for (const edge of imports)
-    for (const parent of edge.parentAgent.appAgents) {
-      const k = key(parent.appId, edge.importedAgentId);
-      if (seen.has(k)) continue;
+  // Prisma's conditional relation projection loses its nested result type.
+  // The flag either omits the relation or selects exactly memoryItems above.
+  type AgentRow = InstallationAgent & {
+    memoryItems?: Prisma.AgentGetPayload<{ select: { memoryItems: typeof memoryItems } }>['memoryItems'];
+  };
+  const installations: Array<AppInstallation & { agent: AgentRow }> = [];
+  for (const app of apps) {
+    const physical = app.appAgents.filter(row =>
+      (!agentId || row.agentId === agentId) && (!witnesses || witnesses.rows.includes(row.agentId)));
+    installations.push(...physical.map(row => ({
+      ...row, agent: row.agent as unknown as AgentRow, installationKind: 'ROW' as const, importerAgentId: null,
+    })));
+    if (!app.organizationId || app.organization?.deletedAt || app.deletedAt || app.uninstalledAt) continue;
+    const seen = new Set(physical.map(row => row.agentId));
+    const derived = new Map<string, AppInstallation & { agent: AgentRow }>();
+    // Sort across all physical importers; tie-breaking remains deterministic.
+    const edges = app.appAgents.flatMap(parent => parent.agent.imports.map(edge => ({ parent, edge })))
+      .sort((a, b) => a.edge.createdAt.getTime() - b.edge.createdAt.getTime()
+        || a.edge.parentAgentId.localeCompare(b.edge.parentAgentId)
+        || a.edge.importedAgentId.localeCompare(b.edge.importedAgentId));
+    for (const { parent, edge } of edges) {
+      if (seen.has(edge.importedAgentId)) continue;
       const at = Math.max(edge.createdAt.getTime(), parent.createdAt.getTime());
-      const best = derived.get(k);
+      const best = derived.get(edge.importedAgentId);
       if (best && best.createdAt.getTime() <= at) continue;
-      derived.set(k, {
-        appId: parent.appId,
-        agentId: edge.importedAgentId,
-        createdAt: new Date(at),
-        createdBy: null,
-        updatedAt: null,
-        updatedBy: null,
-        bootPromptNodeId: null,
-        bootPromptUrn: null,
-        installationKind: 'DERIVED',
-        importerAgentId: edge.parentAgentId,
-        agent: edge.importedAgent,
+      derived.set(edge.importedAgentId, {
+        appId: app.id, agentId: edge.importedAgentId, createdAt: new Date(at),
+        createdBy: null, updatedAt: null, updatedBy: null,
+        bootPromptNodeId: null, bootPromptUrn: null,
+        installationKind: 'DERIVED', importerAgentId: edge.parentAgentId,
+        agent: edge.importedAgent as unknown as AgentRow,
       });
     }
-  result.push(...derived.values());
-  return result;
+    installations.push(...derived.values());
+  }
+  return { apps, installations };
+}
+/** Also accepts an App page; never one query per row or per chain depth. */
+export async function listAppInstallations(
+  db: InstallationDb,
+  appId: string | readonly string[],
+  agentId?: string,
+  witnesses?: { rows: string[]; imports: Array<{ parent_agent_id: string; imported_agent_id: string }> },
+): Promise<AppInstallation[]> {
+  return (await loadAppInstallationPage(db, appId, false, agentId, witnesses)).installations;
 }
 /** Candidate App filter for reverse lookups. The source resolver still judges
  * liveness and returns the installation kind; this only bounds candidate Apps. */
