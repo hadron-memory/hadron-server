@@ -364,3 +364,53 @@ describe('#910 — single-human hosts keep the flat bag', () => {
     expect(await layer.read('industry')).toEqual({ ok: true, value: 'A-construction' });
   });
 });
+
+describe('#1328 — extraction into a data node a rule governs', () => {
+  async function governedDataNode(chatId: string) {
+    const { memoryId } = await dataNodeOf(chatId);
+    const task = await db.node.create({
+      data: { id: generateId(), memoryId, loc: 'author-task', name: 'Author task', isRunnable: true, content: 'how' },
+    });
+    const config = await db.memoryConfig.upsert({
+      where: { memoryId }, update: {}, create: { id: generateId(), memoryId },
+    });
+    await db.nodeRoleRule.create({
+      data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true },
+    });
+    await db.node.update({ where: { loc_memoryId: { loc: 'data', memoryId } }, data: { role: 'guide' } });
+  }
+
+  it('a turn that extracts what is already stored is no authored change: no claim needed', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU', industry: 'A-construction' });
+    const before = (await dataNodeOf(chat.chatId)).data;
+    await governedDataNode(chat.chatId);
+
+    await expect(extract(alice.id, chat.chatId, { region: 'EU', industry: 'A-construction' })).resolves.toBeDefined();
+    expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
+  });
+
+  it('a turn that changes the data needs a claim extraction cannot state: refused, nothing written', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    const before = (await dataNodeOf(chat.chatId)).data;
+    await governedDataNode(chat.chatId);
+
+    const refused = await extract(alice.id, chat.chatId, { region: 'US' }).then(() => null, (e) => e);
+    expect(refused?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+    expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
+  });
+
+  it('a change the rulebook no longer governs clears the stamp, which no longer describes the content', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    await db.node.update({ where, data: { authorshipKind: 'TASK', authoredByTask: 'hrn:node:x:y:task', authoredByRevision: 3, authoredAt: new Date() } });
+
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    expect((await db.node.findUniqueOrThrow({ where })).authoredByRevision).toBe(3);
+    await extract(alice.id, chat.chatId, { region: 'US' });
+    expect((await db.node.findUniqueOrThrow({ where })).authoredByRevision).toBeNull();
+  });
+});
