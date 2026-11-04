@@ -8341,7 +8341,7 @@ export const typeDefs = `#graphql
       "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
       after: ID
       types: [String!]
-      "#3449: literal prefix, intersects types; app. includes legacy platform events."
+      "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
       codePrefix: String
       alarmsOnly: Boolean
       taskId: ID

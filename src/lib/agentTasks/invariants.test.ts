@@ -36,7 +36,9 @@ const event = (data: Record<string, unknown> = {}) =>
 
 describe('agent-task-invariants.sql', () => {
   // #1754 moved the pin to the latest agent-tasks migration: the file is the
-  // source of truth, and the newest migration carries its current copy.
+  // source of truth. #3449 splits the event CHECK into its own migration.
+  // A future task/append-only change must retarget its block below to the migration
+  // carrying that change; this pin does not discover the latest migration automatically.
   it('migrations retain task/append-only invariants and the latest event CHECK matches bootstrap', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8');
     const original = readFileSync(new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url), 'utf8');
