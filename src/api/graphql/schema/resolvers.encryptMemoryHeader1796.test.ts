@@ -297,6 +297,45 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
       expect(face(sealed)).toBe(face(absent));
       expect((await row(memory.id)).isEncrypted).toBe(false);
     });
+
+    // Every shape of the operation, not only the one a first encryption is staged for: the narrow
+    // recognizer decides who may stage, so it can't also decide who is concealed from.
+    it.each([
+      ['under a directive', (id: string) => `mutation { encryptMemory(memoryId: "${id}") @include(if: true) { id } }`],
+      ['behind a named fragment', (id: string) => `mutation { ...F } fragment F on Mutation { encryptMemory(memoryId: "${id}") { id } }`],
+      ['behind a nested fragment', (id: string) => `mutation { ...F } fragment F on Mutation { ...G } fragment G on Mutation { encryptMemory(memoryId: "${id}") { id } }`],
+      ['behind an inline fragment', (id: string) => `mutation { ... on Mutation { encryptMemory(memoryId: "${id}") { id } } }`],
+      ['beside another root field', (id: string) => `mutation { encryptMemory(memoryId: "${id}") { id } updateMemory(memoryId: "${id}", name: "x") { id } }`],
+      ['twice under aliases', (id: string) => `mutation { a: encryptMemory(memoryId: "${id}") { id } b: encryptMemory(memoryId: "${id}") { id } }`],
+    ])('gets the missing-memory answer with encryptMemory %s', async (_label, doc) => {
+      const encrypted = await newPrivate(owner.id, 'sealed');
+      await db.memory.update({ where: { id: encrypted.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
+      const missing = generateId();
+      const ask = (id: string) => send(doc(id), {}, { bearer: impJwt, keys: [{ memory: id, dataKey: wrongKey }] });
+      const [plain, sealed, absent] = [await ask(memory.id), await ask(encrypted.id), await ask(missing)];
+      expect(code(absent)).toBe('NOT_FOUND');
+      expect(face(plain)).toBe(face(absent));
+      expect(face(sealed)).toBe(face(absent));
+      expect((await row(memory.id)).isEncrypted).toBe(false);
+    });
+
+    it('gets the missing-memory answer when encryptMemory names a different memory than the entry', async () => {
+      const encrypted = await newPrivate(owner.id, 'sealed');
+      await db.memory.update({ where: { id: encrypted.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
+      const missing = generateId();
+      const ask = (id: string) => send(ENCRYPT, { id: other.id }, { bearer: impJwt, keys: [{ memory: id, dataKey: wrongKey }] });
+      const [plain, sealed, absent] = [await ask(memory.id), await ask(encrypted.id), await ask(missing)];
+      expect(code(absent)).toBe('NOT_FOUND');
+      expect(face(plain)).toBe(face(absent));
+      expect(face(sealed)).toBe(face(absent));
+    });
+
+    it('keeps the ordinary answer on an operation that never reaches encryptMemory (acceptance 4)', async () => {
+      const reply = await send(READ, { ref: memory.id }, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
+      expect(code(reply)).toBe('NOT_ENCRYPTED');
+      const query = await send(`query { encryptMemory(memoryId: "${memory.id}") { id } }`, {}, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
+      expect(code(query)).toBe('NOT_ENCRYPTED');
+    });
   });
 });
 
