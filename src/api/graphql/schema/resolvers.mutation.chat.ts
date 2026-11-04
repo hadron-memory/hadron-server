@@ -1,5 +1,7 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertAuthoring, attestedAuthoring } from '../../../lib/authoringAttestation.js';
+import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
+import { diffNodeChanges } from '../../../lib/nodeRevisionSnapshot.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { isDeepStrictEqual } from 'node:util';
 import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
@@ -1404,19 +1406,25 @@ export const chatMutations = {
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
         });
         if (dataNode) {
-          // #1328 — extraction states no task, so it cannot rewrite a `data`
-          // node a rule governs.
-          await assertAuthoring(tx, chatNode.memoryId, {
-            priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
-            role: dataNode.role, runnable: dataNode.isRunnable, authoredChange: true,
-          }, attestedAuthoring(null));
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = fold(existingData, data);
+          // #1328 — extraction states no task, so it cannot change a `data`
+          // node a rule governs. Compared on plaintext: a turn that extracts
+          // what is stored changes nothing authored, and needs no claim.
+          const authoredChange = authoredContentChanged(diffNodeChanges({ data: existingData }, { data: merged }));
+          const stamp = await assertAuthoring(tx, chatNode.memoryId, {
+            priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
+            role: dataNode.role, runnable: dataNode.isRunnable, authoredChange,
+          }, attestedAuthoring(null));
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
-            data: { data: (encData.data ?? null) as InputJsonValue, updatedBy: ctx.userId ?? null },
+            data: {
+              data: (encData.data ?? null) as InputJsonValue,
+              updatedBy: ctx.userId ?? null,
+              ...(authoredChange ? (stamp ?? clearNodeAuthorship()) : {}),
+            },
           });
           // #1061 — folding extracted data into the memory's `data` node
           // rewrites a real node, so it is its own write.
