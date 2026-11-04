@@ -1,3 +1,4 @@
+import { GraphQLError } from 'graphql';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { assertFullyQualifiedUrn, parseUrnInput } from '../../../lib/urn.js';
@@ -90,16 +91,30 @@ export const runTeamSnapshotMutations = {
     }, { lockMode: 'exclusive', afterLock: tx => lockAutomationGrantActor(tx, admission, row.app) });
   },
 };
+/** Validate only after admission: an invalid filter must not replace an authority refusal. */
+function triggerFilter(input: { triggerKind?: string | null; triggerId?: string | null }) {
+  if (input.triggerKind != null && input.triggerKind !== 'SCHEDULE' && input.triggerKind !== 'WEBHOOK') {
+    throw new GraphQLError('triggerKind must be SCHEDULE or WEBHOOK.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  if (input.triggerId != null && input.triggerKind == null) {
+    throw new GraphQLError('triggerKind is required with triggerId.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return {
+    ...(input.triggerKind != null ? { triggerKind: input.triggerKind } : {}),
+    ...(input.triggerId != null ? { triggerId: input.triggerId } : {}),
+  };
+}
 export const runTeamSnapshotQueries = {
-  automationTeamSnapshotGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null; limit?: number | null; offset?: number | null; instruction?: ActInstruction | null }, ctx: Context) => {
+  automationTeamSnapshotGrants: async (_: unknown, input: { appRef: string; triggerKind?: string | null; triggerId?: string | null; includeRevoked?: boolean | null; limit?: number | null; offset?: number | null; instruction?: ActInstruction | null }, ctx: Context) => {
     refuseAutomationGrantPrincipal(ctx);
     const app = await appOf(ctx, input.appRef);
     const allows = async (c: Context) => { await manager(c, app); return true; };
     let admission = await automationGrantAdmission(ctx, app, input.instruction, allows);
     return withAuthorizedTx(ctx, anchors(app), async c => { admission = await automationGrantAdmission(c, app, input.instruction, allows, admission); }, async (tx, c) => {
       admission = await finalAutomationGrantAdmission(c, app, input.instruction, allows, admission);
+      const filter = triggerFilter(input);
       await appendCredentialInstructionEvent(tx, { appId: app.id, admission, act: 'automation-team-snapshot-grant.list' });
-      const where = { appId: app.id, ...(input.includeRevoked ? {} : { revokedAt: null }) };
+      const where = { appId: app.id, ...filter, ...(input.includeRevoked ? {} : { revokedAt: null }) };
       const take = pageTake(input.limit), skip = Math.max(0, input.offset ?? 0);
       const total = await tx.appAutomationTeamSnapshotGrant.count({ where });
       const items = take === 0 ? [] : await tx.appAutomationTeamSnapshotGrant.findMany({
