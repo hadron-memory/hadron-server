@@ -6,6 +6,7 @@ import { parse, Kind } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -71,6 +72,25 @@ it('one importer: createdAt is the later of its install and the import (both ord
     await importEdge(a.id, b.id, T(imported));
     expect((await entry(b.id)).createdAt.toISOString()).toBe(T(want).toISOString());
   }
+});
+
+it.each(['source', 'roster'] as const)('a physical row wins over a simultaneous import in the %s listing', async (surface) => {
+  const [a, b] = [await agent('Alpha'), await agent('Beta')];
+  await db.appAgent.create({ data: { appId: app.id, agentId: a.id, createdAt: T(1) } });
+  await importEdge(a.id, b.id, T(2));
+  const physical = await db.appAgent.create({
+    data: { appId: app.id, agentId: b.id, createdAt: T(5), createdBy: user.id },
+  });
+  // Keep both witnesses live: checking only after import removal cannot kill
+  // the duplicate DERIVED entry produced when the physical-precedence guard goes.
+  const rows = surface === 'source' ? await listAppInstallations(db, app.id) : await roster();
+  const matches = rows.filter(row => row.agentId === b.id);
+  expect(matches).toHaveLength(1);
+  expect(matches[0]).toMatchObject({
+    installationKind: 'ROW', importerAgentId: null,
+    createdAt: physical.createdAt, createdBy: user.id,
+  });
+  expect(await db.agentImport.count({ where: { parentAgentId: a.id, importedAgentId: b.id } })).toBe(1);
 });
 
 it('after the import is removed the derived entry leaves the listing; the importer stays', async () => {
