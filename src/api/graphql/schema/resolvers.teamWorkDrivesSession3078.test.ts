@@ -20,8 +20,6 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { loadWorkerCheckStatuses } from '../../../lib/workerCheckStatus.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
-import type { AuthContext } from '../../../middleware/auth.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -62,13 +60,6 @@ const gqlCtx = (userId: string, extra: Partial<Context> = {}): Context =>
   ({ db, userId, roles: ['READER'], ...extra }) as Context;
 const recordGql = (c: Context, sessionRef: string, kind = 'issue') =>
   M.recordTeamWork({}, { appRef: app.id, sessionRef, tool: 'github', kind, ref: REFS[kind], action: 'opened' }, c);
-
-const mcpAuth = (userId: string, extra: Partial<AuthContext> = {}): AuthContext =>
-  ({ userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}`, ...extra }) as AuthContext;
-const recordMcp = (a: AuthContext, sessionRef: string, kind = 'issue') =>
-  createTestableMcpServer(a).callToolText('hadron_record_work', {
-    session: sessionRef, app: app.id, tool: 'github', kind, ref: REFS[kind], action: 'opened',
-  });
 
 const impersonating = () => ({ sessionId: generateId(), actorUserId: platformAdmin.id, orgId: org.id, expiresAt: new Date(Date.now() + HOUR) });
 
@@ -190,37 +181,32 @@ describe('#3078 acceptance 5: kind:pr behaves as before', () => {
  * session in the same liveness state. `drives` is the expected answer; it is asserted on both, so a surface that
  * drifts in either direction fails here even if the other drifts with it.
  */
-type Fixture = { sessionId: string; userId: string; extra: { gql: Partial<Context>; mcp: Partial<AuthContext> } };
+type Fixture = { sessionId: string; userId: string; extra: { gql: Partial<Context> } };
 const FIXTURES: [string, () => Promise<Fixture>, boolean][] = [
-  ['live own session', async () => ({ sessionId: (await session(anne, member.id, 20)).id, userId: member.id, extra: { gql: {}, mcp: {} } }), true],
-  ['lapsed own session', async () => ({ sessionId: (await session(anne, member.id, 30)).id, userId: member.id, extra: { gql: {}, mcp: {} } }), false],
-  ['ended own session', async () => ({ sessionId: (await session(anne, member.id, 20, 19)).id, userId: member.id, extra: { gql: {}, mcp: {} } }), false],
-  ['another worker\'s session (platform admin)', async () => ({ sessionId: (await session(liam, other.id, 20)).id, userId: platformAdmin.id, extra: { gql: { roles: ['ADMIN'] }, mcp: { roles: ['ADMIN'] } } }), false],
-  ['another worker\'s session (member)', async () => ({ sessionId: (await session(liam, other.id, 20)).id, userId: member.id, extra: { gql: {}, mcp: {} } }), false],
+  ['live own session', async () => ({ sessionId: (await session(anne, member.id, 20)).id, userId: member.id, extra: { gql: {} } }), true],
+  ['lapsed own session', async () => ({ sessionId: (await session(anne, member.id, 30)).id, userId: member.id, extra: { gql: {} } }), false],
+  ['ended own session', async () => ({ sessionId: (await session(anne, member.id, 20, 19)).id, userId: member.id, extra: { gql: {} } }), false],
+  ['another worker\'s session (platform admin)', async () => ({ sessionId: (await session(liam, other.id, 20)).id, userId: platformAdmin.id, extra: { gql: { roles: ['ADMIN'] } } }), false],
+  ['another worker\'s session (member)', async () => ({ sessionId: (await session(liam, other.id, 20)).id, userId: member.id, extra: { gql: {} } }), false],
   ['impersonation', async () => {
     const imp = impersonating();
-    return { sessionId: (await session(anne, member.id, 20)).id, userId: member.id, extra: { gql: { impersonation: imp }, mcp: { impersonation: imp } } };
+    return { sessionId: (await session(anne, member.id, 20)).id, userId: member.id, extra: { gql: { impersonation: imp } } };
   }, false],
   ['removed caller', async () => {
     const id = (await session(rex, removed.id, 20)).id;
     await db.appMember.deleteMany({ where: { appId: app.id, userId: removed.id } });
-    return { sessionId: id, userId: removed.id, extra: { gql: {}, mcp: {} } };
+    return { sessionId: id, userId: removed.id, extra: { gql: {} } };
   }, false],
 ];
 
-describe('#3078 acceptance 4: GraphQL recordTeamWork and MCP hadron_record_work agree on every fixture', () => {
+// #3082: hadron_record_work is off over MCP, so the GraphQL arm is the whole contract; the MCP arm is gone with the tool.
+describe('#3078 acceptance 4: GraphQL recordTeamWork drives (or refuses to drive) the session on every fixture', () => {
   it.each(FIXTURES)('%s', async (_name, build, drives) => {
     const g = await build();
     const gBefore = await heartbeat(g.sessionId);
     await recordGql(gqlCtx(g.userId, g.extra.gql), g.sessionId).catch(() => undefined);
     const gqlDrove = (await heartbeat(g.sessionId)) > gBefore + HOUR;
 
-    if (_name === 'removed caller') await db.appMember.create({ data: { appId: app.id, userId: removed.id, role: 'member' } });
-    const m = await build();
-    const mBefore = await heartbeat(m.sessionId);
-    await recordMcp(mcpAuth(m.userId, m.extra.mcp), m.sessionId);
-    const mcpDrove = (await heartbeat(m.sessionId)) > mBefore + HOUR;
-
-    expect({ gql: gqlDrove, mcp: mcpDrove }).toEqual({ gql: drives, mcp: drives });
+    expect(gqlDrove).toBe(drives);
   });
 });

@@ -141,13 +141,13 @@ describe('an outsider cannot tell a foreign worker from an absent one', () => {
     }
   });
 
-  it('MCP hadron_start_session delegates: a real worker and a guessed one read identically to an outsider', async () => {
+  it('MCP hadron_start_session refuses a worker binding before any read (#3082): a real worker and a guessed one read identically to an outsider', async () => {
     const srv = createTestableMcpServer({ userId: outsider, roles: ['READER'], clientId: `user:${outsider}` });
     const guessed = composeWorkerUrn(app.urn, 'nobody');
     const real = await srv.callToolText('hadron_start_session', { description: 'probe', workerRef: ada.urn });
     const fake = await srv.callToolText('hadron_start_session', { description: 'probe', workerRef: guessed });
     expect(real).toBe(fake.replaceAll(guessed, ada.urn));
-    expect(real).toContain('Worker not found');
+    expect(real).toContain('MCP_WORKER_BINDING_UNSUPPORTED');
     expect(await db.session.count()).toBe(0);
   });
 });

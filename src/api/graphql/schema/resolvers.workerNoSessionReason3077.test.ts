@@ -29,8 +29,6 @@ import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActiv
 import { loadNoSessionReasons } from '../../../lib/workerCheckStatus.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import type { AuthContext } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -245,28 +243,8 @@ describe('the expiry boundary, on a controlled clock (R5, cor:agt:020:03)', () =
   });
 });
 
-describe('acceptance 3: GraphQL and MCP give the same reason', () => {
-  const authOf = (userId: string) => ({ userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` }) as AuthContext;
-  const mcp = (userId = member.id) =>
-    createTestableMcpServer(authOf(userId), { sessionId: `nsr-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-  const words = (r: string) => r.toLowerCase().replace(/_/g, ' ');
-
-  it('hadron_get_worker shows the reason in the long form, as it shows a PENDING reason', async () => {
-    for (const name of ['Idle', 'Ended', 'Expired', 'Never']) {
-      const reason = (await workerStatus(name)).noSessionReason as string;
-      const out = await mcp().callToolText('hadron_get_worker', { workerRef: w[name].id });
-      expect(out, name).toContain(`Check status: NO_SESSION (${words(reason)}; never checked)`);
-    }
-  });
-
-  it('hadron_team_roster shows the short form check NO_SESSION (<reason>)', async () => {
-    const out = (await mcp().callTool('hadron_team_roster', { appRef: app.id })).content[0].text;
-    expect(out).toMatch(/Idle — [A-Z_]+: [^\n]*check NO_SESSION \(idle\)/);
-    expect(out).toMatch(/Ended — [A-Z_]+: [^\n]*check NO_SESSION \(ended\)/);
-    expect(out).toMatch(/Never — [A-Z_]+: [^\n]*check NO_SESSION \(never bound\)/);
-    expect(out).toMatch(/Live — [A-Z_]+: [^\n]*check PENDING \(no task\)/);
-  });
-});
+// #3082: 'acceptance 3' (MCP renderings of hadron_get_worker / hadron_team_roster) removed, both tools are disabled on MCP. The reason
+// values stay pinned through Worker.checkStatus in acceptance 1/2 above.
 
 describe('acceptance 4: the reason discloses nothing new', () => {
   it('a caller who cannot read checkStatus gets null, never NEVER_BOUND (cor:agt:020:11 rule 5)', async () => {
@@ -276,19 +254,8 @@ describe('acceptance 4: the reason discloses nothing new', () => {
     }
   });
 
-  // Riana §10 P3-1: hadron_get_worker serves the profile tier to any signed-in
-  // user who names the worker, so its check status must come through the
-  // masked resolver. A stranger (no membership, no App binding) sees the
-  // worker but no check status and no reason.
-  it('hadron_get_worker to a stranger shows the worker but no check status or reason', async () => {
-    const strangerAuth = { userId: outsider.id, roles: ['READER'], clientId: `user:${outsider.id}` } as AuthContext;
-    for (const name of ['Idle', 'Ended', 'Never']) {
-      const server = createTestableMcpServer(strangerAuth, { sessionId: `nsr-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
-      const out = await server.callToolText('hadron_get_worker', { workerRef: w[name].id });
-      expect(out, `${name}: the stranger must still get the profile, or this pin proves nothing`).toContain(w[name].id);
-      expect(out, name).not.toMatch(/Check status|NO_SESSION|never bound|never checked/);
-    }
-  });
+  // #3082: the MCP stranger-read pin (hadron_get_worker) is removed with the tool; the masking it proved is the resolver's, pinned by
+  // the first test of this block (Worker.checkStatus is null for a caller who cannot read it).
 
   it('the SDL adds only the closed reason enum: no session id or timestamp', () => {
     const block = /type WorkerCheckStatus \{([\s\S]*?)\n  \}/.exec(typeDefs)?.[1] ?? '';

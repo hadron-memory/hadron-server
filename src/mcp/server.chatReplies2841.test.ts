@@ -43,9 +43,14 @@ beforeEach(async () => {
     await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:team', name: 'team', createdBy: admin.id, asDefaultOfAppId: app.id });
     release = (await ensureChannelWithRoot(db, { memoryId: mem.id, loc: 'chats:release', name: 'release', createdBy: admin.id })).channel;
 });
+// #3082: hadron_team_chat_post / hadron_team_chat_read are disabled on MCP, so the fixture posts through the GraphQL
+// resolver the tool delegated to (Mutation.createTeamChatMessage), as the human with no session (the old `asMe: true`).
 function server(userId: string) {
-    const auth = { userId, roles: ['READER'], clientId: `user:${userId}`, appId: app.id, organizationId: org.id } as AuthContext;
-    return createTestableMcpServer(auth, { sessionId: `ccm-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
+    return {
+        callToolText: async (_tool: string, a: { asMe?: boolean; body: string; replyToSeq?: number }) => {
+            await (resolvers.Mutation as any).createTeamChatMessage({}, { appRef: app.id, body: a.body, replyToSeq: a.replyToSeq ?? null, sessionRef: null }, { db, userId, roles: ['READER'], appId: app.id, organizationId: org.id });
+        },
+    };
 }
 import { buildSchema } from 'graphql';
 import { typeDefs } from '../api/graphql/schema/typeDefs.js';
@@ -117,17 +122,6 @@ for (const encrypted of [false, true])
             await db.node.update({ where: { id: target.id }, data: { deletedAt: new Date() } });
             expect(await code(read(1))).toBe('TEAM_CHAT_REPLY_NOT_FOUND');
         });
-        it('both MCP tools preserve filter and total, including named-channel team path', async () => {
-            const { s, channel } = await fixture(encrypted);
-            for (const [tool, args] of [['hadron_channel_read', { channel: channel.id }], ['hadron_team_chat_read', {}], ['hadron_team_chat_read', { channel: channel.id }]] as const) {
-                const text = await s.callToolText(tool, { ...args, replyToSeq: 1 });
-                expect(text).toContain('2 message(s) total');
-                expect(text).toContain('reply A');
-                expect(text).toContain('reply B');
-                expect(text).not.toContain('unrelated');
-                expect(text).not.toContain('nested');
-            }
-        });
     });
 it('read gate precedes target existence and monitor combination refuses', async () => {
     const { s, channel } = await fixture(false);
@@ -135,7 +129,6 @@ it('read gate precedes target existence and monitor combination refuses', async 
         expect(await code(Q.channelMessages({}, { channelRef: channel.id, replyToSeq }, context(member.id)))).toBe('CHANNEL_NOT_FOUND');
         expect(await code(Q.teamChatMessages({}, { appRef: app.id, replyToSeq }, context(member.id)))).toBe('FORBIDDEN');
     }
-    expect(await s.callToolText('hadron_team_chat_read', { monitor: true, replyToSeq: 1 })).toMatch(/^\[bad_user_input\]/);
 });
 it('a reply-filtered read attributes activity but does not acknowledge unseen channel messages (fenced or not)', async () => {
     const { s, channel } = await fixture(false);
@@ -147,10 +140,6 @@ it('a reply-filtered read attributes activity but does not acknowledge unseen ch
         const state = await db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
         expect(state?.lastSeenSeq ?? 0).toBe(0);
         expect(state?.lastCheckedAt).toBeInstanceOf(Date);
-    }
-    for (const [tool, args] of [['hadron_channel_read', { channel: channel.id }], ['hadron_team_chat_read', {}], ['hadron_team_chat_read', { channel: channel.id }]] as const) {
-        await s.callToolText(tool, { ...args, session: session.id, sinceSeq: 0, replyToSeq: 1 });
-        expect((await db.channelReadState.findFirstOrThrow({ where: { workerId: worker.id, channelId: channel.id } })).lastSeenSeq).toBe(0);
     }
     await vi.waitFor(async () => {
         const events = await db.usageEvent.findMany({ where: { sessionId: session.id, type: 'read', memoryId: channel.memoryId } });

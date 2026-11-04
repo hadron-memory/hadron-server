@@ -16,6 +16,7 @@ import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { serveEveryAgent } from '../test/servedBootPrompt.js';
+import { startWorkerSessionGql } from '../test/startWorkerSessionGql.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey } from '../middleware/auth.js';
 
@@ -31,6 +32,8 @@ const IRIS_REF = 'hrn:worker:shared1769.example:team:iris';
 const DARA_REF = 'hrn:worker:shared1769.example:team:dara';
 let workers: { iris: string; dara: string };
 let memoryId: string;
+let userId: string;
+let appId: string;
 
 beforeAll(async () => {
   server = createHttpServer(await createServer());
@@ -43,9 +46,11 @@ beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'Shared 1769', urn: 'shared1769.example' } });
   const user = await db.user.create({ data: { githubId: 176902, githubUsername: 'shared-1769', handle: 'shared-1769', roles: ['READER'] } });
+  userId = user.id;
   await db.orgMember.create({ data: { organizationId: org.id, userId: user.id, role: 'ADMIN' } });
   const agent = await db.agent.create({ data: { id: generateId(), urn: 'shared1769.example:engineer', name: 'engineer', organizationId: org.id } });
   const app = await db.app.create({ data: { id: generateId(), name: 'Team', urn: 'shared1769.example:team', organizationId: org.id } });
+  appId = app.id;
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'owner' } });
   memoryId = (await db.memory.create({ data: {
@@ -68,9 +73,9 @@ async function connection() {
   expect(init.status).toBe(200);
   const sid = init.headers.get('mcp-session-id')!;
   let id = 10;
-  return async (name: string, args: Record<string, unknown>): Promise<string> => {
+  return async (name: string, args: Record<string, unknown>, hadronSession?: string): Promise<string> => {
     const res = await fetch(`${baseUrl}/mcp`, {
-      method: 'POST', headers: { ...h, 'mcp-session-id': sid },
+      method: 'POST', headers: { ...h, 'mcp-session-id': sid, ...(hadronSession ? { 'x-hadron-session': hadronSession } : {}) },
       body: JSON.stringify({ jsonrpc: '2.0', id: id++, method: 'tools/call', params: { name, arguments: args } }),
     });
     expect(res.status).toBe(200);
@@ -78,11 +83,18 @@ async function connection() {
   };
 }
 
-/** One connection carrying two chat sessions' worker bindings, Iris then Dara. */
+/**
+ * One connection carrying two chat sessions' worker bindings, Iris then Dara. #3082: MCP no longer binds a worker, so the
+ * two worker sessions are started through GraphQL (as the CLI does) and each is presented on the shared connection by
+ * the X-Hadron-Session header, which is what registers a worker session on the connection now.
+ */
 async function shared() {
   const call = await connection();
-  const iris = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat A', workerRef: IRIS_REF, force: true }))![1];
-  const dara = /Session started: ([0-9a-f]{32})/.exec(await call('hadron_start_session', { description: 'chat B', workerRef: DARA_REF }))![1];
+  const ctx = { db, userId, appId, roles: ['READER'] };
+  const iris = await startWorkerSessionGql({ workerRef: workers.iris, force: true, userId, appId, ctx: ctx as never });
+  const dara = await startWorkerSessionGql({ workerRef: workers.dara, userId, appId, ctx: ctx as never });
+  await call('hadron_whoami', {}, iris);
+  await call('hadron_whoami', {}, dara);
   return { call, iris, dara };
 }
 
@@ -93,13 +105,8 @@ describe.each([
   ['hadron_create_review', 'review'],
   ['hadron_create_task', 'task'],
 ])('#1769 shared connection: %s', (tool, kind) => {
-  it('S1: without a session it is refused SESSION_AMBIGUOUS and nothing is written', async () => {
-    const { call } = await shared();
-    const loc = `shared:s1:${kind}`;
-    expect(await call(tool, { urn: urn(loc), name: loc })).toContain('[session_ambiguous]');
-    expect(await nodes(loc)).toEqual([]);
-  });
-
+  // #3082: the S1 case (an unnamed write on a connection that carries two workers is SESSION_AMBIGUOUS) is dropped: that
+  // connection state was only ever produced by MCP worker binds, which are refused now, so it cannot be reached.
   it('S2: naming a session writes, attributed to that worker (not the other one)', async () => {
     const { call, dara } = await shared();
     const loc = `shared:s2:${kind}`;
@@ -115,12 +122,10 @@ describe.each([
   ['hadron_update_review', 'hadron_create_review', 'review'],
   ['hadron_update_task', 'hadron_create_task', 'task'],
 ])('#1769 shared connection: %s', (update, create, kind) => {
-  it('S1/S2: unnamed edit refused and unwritten; a named edit lands attributed to the named worker', async () => {
+  it('S2: a named edit lands attributed to the named worker', async () => {
     const { call, iris, dara } = await shared();
     const loc = `shared:edit:${kind}`;
     await call(create, { urn: urn(loc), name: loc, session: iris });
-    expect(await call(update, { urn: urn(loc), content: 'unsaid' })).toContain('[session_ambiguous]');
-    expect((await nodes(loc))[0].content).not.toBe('unsaid');
     const text = await call(update, { urn: urn(loc), content: 'said', session: dara });
     expect(text).toMatch(/updated/);
     const [node] = await nodes(loc);
