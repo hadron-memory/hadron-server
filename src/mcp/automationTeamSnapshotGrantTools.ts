@@ -7,15 +7,14 @@ import type { Context } from '../api/graphql/schema/resolvers.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
-
-const instruction = z.object({ kind: z.enum(['TEAM_CHAT_MESSAGE', 'TASK', 'LIVE_CHAT']), ref: z.string().min(1) }).nullish().describe('Holder instruction reference, never prose. A held worker may revoke/list within its own App; no instruction-enabled give.');
+import { AUTOMATION_GRANT_INSTRUCTION } from './automationGrantInstructionShape.js';
 
 export const SHAPE_SET_TEAM_SNAPSHOT_GRANT = {
   app: z.string().min(1), triggerKind: z.enum(['SCHEDULE', 'WEBHOOK']), triggerId: z.string().min(1),
 };
-export const SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT = { id: z.string().min(1), instruction };
+export const SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT = { id: z.string().min(1), instruction: AUTOMATION_GRANT_INSTRUCTION };
 export const SHAPE_LIST_TEAM_SNAPSHOT_GRANTS = {
-  instruction,
+  instruction: AUTOMATION_GRANT_INSTRUCTION,
   app: z.string().min(1), includeRevoked: z.boolean().optional(), limit: z.number().int().optional(), offset: z.number().int().optional(),
 };
 export function registerAutomationTeamSnapshotGrantTools(server: McpServer, { db, auth }: { db: PrismaClient; auth: AuthContext }) {
@@ -35,7 +34,7 @@ export function registerAutomationTeamSnapshotGrantTools(server: McpServer, { db
     SHAPE_SET_TEAM_SNAPSHOT_GRANT, ({ app, triggerKind, triggerId }) => call(() => runTeamSnapshotMutations.setAutomationTeamSnapshotGrant(null, { appRef: app, triggerKind, triggerId }, ctx())));
   server.tool('hadron_revoke_automation_team_snapshot_grant',
     'Revoke one automation team snapshot grant, terminal and recorded. App managers only. A held worker may act on its holder\'s instruction within its own App.',
-    SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT, ({ id, instruction }) => call(() => runTeamSnapshotMutations.revokeAutomationTeamSnapshotGrant(null, { id, instruction }, ctx())));
+    SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT, ({ id, instruction: claim }) => call(() => runTeamSnapshotMutations.revokeAutomationTeamSnapshotGrant(null, { id, instruction: claim }, ctx())));
   server.tool('hadron_list_automation_team_snapshot_grants',
     'Page the App team snapshot grants as its manager. includeRevoked defaults false; limit defaults20, capped200, zero counts only; offset defaults0. A held worker may list on an instruction within its own App; each admitted instructed list records one ids-only team event.',
     SHAPE_LIST_TEAM_SNAPSHOT_GRANTS, ({ app, ...args }) => call(() => runTeamSnapshotQueries.automationTeamSnapshotGrants(null, { appRef: app, ...args }, ctx())));

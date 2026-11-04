@@ -5,12 +5,12 @@ import { pageTake } from '../pageBounds.js';
 /** #3350 / ruling 0112 amended: one automation's team snapshot grant, never an App-wide permission. */
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
-import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { Context } from './resolvers.js';
 import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor } from './automationGrantInstruction.js';
+import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor, refuseAutomationGrantPrincipal } from './automationGrantInstruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
 const denied = () => authorizationDenied();
@@ -21,10 +21,9 @@ const anchors = (app: App) => [
   ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
   ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
 ];
-async function person(ctx: Context, giving = false) {
+async function givingPerson(ctx: Context) {
   if (ctx.appKeyId) throw denied();
-  // Giving remains person-only; revoke/list use the shared instructed-act protocol below.
-  return giving ? requirePersonOnlyAct(ctx, 'grant.give', denied) : requirePersonAsThemselves(ctx, denied);
+  return requirePersonOnlyAct(ctx, 'grant.give', denied);
 }
 async function appOf(ctx: Context, ref: string) {
   let id: string;
@@ -52,10 +51,10 @@ async function triggerLive(ctx: Context, appId: string, kind: string, id: string
 
 export const runTeamSnapshotMutations = {
   setAutomationTeamSnapshotGrant: async (_: unknown, input: { appRef: string; triggerKind: string; triggerId: string }, ctx: Context) => {
-    const actorUserId = await person(ctx, true);
+    const actorUserId = await givingPerson(ctx);
     const app = await appOf(ctx, input.appRef);
     return withAuthorizedTx(ctx, anchors(app), async c => {
-      await person(c, true);
+      await givingPerson(c);
       await manager(c, app);
       await triggerLive(c, app.id, input.triggerKind, input.triggerId);
     }, async tx => {
@@ -72,6 +71,7 @@ export const runTeamSnapshotMutations = {
     }, { lockMode: 'exclusive' });
   },
   revokeAutomationTeamSnapshotGrant: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
+    refuseAutomationGrantPrincipal(ctx);
     const row = await ctx.db.appAutomationTeamSnapshotGrant.findUnique({ where: { id }, include: { app: { select: APP_SELECT } } });
     if (!row) throw denied();
     const allows = async (c: Context) => { await manager(c, row.app); return true; };
@@ -92,6 +92,7 @@ export const runTeamSnapshotMutations = {
 };
 export const runTeamSnapshotQueries = {
   automationTeamSnapshotGrants: async (_: unknown, input: { appRef: string; includeRevoked?: boolean | null; limit?: number | null; offset?: number | null; instruction?: ActInstruction | null }, ctx: Context) => {
+    refuseAutomationGrantPrincipal(ctx);
     const app = await appOf(ctx, input.appRef);
     const allows = async (c: Context) => { await manager(c, app); return true; };
     let admission = await automationGrantAdmission(ctx, app, input.instruction, allows);

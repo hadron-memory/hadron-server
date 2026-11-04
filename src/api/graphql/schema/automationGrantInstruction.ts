@@ -4,11 +4,16 @@ import { requireInstructedAct, sameActPrincipal, type ActAdmission, type ActInst
 import { readActInstruction, lockInstructedActRows } from './resolvers.instruction.js';
 import { lockWorkersForAssignment } from '../../../lib/agentTasks/workerLock.js';
 import { lockAppManagerMemberships } from '../../../lib/auth/appManagement.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 
 type App = { id: string; organizationId: string | null; ownerUserId: string | null };
 const denied = () => authorizationDenied();
+/** Uniform principal refusal before entity resolution; the full instructed gate is still re-run under locks. */
+export function refuseAutomationGrantPrincipal(ctx: Context) {
+  if (isRefusedPrincipal(ctx) || ctx.appKeyId) throw denied();
+}
 export async function automationGrantAdmission(ctx: Context, app: App, instruction: ActInstruction | null | undefined,
   allows: (c: Context) => Promise<boolean>, expected?: ActAdmission): Promise<ActAdmission> {
   const fresh = await ctx.db.app.findFirst({ where: { id: app.id, deletedAt: null, uninstalledAt: null }, select: { organizationId: true, ownerUserId: true } });

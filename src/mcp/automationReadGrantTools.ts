@@ -11,23 +11,24 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import type { ActInstruction } from '../lib/auth/instructedAct.js';
+import { AUTOMATION_GRANT_INSTRUCTION } from './automationGrantInstructionShape.js';
 
 type Row = {
   id: string; appId: string; triggerKind: string; triggerId: string; memoryUrn: string | null;
   prefix: string | null; grantedBy: string; createdAt: Date; revokedAt: Date | null; revokedBy: string | null;
 };
 type Fields = {
-  Query: { automationReadGrants: (p: unknown, a: { appRef?: string; memoryRef?: string; includeRevoked?: boolean; instruction?: import('../lib/auth/instructedAct.js').ActInstruction | null }, c: Context) => Promise<Row[]> };
+  Query: { automationReadGrants: (p: unknown, a: { appRef?: string; memoryRef?: string; includeRevoked?: boolean; instruction?: ActInstruction | null }, c: Context) => Promise<Row[]> };
   Mutation: {
     setAutomationReadGrant: (p: unknown, a: { appRef: string; triggerKind: string; triggerId: string; memoryRef: string; prefix?: string }, c: Context) => Promise<Row>;
-    revokeAutomationReadGrant: (p: unknown, a: { id: string; instruction?: import('../lib/auth/instructedAct.js').ActInstruction | null }, c: Context) => Promise<Row>;
+    revokeAutomationReadGrant: (p: unknown, a: { id: string; instruction?: ActInstruction | null }, c: Context) => Promise<Row>;
   };
 };
 
 const line = (r: Row): string =>
   `${r.id}: ${r.triggerKind} ${r.triggerId} (App ${r.appId}) reads ${r.memoryUrn ?? '(memory)'}${r.prefix ? ` under ${r.prefix}` : ' (whole memory)'}; ` +
   `given by ${r.grantedBy}${r.revokedAt ? `; REVOKED by ${r.revokedBy}` : ''}`;
-const instruction = z.object({ kind: z.enum(['TEAM_CHAT_MESSAGE', 'TASK', 'LIVE_CHAT']), ref: z.string().min(1) }).nullish().describe('Holder instruction reference, never prose. A held worker may revoke/list within its own App; no instruction-enabled give.');
 
 export const SHAPE_HADRON_SET_AUTOMATION_READ_GRANT = {
   app: z.string().min(1).describe('The App (URN or id).'),
@@ -36,9 +37,9 @@ export const SHAPE_HADRON_SET_AUTOMATION_READ_GRANT = {
   memory: z.string().min(1).describe('The memory to read (URN or id).'),
   prefix: z.string().optional().describe('A loc prefix: the loc itself and its colon-boundary descendants. Omit for the whole memory.'),
 };
-export const SHAPE_HADRON_REVOKE_AUTOMATION_READ_GRANT = { id: z.string().min(1).describe('The grant id.'), instruction };
+export const SHAPE_HADRON_REVOKE_AUTOMATION_READ_GRANT = { id: z.string().min(1).describe('The grant id.'), instruction: AUTOMATION_GRANT_INSTRUCTION };
 export const SHAPE_HADRON_LIST_AUTOMATION_READ_GRANTS = {
-  instruction,
+  instruction: AUTOMATION_GRANT_INSTRUCTION,
   app: z.string().optional().describe('The App (URN or id).'),
   memory: z.string().optional().describe('The memory (URN or id).'),
   includeRevoked: z.boolean().optional().describe('Include revoked grants. Default false.'),
@@ -74,14 +75,14 @@ export function registerAutomationReadGrantTools(server: McpServer, deps: { db: 
     'hadron_revoke_automation_read_grant',
     'End an automation read grant (terminal), as a person or held worker on an instruction within its own App. The App\'s managers or the target\'s manager may.',
     SHAPE_HADRON_REVOKE_AUTOMATION_READ_GRANT,
-    async ({ id, instruction }) => guard(async () => `Revoked. ${line(await r.Mutation.revokeAutomationReadGrant(null, { id, instruction }, ctxOf()))}`),
+    async ({ id, instruction: claim }) => guard(async () => `Revoked. ${line(await r.Mutation.revokeAutomationReadGrant(null, { id, instruction: claim }, ctxOf()))}`),
   );
   server.tool(
     'hadron_list_automation_read_grants',
-    'List automation read grants for an App (its managers see them) and/or a memory (its manager, or the Agent\'s manager for a system memory, sees the grants on it). You see only the grants whose App or target you manage. Give app, memory or both. A held worker on an instruction sees only its own App grants; memory-only is scoped there. Every admitted instructed list records one ids-only team event.',
+    'List automation read grants for an App (its managers see them) and/or a memory (its manager, or the Agent\'s manager for a system memory, sees the grants on it). You see only the grants whose App or target you manage. Give app, memory or both. A held worker on an instruction sees only its own App grants; memory-only is scoped there. Every admitted instructed list records one ids-only team event. A person supplying an instruction must also name app; omit instruction for a cross-App memory-only list.',
     SHAPE_HADRON_LIST_AUTOMATION_READ_GRANTS,
-    async ({ app, memory, includeRevoked, instruction }) => guard(async () => {
-      const rows = await r.Query.automationReadGrants(null, { appRef: app, memoryRef: memory, includeRevoked, instruction }, ctxOf());
+    async ({ app, memory, includeRevoked, instruction: claim }) => guard(async () => {
+      const rows = await r.Query.automationReadGrants(null, { appRef: app, memoryRef: memory, includeRevoked, instruction: claim }, ctxOf());
       return rows.length === 0 ? 'No automation read grants.' : rows.map(line).join('\n');
     }),
   );

@@ -29,7 +29,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { requireMemoryManageAccess, safeCanonicalUrn, type Context } from './resolvers.helpers.js';
 
 import { requireInstructedAct, type ActInstruction } from '../../../lib/auth/instructedAct.js';
-import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor } from './automationGrantInstruction.js';
+import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor, refuseAutomationGrantPrincipal } from './automationGrantInstruction.js';
 import { callerIsWorkerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 
@@ -163,6 +163,7 @@ export const automationReadGrantMutations = {
   },
 
   revokeAutomationReadGrant: async (_: unknown, { id, instruction }: { id: string; instruction?: ActInstruction | null }, ctx: Context) => {
+    refuseAutomationGrantPrincipal(ctx);
     const existing = await ctx.db.appAutomationReadGrant.findUnique({ where: { id }, include: { app: { select: APP_SELECT } } });
     if (!existing) throw denied();
     const app0 = existing.app;
@@ -202,57 +203,64 @@ export const automationReadGrantMutations = {
 
 type ListInput = { appRef?: string | null; memoryRef?: string | null; includeRevoked?: boolean | null; instruction?: ActInstruction | null };
 async function readGrantRows(input: ListInput, ctx: Context) {
-    // An unknown ref and a ref the caller cannot see are the one answer, the empty list (as the rows below are filtered
-    // by what the caller manages), so the list is no existence oracle for an App or a memory.
-    let appId: string | undefined;
-    let memoryId: string | undefined;
-    try {
-      appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : undefined;
-      memoryId = input.memoryRef ? (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id : undefined;
-    } catch (e) {
-      if ((e as { extensions?: { code?: string } }).extensions?.code === 'FORBIDDEN') return [];
-      throw e;
+  // An unknown ref and a ref the caller cannot see are the one answer, the empty list (as the rows below are filtered
+  // by what the caller manages), so the list is no existence oracle for an App or a memory.
+  let appId: string | undefined;
+  let memoryId: string | undefined;
+  try {
+    appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : undefined;
+    memoryId = input.memoryRef ? (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id : undefined;
+  } catch (e) {
+    if ((e as { extensions?: { code?: string } }).extensions?.code === 'FORBIDDEN') return [];
+    throw e;
+  }
+  const rows = await ctx.db.appAutomationReadGrant.findMany({
+    where: { ...(appId ? { appId } : {}), ...(memoryId ? { memoryId } : {}), ...(input.includeRevoked ? {} : { revokedAt: null }) },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    include: { app: { select: APP_SELECT } },
+  });
+  // A reader sees a row when they manage its App or manage its target; decided once per App and per memory.
+  const appManaged = new Map<string, boolean>();
+  const targetManaged = new Map<string, TargetRow | null>();
+  const urnOf = new Map<string, { urn: string } | null>();
+  const out: ReturnType<typeof project>[] = [];
+  for (const row of rows) {
+    let viaApp = appManaged.get(row.appId);
+    if (viaApp === undefined) { viaApp = await managesApp(ctx, row.app); appManaged.set(row.appId, viaApp); }
+    let target = targetManaged.get(row.memoryId);
+    if (target === undefined) {
+      const memory = await ctx.db.memory.findFirst({ where: { id: row.memoryId, deletedAt: null }, select: TARGET_SELECT });
+      target = memory && (await managesReadGrantTarget(ctx, memory)) ? memory : null;
+      targetManaged.set(row.memoryId, target);
     }
-    const rows = await ctx.db.appAutomationReadGrant.findMany({
-      where: { ...(appId ? { appId } : {}), ...(memoryId ? { memoryId } : {}), ...(input.includeRevoked ? {} : { revokedAt: null }) },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      include: { app: { select: APP_SELECT } },
-    });
-    // A reader sees a row when they manage its App or manage its target; decided once per App and per memory.
-    const appManaged = new Map<string, boolean>();
-    const targetManaged = new Map<string, TargetRow | null>();
-    const urnOf = new Map<string, { urn: string } | null>();
-    const out: ReturnType<typeof project>[] = [];
-    for (const row of rows) {
-      let viaApp = appManaged.get(row.appId);
-      if (viaApp === undefined) { viaApp = await managesApp(ctx, row.app); appManaged.set(row.appId, viaApp); }
-      let target = targetManaged.get(row.memoryId);
-      if (target === undefined) {
-        const memory = await ctx.db.memory.findFirst({ where: { id: row.memoryId, deletedAt: null }, select: TARGET_SELECT });
-        target = memory && (await managesReadGrantTarget(ctx, memory)) ? memory : null;
-        targetManaged.set(row.memoryId, target);
-      }
-      if (!viaApp && !target) continue;
-      let memory: { urn: string } | null = target;
-      if (!memory) {
-        // Cached per memory: a page of grants on one target costs one lookup, not one per row.
-        if (!urnOf.has(row.memoryId)) urnOf.set(row.memoryId, await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } }));
-        memory = urnOf.get(row.memoryId) ?? null;
-      }
-      out.push(project(row, memory));
+    if (!viaApp && !target) continue;
+    let memory: { urn: string } | null = target;
+    if (!memory) {
+      // Cached per memory: a page of grants on one target costs one lookup, not one per row.
+      if (!urnOf.has(row.memoryId)) urnOf.set(row.memoryId, await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } }));
+      memory = urnOf.get(row.memoryId) ?? null;
     }
-    return out;
+    out.push(project(row, memory));
+  }
+  return out;
 }
 export const automationReadGrantQueries = {
   automationReadGrants: async (_: unknown, input: ListInput, ctx: Context) => {
+    refuseAutomationGrantPrincipal(ctx);
     if (!await callerIsWorkerSession(ctx)) {
       // Preserve the direct-person filtering and cross-App target-manager reach.
       await requirePersonAsThemselves(ctx, denied);
       if (!input.appRef && !input.memoryRef) throw badInput('appRef or memoryRef is required.');
       // Validate a supplied person claim under the same protocol, without recording it.
       if (input.instruction != null) {
-        const appId = input.appRef ? (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id : undefined;
-        await requireInstructedAct(ctx, appId ?? '', input.instruction, async () => true,
+        // No inferred App for a direct person's cross-App memory-only list. A supplied claim must name its App.
+        if (!input.appRef) throw denied();
+        // LIVE_CHAT is an opaque person's claim, with no referenced App to resolve. Validate it before
+        // the filtered row reader, which conceals an unknown App just like an existing unmanaged App.
+        // TASK/message claims still resolve and check their same-App readable reference.
+        const claimApp = input.instruction.kind === 'LIVE_CHAT' ? input.appRef
+          : (await resolveOrDeny(() => resolveAppRef(ctx.db, input.appRef!))).id;
+        await requireInstructedAct(ctx, claimApp, input.instruction, async () => true,
           readActInstruction, denied);
       }
       return readGrantRows(input, ctx);
@@ -265,8 +273,18 @@ export const automationReadGrantQueries = {
     if (appId !== session.appId) throw denied();
     const app = await ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
     if (!app) throw denied();
-    const memoryId = input.memoryRef ? (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id : undefined;
-    const targets = await ctx.db.memory.findMany({ where: memoryId ? { id: memoryId, deletedAt: null } : {
+    let memoryId: string | undefined;
+    let unknownMemory = false;
+    if (input.memoryRef) {
+      try { memoryId = (await resolveOrDeny(() => resolveMemoryRef(ctx.db, input.memoryRef!))).id; }
+      catch (e) {
+        if ((e as { extensions?: { code?: string } }).extensions?.code !== 'FORBIDDEN') throw e;
+        unknownMemory = true;
+      }
+    }
+    // An unknown selector never becomes an unscoped list. Managers are admitted and record the same empty
+    // result as for an existing foreign target; a non-manager has no target authority and is refused.
+    const targets = unknownMemory ? [] : await ctx.db.memory.findMany({ where: memoryId ? { id: memoryId, deletedAt: null } : {
       deletedAt: null, automationReadGrants: { some: { appId } },
     }, select: TARGET_SELECT });
     const allows = async (c: Context) => {

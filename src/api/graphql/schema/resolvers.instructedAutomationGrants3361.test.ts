@@ -407,4 +407,34 @@ describe('#3361 instructed automation grants', () => {
     expect(answers[0]).toEqual(answers[1]); expect(answers[0].code).toBe('FORBIDDEN'); expect(await snapshot()).toEqual(before);
   });
 
+  for (const surface of ['graphql', 'mcp']) it(`${surface} conceals unknown and foreign-existing memory/App references`, async () => {
+    const org = await db.organization.create({ data: { name: 'Foreign', urn: 'cred3361.foreign' } });
+    const app = await db.app.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:app', organizationId: org.id } });
+    const memory = await db.memory.create({ data: { name: 'Foreign', urn: 'cred3361.foreign:memory', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as any });
+    for (const worker of [true, false]) {
+      const refs = worker ? [`hrn:mem:${memory.urn}`, 'hrn:mem:cred3361.foreign:absent'] : [`hrn:app:${app.urn}`, 'hrn:app:cred3361.foreign:absent'];
+      const answers = [];
+      for (const ref of refs) {
+        if (surface === 'graphql') {
+          const selector = worker ? 'memoryRef' : 'appRef';
+          const r = await server.executeOperation({ query: `query($ref:String!,$claim:ActInstructionInput){automationReadGrants(${selector}:$ref,instruction:$claim){id}}`, variables: { ref, claim: live } }, { contextValue: worker ? bound() : ctx() });
+          if (r.body.kind !== 'single') throw Error('incremental');
+          expect(r.body.singleResult.errors).toBeUndefined(); answers.push(r.body.singleResult.data);
+        } else {
+          const mcp = new McpServer({ name: '3361-oracle', version: '1' });
+          registerAutomationReadGrantTools(mcp, { db, auth: { userId: f.holder.id, roles: ['READER'], appId: f.app.id, ...(worker ? { sessionId: f.session.id } : {}) } as any });
+          const client = new Client({ name: '3361-oracle', version: '1' }); const [a, b] = InMemoryTransport.createLinkedPair();
+          await mcp.connect(b); await client.connect(a);
+          try {
+            const r = await client.callTool({ name: 'hadron_list_automation_read_grants', arguments: { ...(worker ? { memory: ref } : { app: ref }), instruction: live } });
+            expect(r.isError).not.toBe(true); answers.push(r.content);
+          } finally { await client.close(); await mcp.close(); }
+        }
+      }
+      expect(answers[0]).toEqual(answers[1]);
+      const events = await instructionEvents(); expect(events).toHaveLength(2);
+      expect(events[0].payload).toEqual(events[1].payload);
+    }
+  });
+
 });
