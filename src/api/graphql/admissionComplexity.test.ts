@@ -261,6 +261,10 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ __typename }')).toBe(0);
   });
 
+  it('#3381 single grant metadata costs one object plus eight leaves, not a page', () => {
+    expect(cost('{ automationTeamSnapshotGrant(id: "g") { id appId triggerKind triggerId grantedBy createdAt revokedAt revokedBy } }')).toBe(9);
+  });
+
   it('a list that states its page size multiplies by it; a wrapper around a list does too (the dominant shape)', () => {
     expect(cost('{ usageEvents(limit: 200) { id } }')).toBe(1 + 200 * 1);
     // edges is EdgesPage { items [Edge] total }: items costs 1 + 10 x 1 = 11, total 1, wrapper = 1 + (200 / 10) x 12
