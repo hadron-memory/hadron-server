@@ -349,7 +349,7 @@ describe('readiness uses only event facts', () => {
     const agent = await db.agent.create({ data: { name: 'Caller', urn: `${app.urn}:caller-agent`, systemMemoryId: memory.id, ownerUserId: author.id } });
     const spy = vi.spyOn(RegisterLookup.prototype, 'teamMemory').mockRejectedValue(new Error('synthetic lookup failure'));
     try {
-      expect((await runAsActor({ workerId: null, agentId: agent.id }, () => freeze())).action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' });
+      expect((await runAsActor({ workerId: null, agentId: agent.id }, () => freeze())).action).toEqual({ code: 'pr.frozen', state: 'UNRESOLVED' });
       expect(spy).toHaveBeenCalled();
       expect((await events())[0].type).toBe('pr.frozen');
       expect((await stored()).properties).toMatchObject({ 'pr.head': H });
@@ -386,7 +386,7 @@ describe('protocol admission order under a delayed transaction', () => {
 
 describe('protocol event feed compatibility', () => {
   it('round-trips protocol event types and payloads through the public GraphQL history query', async () => {
-    await readySeats();
+    const seats=await readySeats();
     await command('recordReadyCall', { taskRef: build.id, head: H }, author.id);
     const api = new ApolloServer({ typeDefs, resolvers });
     try {
@@ -400,6 +400,12 @@ describe('protocol event feed compatibility', () => {
         { type: 'review.scheduled', payload: { slots: ['local', 'blind', 'security'] } },
         { type: 'pr.frozen', payload: { head: H, pullRequest: 'https://github.com/example/project/pull/1' } },
         { type: 'pr.ready', payload: { head: H } },
+      ]));
+      const child=await api.executeOperation({query:'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskId:$task) { type payload } }',variables:{app:app.id,task:seats[0]!.id}}, {contextValue:ctx()});
+      const answer=(child.body as any).singleResult;expect(answer.errors).toBeUndefined();
+      expect(answer.data.agentTeamEvents).toEqual(expect.arrayContaining([
+        {type:'review.seat.assigned',payload:{slot:'local',head:H,supersedes:null}},
+        {type:'review.verdict',payload:{slot:'local',head:H,verdict:'APPROVE',node:'hrn:node:example.test:reviews:one',receipt:'https://example.test/receipt'}},
       ]));
     } finally { await api.stop(); }
   });
@@ -482,6 +488,8 @@ describe('SECURITY delta: negative history survives bounce and reassignment', ()
     await M.reassignAgentTask!({}, { taskId: t.id, assignee: { user: reviewer.id } }, ctx(author.id));
     await command('recordReviewVerdict', { taskRef:t.id, head:H, verdict:'APPROVE' }, reviewer.id);
     await finish(t); expect((await readiness()).ready).toBe(true);
+    await freeze(); // newest verdict per child wins, not any historical negative
+    expect((await readiness()).ready).toBe(true);
   });
 });
 
@@ -574,16 +582,49 @@ describe('Worker actor floor and register disclosure', () => {
     await workerVerdict(t);
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
     expect((await readiness()).slots[0].counts).toBe(false);
+    await freeze(H,other.id);
+    expect((await readiness()).slots[0].counts).toBe(false);
   });
-  it.each(['team','agent'])('withholds loc and URN when an inherited %s chain memory is unreadable, even with a nearer mapping',async side=>{
+  it.each(['team','agent'])('a nearer readable mapping wins over an inherited unreadable %s chain memory',async side=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
     const baseMemory=await db.memory.create({data:{name:'Unreadable base',urn:`${app.urn}:hidden-base`,class:'system',ownerUserId:other.id}});
     const baseAgent=await db.agent.create({data:{name:'Hidden base',urn:`${app.urn}:hidden-agent`,systemMemoryId:baseMemory.id,ownerUserId:other.id}});
     await db.agent.update({where:{id:side==='team'?teamAgent.id:roleAgent.id},data:{extendsAgentId:baseAgent.id}});
     const r=await bound(()=>freeze());
-    expect(r.action).toEqual({code:'pr.frozen',state:'WITHHELD'});
+    expect(r.action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
     expect((await events()).filter(e=>e.type==='pr.frozen')).toHaveLength(2);
+  });
+  it('an unreadable nearer entry is unmapped and does not fall through to a readable farther entry',async()=>{
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await db.node.deleteMany({where:{memoryId:teamAgent.systemMemoryId,loc:'register:pr.frozen'}});
+    const farMemory=await db.memory.create({data:{name:'Readable far entry',urn:`${app.urn}:far-entry`,class:'system',ownerUserId:author.id}});
+    const far=await db.agent.create({data:{name:'Far entry',urn:`${app.urn}:far-entry-agent`,systemMemoryId:farMemory.id,ownerUserId:author.id}});
+    const hiddenMemory=await db.memory.create({data:{name:'Hidden entry',urn:`${app.urn}:hidden-entry`,class:'system',ownerUserId:other.id}});
+    const hidden=await db.agent.create({data:{name:'Hidden entry',urn:`${app.urn}:hidden-entry-agent`,systemMemoryId:hiddenMemory.id,ownerUserId:other.id,extendsAgentId:far.id}});
+    await db.agent.update({where:{id:teamAgent.id},data:{extendsAgentId:hidden.id}});
+    for(const memoryId of [hiddenMemory.id,farMemory.id]) await db.node.create({data:{id:generateId(),memoryId,loc:'register:pr.frozen',name:'Entry',data:{registerEntry:{code:'pr.frozen',taskLoc:'tasks:review'}}}});
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'UNMAPPED'});
+    // Restoring a readable nearer entry makes a positive mapping without reading the ancestor.
+    await db.node.create({data:{id:generateId(),memoryId:teamAgent.systemMemoryId,loc:'register:pr.frozen',name:'Own entry',data:{registerEntry:{code:'pr.frozen',taskLoc:'tasks:review'}}}});
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
+  });
+  it.each(['unreadable','missing'])('a readable entry with a %s nearest task is unresolved without a task URN',async mode=>{
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await db.node.deleteMany({where:{memoryId:roleMemory.id,loc:'tasks:review'}});
+    if(mode==='unreadable'){
+      const farMemory=await db.memory.create({data:{name:'Readable far task',urn:`${app.urn}:far-task`,class:'system',ownerUserId:author.id}});
+      const far=await db.agent.create({data:{name:'Far task',urn:`${app.urn}:far-task-agent`,systemMemoryId:farMemory.id,ownerUserId:author.id}});
+      const hiddenMemory=await db.memory.create({data:{name:'Hidden task',urn:`${app.urn}:hidden-task`,class:'system',ownerUserId:other.id}});
+      const hidden=await db.agent.create({data:{name:'Hidden task',urn:`${app.urn}:hidden-task-agent`,systemMemoryId:hiddenMemory.id,ownerUserId:other.id,extendsAgentId:far.id}});
+      await db.agent.update({where:{id:roleAgent.id},data:{extendsAgentId:hidden.id}});
+      for(const memoryId of [hiddenMemory.id,farMemory.id]) await db.node.create({data:{id:generateId(),memoryId,loc:'tasks:review',name:'Task',isRunnable:true}});
+    }
+    const result=(await bound(()=>freeze())).action;
+    expect(result.state).toBe('UNRESOLVED');expect(result.code).toBe('pr.frozen');expect(result.taskUrn).toBeUndefined();
+    expect(result.taskLoc).toBe('tasks:review');
+    await db.node.create({data:{id:generateId(),memoryId:roleMemory.id,loc:'tasks:review',name:'Own task',isRunnable:true}});
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
   });
   it('does not resolve the task of an Agent retired after the command committed',async()=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
@@ -648,5 +689,34 @@ describe('controlled same-ms writer clock evidence (harness only)', () => {
     // selects H, so H2 refuses. No claim about other tied verdict sequences follows.
     await expect(readiness(H2)).rejects.toMatchObject(error('PR_HEAD_NOT_FROZEN'));
     expect((await readiness(H)).head).toBe(H);
+  });
+});
+
+describe('BLIND delta new refreeze floor probe',()=>{
+ it('a second freezer cannot release an earlier freezer self verdict at the same head',async()=>{
+  await schedule(['local']);await freeze();const t=await seat('local',H,author.id);
+  await verdict(t,'APPROVE',H,author.id);await finish(t,author.id);
+  expect((await readiness()).slots[0].counts).toBe(false);
+  await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
+  expect((await readiness()).slots[0].counts).toBe(false);
+  await freeze(H,other.id);
+  const answer=await readiness();
+  expect(answer.slots[0].counts).toBe(false);
+  expect(answer.ready).toBe(false);
+ });
+});
+
+
+describe('late verdicts on superseded seats',()=>{
+  it.each(['CHANGES_REQUESTED','FAIL','REFUSED'])('a late %s at H blocks the slot until a new head',async value=>{
+    await schedule(['local']);await freeze();
+    const old=await seat('local');await M.startAgentTask!({}, {taskId:old.id},ctx(reviewer.id));
+    const now=await seat('local',H,other.id,old.id);await verdict(now,'APPROVE',H,other.id);await finish(now,other.id);
+    expect((await readiness()).ready).toBe(true);
+    await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:value},reviewer.id);
+    const answer=await readiness();expect(answer.slots[0].currentTaskId).toBe(now.id);expect(answer.slots[0].counts).toBe(false);expect(answer.ready).toBe(false);
+    await expect(command('recordReadyCall',{taskRef:build.id,head:H},author.id)).rejects.toMatchObject(error('PR_NOT_READY'));
+    await freeze(H2);const next=await seat('local',H2,other.id,now.id);await verdict(next,'APPROVE',H2,other.id);await finish(next,other.id);
+    expect((await readiness(H2)).ready).toBe(true);
   });
 });
