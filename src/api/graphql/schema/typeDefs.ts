@@ -8139,7 +8139,28 @@ export const typeDefs = `#graphql
     changeReference: String!
   }
 
+  "#3448 — a typed review outcome; the command records it without finishing the task (hrn:node:hadronmemory.com:specs:cor:agt:050:08)."
+  enum ReviewVerdict { APPROVE CHANGES_REQUESTED PASS FAIL CARRY REFUSED }
+  "#3448 — a command committed, with optional register guidance (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  type PrProtocolResult { task: AgentTask! action: PrProtocolAction! }
+  "#3448 — register guidance for the committed event code (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  type PrProtocolAction { code: String! state: TickActionState! taskLoc: String taskUrn: String }
+  "#3448 — a required slot's current unsuperseded seat, from typed events only."
+  type ReviewSlotReadiness {
+    slot: String!
+    currentTaskId: ID
+    state: String!
+    verdict: ReviewVerdict
+    head: String
+    counts: Boolean!
+  }
+  "#3448 — readiness ignores opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
+  type PullRequestReadiness { ready: Boolean! head: String! slots: [ReviewSlotReadiness!]! }
+
   type Query {
+    "#3448 — task readers, including the App's own live key (hrn:node:hadronmemory.com:specs:cor:agt:050:21 / hrn:node:hadronmemory.com:specs:cor:agt:050:23). Null for an unreadable task. PR_HEAD_NOT_FROZEN or REVIEW_SCHEDULE_MISSING for absent event facts."
+    pullRequestReadiness(taskRef: ID!, head: String!): PullRequestReadiness
+
     "Live platform ADMIN/OWNER human only; bounded five-row policy read (#1793)."
     rateLimitPolicies: [RateLimitPolicy!]!
     """
@@ -10406,6 +10427,17 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
+    "#3448 — owner-chain only, never the assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Non-empty unique atom slots, at most 64 characters each; latest event replaces the schedule."
+    setReviewSchedule(taskRef: ID!, slots: [String!]!): PrProtocolResult!
+    "#3448 — the assignee freezes a full 40-hex head on a task with a pull_request reference (hrn:node:hadronmemory.com:specs:cor:agt:050:08)."
+    freezePullRequestHead(taskRef: ID!, head: String!): PrProtocolResult!
+    "#3448 — seat owner-chain binds a direct child to a scheduled slot at the frozen head. A sibling's CHANGES_REQUESTED, FAIL or REFUSED verdict at this head cannot be superseded (REVIEW_SEAT_NOT_SUPERSEDABLE)."
+    assignReviewSeat(taskRef: ID!, slot: String!, head: String!, supersedes: ID): PrProtocolResult!
+    "#3448 — STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing."
+    recordReviewVerdict(taskRef: ID!, head: String!, verdict: ReviewVerdict!, node: String, receipt: String): PrProtocolResult!
+    "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head, by an actor other than the implementer. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
+    recordReadyCall(taskRef: ID!, head: String!): PrProtocolResult!
+
     "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."
     setRateLimitPolicy(input: SetRateLimitPolicyInput!): RateLimitPolicy!
     "Restore one retained deleted node in a live memory you can read and write. Restore deleted ancestors first; governed nodes, comments, compiled boot prompts and protected internal addresses refuse. Does not restore descendants or revisions. hrn:node:hadronmemory.com:specs:cor:acl:130:02"

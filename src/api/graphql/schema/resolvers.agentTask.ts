@@ -188,7 +188,7 @@ const APP_SELECT = {
   uninstalledAt: true, deletedAt: true,
 } as const;
 export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
-type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
+export type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
 
 /**
  * #3323 (S4a of #2483, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): the instruction a wired door was called with,
@@ -617,7 +617,7 @@ async function loadReadableTask(
 }
 
 /** A task the caller may READ, with its App: a participant, or the App's own key (#1755). Null when missing or unreadable. */
-async function withReadableTask<T>(
+export async function withReadableTask<T>(
   ctx: Context,
   taskRef: string,
   body: (c: Context, r: { task: TaskRow; app: TaskApp }) => Promise<T>,
@@ -653,7 +653,7 @@ function actorIs(actor: TaskActor, workerId: string | null, userId: string | nul
   return workerId === null && userId !== null && userId === actor.userId;
 }
 const isOwner = (actor: TaskActor, t: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): boolean => actorIs(actor, t.ownerWorkerId, t.ownerUserId);
-const isAssignee = (actor: TaskActor, t: Pick<TaskRow, 'assigneeWorkerId' | 'assigneeUserId'>): boolean =>
+export const isAssignee = (actor: TaskActor, t: Pick<TaskRow, 'assigneeWorkerId' | 'assigneeUserId'>): boolean =>
   actorIs(actor, t.assigneeWorkerId, t.assigneeUserId);
 
 /** The App-manager arm's own refusal inside #3307's check; the door answers with its own refusal. */
@@ -743,7 +743,7 @@ async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskAc
  * The task's owner, (#1726) a worker the owner reports to, or whoever manages the App. #3323: the manager arm is asked
  * last, so a worker the other arms admit needs no instruction and writes no instructed-act record.
  */
-async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): Promise<boolean> {
+export async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): Promise<boolean> {
   return isOwner(actor, task) || (await actorCoordinatesOwner(tx, actor, task)) || (await actorManagesApp(txCtx, app, actor, actor.instructed));
 }
 
@@ -1209,7 +1209,7 @@ export async function inTaskWriteTx<T>(
  * TRANSACTION context, so the authorization and state checks inside `act` see
  * exactly the row and the authority they depend on.
  */
-async function mutateTask(
+export async function mutateTask(
   ctx: Context,
   taskRef: string,
   act: (tx: Prisma.TransactionClient, task: TaskRow, actor: TaskActor, app: TaskApp, txCtx: Context, locked: ReadonlySet<string>) => Promise<void>,

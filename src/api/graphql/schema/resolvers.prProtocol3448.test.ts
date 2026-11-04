@@ -75,6 +75,11 @@ describe('typed PR schedule and freeze', () => {
     await expect(schedule(['local'], author.id)).rejects.toMatchObject(error('TASK_NOT_OWNER'));
     expect(await events()).toHaveLength(0); expect((await stored()).properties).toBeNull();
   });
+  it('a schedule writer who is also the assignee is still refused', async () => {
+    const t = await M.createAgentTask!({}, { input: { appRef: app.id, title: 'Own build', source: 's', assignee: { user: author.id } } }, ctx(author.id));
+    await expect(command('setReviewSchedule', { taskRef: t.id, slots: ['local'] }, author.id)).rejects.toMatchObject(error('TASK_NOT_OWNER'));
+    expect(await events(t.id)).toHaveLength(0);
+  });
   it.each([[], ['local', 'local'], ['a b'], ['x'.repeat(65)], ['local.'], ['qa::portal'], ['qa:']])('refuses invalid slots %j atomically', async (...slots) => {
     await expect(schedule(slots as string[])).rejects.toMatchObject(error('BAD_USER_INPUT'));
     expect(await events()).toHaveLength(0);
@@ -193,6 +198,11 @@ describe('seat binding and verdicts', () => {
   it('a started task without an assignment cannot record a verdict', async () => {
     await M.startAgentTask!({}, { taskId: build.id }, ctx(author.id));
     await expect(command('recordReviewVerdict', { taskRef: build.id, head: H, verdict: 'APPROVE' }, author.id)).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));
+  });
+  it('untyped resolver callers cannot invent a verdict enum value', async () => {
+    await schedule(); await freeze(); const t = await seat('local'); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await expect(command('recordReviewVerdict', { taskRef: t.id, head: H, verdict: 'APPROVED' }, reviewer.id)).rejects.toMatchObject(error('BAD_USER_INPUT'));
+    expect((await events(t.id)).filter(e => e.type === 'review.verdict')).toHaveLength(0);
   });
 });
 
