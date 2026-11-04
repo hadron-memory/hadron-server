@@ -5,11 +5,13 @@
  * `offTeamTool` they never reach the SDK, so `tools/list` omits them for every principal and a call answers the
  * SDK's unknown-tool error, exactly like a name that never existed.
  *
- * Shape (D1a, the switch must be visible to the two manifest scrapers): hadron-cli's `scripts/gen-tools-manifest.sh`
- * greps `server.tool(` and hadron-portal's `scripts/refresh-hosted-mcp-tools.mjs` matches `tool(` / `registerTool(` /
- * `addTool(` followed by a quoted name. A disabled tool is written `off('<tool name>', …)`, which neither matches, so both
- * generators skip it with no change of their own. Keep that: never write `server.tool(` or `.tool('hadron_…` for a
- * disabled tool, and keep the quoted name on the line AFTER `off(` so the CLI's one-line-after grep cannot catch it.
+ * Shape (D1a; S1 source 99246d46): keep the `offTeamTool` helper, its local `off` alias and disabled `off(...)` calls
+ * visible to the manifest scrapers. hadron-cli's `scripts/gen-tools-manifest.sh` still scrapes `server.tool(` plus
+ * the next line, but now explicitly subtracts names registered through this helper (CLI#1618). The merged portal
+ * change https://github.com/hadron-memory/hadron-portal/pull/1662 (531adffc) makes `scripts/refresh-hosted-mcp-tools.mjs`
+ * recognize the helper and its module-local aliases, then subtract switched-off names from the registered set.
+ * Never write `server.tool(` or `.tool('hadron_…` for a disabled tool. Keep its quoted name on the line AFTER `off(`
+ * for the CLI's opener/next-line source layout; neither regex scraper promises to understand arbitrary syntax.
  *
  * Code, not configuration (D2): there is no environment variable, no option on `createMcpServerInstance` and no test-only
  * path back (R4). Turning a tool back on is a code change in the file that registers it: change `off(` to `server.tool(`.
