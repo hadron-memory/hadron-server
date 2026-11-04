@@ -1,11 +1,11 @@
 /**
  * #2810 second slice: recoveryEdges' work must be bounded by what the call names,
  * not by the memory's size. Pins, red on main at b6ca89ce47's shape:
- *  - the whole-memory page takes ~1.6s/page at 20k nodes / 40k edges (per-edge-side
+ *  - the whole-memory page takes 1591-1882ms at 20k nodes / 40k edges (per-edge-side
  *    visibility evaluation — the ancestor subplan ran once per edge × side);
- *  - a restricted (edgeIds) call whose 200 edges fan out over 152 endpoint
- *    memories takes ~1.3s (sequential per-memory authorization cascade), and the
- *    portal pays it per batch request — a fresh context per call, like a request;
+ *  - a restricted (edgeIds) call whose 200 edges fan out over 152 endpoint memories
+ *    takes 2620ms (sequential per-memory authorization cascade), and the portal pays
+ *    it per batch request — a fresh context per call, like a request;
  *  - count and page are two masked statements (endpoint discovery is a third,
  *    unmasked), so every call pays the masked edge scan twice.
  * Budget fixture sizes are the local repro scale; the production trace calibrates
