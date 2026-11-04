@@ -1,6 +1,7 @@
 import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
-import { captureSetupConsent } from '../../../lib/automation/pins.js';
+import { captureSetupConsent, captureSetupOutcome } from '../../../lib/automation/pins.js';
+import { summarizeAutomation } from '../../../lib/automation/approvalSummary.js';
 // Headless-run surfaces (spec 040 plan §9): schedule CRUD, the run audit
 // read surface (cor:api:120-shaped), manual trigger, and the kill switch.
 
@@ -103,6 +104,9 @@ export function buildAppRunOrderBy(
       return [{ createdAt: dir }, tiebreak];
   }
 }
+
+/** #3457: createAgentSchedule's input minus the schedule's own name, plus nothing: the pin never depends on the name. */
+export type PreviewAgentScheduleInput = Omit<CreateAgentScheduleInput, 'name' | 'policy' | 'scopeRef'>;
 
 export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** App reference — PK or fully-qualified URN (the platform-wide `ref` convention). */
@@ -1002,6 +1006,42 @@ export const appRunMutations = {
 };
 
 export const appRunQueries = {
+  /**
+   * #3457 (Refs #2435): what a schedule would do, before it exists. Same authority as createAgentSchedule (org-ADMIN,
+   * checked first, before any node or Agent read) and the same pin: it comes from captureSetupOutcome, the call create
+   * stores its consent from, so previewed hash === the created schedule's automationApproval.hash while the graph is
+   * unchanged. Writes nothing. An entry create would store as UNADOPTED is a typed result (reason split as the marker's),
+   * not an error; admin, App, Agent and timing refusals are create's own errors.
+   */
+  previewAgentSchedule: async (
+    _: unknown,
+    { input }: { input: PreviewAgentScheduleInput },
+    ctx: Context,
+  ) => {
+    const app = await requireScheduleAdmin(ctx, input.appRef);
+    const budgets = triggerBudgetPatch(input);
+    assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
+    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const timezone = input.timezone?.trim() || 'UTC';
+    if ((input.cron == null) === (input.runAt == null)) {
+      throw new GraphQLError('Provide exactly one of cron (recurring) or runAt (one-shot).', {
+        extensions: { code: 'BAD_USER_INPUT' },
+      });
+    }
+    if (input.cron != null) validatedCronNext(input.cron, timezone);
+    const runAt = input.runAt != null ? validatedRunAt(input.runAt) : null;
+    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    if (!outcome.adoptable) {
+      return { outcome: 'CANNOT_BE_ADOPTED', hash: null, summary: null, reason: outcome.marker.reason === 'MEMORY_UNREADABLE' ? 'MEMORY_UNREADABLE' : 'OTHER' };
+    }
+    const summary = summarizeAutomation(outcome.pin, {
+      kind: 'SCHEDULE',
+      budgets,
+      schedule: { cron: input.cron ?? null, timezone, runAt, enabled: input.enabled ?? true },
+    });
+    return { outcome: 'ADOPTABLE', hash: outcome.pin.hash, summary, reason: null };
+  },
+
   /** Paginated schedules for an App (org-ADMIN; cor:api:120 envelope). */
   agentSchedules: async (
     _: unknown,

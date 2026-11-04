@@ -711,3 +711,20 @@ export async function appendManagerInstructionEvent(
     payload: { act: args.act, ...subject, instruction: { kind: a.instruction.kind, ref: a.instruction.ref } },
   } });
 }
+
+/**
+ * #3449 (cor:agt:110:01, :050:21/:23): App-defined events are the explicit opaque-payload exception to
+ * the fixed platform builders above. Caller validates the code/current slug and 4KiB JSON object under
+ * the ordinary creator gate. App-wide readable: never put secrets here. No platform list gains the code.
+ */
+export async function appendAppActionEvent(tx: Prisma.TransactionClient, args: {
+  appId: string; taskId: string | null; code: string; payload: Prisma.InputJsonObject; actor: EventActor;
+}): Promise<string> {
+  const row = await tx.agentTeamEvent.create({ data: {
+    id: generateId(), appId: args.appId, taskId: args.taskId, type: args.code,
+    payload: { payload: args.payload }, actorUserId: args.actor.userId,
+    actorWorkerId: args.actor.workerId, actorAgentId: args.actor.agentId,
+    actorRunId: args.actor.runId ?? null, actorAppKeyId: args.actor.appKeyId ?? null,
+  }, select: { id: true } });
+  return row.id;
+}

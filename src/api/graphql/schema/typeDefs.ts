@@ -6767,6 +6767,51 @@ export const typeDefs = `#graphql
     scopeRef: ID
   }
 
+  "#3457: what a schedule would do, asked before it exists. The inputs create takes that the pin or the timing sentence depend on; the schedule's own name, policy and scope never do. Resolved exactly as createAgentSchedule resolves them."
+  input PreviewAgentScheduleInput {
+    budgetTokens: Int
+    budgetActions: Int
+    "App the run would execute as - ref: PK or fully-qualified URN."
+    appRef: String!
+    "Recurring: 5-field cron, evaluated in timezone (default UTC). Provide exactly one of cron / runAt."
+    cron: String
+    "One-shot: ISO-8601 instant. Provide exactly one of cron / runAt."
+    runAt: String
+    timezone: String
+    "Fully-qualified URN of the prompt node to run."
+    entryNodeUrn: String!
+    "Agent - ref: PK or URN; must be installed in the App."
+    agentRef: String
+    runAsSelf: Boolean
+    "Static payload; only its __aiConfigName entry can change what is previewed."
+    eventData: JSON
+    aiConfigName: String
+    enabled: Boolean
+  }
+
+  enum AgentSchedulePreviewOutcome {
+    "The automation can be adopted: summary and hash are set, reason is null."
+    ADOPTABLE
+    "Create would store this schedule UNADOPTED: summary and hash are null and reason says which kind."
+    CANNOT_BE_ADOPTED
+  }
+
+  enum AgentSchedulePreviewReason {
+    "The entry or something it routes to is missing or not readable by you or by the run. A missing entry and an unreadable one answer identically."
+    MEMORY_UNREADABLE
+    "Readable, but the graph is encrypted, outside the organization or over the consent bounds."
+    OTHER
+  }
+
+  "#3457: the preview of a schedule that does not exist yet. A snapshot, not a promise: if the graph changes before Create, the hash differs. summary.schedule carries the raw cron, so a plain-language UI renders its own timing."
+  type AgentSchedulePreview {
+    outcome: AgentSchedulePreviewOutcome!
+    "The pin hash the created schedule's automationApproval.hash shows while the graph is unchanged. Null when CANNOT_BE_ADOPTED."
+    hash: String
+    summary: AutomationSummary
+    reason: AgentSchedulePreviewReason
+  }
+
   input UpdateAgentScheduleInput {
     "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
     budgetTokens: Int
@@ -8181,6 +8226,8 @@ export const typeDefs = `#graphql
     recoveryEdges(memoryRef: ID!, edgeIds: [ID!], limit: Int = 20, offset: Int = 0): RecoveryEdgesPage!
     "#1719: review exact automation graph bytes and digest. triggerRef is the trigger row ID; MANUAL uses the origin AppRun ID. Only its run-as user or the manager of an App-only trigger may preview."
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
+    "#3457: what a schedule would do before it exists (org ADMIN of the App, checked first; writes nothing). Admin, App, Agent and timing refusals are createAgentSchedule's errors; an entry create would store UNADOPTED is the typed outcome CANNOT_BE_ADOPTED."
+    previewAgentSchedule(input: PreviewAgentScheduleInput!): AgentSchedulePreview!
     "#2441: the schedules and webhooks of an App that the caller may adopt, with their adoption state. Authorization first, then ordered by (name, kind, id) and paged: limit defaults to 20, maximum 50; after is the previous page's nextCursor. MANUAL triggers are never listed (consent is per run); omitted says so. Only an adopter sees any row."
     automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
     "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
@@ -8362,6 +8409,8 @@ export const typeDefs = `#graphql
       "The id of the last event read: the page continues strictly after it. An id that is not an event of this App is refused BAD_USER_INPUT."
       after: ID
       types: [String!]
+      "#3449: literal prefix, intersects nonempty types; app. includes legacy platform events. An empty prefix matches all types; omitted or empty types adds no type filter."
+      codePrefix: String
       alarmsOnly: Boolean
       taskId: ID
       limit: Int
@@ -10492,7 +10541,23 @@ export const typeDefs = `#graphql
     already see it on the roster.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
     """
+
     createAgentTask(input: CreateAgentTaskInput!, instruction: ActInstructionInput): AgentTask!
+
+    """
+    #3449: App action app.<current-app-slug>.<name>, lower-case legal URN atom, at most 64 characters.
+    Same creator authority as createAgentTask (hrn:node:hadronmemory.com:specs:cor:agt:050:06).
+    taskRef must name a readable task in this App; unknown and foreign refs answer TASK_NOT_FOUND.
+    An omitted payload becomes {}; explicit null, non-objects, NUL or an unpaired surrogate in a JSON key/value refuse BAD_USER_INPUT.
+    payload is a JSON object of at most 4096 UTF-8 bytes, readable by EVERY App participant and the App's own key,
+    with or without taskRef, and must contain nothing secret (hrn:node:hadronmemory.com:specs:cor:agt:050:23).
+    Each successful call appends a new event (retries are not deduplicated), type = code, payload = {payload}.
+    Task-bound actions are passive: they never
+    acknowledge assignment/child-finished wakes. APP_ACTION_CODE_INVALID refuses invalid codes and foreign slugs.
+    The register answer reads as the caller (hrn:node:hadronmemory.com:specs:cor:agt:110:03), never authorization.
+    A caller without an Agent receives WITHHELD with code only, no task loc/URN and no register lookup.
+    """
+    recordAppAction(appRef: ID!, code: String!, taskRef: ID, payload: JSON): RecordAppActionResult!
     """
     Default matching (distinctAssignees omitted, null or false): items with match:true each get one post-commit
     match attempt in list order; failure marks that task, not a call refusal. Different workers and all-or-none
@@ -14749,13 +14814,18 @@ export const typeDefs = `#graphql
     MAPPED
     "No mapping in the fully readable Team Agent chain, or no single Team Agent."
     UNMAPPED
-    "The readable entry's loc has no usable task in the worker's chain."
+    "The readable entry's loc has no usable task in the lookup chain."
     UNRESOLVED
     "Code-only guidance: resolve the task yourself. Includes failed reads."
     WITHHELD
   }
+  "#3449: App action and caller-readable register answer (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  type RecordAppActionResult {
+    eventId: ID!
+    action: TickAction!
+  }
   type TickAction {
-    "Permanent tick code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
+    "Permanent action code (hrn:node:hadronmemory.com:specs:cor:agt:110:01)."
     code: String!
     state: TickActionState!
     "The readable entry's loc, including when no usable task was found."
