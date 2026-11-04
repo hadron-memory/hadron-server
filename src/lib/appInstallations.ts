@@ -122,16 +122,21 @@ export async function listAppInstallations(
       { importedAgentId: 'asc' },
     ],
   });
+  // #3435: a derived install's createdAt is the EARLIEST, across the importers it derives from, of the later of that
+  // importer's install in the App and the import itself; the importer it names is the one that gives that moment
+  // (the first on a tie, in import order). Never the first importer's value merely because its edge came first.
+  const derived = new Map<string, AppInstallation>();
   for (const edge of imports)
     for (const parent of edge.parentAgent.appAgents) {
-      if (seen.has(key(parent.appId, edge.importedAgentId))) continue;
-      seen.add(key(parent.appId, edge.importedAgentId));
-      result.push({
+      const k = key(parent.appId, edge.importedAgentId);
+      if (seen.has(k)) continue;
+      const at = Math.max(edge.createdAt.getTime(), parent.createdAt.getTime());
+      const best = derived.get(k);
+      if (best && best.createdAt.getTime() <= at) continue;
+      derived.set(k, {
         appId: parent.appId,
         agentId: edge.importedAgentId,
-        createdAt: new Date(
-          Math.max(edge.createdAt.getTime(), parent.createdAt.getTime()),
-        ),
+        createdAt: new Date(at),
         createdBy: null,
         updatedAt: null,
         updatedBy: null,
@@ -142,6 +147,7 @@ export async function listAppInstallations(
         agent: edge.importedAgent,
       });
     }
+  result.push(...derived.values());
   return result;
 }
 /** Candidate App filter for reverse lookups. The source resolver still judges

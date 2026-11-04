@@ -1,4 +1,4 @@
-import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization } from '../../../lib/appInstallations.js';
+import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
@@ -3405,7 +3405,10 @@ export async function uninstallAgentFromAppCore(
     },
     async (tx) => {
       await tx.appAgent.deleteMany({ where: { appId: resolvedAppId, agentId: resolvedAgentId } });
-      await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
+      // #3435: the delete is row-keyed. An Agent that is STILL installed by derivation (a direct import of an installed
+      // Agent, #2168) has not left the App, so the App's own register rows naming it stay.
+      if (!(await resolveAppInstallation(tx, resolvedAppId, resolvedAgentId)))
+        await removeRegisterRowsForUninstall(tx, resolvedAppId, resolvedAgentId, ctx.userId ?? null);
     },
     { lockMode: 'exclusive', afterLock: async (tx) => {
       await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedAppId} FOR SHARE`;
