@@ -105,4 +105,62 @@ describe('#1328 MCP parity', () => {
     await srv.callToolText('hadron_move_node', { urn: urn('b'), targetUrn: urn('c'), renameToLeaf: true, authoredWith: claim() });
     expect(await stored('c')).toMatchObject({ name: 'c', authoredByTask: taskId });
   });
+
+  describe('a rename out of a memory answers to the rules it leaves', () => {
+    const other = (loc: string) => `hrn:node:attest-mcp:other:${loc}`;
+    let otherId: string;
+    const inOther = (loc: string) => db.node.findUnique({ where: { loc_memoryId: { loc, memoryId: otherId } } });
+    const seed = async (srv: ReturnType<typeof createTestableMcpServer>, withChild: boolean) => {
+      await srv.callToolText('hadron_create_node', { urn: urn('a'), name: 'A', role: 'guide', content: 'one', authoredWith: claim() });
+      if (withChild) await srv.callToolText('hadron_create_node', { urn: urn('a:kid'), name: 'Kid', content: 'two' });
+    };
+
+    beforeEach(async () => {
+      const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+      otherId = (await db.memory.create({
+        data: { id: generateId(), organizationId: source.organizationId, urn: 'attest-mcp:other', name: 'other', class: 'knowledge' },
+      })).id;
+    });
+
+    // A node with a child goes through the subtree helper; a lone node may not. Both doors must hold.
+    describe.each([['a lone node', false], ['a node with a child', true]])('%s', (_name, withChild) => {
+      it('into an ungoverned memory: no claim is refused, nothing moves', async () => {
+        const srv = createTestableMcpServer(auth());
+        await seed(srv, withChild);
+        expect(await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: other('b'), renameToLeaf: true }))
+          .toMatch(/authoring_attestation_missing/);
+        expect(await stored('a')).toMatchObject({ name: 'A' });
+        expect(await inOther('b')).toBeNull();
+      });
+
+      it("into an ungoverned memory: the source rule's claim passes", async () => {
+        const srv = createTestableMcpServer(auth());
+        await seed(srv, withChild);
+        await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: other('b'), renameToLeaf: true, authoredWith: claim() });
+        expect(await inOther('b')).toMatchObject({ name: 'b' });
+      });
+
+      it('into a memory requiring a different task: one claim cannot meet both, so split it', async () => {
+        const srv = createTestableMcpServer(auth());
+        await seed(srv, withChild);
+        const otherTask = await db.node.create({ data: { id: generateId(), memoryId: otherId, loc: 'task', name: 'T', isRunnable: true } });
+        const otherConfig = await db.memoryConfig.create({ data: { id: generateId(), memoryId: otherId } });
+        await db.nodeRoleRule.create({
+          data: { id: generateId(), configId: otherConfig.id, role: 'guide', authorTaskId: otherTask.id, authorTaskRequired: true },
+        });
+        for (const authoredWith of [claim(), { task: otherTask.id, revision: 1 }]) {
+          expect(await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: other('b'), renameToLeaf: true, authoredWith }))
+            .toMatch(/authoring_attestation_wrong_task/);
+        }
+        expect(await inOther('b')).toBeNull();
+      });
+    });
+
+    it('a plain move still carries: the address is not authored', async () => {
+      const srv = createTestableMcpServer(auth());
+      await seed(srv, false);
+      await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: other('b') });
+      expect(await inOther('b')).toMatchObject({ name: 'A', authoredByTask: taskId });
+    });
+  });
 });
