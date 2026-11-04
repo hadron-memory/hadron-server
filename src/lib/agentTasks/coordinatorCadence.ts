@@ -18,7 +18,8 @@
  * THE LANE. The matcher's team pool for the coordinator (`matchingTeamPool`) minus every worker whose role is
  * `coordinator` (the pool includes the lead itself, and another coordinator with no reporting line joins every pool; a
  * coordinator is nobody's free worker). A worker with no reporting line is in every coordinator's lane, as for matching.
- * Free for work is the shared helper's `free` (cor:agt:060:05), the one the matcher and the roster read.
+ * Free for work is the shared helper's `free` (cor:agt:060:05), the one the matcher and the roster read, minus every
+ * lane worker a live stop signal covers at any level (ruling 0123, alarm-only exclusion).
  *
  * EPISODES. The alarm stream is append-only and `agent_team_events_episode_uniq` does not dedupe a NULL task id, so the
  * episode is a row in `coordinator_cadence_episodes` whose partial unique index admits one OPEN row per coordinator,
@@ -37,6 +38,7 @@ import { loadPendingReasons } from '../tickers/checkPending.js';
 import { darkAlarmChain, EXEMPT_PENDING } from './darkWorker.js';
 import { loadWorkerWorkStates, matchingTeamPool } from './matcher.js';
 import { isSerializationFailure } from './stall.js';
+import { coveringSignals } from '../stopSignals/state.js';
 
 export const COORDINATOR_CADENCE_EVENT_TYPE = 'alarm.coordinator-cadence';
 /** Ruling 0094 A: 60 minutes, fixed for now (a per-App setting is out of scope). */
@@ -94,9 +96,12 @@ async function decide(db: PrismaClient, appId: string, workerId: string, now: Da
   if (now.getTime() - clock < COORDINATOR_CADENCE_WINDOW_MINUTES * 60_000) return null;
   const pool = await matchingTeamPool(db, appId, c.id);
   const states = new Map((await loadWorkerWorkStates(db, appId, now)).map((st) => [st.id, st]));
+  // Ruling 0123: every stop level blocks assignment, including pause-dispatch.
+  // Read live coverage through this connection so raise() rechecks it in its transaction too.
+  const stopped = await coveringSignals(db, appId, [...pool], now);
   const freeWorkerCount = [...pool].filter((id) => {
     const st = states.get(id);
-    return !!st && !isCoordinator(st.role) && st.free;
+    return !!st && !isCoordinator(st.role) && st.free && !stopped.has(id);
   }).length;
   return freeWorkerCount === 0 ? null : { workerId: c.id, lastAssignedAt: last, freeWorkerCount };
 }
