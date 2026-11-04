@@ -35,6 +35,24 @@ describe('App-defined actions', () => {
     expect(await db.agentTeamEvent.findUnique({ where: { id: answer.eventId } })).toMatchObject({ appId, type: 'app.team.design.approved', payload: { payload: { approved: true } }, actorUserId: userId });
   });
   it.each(['app.other.design.approved', 'task.start', 'app.team.UPPER', 'app.team.design approved', 'app.team.', 'app.team..x', 'app.team.x-', 'app.team.' + 'x'.repeat(56)])('refuses invalid code %s with no event', async code => { await refused({ code }); });
+  it.each(['app.team.v2', 'app.team.2x', 'app.team.a.b2', 'app.team.a--b'])('persists legal code %s through the database CHECK', async code => {
+    const result = await record({ code });
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: result.eventId } })).type).toBe(code);
+  });
+  it('records for an App slug containing digits and repeated hyphens', async () => {
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    await db.app.update({ where: { id: appId }, data: { urn: app.urn.replace(/:team$/, ':app2--team') } });
+    const result = await record({ code: 'app.app2--team.v2' });
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: result.eventId } })).type).toBe('app.app2--team.v2');
+  });
+  it.each([{ x: '\0' }, { nested: [{ x: '\0' }] }, { ['bad\0key']: true }])('refuses PostgreSQL-incompatible NUL in payload %# before insertion', async payload => {
+    await refused({ payload }, 'BAD_USER_INPUT');
+  });
+  it('preserves a literal backslash-u0000 string as ordinary JSON data', async () => {
+    const payload = { x: String.raw`\u0000` };
+    const result = await record({ payload });
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: result.eventId } })).payload).toEqual({ payload });
+  });
   it('accepts a 64-character code and exactly 4KiB JSON object', async () => {
     await record({ code: 'app.team.' + 'x'.repeat(55), payload: { x: 'x'.repeat(4088) } });
   });
