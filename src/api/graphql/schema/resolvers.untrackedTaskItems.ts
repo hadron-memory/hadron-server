@@ -12,7 +12,7 @@
  * else, and another App's key, is answered APP_NOT_FOUND, the same whether or not the App has an integration. The
  * integration is looked up in the resolved App's own properties only.
  *
- * Judged in this order, each before any GitHub call: the gate, the integration name, the repository, the team, a key's
+ * Judged in this order, each before any GitHub call: the gate, the integration name, the repository, no team with a team (#3422), the team, a key's
  * or run's assignee and owner, the page bounds. Any App may hold task integrations (rulings:0071 = B); one with no organization has no GitHub App installation
  * to read through, so it is GITHUB_NOT_INSTALLED after those checks, as an organization with none is. GitHub calls run OUTSIDE any database transaction; the read of the App's claimed external ids that
  * follows re-runs the gate, so a key revoked during the GitHub read is refused rather than answered.
@@ -60,6 +60,7 @@ type Args = {
   appRef: string;
   integration: string;
   team?: string | null;
+  noTeam?: boolean | null;
   repository?: string | null;
   ready?: ReadyFilter | null;
 };
@@ -87,6 +88,12 @@ async function resolveIntegration(c: Context, app: TaskApp, args: Args): Promise
     }
     repository = wanted;
   }
+  // #3422 (cor:agt:120:03). GraphQL has already typed noTeam, but a run tool's arguments reach here as the model wrote
+  // them. A malformed value must not read as absent: an unfiltered claim would take another lane's item.
+  if (args.noTeam != null && typeof args.noTeam !== 'boolean') throw badInput('noTeam must be true or false.');
+  const noTeam = args.noTeam === true;
+  // Judged before the team resolves, so a blank or unknown team beside noTeam is this refusal, not TEAM_UNKNOWN.
+  if (noTeam && args.team != null) throw badInput('Ask for no team or for a team, not both.');
   let teamLabel: string | null = null;
   if (args.team != null) {
     const ref = args.team.trim();
@@ -96,7 +103,7 @@ async function resolveIntegration(c: Context, app: TaskApp, args: Args): Promise
     if (!team) throw taskError('TASK_INTEGRATION_TEAM_UNKNOWN', "That worker leads no team in this task integration's team map.");
     teamLabel = team.label;
   }
-  return { app, organizationId: app.organizationId, integration, filters: { repository, teamLabel, ready: args.ready ?? 'ANY' } };
+  return { app, organizationId: app.organizationId, integration, filters: { repository, teamLabel, noTeam, ready: args.ready ?? 'ANY' } };
 }
 
 function bounded(value: number | null | undefined, def: number, min: number, max: number, field: string): number {
