@@ -3218,7 +3218,9 @@ export const typeDefs = `#graphql
     omitted here and appears in \`appAgents\` with \`agent: null\`. Only the
     installed Agents this caller may read: the list may be PARTIAL, an unreadable
     Agent is left out, and its length is not the install count (use \`appAgents\`,
-    one entry per install).
+    one entry per install). Order matches the readable non-null entries of
+    \`appAgents\`: served installation creation time, then Agent id. When any
+    installed Agent is withheld, every entry shares the App date, so order is by id.
     """
     agents: [Agent!]!
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."

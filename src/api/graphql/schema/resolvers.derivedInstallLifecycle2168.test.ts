@@ -241,3 +241,14 @@ it('a deleted imported Agent leaves both installation source and roster',async()
   expect((await listAppInstallations(db,app.id)).some(row=>row.agentId===b.id)).toBe(false);
   expect((await roster()).some(row=>row.agentId===b.id)).toBe(false);
 });
+
+it('removing the physical row with only an unlicensed import left removes register rows',async()=>{
+ const [a,b]=[await agent('Alpha'),await agent('Beta')];
+ await db.appAgent.createMany({data:[{appId:app.id,agentId:a.id},{appId:app.id,agentId:b.id}]});
+ await importEdge(a.id,b.id,T(2));
+ const reg=await registerFixture(b.id,a.id);
+ await db.agentOrgGrant.update({where:{orgId_agentId:{orgId:org.id,agentId:b.id}},data:{revokedAt:new Date()}});
+ await M.uninstallAgentFromApp({}, {appRef:app.id,agentRef:b.id},ctx());
+ expect(await entry(b.id)).toBeUndefined();
+ expect((await db.registerEntry.findUniqueOrThrow({where:{id:reg.id}})).deletedAt).not.toBeNull();
+});
