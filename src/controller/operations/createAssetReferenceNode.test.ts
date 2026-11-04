@@ -109,6 +109,17 @@ describe('assetIdFromRef', () => {
 });
 
 describe('createAssetReferenceNode', () => {
+  it('states no task, so it cannot revive a role-governed tombstone (#1328)', async () => {
+    await seedAsset();
+    const task = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'author-task', name: 'Task', isRunnable: true } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: memory.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: task.id, authorTaskRequired: true } });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'files:plan', name: 'plan', role: 'guide', deletedAt: new Date() } });
+    await expect(createAssetReferenceNode(db, callerFor(user.id), ctxFor(user.id), {
+      assetRef: assetId, nodeUrn: `hrn:node:${org.urn}:docs:files:plan`,
+    })).rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
+  });
+
   it('creates a reference node carrying the asset pointer', async () => {
     await seedAsset();
     const node = await createAssetReferenceNode(

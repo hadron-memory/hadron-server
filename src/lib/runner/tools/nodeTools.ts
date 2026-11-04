@@ -14,6 +14,7 @@
 
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../auth/publicKnowledgeRead.js';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
+import { attestedAuthoring, type AuthoredWith } from '../../authoringAttestation.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { runHoldsReadGrant } from '../../automationReadGrant.js';
@@ -26,6 +27,12 @@ const WRITE_ARG_PROPERTIES = {
   urn: {
     type: 'string',
     description: 'Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). Same-org only.',
+  },
+  authoredWith: {
+    type: 'object',
+    description: 'The author task this write worked from, required when the node\'s role rule names one: its id or URN, and its current revision.',
+    properties: { task: { type: 'string' }, revision: { type: 'integer' } },
+    required: ['task', 'revision'],
   },
   name: { type: 'string', description: 'Node display name.' },
   content: { type: 'string', description: 'Markdown content.' },
@@ -116,6 +123,15 @@ export const hadronReadNode: RunToolDef = {
   },
 };
 
+/** #1328 — a run tool states its claim like any other writer. Never the portal path. */
+function runToolAuthoring(args: Record<string, unknown>) {
+  const claim = args.authoredWith as Partial<AuthoredWith> | null | undefined;
+  return attestedAuthoring(
+    claim && typeof claim.task === 'string' && typeof claim.revision === 'number'
+      ? { task: claim.task, revision: claim.revision } : null,
+  );
+}
+
 export const hadronCreateNode: RunToolDef = {
   name: 'hadron_create_node',
   description:
@@ -147,6 +163,7 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
+        { authoring: runToolAuthoring(args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
@@ -197,7 +214,7 @@ export const hadronUpdateNode: RunToolDef = {
       } as never,
       ctx.principal,
       'update',
-      { targetNodeId: node.id },
+      { authoring: runToolAuthoring(args), targetNodeId: node.id },
     );
     return { updated: true, urn, id: written.id };
   },

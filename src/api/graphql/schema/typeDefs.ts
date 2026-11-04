@@ -6209,6 +6209,23 @@ export const typeDefs = `#graphql
   }
 
   """
+  #1328 — an authoring attestation. The writer states which task it worked from
+  and that task's current revision (Node.revSeq). The server compares both with
+  the rule and refuses a mismatch: AUTHORING_ATTESTATION_MISSING,
+  AUTHORING_ATTESTATION_WRONG_TASK, AUTHORING_ATTESTATION_STALE, or
+  AUTHOR_TASK_BROKEN when the rule's task is gone. A match records a TASK stamp.
+  This does not prove the task was read or followed. With no applicable rule
+  the claim is ignored. People in the portal are exempt, derived from their
+  sign-in; no client field selects that.
+  """
+  input AuthoredWithInput {
+    "The task's id or canonical URN."
+    task: ID!
+    "The task's current revision."
+    revision: Int!
+  }
+
+  """
   Outgoing edge on a node, used in NodeInput.edges
   """
   input NodeEdgeInput {
@@ -6297,6 +6314,11 @@ export const typeDefs = `#graphql
   loc) rejects with NodeLocConflictError (spec 039 Phase 0 D1/D4).
   """
   input CreateNodeInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Forced PK (importer/sync use case, e.g. a stable UUIDv7). Only ever a create-id here — never a selector (D2). Omit to mint."
     id: String
     """
@@ -6349,6 +6371,11 @@ export const typeDefs = `#graphql
   Every content field is optional: omitted = preserved (D4).
   """
   input UpdateNodeInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "The node to change: PK (CUID / 32-char hex) or fully-qualified node URN (hrn:node:<root>:<memory>:<loc>). XOR with memoryId+loc."
     id: String
     "Selector, with 'loc': the target's memory (ID or fully-qualified URN). XOR with 'id'."
@@ -6414,6 +6441,11 @@ export const typeDefs = `#graphql
   exactly one of 'url' | 'content'.
   """
   input ImportNodeInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Target memory (ID or fully-qualified URN), with 'loc'. XOR with 'nodeUrn'."
     memoryId: String
     "Target loc within 'memoryId'. XOR with 'nodeUrn'."
@@ -7068,6 +7100,11 @@ export const typeDefs = `#graphql
   Set 'dryRun: true' to get per-node/per-field match counts WITHOUT writing.
   """
   input SearchReplaceInNodesInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Text (literal) or RegExp source (regex mode) to find. Must be non-empty."
     oldText: String!
     "Replacement. May be empty (deletes the matched text). Regex mode honors dollar-sign backrefs."
@@ -7105,6 +7142,8 @@ export const typeDefs = `#graphql
   Generic replacement keeps its governed-node protections.
   """
   input SpecSearchReplaceInput {
+    "#1328 — one claim for every changed spec. See AuthoredWithInput."
+    authoredWith: AuthoredWithInput
     memoryRef: ID!
     nodeIds: [ID!]!
     oldText: String!
@@ -7209,6 +7248,11 @@ export const typeDefs = `#graphql
   }
 
   input MergeNodesInput {
+    """
+    #1328 — the author task this write worked from, required when the node's
+    role rule names one (before and after the write). See AuthoredWithInput.
+    """
+    authoredWith: AuthoredWithInput
     "Source node — ID or fully-qualified URN. Folded into 'target'."
     source: String!
     "Target node — ID or fully-qualified URN. The surviving node."
@@ -11282,7 +11326,7 @@ export const typeDefs = `#graphql
     invariants as updateNode (per-memory write auth, encryption, revision
     history, git mirror). Returns the updated node.
     """
-    updateNodeData(nodeRef: ID!, data: JSON!, reason: String): Node!
+    updateNodeData(nodeRef: ID!, data: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #742 - Shallow-merge a JSON patch into a node's structured 'properties'
@@ -11311,7 +11355,7 @@ export const typeDefs = `#graphql
     (per-memory write auth, an active session on an encrypted memory, revision
     history, git mirror). Returns the updated node.
     """
-    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String): Node!
+    updateNodeProperties(nodeRef: ID!, properties: JSON!, reason: String, authoredWith: AuthoredWithInput): Node!
 
     """
     #745 — Object store: the legible sugar surface over structured storage.

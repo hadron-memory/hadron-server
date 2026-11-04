@@ -167,6 +167,7 @@ export const specCorpusMutations = {
             txCtx,
             'create',
             {
+              authoring: { kind: 'platform', record: 'spec-reservation' },
               ownsKind: 'spec',
               governedContext: 'node-write',
               concealUnreadable: { entity: 'memory', ref: memoryRef },
@@ -334,6 +335,7 @@ export const specCorpusMutations = {
         txCtx,
         'create',
         {
+          authoring: { kind: 'platform', record: 'spec-reservation' },
           ownsKind: 'spec',
           governedContext: 'node-write',
           concealUnreadable: { entity: 'memory', ref: memoryRef },
@@ -1330,7 +1332,7 @@ async function rewriteWithRetry(
         { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
         ctx,
         'update',
-        { targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
+        { authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
       return { fields: Object.keys(plan.patch), count: plan.count, loc: node.loc };
     } catch (e) {

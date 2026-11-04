@@ -1,3 +1,4 @@
+import type { AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
@@ -132,6 +133,11 @@ export interface Context {
    * names no MCP door (@codex, PR #1305).
    */
   governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
+  /**
+   * #1328 — the trusted portal human: set ONLY by the /graphql Apollo context, from the sign-in credential
+   * (`portalHumanUserId`). Never built from input, and absent from every MCP, runner and job context.
+   */
+  portalHumanUserId?: string;
   clientId?: string;       // "github:<username>" / "email:<addr>" — only set for OAuth/JWT users
   userId?: string;         // User.id — only set for OAuth/JWT users
   appId?: string;          // App.id — set when caller authenticated via an App Key
@@ -4039,6 +4045,8 @@ export interface NodeInput {
   edges?: NodeEdgeInput[];
   /** Why this change was made — stored in revision history (NodeRevision.revLabel, #620). Issue #88. */
   reason?: string | null;
+  /** #1328 — the author task this write worked from. Consumed at the write seam, never persisted. */
+  authoredWith?: AuthoredWith | null;
 }
 
 /**
@@ -4065,6 +4073,8 @@ export interface UpdateNodeInput
 export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
 
 export interface SearchReplaceInNodesInput {
+  /** #1328 — one claim for every changed governed node. */
+  authoredWith?: AuthoredWith | null;
   oldText: string;
   newText: string;
   nodeIds?: string[];
@@ -4095,6 +4105,8 @@ export interface EdgeInput {
  * `mergeNodes` resolver for the per-field merge strategy.
  */
 export interface MergeNodesInput {
+  /** #1328 — the claim for the surviving target. */
+  authoredWith?: AuthoredWith | null;
   /** Source node — ID or fully-qualified URN. Folded into `target`. */
   source: string;
   /** Target node — ID or fully-qualified URN. The surviving node. */

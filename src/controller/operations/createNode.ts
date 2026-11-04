@@ -7,6 +7,7 @@ import { GRAPHS_PATH } from '../../config.js';
 import { generateId } from '../../lib/id.js';
 import { db } from '../../integrations/db/client.js';
 import { serializeTags } from '../../integrations/db/provider.js';
+import { assertAuthoring, attestedAuthoring } from '../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { hasFsProjectionScope, projectionCleanupFor, registerFsProjectionCleanup, runCleanups, snapshotProjection } from '../../lib/fsProjectionRollback.js';
 import { saveNodeToFs } from '../../integrations/localFs/saveNodeToFs.js';
@@ -105,6 +106,12 @@ const createNodeAsSystem = async (
     if (existing) {
       const changes = diffNodeChanges(existing, fields);
       authoredEdit = authoredContentChanged(changes);
+      // #1328 — this seam states no task, so an edit of a governed row refuses
+      // before its revision. Its callers write a new memory's root, which has no rule.
+      await assertAuthoring(tx, node.memoryId, {
+        priorRole: existing.role, priorRunnable: existing.isRunnable,
+        role: existing.role, runnable: existing.isRunnable, authoredChange: authoredEdit,
+      }, attestedAuthoring(null));
       // An identical re-save is not a revision (@codex P2, PR #1339): a
       // snapshot here would manufacture history on every idempotent save and
       // evict real revisions under maxRevCount.
