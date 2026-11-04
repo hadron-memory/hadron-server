@@ -492,14 +492,16 @@ async function tryAssign(
   /** The monotonic half of `now`'s sample (`anchorNow`), from the pass; by default taken here, beside a fresh `now`. */
   anchor: number = anchorNow(),
   matchNow = false,
+  /** #3246: the recovery sweep's claim; the write lands only while this attempt still holds it. */
+  claim?: Date,
 ): Promise<AttemptOutcome> {
-  return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow));
+  return db.$transaction(tx => tryAssignInTx(tx, task, workerId, family, now, hooks, anchor, matchNow, claim));
 }
 
 /** Shared deciding write. A batch caller already holds every candidate worker lock before its task rows. */
 async function tryAssignInTx(
   tx: Prisma.TransactionClient, task: QueuedTask, workerId: string, family: string, now: Date,
-  hooks: MatcherHooks, anchor: number, matchNow: boolean,
+  hooks: MatcherHooks, anchor: number, matchNow: boolean, claim?: Date,
 ): Promise<AttemptOutcome> {
   await lockAuthorityAnchors(tx, [{ kind: 'app', id: task.appId }], 'shared');
   const app = await tx.app.findUnique({ where: { id: task.appId }, select: { deletedAt: true, uninstalledAt: true } });
@@ -524,7 +526,7 @@ async function tryAssignInTx(
   await hooks.afterWorkerCheck?.({ taskId: task.id, workerId });
   const n = await tx.agentTask.updateMany({
     where: { id: task.id, appId: task.appId, status: 'pending', blocked: false, assigneeWorkerId: null, assigneeUserId: null,
-      matchPending: matchNow, matchFailedAt: null,
+      matchPending: matchNow, matchFailedAt: null, ...(claim ? { matchClaimedAt: claim } : {}),
       requirements: { equals: currentTask.requirements ?? Prisma.AnyNull } },
     data: {
       assigneeWorkerId: workerId,
@@ -725,18 +727,22 @@ export type MatchFailureReason = 'NO_ROLE' | 'REQUIREMENTS_EXCLUDED' | 'NOBODY_F
  * the same worker lock and final gates as the automatic matcher. A manual assignment/cancel racing the attempt
  * wins its guarded write; a failure is recorded only while the task is still reserved, pending and unassigned.
  */
-export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date): Promise<void> {
+export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date, claim?: Date): Promise<void> {
   const anchor = anchorNow();
   const task = await db.agentTask.findUniqueOrThrow({ where: { id: taskId } });
   if (!task.matchPending || task.status !== 'pending' || task.assigneeWorkerId || task.assigneeUserId) return;
+  // #3246: the recovery sweep passes the claim it wrote. An attempt whose claim was superseded (its own was slow or
+  // died, and a later sweep reclaimed the task) neither starts nor writes: the later claimant is the one attempt.
+  if (claim && task.matchClaimedAt?.getTime() !== claim.getTime()) return;
   const outcome = await chooseMatchNow(db, task, now, async (workerId, family) =>
-    tryAssign(db, task, workerId, family, now, {}, anchor, true));
+    tryAssign(db, task, workerId, family, now, {}, anchor, true, claim));
   if ('workerId' in outcome) {
     if (!outcome.live) await launchForAssignment(db, { appId: task.appId, taskId, workerId: outcome.workerId, family: outcome.family }, now, anchor);
     return;
   }
   const { reason } = outcome;
-  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null },
+  await db.agentTask.updateMany({ where: { id: taskId, matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null,
+    ...(claim ? { matchClaimedAt: claim } : {}) },
     data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
 }
 
@@ -755,7 +761,8 @@ export function matchRecoverySeconds(): number {
 /**
  * Recover the match-now tasks whose one attempt never ran (the process died between the create commit and the attempt):
  * a reservation older than the bound is claimed with ONE guarded write (`match_claimed_at`, so two sweeps or instances make
- * the attempt once between them) and then gets exactly the usual single-shot attempt, `matchTaskNow`: assigned, or marked
+ * the attempt once between them) and then gets exactly the usual single-shot attempt, `matchTaskNow`, which carries the claim
+ * as a token (an attempt superseded by a later reclaim neither starts nor writes): assigned, or marked
  * match-failed with one of the five reasons, never retried. A claim whose own attempt died is reclaimable only after the
  * bound again. A task that is not pending, is assigned, or has no reservation (never reserved, assigned, cancelled,
  * parked then made ready) is never selected. Returns the attempts this call made.
@@ -771,7 +778,7 @@ export async function recoverInterruptedMatches(db: PrismaClient, now: Date, lim
       const claimed = await db.agentTask.updateMany({ where: { AND: [{ id }, stale] }, data: { matchClaimedAt: now } });
       if (claimed.count !== 1) continue; // another sweep took it
       attempts += 1;
-      await matchTaskNow(db, id, now);
+      await matchTaskNow(db, id, now, now);
     } catch (err) {
       console.error('[task-matcher] recovering an interrupted match failed:', err);
     }

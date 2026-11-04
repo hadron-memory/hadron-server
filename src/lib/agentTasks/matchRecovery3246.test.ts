@@ -4,13 +4,13 @@
  * that attempt, the sweep releases the task after a fixed, tunable time and makes the one attempt then. Every instant is
  * passed explicitly, so the controllable clock is the `now` argument.
  */
-import { beforeEach, afterEach, expect, it } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
-import { recoverInterruptedMatches, matchRecoverySeconds, matchQueuedTasks } from './matcher.js';
+import { recoverInterruptedMatches, matchRecoverySeconds, matchQueuedTasks, matchTaskNow } from './matcher.js';
 import { taskMatcherTick } from '../../jobs/taskMatcher.js';
 
 const M = resolvers.Mutation as any;
@@ -130,4 +130,67 @@ it('the matcher tick runs the recovery and reports it', async () => {
   await worker();
   await interrupted();
   expect((await taskMatcherTick(db, at(BOUND))).recovered).toBe(1);
+});
+
+// ── the claim is a token: a superseded attempt neither starts nor writes (Beckett's blind P2 on #3417) ──
+/** A client whose first task read is followed by a later sweep's reclaim: the claim is superseded MID-ATTEMPT. */
+const supersededMidAttempt = (taskId: string, current: Date) => db.$extends({ query: { agentTask: {
+  async findUniqueOrThrow({ args, query }: any) {
+    const read = await query(args);
+    await db.agentTask.update({ where: { id: taskId }, data: { matchClaimedAt: current } });
+    return read;
+  },
+} } }) as unknown as typeof db;
+
+it('a claimant superseded before it starts neither starts nor writes', async () => {
+  const w = await worker();
+  const stale = at(BOUND), current = at(BOUND * 2);
+  const t = await interrupted({ requirements: { role: 'reviewer' }, matchClaimedAt: current }); // a later sweep reclaimed it
+  await matchTaskNow(db, t.id, at(BOUND * 2 + 1000), stale);
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: null, matchPending: true, matchFailedAt: null, matchClaimedAt: current });
+  expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'assignment.matched' } })).toBe(0);
+  await matchTaskNow(db, t.id, at(BOUND * 2 + 1000), current); // the current holder is the one attempt
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: w.id, matchPending: false });
+  expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'assignment.matched' } })).toBe(1);
+});
+
+it('a claimant superseded mid-attempt cannot assign: the guarded write holds the token', async () => {
+  await worker();
+  const stale = at(BOUND), current = at(BOUND * 2);
+  const t = await interrupted({ requirements: { role: 'reviewer' }, matchClaimedAt: stale });
+  await matchTaskNow(supersededMidAttempt(t.id, current), t.id, at(BOUND * 2 + 1000), stale);
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: null, matchPending: true, matchClaimedAt: current });
+  expect(await db.agentTeamEvent.count({ where: { taskId: t.id, type: 'assignment.matched' } })).toBe(0);
+});
+
+it('a claimant superseded mid-attempt cannot record a failure either', async () => {
+  const stale = at(BOUND), current = at(BOUND * 2);
+  const t = await interrupted({ requirements: { role: 'nobody' }, matchClaimedAt: stale });
+  await matchTaskNow(supersededMidAttempt(t.id, current), t.id, at(BOUND * 2 + 1000), stale);
+  expect(await row(t.id)).toMatchObject({ matchPending: true, matchFailedAt: null, matchFailedReason: null, matchClaimedAt: current });
+  await matchTaskNow(db, t.id, at(BOUND * 2 + 1000), current);
+  expect(await row(t.id)).toMatchObject({ matchPending: false, matchFailedReason: 'NO_ROLE' });
+});
+
+it('the sweep itself carries its claim: a reclaim landing mid-attempt stops the sweep\'s attempt from writing', async () => {
+  await worker();
+  const t = await interrupted({ requirements: { role: 'reviewer' } });
+  const later = at(BOUND * 3);
+  expect(await recoverInterruptedMatches(supersededMidAttempt(t.id, later), at(BOUND))).toBe(1);
+  expect(await row(t.id)).toMatchObject({ assigneeWorkerId: null, matchPending: true, matchClaimedAt: later });
+});
+
+it('an attempt that throws leaves its claim; nothing retries it inside the bound, and one reclaim finishes it after', async () => {
+  const w = await worker();
+  const t = await interrupted({ requirements: { role: 'reviewer' } });
+  const boom = db.$extends({ query: { agentTask: { async findUniqueOrThrow() { throw new Error('boom'); } } } }) as unknown as typeof db;
+  const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    expect(await recoverInterruptedMatches(boom, at(BOUND))).toBe(1); // claimed, then the attempt died
+  } finally { quiet.mockRestore(); }
+  expect(await row(t.id)).toMatchObject({ matchPending: true, assigneeWorkerId: null, matchClaimedAt: at(BOUND) });
+  expect(await recoverInterruptedMatches(db, at(BOUND * 2 - 1))).toBe(0); // inside the bound: no second attempt
+  expect(await recoverInterruptedMatches(db, at(BOUND * 2))).toBe(1); // after it: exactly one reclaim, which completes
+  expect((await row(t.id)).assigneeWorkerId).toBe(w.id);
+  expect(await recoverInterruptedMatches(db, at(BOUND * 3))).toBe(0);
 });
