@@ -619,3 +619,17 @@ it('gives an absent Agent and an existing non-imported one the same refusal JSON
     extensions: { code: 'WORKER_AGENT_NOT_INSTALLED', appId: app.id },
   });
 });
+
+it.each([
+  { bootPromptNodeId: 'missing-node', bootPromptUrn: null },
+  { bootPromptNodeId: null, bootPromptUrn: 'missing:node' },
+])(
+  'the database rejects a half-written derived prompt pointer: %j',
+  async (pair) => {
+    await expect(
+      db.appAgentCustomization.create({
+        data: { appId: app.id, agentId: role.id, ...pair },
+      }),
+    ).rejects.toThrow(/chk_app_agent_customizations_boot_prompt_pointer_pair/);
+  },
+);
