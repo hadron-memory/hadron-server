@@ -248,8 +248,8 @@ describe('#3382 batch-only list contract', () => {
       if (!injected && args.where && 'automationReadGrants' in args.where) {
         injected = true;
         await db.$transaction(async tx => {
-          await tx.memory.updateMany({ where: { id: { in: ids } }, data: { organizationId: null, ownerUserId: f.holder.id } });
-          await tx.agent.updateMany({ where: { systemMemoryId: { in: ids } }, data: { organizationId: null, ownerUserId: f.holder.id } });
+          await tx.memory.updateMany({ where: { id: { in: ids } }, data: { ownerUserId: f.holder.id } });
+          await tx.agent.updateMany({ where: { systemMemoryId: { in: ids } }, data: { ownerUserId: f.holder.id } });
         });
       }
       return rows;
