@@ -1,4 +1,4 @@
-import { listAppInstallations } from '../../../lib/appInstallations.js';
+import { listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js';
 // Team roles as a platform surface — #960 (cor:agt:020:01/:02), re-keyed by
 // the Worker model (#974): a role definition is the `roles:<role>` node in the
 // Team Agent's system memory. The boot prompt is NOT here — it is the
@@ -62,7 +62,7 @@ async function loadRoleAgentIndex(
   ctx: Context,
   appId: string,
 ): Promise<Map<string, RoleAgentEntry>> {
-  const installed = await listAppInstallations(ctx.db, appId);
+  const installed = await listAppInstallationsWithDerivedLicense(ctx.db, appId);
   const index = new Map<string, RoleAgentEntry>();
   const installedRoles = new Set(installed.filter(r=>r.installationKind === 'ROW').map(r=>(r.agent.personaRole ?? '').trim().toLowerCase()));
   for (const { agent, installationKind } of installed) {
@@ -634,7 +634,7 @@ export async function loadAppRepoAffinity(
     // environments (PR #1071 review, Copilot) — and the comment below claimed a
     // determinism the query did not provide. Install order is the meaningful
     // one: the agent installed first owns the role by default.
-    const installed = await listAppInstallations(ctx.db, appId);
+    const installed = await listAppInstallationsWithDerivedLicense(ctx.db, appId);
     const memoryIds = [
       ...new Set(
         installed

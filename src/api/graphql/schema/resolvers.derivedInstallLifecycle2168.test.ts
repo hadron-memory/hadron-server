@@ -6,6 +6,7 @@ import { parse, Kind } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
+import { listAppInstallations, loadAppInstallationPage } from '../../../lib/appInstallations.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { ensureChannelWithRoot } from '../../../lib/channels.js';
@@ -71,6 +72,25 @@ it('one importer: createdAt is the later of its install and the import (both ord
     await importEdge(a.id, b.id, T(imported));
     expect((await entry(b.id)).createdAt.toISOString()).toBe(T(want).toISOString());
   }
+});
+
+it.each(['source', 'roster'] as const)('a physical row wins over a simultaneous import in the %s listing', async (surface) => {
+  const [a, b] = [await agent('Alpha'), await agent('Beta')];
+  await db.appAgent.create({ data: { appId: app.id, agentId: a.id, createdAt: T(1) } });
+  await importEdge(a.id, b.id, T(2));
+  const physical = await db.appAgent.create({
+    data: { appId: app.id, agentId: b.id, createdAt: T(5), createdBy: user.id },
+  });
+  // Keep both witnesses live: checking only after import removal cannot kill
+  // the duplicate DERIVED entry produced when the physical-precedence guard goes.
+  const rows = surface === 'source' ? await listAppInstallations(db, app.id) : await roster();
+  const matches = rows.filter(row => row.agentId === b.id);
+  expect(matches).toHaveLength(1);
+  expect(matches[0]).toMatchObject({
+    installationKind: 'ROW', importerAgentId: null,
+    createdAt: physical.createdAt, createdBy: user.id,
+  });
+  expect(await db.agentImport.count({ where: { parentAgentId: a.id, importedAgentId: b.id } })).toBe(1);
 });
 
 it('after the import is removed the derived entry leaves the listing; the importer stays', async () => {
@@ -156,4 +176,68 @@ it('ruling A keeps the installation discriminator internal until the whole-App g
   expect(appAgent?.kind).toBe(Kind.OBJECT_TYPE_DEFINITION);
   if (appAgent?.kind !== Kind.OBJECT_TYPE_DEFINITION) return;
   expect(appAgent.fields?.some(f => f.name.value === 'installationKind')).toBe(false);
+});
+
+it('an empty held-import set cannot admit a later edge in the witness-restricted re-read', async () => {
+  const [a,b] = [await agent('Alpha'),await agent('Beta')];
+  await db.appAgent.create({data:{appId:app.id,agentId:a.id}});
+  await importEdge(a.id,b.id,T(2));
+  expect((await listAppInstallations(db,app.id)).map(row=>row.agentId)).toContain(b.id);
+  const {installations} = await loadAppInstallationPage(db,app.id,false,undefined,{rows:[a.id],imports:[]});
+  expect(installations.map(row=>row.agentId)).toEqual([a.id]);
+});
+
+it('uninstall holds the surviving import witness until its register decision commits', async () => {
+  const [a,b] = [await agent('Alpha'),await agent('Beta')];
+  await db.appAgent.create({data:{appId:app.id,agentId:a.id}});
+  await importEdge(a.id,b.id,T(2));
+  const reg = await registerFixture(b.id,a.id);
+  let release!:()=>void, ready!:()=>void;
+  const held = new Promise<void>(r=>{release=r;});
+  const staged = new Promise<void>(r=>{ready=r;});
+  let writerPid=0,paused=false;
+  const hooked = new Proxy(db,{get(target,key){
+    if(key==='$transaction') return (work:any,options:any)=>db.$transaction(async tx=>{
+      const wrapped=new Proxy(tx,{get(transaction,model){
+        if(model==='app') return new Proxy(tx.app,{get(delegate,method){
+          if(method==='findMany') return async(args:any)=>{
+            const result=await tx.app.findMany(args);
+            if(!paused && args.select?.appAgents){
+              paused=true; writerPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+              ready();await held;
+            }
+            return result;
+          };
+          const value=Reflect.get(delegate,method,delegate);return typeof value==='function'?value.bind(delegate):value;
+        }});
+        const value=Reflect.get(transaction,model,transaction);return typeof value==='function'?value.bind(transaction):value;
+      }});return work(wrapped);
+    },options);
+    const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+  }});
+  const uninstall=M.uninstallAgentFromApp({}, {appRef:app.id,agentRef:b.id},{...ctx(),db:hooked});
+  await Promise.race([staged,uninstall.then(()=>{throw new Error('uninstall did not reach the deciding read');})]);
+  let removerPid=0;
+  const removing=db.$transaction(async tx=>{
+    removerPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    await tx.agentImport.deleteMany({where:{parentAgentId:a.id,importedAgentId:b.id}});
+  },{timeout:15000});
+  try {
+    await vi.waitFor(async()=>{
+      expect(removerPid).toBeGreaterThan(0);
+      const rows=await db.$queryRaw<Array<{blocked:boolean}>>`SELECT ${writerPid}=ANY(pg_blocking_pids(${removerPid}::int)) AS blocked`;
+      expect(rows[0].blocked).toBe(true);
+    },{timeout:5000,interval:10});
+  } finally {release();await Promise.all([uninstall,removing]);}
+  expect((await db.registerEntry.findUniqueOrThrow({where:{id:reg.id}})).deletedAt).toBeNull();
+}, 30000);
+
+it('a deleted imported Agent leaves both installation source and roster',async()=>{
+  const [a,b]=[await agent('Alpha'),await agent('Beta')];
+  await db.appAgent.create({data:{appId:app.id,agentId:a.id}});
+  await importEdge(a.id,b.id,T(2));
+  expect((await listAppInstallations(db,app.id)).some(row=>row.agentId===b.id)).toBe(true);
+  await db.agent.update({where:{id:b.id},data:{deletedAt:new Date()}});
+  expect((await listAppInstallations(db,app.id)).some(row=>row.agentId===b.id)).toBe(false);
+  expect((await roster()).some(row=>row.agentId===b.id)).toBe(false);
 });

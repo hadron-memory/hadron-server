@@ -11,6 +11,13 @@ type SpanJSON = Parameters<typeof scrubSentrySpan>[0];
 type TransactionEvent = Parameters<typeof scrubSentryTransaction>[0];
 
 describe('scrubSentryEvent', () => {
+  it('#1796: a first-encryption passphrase entry in x-hadron-memory-keys never reaches Sentry', () => {
+    const event = {
+      request: { headers: { 'x-hadron-memory-keys': '[{"memory":"m","passphrase":"first-encryption-secret"}]' } },
+    } as unknown as ErrorEvent;
+    expect(JSON.stringify(scrubSentryEvent(event))).not.toContain('first-encryption-secret');
+  });
+
   afterEach(async () => {
     await Sentry.close(2_000);
   });

@@ -1,4 +1,4 @@
-import { listAppInstallations } from './appInstallations.js';
+import { listAppInstallationsWithDerivedLicense } from './appAgent.js';
 /**
  * Spec 049 Phase 2 — named search scopes ("lenses"), D-2026-09-13-001.
  *
@@ -208,7 +208,7 @@ export async function appContextIfReadable(
   if (!app) return null;
   const admitted = ctx.userId ? await isAppParticipant(ctx, app) : ctx.appId === app.id;
   if (!admitted) return null;
-  return { id: app.id, organizationId: app.organizationId, agentIds: (await listAppInstallations(ctx.db,app.id)).map(row=>row.agentId) };
+  return { id: app.id, organizationId: app.organizationId, agentIds: (await listAppInstallationsWithDerivedLicense(ctx.db,app.id)).map(row=>row.agentId) };
 }
 
 /** An App key's scope reach: its App, its App's org, its App's installed Agents. */
@@ -226,7 +226,7 @@ async function appKeyScopeReach(
   return {
     appId,
     organizationId: app?.organizationId ?? null,
-    agentIds: app ? (await listAppInstallations(ctx.db,appId)).map(row=>row.agentId) : [],
+    agentIds: app ? (await listAppInstallationsWithDerivedLicense(ctx.db,appId)).map(row=>row.agentId) : [],
   };
 }
 
@@ -488,7 +488,7 @@ export async function appScopeMemoryIds(db: Context['db'], appId: string): Promi
     },
   });
   if (!app) return [];
-  const installs = await listAppInstallations(db,appId);
+  const installs = await listAppInstallationsWithDerivedLicense(db,appId);
   const agents = await db.agent.findMany({where:{id:{in:installs.map(row=>row.agentId)}},select:{
     id:true,organizationId:true,deletedAt:true,memoryItems:{
       where:{deletedAt:null,memory:{deletedAt:null,class:{not:'system'}}},orderBy:{createdAt:'asc'},

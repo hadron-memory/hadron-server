@@ -23,7 +23,7 @@ import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockPathForCreateUn
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
-import { isAgentInstalled } from '../../../lib/appAgent.js';
+import { isAgentInstalledForAppOperation } from '../../../lib/appAgent.js';
 import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/requestOperationKey.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
@@ -1924,7 +1924,7 @@ export const sessionMutations = {
         // IS NULL) cannot operate any agent.
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
-        if (!(await isAgentInstalled(tx, app.id, agentId))) {
+        if (!(await isAgentInstalledForAppOperation(tx, app.id, agentId))) {
           throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
 

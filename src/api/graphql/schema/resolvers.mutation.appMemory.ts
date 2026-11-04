@@ -140,8 +140,8 @@ async function resolveInstalledAgent(
     if (e instanceof AgentNotFoundError) throw notInstalled();
     throw e;
   }
-  // One query does the install check AND fetches the agent's urn (via the
-  // AppAgent join) instead of isAgentInstalled + a separate agent read.
+  // Resolve physical or derived membership through the shared installation
+  // source, which also supplies the Agent identity used below.
   const appAgent = await resolveAppInstallation(ctx.db, appId, agentId);
   if (!appAgent) throw notInstalled();
   return appAgent.agent;

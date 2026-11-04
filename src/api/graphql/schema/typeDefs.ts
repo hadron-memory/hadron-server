@@ -3276,8 +3276,9 @@ export const typeDefs = `#graphql
     """
     createdAt: DateTime!
     """
-    The row's audit identity; null on a DERIVED entry (the import's audit names another Agent's builder, often in another
-    org, and is never copied onto this App's roster).
+    Row audit fields are visible only when the caller may read EVERY installed Agent in this App.
+    Otherwise all three are null on EVERY entry, including physical rows. A derived entry has no
+    row audit identity, so these stay null even under the whole-App gate; importer identities are never copied.
     """
     createdBy: String
     updatedAt: DateTime
@@ -14277,9 +14278,19 @@ export const typeDefs = `#graphql
     historical node fields are converted in bounded locked passes. One-way
     without the key: the server cannot recover the content.
 
+    The secret travels beside the operation, never in it (hrn:node:hadronmemory.com:specs:cor:sec:040:04, #1796).
+    The strict owner sends exactly one of dataKey or passphrase in an x-hadron-memory-keys entry
+    naming this memory; on a first encryption that entry establishes the verifier, and it counts only
+    when encryptMemory is the operation's sole root field. The owning App sends its key in
+    x-hadron-operation-key, for completion only.
+
     Accepts the entity's ID or URN.
     """
-    encryptMemory(memoryId: ID!, dataKey: String, passphrase: String): Memory!
+    encryptMemory(
+      memoryId: ID!
+      dataKey: String @deprecated(reason: "Send the key in x-hadron-memory-keys, or x-hadron-operation-key for an owning App's completion.")
+      passphrase: String @deprecated(reason: "Send the passphrase in x-hadron-memory-keys.")
+    ): Memory!
   }
 
   # ── Chat types ──────────────────────────────────────────────────────
