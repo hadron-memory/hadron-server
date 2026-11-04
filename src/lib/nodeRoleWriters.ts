@@ -69,7 +69,7 @@ export type RoleWriterChange = {
 const RUNNABLE_RULE_KEY = 'task';
 
 /** The rule keys a node state is judged under. */
-function ruleKeysOf(role: string | null | undefined, runnable: boolean | null | undefined): string[] {
+export function ruleKeysOf(role: string | null | undefined, runnable: boolean | null | undefined): string[] {
   const keys: string[] = [];
   if (role) keys.push(role);
   if (runnable === true && role !== RUNNABLE_RULE_KEY) keys.push(RUNNABLE_RULE_KEY);

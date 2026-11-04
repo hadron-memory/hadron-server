@@ -25,12 +25,15 @@ import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { fetchWebPage } from '../../../lib/webFetch.js';
 import { extractArticle } from '../../../lib/articleExtract.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
+import { attestedAuthoring, type AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
 import { publishRunRequested } from '../../../jobs/appRuns.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
 import { type Context, requireMemoryWriteAccess, withoutRequestCaches } from './resolvers.helpers.js';
 
 export interface ImportNodeInput {
+  /** #1328 — import always attests, from any surface. */
+  authoredWith?: AuthoredWith | null;
   // Target — (memoryId + loc) XOR nodeUrn. The URN may name a
   // not-yet-existing node (import creates it), so it is SPLIT into
   // memory-URN + loc rather than resolved via resolveNodeRef.
@@ -240,7 +243,7 @@ export const importNodeMutations = {
       },
       writeCtx,
       name === undefined ? 'update' : 'upsert',
-      { transaction },
+      { transaction, authoring: attestedAuthoring(input.authoredWith) },
     );
 
     if (!taskRun) {

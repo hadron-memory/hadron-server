@@ -13,7 +13,8 @@ import { GraphQLError } from 'graphql';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../lib/specCorpus.js';
 import { governedSignalsFromMirror } from '../../lib/governedSignals.js';
 import { lockMemoryConfigShared, mergedGovernedState, strictParentRefusingRole } from '../../lib/governedRole.js';
-import { authoredContentChanged, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
+import { attestedAuthoring, judgeAuthoring, parseMirroredAuthoredWith, type AttestationRefusalCode } from '../../lib/authoringAttestation.js';
+import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../../lib/nodeAuthorship.js';
 import { NodeSchemaViolation, validateNodeAgainstSchema } from '../../lib/validateNodeAgainstSchema.js';
 import type { MemorySchema } from '../../lib/memorySchema.js';
 // Spec 049 S4 — a Channel's address is skipped and reported, never overwritten from git.
@@ -123,6 +124,13 @@ export interface SkippedUndeclaredRole {
   code: 'ROLE_NOT_DECLARED';
 }
 
+/** #1328 — a synced file whose attestation was refused; the file is skipped, its row kept. */
+export interface SkippedAttestation {
+  loc: string;
+  role: string;
+  code: AttestationRefusalCode;
+}
+
 /** #2040 — a synced file whose include tags are invalid; the file is skipped, its row kept. */
 export interface SkippedInvalidInclude {
   loc: string;
@@ -142,6 +150,7 @@ export function describeSkippedUndeclaredRole(s: SkippedUndeclaredRole): string 
 export function describeSyncOutcome(result: {
   nodeCount?: number;
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  skippedAttestations?: SkippedAttestation[];
   skippedInvalidIncludes?: SkippedInvalidInclude[];
   deferredLateRows?: string[];
   heldMoves?: string[];
@@ -153,6 +162,10 @@ export function describeSyncOutcome(result: {
     section(
       result.skippedUndeclaredRoles?.map(describeSkippedUndeclaredRole),
       (n) => `Skipped ${n} file(s), ROLE_NOT_DECLARED (the role is not declared under a strict parent; declare it or change the file):`,
+    ) +
+    section(
+      result.skippedAttestations?.map((a) => `${a.loc} (${a.code}, role "${a.role}")`),
+      (n) => `Skipped ${n} file(s) whose authoredWith was refused (state the role's author task as task@revision; the stored node was kept as it was):`,
     ) +
     section(
       result.skippedInvalidIncludes?.map((i) => `${i.loc} (${i.code}: ${i.message})`),
@@ -218,6 +231,8 @@ export async function updateNodeFromGitSync(
    * has at write time, not before the lock).
    */
   extra?: (locked: Node) => Record<string, unknown>,
+  /** #1328 — the verified stamp of this file's claim, written when authored fields change. */
+  authoredStamp?: NodeAuthorshipStamp | null,
 ): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "nodes" WHERE "id" = ${current.id} FOR UPDATE`;
   const owner = await tx.node.findUnique({ where: { id: current.id }, select: { memoryId: true } });
@@ -291,7 +306,7 @@ export async function updateNodeFromGitSync(
     where: { id: locked.id },
     data: {
       ...(update as Prisma.NodeUncheckedUpdateInput),
-      ...(authoredContentChanged(changes) ? clearNodeAuthorship() : {}),
+      ...(authoredContentChanged(changes) ? (authoredStamp ?? clearNodeAuthorship()) : {}),
       // #1450 (@codex P2, PR #1452): filling a reserved citation by editing its
       // mirrored file writes the spec, same as updateSpecNode.
       ...placeholderFillPatch(locked, update.content),
@@ -337,6 +352,8 @@ const syncGraphFromGithubAsSystem = async (
    * is kept as it was; every other file still syncs.
    */
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
+  /** #1328 — files NOT synced because their authoring claim was refused; each row is kept. */
+  skippedAttestations?: SkippedAttestation[];
   /** #2040 — files NOT synced because an include tag is malformed or cycles. */
   skippedInvalidIncludes?: SkippedInvalidInclude[];
   /**
@@ -463,6 +480,7 @@ const syncGraphFromGithubAsSystem = async (
     const skippedProtected: string[] = [];
     const skippedObjectTypes: string[] = [];
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
+    const skippedAttestations: SkippedAttestation[] = [];
     const skippedInvalidIncludes: SkippedInvalidInclude[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
@@ -539,7 +557,7 @@ const syncGraphFromGithubAsSystem = async (
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
     embeddingWakeNeeded = false;
-    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves, reportEntries]) {
+    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves, reportEntries]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
@@ -1005,7 +1023,7 @@ const syncGraphFromGithubAsSystem = async (
           if (keep) protectedRowIds.add(keep.id);
           return true;
         };
-        const refusesRole = async (prior: Node | null): Promise<boolean> => {
+        const refusesGovernance = async (prior: Node | null): Promise<boolean> => {
           // #1606 (cor:dmo:110:04) — git sync never writes a comment: a file
           // that lands on a comment's loc is skipped and the comment kept.
           if (prior?.nodeType === COMMENT_NODE_TYPE || node.nodeType === COMMENT_NODE_TYPE) {
@@ -1063,6 +1081,36 @@ const syncGraphFromGithubAsSystem = async (
           refusedRoleLocs.add(loc);
           return true;
         };
+        // #1328 — git sync is authoring (D-2026-09-24-003). Judged before a move
+        // or displacement touches anything, on the row under the locks above; a
+        // file whose claim is refused is skipped and reported like a strict
+        // role, and its row survives cleanup, so an absent or malformed claim
+        // can never read as a deletion. An unchanged file needs no claim.
+        let authoredStamp: NodeAuthorshipStamp | null = null;
+        const refusesAttestation = async (prior: Node | null): Promise<boolean> => {
+          const signals = governedSignalsFromMirror(node);
+          const merged = mergedGovernedState(prior, signals);
+          // An unwritten placeholder keeps its role whatever its file says, so
+          // that key is not a change here either (`updateNodeFromGitSync`).
+          const comparable: Record<string, unknown> = update.data === Prisma.DbNull ? { ...update, data: null } : { ...update };
+          if (prior?.isPlaceholder) delete comparable.role;
+          const verdict = await judgeAuthoring(tx, graph.id, {
+            priorRole: prior?.role ?? null, priorRunnable: prior?.isRunnable ?? null,
+            role: merged.role, runnable: merged.isRunnable,
+            authoredChange: prior === null || authoredContentChanged(diffNodeChanges(prior, comparable)),
+          }, attestedAuthoring(parseMirroredAuthoredWith((node as { authoredWith?: unknown }).authoredWith)));
+          if (!verdict.refused) {
+            authoredStamp = verdict.stamp;
+            return false;
+          }
+          skippedAttestations.push({ loc, role: verdict.role, code: verdict.refused });
+          reportEntries.push({ kind: 'attestation_refused', loc, code: verdict.refused });
+          if (prior) protectedRowIds.add(prior.id);
+          refusedRoleLocs.add(loc);
+          return true;
+        };
+        const refusesRole = async (prior: Node | null): Promise<boolean> =>
+          (await refusesGovernance(prior)) || refusesAttestation(prior);
 
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
@@ -1201,7 +1249,7 @@ const syncGraphFromGithubAsSystem = async (
             console.log(`[syncGraphFromGithub] "${graphName}": node ${byId.id} moved "${byId.loc}" → "${loc}"`);
           }
           await updateNodeFromGitSync(tx, byId, { ...update, ...placeholderMarkerFor(byId) }, parkedRevisionBases.get(byId.id), graph.id, (locked) =>
-            objectTypeAndOriginalLoc(locked),
+            objectTypeAndOriginalLoc(locked), authoredStamp,
           );
           parkedRevisionBases.delete(byId.id);
           rowId = byId.id;
@@ -1247,6 +1295,7 @@ const syncGraphFromGithubAsSystem = async (
               parkedRevisionBases.get(existingAtLoc.id),
               graph.id,
               objectTypeAndOriginalLoc,
+              authoredStamp,
             );
             parkedRevisionBases.delete(existingAtLoc.id);
             // The SURVIVING id: an update keeps the existing row's id, which
@@ -1261,6 +1310,7 @@ const syncGraphFromGithubAsSystem = async (
                 ...update,
                 ...placeholderMarkerFor(null),
                 ...objectTypeFor(null),
+                ...(authoredStamp ?? {}),
                 revisionContentHash: revisionStateHashRefreshMarker(),
               },
               select: { id: true },
@@ -1671,6 +1721,11 @@ const syncGraphFromGithubAsSystem = async (
         `Sync of "${graphName}": skipped ${skippedUndeclaredRoles.length} file(s) whose role is not declared under a strict parent (ROLE_NOT_DECLARED): ${skippedUndeclaredRoles.map(describeSkippedUndeclaredRole).join('; ')}`,
       );
     }
+    if (skippedAttestations.length > 0) {
+      console.warn(
+        `Sync of "${graphName}": skipped ${skippedAttestations.length} file(s) whose authoredWith was refused: ${skippedAttestations.map((a) => `${a.loc} (${a.code})`).join('; ')}`,
+      );
+    }
     if (skippedInvalidIncludes.length > 0) {
       console.warn(
         `Sync of "${graphName}": skipped ${skippedInvalidIncludes.length} file(s) with an invalid include tag: ${skippedInvalidIncludes.map((i) => `${i.loc} (${i.code})`).join('; ')}`,
@@ -1681,7 +1736,7 @@ const syncGraphFromGithubAsSystem = async (
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedInvalidIncludes, deferredLateRows, heldMoves };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves };
   } catch (error) {
     // Update sync status to ERROR
     await db.memory.update({

@@ -55,7 +55,8 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { authoredContentChanged, clearNodeAuthorship } from '../lib/nodeAuthorship.js';
+import { assertAuthoring, attestationRefusalText, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
@@ -4186,7 +4187,7 @@ export function createMcpServerInstance(
     'hadron_create_parent_node',
     'Create a parent (section/category) node in the memory graph. Lightweight container for organizing nodes. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>).',
     SHAPE_HADRON_CREATE_PARENT_NODE,
-    async ({ urn: rawUrn, name: rawName, description, tags }) => {
+    async ({ urn: rawUrn, name: rawName, description, tags, authoredWith }) => {
       // Spec 022: qualification at the API boundary.
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
@@ -4310,6 +4311,7 @@ export function createMcpServerInstance(
             select: { id: true, deletedAt: true, role: true, isRunnable: true },
           });
           let sectionChanged = false;
+          let sectionStamp: NodeAuthorshipStamp | null = null;
           // #1331 — an existing section keeps its role through this write, so the
           // role's writer level applies to the edit (and to reviving a tombstone).
           if (prior) {
@@ -4360,6 +4362,12 @@ export function createMcpServerInstance(
             });
             if (changes.length === 0) return current.id;
             sectionChanged = authoredContentChanged(changes);
+            // #1328 — a re-save is an update whatever the tool is called
+            // (`findings:parent-node-upsert-is-authoring`).
+            sectionStamp = await assertAuthoring(tx, memoryId, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: current.role, runnable: current.isRunnable, authoredChange: sectionChanged,
+            }, attestedAuthoring(authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4375,7 +4383,7 @@ export function createMcpServerInstance(
           }
           const row = await tx.node.upsert({
             ...upsertArgs,
-            update: { ...upsertArgs.update, ...(sectionChanged ? clearNodeAuthorship() : {}), revisionContentHash: revisionStateHashRefreshMarker() },
+            update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
           });
           await applyIncludesInTransaction(tx, row, content, auth, storedForIncludes);
           sectionContentSaved = true;
@@ -4390,6 +4398,8 @@ export function createMcpServerInstance(
         if (e instanceof RoleGovernedError || isCommentGovernedError(e)) return refusalResult(`[role_governed] ${(e as Error).message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
+        const attestationRefusal = attestationRefusalText(e);
+        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -6257,7 +6267,7 @@ export function createMcpServerInstance(
       const urn = await nodeUrn(node.loc, node.memoryId);
       return textResult(`${op === 'create' ? 'Node created' : 'Node updated'} in the App's install memory: ${urn} (id: ${node.id})${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
     } catch (e) {
-      return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
+      return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : `${op} failed`}`, `hadron_${op}_node:install`);
     }
   };
 
@@ -6267,12 +6277,13 @@ export function createMcpServerInstance(
     'hadron_create_node',
     'Add a NEW node to the memory graph. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Requires write access to the memory. CREATE-ONLY: a loc that already holds a live node is REFUSED, not overwritten — use hadron_update_node to edit an existing node (#1181; same contract as the GraphQL createNode mutation). A loc holding a SOFT-DELETED node is the one exception: that row is resurrected and rewritten, so an omitted `description`, `abstract`, `content` or `tags` is CLEARED rather than carried over from the tombstone (the other fields — nodeType, objectType, isRunnable, seq, properties, data, llmModel, aiAgent — are kept when omitted). Resurrection snapshots the prior state to revision history first (#976), and encryption is honored.',
     SHAPE_HADRON_CREATE_NODE,
-    async ({ urn: rawUrn, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
+    async ({ urn: rawUrn, authoredWith, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, install }) => {
       // #2044: an App's install memory is written through the GraphQL operation (one write path
       // for the first-customisation create), not this inline parity writer.
       if (install) {
         if (edges || isRunnable) return textResult('`install` does not support `edges` or `isRunnable`; write those with a plain memory node.');
         return writeInstallNodeViaGraphql('create', install, {
+          authoredWith,
           loc: rawUrn, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
           properties, data: nodeData, llmModel, aiAgent,
         });
@@ -6732,6 +6743,14 @@ export function createMcpServerInstance(
             priorRunnable: pre?.isRunnable ?? null,
             nextRunnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
           });
+          // #1328 — parity with writeNodeCore: a new row or a revived tombstone
+          // is authored, with the tombstone's role judged on the locked row.
+          const authoredStamp = await assertAuthoring(tx, memoryId, {
+            priorRole: pre?.role ?? null, priorRunnable: pre?.isRunnable ?? null,
+            role: role === undefined ? (pre?.role ?? null) : role,
+            runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
+            authoredChange: true,
+          }, attestedAuthoring(authoredWith));
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
@@ -6756,13 +6775,13 @@ export function createMcpServerInstance(
           const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
           const written = await tx.node.upsert({
             ...upsertArgs,
-            create: { ...upsertArgs.create, ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
+            create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
             // Resurrect (#543) on the authoritative row, not the stale probe: a
             // tombstone that appeared after it would otherwise stay flagged
             // deleted while taking the new content.
             update: {
               ...upsertArgs.update,
-              ...(pre ? clearNodeAuthorship() : {}),
+              ...(pre ? (authoredStamp ?? clearNodeAuthorship()) : {}),
               ...(pre?.deletedAt ? { deletedAt: null, deletedBy: null, embeddingPendingAt: revivedPendingAt } : {}),
             } as any,
           });
@@ -6789,6 +6808,8 @@ export function createMcpServerInstance(
         if (isLegacyMessageSeqError(e)) return refusalResult(`[seq_protected] ${e.message}`);
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
+        const attestationRefusal = attestationRefusalText(e);
+        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (e instanceof InlineEdgeEndpointError) return refusalResult(e.message);
@@ -6852,10 +6873,11 @@ export function createMcpServerInstance(
     'hadron_update_node',
     'Partially update an existing node. Only the fields you provide are changed — everything else is preserved. The URN MUST be fully qualified (hrn:node:<root>:<memory>:<loc>). Pass expectedRevision from hadron_get_node to refuse atomically if the node changed since you read it.',
     SHAPE_HADRON_UPDATE_NODE,
-    async ({ urn: rawUrn, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
+    async ({ urn: rawUrn, authoredWith, expectedRevision, name, nodeType, objectType, isRunnable, role: rawRole, description, abstract, content, abstractStillAccurate, seq, tags, properties, data: nodeData, llmModel, aiAgent, edges, reason, install }) => {
       if (install) {
         if (edges || isRunnable || abstractStillAccurate) return textResult('`install` does not support `edges`, `isRunnable` or `abstractStillAccurate`.');
         return writeInstallNodeViaGraphql('update', install, {
+          authoredWith,
           loc: rawUrn, expectedRevision, name, nodeType, objectType, role: rawRole, description, abstract, content, seq, tags: tags as never,
           properties, data: nodeData, llmModel, aiAgent, reason,
         });
@@ -7186,6 +7208,14 @@ export function createMcpServerInstance(
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             if (changedFields.length === 0 && resolvedEdges === null) return;
+            // #1328 — parity with writeNodeCore, before the snapshot.
+            const authoredChange = authoredContentChanged(changedFields);
+            const authoredStamp = await assertAuthoring(tx, memory.id, {
+              priorRole: current.role, priorRunnable: current.isRunnable,
+              role: role === undefined ? current.role : role,
+              runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
+              authoredChange,
+            }, attestedAuthoring(authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
@@ -7193,7 +7223,7 @@ export function createMcpServerInstance(
                 changes: changedFields,
               }),
             });
-            if (authoredContentChanged(changedFields)) Object.assign(data, clearNodeAuthorship());
+            if (authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
               ? await tx.node.update({ where: { id: existing.id }, data })
@@ -7230,6 +7260,8 @@ export function createMcpServerInstance(
           if (e instanceof RoleNotDeclaredError) return refusalResult(`[role_not_declared] ${e.message}`);
           const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
+        const attestationRefusal = attestationRefusalText(e);
+        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
           if (writerRefusal) return refusalResult(writerRefusal);
           if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
@@ -7464,7 +7496,7 @@ export function createMcpServerInstance(
     'hadron_update_node_data',
     "Merge a JSON object into a node's `data` bag, preserving keys you don't mention. The patch's top-level keys are written over the node's existing data (the patch wins on collision); other keys stay as they were; a node with no data yet takes the patch as-is. The merge is SHALLOW — a nested object value is replaced wholesale, not deep-merged. Use this for partial data edits; to REPLACE the whole `data` bag instead, use hadron_update_node's `data` argument. Honors write permissions, revision history, and encryption.",
     SHAPE_HADRON_UPDATE_NODE_DATA,
-    async ({ nodeUrn: rawNodeUrn, data }) => {
+    async ({ nodeUrn: rawNodeUrn, data, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth, including appId + sessionId
       // so app-keyed write authorization resolves the same way it does for
       // hadron_update_node. Both fields are load-bearing and were once omitted
@@ -7488,13 +7520,13 @@ export function createMcpServerInstance(
       try {
         const node = await resolvers.Mutation.updateNodeData(
           {},
-          { nodeRef: rawNodeUrn, data },
+          { nodeRef: rawNodeUrn, data, authoredWith },
           ctx,
         );
         const urn = await nodeUrn(node.loc, node.memoryId);
         return textResult(`Node data merged: ${urn} (id: ${node.id})${renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), node.id))}`);
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
+        return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : 'update failed'}`, 'hadron_update_node_data:resolver');
       }
     },
   );
@@ -7612,7 +7644,7 @@ export function createMcpServerInstance(
     'hadron_replace_text',
     "Search-and-replace a piece of text across MANY nodes in one call. Selection is the union of explicit node URNs and whole memories (memoryUrns), optionally narrowed to a subtree by 'prefix' (a parent loc — matches that node plus its descendants on ':' path boundaries, so 'auth' matches 'auth' and 'auth:tokens' but not 'authoring'; requires memoryUrns). Searches the chosen text fields (content, name, alias, description, abstract, tags); JSON fields are not touched. Literal substring match by default; set regex:true to treat oldText as a regular expression and newText as a replacement pattern (supports $1/$& backrefs). ALWAYS run with dryRun:true first to preview match counts before writing — this tool can rewrite a lot of nodes at once. Governed nodes and Channel addresses are protected and reported as skipped rather than searched. Multi-node runs are all-or-nothing: a node whose edited field would violate a field cap (e.g. the 2000-character abstract cap, whose refusal reports the edit's delta and remaining headroom) refuses the WHOLE batch before any write — nothing is partially applied; fix the edit and re-run. Honors write permissions, revision history (each change is undoable), and re-embeds changed nodes.",
     SHAPE_HADRON_REPLACE_TEXT,
-    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun }) => {
+    async ({ oldText, newText, nodeUrns, memoryUrns, prefix, fields, caseInsensitive, regex, dryRun, authoredWith }) => {
       // Build a GraphQL Context from the MCP auth. Include appId + sessionId so
       // app-keyed write authorization (requireMemoryWriteAccess) resolves the
       // same way it does for hadron_create_node / hadron_update_node.
@@ -7634,6 +7666,7 @@ export function createMcpServerInstance(
           {},
           {
             input: {
+              authoredWith,
               oldText,
               newText,
               nodeIds: nodeUrns,
@@ -7697,7 +7730,7 @@ export function createMcpServerInstance(
         }
         return textResult([header, coverage, ...guidance, ...lines, ...lintLines].join('\n'));
       } catch (e) {
-        return toolErrorResult(e, () => `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
+        return toolErrorResult(e, () => attestationRefusalText(e) ?? `Error: ${e instanceof Error ? e.message : 'search-and-replace failed'}`, 'hadron_replace_text:resolver');
       }
     },
   );
@@ -8108,7 +8141,7 @@ Atomicity: collision-evict → per-node NodeRevision snapshot → subtree move a
 
 On success returns the moved node's record: new URN, name, type, tags, edge counts, and immediate-child count (empty sections omitted). A cross-memory move also reports raw relative content links that now miss or point to a different node; content is not rewritten.`,
     SHAPE_HADRON_MOVE_NODE,
-    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf }) => {
+    async ({ urn: rawFrom, targetUrn: rawTo, overwrite, renameToLeaf, authoredWith }) => {
       // Spec 022: qualification at the API boundary for both source and target.
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
@@ -8287,6 +8320,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 // #1641 — a decision's name is its rendered `<code>: <title>`,
                 // which its approval covers; only the decision doors change it.
                 if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
+                // #1328 — the name is authored; the address is not.
+                const renameStamp = await assertAuthoring(tx, toMemory.id, {
+                  priorRole: locked.role, priorRunnable: locked.isRunnable,
+                  role: locked.role, runnable: locked.isRunnable, authoredChange: true,
+                }, attestedAuthoring(authoredWith));
                 await createNodeRevision(tx, {
                   id: generateId(),
                   ...buildNodeRevisionSnapshot(locked, editorFromAuth(auth), {
@@ -8299,7 +8337,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                     loc: toLoc,
                     name: newName,
                     memoryId: toMemory.id,
-                    ...clearNodeAuthorship(),
+                    ...(renameStamp ?? clearNodeAuthorship()),
                     revisionContentHash: revisionStateHashRefreshMarker(),
                   },
                 });
@@ -8360,6 +8398,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 destMemoryId: crossMemory ? toMemory.id : undefined,
                 editor: editorFromAuth(auth),
                 renameSourceLeaf: renameToLeaf === true,
+                renameAuthoring: attestedAuthoring(authoredWith),
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
               });
@@ -8452,6 +8491,8 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         const includeText = includeRefusalText(e);
         if (includeText) return refusalResult(includeText);
+        const attestationRefusal = attestationRefusalText(e);
+        if (attestationRefusal) return refusalResult(attestationRefusal);
         const writerRefusal = roleWriterRefusalText(e);
         if (writerRefusal) return refusalResult(writerRefusal);
         if (
@@ -12708,7 +12749,14 @@ const recoveryEdgesArgs = {
   edgeIds: z.array(z.string()).nullable().optional().describe('Restrict the result, total included, to these edge ids (1 to 200). An id that is not a visible edge of this memory is absent.'),
 };
 
+/** #1328 — the claim, as every MCP node writer takes it. */
+const AUTHORED_WITH_ARG = z.object({
+  task: z.string().describe('The author task: its node id or canonical URN.'),
+  revision: z.number().int().positive().describe('The current revision of that task.'),
+}).optional().describe('The author task this write worked from, required when the node\'s role rule names one. The server compares it and records it; it does not prove the task was followed.');
+
 const governedDoorArgs = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
   name: z.string().optional().describe('Node name. Required when creating.'),
   description: z.string().optional().describe('Short description'),
@@ -12910,6 +12958,7 @@ const SHAPE_HADRON_SET_ACTIVE_SCOPE = {
 };
 
 const SHAPE_HADRON_CREATE_PARENT_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN for the new section, e.g. "hrn:node:acme.com:mmdata:services" or "hrn:node:acme.com:mmdata:services:db-helpers"'),
   name: z.string().optional().describe('Display name (defaults to the last loc atom)'),
   description: z.string().optional().describe('What this section contains'),
@@ -12999,6 +13048,7 @@ const SHAPE_HADRON_UNLOCK_MEMORY = {
 const SHAPE_HADRON_LOCK_MEMORY = { memoryUrn: z.string().describe('Memory URN or id') };
 
 const SHAPE_HADRON_CREATE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports". Both bare and prefixed forms accepted, in either URN grammar. Relative-form URNs (no memory) are rejected.'),
   name: z.string().describe('Node name'),
   nodeType: z.string().optional().describe('Node classification (free-form; canonical values: abstract, chat, data, info (default), prompt, record, reference, system). Running is gated by isRunnable, independent of nodeType.'),
@@ -13028,6 +13078,7 @@ const SHAPE_HADRON_CREATE_NODE = {
 };
 
 const SHAPE_HADRON_UPDATE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Fully-qualified node URN, e.g. "hrn:node:acme.com:mmdata:review:sort-imports"'),
   expectedRevision: z.number().int().positive().max(2_147_483_647).optional().describe('Optional positive Revision value from hadron_get_node. A mismatch refuses with [node_write_conflict]; omit for backward-compatible last-write-wins behavior.'),
   name: z.string().optional().describe('New node name'),
@@ -13060,6 +13111,7 @@ const SHAPE_HADRON_UPDATE_NODE = {
 };
 
 const SHAPE_HADRON_UPDATE_NODE_DATA = {
+  authoredWith: AUTHORED_WITH_ARG,
   nodeUrn: z.string().describe('Node to update — a fully-qualified node URN (hrn:node:<root>:<memory>:<loc>) or an ID-shape PK.'),
   data: z.record(z.string(), z.unknown()).describe('JSON object to merge into the node\'s `data`. Must be an object (not an array or scalar). Its top-level keys overwrite existing ones; unmentioned keys are preserved.'),
 };
@@ -13098,6 +13150,7 @@ const SHAPE_HADRON_FIND_OBJECTS = {
 };
 
 const SHAPE_HADRON_REPLACE_TEXT = {
+  authoredWith: AUTHORED_WITH_ARG,
   oldText: z.string().describe('Text to find (literal substring), or a regular-expression source when regex:true. Must be non-empty.'),
   newText: z.string().describe('Replacement text. May be empty to delete the matched text. In regex mode, $1/$<name>/$& are honored.'),
   nodeUrns: z.array(z.string()).optional().describe('Explicit nodes to edit — fully-qualified node URNs (hrn:node:<root>:<memory>:<loc>) or ID-shape values.'),
@@ -13142,6 +13195,7 @@ const SHAPE_HADRON_DELETE_NODE = {
 };
 
 const SHAPE_HADRON_MOVE_NODE = {
+  authoredWith: AUTHORED_WITH_ARG,
   urn: z.string().describe('Current node fully-qualified URN, e.g. "hrn:node:acme.com:mmdata:services:db-helper"'),
   targetUrn: z.string().describe('Destination node fully-qualified URN. Different memory in the target URN performs a cross-memory move.'),
   overwrite: z.boolean().optional().describe('Default false (refuses on collision). Pass true to soft-delete an existing live target node before moving; the move then proceeds into the freed URN slot.'),

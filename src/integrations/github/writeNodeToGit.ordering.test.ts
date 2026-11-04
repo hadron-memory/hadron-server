@@ -33,7 +33,7 @@ describe('Node Git mirror ordering', () => {
 
     const initial: NodeForGit = {
       id: 'node-1', loc: 'source', name: 'Source', content: 'old', tags: [],
-      role: null, isRunnable: null, isPlaceholder: false, outgoingEdges: [],
+      role: null, isRunnable: null, isPlaceholder: false, authorshipKind: null, authoredByTask: null, authoredByRevision: null, outgoingEdges: [],
     };
     let latest = { ...initial, content: 'new' };
     const refresh = vi.fn(async () => latest);

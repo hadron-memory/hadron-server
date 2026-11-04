@@ -107,7 +107,7 @@ describe('#1328 git sync', () => {
     writeFrontmatterNode(join(repo(), 'a.md'), { name: 'A', role: 'guide', authoredWith: `${taskId}@1` }, 'body');
     await sync();
     const { id } = await stored('a');
-    writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: null }, 'edited');
+    writeFrontmatterNode(join(repo(), 'a.md'), { id, name: 'A', role: null as unknown as string }, 'edited');
     await sync();
     expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: taskId });
   });

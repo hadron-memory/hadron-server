@@ -8,13 +8,15 @@
  * task was read nor that it was followed.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
+import { GraphQLError, parse, type InputObjectTypeDefinitionNode } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
+import { hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -175,10 +177,14 @@ describe('#1328 trusted portal human', () => {
     expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: null });
   });
 
-  it('a client-supplied human flag means nothing', async () => {
-    await expect(create('a', { human: true })).rejects.toThrow();
-    await expect(create('a', { trustedHuman: { authenticatedUserId: userId } })).rejects.toThrow();
-    expect(await db.node.count({ where: { memoryId, loc: 'a' } })).toBe(0);
+  it('no write input carries a human flag', () => {
+    const doc = parse(typeDefs);
+    for (const name of ['CreateNodeInput', 'UpdateNodeInput', 'ImportNodeInput', 'MergeNodesInput', 'SearchReplaceInNodesInput', 'AuthoredWithInput']) {
+      const input = doc.definitions.find((d) => d.kind === 'InputObjectTypeDefinition' && d.name.value === name);
+      expect(input, name).toBeTruthy();
+      const fields = (input as InputObjectTypeDefinitionNode).fields!.map((f) => f.name.value.toLowerCase());
+      expect(fields.filter((f) => f.includes('human') || f.includes('portal') || f.includes('surface'))).toEqual([]);
+    }
   });
 
   it('the signal names a different user than the request: not trusted', async () => {
@@ -255,6 +261,18 @@ describe('#1328 merges and bulk edits', () => {
     expect((await stored('imp')).content).toBe('body');
     await M.importNode({}, { input: { ...base, authoredWith: claim() } }, ctx());
     expect(await stored('imp')).toMatchObject({ content: 'imported', authoredByTask: taskId });
+  });
+});
+
+describe('#1328 runner tools', () => {
+  it('hadron_update_node attests through ctx.principal and ignores the portal signal', async () => {
+    await create('a', { authoredWith: claim() });
+    const org = await db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { organizationId: true } });
+    const run = { principal: portal(), db, run: { id: 'run', organizationId: org.organizationId } } as never;
+    const args = { urn: 'hrn:node:attest-org:mem:a', content: 'by run' };
+    await expectRefused(hadronUpdateNode.execute(run, args), 'AUTHORING_ATTESTATION_MISSING');
+    await hadronUpdateNode.execute(run, { ...args, authoredWith: claim() });
+    expect(await stored('a')).toMatchObject({ content: 'by run', authoredByTask: taskId });
   });
 });
 

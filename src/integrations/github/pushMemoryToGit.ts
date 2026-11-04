@@ -227,6 +227,9 @@ async function pushMemoryToGitUnderLock(
         role: node.role,
         isRunnable: node.isRunnable,
         isPlaceholder: node.isPlaceholder,
+        authorshipKind: node.authorshipKind,
+        authoredByTask: node.authoredByTask,
+        authoredByRevision: node.authoredByRevision,
       }, node.outgoingEdges);
       preserveUnmanagedFrontmatter(frontmatter, mdPath);
 

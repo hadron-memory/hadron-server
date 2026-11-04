@@ -1,4 +1,5 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { assertAuthoring, attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { isDeepStrictEqual } from 'node:util';
 import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
@@ -1403,6 +1404,12 @@ export const chatMutations = {
           where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
         });
         if (dataNode) {
+          // #1328 — extraction states no task, so it cannot rewrite a `data`
+          // node a rule governs.
+          await assertAuthoring(tx, chatNode.memoryId, {
+            priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
+            role: dataNode.role, runnable: dataNode.isRunnable, authoredChange: true,
+          }, attestedAuthoring(null));
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
           const merged = fold(existingData, data);

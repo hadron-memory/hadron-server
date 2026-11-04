@@ -81,6 +81,8 @@ interface NodeYaml {
   isRunnable?: boolean | null;
   /** An untrusted mirror claim, validated against the destination by Git sync. */
   placeholder?: unknown;
+  /** #1328 — `task@revision`, untrusted: judged in the sync transaction, never here. */
+  authoredWith?: unknown;
   tags?: string[];
   nodes?: Array<{ id: string; rel: string; loc?: string }>;
   alias?: string;
@@ -409,6 +411,7 @@ async function loadFrontmatterNode(
       // sync update preserves the stored value. See the NodeYaml doc above.
       ...governedSignalsFromMeta(meta),
       ...placeholderFromMeta(meta, mdPath),
+      ...(meta.authoredWith !== undefined ? { authoredWith: meta.authoredWith } : {}),
     },
     edges,
   };
@@ -472,6 +475,7 @@ async function loadLegacyNode(
       // the two formats. Same reader, same absent-means-preserve rule.
       ...governedSignalsFromMeta(meta),
       ...placeholderFromMeta(meta, yamlPath),
+      ...(meta.authoredWith !== undefined ? { authoredWith: meta.authoredWith } : {}),
     },
     edges,
   };

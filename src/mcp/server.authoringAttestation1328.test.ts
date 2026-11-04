@@ -60,8 +60,8 @@ describe('#1328 MCP parity', () => {
   it('hadron_update_node_data forwards the claim to the shared seam', async () => {
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_create_node', { urn: urn('a'), name: 'A', role: 'guide', content: 'one', authoredWith: claim() });
-    expect(await srv.callToolText('hadron_update_node_data', { urn: urn('a'), data: { k: 1 } })).toMatch(/authoring_attestation_missing/);
-    await srv.callToolText('hadron_update_node_data', { urn: urn('a'), data: { k: 1 }, authoredWith: claim() });
+    expect(await srv.callToolText('hadron_update_node_data', { nodeUrn: urn('a'), data: { k: 1 } })).toMatch(/authoring_attestation_missing/);
+    await srv.callToolText('hadron_update_node_data', { nodeUrn: urn('a'), data: { k: 1 }, authoredWith: claim() });
     expect(await stored('a')).toMatchObject({ data: { k: 1 }, authoredByTask: taskId });
   });
 
@@ -78,11 +78,11 @@ describe('#1328 MCP parity', () => {
   it('hadron_create_parent_node re-saving a governed section attests', async () => {
     const srv = createTestableMcpServer(auth());
     await srv.callToolText('hadron_create_node', { urn: urn('section'), name: 'S', role: 'guide', content: 'one', authoredWith: claim() });
-    const args = { urn: urn('section'), name: 'Renamed', content: 'two' };
+    const args = { urn: urn('section'), name: 'Renamed' };
     expect(await srv.callToolText('hadron_create_parent_node', args)).toMatch(/authoring_attestation_missing/);
-    expect(await stored('section')).toMatchObject({ content: 'one', name: 'S' });
+    expect(await stored('section')).toMatchObject({ name: 'S' });
     await srv.callToolText('hadron_create_parent_node', { ...args, authoredWith: claim() });
-    expect(await stored('section')).toMatchObject({ content: 'two', authoredByTask: taskId });
+    expect(await stored('section')).toMatchObject({ name: 'Renamed', authoredByTask: taskId });
   });
 
   it('the review door takes the claim, so the generic refusal does not trap an agent', async () => {
