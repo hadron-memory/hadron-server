@@ -116,6 +116,16 @@ describe('seat binding and verdicts', () => {
     const now = await seat('local', H, reviewer.id, old.id);
     expect((await readiness()).slots[0].currentTaskId).toBe(now.id);
   });
+  it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('cannot shop away %s at the same head, but a new head permits replacement', async value => {
+    await schedule(['local']); await freeze(); const old = await seat('local'); await verdict(old, value); await finish(old);
+    const replacement = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'Replacement', assignee: { user: other.id }, source: 'synthetic' } }, ctx(author.id));
+    const args = { taskRef: replacement.id, slot: 'local', head: H, supersedes: old.id };
+    await expect(command('assignReviewSeat', args, author.id)).rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
+    expect(await events(replacement.id)).toHaveLength(0); expect((await stored(replacement.id)).properties).toBeNull();
+    await freeze(H2); await command('assignReviewSeat', { ...args, head: H2 }, author.id);
+    await verdict(replacement, 'APPROVE', H2, other.id); await finish(replacement, other.id);
+    expect((await readiness(H2)).ready).toBe(true);
+  });
   it.each(['APPROVE', 'CHANGES_REQUESTED', 'PASS', 'FAIL', 'CARRY', 'REFUSED'])('records %s once, mirrors it and leaves the seat STARTED', async value => {
     await schedule(); await freeze(); const t = await seat('local'); await verdict(t, value);
     expect((await stored(t.id)).status).toBe('started');
@@ -130,6 +140,10 @@ describe('seat binding and verdicts', () => {
     await expect(command('recordReviewVerdict', { taskRef: t.id, head: H, verdict: 'APPROVE' }, other.id)).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE'));
     await expect(command('recordReviewVerdict', { taskRef: build.id, head: H, verdict: 'APPROVE' }, author.id)).rejects.toMatchObject(error('TASK_INVALID_TRANSITION'));
     expect((await events(t.id)).filter(e => e.type === 'review.verdict')).toHaveLength(0);
+  });
+  it('a started task without an assignment cannot record a verdict', async () => {
+    await M.startAgentTask!({}, { taskId: build.id }, ctx(author.id));
+    await expect(command('recordReviewVerdict', { taskRef: build.id, head: H, verdict: 'APPROVE' }, author.id)).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));
   });
 });
 
@@ -175,5 +189,20 @@ describe('readiness uses only event facts', () => {
     expect(await readiness(H, outsider.id)).toBeNull();
     const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'test' } });
     expect(await Q.pullRequestReadiness!({}, { taskRef: build.id, head: H }, { db, appId: app.id, appKeyId: key.id, roles: [] })).toMatchObject({ ready: true });
+  });
+  it('only the build assignee records a ready call', async () => {
+    await readySeats();
+    await expect(command('recordReadyCall', { taskRef: build.id, head: H }, owner.id)).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE'));
+    expect((await events()).filter(e => e.type === 'pr.ready')).toHaveLength(0);
+  });
+  it('resolves the emitted code through the same live register lookup as tick actions', async () => {
+    const memory = await db.memory.create({ data: { name: 'Team system', urn: `${app.urn}:system`, class: 'system' } });
+    const agent = await db.agent.create({ data: { name: 'Team', urn: `${app.urn}:agent`, systemMemoryId: memory.id, ownerUserId: author.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    for (const loc of ['roles:author', 'tasks:review']) await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc, isRunnable: loc.startsWith('tasks:') } });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'register:pr.frozen', name: 'Freeze', data: { registerEntry: { code: 'pr.frozen', taskLoc: 'tasks:review' } } } });
+    // The owning person can read their Agent's system memory. App installation alone grants no owner identity.
+    const result = await freeze();
+    expect(result.action).toEqual({ code: 'pr.frozen', state: 'MAPPED', taskLoc: 'tasks:review', taskUrn: `hrn:node:${memory.urn}:tasks:review` });
   });
 });
