@@ -36,3 +36,38 @@ export function setRequestKey(memoryId: string, key: EncryptionKey): void {
   }
   store.set(memoryId, key);
 }
+
+/**
+ * #1796 (cor:sec:040:04, ruling 0145): a first encryption's secret, as the header supplied it. A
+ * first encryption has no verifier, so there is nothing to verify this against yet, and it is
+ * deliberately NOT in `requestKeyStorage`: every encrypt/decrypt call site reads that store, and an
+ * unverified secret must reach `encryptMemory` and nothing else.
+ */
+export interface FirstEncryptionEntry {
+  dataKey?: string;
+  passphrase?: string;
+}
+
+export const requestFirstEncryptionStorage = new AsyncLocalStorage<Map<string, FirstEncryptionEntry>>();
+
+/** Stage a first-encryption entry into the CURRENT request. Throws outside a request scope. */
+export function setRequestFirstEncryption(memoryId: string, entry: FirstEncryptionEntry): void {
+  const store = requestFirstEncryptionStorage.getStore();
+  if (!store) {
+    throw new Error('setRequestFirstEncryption called outside a request scope');
+  }
+  store.set(memoryId, entry);
+}
+
+/** True when this request already staged an entry for this memory. */
+export function hasRequestFirstEncryption(memoryId: string): boolean {
+  return requestFirstEncryptionStorage.getStore()?.has(memoryId) ?? false;
+}
+
+/** Claim the entry for a memory: it answers once, and only inside its own request. */
+export function takeRequestFirstEncryption(memoryId: string): FirstEncryptionEntry | null {
+  const store = requestFirstEncryptionStorage.getStore();
+  const entry = store?.get(memoryId) ?? null;
+  if (entry) store?.delete(memoryId);
+  return entry;
+}

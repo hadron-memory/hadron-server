@@ -14283,9 +14283,19 @@ export const typeDefs = `#graphql
     historical node fields are converted in bounded locked passes. One-way
     without the key: the server cannot recover the content.
 
+    The secret travels beside the operation, never in it (hrn:node:hadronmemory.com:specs:cor:sec:040:04, #1796).
+    The strict owner sends exactly one of dataKey or passphrase in an x-hadron-memory-keys entry
+    naming this memory; on a first encryption that entry establishes the verifier, and it counts only
+    when encryptMemory is the operation's sole root field. The owning App sends its key in
+    x-hadron-operation-key, for completion only.
+
     Accepts the entity's ID or URN.
     """
-    encryptMemory(memoryId: ID!, dataKey: String, passphrase: String): Memory!
+    encryptMemory(
+      memoryId: ID!
+      dataKey: String @deprecated(reason: "Send the key in x-hadron-memory-keys, or x-hadron-operation-key for an owning App's completion.")
+      passphrase: String @deprecated(reason: "Send the passphrase in x-hadron-memory-keys.")
+    ): Memory!
   }
 
   # ── Chat types ──────────────────────────────────────────────────────
