@@ -237,7 +237,7 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
     expect((await row(memory.id)).isEncrypted).toBe(false);
   });
 
-  it('a header entry and an argument together are refused: one secret, one channel', async () => {
+  it('on a first encryption, a header entry and an argument together are refused: one secret, one channel', async () => {
     const reply = await send(
       'mutation($id: ID!, $k: String) { encryptMemory(memoryId: $id, dataKey: $k) { id } }',
       { id: memory.id, k: dataKey },
@@ -403,6 +403,49 @@ describe('#1796 acceptance 4: an entry on a plaintext memory, on anything but en
 
   it('a document that does not parse', async () => {
     notEncrypted(await send('mutation { encryptMemory(', {}, { keys: [{ memory: memory.id, dataKey }] }));
+  });
+});
+
+describe('#1796 the owner keeps every answer the header gave before this change', () => {
+  // These run unchanged against main's staging: an amendment for impersonators moves none of them.
+  let sealed: { id: string };
+  beforeEach(async () => {
+    sealed = await newPrivate(owner.id, 'sealed');
+    await db.memory.update({ where: { id: sealed.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
+  });
+  const ask = (id: string, key: string) => send(READ, { ref: id }, { keys: [{ memory: id, dataKey: key }] });
+
+  it('a query with the right key is admitted', async () => {
+    const reply = await ask(sealed.id, dataKey);
+    expect(reply.errors).toBeUndefined();
+    expect(reply.data.memory.id).toBe(sealed.id);
+  });
+  it('a query with the wrong key is WRONG_KEY', async () => {
+    expect(code(await ask(sealed.id, wrongKey))).toBe('WRONG_KEY');
+  });
+  it('a query on a plaintext memory is NOT_ENCRYPTED', async () => {
+    expect(code(await ask(memory.id, dataKey))).toBe('NOT_ENCRYPTED');
+  });
+  it('a query on a missing memory is NOT_FOUND', async () => {
+    expect(code(await ask(generateId(), dataKey))).toBe('NOT_FOUND');
+  });
+});
+
+describe('#1796 completion with the header and an argument both present (argument deprecated)', () => {
+  // Not exclusive, unlike first encryption: there is a verifier, so both channels prove themselves
+  // and a mismatch can't pass. Step 2 deletes the argument and the case with it.
+  beforeEach(async () => {
+    await db.memory.update({ where: { id: memory.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
+  });
+  const COMPLETE = 'mutation($id: ID!, $key: String) { encryptMemory(memoryId: $id, dataKey: $key) { id isEncrypted } }';
+
+  it('the same key in both completes', async () => {
+    const reply = await send(COMPLETE, { id: memory.id, key: dataKey }, { keys: [{ memory: memory.id, dataKey }] });
+    expect(reply.errors).toBeUndefined();
+  });
+  it('a verified header does not excuse a wrong argument', async () => {
+    const reply = await send(COMPLETE, { id: memory.id, key: wrongKey }, { keys: [{ memory: memory.id, dataKey }] });
+    expect(code(reply)).toBe('WRONG_KEY');
   });
 });
 
