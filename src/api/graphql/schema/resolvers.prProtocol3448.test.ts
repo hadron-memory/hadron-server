@@ -1,3 +1,4 @@
+import { canReadMemory } from '../../../mcp/access-control.js';
 /** #3448: PR protocol facts are typed events, never opaque properties (cor:agt:050:28). */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -624,6 +625,22 @@ describe('Worker actor floor and register disclosure', () => {
     expect(result.state).toBe('UNRESOLVED');expect(result.code).toBe('pr.frozen');expect(result.taskUrn).toBeUndefined();
     expect(result.taskLoc).toBe('tasks:review');
     await db.node.create({data:{id:generateId(),memoryId:roleMemory.id,loc:'tasks:review',name:'Own task',isRunnable:true}});
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
+  });
+  it.each(['team','agent'])('root-memory readability probe: unreadable %s root does not disclose a task URN',async kind=>{
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    const rootAgent=kind==='team'?teamAgent:roleAgent;
+    const rootId=kind==='team'?teamAgent.systemMemoryId:roleMemory.id;
+    await db.agent.update({where:{id:rootAgent.id},data:{ownerUserId:outsider.id}});
+    await db.memory.update({where:{id:rootId},data:{ownerUserId:outsider.id}});
+    await bound(async()=>{
+      expect(await canReadMemory(db,ctx(author.id),rootId)).toBe(false);
+      const result=await freeze();
+      expect(result.action).toEqual(kind==='team'?{code:'pr.frozen',state:'UNMAPPED'}:{code:'pr.frozen',state:'UNRESOLVED',taskLoc:'tasks:review'});
+      expect(result.action.taskUrn).toBeUndefined();
+    });
+    await db.agent.update({where:{id:rootAgent.id},data:{ownerUserId:author.id}});
+    await db.memory.update({where:{id:rootId},data:{ownerUserId:author.id}});
     expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
   });
   it('does not resolve the task of an Agent retired after the command committed',async()=>{
