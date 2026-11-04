@@ -11,6 +11,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { validateSessionBinding } from '../../../middleware/auth.js';
 import { requestActorStorage } from '../../../lib/requestActor.js';
 import { typeDefs } from './typeDefs.js';
 import { emitActionUrnV2, emitEntityUrnV2 } from '../../../lib/urnEmit.js';
@@ -379,11 +380,33 @@ describe('#3365 implicit asking Agent readability (ruling 0122)', () => {
     expect(await wire((kind === 'worker' ? asWorker : asRun)(foreign.id, implicit))).toBe(named);
   });
 
+  it('refuses a soft-deleted cast Agent whose owned session still validates', async () => {
+    const session = await db.session.create({ data: {
+      id: generateId(), appId: app.id, userId: admin.id, workerId: coderWorker.id,
+      agentId: coder.id, tool: 'vitest',
+    } });
+    // Use the product deletion door: Coder is cast-only, not installed.
+    await M.deleteAgent({}, { ref: agentUrn(coder) }, ctx(admin.id));
+    const binding = await validateSessionBinding(db, { userId: admin.id }, session.id);
+    expect(binding?.actor).toEqual({ workerId: coderWorker.id, agentId: coder.id });
+    const named = await wire(index({ agentRef: agentUrn(coder) }));
+    expect(JSON.parse(named).extensions.code).toBe('AGENT_NOT_FOUND');
+    expect(await wire(requestActorStorage.run(binding!.actor, implicit))).toBe(named);
+  });
+
   it('types a missing implicit row without exposing its database id', async () => {
     const missing = generateId();
-    const result = await wire(asRun(missing, implicit));
-    expect(JSON.parse(result).extensions.code).toBe('AGENT_NOT_FOUND');
-    expect(result).not.toContain(missing);
+    const logs = ['error', 'warn', 'info', 'log', 'debug'].map((method) =>
+      vi.spyOn(console, method as 'error').mockImplementation(() => {}));
+    try {
+      const result = await wire(asRun(missing, implicit));
+      expect(JSON.parse(result)).toEqual({
+        message: 'AGENT_NOT_FOUND: implicit asking Agent', extensions: { code: 'AGENT_NOT_FOUND', ref: 'implicit asking Agent' },
+      });
+      expect(result).not.toContain(missing);
+      expect(JSON.stringify(logs.flatMap((spy) => spy.mock.calls))).not.toContain(missing);
+      expect(logs.flatMap((spy) => spy.mock.calls)).toEqual([]);
+    } finally { for (const spy of logs) spy.mockRestore(); }
   });
 
   it.each(['deleted', 'unreadable', 'missing'])('keeps App admission first for an implicit %s Agent', async (state) => {
