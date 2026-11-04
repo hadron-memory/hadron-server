@@ -460,6 +460,8 @@ describe('#1328 — extraction into a data node a rule governs', () => {
     } as never, { db, roles: ['ADMIN'], userId: adminId });
     const stamped = await db.node.findUniqueOrThrow({ where });
     expect(stamped.authoredByTask).toBe(task.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    expect(await db.node.findUniqueOrThrow({ where })).toMatchObject({ authoredByTask: task.id, authoredByRevision: task.revSeq });
     await db.nodeRoleRule.deleteMany({ where: { role: 'guide' } });
     const revisions = await db.nodeRevision.count({ where: { nodeId: stamped.id } });
 

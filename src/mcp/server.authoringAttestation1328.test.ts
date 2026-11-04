@@ -137,7 +137,8 @@ describe('#1328 MCP parity', () => {
         const srv = createTestableMcpServer(auth());
         await seed(srv, withChild);
         await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: other('b'), renameToLeaf: true, authoredWith: claim() });
-        expect(await inOther('b')).toMatchObject({ name: 'b' });
+        // The stamp is the destination's: this destination has no rule, so nothing is claimed there.
+        expect(await inOther('b')).toMatchObject({ name: 'b', authorshipKind: null, authoredByTask: null, authoredByRevision: null });
       });
 
       it('into a memory requiring a different task: one claim cannot meet both, so split it', async () => {
