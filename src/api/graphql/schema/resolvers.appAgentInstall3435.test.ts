@@ -142,11 +142,26 @@ it('multiple importers: the derived entry names the earliest witness, and a with
   await importEdge(a.id, b.id, T(2));
   await importEdge(c.id, b.id, T(6));
   const full = await rosterWire();
-  expect(full.by(b.id)).toMatchObject({ installMethod: 'DERIVED' });
+  expect(full.by(b.id)).toMatchObject({ installMethod: 'DERIVED', importer: { id: a.id } });
   expect(new Date(full.by(b.id).createdAt).getTime()).toBe(T(3).getTime()); // earliest of (importer install, import) over importers
   const f = await foreignAgent('Hidden');
   await db.appAgent.create({ data: { appId: app.id, agentId: f.agent.id } });
   const part = await rosterWire();
   const times = new Set(part.rows.map((r) => new Date(r.createdAt).getTime()));
   expect(times.size).toBe(1);
+});
+
+// g5b/g6b (Xan A3.2 split, Riana P3): the Agent-side route to an AppAgent never serves the pair, ROW or DERIVED, whole App readable.
+it('Agent.appAgents answers installMethod null and importer null for ROW and DERIVED rows even when the whole App is readable', async () => {
+  const [a, b] = [await agent('Alpha'), await agent('Beta')];
+  await db.appAgent.create({ data: { appId: app.id, agentId: a.id, createdBy: user.id } });
+  await importEdge(a.id, b.id, T(2));
+  const roster = await rosterWire();
+  expect(roster.by(b.id)).toMatchObject({ installMethod: 'DERIVED', importer: { id: a.id } }); // the App route does serve it
+  for (const id of [a.id, b.id]) {
+    const out = await wire(`query($ref: ID!) { agent(ref: $ref) { appAgents { installMethod importer { id } } } }`, { ref: id });
+    expect(out.errors).toBeUndefined();
+    const rows = (out.data as any).agent.appAgents as any[];
+    for (const row of rows) expect(row).toEqual({ installMethod: null, importer: null });
+  }
 });
