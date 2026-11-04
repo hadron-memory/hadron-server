@@ -64,7 +64,7 @@ let owner: { id: string };
 let ownerJwt: string;
 let strangerJwt: string;
 let memory: { id: string; urn: string };
-let faultLog: ReturnType<typeof vi.spyOn>;
+let faultLog: { mock: { calls: unknown[][] } };
 
 type Reply = { status: number; raw: string; errors?: Array<{ message: string; extensions?: Record<string, unknown> }>; data?: unknown };
 
@@ -175,6 +175,8 @@ describe('#3450 unchanged answers, same code and message', () => {
     ['a NUL in a URN', 'hrn:memory:enc3450\u0000x::y'],
     ['a NUL in a bare ref', 'abc\u0000def'],
     ['a NUL in an id-length ref', `${'a'.repeat(31)}\u0000`],
+    ['a lone surrogate', 'hrn:memory:enc3450\ud800x::y'],
+    ['a very long URN', `hrn:memory:enc3450::${'y'.repeat(12000)}`],
     ['a missing memory', missing],
   ])('entry ref: %s is NOT_FOUND', async (_name, ref) => {
     const reply = await send(READ, { ref: memory.id }, [{ memory: ref, dataKey }]);
@@ -186,6 +188,7 @@ describe('#3450 unchanged answers, same code and message', () => {
   it.each([
     ['not a URN', 'not-a-urn'],
     ['a NUL in a URN', 'hrn:memory:enc3450\u0000x::y'],
+    ['a lone surrogate', 'hrn:memory:enc3450\ud800x::y'],
     ['a missing memory', missing],
   ])('encryptMemory target: %s is NOT_ENCRYPTED for an entry on a plaintext memory', async (_name, ref) => {
     const reply = await send(ENCRYPT, { id: ref }, [{ memory: memory.id, dataKey }]);

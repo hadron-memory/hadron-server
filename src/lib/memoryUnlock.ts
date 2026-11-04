@@ -45,6 +45,9 @@ import {
 } from './crypto.js';
 import { hasRequestFirstEncryption, setRequestFirstEncryption, setRequestKey } from './requestKeys.js';
 import { resolveMemoryRef } from './entityRef/memoryRef.js';
+import { AmbiguousLegacyUrnError } from './entityRef/errors.js';
+import { MemoryNotFoundError } from './asset/gate.js';
+import { UrnNotQualifiedError, UrnParseError } from './urn.js';
 
 const KEY_CHECK_PLAINTEXT = 'hadron-key-check:v1';
 
@@ -67,6 +70,30 @@ export class MemoryUnlockError extends Error {
     super(message);
     this.name = 'MemoryUnlockError';
   }
+}
+
+/**
+ * #3450: the four errors `resolveMemoryRef` throws for a caller's ref, and nothing else. Both catches in
+ * `stageRequestMemoryKeys` consume exactly these and give their own answer. Each is a client error with the ref in its
+ * payload, so one left out would reach the caller typed: an ambiguous alias would be an oracle on memories the caller
+ * doesn't own (cor:sec:040:04, property 1). Anything else is a fault and leaves for the redacted boundary.
+ */
+function isUnresolvableRef(err: unknown): boolean {
+  return err instanceof MemoryNotFoundError || err instanceof AmbiguousLegacyUrnError ||
+    err instanceof UrnNotQualifiedError || err instanceof UrnParseError;
+}
+
+const TEXT_POSTGRES_CANNOT_HOLD = /[\0\p{Cs}]/u;
+
+/**
+ * #3450: a header ref resolved for {@link isUnresolvableRef}. Postgres text can't hold a NUL or a lone surrogate, so such
+ * a ref can't name a memory, yet it passes the URN checks and the driver would refuse it as a fault. It is a malformed
+ * ref, and it answers as one. Local to the header path: `resolveMemoryRef` is shared, and its other callers are not in
+ * question here.
+ */
+async function resolveHeaderRef(db: PrismaClient, ref: string): Promise<{ id: string }> {
+  if (TEXT_POSTGRES_CANNOT_HOLD.test(ref)) throw new MemoryNotFoundError(ref);
+  return resolveMemoryRef(db, ref);
 }
 
 /** Fresh random KDF salt (base64, 16 bytes). */
@@ -170,8 +197,11 @@ export async function resolveSuppliedKey(
         'BAD_UNLOCK_INPUT',
       );
     }
+    // #3450: the header's JSON can carry a number here. scrypt's TypeError repeats a number or boolean verbatim, and a
+    // fault goes to the log whole, so this stops before it. The answer is the one this input has always had.
+    if (typeof input.passphrase !== 'string') throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
     key = await deriveDataKeyFromPassphrase(
-      input.passphrase as string,
+      input.passphrase,
       memory.kdfSalt,
       parseKdfParams(memory.kdfParams),
     );
@@ -321,7 +351,10 @@ export async function stageRequestMemoryKeys(
   const targetedByEncryptMemory = async (memoryId: string): Promise<boolean> => {
     if (encryptMemoryTargetId === undefined) {
       const ref = options.encryptMemoryTarget?.() ?? null;
-      encryptMemoryTargetId = ref === null ? null : (await resolveMemoryRef(db, ref).catch(() => null))?.id ?? null;
+      encryptMemoryTargetId = ref === null ? null : (await resolveHeaderRef(db, ref).catch((err: unknown) => {
+        if (isUnresolvableRef(err)) return null;
+        throw err;
+      }))?.id ?? null;
     }
     return encryptMemoryTargetId === memoryId;
   };
@@ -343,7 +376,7 @@ export async function stageRequestMemoryKeys(
       keyVerifier: string | null;
     } | null = null;
     try {
-      const { id: memoryId } = await resolveMemoryRef(db, entry.memory);
+      const { id: memoryId } = await resolveHeaderRef(db, entry.memory);
       memory = await db.memory.findUnique({
         where: { id: memoryId },
         select: {
@@ -382,7 +415,7 @@ export async function stageRequestMemoryKeys(
         continue;
       }
     } catch (err) {
-      if (err instanceof MemoryUnlockError) throw err;
+      if (err instanceof MemoryUnlockError || !isUnresolvableRef(err)) throw err;
       // Unresolvable ref falls through to the uniform NOT_FOUND below.
     }
     throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
