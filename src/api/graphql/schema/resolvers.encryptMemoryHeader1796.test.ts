@@ -452,10 +452,15 @@ describe('#1796 completion with the header and an argument both present (argumen
   it('the same key in both completes', async () => {
     const reply = await send(COMPLETE, { id: memory.id, key: dataKey }, { keys: [{ memory: memory.id, dataKey }] });
     expect(reply.errors).toBeUndefined();
+    expect(reply.data.encryptMemory).toEqual({ id: memory.id, isEncrypted: true });
+    const node = await db.node.findFirstOrThrow({ where: { memoryId: memory.id } });
+    expect(isCiphertext(node.content)).toBe(true);
   });
   it('a verified header does not excuse a wrong argument', async () => {
     const reply = await send(COMPLETE, { id: memory.id, key: wrongKey }, { keys: [{ memory: memory.id, dataKey }] });
     expect(code(reply)).toBe('WRONG_KEY');
+    const node = await db.node.findFirstOrThrow({ where: { memoryId: memory.id } });
+    expect(isCiphertext(node.content)).toBe(false);
   });
 });
 

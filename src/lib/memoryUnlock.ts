@@ -221,8 +221,10 @@ export function encryptMemoryTargetRef(body: unknown): string | null {
   if (value?.kind === Kind.STRING) return value.value;
   if (value?.kind !== Kind.VARIABLE) return null;
   const name = value.name.value;
-  const supplied = variables && typeof variables === 'object' ? (variables as Record<string, unknown>)[name] : undefined;
-  if (supplied !== undefined) return typeof supplied === 'string' ? supplied : null;
+  if (variables && typeof variables === 'object' && Object.hasOwn(variables, name)) {
+    const supplied = (variables as Record<string, unknown>)[name];
+    return typeof supplied === 'string' ? supplied : null;
+  }
   // Omitted: the operation's own default is what the resolver will receive.
   const fallback = operation.variableDefinitions?.find((definition) => definition.variable.name.value === name)?.defaultValue;
   return fallback?.kind === Kind.STRING ? fallback.value : null;
