@@ -540,8 +540,8 @@ describe('#3385 admission interleaves', () => {
   });
 });
 
-// Owner-column drift also remains refused; unlike the org-to-org tests above, the
-// holder loses authority, so these controls do not isolate the drift guard alone.
+// App owner-role membership remains authority across the App-owner move. The
+// target-owner move loses identity-bound rights; target org drift above isolates its guard.
 describe('#3385 owner drift controls', () => {
   for (const [name, call] of Object.entries(doors)) it(`${name}: App owner transfer before anchors refuses without effects`, async () => {
     await db.app.update({ where: { id: f.app.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
