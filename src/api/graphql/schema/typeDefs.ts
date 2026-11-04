@@ -8143,7 +8143,7 @@ export const typeDefs = `#graphql
   enum ReviewVerdict { APPROVE CHANGES_REQUESTED PASS FAIL CARRY REFUSED }
   "#3448 — a command committed, with optional register guidance (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
   type PrProtocolResult { task: AgentTask! action: PrProtocolAction! }
-  "#3448 — register guidance for the committed event code (hrn:node:hadronmemory.com:specs:cor:agt:110:03)."
+  "#3448 — register guidance for the committed event code (hrn:node:hadronmemory.com:specs:cor:agt:110:03). A caller without an Agent gets WITHHELD and the code only, with no register lookup."
   type PrProtocolAction { code: String! state: TickActionState! taskLoc: String taskUrn: String }
   "#3448 — a required slot's current unsuperseded seat, from typed events only."
   type ReviewSlotReadiness {

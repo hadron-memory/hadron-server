@@ -103,6 +103,10 @@ async function record(tx: Prisma.TransactionClient, c: Context, task: TaskRow, e
 
 /** Optional guidance is resolved after commit. Failure never turns an accepted command into a refusal. */
 async function action(ctx: Context, appId: string, code: string): Promise<PublicTickAction> {
+  // No Agent means no register answer, not an assertion that an entry is absent. In particular,
+  // never substitute the Team Agent for a person (cor:agt:110:03; #3448 gate clarification 76106).
+  const agentId = currentActor().agentId;
+  if (!agentId) return { code, state: 'WITHHELD' };
   try {
     return await boundedRead(ctx, async (tx, deadline) => {
       const c = withoutRequestCaches(ctx, tx);
@@ -112,9 +116,8 @@ async function action(ctx: Context, appId: string, code: string): Promise<Public
       for (const id of await lookup.chain(team)) if (!await lookup.readable(c, id, 'reader')) return { code, state: 'WITHHELD' };
       const entry = await lookup.entry(code);
       if (entry.state !== 'FOUND') return { code, state: entry.state };
-      const workerId = currentActor().workerId;
-      const worker = workerId ? await tx.worker.findFirst({ where: { id: workerId, appId }, select: { agent: { select: { systemMemoryId: true, deletedAt: true } } } }) : null;
-      const memoryId = workerId ? (worker?.agent.deletedAt ? null : worker?.agent.systemMemoryId) : team;
+      const agent = await tx.agent.findUnique({ where: { id: agentId }, select: { systemMemoryId: true, deletedAt: true } });
+      const memoryId = agent?.deletedAt ? null : agent?.systemMemoryId;
       if (memoryId) {
         for (const id of await lookup.chain(memoryId)) if (!await lookup.readable(c, id, 'reader')) return { code, state: 'WITHHELD' };
         const task = await lookup.task(memoryId, entry.taskLoc);
