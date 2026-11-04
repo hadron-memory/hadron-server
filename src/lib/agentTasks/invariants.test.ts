@@ -37,13 +37,15 @@ const event = (data: Record<string, unknown> = {}) =>
 describe('agent-task-invariants.sql', () => {
   // #1754 moved the pin to the latest agent-tasks migration: the file is the
   // source of truth, and the newest migration carries its current copy.
-  it('the latest agent-tasks migration carries a byte-identical copy of the invariants file', () => {
+  it('migrations retain task/append-only invariants and the latest event CHECK matches bootstrap', () => {
     const source = readFileSync(new URL('../../../prisma/agent-task-invariants.sql', import.meta.url), 'utf8');
-    const migration = readFileSync(
-      new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url),
-      'utf8',
-    );
-    expect(migration.endsWith(source)).toBe(true);
+    const original = readFileSync(new URL('../../../prisma/migrations/20261012020000_agent_task_backlog_status/migration.sql', import.meta.url), 'utf8');
+    const latest = readFileSync(new URL('../../../prisma/migrations/20261104180000_app_action_event_codes/migration.sql', import.meta.url), 'utf8');
+    const start = source.indexOf('ALTER TABLE agent_team_events DROP CONSTRAINT');
+    const end = source.indexOf('-- Append-only');
+    expect(original).toContain(source.slice(source.indexOf('ALTER TABLE agent_tasks'), start).trim());
+    expect(original.endsWith(source.slice(end))).toBe(true);
+    expect(latest.trimEnd().endsWith(source.slice(start, end).trim())).toBe(true);
   });
 });
 

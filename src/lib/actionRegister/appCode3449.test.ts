@@ -14,7 +14,7 @@ function codes(path: string, source: string): { found: string[]; raw: number } {
   const found: string[] = [];
   let raw = 0;
   const strings = (node: ts.Node) => {
-    if (ts.isStringLiteral(node) && isApp(node.text)) found.push(node.text);
+    if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && isApp(node.text)) found.push(node.text);
     ts.forEachChild(node, strings);
   };
   const visit = (node: ts.Node) => {
@@ -59,11 +59,11 @@ describe('reserved App event code namespace', () => {
     expect(TICK_CODE_PREFIX).toBe('tick.');
   });
   it('the census sees new entries in every guarded source shape and ignores payload/grant names', () => {
-    const fake = `const TASK_EVENT_TYPES = ['app.team.bad'];
+    const fake = `const TASK_EVENT_TYPES = ['app.team.bad', \`app.team.backtick\`];
       type TaskEventPayload = { type: 'app.team.union' };
       tx.agentTeamEvent.create({data:{type:'app.team.orm',payload:{act:'app.payload.allowed'}}});
       tx.$executeRaw\`INSERT INTO agent_team_events(type) VALUES ('app.team.sql')\`;
       type ManagerAct = 'app.model-group.set'; const grant='app.members';`;
-    expect(codes('src/lib/agentTasks/events.ts', fake).found.sort()).toEqual(['app.team.bad', 'app.team.union', 'app.team.orm', 'app.team.sql'].sort());
+    expect(codes('src/lib/agentTasks/events.ts', fake).found.sort()).toEqual(['app.team.bad', 'app.team.backtick', 'app.team.union', 'app.team.orm', 'app.team.sql'].sort());
   });
 });
