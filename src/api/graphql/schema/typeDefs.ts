@@ -3260,11 +3260,36 @@ export const typeDefs = `#graphql
     App's participants), which is judged before anything is resolved.
     """
     bootPromptServe: BootPromptServeOutcome
+    """
+    #3435 (hrn:node:hadronmemory.com:specs:cor:dmo:050:03, :050:06, :050:11) — how this App installs the Agent: ROW (an
+    AppAgent row) or DERIVED (a direct import of an Agent installed here, no row). Answered only on App.appAgents, and
+    only when the caller may read EVERY Agent installed in the App, row installs and derived ones alike. Otherwise it is
+    null on EVERY entry, ROW ones included: a per-entry answer would show, by elimination, which installs derive from an
+    Agent the caller cannot read (that the App runs one, and never which). Null is therefore not proof of anything, and
+    also what an AppAgent reached through another field returns. createdAt (below) is a computed time, never a row audit.
+    """
+    installMethod: InstallMethod
+    """
+    #3435 — the installed Agent this DERIVED install derives from: the importer that gives its createdAt. Null for a ROW
+    entry and whenever installMethod is null (same whole-App read gate), so a DERIVED entry always has a readable importer.
+    """
+    importer: Agent
+    """
+    A ROW entry's creation time. A DERIVED entry has no row: it is the earliest, across the importers it derives from, of
+    the later of that importer's install in this App and the import itself.
+    """
     createdAt: DateTime!
+    """
+    The row's audit identity; null on a DERIVED entry (the import's audit names another Agent's builder, often in another
+    org, and is never copied onto this App's roster).
+    """
     createdBy: String
     updatedAt: DateTime
     updatedBy: String
   }
+
+  """#3435 — how an App installs an Agent: by an AppAgent row, or derived from a direct import of an installed Agent."""
+  enum InstallMethod { ROW DERIVED }
 
   """
   Return shape for the installAgentIntoApp mutation. Wraps the new

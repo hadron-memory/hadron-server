@@ -1897,7 +1897,17 @@ export const typeResolvers = {
           agents.set(agent.id,agent);
         }
       }
-      return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId)}));
+      // #3435: how each Agent is installed is answered only when the caller may read EVERY Agent installed in the App,
+      // row installs and derived ones; otherwise null on EVERY entry (a per-entry answer discloses, by elimination, which
+      // installs derive from an Agent the caller cannot read; cor:dmo:050:03). Checked once for the App, not per entry.
+      const readable = new Map<string, boolean>();
+      for (const row of installs) readable.set(row.agentId, (await readableNestedAgent(ctx, agents.get(row.agentId) as NestedAgentRow | undefined)) !== null);
+      const wholeAppReadable = installs.every(row => readable.get(row.agentId));
+      return installs.map(row=>({
+        ...row,app:a,agent:agents.get(row.agentId),
+        exposedInstallMethod: wholeAppReadable ? row.installationKind : null,
+        exposedImporter: wholeAppReadable && row.installationKind === 'DERIVED' && row.importerAgentId ? agents.get(row.importerAgentId) ?? null : null,
+      }));
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
@@ -1909,6 +1919,9 @@ export const typeResolvers = {
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
     installationKind: (row: {installationKind?: string}) => row.installationKind ?? 'ROW',
+    // #3435: set only by App.appAgents, after the whole-App read gate; any other route to an AppAgent answers null.
+    installMethod: (row: {exposedInstallMethod?: string | null}) => row.exposedInstallMethod ?? null,
+    importer: (row: {exposedImporter?: unknown}) => row.exposedImporter ?? null,
     app: (aa: { appId: string }, _: unknown, ctx: Context) =>
       loadReadableNestedApp(ctx, aa.appId),
     agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) => {
