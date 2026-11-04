@@ -14,6 +14,7 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { compileTemplate } from '../../../lib/template.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { computeRevisionStateHash } from '../../../lib/nodeRevisionSnapshot.js';
+import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -415,6 +416,35 @@ describe('#1328 — extraction into a data node a rule governs', () => {
     expect((await db.node.findUniqueOrThrow({ where })).authoredByRevision).toBe(3);
     await extract(alice.id, chat.chatId, { region: 'US' });
     expect((await db.node.findUniqueOrThrow({ where })).authoredByRevision).toBeNull();
+    // That stamp was set outside a writer, so it is drift: history must not repeat it as true.
+    expect(await db.nodeRevision.count({ where: { authoredByRevision: 3 } })).toBe(0);
+  });
+
+  it('a role committed while the turn waits on the row governs it: judged on the locked row', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    await governedDataNode(chat.chatId);
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    await db.node.update({ where, data: { role: null } });
+    const before = (await dataNodeOf(chat.chatId)).data;
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const writer = db.$transaction(async (tx) => {
+      await tx.node.update({ where, data: { role: 'guide' } });
+      held();
+      await gate;
+    });
+    await holding;
+    const turn = extract(alice.id, chat.chatId, { region: 'US' }).then(() => null, (e) => e);
+    await waitForLockWaitersOfType(db, 'transactionid', 1);
+    release();
+    await writer;
+    expect((await turn)?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+    expect((await dataNodeOf(chat.chatId)).data).toEqual(before);
   });
 
   it('a change that clears a real stamp keeps the stamped predecessor in history, with no later drift', async () => {

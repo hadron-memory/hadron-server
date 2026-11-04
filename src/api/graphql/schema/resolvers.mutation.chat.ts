@@ -1,7 +1,14 @@
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertAuthoring, attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
-import { diffNodeChanges } from '../../../lib/nodeRevisionSnapshot.js';
+import {
+  buildNodeRevisionSnapshot,
+  createNodeRevision,
+  diffNodeChanges,
+  editorFromAuth,
+  ensureCurrentNodeRevisionInTransaction,
+  revisionStateHashRefreshMarker,
+} from '../../../lib/nodeRevisionSnapshot.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
 import { isDeepStrictEqual } from 'node:util';
 import { clientReportedChatModel } from '../../../lib/bootPrompt/chatModel.js';
@@ -1402,9 +1409,12 @@ export const chatMutations = {
         // under different chat locks. Serialize the read-modify-write on the
         // `data` loc so neither turn loses the other's bucket.
         await lockLocForWrite(tx, chatNode.memoryId, 'data');
-        const dataNode = await tx.node.findFirst({
-          where: { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null },
-        });
+        const dataNodeWhere = { loc: 'data', memoryId: chatNode.memoryId, deletedAt: null };
+        // #1328 — the row lock, not only the loc lock: the check below judges
+        // this row, and a writer that takes no loc lock (git sync) can change it.
+        const located = await tx.node.findFirst({ where: dataNodeWhere, select: { id: true } });
+        if (located) await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${located.id} FOR UPDATE`;
+        const dataNode = located ? await tx.node.findFirst({ where: dataNodeWhere }) : null;
         if (dataNode) {
           if (memEncInfo.isEncrypted) decryptNodeFields(dataNode, memEncInfo);
           const existingData = (dataNode.data as Record<string, unknown>) ?? {};
@@ -1417,13 +1427,31 @@ export const chatMutations = {
             priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
             role: dataNode.role, runnable: dataNode.isRunnable, authoredChange,
           }, attestedAuthoring(null));
+          // Nothing changed, so nothing is written. Rewriting would re-encrypt
+          // an encrypted row, and fresh ciphertext reads as drift that clears the stamp.
+          if (!authoredChange) return null;
+          // A stamp is about to go: keep the stamped predecessor in history.
+          // Reconciling first means a stamp raw drift already falsified is
+          // dropped rather than snapshotted as if it described this content.
+          // An unstamped row has no attribution to lose, and keeps the
+          // revision-free write extraction has always made.
+          let revisioned = false;
+          if (dataNode.authorshipKind != null) {
+            await ensureCurrentNodeRevisionInTransaction(tx, dataNode.id, { expectedMemoryId: chatNode.memoryId });
+            const current = await tx.node.findUniqueOrThrow({ where: { id: dataNode.id } });
+            if (current.authorshipKind != null) {
+              await createNodeRevision(tx, buildNodeRevisionSnapshot(current, editorFromAuth(ctx), { changes: ['data'] }));
+              revisioned = true;
+            }
+          }
           const encData = encryptNodeFields({ content: null, data: merged }, memEncInfo);
           await tx.node.update({
             where: { id: dataNode.id },
             data: {
               data: (encData.data ?? null) as InputJsonValue,
               updatedBy: ctx.userId ?? null,
-              ...(authoredChange ? (stamp ?? clearNodeAuthorship()) : {}),
+              ...(stamp ?? clearNodeAuthorship()),
+              ...(revisioned ? { revisionContentHash: revisionStateHashRefreshMarker() } : {}),
             },
           });
           // #1061 — folding extracted data into the memory's `data` node
