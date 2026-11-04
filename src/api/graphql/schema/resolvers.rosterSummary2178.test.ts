@@ -11,8 +11,6 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
-import type { AuthContext } from '../../../middleware/auth.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { renderRosterEntry } from '../../../mcp/agentTaskTools.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
@@ -126,10 +124,9 @@ describe('#2178 safe roster enrichment — red first', () => {
     expect((await entry('Rook')).currentTask.id).toBe(moved.id);
   });
 
-  it('prints the same authorized selected title on the actual MCP roster tool', async () => {
+  it('prints the same authorized selected title through the roster renderer (hadron_team_roster is off over MCP, #3082)', async () => {
     await task({title:'selected title 2178',status:'started',assigneeWorkerId:w.Kit.id,assignedAt:ago(1)});
-    const srv=createTestableMcpServer({userId:mia.id,roles:['READER'],clientId:`user:${mia.id}`} as AuthContext);
-    expect(await srv.callToolText('hadron_team_roster',{appRef:app.id})).toContain('selected title 2178');
+    expect(renderRosterEntry(await entry('Kit'), new Date())).toContain('selected title 2178');
   });
 
   it('renders stored pause tense against the roster snapshot, including equality, rather than the host clock', async () => {
@@ -142,12 +139,11 @@ describe('#2178 safe roster enrichment — red first', () => {
     expect(renderRosterEntry({ ...r, pausedUntil: future }, asOf)).toContain(`own pause until ${future.toISOString()}`);
   });
 
-  it('labels the selected task as an assignment and expired pause as ended on actual MCP', async () => {
+  it('labels the selected task as an assignment and expired pause as ended in the roster renderer', async () => {
     await task({ title: 'pending display only', status: 'pending', assigneeWorkerId: w.Kit.id });
     const expired = ago(10);
     await db.workerWakeSettings.create({ data: { workerId: w.Kit.id, pausedUntil: expired } });
-    const srv = createTestableMcpServer({ userId: mia.id, roles: ['READER'], clientId: `user:${mia.id}` } as AuthContext);
-    const text = await srv.callToolText('hadron_team_roster', { appRef: app.id });
+    const text = renderRosterEntry(await entry('Kit'), new Date());
     expect(text).toContain('top assignment');
     expect(text).toContain(`own pause ended ${expired.toISOString()}`);
     expect(text).not.toContain('current task');

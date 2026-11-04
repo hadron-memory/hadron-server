@@ -16,8 +16,6 @@ import { appendChatMessage } from './chatRoot.js';
 import { getMemoryEncryptionInfo } from './nodeCrypto.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
-import { createTestableMcpServer } from '../mcp/server.js';
-import type { AuthContext } from '../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from './workerSignature.js';
 
 vi.mock('./bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -133,7 +131,6 @@ afterEach(() => {
 
 
 
-const mcpAuth = (): AuthContext => ({ userId: user.id, appId: app.id, roles: ['READER'], clientId: `user:${user.id}` });
 const readState = () => db.channelReadState.findFirst({ where: { workerId: worker.id, channelId: channel.id } });
 const currentIncarnation = async () => (await db.channel.findUniqueOrThrow({ where: { id: channel.id } })).incarnation;
 const sessionRow = () => db.session.findUniqueOrThrow({ where: { id: sessionId } });
@@ -520,22 +517,6 @@ describe('#2181 the pinned read', () => {
   });
 });
 
-describe('#2181 MCP parity', () => {
-  it('reads end with the envelope line, a pinned stale read is [channel_incarnation_changed], marks take the pin', async () => {
-    await post('one');
-    const server = createTestableMcpServer({ ...mcpAuth(), sessionId });
-    const read = await server.callToolText('hadron_channel_read', { channel: channel.id, sinceSeq: 0, session: sessionId });
-    expect(read.trimEnd().endsWith(`channel ${channel.id} incarnation 1`)).toBe(true);
-    const team = await server.callToolText('hadron_team_chat_read', { sinceSeq: 0, session: sessionId, app: app.id });
-    expect(team.trimEnd().endsWith(`channel ${channel.id} incarnation 1`)).toBe(true);
-    const ok = await server.callToolText('hadron_team_chat_mark_read', { session: sessionId, app: app.id, channel: channel.id, seq: 1, expectedIncarnation: 1 });
-    expect(ok).toContain('"channelIncarnation": 1');
-    expect(ok).toContain('"cursorIncarnation": 1');
-    await recreate();
-    const stale = await server.callToolText('hadron_team_chat_mark_read', { session: sessionId, app: app.id, channel: channel.id, seq: 1, expectedIncarnation: 1 });
-    expect(stale).toContain('[channel_incarnation_changed]');
-    expect(stale).toContain('now incarnation 2');
-    const staleRead = await server.callToolText('hadron_channel_read', { channel: channel.id, sinceSeq: 0, session: sessionId, expectedIncarnation: 1 });
-    expect(staleRead).toContain('[channel_incarnation_changed]');
-  });
-});
+// #3082: the 'MCP parity' block (hadron_channel_read / hadron_team_chat_read / hadron_team_chat_mark_read) is removed: those tools are
+// disabled on MCP. The incarnation envelope, the stale-pin CHANGED refusal and the pinned mark are pinned on the resolvers by
+// 'the wire', 'the mark fence' and 'the pinned read' above.

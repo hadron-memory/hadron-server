@@ -1,11 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
-import { createMcpServerInstance } from '../../../mcp/server.js';
-import type { AuthContext } from '../../../middleware/auth.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
@@ -98,36 +94,23 @@ it('a non-participant gets APP_NOT_FOUND with text, valid or not', async () => {
     await expect(list({ text }, outsider())).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
 });
 
-it('GraphQL and MCP agree on the match and the refusal', async () => {
+it('GraphQL and the resolver agree on the match and the refusal (MCP leg removed with hadron_task_list, #3082)', async () => {
   await task('Fix the Login Page');
   await task('Other', { description: 'login again' });
   await task('Unrelated');
   const api = new ApolloServer<Context>({ typeDefs, resolvers });
-  const server = createMcpServerInstance({ userId, roles: ['READER'], clientId: `user:${userId}` } as AuthContext, () => undefined, { kind: 'multi-app' });
-  const client = new Client({ name: 'text2664', version: '1' });
-  const [local, remote] = InMemoryTransport.createLinkedPair();
   await api.start();
-  await server.connect(remote); await client.connect(local);
   const gql = async (text: string) => {
     const r = await api.executeOperation({ query: `query($app:ID!,$t:String){agentTasks(appRef:$app,text:$t){id title}}`, variables: { app: appId, t: text } }, { contextValue: ctx() });
     if (r.body.kind !== 'single') throw new Error('unexpected body');
     return r.body.singleResult;
   };
-  const mcp = async (text: string) => {
-    const r = await client.callTool({ name: 'hadron_task_list', arguments: { appRef: appId, text } });
-    return { isError: r.isError, text: (r.content as any[]).map(i => i.text).join('\n') as string };
-  };
   try {
     const g = await gql('LOGIN');
     expect(g.errors).toBeUndefined();
-    const m = await mcp('LOGIN');
-    expect(m.isError).not.toBe(true);
-    const ids = [...m.text.matchAll(/\(id: ([0-9a-z]+)\)/g)].map(x => x[1]);
-    expect(ids).toEqual((g.data as any).agentTasks.map((t: any) => t.id));
+    const ids = (g.data as any).agentTasks.map((t: any) => t.id);
+    expect(ids).toEqual((await list({ text: 'LOGIN' })).map((r: any) => r.id));
     expect(ids).toHaveLength(2);
     expect((await gql('')).errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
-    const refused = await mcp('');
-    expect(refused.isError).toBe(true);
-    expect(refused.text).toMatch(/^\[bad_user_input\]/);
-  } finally { await client.close(); await server.close(); await api.stop(); }
+  } finally { await api.stop(); }
 });

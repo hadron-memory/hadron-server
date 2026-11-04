@@ -362,12 +362,8 @@ describe('#2045 read exposure: one gate per owner, null in both fields when mask
     expect(await read('Worker', row, ctxOf(f.stranger.id))).toEqual([null, null]);
   });
 
-  it('MCP hadron_get_worker shows the pointer to a reader, through the same gate', async () => {
-    const f = await fixture();
-    const set = await write(ctxOf(f.admin.id), f.targets.WORKER, f.nodes.install1.id);
-    const mcp = createTestableMcpServer({ userId: f.admin.id, roles: [], clientId: `user:${f.admin.id}` });
-    expect(await mcp.callToolText('hadron_get_worker', { workerRef: f.worker.id })).toContain(`Boot prompt pointer: ${set!.urn}`);
-  });
+  // #3082: 'MCP hadron_get_worker shows the pointer to a reader' removed (the tool is disabled on MCP); the gate it exercised is the
+  // Worker field read pinned by the 'Worker: behind the worker read gate' test just above.
 });
 
 describe('#2045 surfaces and code inventory', () => {

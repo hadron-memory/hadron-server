@@ -82,7 +82,6 @@ describe('S12 cast choice', () => {
 import { ApolloServer } from '@apollo/server';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
-import { createTestableMcpServer } from '../../../mcp/server.js';
 import { writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
 import { readFileSync } from 'node:fs';
@@ -110,28 +109,25 @@ for (const required of [false, true]) {
         [{ reports: 'secret-foreign-name', none: false }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
         [{ reports: null, none: true }, 'CONFLICT', 'Supply reportsTo or noTeam, never both.'],
       ];
-      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
       for (const [input, suffix, message] of cases) {
         for (const op of ['castWorker', 'castWorkerPreview'] as const) {
           expect((await wire(op, input)).errors?.[0]).toMatchObject({ message, extensions: { code: `WORKER_TEAM_CHOICE_${suffix}` } });
         }
-        const choice = { ...('reports' in input ? { reportsTo: input.reports } : {}), ...('none' in input ? { noTeam: input.none } : {}) };
-        expect(await mcp.callToolText('hadron_cast_worker', { app: app.id, agent: agent.id, name: 'Wire', ...choice }))
-          .toBe(`Error: [WORKER_TEAM_CHOICE_${suffix}] ${message}`);
       }
       const literal = await wire('castWorker', {}, 'reportsTo:null');
       expect(literal.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_INVALID');
       expect(await db.worker.count()).toBe(0);
       expect(await db.agentTeamEvent.count()).toBe(0);
     });
-    it('preserves actual old GraphQL/MCP request omission', async () => {
+    it('preserves actual old GraphQL request omission', async () => {
       vi.stubEnv('CAST_REPORTING_CHOICE_REQUIRED', String(required));
       const result = await wire('castWorkerPreview', {});
       if (required) expect(result.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
       else expect(result.data?.castWorkerPreview).toMatchObject({ teamPlacement: 'UNSET' });
-      const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-      const text = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'Old MCP' });
-      expect(text).toContain(required ? '[WORKER_TEAM_CHOICE_REQUIRED]' : 'Team placement: UNSET');
+      // #3082: the hadron_cast_worker MCP leg is gone; the castWorker mutation carries the same omission.
+      const cast = await wire('castWorker', {});
+      if (required) expect(cast.errors?.[0].extensions?.code).toBe('WORKER_TEAM_CHOICE_REQUIRED');
+      else expect(cast.data?.castWorker).toMatchObject({ teamPlacement: 'UNSET' });
       expect(await db.worker.count()).toBe(required ? 0 : 1);
     });
   });
@@ -413,14 +409,10 @@ it('a head cast enters existing S6 team stop coverage atomically', async () => {
   expect(await db.agentTeamEvent.count({ where: { subjectWorkerId: made.id, type: 'worker.reports-to' } })).toBe(1);
 });
 
-it('returns selected head identity through GraphQL and delegated MCP receipts', async () => {
+it('returns selected head identity through GraphQL', async () => {
   const head = await M.castWorker({}, args({ name: 'Head' }), ctx());
   expect((await wire('castWorkerPreview', { reports: head.id })).data?.castWorkerPreview).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
   expect((await wire('castWorker', { reports: head.id })).data?.castWorker).toMatchObject({ teamPlacement: 'REPORTS_TO', reportsToWorkerId: head.id });
-  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-  const receipt = await mcp.callToolText('hadron_cast_worker', { agent: agent.id, name: 'McpReport', reportsTo: head.id });
-  expect(receipt).toContain('Team placement: REPORTS_TO');
-  expect(receipt).toContain(`Reports to worker: ${head.id}`);
 });
 
 it('a late template failure rolls back reporting and S6 coverage/notices together', async () => {
@@ -612,13 +604,13 @@ it('an omitted or null reporting choice at bind preserves legacy UNSET without a
   }
 });
 
-it('the delegated MCP list distinguishes stored NO_TEAM from legacy UNSET', async () => {
-  await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
-  await M.castWorker({}, args({ name: 'Legacy' }), ctx());
-  const mcp = createTestableMcpServer({ userId: user.id, roles: ['READER'], appId: app.id, clientId: `user:${user.id}` });
-  const text = await mcp.callToolText('hadron_list_workers', {});
-  expect(text.split('\n').find(line => line.includes('Explicit'))).toContain('team placement NO_TEAM');
-  expect(text.split('\n').find(line => line.includes('Legacy'))).toContain('team placement UNSET');
+it('the worker read distinguishes stored NO_TEAM from legacy UNSET', async () => {
+  // #3082: moved from the hadron_list_workers MCP text to the Worker.teamPlacement field it rendered.
+  const explicit = await M.castWorker({}, args({ name: 'Explicit', noTeam: true }), ctx());
+  const legacy = await M.castWorker({}, args({ name: 'Legacy' }), ctx());
+  const row = (id: string) => db.worker.findUniqueOrThrow({ where: { id } });
+  expect(await W.teamPlacement(await row(explicit.id), {}, ctx())).toBe('NO_TEAM');
+  expect(await W.teamPlacement(await row(legacy.id), {}, ctx())).toBe('UNSET');
 });
 
 import { lockStopFence } from '../../../lib/stopSignals/state.js';

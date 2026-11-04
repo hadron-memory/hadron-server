@@ -25,6 +25,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { startWorkerSessionGql } from '../test/startWorkerSessionGql.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import type { AuthContext } from '../middleware/auth.js';
 
@@ -96,317 +97,16 @@ const worker = (name: string, slug: string, extra: Record<string, unknown> = {})
     data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name, slug, role: 'backend-engineer', ...extra },
   });
 
+/** #3082: a worker session is started through GraphQL (as the CLI does), never over MCP. */
+const startGql = (workerRef: string) =>
+  startWorkerSessionGql({ workerRef, userId: user.id, appId: app.id, ctx: ctxFor() });
+
 const ctxFor = (userId = user.id): Context =>
   ({ db, userId, appId: app.id, roles: ['READER'], clientId: `user:${userId}` }) as Context;
 
-// ---------------------------------------------------------------------------
-// #1015 — hadron_get_worker
-// ---------------------------------------------------------------------------
-
-describe('#1015 — hadron_get_worker re-fetches the boot briefing', () => {
-  it('returns identity plus the resolved briefing, by NAME', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-
-    expect(out).toContain('Iris');
-    expect(out).toContain('backend-engineer');
-    expect(out).toContain(`hrn:worker:${org.urn}:team:iris`);
-    // The briefing itself, with the template placeholders bound.
-    expect(out).toContain('You are Iris, the backend-engineer on this team.');
-    expect(out).toContain('Boot briefing');
-    // #1090: the receipt stamps THIS rendering — composition time plus the
-    // role Agent's generic updatedAt, both from the one agent read that
-    // supplied the briefing.
-    expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-    expect(out).toMatch(/role Agent updated at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-    expect(out).toContain('(generic Agent row update)');
-  });
-
-  it('reports a null role-Agent updatedAt honestly instead of inventing a stamp (#1090)', async () => {
-    const nullStampAgent = await db.agent.create({
-      data: {
-        id: generateId(), organizationId: org.id, urn: `${org.urn}:null-stamp`,
-        name: 'Null stamp', visibility: 'ORGANIZATION',
-        personaRole: 'archivist',
-      },
-    });
-    await serveAgentBootPrompt(db, nullStampAgent.id, 'You are {{worker.name}}, the {{worker.role}}.');
-    await db.agent.update({ where: { id: nullStampAgent.id }, data: { updatedAt: null } });
-    await db.worker.create({
-      data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: nullStampAgent.id, name: 'Stale', slug: 'stale', role: 'archivist' },
-    });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', { workerRef: 'Stale' });
-    expect(out).toContain('You are Stale, the archivist.');
-    expect(out).toContain('role Agent updated at: not recorded');
-    expect(out).toMatch(/rendered at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-  });
-
-  it('resolves a name case-insensitively, the way a human types it', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'iris',
-    });
-    expect(out).toContain('You are Iris');
-  });
-
-  it('works by URN with NO App scope — the post-reconnect case', async () => {
-    // This is the scenario the issue is really about: the selection evaporated,
-    // so a bare name has nothing to resolve against, but a URN names its own
-    // App and must not demand a hadron_set_active_app first.
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(reconnectedAuth()).callToolText('hadron_get_worker', {
-      workerRef: `hrn:worker:${org.urn}:team:iris`,
-    });
-    expect(out).toContain('You are Iris, the backend-engineer on this team.');
-  });
-
-  it('works by id with no App scope', async () => {
-    const iris = await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(reconnectedAuth()).callToolText('hadron_get_worker', {
-      workerRef: iris.id,
-    });
-    expect(out).toContain('You are Iris');
-  });
-
-  it('recovers App scope for a bare NAME from the session id', async () => {
-    // The other half of #1005/#1016: the Hadron session is the durable anchor
-    // that survives the reconnect, so it can stand in for the lost selection.
-    const iris = await worker('Iris', 'iris');
-    const session = await db.session.create({
-      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id },
-    });
-    await db.appMember.create({ data: { appId: app.id, userId: user.id, role: 'member' } });
-
-    const out = await createTestableMcpServer(reconnectedAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-      session: session.id,
-    });
-    expect(out).toContain(`hrn:worker:${org.urn}:team:iris`);
-    // The hand-made session has no served-prompt record, so its own read gets the typed notice, never a newer revision.
-    expect(out).toContain('SESSION_UNRECORDED');
-  });
-
-  it('refuses a bare NAME with no App context, and says what to do', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(reconnectedAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(out).not.toContain('You are Iris');
-    expect(out).toMatch(/only unique within an App/);
-    // The remedy is named, and so is the form that needs none of it.
-    expect(out).toMatch(/id or URN/);
-  });
-
-  it('renders the briefing LIVE, so a changed template is picked up', async () => {
-    // The contract says never to cache the briefing precisely because it is
-    // rendered from what the role agent is served now. If this read were a
-    // snapshot it would reintroduce the staleness the contract forbids.
-    await worker('Iris', 'iris');
-    const srv = createTestableMcpServer(hybridAuth());
-    expect(await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' })).toContain(
-      'the backend-engineer on this team',
-    );
-
-    await serveAgentBootPrompt(db, agent.id, 'You are {{worker.name}}. The team ships on Fridays.');
-
-    const after = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
-    expect(after).toContain('The team ships on Fridays.');
-    expect(after).not.toContain('on this team.');
-  });
-
-  /**
-   * #1120 review (Codex P2) — the recovery read must hand back YOUR session id
-   * even when someone else's live session sorts ahead of it.
-   *
-   * Two questions were being answered from one row: "is anyone driving this"
-   * (any live session) and "what is my session id" (the caller's own). While
-   * the scan was ordered by `startedAt` that mostly coincided; ordering by
-   * heartbeat made it come apart, and the id silently vanished from the ONE
-   * read whose purpose is restoring it after a context compaction.
-   */
-  it('names the CALLER\'s own live session, not whichever sorts first', async () => {
-    const w = await worker('Iris', 'iris');
-    const older = new Date(Date.now() - 60 * 60 * 1000);
-
-    // The caller's own session, started EARLIER and with no recent heartbeat.
-    const mine = generateId();
-    await db.session.create({
-      data: {
-        id: mine, workerId: w.id, appId: app.id, userId: user.id,
-        startedAt: older, updatedAt: older,
-      },
-    });
-    // Someone else's, started later AND touched a moment ago — so it sorts
-    // first under heartbeat ordering.
-    await db.session.create({
-      data: {
-        id: generateId(), workerId: w.id, appId: app.id, userId: outsider.id,
-        startedAt: new Date(), updatedAt: new Date(),
-      },
-    });
-
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-
-    // Taken — any live session answers that.
-    expect(out).toContain('taken');
-    // ...and the caller still gets their OWN id back, which is the point.
-    expect(out).toContain(`Your active session: ${mine}`);
-  });
-
-  it("finds the caller's session even when it would not survive the shared cap", async () => {
-    // #1120 review, Codex P2 (second time on this line). Selecting `mine` out
-    // of the CAPPED set was still order-dependent: past the cap, the caller's
-    // own session is simply absent. The recovery guarantee cannot be a
-    // by-product of surviving a bound shared with everyone else's sessions, so
-    // it gets its own query scoped to the caller.
-    //
-    // Seeded PAST the cap for real. A first draft simulated it with four rows
-    // and "worst possible ordering", and the discriminating mutation — putting
-    // `mine` back inside the capped set — still passed, because with four rows
-    // the cap never bites. A bound can only be tested by exceeding it.
-    const w = await worker('Mira', 'mira');
-    const ancient = new Date(Date.now() - 10 * 60 * 60 * 1000);
-    const mine = generateId();
-    await db.session.create({
-      data: {
-        id: mine, workerId: w.id, appId: app.id, userId: user.id,
-        startedAt: ancient, updatedAt: ancient,
-      },
-    });
-    // Live ONLY through a usage event — the heartbeat input the ordering
-    // cannot see, so nothing keeps this row inside a shared prefix.
-    await db.usageEvent.create({
-      data: { countsAsActivity: true, id: generateId(), sessionId: mine, type: 'read', createdAt: new Date() },
-    });
-    // More live sessions than OPEN_SESSION_SCAN_CAP, all newer by updatedAt.
-    const now = new Date();
-    await db.session.createMany({
-      data: Array.from({ length: 220 }, () => ({
-        id: generateId(), workerId: w.id, appId: app.id, userId: outsider.id,
-        startedAt: now, updatedAt: now,
-      })),
-    });
-
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Mira',
-    });
-    expect(out).toContain('taken');
-    expect(out).toContain(`Your active session: ${mine}`);
-  });
-
-  it('does NOT name a session belonging to someone else', async () => {
-    // The control, and the privacy half: whose session it is otherwise stays
-    // behind the takeover refusal, which is a deliberate act rather than a
-    // listing.
-    const w = await worker('Jonas', 'jonas');
-    await db.session.create({
-      data: {
-        id: generateId(), workerId: w.id, appId: app.id, userId: outsider.id,
-        startedAt: new Date(), updatedAt: new Date(),
-      },
-    });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Jonas',
-    });
-    expect(out).toContain('taken');
-    expect(out).not.toContain('Your active session');
-  });
-
-  it('masks the briefing from a caller who may not see worker internals', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer({
-      userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
-    }).callToolText('hadron_get_worker', { workerRef: `hrn:worker:${org.urn}:team:iris` });
-    expect(out).not.toContain('on this team');
-  });
-
-  it('reports whether the worker is currently taken', async () => {
-    const iris = await worker('Iris', 'iris');
-    const free = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(free).toMatch(/free/);
-
-    await db.session.create({
-      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id },
-    });
-    const taken = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(taken).toMatch(/taken/);
-  });
-
-  it('names the driving session when it is the CALLER\'S OWN', async () => {
-    // The point of the read is recovery, so an agent that lost its session id
-    // gets it back here — but only its own.
-    const iris = await worker('Iris', 'iris');
-    const mine = await db.session.create({
-      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: user.id },
-    });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(out).toContain(mine.id);
-  });
-
-  it('does not name someone else\'s driving session', async () => {
-    // Whose session it is stays behind the takeover refusal — a deliberate act,
-    // not a listing (hadron_list_workers' rule).
-    const iris = await worker('Iris', 'iris');
-    const theirs = await db.session.create({
-      data: { id: generateId(), workerId: iris.id, appId: app.id, userId: outsider.id },
-    });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(out).toMatch(/taken/);
-    expect(out).not.toContain(theirs.id);
-    expect(out).not.toContain(outsider.id);
-  });
-
-  it('a retired worker is readable and marked RETIRED', async () => {
-    // Retirement preserves history; the roster must stay legible.
-    await worker('Gone', 'gone', { retiredAt: new Date() });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Gone',
-    });
-    expect(out).toContain('RETIRED');
-  });
-
-  it('says so plainly when there is no briefing to give', async () => {
-    await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: null, bootPromptUrn: null } });
-    await worker('Bare', 'bare');
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Bare',
-    });
-    expect(out).toMatch(/No boot briefing/);
-  });
-
-  describe('the roster is not an existence oracle', () => {
-    it('an outsider naming a real worker gets WORKER_NOT_FOUND, not FORBIDDEN', async () => {
-      await worker('Iris', 'iris');
-      // Denial and absence must be indistinguishable, or guessing names becomes
-      // a probe for another tenant's staff (#990's gate ordering).
-      const out = await createTestableMcpServer({
-        userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
-      }).callToolText('hadron_get_worker', { workerRef: 'Iris' });
-
-      expect(out).not.toContain('You are Iris');
-      expect(out).toMatch(/not found/i);
-    });
-
-    it('…the SAME answer an absent name gets', async () => {
-      const absent = await createTestableMcpServer({
-        userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
-      }).callToolText('hadron_get_worker', { workerRef: 'NoSuchWorker' });
-      expect(absent).toMatch(/not found/i);
-    });
-  });
-});
+// #1015 — hadron_get_worker: #3082 turned the tool off over MCP. Its subject was the MCP rendering of Query.worker, whose
+// resolver rules (lookup by name/URN/id, App scoping, WORKER_NOT_FOUND for an outsider and an absent name, retired workers)
+// are pinned by resolvers.worker.test.ts (Q.worker 'WORKER_NOT_FOUND' cases) and the briefing by resolvers.workerProfile1149.test.ts.
 
 // ---------------------------------------------------------------------------
 // #1016 — hadron_whoami
@@ -429,7 +129,8 @@ describe('#1016 — hadron_whoami recovers the session id', () => {
     expect(out).toContain('Team App');
     expect(out).toContain('Ship the roster read');
     // …and tells the model what the id is FOR, which is the point.
-    expect(out).toContain('hadron_team_chat_post');
+    // #3082: whoami now says what the id is FOR in terms of the `session` argument, not a disabled tool's name.
+    expect(out).toContain('pass as `session` on a write to attribute it');
   });
 
   it('works with no App scope — the post-reconnect case it exists for', async () => {
@@ -550,39 +251,9 @@ describe('#1016 — hadron_whoami recovers the session id', () => {
 // #1010 — updateWorker
 // ---------------------------------------------------------------------------
 
-describe('#1010 — hadron_update_worker and the worker read', () => {
-  // #2712 removed the per-worker prompt override this tool was written for; it now edits signature and trailer.
-  it('omitting every editable field changes nothing and says so', async () => {
-    const iris = await worker('Iris', 'iris');
-    const before = await db.worker.findUniqueOrThrow({ where: { id: iris.id } });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-    });
-    expect(out).toMatch(/no change requested/);
-    expect(out).not.toContain('Prompt override');
-    expect(await db.worker.findUniqueOrThrow({ where: { id: iris.id } })).toEqual(before);
-  });
-
-  it('refuses a caller who may not staff the App', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer({
-      userId: outsider.id, appId: app.id, roles: ['READER'], clientId: `user:${outsider.id}`,
-    }).callToolText('hadron_update_worker', { workerRef: 'Iris', signature: 'mine now' });
-
-    expect(out).not.toMatch(/^Updated/m);
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).signature).not.toBe('mine now');
-  });
-
-  it('refuses a PURE App-key principal — staffing is a human act', async () => {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(appKeyAuth()).callToolText('hadron_update_worker', {
-      workerRef: 'Iris',
-      signature: 'by a robot',
-    });
-    expect(out).not.toMatch(/^Updated/m);
-    expect((await db.worker.findFirstOrThrow({ where: { name: 'Iris' } })).signature).not.toBe('by a robot');
-  });
-
+describe('#1010 — the worker read', () => {
+  // #3082: hadron_update_worker is off over MCP; its three tests (no-op update, refuse a non-staffer, refuse a pure
+  // App-key) were the MCP rendering of Mutation.updateWorker, covered by resolvers.worker.test.ts (updateWorker cases).
   describe('the GraphQL surface', () => {
     it('reads a worker by NAME through Query.worker with appRef', async () => {
       await worker('Iris', 'iris');
@@ -661,10 +332,7 @@ describe('#1100 — ending with `summary` instead of `handoff` is called out', (
     srv: ReturnType<typeof createTestableMcpServer>,
     args: Record<string, unknown>,
   ) => {
-    const started = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint one',
-    });
-    const id = started.match(/Session started: (\S+)/)![1];
+    const id = await startGql('Iris');
     return { id, receipt: await srv.callToolText('hadron_end_session', { id, ...args }) };
   };
 
@@ -720,83 +388,27 @@ describe('#1100 — ending with `summary` instead of `handoff` is called out', (
     expect(retry).toContain('append-only');
 
     // The remedy that works: bind again and end THAT stint with the handoff.
-    const second = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint two',
-    });
+    const second = await startGql('Iris');
     await srv.callToolText('hadron_end_session', {
-      id: second.match(/Session started: (\S+)/)![1],
+      id: second,
       handoff: 'PR #1134 merged; #1100 is next.',
     });
 
-    const rebound = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint three',
+    // #3082: the rebind receipt (hadron_start_session) no longer renders over MCP for a worker; the handoff the next
+    // stint would be handed is the stored one, read here from the worker's handoffs: branch.
+    const fresh = await db.worker.findUniqueOrThrow({ where: { appId_slug: { appId: app.id, slug: 'iris' } } });
+    const kept = await db.node.findMany({
+      where: { memoryId: fresh.memoryId!, loc: { startsWith: 'handoffs:' }, deletedAt: null },
+      select: { content: true },
     });
-    expect(rebound).toContain('#1100 is next');
+    expect(kept.map((c) => c.content).join('\n')).toContain('#1100 is next');
   });
 });
 
 describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', () => {
-  it('hadron_start_session renders the previous stint\'s handoff after the briefing', async () => {
-    const w = await worker('Iris', 'iris');
-    const srv = createTestableMcpServer(hybridAuth());
-    const started = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint one',
-    });
-    const sessionId = started.match(/Session started: (\S+)/)![1];
-    await srv.callToolText('hadron_end_session', {
-      id: sessionId,
-      handoff: 'PR #1045 is open. Do NOT rerun the backfill.',
-    });
-
-    // A fresh bind — the acceptance narrative's step 6. Nothing asks for the
-    // handoff; the bind delivers it.
-    const rebound = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint two',
-    });
-    expect(rebound).toContain('Boot briefing');
-    expect(rebound).toContain('Handoff from the previous session');
-    expect(rebound).toContain('Do NOT rerun the backfill');
-    expect(w.id).toBeTruthy();
-  });
-
-  it('hadron_get_worker carries it too — the post-compaction reader', async () => {
-    await worker('Iris', 'iris');
-    const srv = createTestableMcpServer(hybridAuth());
-    const started = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint one',
-    });
-    await srv.callToolText('hadron_end_session', {
-      id: started.match(/Session started: (\S+)/)![1],
-      handoff: 'the migration is half-applied',
-    });
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_get_worker', {
-      workerRef: 'Iris',
-    });
-    expect(out).toContain('the migration is half-applied');
-  });
-
-  it('names an auto-expired stint rather than presenting stale prose as current', async () => {
-    const w = await worker('Iris', 'iris');
-    const srv = createTestableMcpServer(hybridAuth());
-    const s1 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'one' }))
-      .match(/Session started: (\S+)/)![1];
-    await srv.callToolText('hadron_end_session', { id: s1, handoff: 'state as of stint one' });
-
-    // Stint two is REAPED — the #930 reaper stamps both columns and writes no
-    // handoff, because nobody closed it deliberately.
-    const s2 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'two' }))
-      .match(/Session started: (\S+)/)![1];
-    const now = new Date();
-    await db.session.update({ where: { id: s2 }, data: { endedAt: now, autoExpiredAt: now } });
-
-    const out = await srv.callToolText('hadron_get_worker', { workerRef: 'Iris' });
-    expect(out).toContain('No current handoff');
-    expect(out).toContain('auto-expired by the server');
-    // Still handed over, but framed as history.
-    expect(out).toContain('state as of stint one');
-    expect(out).toContain('history, not as the current state of play');
-    expect(w.id).toBeTruthy();
-  });
+  // #3082: three MCP-rendering tests were removed here: hadron_start_session's handoff-after-briefing render (a worker
+  // bind is refused over MCP), and hadron_get_worker's handoff and auto-expired-framing reads (tool off). The handoff
+  // continuity they carried is Worker.continuity, pinned by resolvers.nodeMemoryGate2193.test.ts.
 
   it('a retried hadron_end_session writes no second handoff and does not move endedAt', async () => {
     // The MCP tool reimplements the end with its own raw update, which is how
@@ -804,13 +416,11 @@ describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', ()
     // P1). Both now come from the shared writer plus first-end-wins here.
     await worker('Iris', 'iris');
     const srv = createTestableMcpServer(hybridAuth());
-    const s1 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'one' }))
-      .match(/Session started: (\S+)/)![1];
+    const s1 = await startGql('Iris');
     await srv.callToolText('hadron_end_session', { id: s1, handoff: 'stint one' });
     const endedAt = (await db.session.findUniqueOrThrow({ where: { id: s1 } })).endedAt;
 
-    const s2 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'two' }))
-      .match(/Session started: (\S+)/)![1];
+    const s2 = await startGql('Iris');
     await srv.callToolText('hadron_end_session', { id: s2, handoff: 'stint two' });
 
     // The retry of the OLDER session.
@@ -838,8 +448,7 @@ describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', ()
     // long ago.
     await worker('Iris', 'iris');
     const srv = createTestableMcpServer(hybridAuth());
-    const s1 = (await srv.callToolText('hadron_start_session', { workerRef: 'Iris', description: 'one' }))
-      .match(/Session started: (\S+)/)![1];
+    const s1 = await startGql('Iris');
     await srv.callToolText('hadron_end_session', { id: s1, summary: 'first' });
     const endedAt = (await db.session.findUniqueOrThrow({ where: { id: s1 } })).endedAt;
     expect(endedAt).not.toBeNull();
@@ -861,68 +470,8 @@ describe('#1029 — the handoff arrives at bind, and recovery re-fetches it', ()
 });
 
 
-// ---------------------------------------------------------------------------
-// #1053 — recording against an ended session says so
-// ---------------------------------------------------------------------------
-
-describe('#1053 — hadron_record_work names an ended session', () => {
-  async function boundSession(): Promise<string> {
-    await worker('Iris', 'iris');
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint',
-    });
-    return out.match(/Session started: (\S+)/)![1];
-  }
-
-  it('a live session records with a clean receipt and no warning', async () => {
-    const sid = await boundSession();
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_record_work', {
-      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#1', action: 'opened',
-    });
-    expect(out).toContain('Recorded');
-    expect(out).not.toContain('ALREADY ENDED');
-  });
-
-  it('a REAPED session still records — and the receipt says the binding is gone', async () => {
-    // The observed incident: two milestones recorded twelve minutes after the
-    // reap, both with clean receipts, and the worker would have finished the
-    // stint believing it was still bound.
-    const sid = await boundSession();
-    const now = new Date();
-    await db.session.update({ where: { id: sid }, data: { endedAt: now, autoExpiredAt: now } });
-
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_record_work', {
-      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#2', action: 'merged',
-    });
-    // The record is KEPT — late attribution is the worklog's point
-    // (cor:agt:020:05), so refusing here would invalidate durable law.
-    expect(out).toContain('Recorded');
-    expect(out).toContain('ALREADY ENDED');
-    expect(out).toContain('end reason: unknown');
-    expect(out).toContain('hadron_whoami');
-    // The warning must NOT claim attribution stops — that is the behaviour
-    // this change exists to defend, and saying otherwise would send a worker
-    // rebinding to recover records it never lost (PR #1055 review, both bots).
-    expect(out).toContain('further records against it will be too');
-    // No clause may read as "attribution stops" — the third wording of this
-    // one sentence, each earlier draft caught by review (PR #1055).
-    expect(out).not.toMatch(/will not be attributed/);
-    expect(out).not.toMatch(/nothing new is being attributed/);
-  });
-
-  it('distinguishes a deliberate close from a reap — they mean different things', async () => {
-    const sid = await boundSession();
-    await createTestableMcpServer(hybridAuth()).callToolText('hadron_end_session', { id: sid });
-
-    const out = await createTestableMcpServer(hybridAuth()).callToolText('hadron_record_work', {
-      session: sid, tool: 'github', kind: 'pr', ref: 'acme/repo#3', action: 'merged',
-    });
-    expect(out).toContain('Recorded');
-    expect(out).toContain('end reason: ended');
-    expect(out).not.toContain('auto-expired');
-  });
-});
-
+// #1053 — hadron_record_work: off over MCP (#3082); the receipt wording was MCP-only. The late-attribution rule
+// (cor:agt:020:05) is pinned at Mutation.recordWork in the resolver tests.
 
 describe('#1053 — hadron_end_session does not read as a fresh close when it was not', () => {
   it('an ALREADY-ended session says so rather than reporting a clean end', async () => {
@@ -931,10 +480,7 @@ describe('#1053 — hadron_end_session does not read as a fresh close when it wa
     // liveness signal — in the very tool the old guidance called the loud one.
     await worker('Iris', 'iris');
     const srv = createTestableMcpServer(hybridAuth());
-    const started = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint',
-    });
-    const sid = started.match(/Session started: (\S+)/)![1];
+    const sid = await startGql('Iris');
     const now = new Date();
     await db.session.update({ where: { id: sid }, data: { endedAt: now, autoExpiredAt: now } });
 
@@ -951,10 +497,7 @@ describe('#1053 — hadron_end_session does not read as a fresh close when it wa
   it('a genuine close still reads as one', async () => {
     await worker('Iris', 'iris');
     const srv = createTestableMcpServer(hybridAuth());
-    const started = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint',
-    });
-    const sid = started.match(/Session started: (\S+)/)![1];
+    const sid = await startGql('Iris');
     const out = await srv.callToolText('hadron_end_session', { id: sid });
     // #1034: this session IS worker-bound, so the receipt names the KIND that
     // ended — a strictly stronger assertion than the bare "Session ended" this
@@ -975,10 +518,7 @@ describe('#1053 — the reaper racing an end must not produce a fresh-close rece
     // auto-expired at one instant and ended at a later one.
     await worker('Iris', 'iris');
     const srv = createTestableMcpServer(hybridAuth());
-    const started = await srv.callToolText('hadron_start_session', {
-      workerRef: 'Iris', description: 'stint',
-    });
-    const sid = started.match(/Session started: (\S+)/)![1];
+    const sid = await startGql('Iris');
 
     const reapedAt = new Date(Date.now() - 60_000);
     const spy = vi
