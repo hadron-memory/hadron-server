@@ -76,7 +76,7 @@ describe('#3140 item 2: an ENDED session read straight through the resolver (bui
   // newest open session, not an ended one). Direct-resolver defence-in-depth only: validateSessionBinding admits only
   // live, owned, non-dormant sessions, so this is not a reachable principal, not a lifecycle or admission rule, and no
   // evidence for either answer if the state ever becomes reachable. Changing this undefined state needs no spec change.
-  it('built-as: an ended session with a record keeps no placement but its recorded values still fill the lines', async () => {
+  it('built-as: an ended session with a record still fills signature, trailer and prompt from the record', async () => {
     const sessionA = await bind(workerA, 'model-A');
     const before = await outputs(workerA, ctx({ sessionId: sessionA }));
     await db.session.update({ where: { id: sessionA }, data: { endedAt: new Date() } });
@@ -85,9 +85,12 @@ describe('#3140 item 2: an ENDED session read straight through the resolver (bui
     const ended = await outputs(live, ctx({ sessionId: sessionA }));
     // No `endedAt` filter on the recorded lookup: the record's variables still win over today's values.
     expect(ended.signature).toBe(before.signature);
+    expect(ended.trailer).toBe(before.trailer);
+    expect(ended.prompt).toBe(before.prompt);
     expect(ended.signature).toContain('model-A');
     expect(ended.signature).not.toContain('Renamed');
-    // No placement for an ended session: the role the NEXT bind would use is the live row's, observed here without
+    expect(ended.prompt).not.toContain('Renamed');
+    // Only the recorded-value behaviour is pinned; the live row is what an unbound read shows, observed here without
     // describing it as the served prompt's lines.
     const open = await outputs(live, ctx());
     expect(open.signature).toContain('Renamed');
