@@ -252,7 +252,7 @@ it('unlicensed matching imports neither appear in role ambiguity nor prevent a l
 
 it('an explicit derived cast validates its license before role-mismatch metadata',async()=>{
   const input={appRef:app.id,agentRef:target.id,role:'other-role',name:'CheckedRole'};
-  await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({code:'AGENT_NOT_FOUND'});
+  await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_INSTALLED'}});
   await createDbAgentOrgGrant(db,holder.id,target.id);
   await expect(M.castWorker({},input,ctx())).rejects.toMatchObject({extensions:{code:'WORKER_ROLE_OVERRIDE_REFUSED'}});
 });

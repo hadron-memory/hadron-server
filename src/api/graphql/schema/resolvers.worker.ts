@@ -985,8 +985,15 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       if (e instanceof AgentNotFoundError) throw notInstalled();
       throw e;
     }
-    const row = await resolveUnfilteredAppInstallation(ctx.db, appId, id);
-    if (!row || row.agent.deletedAt) throw notInstalled();
+    const row = await resolveAppInstallation(ctx.db, appId, id);
+    if (!row || row.agent.deletedAt) {
+      if (expectedAgentId !== undefined && id !== expectedAgentId) throw castTargetChanged();
+      // Raw membership may preserve the existing typed license refusal, but
+      // must never supply identity metadata to an ordinary cast decision.
+      const witness = await resolveUnfilteredAppInstallation(ctx.db, appId, id);
+      if (witness?.installationKind === 'DERIVED') await assertCastable(ctx.db, app, id);
+      throw notInstalled();
+    }
     agent = row.agent;
   } else {
     if (!roleNorm) {
