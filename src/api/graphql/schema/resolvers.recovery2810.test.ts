@@ -118,13 +118,13 @@ describe('recoveryEdges bounded work (#2810)', () => {
     const raw = vi.spyOn(db, '$queryRaw');
     try {
       await Q.recoveryEdges({}, { memoryRef: memoryId, edgeIds: batchIds.slice(0, 3), limit: 3 }, ctx);
-      // The masked statement is the one carrying the visibility scan (WITH tombs AS
-      // MATERIALIZED — the tombstone set, endpoint identity, the masking predicate
-      // and the window total); endpoint discovery interpolates edge subqueries but
-      // computes no visibility, and is not the masked scan being pinned.
+      // The masked statement is the one carrying the visibility predicate and the window
+      // total (WITH page AS — endpoints joined by primary key with the masking predicate as
+      // a filter, count(*) OVER () riding the page); endpoint identity is fetched by plain
+      // key-lookup statements that compute no visibility, and are not the masked scan.
       const masked = raw.mock.calls.filter((call) => {
         const sql = (call[0] as Prisma.Sql)?.sql ?? '';
-        return sql.includes('WITH tombs AS MATERIALIZED');
+        return sql.includes('WITH page AS');
       });
       expect(masked).toHaveLength(1);
     } finally { raw.mockRestore(); }

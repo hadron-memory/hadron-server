@@ -125,27 +125,34 @@ async function mapBound<T>(items: readonly T[], limit: number, fn: (item: T) => 
 export const recoveryQueries = {
   /**
    * Explicit graph inspection; endpoint authority and ancestor liveness precede SQL count and page.
-   * #2810 slice 2: the work is bounded by what the call names — visibility is evaluated once per
-   * UNIQUE endpoint (CTE vis, not once per edge side), endpoint-memory authority is one batched
-   * row fetch plus bounded-concurrency verdicts, and count and page share ONE masked pass (a
-   * window total evaluated before LIMIT, with one first-page re-ask for the rare offset page
-   * past the end, which has no row to carry the total).
+   * #2810 slice 2: the work is bounded by what the call names — endpoint identity is fetched ONCE
+   * by primary key, the tombstoned-ancestor test is computed in JS against one fetched tombstone
+   * set (no planner can misjoin it), and count and page share ONE masked pass (a window total
+   * evaluated before LIMIT, with one first-page re-ask for the rare offset page past the end,
+   * which has no row to carry the total).
    */
   recoveryEdges: async (_: unknown, args: { memoryRef: string; edgeIds?: string[] | null; limit?: number | null; offset?: number | null }, ctx: Context) => {
     const only = edgeRestriction(args.edgeIds);
     const memoryId = await recoveryMemory(ctx, args.memoryRef);
-    // #2810: a UNION of key lookups; an OR join condition cannot use the node primary key.
-    const endpointIds = Prisma.sql`SELECT e.source_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}
-      UNION SELECT e.target_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}`;
-    // #2818: a restricted call probes its few endpoints by primary key; IN would hash-join a scan of every node.
-    const endpointById = args.edgeIds == null
-      ? Prisma.sql`n.id IN (${endpointIds})`
-      : Prisma.sql`n.id = ANY(ARRAY(${endpointIds}))`;
-    const endpointMemories = await ctx.db.$queryRaw<Array<{ memory_id: string }>>(
-      Prisma.sql`SELECT DISTINCT n.memory_id FROM nodes n WHERE ${endpointById}`);
+    // #2810: endpoint identity arrives in TWO plain statements, each of which every planner
+    // executes as key lookups: the endpoint id set (a UNION over the call's own edge scope —
+    // an OR join condition cannot use the node primary key), then the endpoint rows by
+    // `id = ANY(...)`. The single-statement `n.id IN (UNION …)` shape this replaces was the
+    // CI plan failure: on GitHub's default-config pg16 one warm whole-memory call cost ~176s
+    // at the 20k/40k pin scale where dev PG17 pays ~300ms, and no GUC combination reproduces
+    // the catastrophic shape locally — so the shape is gone rather than worked around. The
+    // restricted form (`= ANY(ARRAY(…))`) ran fine on that same runner, which is what pins
+    // parameter-array membership as the safe shape here.
+    const endpointIds = (await ctx.db.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT e.source_id AS id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}
+        UNION SELECT e.target_id FROM edges e WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}`)).map((r) => r.id);
+    const endpoints = endpointIds.length === 0 ? [] : await ctx.db.$queryRaw<
+      Array<{ id: string; loc: string; memory_id: string; deleted_at: Date | null; node_type: string }>>(
+      Prisma.sql`SELECT n.id, n.loc, n.memory_id, n.deleted_at, n.node_type FROM nodes n WHERE n.id = ANY(${endpointIds}::text[])`);
+    const endpointMemories = [...new Set(endpoints.map((e) => e.memory_id))];
     // #2810 slice 2: ONE batched row fetch replaces the per-memory findUnique cascade.
     const rows = await ctx.db.memory.findMany({
-      where: { id: { in: endpointMemories.map((r) => r.memory_id) } },
+      where: { id: { in: endpointMemories } },
       select: { id: true, deletedAt: true, organization: { select: { deletedAt: true } }, app: { select: { deletedAt: true, uninstalledAt: true } } },
     });
     const rowById = new Map(rows.map((row) => [row.id, row]));
@@ -158,81 +165,65 @@ export const recoveryQueries = {
     const accessible = await getAccessibleMemoryIds(ctx);
     const accessibleSet = accessible === null ? null : new Set(accessible);
     const readable: string[] = [], recoverable: string[] = [];
-    await mapBound(endpointMemories.map((r) => r.memory_id), 16, async (id) => {
+    for (const id of endpointMemories) {
       const row = rowById.get(id);
-      if (!row || row.deletedAt || (accessibleSet !== null && !accessibleSet.has(id))) return;
+      if (!row || row.deletedAt || (accessibleSet !== null && !accessibleSet.has(id))) continue;
       readable.push(id);
-    });
+    }
     // #2810 slice 2: the write half of the fan-out verdicts is only ever READ for memories
-    // that actually contribute a non-comment tombstoned endpoint (vis's deleted-endpoint
-    // branch) — write-gating every readable endpoint memory ran ~150 gates per portal batch
-    // whose verdicts the statement could never read. One tombstone-presence query names the
-    // few that matter; canRecoverMemoryRow itself is unchanged.
-    const tombstoneMemories = readable.length === 0 ? new Set<string>() : new Set(
-      (await ctx.db.$queryRaw<Array<{ memory_id: string }>>(Prisma.sql`
-        SELECT DISTINCT memory_id FROM nodes
-        WHERE deleted_at IS NOT NULL AND node_type <> ${COMMENT_NODE_TYPE}
-          AND memory_id = ANY(${readable}::text[])`)).map((r) => r.memory_id));
+    // that actually contribute a non-comment tombstoned endpoint (the masked predicate's
+    // deleted-endpoint branch) — write-gating every readable endpoint memory ran ~150 gates
+    // per portal batch whose verdicts the statement could never read. The same tombstone
+    // fetch names the few that matter AND carries the locs the ancestor test needs. No
+    // node_type filter on the ancestor half: ANY tombstoned ancestor masks a live endpoint
+    // (restoreNode's parent fence ignores type the same way); only the endpoint's OWN
+    // tombstone branch is comment-excluded, as the masked predicate states.
+    const tombstones = readable.length === 0 ? [] : await ctx.db.$queryRaw<
+      Array<{ memory_id: string; loc: string; node_type: string }>>(Prisma.sql`
+      SELECT memory_id, loc, node_type FROM nodes
+      WHERE deleted_at IS NOT NULL AND memory_id = ANY(${readable}::text[])`);
+    const tombstoneMemories = new Set(tombstones.filter((t) => t.node_type !== COMMENT_NODE_TYPE).map((t) => t.memory_id));
+    // The tombstoned-ancestor test in JS: one Set lookup per (endpoint × ancestor), with the
+    // SAME ancestor derivation restoreNode's lock path uses (ancestorLocs, ':'-prefixed locs).
+    // This replaced two SQL shapes that made the test plan-luck: the per-endpoint NOT EXISTS
+    // probing `p.loc = ANY(ancestors)` could flip to an index scan on memory_id alone (one
+    // ANALYZE away from fetching every same-memory node per endpoint — measured 8.17M
+    // buffers, a 34s page), and the CTE-join replacement (endpoints lateral-unnested against
+    // a materialized tombstone set) is exactly the kind of unindexable-CTE join a default-
+    // configured planner can cost as a nested loop. No join, no plan to flip.
+    const tombByKey = new Set(tombstones.map((t) => `${t.memory_id}\u0000${t.loc}`));
+    const badIds = endpoints.filter((e) => !e.deleted_at
+      && ancestorLocs(e.loc).some((ancestor) => tombByKey.has(`${e.memory_id}\u0000${ancestor}`))).map((e) => e.id);
     await mapBound(readable.filter((id) => tombstoneMemories.has(id)), 16, async (id) => {
       const row = rowById.get(id);
       if (row && await canRecoverMemoryRow(ctx, row)) recoverable.push(id);
     });
-    // Every interpolated value is a bound SQL parameter. The ancestors are the endpoint loc's ':'
-    // prefixes (ancestorLocs). #2810 slice 2: vis evaluates visibility once per UNIQUE endpoint (ep
-    // needs no DISTINCT — the UNION already dedupes the endpoint ids and the nodes join is on the
-    // primary key); the old shape re-ran it per edge side (229k subplan evals at the 80k-edge repro)
-    // because visibility sat on the joined edge row. A prefix comparison against every tombstone
-    // cannot use an index and scanned the whole nodes table once per endpoint.
-    //
-    // The tombstoned-ancestor test is a ONE-TIME set operation, not a per-endpoint subplan: bad is
-    // ep lateral-unnested to its ancestor locs and hash-joined against the materialized tombstone
-    // set (tombs), and vis LEFT JOINs bad. The earlier per-endpoint NOT EXISTS probing nodes by
-    // p.loc = ANY(ancestors) was plan-luck: one ANALYZE away from an index scan on memory_id alone
-    // that fetched every same-memory node per endpoint (measured 8.17M buffers — a 34s page — at
-    // the pin-scale repro while the same statement planned fine at twice the scale elsewhere).
-    // Joining the small materialized set makes the cost O(tombstones + endpoints × depth) by
-    // construction, independent of which nodes index the planner fancies.
-    //
-    // The masked pass joins edges to vis alone: endpoint identity, liveness and authority all live in
-    // vis's ok (readable/recoverable are built from freshly fetched rows, and both already exclude a
-    // soft-deleted endpoint memory — the pre-slice-2 `memories.deleted_at IS NULL` join re-stated that
-    // same exclusion). Node and memory DTO columns are joined AFTER the limit, for the returned page
-    // only. The total rides the SAME pass (count(*) OVER () evaluates before LIMIT), so the masked scan
-    // is paid once per call; an offset page PAST the end has no row to carry the window total, so that
-    // one case re-asks the first page and keeps only its total.
+    // The masked pass joins edges to the endpoint rows by PRIMARY KEY with visibility as a
+    // filter — the join skeleton production's planner already picks healthily for this path
+    // (every admissible plan is PK probes or a hash join; no unindexable CTE or LATERAL
+    // remains for a differently-configured planner to cost as a nested loop). readable and
+    // recoverable are built from freshly fetched rows, and both already exclude a soft-deleted
+    // endpoint memory (the pre-slice-2 `memories.deleted_at IS NULL` join re-stated that same
+    // exclusion). Node and memory DTO columns are joined AFTER the limit, for the returned
+    // page only. The total rides the SAME pass (count(*) OVER () evaluates before LIMIT), so
+    // the masked scan is paid once per call; an offset page PAST the end has no row to carry
+    // the window total, so that one case re-asks the first page and keeps only its total.
+    const ok = (alias: string) => Prisma.sql`((${Prisma.raw(alias)}.deleted_at IS NULL
+        AND ${Prisma.raw(alias)}.memory_id = ANY(${readable}::text[])
+        AND ${Prisma.raw(alias)}.id <> ALL(${badIds}::text[]))
+      OR (${Prisma.raw(alias)}.deleted_at IS NOT NULL
+        AND ${Prisma.raw(alias)}.node_type <> ${COMMENT_NODE_TYPE}
+        AND ${Prisma.raw(alias)}.memory_id = ANY(${recoverable}::text[])))`;
     const { take, skip } = page(args);
     type GraphRow = { id: string; name: string | null; source_id: string; source_loc: string; source_name: string | null;
       source_deleted: Date | null; source_urn: string; target_id: string; target_loc: string; target_name: string | null;
       target_deleted: Date | null; target_urn: string; total: bigint };
     const maskedScan = (limit: number, offset: number) => Prisma.sql`
-      WITH tombs AS MATERIALIZED (
-        SELECT memory_id, loc FROM nodes WHERE deleted_at IS NOT NULL
-      ),
-      ep AS (
-        SELECT n.id, n.loc, n.memory_id, n.deleted_at, n.node_type FROM nodes n WHERE ${endpointById}
-      ),
-      bad AS (
-        SELECT ep.id
-        FROM ep
-        CROSS JOIN LATERAL unnest(ARRAY(SELECT array_to_string((string_to_array(ep.loc, ':'))[1:g.i], ':')
-          FROM generate_series(1, cardinality(string_to_array(ep.loc, ':')) - 1) g(i))) AS a(loc)
-        JOIN tombs t ON t.memory_id = ep.memory_id AND t.loc = a.loc
-      ),
-      vis AS (
-        SELECT ep.id, (
-          (ep.deleted_at IS NULL AND ep.memory_id = ANY(${readable}::text[])
-            AND b.id IS NULL)
-          OR (ep.deleted_at IS NOT NULL AND ep.node_type <> ${COMMENT_NODE_TYPE}
-            AND ep.memory_id = ANY(${recoverable}::text[])))
-        AS ok
-        FROM ep
-        LEFT JOIN bad b ON b.id = ep.id
-      ),
-      page AS (
+      WITH page AS (
         SELECT e.id, e.name, e.loc AS edge_loc, e.source_id, e.target_id, count(*) OVER () AS total
         FROM edges e
-        JOIN vis vs ON vs.id = e.source_id AND vs.ok
-        JOIN vis vt ON vt.id = e.target_id AND vt.ok
+        JOIN nodes src ON src.id = e.source_id AND ${ok('src')}
+        JOIN nodes tgt ON tgt.id = e.target_id AND ${ok('tgt')}
         WHERE e.memory_id = ${memoryId} AND e.deleted_at IS NULL${only}
         ORDER BY e.loc, e.id LIMIT ${limit} OFFSET ${offset}
       )
