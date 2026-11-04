@@ -256,6 +256,24 @@ describe('#1328 merges and bulk edits', () => {
     expect(await stored('plain')).toMatchObject({ content: 'beta', authoredByTask: null });
   });
 
+  it('searchReplaceInNodes judges each row on what it changes: a no-op row needs no claim and keeps its stamp', async () => {
+    await create('a', { content: 'alpha', authoredWith: claim() });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'plain', name: 'plain', content: 'ALPHA' } });
+    await db.node.update({ where: { id: taskId }, data: { revSeq: 5 } });
+    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryIds: [memoryId], fields: ['content'] };
+    await M.searchReplaceInNodes({}, { input }, ctx());
+    expect(await stored('a')).toMatchObject({ content: 'alpha', authoredByTask: taskId, authoredByRevision: 1 });
+    expect((await stored('plain')).content).toBe('alpha');
+  });
+
+  it('searchReplaceInNodes still demands a claim for a row that changes beside a no-op row', async () => {
+    await create('a', { content: 'alpha', authoredWith: claim() });
+    await create('b', { content: 'ALPHA', authoredWith: claim() });
+    const input = { oldText: 'alpha', newText: 'alpha', caseInsensitive: true, memoryIds: [memoryId], fields: ['content'] };
+    await expectRefused(M.searchReplaceInNodes({}, { input }, ctx()), 'AUTHORING_ATTESTATION_MISSING');
+    expect((await stored('b')).content).toBe('ALPHA');
+  });
+
   it('a dry run needs no claim', async () => {
     await create('a', { content: 'alpha', authoredWith: claim() });
     const input = { oldText: 'alpha', newText: 'beta', memoryIds: [memoryId], fields: ['content'], dryRun: true };
