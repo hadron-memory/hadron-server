@@ -603,6 +603,31 @@ describe('#3321 refusal before oracle (acceptance 8)', () => {
     const b = await refused(() => M.liftTeamStopSignal({}, { appRef: f.app.id, id: generateId(), instruction: live }, bound()));
     expect(a).toEqual(b);
   });
+  // Bruno, LOCAL #3398: a worker sees only the signals covering it (090:07), so another worker's signal in the SAME App
+  // is concealed from it. The manager arm is judged before the signal is looked up, or the refusal says the signal exists.
+  it('liftTeamStopSignal: a same-App signal the worker cannot read and a missing one answer alike, whatever the instruction', async () => {
+    const lift = (id: string, claim: unknown) => () => M.liftTeamStopSignal({}, { appRef: f.app.id, id, instruction: claim }, bound());
+    await demoteHolder();
+    const list = await asWorker(() => Q.teamStopSignals({}, { appRef: f.app.id }, bound())) as { signals: { id: string }[] };
+    expect(list.signals.map((s) => s.id)).not.toContain(f.signal.id);
+    const before = await snapshot();
+    for (const claim of [live, badClaim, undefined]) {
+      const concealed = await answer(() => asWorker(lift(f.signal.id, claim)));
+      const none = await answer(() => asWorker(lift(generateId(), claim)));
+      expect(concealed.code).toBe('APP_MANAGER_REQUIRED');
+      expect(concealed).toEqual(none);
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+  it('liftTeamStopSignal: a worker held by a manager is told a missing signal is missing', async () => {
+    expect((await answer(() => asWorker(() => M.liftTeamStopSignal({}, { appRef: f.app.id, id: generateId(), instruction: live }, bound())))).code).toBe('STOP_SIGNAL_NOT_FOUND');
+    expect(await managerActs()).toEqual([]);
+  });
+  it('liftTeamStopSignal: a person in the App keeps their order, since they read every signal (090:07)', async () => {
+    await demoteHolder();
+    expect((await answer(() => M.liftTeamStopSignal({}, { appRef: f.app.id, id: generateId() }, ctx()))).code).toBe('STOP_SIGNAL_NOT_FOUND');
+    expect((await answer(() => M.liftTeamStopSignal({}, { appRef: f.app.id, id: f.signal.id }, ctx()))).code).toBe('APP_MANAGER_REQUIRED');
+  });
 });
 
 describe('#3321 callers not wired here keep refusing a worker (acceptance 10, ask 2)', () => {
