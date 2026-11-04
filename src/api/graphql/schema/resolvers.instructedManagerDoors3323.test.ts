@@ -436,12 +436,24 @@ describe('#3323 the choke point\'s fences', () => {
     expect(instructed.admitted).toBeNull();
   });
 
+  /** Resolves once a backend really is blocked on the session row's FOR SHARE, read outside the holding transaction. */
+  const sessionLockWaiter = async () => {
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      const [row] = await db.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM sessions%FOR SHARE%'`;
+      if (row.n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('no backend ever waited on the session lock');
+  };
+
   it('a session ending while the act is judged is waited for, and the act is refused', async () => {
     let call!: Promise<unknown>;
     await db.$transaction(async (tx) => {
       await tx.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
       call = answer(() => asWorker(() => doors.cancelAgentTask!.call(live, bound())));
-      await new Promise((resolve) => setTimeout(resolve, 750));
+      await sessionLockWaiter();
     }, { timeout: 15000 });
     expect(await call).toMatchObject({ code: 'TASK_NOT_OWNER' });
     expect(await managerActs()).toHaveLength(0);
