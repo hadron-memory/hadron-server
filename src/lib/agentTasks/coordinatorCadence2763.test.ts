@@ -9,6 +9,9 @@ import { generateId } from '../id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../workerSignature.js';
 import { ensureChannelWithRoot } from '../channels.js';
 import { evaluateCoordinatorCadence } from './coordinatorCadence.js';
+import { matchingTeamPool } from './matcher.js';
+import * as stopState from '../stopSignals/state.js';
+import { Prisma } from '../../generated/prisma/index.js';
 import { eventPayloadFor } from './darkWorker.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 
@@ -392,13 +395,16 @@ describe('#3400 stop-covered lane workers (ruling 0123)', () => {
     expect(await alarms('Beth')).toHaveLength(0);
   });
 
-  it('derives team coverage from the current reporting tree on each pass', async () => {
+  it('#3410 derives team coverage across reparenting within the same lane', async () => {
     await lateAda();
-    w.Head = await mk('Head', null, 'coordinator');
+    w.Head = await mk('Head', w.Ada.id, 'coordinator');
     await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Head.id } });
+    // Lane membership is positive on both sides; only stop coverage changes.
+    expect((await matchingTeamPool(db, app.id, w.Ada.id)).has(w.Liam.id)).toBe(true);
     await signal(w.Head.id, 'pause-dispatch', { scope: 'team' });
     expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
     await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Ada.id } });
+    expect((await matchingTeamPool(db, app.id, w.Ada.id)).has(w.Liam.id)).toBe(true);
     expect(await evaluateCoordinatorCadence(db, later(1))).toHaveLength(1);
     expect(await alarms('Ada')).toHaveLength(1);
     expect(await db.teamStopSignal.count({ where: { endedAt: null } })).toBe(1);
@@ -419,18 +425,80 @@ describe('#3400 stop-covered lane workers (ruling 0123)', () => {
     expect(await db.coordinatorCadenceEpisode.findUnique({ where: { id: episode.id } })).toMatchObject({ endedAt: later(4) });
   });
 
-  it('rechecks newly committed lane coverage inside raise, publishing nothing on a stale outer count', async () => {
+  it('#3410 identifies uncovered outer and covered raise-transaction decisions', async () => {
     await lateAda();
     const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
-    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
-      await signal(w.Liam.id);
-      return real(...a);
+    const readCoverage = stopState.coveringSignals;
+    const observations: { inRaise: boolean; client: unknown; covered: boolean }[] = [];
+    let inRaise = false;
+    let raiseClient: unknown;
+    let raises = 0;
+    const coverageSpy = vi.spyOn(stopState, 'coveringSignals').mockImplementation(async (...args) => {
+      const coverage = await readCoverage(...args);
+      if (args[1] === app.id && args[2]?.includes(w.Liam.id)) {
+        observations.push({ inRaise, client: args[0], covered: coverage.has(w.Liam.id) });
+      }
+      return coverage; // Observe the real read; do not replace its answer.
+    });
+    const transactionSpy = vi.spyOn(db, '$transaction').mockImplementation((async (...a: unknown[]) => {
+      const [callback, options] = a as [
+        (tx: Prisma.TransactionClient) => Promise<unknown>,
+        { isolationLevel?: Prisma.TransactionIsolationLevel } | undefined,
+      ];
+      if (options?.isolationLevel !== Prisma.TransactionIsolationLevel.Serializable) return real(...a);
+      // An earlier transaction cannot silently consume the interleave: the outer lane read must already be uncovered.
+      expect(observations.some((o) => !o.inRaise && o.client === db && !o.covered)).toBe(true);
+      raises++;
+      await signal(w.Liam.id); // Committed before the actual SERIALIZABLE raise callback begins.
+      return real(async (tx: Prisma.TransactionClient) => {
+        raiseClient = tx;
+        inRaise = true;
+        try { return await callback(tx); }
+        finally { inRaise = false; }
+      }, options);
     }) as never);
-    try { expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]); }
-    finally { spy.mockRestore(); }
+    try {
+      expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+      expect(raises).toBe(1);
+      expect(observations.some((o) => o.inRaise && o.client === raiseClient && o.covered)).toBe(true);
+    } finally {
+      transactionSpy.mockRestore();
+      coverageSpy.mockRestore();
+    }
     expect(await alarms()).toHaveLength(0);
     expect(await db.coordinatorCadenceEpisode.count()).toBe(0);
     expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
+  });
+
+  it.each([false, true])('#3410 overlapping stops lift independently; existing episode: %s', async (openEpisode) => {
+    await lateAda();
+    if (openEpisode) expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1);
+    const first = await signal(w.Liam.id, 'pause');
+    const second = await signal(w.Liam.id, 'halt');
+    expect(await evaluateCoordinatorCadence(db, later(1))).toEqual([]);
+    expect((await stopState.coveringSignals(db, app.id, [w.Liam.id], later(1))).get(w.Liam.id)?.map((s) => s.id))
+      .toEqual(expect.arrayContaining([first.id, second.id]));
+    await db.teamStopSignal.update({ where: { id: first.id }, data: {
+      endedAt: later(2), endKind: 'lifted', endedByUserId: user.id,
+    } });
+    expect((await stopState.coveringSignals(db, app.id, [w.Liam.id], later(3))).get(w.Liam.id)?.map((s) => s.id))
+      .toEqual([second.id]);
+    expect(await evaluateCoordinatorCadence(db, later(3))).toEqual([]);
+    await db.teamStopSignal.update({ where: { id: second.id }, data: {
+      endedAt: later(4), endKind: 'lifted', endedByUserId: user.id,
+    } });
+    expect((await stopState.coveringSignals(db, app.id, [w.Liam.id], later(5))).has(w.Liam.id)).toBe(false);
+    const afterLastLift = await evaluateCoordinatorCadence(db, later(5));
+    expect(afterLastLift).toHaveLength(openEpisode ? 0 : 1);
+    expect(await alarms()).toHaveLength(1);
+    expect((await alarms())[0].payload).toMatchObject({ freeWorkerCount: 1 });
+    expect(await db.coordinatorCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(1);
+    // The assignment at NOW+6, not either lift, ends the episode. A later full window can raise again.
+    await event('task.reassigned', 'Ada', -6);
+    expect(await evaluateCoordinatorCadence(db, later(7))).toEqual([]);
+    expect(await db.coordinatorCadenceEpisode.count({ where: { workerId: w.Ada.id, endedAt: null } })).toBe(0);
+    expect(await evaluateCoordinatorCadence(db, later(66))).toHaveLength(1);
+    expect(await alarms()).toHaveLength(2);
   });
 
   it('a coordinator team pause-dispatch leaves an unattached worker in its lane, without exempting the coordinator', async () => {
