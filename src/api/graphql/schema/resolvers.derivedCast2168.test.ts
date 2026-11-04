@@ -633,3 +633,15 @@ it.each([
     ).rejects.toThrow(/chk_app_agent_customizations_boot_prompt_pointer_pair/);
   },
 );
+
+it.each(['org-member','platform-admin'] as const)('Agent-filtered App lists retain tenant/owner limits for %s', async kind => {
+  const otherUser=await db.user.create({data:{handle:`other-${generateId()}`}});
+  const otherOrg=await db.organization.create({data:{name:'Foreign',urn:`foreign-${generateId().toLowerCase()}.example`}});
+  const foreign=await db.app.create({data:{name:'Foreign private App',urn:`foreign-${generateId().toLowerCase()}.example:app`,
+    organizationId:kind==='org-member'?otherOrg.id:null,ownerUserId:kind==='platform-admin'?otherUser.id:null}});
+  await db.appAgent.create({data:{appId:foreign.id,agentId:role.id}});
+  const context=kind==='platform-admin'?{...ctx(),roles:['ADMIN']}:ctx();
+  const result=await (resolvers.Query as any).apps({}, {filter:{agentId:role.id}},context);
+  expect(result.items.map((row:{id:string})=>row.id)).not.toContain(foreign.id);
+  expect(result.items.map((row:{id:string})=>row.id)).toContain(app.id);
+});
