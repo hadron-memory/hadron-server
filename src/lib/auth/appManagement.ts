@@ -29,6 +29,7 @@
 
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
+import { cachedManagerOrgRole } from './managerOrgRoles.js';
 
 /** The caller fields this predicate reads — a structural slice of the GraphQL Context. */
 export type AppManagerCaller = {
@@ -151,6 +152,8 @@ export async function managesAgent(
   }
   if (agent.ownerUserId !== null) return ctx.userId === agent.ownerUserId;
   if (agent.organizationId === null) return false;
+  const cached = cachedManagerOrgRole(ctx, agent.organizationId);
+  if (cached !== undefined) return cached === 'ADMIN' || cached === 'OWNER';
   const admin = await ctx.db.orgMember.findFirst({
     where: {
       organizationId: agent.organizationId,
