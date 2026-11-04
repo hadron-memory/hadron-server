@@ -121,8 +121,10 @@ describe('#1522 nested Agent read parity', () => {
     if (nested.body.kind !== 'single') return;
     expect(nested.body.singleResult.data?.app).toEqual({
       agent: null,
-      agents: [],
-      appAgents: [{ agent: null }],
+      // #2168: the PUBLIC child is a derived install in its own right. The
+      // foreign private parent remains absent; its license grants no person read.
+      agents: [{ id: publicChild.id, description: null }],
+      appAgents: [{ agent: null }, { agent: { id: publicChild.id, description: null } }],
     });
     expect(await resolvers.AppRun.agent(
       { agentId: agent.id },
@@ -141,8 +143,8 @@ describe('#1522 nested Agent read parity', () => {
     expect(appKey.body.singleResult.errors).toBeUndefined();
     expect(appKey.body.singleResult.data?.myApp).toMatchObject({
       agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' },
-      agents: [{ id: agent.id }],
-      appAgents: [{ agent: { id: agent.id } }],
+      agents: [{ id: agent.id }, { id: publicChild.id }],
+      appAgents: [{ agent: { id: agent.id } }, { agent: { id: publicChild.id } }],
     });
     const importQuery = 'query ($ref: ID!) { agent(ref: $ref) { importedBy { parentAgent { description } } } }';
     const licensedImport = await server.executeOperation(
@@ -170,8 +172,10 @@ describe('#1522 nested Agent read parity', () => {
     expect(revokedKey.body.singleResult.errors).toBeUndefined();
     expect(revokedKey.body.singleResult.data?.myApp).toEqual({
       agent: null,
-      agents: [],
-      appAgents: [{ agent: null }],
+      // Revoking the parent's grant does not revoke the child's own active
+      // grant; the physical parent and import witness still exist.
+      agents: [{ id: publicChild.id }],
+      appAgents: [{ agent: null }, { agent: { id: publicChild.id } }],
     });
     expect(await resolvers.AppRun.agent(
       { agentId: agent.id }, {}, { db, appId: app.id, roles: [] } as Context,
@@ -197,8 +201,8 @@ describe('#1522 nested Agent read parity', () => {
     if (authorized.body.kind !== 'single') return;
     expect(authorized.body.singleResult.data?.app).toMatchObject({
       agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' },
-      agents: [{ id: agent.id, description: 'synthetic-vendor-private-prompt' }],
-      appAgents: [{ agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' } }],
+      agents: [{ id: agent.id, description: 'synthetic-vendor-private-prompt' }, { id: publicChild.id }],
+      appAgents: [{ agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' } }, { agent: { id: publicChild.id } }],
     });
 
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
@@ -213,8 +217,8 @@ describe('#1522 nested Agent read parity', () => {
     if (publicResult.body.kind !== 'single') return;
     expect(publicResult.body.singleResult.data?.app).toMatchObject({
       agent: { id: agent.id, description: 'synthetic-vendor-private-prompt' },
-      agents: [{ id: agent.id }],
-      appAgents: [{ agent: { id: agent.id } }],
+      agents: [{ id: agent.id }, { id: publicChild.id }],
+      appAgents: [{ agent: { id: agent.id } }, { agent: { id: publicChild.id } }],
     });
   });
 
