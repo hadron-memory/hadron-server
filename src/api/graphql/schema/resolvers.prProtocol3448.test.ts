@@ -720,3 +720,41 @@ describe('late verdicts on superseded seats',()=>{
     expect((await readiness(H2)).ready).toBe(true);
   });
 });
+
+
+describe('same-head floor scope controls',()=>{
+  it('the original superseded reviewer may re-rate its own negative without leaving an older negative effective',async()=>{
+    await schedule(['local']);await freeze();const old=await seat('local');
+    await M.startAgentTask!({}, {taskId:old.id},ctx(reviewer.id));
+    const now=await seat('local',H,other.id,old.id);await verdict(now,'APPROVE',H,other.id);await finish(now,other.id);
+    await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:'FAIL'},reviewer.id);
+    expect((await readiness()).ready).toBe(false);
+    await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:'APPROVE'},reviewer.id);
+    expect((await readiness()).ready).toBe(true);
+  });
+  it('a freezer at an earlier head may review a new head frozen by a different implementer',async()=>{
+    await schedule(['local']);await freeze();
+    const review=await seat('local',H,author.id);
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
+    await freeze(H2,other.id);
+    const next=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'New head',source:'synthetic',assignee:{user:author.id}}},ctx(other.id));
+    await command('assignReviewSeat',{taskRef:next.id,slot:'local',head:H2,supersedes:review.id},other.id);
+    await verdict(next,'APPROVE',H2,author.id);await finish(next,author.id);
+    expect((await readiness(H2)).ready).toBe(true);
+  });
+});
+
+
+describe('late verdicts after a clean slot is dropped',()=>{
+  it.each(['CHANGES_REQUESTED','FAIL','REFUSED'])('a late %s from an unscheduled child blocks the head',async value=>{
+    await schedule(['local','blind']);await freeze();const old=await seat('local');
+    await M.startAgentTask!({}, {taskId:old.id},ctx(reviewer.id));
+    const kept=await seat('blind',H,other.id);await verdict(kept,'APPROVE',H,other.id);await finish(kept,other.id);
+    await schedule(['blind']);expect((await readiness()).ready).toBe(true);
+    await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:value},reviewer.id);
+    expect((await readiness()).ready).toBe(false);
+    await expect(command('recordReadyCall',{taskRef:build.id,head:H},author.id)).rejects.toMatchObject(error('PR_NOT_READY'));
+    await freeze(H2);const next=await seat('blind',H2,other.id,kept.id);await verdict(next,'APPROVE',H2,other.id);await finish(next,other.id);
+    expect((await readiness(H2)).ready).toBe(true);
+  });
+});
