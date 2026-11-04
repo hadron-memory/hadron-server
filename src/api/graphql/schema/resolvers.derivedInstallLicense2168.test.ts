@@ -133,3 +133,16 @@ it.each(['unactivated', 'expired'] as const)('preserves mint subscriber semantic
   await expect(mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
     triggerKind:'MANUAL',entryNodeUrn:entry,publish:false})).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
 });
+
+it('mint on-behalf membership uses the App holder license for DERIVED entries without tightening subscriber activation', async () => {
+  await createDbAgentSubscription(db,stranger.id,target.id);
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{activatedAt:null}});
+  const installedParent = await db.appAgent.findFirstOrThrow({where:{appId:app.id},select:{agentId:true}});
+  const input = {organizationId:holder.id,appId:app.id,agentId:installedParent.agentId,userId:stranger.id,triggerKind:'MANUAL' as const,
+    entryNodeUrn:entry,publish:false};
+  await expect(mintAppRun(db,input)).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  await expect(mintAppRun(db,input)).resolves.toMatchObject({userId:stranger.id});
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{revokedAt:new Date()}});
+  await expect(mintAppRun(db,input)).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
+});
