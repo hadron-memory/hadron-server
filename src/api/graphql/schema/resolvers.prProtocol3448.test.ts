@@ -18,7 +18,7 @@ const M = resolvers.Mutation as Record<string, (...args: any[]) => Promise<any>>
 const Q = resolvers.Query as Record<string, (...args: any[]) => Promise<any>>;
 const H = 'a'.repeat(40), H2 = 'b'.repeat(40);
 let owner: any, author: any, reviewer: any, other: any, outsider: any, app: any, build: any;
-const ctx = (userId = owner.id) => ({ db, userId, roles: ['READER'] });
+const ctx = (userId = owner.id) => ({ db, userId, roles: ['READER' as const] });
 const error = (code: string) => ({ extensions: { code } });
 async function command(name: string, args: Record<string, unknown>, who = owner.id) {
   expect(M[name], `${name} must exist`).toBeTypeOf('function');
@@ -586,6 +586,14 @@ describe('Worker actor floor and register disclosure', () => {
     await freeze(H,other.id);
     expect((await readiness()).slots[0].counts).toBe(false);
   });
+  it('SECURITY final pins: an Agent caller without a single Team Agent is UNMAPPED',async()=>{
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
+    await db.appAgent.delete({where:{appId_agentId:{appId:app.id,agentId:teamAgent.id}}});
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'UNMAPPED'});
+    await db.appAgent.create({data:{appId:app.id,agentId:teamAgent.id}});
+    expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
+  });
   it.each(['team','agent'])('a nearer readable mapping wins over an inherited unreadable %s chain memory',async side=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
@@ -773,5 +781,25 @@ describe('late verdicts after a clean slot is dropped',()=>{
     await expect(command('recordReadyCall',{taskRef:build.id,head:H},author.id)).rejects.toMatchObject(error('PR_NOT_READY'));
     await freeze(H2);const next=await seat('blind',H2,other.id,kept.id);await verdict(next,'APPROVE',H2,other.id);await finish(next,other.id);
     expect((await readiness(H2)).ready).toBe(true);
+  });
+});
+
+
+describe('SECURITY final pins: freezer actor scope',()=>{
+  it('a same-head freezer on another build does not exclude this build reviewer',async()=>{
+    const sibling=await M.createAgentTask!({}, {input:{appRef:app.id,title:'Other build',source:'synthetic',assignee:{user:reviewer.id},references:[{kind:'PULL_REQUEST',target:'https://github.com/example/project/pull/2'}]}},ctx());
+    await command('freezePullRequestHead',{taskRef:sibling.id,head:H},reviewer.id);
+    await schedule(['local']);await freeze();const t=await seat('local');await verdict(t);await finish(t);
+    expect((await readiness()).ready).toBe(true);
+  });
+  it('both same-head freezers remain excluded together after reassignment to a third actor',async()=>{
+    await schedule(['local','blind']);await freeze();
+    const a=await seat('local',H,author.id),b=await seat('blind',H,other.id);
+    await verdict(a,'APPROVE',H,author.id);await finish(a,author.id);
+    await verdict(b,'APPROVE',H,other.id);await finish(b,other.id);
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());await freeze(H,other.id);
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:reviewer.id}},ctx());
+    const answer=await readiness();expect(answer.slots).toHaveLength(2);
+    expect(answer.slots.map((slot:any)=>slot.counts)).toEqual([false,false]);expect(answer.ready).toBe(false);
   });
 });
