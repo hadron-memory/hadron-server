@@ -1908,7 +1908,6 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
-    installationKind: (row: {installationKind?: string}) => row.installationKind ?? 'ROW',
     app: (aa: { appId: string }, _: unknown, ctx: Context) =>
       loadReadableNestedApp(ctx, aa.appId),
     agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) => {
