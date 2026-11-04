@@ -16,6 +16,7 @@ export const SHAPE_GET_TEAM_SNAPSHOT_GRANT = { id: z.string().min(1) };
 export const SHAPE_REVOKE_TEAM_SNAPSHOT_GRANT = { id: z.string().min(1), instruction: AUTOMATION_GRANT_INSTRUCTION };
 export const SHAPE_LIST_TEAM_SNAPSHOT_GRANTS = {
   instruction: AUTOMATION_GRANT_INSTRUCTION,
+  triggerKind: z.string().optional(), triggerId: z.string().optional(),
   app: z.string().min(1), includeRevoked: z.boolean().optional(), limit: z.number().int().optional(), offset: z.number().int().optional(),
 };
 export function registerAutomationTeamSnapshotGrantTools(server: McpServer, { db, auth }: { db: PrismaClient; auth: AuthContext }) {
@@ -40,6 +41,6 @@ export function registerAutomationTeamSnapshotGrantTools(server: McpServer, { db
     'Read one team snapshot grant by id, including revoked rows, as a person managing its App. Returns eight metadata fields. Unknown and unauthorized ids both refuse NOT_FOUND; no worker instruction arm (cor:agt:050:23).',
     SHAPE_GET_TEAM_SNAPSHOT_GRANT, ({ id }) => call(() => runTeamSnapshotQueries.automationTeamSnapshotGrant(null, { id }, ctx())));
   server.tool('hadron_list_automation_team_snapshot_grants',
-    'Page the App team snapshot grants as its manager. includeRevoked defaults false; limit defaults20, capped200, zero counts only; offset defaults0. A held worker may list on an instruction within its own App; each admitted instructed list records one ids-only team event.',
+    'Page the App team snapshot grants as its manager. Optional triggerKind (SCHEDULE or WEBHOOK) and triggerId narrow rows and total; triggerId requires triggerKind. Unknown/foreign triggers give empty pages; authority precedes filter validation. includeRevoked defaults false; limit defaults20, capped200, zero counts only; offset defaults0. A held worker may list on an instruction within its own App; each admitted instructed list records one ids-only team event.',
     SHAPE_LIST_TEAM_SNAPSHOT_GRANTS, ({ app, ...args }) => call(() => runTeamSnapshotQueries.automationTeamSnapshotGrants(null, { appRef: app, ...args }, ctx())));
 }

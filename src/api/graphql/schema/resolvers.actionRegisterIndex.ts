@@ -54,9 +54,9 @@ async function requireAskingAgentInApp(c: Context, appId: string, id: string, re
 }
 
 /**
- * Rulings 0106/0120 A, cor:agt:110:03: both the named and implicit asking
- * Agent must be installed or live-cast in this App. A named Agent must also
- * be readable. The implicit refusal uses the authenticated Agent's emitted
+ * Rulings 0106/0120/0122 A, cor:agt:110:03: both the named and implicit asking
+ * Agent must be live, readable, and installed or live-cast in this App.
+ * The implicit refusal uses the authenticated Agent's emitted
  * URN, never its raw id. No Agent and no ref remains BAD_USER_INPUT.
  */
 async function askingAgentId(c: Context, appId: string, agentRef: string | null | undefined): Promise<string> {
@@ -67,8 +67,14 @@ async function askingAgentId(c: Context, appId: string, agentRef: string | null 
         extensions: { code: 'BAD_USER_INPUT', argumentName: 'agentRef' },
       });
     }
-    const row = await c.db.agent.findUniqueOrThrow({ where: { id: own }, select: { urn: true } });
-    await requireAskingAgentInApp(c, appId, own, emitEntityUrnV2('agent', row.urn));
+    const row = await c.db.agent.findUnique({
+      where: { id: own },
+      select: { urn: true, visibility: true, deletedAt: true, organizationId: true, ownerUserId: true },
+    });
+    // A stale actor with no row has no URN to emit; never expose its internal id.
+    const ref = row ? emitEntityUrnV2('agent', row.urn) : 'implicit asking Agent';
+    await requireReadableAgent(c, row, ref);
+    await requireAskingAgentInApp(c, appId, own, ref);
     return own;
   }
   const { id } = await resolveAgentRef(c.db, agentRef);
