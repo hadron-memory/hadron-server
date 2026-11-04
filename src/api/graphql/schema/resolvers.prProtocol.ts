@@ -77,8 +77,8 @@ function sameEventActor(event: Pick<Event, 'actorWorkerId' | 'actorUserId'>, act
     : !actor.workerId && !!event.actorUserId && event.actorUserId === actor.userId;
 }
 
-/** The App graph is exclusive: include superseded seats and dropped slots, not just the current schedule. */
-async function refuseNegativeHead(tx: Prisma.TransactionClient, build: TaskRow, head: string): Promise<void> {
+/** Caller holds the App graph lock: include superseded seats and dropped slots, not just the current schedule. */
+async function negativeHead(tx: Prisma.TransactionClient, build: Pick<TaskRow, 'id' | 'appId'>, head: string): Promise<boolean> {
   const [answer] = await tx.$queryRaw<{ blocked: boolean }[]>`SELECT EXISTS (
     SELECT 1 FROM (
       SELECT DISTINCT ON (e.task_id) e.payload FROM agent_team_events e
@@ -87,7 +87,10 @@ async function refuseNegativeHead(tx: Prisma.TransactionClient, build: TaskRow, 
       ORDER BY e.task_id, e.created_at DESC, e.id DESC
     ) latest WHERE latest.payload->>'verdict' IN ('CHANGES_REQUESTED', 'FAIL', 'REFUSED')
   ) AS blocked`;
-  if (answer.blocked) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A head with a negative seat verdict cannot be frozen again; answer the finding with a new head.');
+  return answer.blocked;
+}
+async function refuseNegativeHead(tx: Prisma.TransactionClient, build: TaskRow, head: string): Promise<void> {
+  if (await negativeHead(tx, build, head)) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A head with a negative seat verdict cannot be frozen again; answer the finding with a new head.');
 }
 function assignments(events: Event[]): Event[] {
   return events.filter(e => e.type === 'review.seat.assigned')
@@ -136,19 +139,17 @@ async function action(ctx: Context, appId: string, code: string): Promise<Public
       const lookup = new RegisterLookup(tx, c, appId, deadline);
       const team = await lookup.teamMemory();
       if (!team) return { code, state: 'UNMAPPED' };
-      for (const id of await lookup.chain(team)) if (!await lookup.readable(c, id, 'reader')) return { code, state: 'WITHHELD' };
       const entry = await lookup.entry(code);
-      if (entry.state !== 'FOUND') return { code, state: entry.state };
+      if (entry.state !== 'FOUND') return { code, state: 'UNMAPPED' };
       const agent = await tx.agent.findUnique({ where: { id: agentId }, select: { systemMemoryId: true, deletedAt: true } });
       const memoryId = agent?.deletedAt ? null : agent?.systemMemoryId;
       if (memoryId) {
-        for (const id of await lookup.chain(memoryId)) if (!await lookup.readable(c, id, 'reader')) return { code, state: 'WITHHELD' };
         const task = await lookup.task(memoryId, entry.taskLoc);
         if (task?.task) return { code, state: 'MAPPED', taskLoc: task.task.loc, taskUrn: task.task.urn };
       }
       return { code, state: 'UNRESOLVED', taskLoc: entry.taskLoc };
     });
-  } catch { return { code, state: 'WITHHELD' }; }
+  } catch { return { code, state: 'UNRESOLVED' }; }
 }
 
 type SlotAnswer = { slot: string; currentTaskId: string | null; state: string; verdict: string | null; head: string | null; counts: boolean };
@@ -163,7 +164,14 @@ async function readinessInTx(tx: Prisma.TransactionClient, buildId: string, appI
   if (!build) throw taskError('TASK_NOT_FOUND', 'Task not found.');
   const events = await taskEvents(tx, tasks.map(t => t.id));
   frozen(events, buildId, head);
-  const freezer = latest(events, 'pr.frozen', buildId)!;
+  // Every actor who froze this exact head is excluded, even after another actor re-freezes it.
+  const freezers = await tx.$queryRaw<{ workerId: string | null; userId: string | null }[]>`SELECT DISTINCT
+    actor_worker_id AS "workerId", CASE WHEN actor_worker_id IS NULL THEN actor_user_id ELSE NULL END AS "userId"
+    FROM agent_team_events WHERE app_id = ${appId} AND task_id = ${buildId}
+      AND type = 'pr.frozen' AND payload->>'head' = ${head}`;
+  // The same predicate as freeze: even an unscheduled/superseded child's newest
+  // negative at H blocks this head. Positive counting still uses the scheduled slots.
+  const blockedHead = await negativeHead(tx, { id: buildId, appId }, head);
   const slots = scheduled(events, buildId);
   const childEvents = events.filter(e => e.taskId !== buildId);
   const answers = slots.map((slot): SlotAnswer => {
@@ -173,9 +181,9 @@ async function readinessInTx(tx: Prisma.TransactionClient, buildId: string, appI
     const payload = data(verdict);
     // Actor identity is the same worker/person distinction as the task writer gate, not the holder's credential.
     const ownVerdict = !!verdict && (sameEventActor(verdict, { workerId: build.assigneeWorkerId, userId: build.assigneeUserId })
-      || sameEventActor(verdict, { workerId: freezer.actorWorkerId, userId: freezer.actorUserId }));
+      || freezers.some(actor => sameEventActor(verdict, actor)));
     const counts = !!task && task.status === 'finished' && data(assignment).head === head && payload.head === head
-      && payload.slot === slot && ['APPROVE', 'PASS', 'CARRY'].includes(String(payload.verdict)) && !ownVerdict;
+      && payload.slot === slot && ['APPROVE', 'PASS', 'CARRY'].includes(String(payload.verdict)) && !ownVerdict && !blockedHead;
     return { slot, currentTaskId: task?.id ?? null, state: task?.status.toUpperCase() ?? 'MISSING',
       verdict: typeof payload.verdict === 'string' ? payload.verdict : null,
       head: typeof payload.head === 'string' ? payload.head : typeof data(assignment).head === 'string' ? data(assignment).head as string : null, counts };
