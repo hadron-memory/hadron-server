@@ -729,13 +729,14 @@ async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: 
 /**
  * #2420 (cor:agt:050:28): who may write a task's `properties` — the cor:agt:050:09 set (owner, a worker the owner
  * reports to, whoever manages the App) AND the task's own assignee; nobody else. Asked of a task row or, at creation,
- * of the facts the new row will carry.
+ * of the facts the new row will carry. #3323: the assignee arm decides first, because the manager arm of
+ * {@link mayDirectTask} would record an instructed act for a write the assignee may make on its own (cor:dmo:050:12).
  */
 async function mayWriteProperties(
   tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor,
   task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId' | 'assigneeWorkerId' | 'assigneeUserId'>,
 ): Promise<boolean> {
-  return (await mayDirectTask(tx, txCtx, app, actor, task)) || isAssignee(actor, task);
+  return isAssignee(actor, task) || (await mayDirectTask(tx, txCtx, app, actor, task));
 }
 
 function sameActor(a: TaskActor, b: TaskActor): boolean {
@@ -2563,6 +2564,7 @@ export const agentTaskMutations = {
     if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: args.taskRef });
     const reference = args.reference == null ? null : taskReferencesInput([args.reference])[0];
     const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+    const unchanged = dispositions.some(d => d.findingId === args.findingId && d.disposition === args.disposition && isDeepStrictEqual(d.reference, reference));
     const next = dispositions.filter(d => d.findingId !== args.findingId);
     next.push({ findingId: args.findingId, disposition: args.disposition as string, reference });
     next.sort((a, b) => findings.findIndex(f => f.id === a.findingId) - findings.findIndex(f => f.id === b.findingId));
@@ -2570,7 +2572,8 @@ export const agentTaskMutations = {
     await tx.agentTask.update({ where: { id: task.id }, data: { findingDispositions: next, ...updatedStamp(ctx) } });
     await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
       event: { type: 'task.finding-disposed', findingId: args.findingId, disposition: args.disposition as 'fixed' | 'accepted' | 'deferred' | 'rejected' } });
-    await recordInstructedManagerAct(tx, app.id, actor, 'task.finding-dispose', { taskId: task.id });
+    // #3323 (acceptance 6): the same disposition again is a no-op, and a no-op writes no record.
+    if (!unchanged) await recordInstructedManagerAct(tx, app.id, actor, 'task.finding-dispose', { taskId: task.id });
   }, {}, args.instruction),
 
   /**

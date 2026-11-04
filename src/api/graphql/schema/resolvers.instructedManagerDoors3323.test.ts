@@ -325,6 +325,32 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
     expect(await managerActs()).toHaveLength(0);
   });
 
+  it('a no-op writes no record: the disposition the finding already has', async () => {
+    await doors.disposeAgentTaskFinding!.call(undefined, ctx({ userId: f.boss.id }));
+    expect(await answer(() => asWorker(() => doors.disposeAgentTaskFinding!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('a person with a bad claim is refused, and nothing is written', async () => {
+    const before = await snapshot();
+    const got = await answer(() => doors.cancelAgentTask!.call({ kind: 'TASK', ref: 'hrn:agenttask:nowhere:AT404' }, ctx()));
+    expect(got.code).toBe('TASK_NOT_OWNER');
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('a worker marks itself available only through the manager arm, on an instruction, with one record', async () => {
+    expect(await answer(() => asWorker(() => M.setWorkerAvailability({}, { input: { worker: f.worker.id, state: 'AVAILABLE' }, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect((await db.workerAvailability.findUniqueOrThrow({ where: { workerId: f.worker.id } })).setBy).toBe('app-manager');
+    expect((await managerActs())[0]!.payload).toMatchObject({ act: 'worker.availability', workerId: f.worker.id });
+  });
+
+  it('a worker the target reports to, refused on its own arm, falls to the manager arm on an instruction', async () => {
+    await db.worker.update({ where: { id: f.target.id }, data: { reportsToWorkerId: f.worker.id } });
+    expect(await answer(() => asWorker(() => doors.setWorkerAvailability!.call(live, bound())))).toEqual({ code: 'RESOLVED' });
+    expect((await db.workerAvailability.findUniqueOrThrow({ where: { workerId: f.target.id } })).setBy).toBe('app-manager');
+    expect(await managerActs()).toHaveLength(1);
+  });
+
   it('a no-op writes no record: adding a blocker the task already has', async () => {
     expect(await answer(() => asWorker(() => M.addAgentTaskBlocker({}, { taskRef: f.blocked.id, blockerTaskRef: f.blocker.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
     expect(await managerActs()).toHaveLength(0);
@@ -355,6 +381,13 @@ describe('#3323 other arms are unchanged and write no record (acceptance 5)', ()
     await db.worker.update({ where: { id: f.target.id }, data: { reportsToWorkerId: f.worker.id } });
     const owned: any = await runAsActor({ workerId: f.target.id, agentId: f.agent.id }, () => M.createAgentTask({}, { input: { appRef: f.app.id, title: 'Theirs' } }, ctx({ userId: f.holder.id })));
     expect(await answer(() => asWorker(() => M.parkAgentTask({}, { taskId: owned.id, instruction: live }, bound())))).toEqual({ code: 'RESOLVED' });
+    expect(await managerActs()).toHaveLength(0);
+  });
+
+  it('the assignee arm decides before the instructed manager arm: a create naming the worker as assignee writes no record', async () => {
+    const input = { appRef: f.app.id, title: 'Mine to fill', owner: { user: f.boss.id }, assignee: { worker: f.worker.id }, properties: { k: 3 } };
+    const made: any = await asWorker(() => M.createAgentTask({}, { input, instruction: live }, bound()));
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: made.id } })).properties).toEqual({ k: 3 });
     expect(await managerActs()).toHaveLength(0);
   });
 
@@ -433,6 +466,24 @@ describe('#3323 refusal before oracle (acceptance 8)', () => {
     expect(foreign.code).toBe('TASK_NOT_FOUND');
     expect(missing.code).toBe(foreign.code);
   });
+  it('a worker in another App and a missing worker answer alike, whatever the instruction (Xanthos #72543)', async () => {
+    const foreign = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.otherApp.id, agentId: f.agent.id, name: 'Foreign', slug: 'foreign' } });
+    const missing = generateId();
+    const call = (worker: string, instruction: unknown) => answer(() => asWorker(() => M.setWorkerAvailability({}, { input: { worker, state: 'UNAVAILABLE', reason: 'OUT_OF_TOKENS' }, instruction }, bound())));
+    const scrub = (a: any, id: string) => JSON.parse(JSON.stringify(a).replaceAll(id, '<ref>'));
+    const before = await snapshot();
+    const answers: unknown[] = [];
+    for (const claim of [live, { kind: 'TASK', ref: 'hrn:agenttask:nowhere:AT404' }, undefined]) {
+      const a = await call(foreign.id, claim);
+      expect(a.code).toBe('WORKER_NOT_FOUND');
+      expect(scrub(a, foreign.id)).toEqual(scrub(await call(missing, claim), missing));
+      answers.push(scrub(a, foreign.id));
+    }
+    expect(answers[1]).toEqual(answers[0]);
+    expect(answers[2]).toEqual(answers[0]);
+    expect(await snapshot()).toEqual(before);
+  });
+
   it('an alarm in another App and a missing alarm answer alike', async () => {
     const foreign = await refusedWorker(() => M.acknowledgeAlarm({}, { eventId: f.foreignAlarm.id, instruction: live }, bound()));
     const missing = await refusedWorker(() => M.acknowledgeAlarm({}, { eventId: generateId(), instruction: live }, bound()));
