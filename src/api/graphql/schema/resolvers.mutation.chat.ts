@@ -73,6 +73,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
+import { pickUnnamedStartConversation, topLevelConversations } from '../../../lib/chatConversationOrder.js';
 
 /**
  * How many of a chat's most recent messages `sendChatMessage` hands the model.
@@ -295,13 +296,9 @@ export const chatMutations = {
       if (conversationName) {
         convName = conversationName;
       } else {
-        const allConvs = await findSystemNodesByPrefix('conversations:');
-        const topLevel = allConvs.filter((n) => n.loc.split(':').length === 2);
-        const nonSetup = topLevel.find((n) => {
-          const d = (n.data as Record<string, unknown>) ?? {};
-          return d.isSetup !== true && d.isFallback !== true;
-        });
-        const chosen = nonSetup ?? topLevel[0];
+        // #3405 (cor:cht:020:01 step 1, ruling 0127): ordinary by code-unit loc, then setup,
+        // then fallback. Same rule on the live and the published-snapshot script.
+        const chosen = pickUnnamedStartConversation(await findSystemNodesByPrefix('conversations:'));
         if (!chosen) {
           throw new ChatScopeError('AGENT_HAS_NO_CONVERSATIONS', 'Agent has no conversations configured.');
         }
@@ -1012,15 +1009,16 @@ export const chatMutations = {
                 where: { memoryId: systemMemoryId, loc: startedWithRevision!, deletedAt: null },
                 select: { data: true },
               });
-              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? [])
-                .filter((n: SnapshotNode) => n.loc.startsWith('conversations:') && n.loc.split(':').length === 2);
+              return ((revNode?.data as any)?.snapshot?.nodes as SnapshotNode[] ?? []);
             }
             const nodes = await ctx.db.node.findMany({
               where: { memoryId: systemMemoryId, loc: { startsWith: 'conversations:' }, deletedAt: null },
               select: { loc: true, name: true, data: true, nodeType: true, description: true, content: true },
             });
-            return nodes.filter((n) => n.loc.split(':').length === 2) as SnapshotNode[];
-          })();
+            return nodes as SnapshotNode[];
+          })().then((nodes) => topLevelConversations(nodes));
+          // #3405: both scans below walk top-level conversations in code-unit `loc` order
+          // (cor:cht:030:02 step 3), so the first match and the default are deterministic.
 
           const msgLower = userMessage.toLowerCase();
           let bestMatch: { convName: string; firstStage: string } | null = null;

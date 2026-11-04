@@ -320,3 +320,124 @@ describe('#2763 fix head: the decision is re-derived inside the raise transactio
     expect(rows[1].endedAt).not.toBeNull();
   });
 });
+
+
+describe('#3400 stop-covered lane workers (ruling 0123)', () => {
+  const signal = (workerId: string, level = 'pause-dispatch', extra: Record<string, unknown> = {}) =>
+    db.teamStopSignal.create({ data: {
+      id: generateId(), appId: app.id, level, scope: 'worker', targetWorkerId: workerId,
+      setAt: at(1), setByUserId: user.id, ...extra,
+    } });
+
+  it.each(['pause', 'halt', 'pause-dispatch'])('excludes the sole free lane worker under %s, with a live control', async (level) => {
+    await lateAda();
+    const stop = await signal(w.Liam.id, level);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    expect(await alarms()).toHaveLength(0);
+    expect(await db.coordinatorCadenceEpisode.count()).toBe(0);
+    await db.teamStopSignal.update({ where: { id: stop.id }, data: { endedAt: NOW, endKind: 'lifted', endedByUserId: user.id } });
+    expect(await evaluateCoordinatorCadence(db, later(1))).toHaveLength(1);
+    expect((await alarms())[0].payload).toMatchObject({ freeWorkerCount: 1 });
+  });
+
+  it.each(['pause', 'halt', 'pause-dispatch'])('counts only the uncovered free worker under %s', async (level) => {
+    await lateAda();
+    await bind('Tove');
+    await signal(w.Liam.id, level);
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1);
+    expect((await alarms())[0].payload).toMatchObject({ freeWorkerCount: 1 });
+  });
+
+  it.each(['pause', 'halt', 'pause-dispatch'])('uses team coverage at every level: %s', async (level) => {
+    await lateAda();
+    w.Head = await mk('Head', w.Ada.id);
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Head.id } });
+    await signal(w.Head.id, level, { scope: 'team' });
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    expect(await alarms()).toHaveLength(0);
+  });
+
+  it.each(['pause', 'halt', 'pause-dispatch'])('uses host registration coverage at every level: %s', async (level) => {
+    await lateAda();
+    const host = await db.hostRegistration.create({ data: {
+      appId: app.id, hostId: 'cadence-test-host', label: 'Cadence test', pollIntervalSeconds: 600, refreshedAt: NOW,
+    } });
+    await db.hostRegistrationWorker.create({ data: { registrationId: host.id, workerId: w.Liam.id, family: 'claude' } });
+    await signal(w.Liam.id, level, { scope: 'host', targetWorkerId: null, targetHostRegistrationId: host.id });
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    expect(await alarms()).toHaveLength(0);
+  });
+
+  it('expires coverage at until, before the expiry sweep has recorded an end', async () => {
+    await lateAda();
+    await signal(w.Liam.id, 'pause-dispatch', { until: later(1) });
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    expect(await evaluateCoordinatorCadence(db, later(1))).toHaveLength(1);
+    expect((await alarms())[0].payload).toMatchObject({ freeWorkerCount: 1 });
+  });
+
+  it('ignores another App and another lane, while an uncovered local worker still counts', async () => {
+    await lateAda();
+    w.Beth = await mk('Beth', null, 'coordinator');
+    w.Sam = await mk('Sam', w.Beth.id);
+    await bind('Sam');
+    const otherApp = await db.app.create({ data: { organizationId: org.id, name: 'Other', urn: `${org.urn}:other` } });
+    const foreign = await db.worker.create({ data: {
+      ...WORKER_SIGNATURE_DEFAULTS, appId: otherApp.id, agentId: agent.id, name: 'Other', slug: 'other', role: 'engineer',
+    } });
+    await signal(foreign.id, 'pause-dispatch', { appId: otherApp.id });
+    await signal(w.Sam.id, 'pause-dispatch');
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1);
+    expect((await alarms('Ada'))[0].payload).toMatchObject({ freeWorkerCount: 1 });
+    expect(await alarms('Beth')).toHaveLength(0);
+  });
+
+  it('derives team coverage from the current reporting tree on each pass', async () => {
+    await lateAda();
+    w.Head = await mk('Head', null, 'coordinator');
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Head.id } });
+    await signal(w.Head.id, 'pause-dispatch', { scope: 'team' });
+    expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]);
+    await db.worker.update({ where: { id: w.Liam.id }, data: { reportsToWorkerId: w.Ada.id } });
+    expect(await evaluateCoordinatorCadence(db, later(1))).toHaveLength(1);
+    expect(await alarms('Ada')).toHaveLength(1);
+    expect(await db.teamStopSignal.count({ where: { endedAt: null } })).toBe(1);
+  });
+
+  it('keeps an existing episode open while the free lane is stopped, until a counted assignment', async () => {
+    await lateAda();
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1);
+    const [episode] = await db.coordinatorCadenceEpisode.findMany();
+    const stop = await signal(w.Liam.id);
+    expect(await evaluateCoordinatorCadence(db, later(1))).toEqual([]);
+    expect(await db.coordinatorCadenceEpisode.findUnique({ where: { id: episode.id } })).toMatchObject({ endedAt: null });
+    await db.teamStopSignal.update({ where: { id: stop.id }, data: { endedAt: later(2), endKind: 'lifted', endedByUserId: user.id } });
+    expect(await evaluateCoordinatorCadence(db, later(3))).toEqual([]);
+    expect(await alarms()).toHaveLength(1);
+    await event('task.assigned', 'Ada', -4);
+    expect(await evaluateCoordinatorCadence(db, later(5))).toEqual([]);
+    expect(await db.coordinatorCadenceEpisode.findUnique({ where: { id: episode.id } })).toMatchObject({ endedAt: later(4) });
+  });
+
+  it('rechecks newly committed lane coverage inside raise, publishing nothing on a stale outer count', async () => {
+    await lateAda();
+    const real = db.$transaction.bind(db) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(db, '$transaction').mockImplementationOnce((async (...a: unknown[]) => {
+      await signal(w.Liam.id);
+      return real(...a);
+    }) as never);
+    try { expect(await evaluateCoordinatorCadence(db, NOW)).toEqual([]); }
+    finally { spy.mockRestore(); }
+    expect(await alarms()).toHaveLength(0);
+    expect(await db.coordinatorCadenceEpisode.count()).toBe(0);
+    expect(await db.agentTeamAlarmSchedule.count()).toBe(0);
+  });
+
+  it('a coordinator team pause-dispatch leaves an unattached worker in its lane, without exempting the coordinator', async () => {
+    await lateAda();
+    await bind('Tove');
+    await signal(w.Ada.id, 'pause-dispatch', { scope: 'team' });
+    expect(await evaluateCoordinatorCadence(db, NOW)).toHaveLength(1);
+    expect((await alarms())[0].payload).toMatchObject({ freeWorkerCount: 1 });
+  });
+});
