@@ -303,6 +303,20 @@ describe('#3321 worker.start names the worker that issued it', () => {
   });
 });
 
+describe('#3321 the rows name the holder whose right was used', () => {
+  it('a set and a lifted stop signal', async () => {
+    await asWorker(() => doors.setTeamStopSignal!.call(live, bound()));
+    const set = await db.teamStopSignal.findFirstOrThrow({ where: { appId: f.app.id, targetWorkerId: f.target.id, id: { not: f.signal.id } } });
+    expect(set.setByUserId).toBe(f.holder.id);
+    await asWorker(() => doors.liftTeamStopSignal!.call(live, bound()));
+    expect((await db.teamStopSignal.findUniqueOrThrow({ where: { id: f.signal.id } })).endedByUserId).toBe(f.holder.id);
+  });
+  it('an isolation', async () => {
+    await asWorker(() => doors.isolateWorker!.call(live, bound()));
+    expect((await db.workerWakeSettings.findUniqueOrThrow({ where: { workerId: f.target.id } })).isolatedByUserId).toBe(f.holder.id);
+  });
+});
+
 describe('#3321 the record comes after every refusal (acceptance 6)', () => {
   const refusedAfterGate: Record<string, () => Promise<unknown>> = {
     'worker.start on a worker that is not startable': () => issue('worker.start', f.target.id, { worktree: 'hadron-server/target', family: 'claude' }, live, bound()),
