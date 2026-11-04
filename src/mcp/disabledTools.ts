@@ -7,8 +7,8 @@
  *
  * Shape (D1a; S1 source 99246d46): keep the `offTeamTool` helper, its local `off` alias and disabled `off(...)` calls
  * visible to the manifest scrapers. hadron-cli's `scripts/gen-tools-manifest.sh` still scrapes `server.tool(` plus
- * the next line, but now explicitly subtracts names registered through this helper (CLI#1618). The pending portal
- * change https://github.com/hadron-memory/hadron-portal/pull/1662 makes `scripts/refresh-hosted-mcp-tools.mjs`
+ * the next line, but now explicitly subtracts names registered through this helper (CLI#1618). The merged portal
+ * change https://github.com/hadron-memory/hadron-portal/pull/1662 (531adffc) makes `scripts/refresh-hosted-mcp-tools.mjs`
  * recognize the helper and its module-local aliases, then subtract switched-off names from the registered set.
  * Never write `server.tool(` or `.tool('hadron_…` for a disabled tool. Keep its quoted name on the line AFTER `off(`
  * for the CLI's opener/next-line source layout; neither regex scraper promises to understand arbitrary syntax.
