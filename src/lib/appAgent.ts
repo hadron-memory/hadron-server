@@ -159,22 +159,25 @@ export async function activeAppInstallLicenseIdsForAgent(
   return licensed;
 }
 
-/** Authority-conferring readers need the App holder's live license as well as membership.
- * The importer's grant is only an import witness and never licenses the App. */
-export async function listLicensedAppInstallations(db: Db, appId: string) {
+/** Preserve these readers' physical-row membership contract. New DERIVED
+ * entries additionally require the App holder's license, never the importer's.
+ * Readers that already required licenses for ROW must retain that stricter gate. */
+export async function listAppInstallationsWithDerivedLicense(db: Db, appId: string) {
   const {apps, installations:rows} = await loadAppInstallationPage(db, appId);
+  const derived=rows.filter(row=>row.installationKind==='DERIVED');
+  if (!derived.length) return rows;
   const app = apps[0];
-  if (!app || app.deletedAt || app.uninstalledAt) return [];
-  const licensed = await activeAgentInstallLicenseIds(db, app, rows.map(row => row.agent));
+  if (!app || app.deletedAt || app.uninstalledAt) return rows.filter(row=>row.installationKind==='ROW');
+  const licensed = await activeAgentInstallLicenseIds(db, app, derived.map(row => row.agent));
   // Keep legacy ROW readers unchanged. DERIVED entries obey cast's rule:
   // own-org may provision a missing grant, but never revive an inactive row.
   const ownDerivedIds=rows.filter(row=>row.installationKind==='DERIVED' && row.agent.organizationId===app.organizationId).map(row=>row.agentId);
   const ownGrants=app.organizationId && ownDerivedIds.length
     ? await db.agentOrgGrant.findMany({where:{orgId:app.organizationId,agentId:{in:ownDerivedIds}}}) : [];
   const ownById=new Map(ownGrants.map(grant=>[grant.agentId,grant]));
-  return rows.filter(row => licensed.has(row.agentId) &&
-    !(row.installationKind==='DERIVED' && app.organizationId && row.agent.organizationId===app.organizationId &&
-      !orgAgentLicenseUsable(app.organizationId,row.agent.organizationId,ownById.get(row.agentId)??null)));
+  return rows.filter(row => row.installationKind==='ROW' || (licensed.has(row.agentId) &&
+    !(app.organizationId && row.agent.organizationId===app.organizationId &&
+      !orgAgentLicenseUsable(app.organizationId,row.agent.organizationId,ownById.get(row.agentId)??null))));
 }
 
 /** A retained AppAgent pointer is authority only while its install is live. */
@@ -193,6 +196,15 @@ export async function isAgentInstalledAndLicensed(
     return orgAgentLicenseUsable(app.organizationId,install.agent.organizationId,grant);
   }
   return true;
+}
+
+/** Existing operation doors used ROW membership. Keep that contract; only
+ * newly derived entries add the App-holder license check. Existing licensed
+ * memory readers continue using isAgentInstalledAndLicensed directly. */
+export async function isAgentInstalledForAppOperation(db:Db,appId:string,agentId:string):Promise<boolean> {
+  const install=await resolveAppInstallation(db,appId,agentId);
+  if(!install)return false;
+  return install.installationKind==='ROW' || isAgentInstalledAndLicensed(db,appId,agentId);
 }
 
 /** Primary is an audit-order convenience over physical rows, not an installation-membership test. */

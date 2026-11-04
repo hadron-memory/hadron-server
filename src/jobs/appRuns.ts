@@ -1,4 +1,4 @@
-import { isAgentInstalledAndLicensed } from '../lib/appAgent.js';
+import { isAgentInstalledForAppOperation } from '../lib/appAgent.js';
 import { hasAppRelationship } from '../lib/auth/appRelationship.js';
 import { renderScriptArgs, ScriptVariableMissingError } from '../lib/runner/scriptArgs.js';
 import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
@@ -436,7 +436,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // review, Codex P1). Checked here (defense in depth) and at trigger
   // creation.
   if (args.agentId) {
-    const installed = await isAgentInstalledAndLicensed(db,args.appId,args.agentId);
+    const installed = await isAgentInstalledForAppOperation(db,args.appId,args.agentId);
     if (!installed) {
       throw new RunLaunchDeniedError(
         'agentId is not installed in this App.',

@@ -1,4 +1,4 @@
-import { listLicensedAppInstallations } from './appAgent.js';
+import { listAppInstallationsWithDerivedLicense } from './appAgent.js';
 import { lockAppInstallations } from './appInstallations.js';
 /**
  * #2171 (R211, cor:dmo:050:04 "Which roles an App offers"): member roles stay
@@ -63,7 +63,7 @@ export async function loadOfferedMemberRoles(
   /** Restrict the union to these Agents: the ones an admission actually locked (see lockOfferedMemberRoleRows). */
   onlyAgentIds?: readonly string[],
 ): Promise<{ installed: boolean; roles: string[] }> {
-  const installs = (await listLicensedAppInstallations(db, appId)).filter(row => !onlyAgentIds || onlyAgentIds.includes(row.agentId));
+  const installs = (await listAppInstallationsWithDerivedLicense(db, appId)).filter(row => !onlyAgentIds || onlyAgentIds.includes(row.agentId));
   const roles: string[] = [];
   for (const i of installs) {
     for (const r of rolesOfPolicy(i.agent.installationPolicy)) if (!roles.includes(r)) roles.push(r);

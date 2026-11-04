@@ -1,4 +1,4 @@
-import { isAgentInstalledAndLicensed, listLicensedAppInstallations } from '../../../lib/appAgent.js';
+import { isAgentInstalledForAppOperation, listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js';
 import { triggerBudgetPatch, type TriggerRunBudgets } from '../../../lib/automation/runBudgets.js';
 import { configSelection } from '../../../lib/automation/identities.js';
 import { captureSetupConsent } from '../../../lib/automation/pins.js';
@@ -387,7 +387,7 @@ async function resolveManualRunAgent(
 ): Promise<string | null> {
   const named = await resolveInstalledAgent(ctx, appId, agentRef);
   if (named) return named;
-  const installed = (await listLicensedAppInstallations(ctx.db,appId)).slice(0,2);
+  const installed = (await listAppInstallationsWithDerivedLicense(ctx.db,appId)).slice(0,2);
   if (installed.length > 1) {
     throw new GraphQLError('This App has several installed Agents: pass agentRef to name the one the run is served as.', {
       extensions: { code: 'RUN_AGENT_REQUIRED' },
@@ -492,7 +492,7 @@ async function resolveInstalledAgent(
     if (e instanceof AgentNotFoundError) throw notInstalled();
     throw e;
   }
-  const installed = await isAgentInstalledAndLicensed(ctx.db,appId,agentId);
+  const installed = await isAgentInstalledForAppOperation(ctx.db,appId,agentId);
   if (!installed) throw notInstalled();
   return agentId;
 }

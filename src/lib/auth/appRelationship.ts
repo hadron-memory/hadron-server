@@ -1,4 +1,4 @@
-import { listLicensedAppInstallations } from '../appAgent.js';
+import { listAppInstallationsWithDerivedLicense } from '../appAgent.js';
 import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 
 /**
@@ -18,7 +18,7 @@ export async function hasAppRelationship(
     select: { userId: true },
   });
   if (member) return true;
-  const installations = await listLicensedAppInstallations(db, appId);
+  const installations = await listAppInstallationsWithDerivedLicense(db, appId);
   if (!installations.length) return false;
   const now = new Date();
   const sub = await db.agentSubscription.findFirst({
