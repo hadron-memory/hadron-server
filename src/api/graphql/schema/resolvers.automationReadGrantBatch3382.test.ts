@@ -65,7 +65,9 @@ function measured() {
     if (predicateModels.has(model) && operation.startsWith('find')) counts[model + '.' + operation] = (counts[model + '.' + operation] ?? 0) + 1;
     return query(args);
   } } } });
-  return { client: client as unknown as Context['db'], counts, total: () => Object.values(counts).reduce((a, b) => a + b, 0) };
+  return { client: client as unknown as Context['db'], counts, // Memory.findUnique includes the unchanged per-anchor liveness reads (and legacy URN lookups).
+    // Publish them, but do not claim to batch/bound anchors in a predicate-only optimization.
+    total: () => Object.entries(counts).filter(([key]) => key !== 'Memory.findUnique').reduce((a, [, b]) => a + b, 0) };
 }
 const events = () => db.agentTeamEvent.count();
 const forbidden = (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
@@ -89,7 +91,7 @@ describe('#3382 batch-only list contract', () => {
           mode === 'cross-app-memory' ? f.memories[0].id : null, includeRevoked, asOwner)));
         if (mode === 'worker') audit++;
         expect(await events()).toBe(audit);
-        metrics.push({ mode, includeRevoked, rows: out.length, queries: m.total(), detail: m.counts });
+        metrics.push({ mode, includeRevoked, rows: out.length, queries: m.total(), anchorOrUrnReads: m.counts['Memory.findUnique'] ?? 0, detail: m.counts });
       }
     }
     const census = { active: f.rows.filter(r => !r.revokedAt).length, revoked: f.rows.filter(r => !!r.revokedAt).length,
