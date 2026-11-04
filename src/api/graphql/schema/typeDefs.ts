@@ -10469,9 +10469,11 @@ export const typeDefs = `#graphql
     #3449: App action app.<current-app-slug>.<name>, lower-case legal URN atom, at most 64 characters.
     Same creator authority as createAgentTask (hrn:node:hadronmemory.com:specs:cor:agt:050:06).
     taskRef must name a readable task in this App; unknown and foreign refs answer TASK_NOT_FOUND.
+    An omitted payload becomes {}; explicit null, non-objects and NUL in a JSON key/value refuse BAD_USER_INPUT.
     payload is a JSON object of at most 4096 UTF-8 bytes, readable by EVERY App participant and the App's own key,
     with or without taskRef, and must contain nothing secret (hrn:node:hadronmemory.com:specs:cor:agt:050:23).
-    Records one event whose type is the code and payload is {payload}. Task-bound actions are passive: they never
+    Each successful call appends a new event (retries are not deduplicated), type = code, payload = {payload}.
+    Task-bound actions are passive: they never
     acknowledge assignment/child-finished wakes. APP_ACTION_CODE_INVALID refuses invalid codes and foreign slugs.
     The register answer reads as the caller (hrn:node:hadronmemory.com:specs:cor:agt:110:03), never authorization.
     """

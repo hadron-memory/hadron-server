@@ -1999,7 +1999,13 @@ export const agentTaskMutations = {
     const payload = args.payload === undefined ? {} : args.payload;
     if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw badInput('payload must be a JSON object of at most 4096 bytes.');
     let serialized: string;
-    try { serialized = JSON.stringify(payload); } catch { throw badInput('payload must be a JSON object of at most 4096 bytes.'); }
+    try {
+      serialized = JSON.stringify(payload, (key, value) => {
+        // PostgreSQL jsonb cannot represent NUL in either a key or a string value.
+        if (key.includes('\0') || (typeof value === 'string' && value.includes('\0'))) throw new Error('NUL in JSON');
+        return value;
+      });
+    } catch { throw badInput('payload must be a JSON object of at most 4096 bytes.'); }
     if (Buffer.byteLength(serialized, 'utf8') > 4096) throw badInput('payload must be a JSON object of at most 4096 bytes.');
     const value = JSON.parse(serialized) as Prisma.InputJsonObject;
     const eventId = await inTaskWriteTx(ctx, app, actor, () => appNotFound(args.appRef), async (tx, txCtx, fresh) => {

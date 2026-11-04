@@ -9,6 +9,8 @@ export type ActionAnswer = { code: string; state: 'MAPPED' | 'UNMAPPED' | 'UNRES
 /** Post-commit guidance: a failed/expired read never reverses an accepted event. */
 export async function resolveActionAnswer(ctx: Context, appId: string, code: string, agentId: string | null): Promise<ActionAnswer> {
   const empty: ActionAnswer = { code, state: 'UNMAPPED', taskLoc: null, taskUrn: null };
+  // Holger ruling 0159: a caller with no Agent gets code only, with no lookup.
+  if (!agentId) return { ...empty, state: 'WITHHELD' };
   try {
     return await boundedRead(ctx, async (tx, deadline) => {
       const c = withoutRequestCaches(ctx, tx);
@@ -18,9 +20,8 @@ export async function resolveActionAnswer(ctx: Context, appId: string, code: str
       for (const id of await lookup.chain(team)) if (!await lookup.readable(c, id, 'reader')) return { ...empty, state: 'WITHHELD' };
       const entry = await lookup.entry(code);
       if (entry.state !== 'FOUND') return { ...empty, state: entry.state };
-      const agent = agentId ? await tx.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { systemMemoryId: true } }) : null;
-      // #3449 gate: a person resolves on the Team chain; a worker never borrows it.
-      const memoryId = agentId ? agent?.systemMemoryId : team;
+      const agent = await tx.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { systemMemoryId: true } });
+      const memoryId = agent?.systemMemoryId;
       if (memoryId) {
         for (const id of await lookup.chain(memoryId)) if (!await lookup.readable(c, id, 'reader')) return { ...empty, state: 'WITHHELD' };
         const task = (await lookup.task(memoryId, entry.taskLoc))?.task;
@@ -28,5 +29,9 @@ export async function resolveActionAnswer(ctx: Context, appId: string, code: str
       }
       return { ...empty, state: 'UNRESOLVED', taskLoc: entry.taskLoc };
     });
-  } catch { return { ...empty, state: 'WITHHELD' }; }
+  } catch {
+    // Fixed category only: never log the caller, code, task loc or private failure details.
+    console.warn('action_register.answer_failed');
+    return { ...empty, state: 'WITHHELD' };
+  }
 }

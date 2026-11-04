@@ -14,7 +14,7 @@ describe('App action event CHECK migration', () => {
       await tx.$executeRawUnsafe(`CREATE TEMP TABLE agent_team_events (LIKE public.agent_team_events INCLUDING DEFAULTS ${populated ? 'INCLUDING CONSTRAINTS' : ''}) ON COMMIT DROP`);
       const insert = (type: string) => tx.$executeRaw`INSERT INTO agent_team_events (id, app_id, type, payload) VALUES (${generateId()}, 'migration-only', ${type}, '{}'::jsonb)`;
       if (populated) for (const type of legacy) await insert(type);
-      for (const statement of migration().split(';').map(s => s.trim()).filter(Boolean)) await tx.$executeRawUnsafe(statement);
+      for (const statement of migration().replace(/^\s*--.*$/gm, '').split(';').map(s => s.trim()).filter(Boolean)) await tx.$executeRawUnsafe(statement);
       if (populated) {
         const rows = await tx.$queryRaw<Array<{ type: string }>>`SELECT type FROM agent_team_events ORDER BY type`;
         expect(rows.map(r => r.type)).toEqual([...legacy].sort());
