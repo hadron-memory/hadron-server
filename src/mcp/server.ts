@@ -55,7 +55,7 @@ import {
   editorFromAuth,
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
-import { assertAuthoring, attestationRefusalText, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { assertAuthoring, assertRenameAuthoring, attestationRefusalText, attestedAuthoring } from '../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
@@ -8300,7 +8300,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 // which its approval covers; only the decision doors change it.
                 if (isDecisionFamilyRole(locked.role)) throw decisionContainedError('Renaming this node', [locked.loc]);
                 // #1328 — the name is authored; the address is not.
-                const renameStamp = await assertAuthoring(tx, toMemory.id, {
+                const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
                   priorRole: locked.role, priorRunnable: locked.isRunnable,
                   role: locked.role, runnable: locked.isRunnable, authoredChange: true,
                 }, attestedAuthoring(authoredWith));

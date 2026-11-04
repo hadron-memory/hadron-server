@@ -26,6 +26,9 @@
  * disabled while this waited is judged as committed, including the absent-rule
  * phantom, which a row lock could not cover.
  *
+ * A rename across memories takes the shared lock on both. Shared locks do not
+ * conflict, and a rule writer's exclusive lock is its last, so this cannot cycle.
+ *
  * The task row is read, not locked: a lock here could cycle with a task edit
  * queued behind a rule writer. The check is the serialization point, so a task
  * revision committed before it refuses the claim as stale, and one committed
@@ -200,6 +203,24 @@ export async function assertAuthoring(
   const verdict = await judgeAuthoring(tx, memoryId, write, authoring);
   if (verdict.refused) throw new AuthoringAttestationError(verdict.refused, verdict.role);
   return verdict.stamp;
+}
+
+/**
+ * A rename during a move: it answers to the rules it leaves as well as the rules
+ * it lands under, as a role change answers to both roles, so a move cannot shed a
+ * requirement during an authored change. One claim must meet both (WRONG_TASK
+ * otherwise: split it). The stamp is the destination's, where the node now lives.
+ * A plain move changes nothing authored and does not come here.
+ */
+export async function assertRenameAuthoring(
+  tx: Prisma.TransactionClient,
+  sourceMemoryId: string,
+  destMemoryId: string,
+  write: AuthoredWrite,
+  authoring: AuthoringContext,
+): Promise<NodeAuthorshipStamp | null> {
+  if (sourceMemoryId !== destMemoryId) await assertAuthoring(tx, sourceMemoryId, write, authoring);
+  return assertAuthoring(tx, destMemoryId, write, authoring);
 }
 
 /** The MCP text for an attestation refusal (`[authoring_attestation_missing] …`), or null for any other error. */

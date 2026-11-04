@@ -72,7 +72,7 @@ import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.j
 import { isId } from './entityRef/shape.js';
 import { validateNodeAgainstSchema, NodeSchemaViolation } from './validateNodeAgainstSchema.js';
 import type { MemorySchema } from './memorySchema.js';
-import { assertAuthoring, attestedAuthoring, type AuthoringContext } from './authoringAttestation.js';
+import { assertRenameAuthoring, attestedAuthoring, type AuthoringContext } from './authoringAttestation.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { memoryIsVectorIndexed } from './embedding/indexing.js';
 import {
@@ -656,11 +656,10 @@ export async function moveNodeSubtree(
   };
   const leaf = destLoc.split(':').pop()!;
   // #1328 — a rename is an authored name change. The rows are locked by now,
-  // and this refuses before the first write of the move. Judged in the memory
-  // the renamed node ends up in, as its next write would be.
+  // and this refuses before the first write of the move.
   const renamed = renameSourceLeaf === true ? subtree.find((n) => n.id === source.id && n.name !== leaf) : undefined;
   const renameStamp = renamed
-    ? await assertAuthoring(tx, destMemoryId, {
+    ? await assertRenameAuthoring(tx, srcMemoryId, destMemoryId, {
         priorRole: renamed.role, priorRunnable: renamed.isRunnable,
         role: renamed.role, runnable: renamed.isRunnable, authoredChange: true,
       }, renameAuthoring ?? attestedAuthoring(null))
