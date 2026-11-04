@@ -644,6 +644,8 @@ export async function appendStaffingInstructionClaim(
 export type CredentialAct =
   | 'app-key.revoke' | 'app-key.scope-revoke' | 'app-grant.revoke' | 'app-write-grant.revoke'
   | 'app-key.list' | 'app-write-grant.list'
+  | 'automation-read-grant.revoke' | 'automation-read-grant.list'
+  | 'automation-team-snapshot-grant.revoke' | 'automation-team-snapshot-grant.list'
   /** #3322: an instructed switch of an App memory asset's public link that changed the flag. */
   | 'asset.public-link';
 

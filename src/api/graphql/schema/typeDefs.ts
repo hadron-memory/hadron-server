@@ -8162,10 +8162,10 @@ export const typeDefs = `#graphql
     automationApproval(triggerKind: AutomationTriggerKind!, triggerRef: String!): AutomationApproval!
     "#2484: the write grants an App holds for its userless runs, oldest first; revoked rows only with includeRevoked. Only whoever manages the App may list them, as themselves or through their held worker on a validated instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0111 A: one team event per admitted instructed call, never a grant id); a grant on a personal or private memory is listed to the holder alone, when they own it. hrn:node:hadronmemory.com:specs:cor:agt:010:01"
     appMemoryWriteGrants(appRef: String!, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AppMemoryWriteGrant!]!
-    "#3350: only this App's managers list its team snapshot grants; includeRevoked defaults false. Worker instruction arm is not yet built, not ruled refused."
-    automationTeamSnapshotGrants(appRef: ID!, includeRevoked: Boolean, limit: Int, offset: Int): AutomationTeamSnapshotGrantPage!
-    "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of."
-    automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false): [AutomationReadGrant!]!
+    "#3350: only this App's managers list its team snapshot grants; includeRevoked defaults false. A held worker on a validated instruction may list within its own App; one ids-only team event per admitted instructed call, including an empty page."
+    automationTeamSnapshotGrants(appRef: ID!, includeRevoked: Boolean, limit: Int, offset: Int, instruction: ActInstructionInput): AutomationTeamSnapshotGrantPage!
+    "#2883: automation read grants. Give an App (its managers see its grants) and/or a memory (that memory's manager, or an Agent's manager for its system memory, sees the grants on it); a reader sees only the rows they manage the App or the target of. A held worker on a validated instruction is scoped to its own App, including memory-only lists; each admitted instructed list records one ids-only team event. A person supplying instruction must also supply appRef; omit instruction to retain a cross-App memory-only list."
+    automationReadGrants(appRef: String, memoryRef: String, includeRevoked: Boolean = false, instruction: ActInstructionInput): [AutomationReadGrant!]!
 
     """
     #1705 — one agent task, or null when it does not exist or the caller may
@@ -10411,12 +10411,12 @@ export const typeDefs = `#graphql
     revokeAppMemoryWriteGrant(id: ID!, instruction: ActInstructionInput): AppMemoryWriteGrant!
     "#3350: App managers, as people acting as themselves, give this live schedule/webhook a read-only own-App team snapshot grant, off until given; identical repeat returns the live row. hrn:node:hadronmemory.com:specs:cor:agt:050:23"
     setAutomationTeamSnapshotGrant(appRef: ID!, triggerKind: String!, triggerId: ID!): AutomationTeamSnapshotGrant!
-    "#3350: terminal revoke, App managers only. Worker instruction arm is not yet built (not a person-only ruling)."
-    revokeAutomationTeamSnapshotGrant(id: ID!): AutomationTeamSnapshotGrant!
+    "#3350: terminal revoke, App managers only. A held worker on a validated instruction may revoke within its own App; changing revokes record the worker and holder."
+    revokeAutomationTeamSnapshotGrant(id: ID!, instruction: ActInstructionInput): AutomationTeamSnapshotGrant!
     "#2883: give an automation (a live schedule or webhook of the App) a read grant on one memory or loc prefix. Given by whoever manages the target: the Agent for its system memory, the memory's manager otherwise, as a person (person-only, hrn:node:hadronmemory.com:specs:cor:dmo:050:12, #3277). A refusal is the same Forbidden as an unknown App, trigger or memory."
     setAutomationReadGrant(appRef: String!, triggerKind: String!, triggerId: ID!, memoryRef: String!, prefix: String): AutomationReadGrant!
-    "#2883: end an automation read grant. The App's managers or the target's manager. Terminal."
-    revokeAutomationReadGrant(id: ID!): AutomationReadGrant!
+    "#2883: end an automation read grant. The App's managers or the target's manager, as themselves or through a held worker on a validated instruction within its own App. Terminal, with no event on a repeat."
+    revokeAutomationReadGrant(id: ID!, instruction: ActInstructionInput): AutomationReadGrant!
 
     """
     #1705 — create an agent task (hrn:node:hadronmemory.com:specs:cor:agt:050:06 root, :07 child). Writes
