@@ -263,11 +263,23 @@ describe('the real schema and the committed manifest', () => {
       expect(e.test, coord).toBe(`src/api/graphql/schema/resolvers.crossParentRows3238.test.ts::${title}`);
     }
   });
-  it('#3238: CompiledBootPrompt.node stays open, pointing at the private follow-up and not claiming a differential test', () => {
+  it('#3238: CompiledBootPrompt.node stays open for #1734 and names the known-gap test', () => {
     const e = manifest().entries['CompiledBootPrompt.node'];
     expect(e.class).toBe('open');
-    expect(e.test).toBeUndefined();
-    expect(e.evidence).toMatch(/private follow-up/);
+    expect(e.evidence).toContain('#1734');
+    expect(e.evidence).toContain('src/api/graphql/schema/resolvers.compiledBootPrompt3238.test.ts::#1734 known gap: a platform admin receives the user-owned Agent compiled node while the direct read refuses');
+    expect(e.evidence).not.toMatch(/private follow-up/);
+  });
+  it('#3387: the open compiled-node evidence names a test declaration that exists', () => {
+    const e = manifest().entries['CompiledBootPrompt.node'];
+    // Resolve the reference from the evidence, not a second hardcoded title.
+    const ref = e.evidence.match(/gap pin: (.+?)\. Keep open/);
+    expect(ref, 'open-row evidence must name its gap pin').not.toBeNull();
+    const [file, title] = ref![1].split('::');
+    expect(file).toBeTruthy();
+    expect(title).toBeTruthy();
+    const source = readFileSync(join(process.cwd(), file), 'utf8');
+    expect(source, ref![1]).toContain("it('" + title + "',");
   });
   it('S2 row 8: Session.worker is parent-implies-child for the identity fields, citing cor:acl:090:02, with a named masking test', () => {
     const e = manifest().entries['Session.worker'];
