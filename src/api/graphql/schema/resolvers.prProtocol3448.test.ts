@@ -799,6 +799,14 @@ describe('SECURITY final pins: freezer actor scope',()=>{
     await schedule(['local']);await freeze();const t=await seat('local');await verdict(t);await finish(t);
     expect((await readiness()).ready).toBe(true);
   });
+  it('a freezer of the same head in another App does not affect this App',async()=>{
+    const foreign=await db.app.create({data:{organizationId:app.organizationId,name:'Foreign',urn:app.urn+':foreign'}});
+    await db.appMember.create({data:{appId:foreign.id,userId:reviewer.id,role:'member'}});
+    const sibling=await M.createAgentTask!({}, {input:{appRef:foreign.id,title:'Foreign build',source:'synthetic',assignee:{user:reviewer.id},references:[{kind:'PULL_REQUEST',target:'https://github.com/example/project/pull/3'}]}},ctx(reviewer.id));
+    await command('freezePullRequestHead',{taskRef:sibling.id,head:H},reviewer.id);
+    await schedule(['local']);await freeze();const t=await seat('local');await verdict(t);await finish(t);
+    expect((await readiness()).ready).toBe(true);
+  });
   it('both same-head freezers remain excluded together after reassignment to a third actor',async()=>{
     await schedule(['local','blind']);await freeze();
     const a=await seat('local',H,author.id),b=await seat('blind',H,other.id);

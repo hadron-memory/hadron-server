@@ -164,10 +164,11 @@ async function readinessInTx(tx: Prisma.TransactionClient, buildId: string, appI
   if (!build) throw taskError('TASK_NOT_FOUND', 'Task not found.');
   const events = await taskEvents(tx, tasks.map(t => t.id));
   frozen(events, buildId, head);
-  // Every actor who froze this exact head is excluded, even after another actor re-freezes it.
+  // Every actor who froze this exact head anywhere in this App is excluded,
+  // even on a sibling build or after another actor re-freezes it.
   const freezers = await tx.$queryRaw<{ workerId: string | null; userId: string | null }[]>`SELECT DISTINCT
     actor_worker_id AS "workerId", CASE WHEN actor_worker_id IS NULL THEN actor_user_id ELSE NULL END AS "userId"
-    FROM agent_team_events WHERE app_id = ${appId} AND task_id = ${buildId}
+    FROM agent_team_events WHERE app_id = ${appId}
       AND type = 'pr.frozen' AND payload->>'head' = ${head}`;
   // The same predicate as freeze: even an unscheduled/superseded child's newest
   // negative at H blocks this head. Positive counting still uses the scheduled slots.
