@@ -93,6 +93,10 @@
    "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
   ],
   [
+   "hadron_get_automation_team_snapshot_grant",
+   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
+  ],
+  [
    "hadron_list_automation_team_snapshot_grants",
    "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
   ],
@@ -389,6 +393,10 @@
   [
    "hadron_revoke_automation_team_snapshot_grant",
    "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
+  ],
+  [
+   "hadron_get_automation_team_snapshot_grant",
+   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
   ],
   [
    "hadron_list_automation_team_snapshot_grants",
@@ -689,6 +697,10 @@
    "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
   ],
   [
+   "hadron_get_automation_team_snapshot_grant",
+   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
+  ],
+  [
    "hadron_list_automation_team_snapshot_grants",
    "2f2c709f30a5d3dd5c3cb09dd7d7f8df72b81f4cc474afc34505a9df4335b6a1"
   ],
@@ -985,6 +997,10 @@
   [
    "hadron_revoke_automation_team_snapshot_grant",
    "bd0f6c4ce104c2f89722b0077dac0ad2c1ea39dfee33bcc959ee512a2208b8bb"
+  ],
+  [
+   "hadron_get_automation_team_snapshot_grant",
+   "a1623ef318bd8db702bbb9e68477d11301c2a4b626b280a6dc7128a82e278f10"
   ],
   [
    "hadron_list_automation_team_snapshot_grants",
