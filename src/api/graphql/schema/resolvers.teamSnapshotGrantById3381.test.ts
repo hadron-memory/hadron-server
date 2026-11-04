@@ -128,11 +128,12 @@ it('does not disguise a database fault as an unknown grant', async () => {
   expect(JSON.stringify(out)).not.toContain('private-db-fault');
 });
 it('rechecks manager authority inside the authority transaction', async () => {
-  const base = db.appAutomationTeamSnapshotGrant.findUnique.bind(db.appAutomationTeamSnapshotGrant);
-  vi.spyOn(db.appAutomationTeamSnapshotGrant, 'findUnique').mockImplementationOnce(async (...args: Parameters<typeof base>) => {
-    const row = await base(...args);
-    await db.orgMember.deleteMany({ where: { userId: f.admin.id } });
-    return row;
-  });
-  expect(await graphql(f.live.id, ctx())).toEqual(GQL_NOT_FOUND);
+  const boundaryDb = db.$extends({ query: { appAutomationTeamSnapshotGrant: {
+    findUnique: async ({ args, query }) => {
+      const row = await query(args);
+      await db.orgMember.deleteMany({ where: { userId: f.admin.id } });
+      return row;
+    },
+  } } });
+  expect(await graphql(f.live.id, ctx(f.admin.id, { db: boundaryDb as unknown as Context['db'] }))).toEqual(GQL_NOT_FOUND);
 });
