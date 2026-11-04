@@ -9,8 +9,9 @@
  *
  * Who may set or clear: the existing updateApp gate, unchanged (`requireOwnerOrOrgRole(ctx, app,
  * 'ADMIN')`): an org ADMIN (or platform ADMIN) for an org-owned App, the owner for a user-owned App
- * (`chk_app_owner_xor`: an App has exactly one of the two). Whether to tighten that is an open
- * ruling on the issue; this build exposes the argument under the existing gate.
+ * (`chk_app_owner_xor`: an App has exactly one of the two). Ruling 0135 chose that gate as built, and
+ * cor:acl:040:07 states it. The platform-ADMIN arm on an org-owned App is as built with no ruling of
+ * its own (that rule's Edge Cases).
  */
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -195,7 +196,7 @@ describe('#3428 updateApp(policy): variables, platform ADMIN, refusal order', ()
     // Two arms admit here: requireOwnerOrOrgRole's platform bypass and requireOrgRole's own platform
     // short-circuit. Removing either alone leaves the other admitting (equivalent mutants); removing
     // both turns this red.
-    it('sets and clears an org-owned App\'s link (cor:dmo:050:12; the platform-role admit)', async () => {
+    it('sets and clears an org-owned App\'s link (as built, no ruling of its own: cor:acl:040:07 Edge Cases)', async () => {
       const set = await run(UPDATE, { ref: orgApp.id, policy: STORED }, platformAdmin.id, ['ADMIN']);
       expect(set.errors).toBeUndefined();
       expect(await policyOf(orgApp.id)).toEqual(STORED);
@@ -204,12 +205,13 @@ describe('#3428 updateApp(policy): variables, platform ADMIN, refusal order', ()
       expect(await policyOf(orgApp.id)).toBeNull();
     });
 
-    // BUILT-AS, NOT LAW (hadron-server#1734). cor:dmo:050:12 (Decided) admits platform admins on a
-    // user-owned App too; its Built line records that as not built, tracked in #1734. Today
-    // requireOwnerOrOrgRole runs spec 047's strict owner-only branch before the platform bypass, so
-    // the platform ADMIN is refused. This pins that built boundary so a change to it is deliberate:
-    // whoever builds #1734 (or a #3423 who-may-set ruling that changes the gate) flips this
-    // expectation knowingly. It is not a guard on a platform rule.
+    // BUILT-AS, NOT LAW (hadron-server#1734). cor:dmo:050:12 (Decided) counts platform admins among
+    // those who manage a user-owned App too; its Built line records that as not built, tracked in
+    // #1734, and cor:acl:040:07 lists whether a platform admin may write this link as open to change.
+    // Today requireOwnerOrOrgRole runs spec 047's strict owner-only branch before the platform bypass,
+    // so the platform ADMIN is refused. This pins that built boundary so a change to it is deliberate:
+    // whoever builds #1734 (or a later ruling that changes the gate) flips this expectation knowingly.
+    // It is not a guard on a platform rule.
     it('is refused on someone else\'s user-owned App, policy unchanged (gate as built under #1734)', async () => {
       await db.app.update({ where: { id: soloApp.id }, data: { policy: STORED } });
       const baseline = await run(UPDATE_NAME_ONLY, { ref: soloApp.id, name: 'x' }, platformAdmin.id, ['ADMIN']);
