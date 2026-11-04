@@ -666,3 +666,30 @@ export async function appendCredentialInstructionEvent(
     payload: { act: args.act, instruction: { kind: a.instruction.kind, ref: a.instruction.ref } },
   } });
 }
+
+/** #3323: which S4a door an instructed App-manager act went through (hrn:node:hadronmemory.com:specs:cor:dmo:050:12). */
+export type ManagerAct =
+  | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
+  | 'task.finding-dispose' | 'task.priority' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
+  | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
+  | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties';
+
+/**
+ * #3323 (S4a of #2483): one record per admitted instructed App-manager act, in the act's transaction. Names the worker,
+ * the instructing holder, the act, the instruction and the ids the act concerns; never a title, description,
+ * properties, patterns or any other content (cor:agt:050:11, ids only). The ids sit in the payload, not in `taskId` or
+ * `subjectWorkerId`, so the record never reads as a task's own transition or an assignment. A person records nothing.
+ */
+export async function appendManagerInstructionEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; admission: ActAdmission; act: ManagerAct; subject: { taskId?: string; workerId?: string; eventId?: string } },
+): Promise<void> {
+  if (args.admission.kind !== 'instructed-worker') return;
+  const a = args.admission;
+  const subject = Object.fromEntries(Object.entries(args.subject).filter(([, v]) => typeof v === 'string'));
+  await tx.agentTeamEvent.create({ data: {
+    appId: args.appId, type: 'app.manager-act',
+    actorUserId: a.userId, actorWorkerId: a.workerId, actorAgentId: a.agentId,
+    payload: { act: args.act, ...subject, instruction: { kind: a.instruction.kind, ref: a.instruction.ref } },
+  } });
+}

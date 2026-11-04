@@ -63,13 +63,15 @@ import { taskListDateTime } from '../../../lib/agentTasks/listDateTime.js';
 // owner-role AppMembers, org ADMIN/OWNER and platform admins. It replaced the
 // strict reading of #1713 (Rook P1-1), whose self-grant risk #1714 closed:
 // `joinApp` never hands out `owner`.
-// INTERIM (team chat #7508): the App-manager arm counts only for a PERSON
-// acting as themselves; a worker acting through its session does not inherit
-// its driver's management rights. This is attribution hygiene, NOT a privilege
-// boundary (Rook P3-3): the same credential can act as the person by sending
-// no worker session. It keeps a worker's own acts from being recorded as
-// management acts. A worker's own authority over others' tasks is 050:09's
-// `reportsTo` arm (Holger #7804; built with #1726), not its driver's role.
+// #3323 (S4a of #2483, cor:dmo:050:12, replacing the #7508 interim): the
+// App-manager arm admits a PERSON acting as themselves, and their held worker's
+// session ONLY on a clear instruction the door passes on (`actorManagesApp`'s
+// explicit `instructed` input; #3307's check, judged on the holder). Such an act
+// is recorded as one `app.manager-act` event, so a worker's management acts are
+// told apart from its own. With no instruction a worker never inherits its
+// holder's management, and every door not wired for S4a passes none. A worker's
+// own authority over others' tasks is still 050:09's `reportsTo` arm (Holger
+// #7804; built with #1726), asked before the manager arm.
 //
 // CONCEALMENT: a task the caller cannot read — including one in another App,
 // or a parent named across Apps — reads as TASK_NOT_FOUND (mutations) or null
@@ -90,6 +92,9 @@ import { composeWorkerUrn, resolveWorkerRef as resolveWorkerRefId } from '../../
 import { resolveWorkerIdByName } from './resolvers.worker.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
+import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
+import { appendManagerInstructionEvent, type ManagerAct } from '../../../lib/agentTasks/events.js';
+import { lockCallerSession, readActInstruction, requireInstructedActKeepingRuns } from './resolvers.instruction.js';
 import { lockAppReportsTo } from '../../../lib/workerReportsTo.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
 import { refuseStoppedAssignee } from '../../../lib/stopSignals/enforce.js';
@@ -185,10 +190,38 @@ const APP_SELECT = {
 export type TaskApp = Prisma.AppGetPayload<{ select: typeof APP_SELECT }>;
 type TaskRow = Omit<Prisma.AgentTaskGetPayload<Record<string, never>>, 'resultFindings'> & { resultFindings?: Prisma.JsonValue | null };
 
-/** Who is acting on a task: a worker through its session, or a person as themselves. */
+/**
+ * #3323 (S4a of #2483, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): the instruction a wired door was called with,
+ * and what the App-manager arm made of it in the current attempt. `admitted` is set only when #3307's check admitted
+ * the caller's held worker on its holder's right; the door records that act, after every refusal.
+ */
+export type ManagerInstruction = { claim: ActInstruction; admitted: Extract<ActAdmission, { kind: 'instructed-worker' }> | null };
+
+/**
+ * Who is acting on a task: a worker through its session, or a person as themselves. `instructed` is attached only by
+ * a door wired for #3323 ({@link withInstruction}); every other caller resolves an actor without one.
+ */
 export type TaskActor =
-  | { kind: 'worker'; workerId: string; agentId: string | null; userId: string | null }
-  | { kind: 'user'; userId: string };
+  | { kind: 'worker'; workerId: string; agentId: string | null; userId: string | null; instructed?: ManagerInstruction }
+  | { kind: 'user'; userId: string; instructed?: ManagerInstruction };
+
+/** #3323: the actor a wired door acts as, carrying the instruction it was called with (none: the actor unchanged). */
+export function withInstruction<A extends TaskActor>(actor: A, claim: ActInstruction | null | undefined): A {
+  return claim == null ? actor : { ...actor, instructed: { claim, admitted: null } };
+}
+
+/**
+ * #3323: one ids-only `app.manager-act` record for an act the instructed App-manager arm admitted (cor:agt:050:11).
+ * Called by the door in the act's own transaction, after every refusal and only when the act changed something; a
+ * person, and a worker admitted on another arm (owner, reportsTo, assignee, itself, the alarm chain), record nothing.
+ */
+export async function recordInstructedManagerAct(
+  tx: Prisma.TransactionClient, appId: string, actor: TaskActor, act: ManagerAct,
+  subject: { taskId?: string; workerId?: string; eventId?: string } = {},
+): Promise<void> {
+  const admission = actor.instructed?.admitted;
+  if (admission) await appendManagerInstructionEvent(tx, { appId, admission, act, subject });
+}
 
 /**
  * #1756 (cor:agt:050:06): a headless run of the App creating a root task. Not a `TaskActor`: a run is never an
@@ -623,15 +656,39 @@ const isOwner = (actor: TaskActor, t: Pick<TaskRow, 'ownerWorkerId' | 'ownerUser
 const isAssignee = (actor: TaskActor, t: Pick<TaskRow, 'assigneeWorkerId' | 'assigneeUserId'>): boolean =>
   actorIs(actor, t.assigneeWorkerId, t.assigneeUserId);
 
+/** The App-manager arm's own refusal inside #3307's check; the door answers with its own refusal. */
+class ManagerArmRefused extends Error {}
+
 /**
- * Whoever manages the App — cor:acl:010:01 as Holger ruled it on 2026-10-10
- * (`managesApp`, #1731). INTERIM: a person acting as themselves only — see the
- * file header. Called with the transaction context, so it reads committed
- * state under the write's anchors, with platform roles re-read from the user row.
+ * Whoever manages the App — cor:acl:010:01 as Holger ruled it on 2026-10-10 (`managesApp`, #1731). Called with the
+ * transaction context, so it reads committed state under the write's anchors, with platform roles re-read.
+ *
+ * #3323 (S4a of #2483, hrn:node:hadronmemory.com:specs:cor:dmo:050:12): a worker's session acts with its holder's
+ * manager right ONLY when the door passes the instruction it was called with (`instructed`, an explicit input). With
+ * none, a worker actor is refused exactly as before: every caller not wired for S4a (the grant and key-scope doors,
+ * the stop-signal, ticker, settings, host and wake doors until #3321) passes none, so widening this helper widens no
+ * door no slice has re-read. With one, #3307's shared check decides on the live transaction (the caller's session row
+ * fenced first): the request user holds the worker, the session is hand-started in this App, the claim is valid, and
+ * `managesApp` holds for that holder. An admitted worker is noted in `instructed.admitted` for the door's record.
+ * A person with an instruction is judged by the same check (a present claim is validated), and records nothing.
  */
-export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor): Promise<boolean> {
-  if (actor.kind !== 'user' || ctx.impersonation) return false;
-  return managesApp(ctx, app);
+export async function actorManagesApp(ctx: Context, app: TaskApp, actor: TaskActor, instructed?: ManagerInstruction): Promise<boolean> {
+  if (ctx.impersonation) return false;
+  if (!instructed) return actor.kind === 'user' && managesApp(ctx, app);
+  await lockCallerSession(ctx.db as Prisma.TransactionClient, ctx.sessionId);
+  let admission: ActAdmission;
+  try {
+    admission = await requireInstructedActKeepingRuns(
+      ctx, app.id, instructed.claim, () => managesApp(ctx, app), readActInstruction, () => new ManagerArmRefused(),
+    );
+  } catch (e) {
+    if (e instanceof ManagerArmRefused) return false;
+    throw e;
+  }
+  if (actor.kind === 'user') return admission.kind === 'person';
+  if (admission.kind !== 'instructed-worker' || admission.workerId !== actor.workerId) return false;
+  instructed.admitted = admission;
+  return true;
 }
 
 /**
@@ -661,21 +718,25 @@ async function actorCoordinatesOwner(tx: Prisma.TransactionClient, actor: TaskAc
   return false;
 }
 
-/** The task's owner, whoever manages the App, or (#1726) a worker the owner reports to. */
+/**
+ * The task's owner, (#1726) a worker the owner reports to, or whoever manages the App. #3323: the manager arm is asked
+ * last, so a worker the other arms admit needs no instruction and writes no instructed-act record.
+ */
 async function mayDirectTask(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId'>): Promise<boolean> {
-  return isOwner(actor, task) || (await actorManagesApp(txCtx, app, actor)) || (await actorCoordinatesOwner(tx, actor, task));
+  return isOwner(actor, task) || (await actorCoordinatesOwner(tx, actor, task)) || (await actorManagesApp(txCtx, app, actor, actor.instructed));
 }
 
 /**
  * #2420 (cor:agt:050:28): who may write a task's `properties` — the cor:agt:050:09 set (owner, a worker the owner
  * reports to, whoever manages the App) AND the task's own assignee; nobody else. Asked of a task row or, at creation,
- * of the facts the new row will carry.
+ * of the facts the new row will carry. #3323: the assignee arm decides first, because the manager arm of
+ * {@link mayDirectTask} would record an instructed act for a write the assignee may make on its own (cor:dmo:050:12).
  */
 async function mayWriteProperties(
   tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor,
   task: Pick<TaskRow, 'ownerWorkerId' | 'ownerUserId' | 'assigneeWorkerId' | 'assigneeUserId'>,
 ): Promise<boolean> {
-  return (await mayDirectTask(tx, txCtx, app, actor, task)) || isAssignee(actor, task);
+  return isAssignee(actor, task) || (await mayDirectTask(tx, txCtx, app, actor, task));
 }
 
 function sameActor(a: TaskActor, b: TaskActor): boolean {
@@ -1081,7 +1142,11 @@ export async function inTaskWriteTx<T>(
         }
         requireWritable(txCtx, fresh);
       },
-      (tx, txCtx) => write(tx, txCtx, fresh as TaskApp),
+      (tx, txCtx) => {
+        // #3323: an admission belongs to the attempt that judged it; a retried attempt judges again.
+        if ('instructed' in actor && actor.instructed) actor.instructed.admitted = null;
+        return write(tx, txCtx, fresh as TaskApp);
+      },
       {
         lockMode: options.lockMode,
         afterLock: async (tx) => {
@@ -1134,6 +1199,8 @@ async function mutateTask(
    * assignee).
    */
   locks: { taskGraph?: 'shared' | 'exclusive'; assignee?: boolean; workers?: (appId: string) => Promise<(string | null)[]> } = {},
+  /** #3323: the instruction a door wired for S4a was called with; the App-manager arm judges it ({@link actorManagesApp}). */
+  instruction?: ActInstruction | null,
 ): Promise<TaskRow> {
   const readable = await loadReadableTask(ctx, taskRef);
   if (!readable) throw notFound(taskRef);
@@ -1143,7 +1210,8 @@ async function mutateTask(
   }
   // #2553: the caller's spelling (an id or a handle) is echoed in refusals; every query below runs on the id.
   const taskId = readable.task.id;
-  const { app, actor } = readable;
+  const { app } = readable;
+  const actor = withInstruction(readable.actor, instruction);
   requireWritable(ctx, app);
   for (let attempt = 0; ; attempt += 1) {
     const named = locks.workers ? await locks.workers(app.id) : [];
@@ -1612,7 +1680,7 @@ export async function setTaskPriorityInTx(tx: Prisma.TransactionClient, txCtx: C
  * Never upgrade a shared graph lock after taking a task row. Never open a nested
  * transaction from an edit; post-commit matching is the outer caller's job.
  */
-export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, ref: string, operation: 'add' | 'remove') {
+export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx: Context, app: TaskApp, actor: TaskActor, task: TaskRow, ref: string, operation: 'add' | 'remove'): Promise<boolean> {
   await requireTaskDirection(tx, txCtx, app, actor, task);
   requireBlockerState(task);
   const id = await blockerRef(txCtx, app.id, ref);
@@ -1622,7 +1690,9 @@ export async function changeTaskBlockerInTx(tx: Prisma.TransactionClient, txCtx:
   if ((operation === 'add' && !existed) || (operation === 'remove' && existed)) {
     await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(txCtx.userId),
       event: { type: operation === 'add' ? 'task.blocker-added' : 'task.blocker-removed', blockerTaskId: id } });
+    return true;
   }
+  return false;
 }
 
 // ── Creating a task: one judgement shared by createAgentTask and createAgentTasks ──
@@ -1897,7 +1967,7 @@ type CreateBatchItem = { task: CreateInput; blockedByPositions?: number[] | null
 
 export const agentTaskMutations = {
   /** #2645: Proposed cor:agt:050:09 Editing. The assignment gate and transaction are the only write door. */
-  updateAgentTask: async (_: unknown, { taskId, input }: { taskId: string; input: Record<string, unknown> }, ctx: Context) =>
+  updateAgentTask: async (_: unknown, { taskId, input, instruction }: { taskId: string; input: Record<string, unknown>; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       // #2420 (cor:agt:050:28): the task's assignee may write its `properties` and nothing else; a patch that names
       // any other field needs the cor:agt:050:09 set, and is refused whole.
@@ -1973,25 +2043,32 @@ export const agentTaskMutations = {
       if (propertiesChange) {
         await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.properties-changed', ...propertiesChange }, createdAt: at });
       }
-    }),
-  setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority }: { taskRef: string; priority: number }, ctx: Context) => {
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.update', { taskId: task.id });
+    }, {}, instruction),
+  setAgentTaskPriority: async (_: unknown, { taskRef: taskId, priority, instruction }: { taskRef: string; priority: number; instruction?: ActInstruction | null }, ctx: Context) => {
     const value = taskPriority(priority);
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       await setTaskPriorityInTx(tx, txCtx, app, actor, task, value);
-    });
+      // #3323 (acceptance 6): a no-op writes no instructed-act record. The door's own event stays as it was.
+      if (task.priority !== value) await recordInstructedManagerAct(tx, app.id, actor, 'task.priority', { taskId: task.id });
+    }, {}, instruction);
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
-  addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
+  addAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId, instruction }: { taskRef: string; blockerTaskRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add');
-    }, { taskGraph: 'exclusive' });
+      if (await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'add')) {
+        await recordInstructedManagerAct(tx, app.id, actor, 'task.blocker-add', { taskId: task.id });
+      }
+    }, { taskGraph: 'exclusive' }, instruction);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
-  removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId }: { taskRef: string; blockerTaskRef: string }, ctx: Context) => {
+  removeAgentTaskBlocker: async (_: unknown, { taskRef: taskId, blockerTaskRef: blockerTaskId, instruction }: { taskRef: string; blockerTaskRef: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const task = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
-      await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove');
-    }, { taskGraph: 'exclusive' });
+      if (await changeTaskBlockerInTx(tx, txCtx, app, actor, task, blockerTaskId, 'remove')) {
+        await recordInstructedManagerAct(tx, app.id, actor, 'task.blocker-remove', { taskId: task.id });
+      }
+    }, { taskGraph: 'exclusive' }, instruction);
     await matchAfterChange(ctx.db, task.appId);
     return ctx.db.agentTask.findUniqueOrThrow({ where: { id: task.id } });
   },
@@ -2004,10 +2081,15 @@ export const agentTaskMutations = {
    * not under an ended parent (TASK_ENDED, 050:07 open question; #1705
    * interim).
    */
-  createAgentTask: async (_: unknown, { input }: { input: CreateInput }, ctx: Context, info?: GraphQLResolveInfo) => {
+  createAgentTask: async (_: unknown, { input, instruction }: { input: CreateInput; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const p = await prepareTaskCreate(ctx, input);
-    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, (tx, txCtx, app) => applyTaskCreate(tx, txCtx, app, p),
-      { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
+    // #3323: the direction arm a create may need (naming its priority, blockers or properties for another owner).
+    p.actor = withInstruction(p.actor, instruction);
+    const made = await inTaskWriteTx(ctx, p.app, p.actor, p.refused, async (tx, txCtx, app) => {
+      const created = await applyTaskCreate(tx, txCtx, app, p);
+      await recordInstructedManagerAct(tx, app.id, p.actor, 'task.create', { taskId: created.id });
+      return created;
+    }, { lockWorkerIds: [p.lockedAssignee], taskGraph: input.blockedBy?.length ? 'exclusive' : 'shared' });
     // #1707 (cor:agt:060:06): a queued task is matched now, after its create
     // committed; the returned task shows the assignee when one was free.
     if (input.match) await matchTaskNow(ctx.db, made.id, new Date());
@@ -2224,7 +2306,7 @@ export const agentTaskMutations = {
    */
   assignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
+    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2279,7 +2361,8 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: evActor,
         event: { type: 'task.assigned', assignee: party, closeSessionWhenDone: close },
       });
-    }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.assign', { taskId: task.id });
+    }, { workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
     // #1709 (cor:agt:070:08): an assignment by hand starts a held worker with no live session through its host.
     await launchAssignee(ctx.db, assigned);
     await emitTaskWarnings(ctx, info, assigned.appId, { codes: warn, taskId: assigned.id });
@@ -2291,7 +2374,7 @@ export const agentTaskMutations = {
    * assignee becomes BACKLOG — unassigned, never matched, never waited on, no
    * alarms. Whoever may assign a task may park it (cor:agt:050:09).
    */
-  parkAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) =>
+  parkAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) =>
     mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, parks it in the backlog.", { taskId });
@@ -2317,14 +2400,15 @@ export const agentTaskMutations = {
       await appendTaskEvent(tx, {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.parked' },
       });
-    }),
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.park', { taskId: task.id });
+    }, {}, instruction),
 
   /**
    * Make a backlog task ready to be worked (#1754, cor:agt:050:02): BACKLOG
    * becomes pending and the task enters the queue. Whoever may assign a task
    * may make it ready (cor:agt:050:09).
    */
-  makeAgentTaskReady: async (_: unknown, { taskId }: { taskId: string }, ctx: Context) => {
+  makeAgentTaskReady: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context) => {
     const ready = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
         throw taskError('TASK_NOT_OWNER', "Only the task's owner, a worker the owner reports to, or whoever manages the App, makes a backlog task ready.", { taskId });
@@ -2350,7 +2434,8 @@ export const agentTaskMutations = {
       // and this event is the stall rule's queue-entry stamp for the new stint
       // (cor:agt:050:17; the unassignable episode starts here, not at creation).
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: evActor, event: { type: 'assignment.queued' } });
-    });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.ready', { taskId: task.id });
+    }, {}, instruction);
     // #1707 (cor:agt:060:06): a free worker may take it right away.
     await matchAfterChange(ctx.db, ready.appId);
     return ready;
@@ -2363,7 +2448,7 @@ export const agentTaskMutations = {
    */
   reassignAgentTask: async (
     _: unknown,
-    { taskId, assignee, closeSessionWhenDone }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null },
+    { taskId, assignee, closeSessionWhenDone, instruction }: { taskId: string; assignee: NonNullable<PartyInput>; closeSessionWhenDone?: boolean | null; instruction?: ActInstruction | null },
     ctx: Context,
     info?: GraphQLResolveInfo,
   ) => {
@@ -2399,7 +2484,8 @@ export const agentTaskMutations = {
         appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
         event: { type: 'task.reassigned', from, to: party, closeSessionWhenDone: close },
       });
-    }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.reassign', { taskId: task.id });
+    }, { assignee: true, workers: async (appId) => [await partyWorkerForLock(ctx, appId, assignee)] }, instruction);
     await launchAssignee(ctx.db, reassigned);
     await emitTaskWarnings(ctx, info, reassigned.appId, { codes: warn, taskId: reassigned.id });
     return reassigned;
@@ -2466,7 +2552,7 @@ export const agentTaskMutations = {
   /** #2663 / hrn:node:hadronmemory.com:specs:cor:agt:050:30: assigners dispose a finished finding, never its result. */
   disposeAgentTaskFinding: async (
     _: unknown,
-    args: { taskRef: string; findingId: string; disposition: unknown; reference?: unknown },
+    args: { taskRef: string; findingId: string; disposition: unknown; reference?: unknown; instruction?: ActInstruction | null },
     ctx: Context,
   ) => mutateTask(ctx, args.taskRef, async (tx, task, actor, app, txCtx) => {
     if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
@@ -2478,6 +2564,7 @@ export const agentTaskMutations = {
     if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: args.taskRef });
     const reference = args.reference == null ? null : taskReferencesInput([args.reference])[0];
     const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
+    const unchanged = dispositions.some(d => d.findingId === args.findingId && d.disposition === args.disposition && isDeepStrictEqual(d.reference, reference));
     const next = dispositions.filter(d => d.findingId !== args.findingId);
     next.push({ findingId: args.findingId, disposition: args.disposition as string, reference });
     next.sort((a, b) => findings.findIndex(f => f.id === a.findingId) - findings.findIndex(f => f.id === b.findingId));
@@ -2485,7 +2572,9 @@ export const agentTaskMutations = {
     await tx.agentTask.update({ where: { id: task.id }, data: { findingDispositions: next, ...updatedStamp(ctx) } });
     await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId),
       event: { type: 'task.finding-disposed', findingId: args.findingId, disposition: args.disposition as 'fixed' | 'accepted' | 'deferred' | 'rejected' } });
-  }),
+    // #3323 (acceptance 6): the same disposition again is a no-op, and a no-op writes no record.
+    if (!unchanged) await recordInstructedManagerAct(tx, app.id, actor, 'task.finding-dispose', { taskId: task.id });
+  }, {}, args.instruction),
 
   /**
    * Finish a started task with its result: the assignee only (cor:agt:050:08).
@@ -2548,7 +2637,7 @@ export const agentTaskMutations = {
    * Cancel a pending, started or backlog task: its owner, or whoever manages
    * the App (cor:agt:050:09, Proposed; backlog directly, Holger team chat #8150).
    */
-  cancelAgentTask: async (_: unknown, { taskId }: { taskId: string }, ctx: Context, info?: GraphQLResolveInfo) => {
+  cancelAgentTask: async (_: unknown, { taskId, instruction }: { taskId: string; instruction?: ActInstruction | null }, ctx: Context, info?: GraphQLResolveInfo) => {
     const warn: TaskWarningCode[] = [];
     const cancelled = await mutateTask(ctx, taskId, async (tx, task, actor, app, txCtx) => {
       if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
@@ -2573,7 +2662,8 @@ export const agentTaskMutations = {
         appId: app.id, task, wasStarted: task.status === 'started', sessionEndRequested: ending !== null,
         actor: eventActor(ctx.userId), now: new Date(),
       });
-    }, { assignee: true });
+      await recordInstructedManagerAct(tx, app.id, actor, 'task.cancel', { taskId: task.id });
+    }, { assignee: true }, instruction);
     // #1707: a worker may have freed up (cor:agt:060:06).
     await matchAfterChange(ctx.db, cancelled.appId);
     await emitTaskWarnings(ctx, info, cancelled.appId, { codes: warn, taskId: cancelled.id });
