@@ -351,6 +351,57 @@ describe('#3359 implicit asking Agent membership (ruling 0120)', () => {
   });
 });
 
+describe('#3365 implicit asking Agent readability (ruling 0122)', () => {
+  const wire = async (p: Promise<unknown>) => {
+    try { await p; } catch (e: any) {
+      const error = new GraphQLError(e.message, { originalError: e, path: ['actionRegisterIndex'] });
+      const formatted = formatGraphQLError(error.toJSON(), error);
+      return JSON.stringify({ message: formatted.message, extensions: formatted.extensions });
+    }
+    throw new Error('expected a refusal');
+  };
+  const implicit = () => index({ agentRef: undefined });
+  const asRun = (agentId: string, fn: () => Promise<any>) => requestActorStorage.run({ workerId: null, agentId }, fn);
+
+  it.each(['worker', 'run'])('refuses a deleted implicit %s Agent exactly like its named URN', async (kind) => {
+    // Membership remains valid: this must exercise liveness, not the membership gate.
+    await db.agent.update({ where: { id: coder.id }, data: { deletedAt: new Date() } });
+    const named = await wire(index({ agentRef: agentUrn(coder) }));
+    expect(JSON.parse(named)).toMatchObject({ message: `AGENT_NOT_FOUND: ${agentUrn(coder)}`, extensions: { code: 'AGENT_NOT_FOUND' } });
+    expect(await wire((kind === 'worker' ? asWorker : asRun)(coder.id, implicit))).toBe(named);
+  });
+
+  it.each(['worker', 'run'])('refuses an unreadable installed implicit %s Agent exactly like its named URN', async (kind) => {
+    const foreign = await foreignAgent('Unreadable Installed Asking');
+    await db.appAgent.create({ data: { appId: app.id, agentId: foreign.id } });
+    const named = await wire(index({ agentRef: agentUrn(foreign) }));
+    expect(JSON.parse(named).extensions.code).toBe('AGENT_NOT_FOUND');
+    expect(await wire((kind === 'worker' ? asWorker : asRun)(foreign.id, implicit))).toBe(named);
+  });
+
+  it('types a missing implicit row without exposing its database id', async () => {
+    const missing = generateId();
+    const result = await wire(asRun(missing, implicit));
+    expect(JSON.parse(result).extensions.code).toBe('AGENT_NOT_FOUND');
+    expect(result).not.toContain(missing);
+  });
+
+  it.each(['deleted', 'unreadable', 'missing'])('keeps App admission first for an implicit %s Agent', async (state) => {
+    let id = coder.id;
+    if (state === 'deleted') await db.agent.update({ where: { id }, data: { deletedAt: new Date() } });
+    if (state === 'unreadable') id = (await foreignAgent('Unreadable Before App')).id;
+    if (state === 'missing') id = generateId();
+    const reads: string[] = [];
+    const counted = db.$extends({ query: { $allModels: { async $allOperations({ model, operation, args, query }) {
+      reads.push(`${model}.${operation}`); return query(args);
+    } } } });
+    const missingApp = generateId();
+    const result = await wire(asRun(id, () => index({ appRef: missingApp, agentRef: undefined }, ctx(admin.id, counted))));
+    expect(JSON.parse(result).extensions.code).toBe('APP_NOT_FOUND');
+    expect(reads.some((r) => /^(Agent|Memory|Node)\./.test(r))).toBe(false);
+  });
+});
+
 describe('#3287 Team Agent and App gate (acceptance 6, 7)', () => {
   it('two Team Agents give the same empty page as none', async () => {
     const none = await noTeamAnswer();
