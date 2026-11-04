@@ -12,6 +12,7 @@ import { GraphQLError, parse, type InputObjectTypeDefinitionNode } from 'graphql
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { attestedAuthoring, judgeAuthoring } from '../../../lib/authoringAttestation.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -142,6 +143,13 @@ describe('#1328 create and update', () => {
   it('a claim on an ungoverned node is ignored: no rule, no stamp', async () => {
     await M.createNode({}, { input: { memoryId, loc: 'free', name: 'free', content: 'x', authoredWith: claim(9) } }, ctx());
     expect(await stored('free')).toMatchObject({ authorshipKind: null, authoredByTask: null });
+  });
+
+  it('an edge-only update is not authored: it needs no claim and keeps the stamp', async () => {
+    await create('a', { authoredWith: claim() });
+    await update('a', { edges: [] });
+    await update('a', { ownerRepo: 'org/repo' });
+    expect(await stored('a')).toMatchObject({ authoredByTask: taskId, authoredByRevision: 1 });
   });
 
   it('a clean existing node stays valid: unrelated structure is not an authored edit', async () => {
@@ -308,6 +316,20 @@ describe('#1328 races: the rulebook lock orders the check against a rule change'
     await holding;
     return { release, done };
   };
+
+  it('the check itself waits for a rule write, for a seam with no writer-level lock of its own', async () => {
+    await db.nodeRoleRule.deleteMany({ where: { configId } });
+    const rule = await holdExclusive((tx) => tx.nodeRoleRule.create({
+      data: { id: generateId(), configId, role: 'guide', authorTaskId: taskId, authorTaskRequired: true },
+    }).then(() => undefined));
+    const judged = db.$transaction((tx) => judgeAuthoring(tx, memoryId, {
+      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, authoredChange: true,
+    }, attestedAuthoring(null)));
+    await waitForLockWaitersOfType(db, 'advisory', 1);
+    rule.release();
+    await rule.done;
+    await expect(judged).resolves.toMatchObject({ refused: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+  });
 
   it('a rule created while the write waits governs it (the absent-rule phantom)', async () => {
     await db.nodeRoleRule.deleteMany({ where: { configId } });

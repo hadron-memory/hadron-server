@@ -116,7 +116,7 @@ describe('#1328 git sync', () => {
     const base = { id: 'n', name: 'N', tags: [], role: 'guide', isRunnable: null, isPlaceholder: false } as never;
     const task = buildNodeFrontmatter({ ...(base as object), authorshipKind: 'TASK', authoredByTask: 't', authoredByRevision: 3 } as never, []);
     expect(task.authoredWith).toBe('t@3');
-    const human = buildNodeFrontmatter({ ...(base as object), authorshipKind: 'HUMAN', authoredByHuman: 'u' } as never, []);
+    const human = buildNodeFrontmatter({ ...(base as object), authorshipKind: 'HUMAN', authoredByHuman: 'u', authoredByTask: 't', authoredByRevision: 3 } as never, []);
     expect(human.authoredWith).toBeUndefined();
   });
 });
