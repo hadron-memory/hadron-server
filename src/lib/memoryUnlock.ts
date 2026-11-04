@@ -20,7 +20,7 @@
  */
 
 import { scrypt as scryptCb, randomBytes, type ScryptOptions } from 'crypto';
-import { Kind, getOperationAST, parse, type DocumentNode, type OperationDefinitionNode, type SelectionSetNode } from 'graphql';
+import { Kind, getOperationAST, parse, type DocumentNode } from 'graphql';
 
 // promisify() picks the options-less overload; wrap by hand.
 function scrypt(
@@ -202,46 +202,8 @@ export const REQUEST_KEYS_HEADER = 'x-hadron-memory-keys';
  * body that doesn't parse) is null, and the entry gets the header's ordinary NOT_ENCRYPTED.
  */
 export function encryptMemoryTargetRef(body: unknown): string | null {
-  const selected = selectedMutation(body);
-  if (!selected) return null;
-  const { variables } = body as Record<string, unknown>;
-  const [field, ...rest] = selected.operation.selectionSet.selections;
-  if (rest.length > 0 || field?.kind !== Kind.FIELD || field.name.value !== 'encryptMemory' || field.directives?.length) {
-    return null;
-  }
-  const value = field.arguments?.find((argument) => argument.name.value === 'memoryId')?.value;
-  if (value?.kind === Kind.STRING) return value.value;
-  if (value?.kind !== Kind.VARIABLE || !variables || typeof variables !== 'object') return null;
-  const supplied = (variables as Record<string, unknown>)[value.name.value];
-  return typeof supplied === 'string' ? supplied : null;
-}
-
-/**
- * #1796: whether this GraphQL request's mutation selects `encryptMemory` in ANY shape: a directive, a
- * fragment, an alias, beside other root fields, on any memory. Concealment from an impersonator rests
- * on this and not on {@link encryptMemoryTargetRef}, whose narrowness decides who may stage a first
- * encryption: an answer that is safe to withhold from a shape that can't stage must not leak from it.
- */
-export function requestSelectsEncryptMemory(body: unknown): boolean {
-  const selected = selectedMutation(body);
-  if (!selected) return false;
-  const seen = new Set<string>();
-  const selects = ({ selections }: SelectionSetNode): boolean => selections.some((selection) => {
-    if (selection.kind === Kind.FIELD) return selection.name.value === 'encryptMemory';
-    if (selection.kind === Kind.INLINE_FRAGMENT) return selects(selection.selectionSet);
-    if (seen.has(selection.name.value)) return false;
-    seen.add(selection.name.value);
-    const fragment = selected.document.definitions.find((definition) =>
-      definition.kind === Kind.FRAGMENT_DEFINITION && definition.name.value === selection.name.value);
-    return fragment?.kind === Kind.FRAGMENT_DEFINITION && selects(fragment.selectionSet);
-  });
-  return selects(selected.operation.selectionSet);
-}
-
-/** The mutation this GraphQL body would run, or null for anything else (a query, a batch, unparseable). */
-function selectedMutation(body: unknown): { document: DocumentNode; operation: OperationDefinitionNode } | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const { query, operationName } = body as Record<string, unknown>;
+  const { query, operationName, variables } = body as Record<string, unknown>;
   if (typeof query !== 'string') return null;
   let document: DocumentNode;
   try {
@@ -250,7 +212,20 @@ function selectedMutation(body: unknown): { document: DocumentNode; operation: O
     return null;
   }
   const operation = getOperationAST(document, typeof operationName === 'string' ? operationName : undefined);
-  return operation?.operation === 'mutation' ? { document, operation } : null;
+  if (operation?.operation !== 'mutation') return null;
+  const [field, ...rest] = operation.selectionSet.selections;
+  if (rest.length > 0 || field?.kind !== Kind.FIELD || field.name.value !== 'encryptMemory' || field.directives?.length) {
+    return null;
+  }
+  const value = field.arguments?.find((argument) => argument.name.value === 'memoryId')?.value;
+  if (value?.kind === Kind.STRING) return value.value;
+  if (value?.kind !== Kind.VARIABLE) return null;
+  const name = value.name.value;
+  const supplied = variables && typeof variables === 'object' ? (variables as Record<string, unknown>)[name] : undefined;
+  if (supplied !== undefined) return typeof supplied === 'string' ? supplied : null;
+  // Omitted: the operation's own default is what the resolver will receive.
+  const fallback = operation.variableDefinitions?.find((definition) => definition.variable.name.value === name)?.defaultValue;
+  return fallback?.kind === Kind.STRING ? fallback.value : null;
 }
 
 /** The request facts staging needs beyond the header, for #1796's first-encryption entry. */
@@ -259,8 +234,6 @@ export interface StageRequestKeysOptions {
   impersonated?: boolean;
   /** Lazily, the ref `encryptMemory` runs on in this request. See {@link encryptMemoryTargetRef}. */
   encryptMemoryTarget?: () => string | null;
-  /** Lazily, whether this request selects `encryptMemory` at all. See {@link requestSelectsEncryptMemory}. */
-  selectsEncryptMemory?: () => boolean;
 }
 
 /**
@@ -380,11 +353,11 @@ export async function stageRequestMemoryKeys(
           keyVerifier: true,
         },
       });
-      // #1796: on encryptMemory an impersonation's target owns nothing. Falling through gives it the
-      // missing-memory answer before the encryption state below can show (cor:sec:040:04).
-      const impersonatedOnEncrypt = !!options.impersonated && memory?.userId === userId &&
-        !!options.selectsEncryptMemory?.();
-      if (memory && memory.userId === userId && !impersonatedOnEncrypt) {
+      // #1796: an impersonation's target owns nothing, on any operation: it is a support view that
+      // reads no personal or private memory, so the header has no use here. Falling through gives
+      // the missing-memory answer before the encryption state, or a verdict on a guessed key, can
+      // show (cor:sec:040:04). This reads no operation, so no shape of a request can get around it.
+      if (memory && memory.userId === userId && !options.impersonated) {
         if (!memory.isEncrypted) {
           // #1796 (ruling 0145): a first encryption's secret establishes the verifier, so there is
           // nothing to verify it against. It waits for encryptMemory, whose gates still decide, and

@@ -253,6 +253,22 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
     expect((await row(memory.id)).isEncrypted).toBe(false);
   });
 
+  describe('the operation names its memory through a variable default', () => {
+    const DEFAULTED = (id: string) => `mutation($id: ID! = "${id}") { encryptMemory(memoryId: $id) { id isEncrypted } }`;
+
+    it('an omitted variable takes the default the resolver will receive', async () => {
+      const reply = await send(DEFAULTED(memory.id), {}, { keys: [{ memory: memory.id, passphrase }] });
+      expect(reply.errors).toBeUndefined();
+      expect((await row(memory.id)).isEncrypted).toBe(true);
+    });
+
+    it('a supplied variable wins over the default', async () => {
+      const reply = await send(DEFAULTED(other.id), { id: memory.id }, { keys: [{ memory: other.id, dataKey }] });
+      expect(code(reply)).toBe('NOT_ENCRYPTED');
+      expect((await row(other.id)).isEncrypted).toBe(false);
+    });
+  });
+
   it('with no entry and no argument the refusal is unchanged', async () => {
     const reply = await send(ENCRYPT, { id: memory.id });
     expect(code(reply)).toBe('BAD_USER_INPUT');
@@ -330,16 +346,16 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
       expect(face(sealed)).toBe(face(absent));
     });
 
-    it('a fragment cycle is the validation refusal it always was, not a crash in staging', async () => {
-      const reply = await send('mutation { ...F } fragment F on Mutation { ...G } fragment G on Mutation { ...F }', {}, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
-      expect(code(reply)).toBe('NOT_ENCRYPTED');
-    });
-
-    it('keeps the ordinary answer on an operation that never reaches encryptMemory (acceptance 4)', async () => {
-      const reply = await send(READ, { ref: memory.id }, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
-      expect(code(reply)).toBe('NOT_ENCRYPTED');
-      const query = await send(`query { encryptMemory(memoryId: "${memory.id}") { id } }`, {}, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
-      expect(code(query)).toBe('NOT_ENCRYPTED');
+    it('gets the missing-memory answer on an operation that is not encryptMemory, and a guessed key gets no verdict', async () => {
+      const encrypted = await newPrivate(owner.id, 'sealed');
+      await db.memory.update({ where: { id: encrypted.id }, data: { isEncrypted: true, keyVerifier: makeKeyVerifier(parseDataKey(dataKey)) } });
+      const missing = generateId();
+      const ask = (id: string, key: string) => send(READ, { ref: id }, { bearer: impJwt, keys: [{ memory: id, dataKey: key }] });
+      const absent = await ask(missing, wrongKey);
+      expect(code(absent)).toBe('NOT_FOUND');
+      expect(face(await ask(memory.id, dataKey))).toBe(face(absent));
+      expect(face(await ask(encrypted.id, wrongKey))).toBe(face(absent));
+      expect(face(await ask(encrypted.id, dataKey))).toBe(face(absent));
     });
   });
 });
