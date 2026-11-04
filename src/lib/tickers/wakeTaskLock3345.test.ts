@@ -44,13 +44,21 @@ beforeEach(async () => {
   workers.sort();
   const key = await db.appKey.create({ data: { appId, label: 'wake reader', keyHash: suffix, keyPreview: suffix.slice(-4) } });
   keyId = key.id;
-  await db.appKeyScope.create({ data: { appKeyId: keyId, scope: 'attention:deliver', grantedByUserId: userId } });
+  await db.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope: 'attention:deliver', grantedByUserId: userId } });
   // Keep AT0 creation out of the race; the competing INSERT below is the actual requested task.
   await M.createAgentTask({}, { input: { appRef: appId, title: 'seed', status: 'backlog' } }, context({ userId }));
 });
 
-it.each(['owner', 'assignee'] as const)('wake audit and create with an earlier %s worker both commit', async party => {
+it.each(['owner', 'assignee', 'distinct-match'] as const)('wake audit and create with an earlier %s worker both commit', async party => {
   const caller = workers[2];
+  if (party === 'distinct-match') {
+    for (const id of workers) {
+      const role = id === workers[0] ? 'target' : 'other';
+      await db.worker.update({ where: { id }, data: { role } });
+      await db.session.create({ data: { id: generateId(), appId, workerId: id, agentId, role, family: 'claude',
+        llmModel: 'claude-sonnet-5-5', startedAt: new Date(), updatedAt: new Date() } });
+    }
+  }
   const held = latch(), resume = latch();
   let createPid = 0;
   // Only observe/pause AFTER the real create's caller-worker SHARE has executed.
@@ -82,30 +90,47 @@ it.each(['owner', 'assignee'] as const)('wake audit and create with an earlier %
   });
   const input = { appRef: appId, title: `competing-${party}`, [party]: { worker: workers[0] } };
   // Attach rejection handlers immediately: a regression must fail an assertion, never leak an unhandled rejection.
-  const creating = runAsActor({ workerId: caller, agentId }, () => M.createAgentTask({}, { input }, context({ userId, db: traced })))
+  const creating = runAsActor({ workerId: caller, agentId }, () => party === 'distinct-match'
+    ? M.createAgentTasks({}, { appRef: appId, distinctAssignees: true,
+      tasks: [{ task: { title: input.title, match: true, requirements: { role: 'target' } } }] }, context({ userId, db: traced }))
+    : M.createAgentTask({}, { input }, context({ userId, db: traced })))
     .then((value: any) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
   let reading: Promise<{ value: any; error: unknown }> | undefined;
+  let barrierTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await held.promise;
+    await Promise.race([
+      held.promise,
+      creating.then(() => { throw new Error('create finished before its caller-worker barrier'); }),
+      new Promise<never>((_, reject) => {
+        barrierTimer = setTimeout(() => reject(new Error('create did not reach its caller-worker barrier')), 5_000);
+      }),
+    ]);
+    clearTimeout(barrierTimer);
     reading = Q.dueWakes({}, { appRef: appId }, context({ appId, appKeyId: keyId, organizationId: orgId }))
       .then((value: any) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
-    // Observer connection is not a participant: prove the real wake transaction waits on this create's row lock.
+    // Observer connection is not a participant: prove the real wake transaction
+    // waits on this create (worker row, or the distinct batch's graph fence).
     let blocked = false;
     for (let n = 0; n < 200; n++) {
       const [row] = await db.$queryRaw<{ blocked: boolean }[]>`
         SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
-          WHERE ${createPid} = ANY(pg_blocking_pids(a.pid)) AND a.query LIKE '%FROM workers%FOR%UPDATE%') AS blocked`;
+          WHERE ${createPid} = ANY(pg_blocking_pids(a.pid))
+            AND (a.query LIKE '%FROM workers%FOR%UPDATE%'
+              OR (${party === 'distinct-match'} AND a.query LIKE '%pg_advisory_xact_lock_shared%'))) AS blocked`;
       if (row.blocked) { blocked = true; break; }
       await new Promise(r => setTimeout(r, 10));
     }
-    expect(blocked, 'wake must hold the earlier worker and wait on the create caller').toBe(true);
+    expect(blocked, 'wake must wait on the create caller or its batch graph fence').toBe(true);
   } finally {
+    clearTimeout(barrierTimer);
     resume.release();
     const [created, read] = await Promise.all([creating, reading]);
     expect(created.error, 'task create must commit without a deadlock retry').toBeNull();
     expect(read?.error, 'wake answer must commit without a deadlock retry').toBeNull();
-    expect(created.value).toMatchObject({ ownerWorkerId: party === 'owner' ? workers[0] : caller, assigneeWorkerId: party === 'assignee' ? workers[0] : null });
+    const made = party === 'distinct-match' ? created.value?.[0] : created.value;
+    expect(made).toMatchObject({ ownerWorkerId: party === 'owner' ? workers[0] : caller, assigneeWorkerId: party === 'owner' ? null : workers[0] });
     expect(read?.value.wakes).toEqual([]);
     expect(await db.appKeyWakeRead.count({ where: { appKeyId: keyId } })).toBe(1);
+    expect(await db.appKeyWakeRead.findFirst({ where: { appKeyId: keyId } })).toMatchObject({ workerCount: 0 });
   }
 }, 20_000);
