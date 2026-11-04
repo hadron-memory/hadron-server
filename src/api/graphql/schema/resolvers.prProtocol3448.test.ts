@@ -786,9 +786,16 @@ describe('late verdicts after a clean slot is dropped',()=>{
 
 
 describe('SECURITY final pins: freezer actor scope',()=>{
-  it('a same-head freezer on another build does not exclude this build reviewer',async()=>{
+  it('a same-head freezer on another build is excluded from this build too',async()=>{
     const sibling=await M.createAgentTask!({}, {input:{appRef:app.id,title:'Other build',source:'synthetic',assignee:{user:reviewer.id},references:[{kind:'PULL_REQUEST',target:'https://github.com/example/project/pull/2'}]}},ctx());
     await command('freezePullRequestHead',{taskRef:sibling.id,head:H},reviewer.id);
+    await schedule(['local']);await freeze();const t=await seat('local');await verdict(t);await finish(t);
+    const answer=await readiness();expect(answer.slots[0].counts).toBe(false);expect(answer.ready).toBe(false);
+    await expect(command('recordReadyCall',{taskRef:build.id,head:H},author.id)).rejects.toMatchObject(error('PR_NOT_READY'));
+  });
+  it('a freezer on another build at an earlier head can review this head',async()=>{
+    const sibling=await M.createAgentTask!({}, {input:{appRef:app.id,title:'Other build',source:'synthetic',assignee:{user:reviewer.id},references:[{kind:'PULL_REQUEST',target:'https://github.com/example/project/pull/2'}]}},ctx());
+    await command('freezePullRequestHead',{taskRef:sibling.id,head:H2},reviewer.id);
     await schedule(['local']);await freeze();const t=await seat('local');await verdict(t);await finish(t);
     expect((await readiness()).ready).toBe(true);
   });
