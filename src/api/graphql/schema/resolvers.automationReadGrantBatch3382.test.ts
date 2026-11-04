@@ -113,6 +113,18 @@ describe('#3382 batch-only list contract', () => {
     for (const metric of metrics) expect(metric.queries, JSON.stringify(metric)).toBeLessThanOrEqual(metric.mode === 'worker' ? 24 : 8);
   }, 30_000);
 
+  it('preserves historical deleted-target URNs for App managers while target-only lists omit them', async () => {
+    const f = await fixture(3);
+    const gone = f.memories[0];
+    await db.memory.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    const appRows = await Q.automationReadGrants({}, { appRef: f.apps[0].id, includeRevoked: true }, context(f.owner.id));
+    expect(JSON.stringify(appRows)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, true)));
+    const targetRows = await Q.automationReadGrants({}, { appRef: f.apps[0].id, includeRevoked: true }, context(f.holder.id));
+    expect(JSON.stringify(targetRows)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, false)
+      .filter(r => r.memoryUrn !== 'hrn:mem:' + gone.urn)));
+    expect(await events()).toBe(0);
+  });
+
   it('empty, unknown/foreign selectors and invalid instruction/principal refuse or filter without widening', async () => {
     const f = await fixture(3);
     const outsider = await db.user.create({ data: { handle: 'batch-outsider' } });
