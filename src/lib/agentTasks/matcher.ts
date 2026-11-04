@@ -740,6 +740,45 @@ export async function matchTaskNow(db: PrismaClient, taskId: string, now: Date):
     data: { matchPending: false, matchFailedAt: new Date(), matchFailedReason: reason } });
 }
 
+/**
+ * #3246 (cor:agt:060:10, "A crash before the one attempt", ruling 0085 A): the fixed time after which the sweep releases a
+ * match-now reservation whose attempt never ran. `MATCH_AT_CREATE_RECOVERY_SECONDS`, read at each call; an integer from 60 to
+ * 86400, anything else (unset, empty, fractional, out of range) is the 300-second default, so a typo cannot switch it off.
+ */
+export function matchRecoverySeconds(): number {
+  const raw = process.env.MATCH_AT_CREATE_RECOVERY_SECONDS;
+  if (raw === undefined || !/^\d+$/.test(raw.trim())) return 300;
+  const n = Number(raw.trim());
+  return Number.isSafeInteger(n) && n >= 60 && n <= 86_400 ? n : 300;
+}
+
+/**
+ * Recover the match-now tasks whose one attempt never ran (the process died between the create commit and the attempt):
+ * a reservation older than the bound is claimed with ONE guarded write (`match_claimed_at`, so two sweeps or instances make
+ * the attempt once between them) and then gets exactly the usual single-shot attempt, `matchTaskNow`: assigned, or marked
+ * match-failed with one of the five reasons, never retried. A claim whose own attempt died is reclaimable only after the
+ * bound again. A task that is not pending, is assigned, or has no reservation (never reserved, assigned, cancelled,
+ * parked then made ready) is never selected. Returns the attempts this call made.
+ */
+export async function recoverInterruptedMatches(db: PrismaClient, now: Date, limit = 100): Promise<number> {
+  const cutoff = new Date(now.getTime() - matchRecoverySeconds() * 1000);
+  const stale: Prisma.AgentTaskWhereInput = { matchPending: true, status: 'pending', assigneeWorkerId: null, assigneeUserId: null, createdAt: { lte: cutoff },
+    OR: [{ matchClaimedAt: null }, { matchClaimedAt: { lte: cutoff } }] };
+  const due = await db.agentTask.findMany({ where: stale, select: { id: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: limit });
+  let attempts = 0;
+  for (const { id } of due) {
+    try {
+      const claimed = await db.agentTask.updateMany({ where: { AND: [{ id }, stale] }, data: { matchClaimedAt: now } });
+      if (claimed.count !== 1) continue; // another sweep took it
+      attempts += 1;
+      await matchTaskNow(db, id, now);
+    } catch (err) {
+      console.error('[task-matcher] recovering an interrupted match failed:', err);
+    }
+  }
+  return attempts;
+}
+
 /** Same eligibility and reason ordering for single-shot and atomic batch matching. */
 async function chooseMatchNow(
   db: Db, task: Awaited<ReturnType<Prisma.TransactionClient['agentTask']['findUniqueOrThrow']>>, now: Date,

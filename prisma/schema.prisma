@@ -5862,6 +5862,9 @@ model AgentTask {
   requirements         Json?
   /// #2829: reserve an opt-in match before create commits, so automatic runs cannot race it.
   matchPending         Boolean   @default(false) @map("match_pending")
+  /// #3246 (cor:agt:060:10, ruling 0085 A): the sweep's claim on an interrupted reservation: one guarded write, so
+  /// concurrent sweeps make the one attempt once. A claim older than the bound is reclaimable (its attempt died too).
+  matchClaimedAt       DateTime? @map("match_claimed_at")
   /// A single-shot failure remains until assignment; cancellation clears it (cor:agt:050:01, ruling 0015).
   matchFailedAt        DateTime? @map("match_failed_at")
   matchFailedReason    String?   @map("match_failed_reason")
