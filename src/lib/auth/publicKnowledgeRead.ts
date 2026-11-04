@@ -7,8 +7,8 @@
  * App-internal, cor:acl:010:01), no per-user holding and no owner (spec 047: a user-owned memory is owner-only
  * whatever its visibility). Reach is the memory's own rule, so it holds in any org. It never writes (ruling 0083).
  *
- * Who: a credential with an App and no user that is NOT session-confined. A session-confined App key keeps its
- * confinement (ruling 0104 does not widen it; Vera, hadron-server#3306). Every user principal, including an
+ * Who: a credential with an App and no user, including a session-bound App key (ruling 0114 B). Only this
+ * PUBLIC read is outside session confinement; all other reads and every write keep their gates. Every user principal, including an
  * impersonation, is unchanged: their PUBLIC reach is already `getOrgReadableMemoryIds`.
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -21,9 +21,9 @@ export interface PublicKnowledgeReader {
   impersonation?: unknown;
 }
 
-/** A principal with an App and no user, not session-confined (the session confinement predicate is `appId && sessionId && !userId`). */
+/** A principal with an App and no user; a session binding does not remove its PUBLIC read (0114 B). */
 export function readsPublicKnowledgeWithoutUser(auth: PublicKnowledgeReader): boolean {
-  return Boolean(auth.appId) && !auth.userId && !auth.sessionId && !auth.impersonation;
+  return Boolean(auth.appId) && !auth.userId && !auth.impersonation;
 }
 
 /** The memory-row predicate: shared so no caller restates it. */

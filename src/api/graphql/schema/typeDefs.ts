@@ -8255,12 +8255,15 @@ export const typeDefs = `#graphql
     Readers: the App's participants and the App's own live key; anyone else, and another App's key, gets
     APP_NOT_FOUND whether or not the App has an integration. Refusals, each judged before GitHub is read:
     TASK_INTEGRATION_NOT_FOUND (no integration of that name in this App), TASK_INTEGRATION_REPOSITORY_NOT_CONNECTED,
-    TASK_INTEGRATION_TEAM_UNKNOWN (team names its lead worker), BAD_USER_INPUT (skip or limit out of range); then the
-    GITHUB_* codes (GITHUB_NOT_INSTALLED, also for an App with no organization, which has no installation;
+    TASK_INTEGRATION_TEAM_UNKNOWN (team names its lead worker), BAD_USER_INPUT (skip or limit out of range, or noTeam
+    with team); then the GITHUB_* codes (GITHUB_NOT_INSTALLED, also for an App with no organization, which has no installation;
     GITHUB_PERMISSION_MISSING, GITHUB_TOKEN_SCOPE_MISMATCH, GITHUB_UNAVAILABLE).
     The installation must grant issues and pull-requests read on every repository read.
+    #3422 (hrn:node:hadronmemory.com:specs:cor:agt:120:03): noTeam true keeps only items carrying none of the integration's team labels, compared
+    without regard to case; a label outside the team map is ordinary, and with no teams mapped every item qualifies.
+    noTeam false or omitted keeps the current behaviour. noTeam true with team is refused with BAD_USER_INPUT.
     """
-    untrackedTaskItems(appRef: ID!, integration: String!, team: ID, repository: String, ready: ReadyFilter, skip: Int, limit: Int): UntrackedTaskItemPage!
+    untrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, skip: Int, limit: Int): UntrackedTaskItemPage!
 
     """
     #1705 — a team App's agent tasks, newest first. Party filters combine with the other selectors;
@@ -10503,8 +10506,11 @@ export const typeDefs = `#graphql
     behalf, and its events name the key as actorAppKeyId and the assignee as their subject. A claim is the only task
     write an App key makes. A key request carrying a session is APP_KEY_SESSION_BOUND. Other refusals as
     untrackedTaskItems.
+    #3422: noTeam as on untrackedTaskItems, applied before the claim walks the list: true claims only items carrying
+    none of the integration's team labels, false or omitted keeps the current behaviour, and with team it is refused
+    with BAD_USER_INPUT before GitHub is read and before any task is created.
     """
-    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
+    claimUntrackedTaskItems(appRef: ID!, integration: String!, team: ID, noTeam: Boolean, repository: String, ready: ReadyFilter, limit: Int, assignee: AgentTaskPartyInput, owner: AgentTaskPartyInput): ClaimUntrackedTaskItemsResult!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:01) — assigner authority; priority1..5, default1. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."
     setAgentTaskPriority(taskRef: ID!, priority: Int!, instruction: ActInstructionInput): AgentTask!
     "#2644 (hrn:node:hadronmemory.com:specs:cor:agt:050:02) — add a same-App blocker to a backlog/pending task, refusing cycles serially. Assigner authority. #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only."

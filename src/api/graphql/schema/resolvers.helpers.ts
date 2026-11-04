@@ -2254,8 +2254,8 @@ export async function getAccessibleMemoryIds(
   if (isOperatorConversionContext(ctx)) return null;
   const scope = onlyMemoryId ? { id: onlyMemoryId } : {};
   // App Key with an active session — hard-isolate to the session's memory
-  // plus the agent's system memory. Even if an LLM asks to read a different
-  // memory by ID, this filter denies it. This is THE security boundary for
+  // plus the agent's system memory, with only the named PUBLIC-knowledge
+  // exception below (0114 B). Other out-of-session IDs stay denied. This is the boundary for
   // multi-user agents — checked FIRST, so it can't be widened by an ADMIN role
   // riding on a session context.
   //
@@ -2272,7 +2272,11 @@ export async function getAccessibleMemoryIds(
   // (#932) and the #967 narrow-never-grant rule.
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await sessionScopedMemoryIds(ctx.db, ctx.appId, ctx.sessionId);
-    return onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
+    const scoped = onlyMemoryId ? ids.filter((id) => id === onlyMemoryId) : ids;
+    // 0114 B: admit only explicitly named PUBLIC targets, never enumerate PUBLIC memories.
+    if (!readsPublicKnowledgeWithoutUser(ctx)) return scoped;
+    const named = onlyMemoryId ? [onlyMemoryId] : (options?.publicTargetIds ?? []);
+    return [...new Set([...scoped, ...await publicKnowledgeAmong(ctx.db, named)])];
   }
 
   // Platform ADMIN/OWNER: broad access EXCEPT another user's owner-owned

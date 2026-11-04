@@ -1149,6 +1149,10 @@ export const typeResolvers = {
           {
             userId: ctx.userId,
             appId: ctx.appId,
+            // A readable parent is no grant on its cross-memory asset. Preserve
+            // the session boundary, including the sole PUBLIC-read exception.
+            sessionId: ctx.sessionId,
+            clientId: ctx.clientId,
             roles: ctx.roles,
             organizationId: ctx.organizationId,
           },

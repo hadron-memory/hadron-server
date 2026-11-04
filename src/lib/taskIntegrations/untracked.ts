@@ -9,7 +9,7 @@
  *
  * The read is bounded per repository; a rate limit, a GitHub error or the bound yields `complete: false` with the
  * reason, never a partial list presented as whole. An issue whose labels or closing pull requests run past one page
- * is left out and the list is marked incomplete (`item_truncated`): its labels decide the exclude, team and ready
+ * is left out and the list is marked incomplete (`item_truncated`): its labels decide the exclude, team, no-team and ready
  * filters, and a guess could list an excluded item or hide a merged flag.
  *
  * Titles and labels are the tracker's text: returned as data, never interpreted, never logged (V48).
@@ -50,6 +50,8 @@ export interface UntrackedFilters {
   repository: string | null;
   /** The team's label (from the team map), or null for no team filter. */
   teamLabel: string | null;
+  /** #3422: only items carrying none of the integration's team labels. Never set together with `teamLabel`. */
+  noTeam: boolean;
   ready: ReadyFilter;
 }
 
@@ -122,11 +124,13 @@ export function compareUntracked(a: UntrackedItem, b: UntrackedItem): number {
   return a.number - b.number;
 }
 
-/** The label filters (exclude, team, ready), compared without regard to case (cor:agt:120:01). */
+/** The label filters (exclude, team, no team, ready), compared without regard to case (cor:agt:120:01). */
 export function passesLabelFilters(labels: readonly string[], integration: StoredTaskIntegration, filters: UntrackedFilters): boolean {
   const has = new Set(labels.map((l) => l.toLowerCase()));
   if ((integration.excludeLabels ?? []).some((l) => has.has(l.toLowerCase()))) return false;
   if (filters.teamLabel !== null && !has.has(filters.teamLabel.toLowerCase())) return false;
+  // #3422 (cor:agt:120:03): a label outside the team map is an ordinary label, and with no teams mapped nothing is a team's.
+  if (filters.noTeam && (integration.teams ?? []).some((t) => has.has(t.label.toLowerCase()))) return false;
   const ready = integration.readyLabel ? has.has(integration.readyLabel.toLowerCase()) : false;
   // V-1 (V45): ONLY against an integration with no ready label lists nothing; EXCLUDE and ANY leave the list as it is.
   if (filters.ready === 'ONLY' && !ready) return false;

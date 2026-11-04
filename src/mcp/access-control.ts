@@ -765,8 +765,8 @@ export async function getMemoryAccess(
   db: PrismaClient,
   auth: AuthContext,
 ): Promise<Map<string, string>> {
-  // A pure App key inside a session is confined to that session's verified
-  // reach on point reads as well as GraphQL enumeration. The ordinary App
+  // This map is only the session's verified reach. Point reads separately
+  // admit named PUBLIC knowledge (0114 B), without putting it in discovery. The ordinary App
   // fold may include sibling AgentMemoryItems, so it cannot answer this shape.
   if (auth.appId && auth.sessionId && !auth.userId) {
     const ids = await sessionScopedMemoryIds(db, auth.appId, auth.sessionId);
@@ -1283,7 +1283,10 @@ async function canReadMemoryRow(
 
   if (auth.appId && auth.sessionId && !auth.userId) {
     const access = opts.access ?? await getMemoryAccess(db, auth);
-    return access.has(memory.id);
+    if (access.has(memory.id)) return true;
+    // 0114 B: the sole outside-session exception is named PUBLIC knowledge, read-only.
+    return readsPublicKnowledgeWithoutUser(auth) &&
+      (opts.publicKnowledgeIds ?? await publicKnowledgeAmong(db, [memory.id])).has(memory.id);
   }
 
   // Non-personal memory: ADMIN/OWNER bypass + access map check.
