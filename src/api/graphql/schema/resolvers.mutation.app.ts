@@ -411,6 +411,7 @@ export const appMutations = {
         identifyUserMethod,
         sessionTimeoutSeconds,
         anonymousTtlDays,
+        policy,
       }: {
         orgRef?: string | null;
         agentRef: string;
@@ -431,6 +432,8 @@ export const appMutations = {
         identifyUserMethod?: 'USER_ID' | 'SECRET';
         sessionTimeoutSeconds?: number;
         anonymousTtlDays?: number;
+        // App-layer action-policy link (cor:acl:040:02). Null or omitted = no restriction.
+        policy?: unknown;
       },
       ctx: Context,
     ) => {
@@ -482,6 +485,12 @@ export const appMutations = {
       }
       // #2403: after the org ADMIN / authenticated-user gate, before any write or agent lookup.
       assertPositiveSessionTimeout(sessionTimeoutSeconds);
+      // The same shape check as updateApp, under this mutation's own gate above.
+      if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
+        throw new GraphQLError('policy must be { allow: string[] } or null.', {
+          extensions: { code: 'BAD_USER_INPUT' },
+        });
+      }
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
@@ -674,6 +683,7 @@ export const appMutations = {
             urn: appUrn,
             surfaces: surfaces ?? undefined, // undefined → use the schema default ['chat']
             trainingMode: trainingMode ?? false,
+            ...(policy !== undefined && policy !== null ? { policy: policy as never } : {}),
             appType: appType ?? 'WORKSTATION',
             role: role ?? 'READER',
             description: description ?? null,
