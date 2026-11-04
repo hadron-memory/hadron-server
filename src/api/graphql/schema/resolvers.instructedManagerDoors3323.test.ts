@@ -184,7 +184,7 @@ beforeEach(async () => {
   const blocked = await mk({ title: 'Blocked', blockedBy: [blocker.id] });
   const finished = await mk({ title: 'Finished', assignee: { user: boss.id } });
   await M.startAgentTask({}, { taskId: finished.id }, asBoss);
-  await M.finishAgentTask({}, { taskId: finished.id, result: { outcome: 'done', summary: 's', findings: [{ id: 'F1', severity: 'P2', text: 'one' }] } }, asBoss);
+  await M.finishAgentTask({}, { taskId: finished.id, result: { outcome: 'done', summary: 's', findings: [{ id: 'F1', severity: 'P2', text: 'one' }, { id: 'F2', severity: 'P3', text: 'two' }] } }, asBoss);
   const foreignTask = await mk({ title: 'Foreign' }, otherApp.id);
   // An alarm with no owner in its chain: only the manager arm acknowledges it.
   const alarm = await db.agentTeamEvent.create({ data: {
@@ -331,6 +331,34 @@ describe('#3323 the S4a doors admit an instructed worker on its holder\'s App-ma
     expect(await managerActs()).toHaveLength(0);
   });
 
+  describe('a disposition that changes something is an act, so it writes its one record (#3390)', () => {
+    const refA = { kind: 'URL', target: 'https://example.test/a' };
+    const refB = { kind: 'URL', target: 'https://example.test/b' };
+    const dispose = (args: Record<string, unknown>, c: Context, instruction?: unknown) =>
+      M.disposeAgentTaskFinding({}, { taskRef: f.finished.id, findingId: 'F1', disposition: 'fixed', instruction, ...args }, c);
+
+    it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+      ['a changed disposition', {}, { disposition: 'accepted' }],
+      ['a changed reference', { reference: refA }, { reference: refB }],
+      ['a reference added', {}, { reference: refA }],
+      ['a reference removed', { reference: refA }, {}],
+      ['another finding with the same disposition', {}, { findingId: 'F2' }],
+    ])('%s', async (_name, before, after) => {
+      await dispose(before, ctx({ userId: f.boss.id }));
+      expect(await managerActs()).toHaveLength(0);
+      await asWorker(() => dispose(after, bound(), live));
+      const acts = await managerActs();
+      expect(acts).toHaveLength(1);
+      expect(acts[0]!.payload).toMatchObject({ act: 'task.finding-dispose', instruction: live, taskId: f.finished.id });
+    });
+
+    it('the same finding, disposition and reference again is the no-op: no record', async () => {
+      await dispose({ reference: refA }, ctx({ userId: f.boss.id }));
+      await asWorker(() => dispose({ reference: { ...refA } }, bound(), live));
+      expect(await managerActs()).toHaveLength(0);
+    });
+  });
+
   it('a person with a bad claim is refused, and nothing is written', async () => {
     const before = await snapshot();
     const got = await answer(() => doors.cancelAgentTask!.call({ kind: 'TASK', ref: 'hrn:agenttask:nowhere:AT404' }, ctx()));
@@ -437,8 +465,8 @@ describe('#3323 the choke point\'s fences', () => {
   });
 
   /** Resolves once a backend really is blocked on this table's FOR SHARE, read outside the holding transaction. */
-  const lockWaiterOn = async (table: string) => {
-    const deadline = Date.now() + 4000;
+  const lockWaiterOn = async (table: string, waitMs = 4000) => {
+    const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       const [row] = await db.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_stat_activity
         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${`%FROM ${table} %FOR SHARE%`}`;
@@ -448,37 +476,49 @@ describe('#3323 the choke point\'s fences', () => {
     throw new Error(`no backend ever waited on ${table}`);
   };
 
+  type Tx = Parameters<Parameters<typeof db.$transaction>[0]>[0];
+  /**
+   * Run `contender` while a transaction holds the lock it must wait for, and answer what it answered. A failed arrival
+   * wait rolls the transaction back and rethrows, so the contender is drained first: it never outlives its test (#3390).
+   */
+  const contend = async (table: string, hold: (tx: Tx) => Promise<unknown>, contender: () => Promise<unknown> = () =>
+    answer(() => asWorker(() => doors.cancelAgentTask!.call(live, bound()))), waitMs?: number) => {
+    let call: Promise<unknown> | undefined;
+    try {
+      await db.$transaction(async (tx) => {
+        await hold(tx);
+        call = contender();
+        await lockWaiterOn(table, waitMs);
+      }, { timeout: 15000 });
+    } finally {
+      await call;
+    }
+    return call;
+  };
+
+  it('a failed arrival wait still drains the contender', async () => {
+    let drained = false;
+    const contender = () => new Promise<void>((resolve) => setTimeout(() => { drained = true; resolve(); }, 150));
+    await expect(contend('no_such_table', async () => undefined, contender, 20)).rejects.toThrow('no backend ever waited on no_such_table');
+    expect(drained).toBe(true);
+  });
+
   it('a session ending while the act is judged is waited for, and the act is refused', async () => {
-    let call!: Promise<unknown>;
-    await db.$transaction(async (tx) => {
-      await tx.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } });
-      call = answer(() => asWorker(() => doors.cancelAgentTask!.call(live, bound())));
-      await lockWaiterOn('sessions');
-    }, { timeout: 15000 });
-    expect(await call).toMatchObject({ code: 'TASK_NOT_OWNER' });
+    const call = await contend('sessions', (tx) => tx.session.update({ where: { id: f.session.id }, data: { endedAt: new Date() } }));
+    expect(call).toMatchObject({ code: 'TASK_NOT_OWNER' });
     expect(await managerActs()).toHaveLength(0);
   });
 
   it('a hold released while the act is judged is waited for, and the act is refused', async () => {
-    let call!: Promise<unknown>;
-    await db.$transaction(async (tx) => {
-      await tx.worker.update({ where: { id: f.worker.id }, data: { heldByUserId: null, heldAt: null } });
-      call = answer(() => asWorker(() => doors.cancelAgentTask!.call(live, bound())));
-      await lockWaiterOn('workers');
-    }, { timeout: 15000 });
-    expect(await call).toMatchObject({ code: 'TASK_NOT_OWNER' });
+    const call = await contend('workers', (tx) => tx.worker.update({ where: { id: f.worker.id }, data: { heldByUserId: null, heldAt: null } }));
+    expect(call).toMatchObject({ code: 'TASK_NOT_OWNER' });
     expect(await managerActs()).toHaveLength(0);
     expect(await doors.cancelAgentTask!.took()).toBe(false);
   });
 
   it('a holder losing the App while the act is judged is waited for, and the act is refused', async () => {
-    let call!: Promise<unknown>;
-    await db.$transaction(async (tx) => {
-      await tx.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
-      call = answer(() => asWorker(() => doors.cancelAgentTask!.call(live, bound())));
-      await lockWaiterOn('app_members');
-    }, { timeout: 15000 });
-    expect(await call).toMatchObject({ code: 'TASK_NOT_OWNER' });
+    const call = await contend('app_members', (tx) => tx.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } }));
+    expect(call).toMatchObject({ code: 'TASK_NOT_OWNER' });
     expect(await managerActs()).toHaveLength(0);
     expect(await doors.cancelAgentTask!.took()).toBe(false);
   });
