@@ -1,3 +1,4 @@
+import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
@@ -1374,7 +1375,8 @@ export async function requireOrgRole(
   // membership no longer authorizes — matches getMemberOrgIds / resolveOrgScope
   // and the memory(ref) resolver's own membership check (PR-475 review, Codex
   // P1: a removed member who still knew an agent/app ref could read it).
-  const member = await ctx.db.orgMember.findFirst({
+  const cached = cachedManagerOrgRole(ctx, orgId);
+  const member = cached !== undefined ? (cached === null ? null : { role: cached }) : await ctx.db.orgMember.findFirst({
     where: { organizationId: orgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
   });
   if (!member || (ROLE_ORDER[member.role] ?? -1) < ROLE_ORDER[required]) {

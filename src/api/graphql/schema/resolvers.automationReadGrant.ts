@@ -19,7 +19,7 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
-import { managesAgent, managesApp } from '../../../lib/auth/appManagement.js';
+import { managesAgent, managesApp, managesAppBatch } from '../../../lib/auth/appManagement.js';
 import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { READ_GRANT_MEMORY_SELECT, readGrantTargetRefusal, type ReadGrantTriggerKind } from '../../../lib/automationReadGrant.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -32,6 +32,7 @@ import { requireInstructedAct, type ActInstruction } from '../../../lib/auth/ins
 import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor, refuseAutomationGrantPrincipal } from './automationGrantInstruction.js';
 import { callerIsWorkerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
+import { withManagerOrgRoles } from '../../../lib/auth/managerOrgRoles.js';
 
 const denied = () => authorizationDenied();
 const badInput = (message: string) => new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -83,9 +84,11 @@ async function triggerIsLive(db: Pick<Context['db'], 'agentSchedule' | 'agentWeb
  * Does the caller manage this target? An Agent's system memory: whoever manages an Agent whose definition it is
  * (the Agent-side twin of managesApp). Any other class: the memory's manager. Never throws a refusal: false.
  */
-export async function managesReadGrantTarget(ctx: Context, memory: TargetRow): Promise<boolean> {
+export async function managesReadGrantTarget(ctx: Context, memory: TargetRow,
+  prefetchedAgents?: readonly { organizationId: string | null; ownerUserId: string | null }[],
+): Promise<boolean> {
   if (memory.class === 'system') {
-    const agents = await ctx.db.agent.findMany({
+    const agents = prefetchedAgents ?? await ctx.db.agent.findMany({
       where: { systemMemoryId: memory.id, deletedAt: null, organizationId: memory.organizationId, ownerUserId: memory.ownerUserId },
       select: { organizationId: true, ownerUserId: true },
     });
@@ -96,6 +99,27 @@ export async function managesReadGrantTarget(ctx: Context, memory: TargetRow): P
     if (e instanceof Error && e.message === 'Forbidden') return false;
     throw e;
   }
+}
+
+/** #3382: data batched once per predicate evaluation, while the shared gates retain their policy.
+ * Never retain this across admissions: the final locked admission needs fresh memberships and targets.
+ * The caller still traverses observed order and stops at its first matching, non-drifted target.
+ */
+async function targetManagers(ctx: Context, memories: readonly TargetRow[]) {
+  const fresh = await withManagerOrgRoles(ctx, memories.flatMap(m => m.organizationId ? [m.organizationId] : []));
+  const systemIds = memories.filter(m => m.class === 'system').map(m => m.id);
+  const agents = systemIds.length ? await ctx.db.agent.findMany({
+    where: { systemMemoryId: { in: systemIds }, deletedAt: null },
+    select: { systemMemoryId: true, organizationId: true, ownerUserId: true },
+  }) : [];
+  const byMemory = new Map<string, typeof agents>();
+  for (const agent of agents) {
+    const id = agent.systemMemoryId!;
+    const group = byMemory.get(id) ?? [];
+    group.push(agent); byMemory.set(id, group);
+  }
+  return (memory: TargetRow) => managesReadGrantTarget(fresh, memory,
+    (byMemory.get(memory.id) ?? []).filter(a => a.organizationId === memory.organizationId && a.ownerUserId === memory.ownerUserId));
 }
 
 function project(row: GrantRow, memory: { urn: string } | null) {
@@ -219,27 +243,24 @@ async function readGrantRows(input: ListInput, ctx: Context) {
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     include: { app: { select: APP_SELECT } },
   });
-  // A reader sees a row when they manage its App or manage its target; decided once per App and per memory.
-  const appManaged = new Map<string, boolean>();
-  const targetManaged = new Map<string, TargetRow | null>();
-  const urnOf = new Map<string, { urn: string } | null>();
+  // #3382: retain the grant query's order and complete result, batching only predicate inputs.
+  const appManaged = await managesAppBatch(ctx, [...new Map(rows.map(r => [r.appId, r.app])).values()]);
+  // Include deleted rows for the App-manager's historical URN projection, as findUnique did before.
+  const memories = rows.length ? await ctx.db.memory.findMany({
+    where: { id: { in: [...new Set(rows.map(r => r.memoryId))] } }, select: TARGET_SELECT,
+  }) : [];
+  const byId = new Map(memories.map(m => [m.id, m]));
+  const managesTarget = await targetManagers(ctx, memories.filter(m => !m.deletedAt));
+  const targetManaged = new Map<string, boolean>();
   const out: ReturnType<typeof project>[] = [];
   for (const row of rows) {
-    let viaApp = appManaged.get(row.appId);
-    if (viaApp === undefined) { viaApp = await managesApp(ctx, row.app); appManaged.set(row.appId, viaApp); }
+    const memory = byId.get(row.memoryId) ?? null;
     let target = targetManaged.get(row.memoryId);
     if (target === undefined) {
-      const memory = await ctx.db.memory.findFirst({ where: { id: row.memoryId, deletedAt: null }, select: TARGET_SELECT });
-      target = memory && (await managesReadGrantTarget(ctx, memory)) ? memory : null;
+      target = !!memory && !memory.deletedAt && await managesTarget(memory);
       targetManaged.set(row.memoryId, target);
     }
-    if (!viaApp && !target) continue;
-    let memory: { urn: string } | null = target;
-    if (!memory) {
-      // Cached per memory: a page of grants on one target costs one lookup, not one per row.
-      if (!urnOf.has(row.memoryId)) urnOf.set(row.memoryId, await ctx.db.memory.findUnique({ where: { id: row.memoryId }, select: { urn: true } }));
-      memory = urnOf.get(row.memoryId) ?? null;
-    }
+    if (!appManaged.get(row.appId) && !target) continue;
     out.push(project(row, memory));
   }
   return out;
@@ -289,9 +310,14 @@ export const automationReadGrantQueries = {
     }, select: TARGET_SELECT });
     const allows = async (c: Context) => {
       if (await managesApp(c, app)) return true;
+      const live = targets.length ? await c.db.memory.findMany({
+        where: { id: { in: targets.map(m => m.id) }, deletedAt: null }, select: TARGET_SELECT,
+      }) : [];
+      const byId = new Map(live.map(m => [m.id, m]));
+      const managesTarget = await targetManagers(c, live);
       for (const observed of targets) {
-        const m = await c.db.memory.findFirst({ where: { id: observed.id, deletedAt: null }, select: TARGET_SELECT });
-        if (m && m.organizationId === observed.organizationId && m.ownerUserId === observed.ownerUserId && await managesReadGrantTarget(c, m)) return true;
+        const m = byId.get(observed.id);
+        if (m && m.organizationId === observed.organizationId && m.ownerUserId === observed.ownerUserId && await managesTarget(m)) return true;
       }
       return false;
     };
