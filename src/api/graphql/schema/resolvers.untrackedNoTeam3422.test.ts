@@ -171,11 +171,13 @@ async function wire<T>(fn: (run: (query: string, variables?: Record<string, unkn
 }
 const LIST = 'total items{number}';
 
-const BARRIER_MS = 5_000;
+/** Inside Vitest's 5 s test budget, with room left to release the gate and settle the claims. */
+const BARRIER_MS = 3_000;
 /**
  * Hold concurrent claims at the tracker until `want` reads have arrived, then let them go. Two things end the wait
  * early, so a broken claim reports its own failure rather than the framework's timeout (#3447): a claim settling, and
- * the bound. `release` always runs, and the claims are settled before this returns, so none outlives its test.
+ * the bound. `release` always runs, and the claims are settled before this returns, so none outlives its test. The bound
+ * covers arrival at the tracker only: a claim that hangs after release still runs to the framework's timeout.
  */
 async function holdAtTracker(claims: Array<Promise<unknown>>, release: () => void, want = 2, boundMs = BARRIER_MS) {
   let settled = false;
@@ -307,6 +309,13 @@ describe('the no-team filter claims (cor:agt:120:03, S2)', () => {
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
     await expect(holdAtTracker([held], release, 2, 20)).rejects.toThrow('barrier: 0 of 2 tracker reads after 20 ms');
+    await expect(held).resolves.toBeUndefined();
+  });
+
+  it('the default bound fires inside the test budget, so it is the barrier that reports, not the framework', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    await expect(holdAtTracker([held], release)).rejects.toThrow(`barrier: 0 of 2 tracker reads after ${BARRIER_MS} ms`);
     await expect(held).resolves.toBeUndefined();
   });
 
