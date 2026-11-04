@@ -539,3 +539,35 @@ describe('#3385 admission interleaves', () => {
     await doors[name]!(live, bound()); expect(await instructionEvents()).toHaveLength(1);
   });
 });
+
+// Owner-column drift also remains refused; unlike the org-to-org tests above, the
+// holder loses authority, so these controls do not isolate the drift guard alone.
+describe('#3385 owner drift controls', () => {
+  for (const [name, call] of Object.entries(doors)) it(`${name}: App owner transfer before anchors refuses without effects`, async () => {
+    await db.app.update({ where: { id: f.app.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
+    let moved = 0;
+    const c = bound({ db: atGrantBoundary(async () => {
+      moved++;
+      await db.app.update({ where: { id: f.app.id }, data: { ownerUserId: f.other.id } });
+    }) });
+    const before = await snapshot();
+    expect((await answer(call(live, c))).code).toBe('FORBIDDEN');
+    expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
+    await db.app.update({ where: { id: f.app.id }, data: { ownerUserId: f.holder.id } });
+    await call(live, bound()); expect(await instructionEvents()).toHaveLength(1);
+  });
+  for (const name of ['read', 'readList']) it(`${name}: target owner transfer before anchors refuses without effects`, async () => {
+    await db.appMember.update({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } }, data: { role: 'member' } });
+    await db.memory.update({ where: { id: f.mem.id }, data: { organizationId: null, ownerUserId: f.holder.id } });
+    let moved = 0;
+    const c = bound({ db: atGrantBoundary(async () => {
+      moved++;
+      await db.memory.update({ where: { id: f.mem.id }, data: { ownerUserId: f.other.id } });
+    }) });
+    const before = await snapshot();
+    expect((await answer(doors[name]!(live, c))).code).toBe('FORBIDDEN');
+    expect(moved).toBe(1); expect(await snapshot()).toEqual(before);
+    await db.memory.update({ where: { id: f.mem.id }, data: { ownerUserId: f.holder.id } });
+    await doors[name]!(live, bound()); expect(await instructionEvents()).toHaveLength(1);
+  });
+});
