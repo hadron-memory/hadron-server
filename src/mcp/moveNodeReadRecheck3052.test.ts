@@ -53,6 +53,23 @@ async function state(memoryIds: string[]) {
   };
 }
 
+/** #3067: a populated source: an outgoing edge, an inbound edge and a revision, so a refusal has rows it could disturb. */
+async function populate(f: Awaited<ReturnType<typeof fixture>>) {
+  const peer = await db.node.create({ data: { id: generateId(), memoryId: f.memory.id, loc: 'peer', name: 'Peer', content: 'peer' } });
+  await db.edge.create({ data: { memoryId: f.memory.id, sourceId: f.node.id, targetId: peer.id, loc: 'source-to-peer', name: 'depends_on' } });
+  await db.edge.create({ data: { memoryId: f.memory.id, sourceId: peer.id, targetId: f.node.id, loc: 'peer-to-source', name: 'imports' } });
+  // A node at revision 2 with its snapshot of revision 1: the next snapshot takes revNo 2, so a real move can proceed.
+  await db.nodeRevision.create({ data: { nodeId: f.node.id, memoryId: f.memory.id, loc: 'source', name: 'Source', content: 'older', revNo: 1 } });
+  await db.node.update({ where: { id: f.node.id }, data: { revSeq: 2 } });
+  const seeded = await state([f.memory.id, f.destination.id]);
+  expect([seeded.edges.length, seeded.revisions.length]).toEqual([2, 1]);
+  return seeded;
+}
+
+/** The full refusal envelope: one text block, flagged, naming the memory and nothing else. */
+const expectRefusal = (result: unknown, memoryUrn: string) =>
+  expect(result).toEqual({ content: [{ type: 'text', text: `Source memory not found: "${memoryUrn}".` }], isError: true });
+
 describe('#3052 hadron_move_node source read recheck', () => {
   it('allows the reader and moves the node', async () => {
     const f = await fixture();
@@ -61,43 +78,54 @@ describe('#3052 hadron_move_node source read recheck', () => {
     expect(await db.node.findUniqueOrThrow({ where: { id: f.node.id } })).toMatchObject({ memoryId: f.destination.id, loc: 'moved' });
   });
 
+  // Control for the refusal pins below: on this same seed a move that is allowed does disturb the seeded rows, so their
+  // byte comparison can fail. Without it, a seed that faults the move would read as "nothing changed".
+  it('allows the reader to move a populated source, and that move changes the seeded rows', async () => {
+    const f = await fixture();
+    const before = await populate(f);
+    const result = await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') });
+    expect(text(result)).not.toMatch(/not found|denied|internal/i);
+    const after = await state([f.memory.id, f.destination.id]);
+    expect(after.nodes).not.toEqual(before.nodes);
+    expect(after.edges).not.toEqual(before.edges);
+    expect(after.revisions).not.toEqual(before.revisions);
+  });
+
   it('refuses a write-only manager at preflight with the existing text and no change', async () => {
-    const f = await fixture(); await f.removeRead();
-    const before = await state([f.memory.id, f.destination.id]);
-    const out = text(await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') }));
-    expect(out).toContain(`Source memory not found: "${f.memoryUrn}".`);
+    const f = await fixture(); const before = await populate(f); await f.removeRead();
+    const result = await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') });
+    expectRefusal(result, f.memoryUrn);
     expect(await state([f.memory.id, f.destination.id])).toEqual(before);
   });
 
   it('refuses after preflight when ownership transfers before the deciding transaction, byte-identical, unchanged', async () => {
     const f = await fixture();
-    const before = await state([f.memory.id, f.destination.id]);
+    const before = await populate(f);
     const seam = beforeTransaction(f.removeRead);
-    const out = text(await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') }));
+    const result = await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') });
     expect(seam.calls()).toBeGreaterThanOrEqual(1);
-    expect(out).toContain(`Source memory not found: "${f.memoryUrn}".`);
-    expect(out).not.toMatch(/before|Source"/);
+    expectRefusal(result, f.memoryUrn);
     expect(await state([f.memory.id, f.destination.id])).toEqual(before);
   });
 
   it('refuses the same-slot rename after preflight and keeps the name', async () => {
     const f = await fixture();
-    const before = await state([f.memory.id]);
+    const before = await populate(f);
     beforeTransaction(f.removeRead);
-    const out = text(await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.sourceUrn, renameToLeaf: true }));
-    expect(out).toContain(`Source memory not found: "${f.memoryUrn}".`);
-    expect(await state([f.memory.id])).toEqual(before);
+    const result = await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.sourceUrn, renameToLeaf: true });
+    expectRefusal(result, f.memoryUrn);
+    expect(await state([f.memory.id, f.destination.id])).toEqual(before);
     expect((await db.node.findUniqueOrThrow({ where: { id: f.node.id } })).name).toBe('Source');
   });
 
   it('refuses on the retry attempt when the transfer lands between attempts', async () => {
     const f = await fixture();
-    const before = await state([f.memory.id, f.destination.id]);
+    const before = await populate(f);
     vi.spyOn(archive, 'validateArchivePlan').mockImplementationOnce(async () => { throw new archive.ArchivePlanStaleError(); });
     const seam = beforeTransaction(f.removeRead, 2);
-    const out = text(await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') }));
+    const result = await f.server.callTool('hadron_move_node', { urn: f.sourceUrn, targetUrn: f.destUrn('moved') });
     expect(seam.calls()).toBeGreaterThanOrEqual(2);
-    expect(out).toContain(`Source memory not found: "${f.memoryUrn}".`);
+    expectRefusal(result, f.memoryUrn);
     expect(await state([f.memory.id, f.destination.id])).toEqual(before);
   });
 });
