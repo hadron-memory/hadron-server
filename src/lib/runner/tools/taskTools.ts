@@ -76,8 +76,9 @@ const filters = (args: Record<string, unknown>) => ({
   integration: args.integration as string,
   repository: str(args.repository) ?? null,
   // #3422: beside noTeam, any team value counts as supplied, so the refusal cannot be dodged by a non-string. The
-  // resolver judges both, after the run's gate; a tool's arguments are not schema-checked.
-  team: args.noTeam === true && args.team != null ? String(args.team) : str(args.team) ?? null,
+  // resolver judges both, after the run's gate; a tool's arguments are not schema-checked. A marker, never String():
+  // converting a value from the model can throw, and this runs before the gate. The resolver only asks whether it is set.
+  team: args.noTeam === true && args.team != null ? 'supplied' : str(args.team) ?? null,
   noTeam: args.noTeam as boolean | null | undefined,
   ready: (str(args.ready) ?? null) as never,
 });
