@@ -1,3 +1,4 @@
+import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
 import { readActInstruction } from './resolvers.instruction.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
@@ -1143,7 +1144,7 @@ export const appMutations = {
         agentRef,
         trainingMode,
       });
-      return { appAgent };
+      return { appAgent: markNewInstallPayload(appAgent,ctx) };
     },
 
     uninstallAgentFromApp: async (

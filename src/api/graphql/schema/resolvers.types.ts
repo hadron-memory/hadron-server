@@ -1,3 +1,4 @@
+import { isNewInstallPayload } from './installationPayload.js';
 import { agentInstallationWhere, listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
@@ -302,7 +303,8 @@ export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context
 // Audit shape itself distinguishes ROW from DERIVED. Ruling6636734542
 // permits it only behind the same whole-App gate as companion #3435. This
 // marker belongs to this response and exact Context, not an authority cache.
-type InstallationAuditRow = {appId:string;createdBy?:string|null;updatedBy?:string|null;updatedAt?:Date|null;
+type InstallationAuditRow = {appId:string;agentId?:string;createdAt?:Date;
+  _installationAppCreatedAt?:Date;createdBy?:string|null;updatedBy?:string|null;updatedAt?:Date|null;
   _installationAuditRead?: WeakMap<Context,boolean>};
 export async function wholeAppInstallationReadable(ctx:Context, appId:string):Promise<boolean> {
   const installations = await listAppInstallations(ctx.db,appId);
@@ -1920,8 +1922,13 @@ export const typeResolvers = {
       }
       const wholeAppReadable = installs.every(row => agents.has(row.agentId)) &&
         (await Promise.all(installs.map(row => readableNestedAgent(ctx,agents.get(row.agentId) as NestedAgentRow)))).every(Boolean);
+      const appCreatedAt=wholeAppReadable ? undefined : a.createdAt instanceof Date ? a.createdAt :
+        (await ctx.db.app.findUniqueOrThrow({where:{id:a.id},select:{createdAt:true}})).createdAt;
       return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId),
-        _installationAuditRead:new WeakMap([[ctx,wholeAppReadable]])}));
+        _installationAppCreatedAt:appCreatedAt,
+        _installationAuditRead:new WeakMap([[ctx,wholeAppReadable]])}))
+        .sort((left,right)=>(wholeAppReadable ? left.createdAt.getTime()-right.createdAt.getTime() : 0) ||
+          left.agentId.localeCompare(right.agentId));
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
@@ -1932,6 +1939,17 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
+    createdAt: async (row:InstallationAuditRow,_:unknown,ctx:Context) => {
+      // A3.1 is scoped to the exact newly-created payload object and composite
+      // row identity. It grants nothing to a later list/read by the same caller.
+      if (isNewInstallPayload(row,ctx)) return row.createdAt;
+      const decision=row._installationAuditRead?.get(ctx);
+      const readable=decision !== undefined ? decision : await wholeAppInstallationReadable(ctx,row.appId);
+      if (readable) return row.createdAt;
+      if (row._installationAppCreatedAt) return row._installationAppCreatedAt;
+      const app=await ctx.db.app.findUniqueOrThrow({where:{id:row.appId},select:{createdAt:true}});
+      return app.createdAt;
+    },
     createdBy: installationAuditField('createdBy'),
     updatedBy: installationAuditField('updatedBy'),
     updatedAt: installationAuditField('updatedAt'),

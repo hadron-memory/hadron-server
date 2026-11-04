@@ -64,9 +64,11 @@ it.each([false,true])('the reverse Agent.appAgents route applies the same date g
 });
 it.each([false,true])('a newly created install returns its real date but a later read applies the gate (full=%s)',async(full)=>{
  await db.agent.create({data:{id:DELTA,name:'Delta',urn:`dates-${generateId().toLowerCase()}.example:delta`,organizationId:orgId,visibility:'ORGANIZATION'}});
- const data=await wire('mutation($app:ID!,$agent:ID!){installAgentIntoApp(appRef:$app,agentRef:$agent){appAgent{createdAt}}}',{app:appId,agent:DELTA},full);
+ const data=await wire('mutation($app:ID!,$agent:ID!){installAgentIntoApp(appRef:$app,agentRef:$agent){appAgent{createdAt app{appAgents{agent{id} createdAt}}}}}',{app:appId,agent:DELTA},full);
  const row=await db.appAgent.findUniqueOrThrow({where:{appId_agentId:{appId,agentId:DELTA}}});
  expect(data.installAgentIntoApp.appAgent.createdAt).toBe(row.createdAt.toISOString());
+ const nested=data.installAgentIntoApp.appAgent.app.appAgents.find((entry:any)=>entry.agent?.id===DELTA);
+ expect(nested.createdAt).toBe((full?row.createdAt:T(2)).toISOString());
  const listed=(await wire(rosterQuery,{ref:appId},full)).app.appAgents;
  const delta=listed.find((entry:any)=>entry.agent?.id===DELTA);
  expect(delta.createdAt).toBe((full?row.createdAt:T(2)).toISOString());

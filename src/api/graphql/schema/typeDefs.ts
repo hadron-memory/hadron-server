@@ -3256,7 +3256,7 @@ export const typeDefs = `#graphql
     App's participants), which is judged before anything is resolved.
     """
     bootPromptServe: BootPromptServeOutcome
-    """Physical row creation time, or the computed earliest install/import witness time for a derived entry."""
+    """When every installed Agent is readable: physical row creation time, or the computed earliest install/import witness time for a derived entry. Otherwise every entry shares the App creation time. The newly created install mutation payload retains its real row time. App.appAgents sorts by the served time, then Agent id."""
     createdAt: DateTime!
     """
     Row audit fields are visible only when the caller may read EVERY installed Agent in this App.
