@@ -9,6 +9,7 @@ import { typeDefs } from './typeDefs.js';
 import * as taskProperties from '../../../lib/agentTasks/properties.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import * as taskGraphLocks from '../../../lib/agentTasks/blockers.js';
 import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
@@ -94,7 +95,8 @@ describe('typed PR schedule and freeze', () => {
     const r = await freeze();
     expect(r.action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' });
     expect((await events())[0]).toMatchObject({ type: 'pr.frozen', actorUserId: author.id, payload: { head: H, pullRequest: 'https://github.com/example/project/pull/1' } });
-    expect((await stored()).properties).toMatchObject({ 'pr.head': H });
+
+      expect((await stored()).properties).toMatchObject({ 'pr.head': H });
   });
   it.each(['abc', 'z'.repeat(40)])('refuses invalid SHA %s without writes', async head => {
     await expect(freeze(head)).rejects.toMatchObject(error('BAD_USER_INPUT')); expect(await events()).toHaveLength(0);
@@ -352,5 +354,180 @@ describe('readiness uses only event facts', () => {
       expect((await events())[0].type).toBe('pr.frozen');
       expect((await stored()).properties).toMatchObject({ 'pr.head': H });
     } finally { spy.mockRestore(); }
+  });
+});
+
+
+describe('protocol admission order under a delayed transaction', () => {
+  it('the freeze that obtains the graph last is newest even if its transaction started first', async () => {
+    await schedule(['local']);
+    let entered!: () => void, release!: () => void;
+    const paused = new Promise<void>(r => { entered = r; });
+    const resume = new Promise<void>(r => { release = r; });
+    const original = taskGraphLocks.lockTaskGraph;
+    const spy = vi.spyOn(taskGraphLocks, 'lockTaskGraph').mockImplementationOnce(async (...args) => {
+      // The real transaction has begun and taken shared authority anchors. Hold it BEFORE
+      // the graph lock, so a later-starting command can acquire the graph and commit first.
+      entered(); await resume; return original(...args);
+    });
+    const laterCommit = freeze(H);
+    try {
+      await paused;
+      await freeze(H2);
+      release(); await laterCommit;
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect((await stored()).properties).toMatchObject({ 'pr.head': H });
+      // This is the event-fed answer, not the correct but non-authoritative mirror above.
+      expect((await readiness(H)).head).toBe(H);
+    } finally { release(); await laterCommit.catch(() => undefined); spy.mockRestore(); }
+  });
+});
+
+
+describe('protocol event feed compatibility', () => {
+  it('round-trips protocol event types and payloads through the public GraphQL history query', async () => {
+    await readySeats();
+    await command('recordReadyCall', { taskRef: build.id, head: H }, author.id);
+    const api = new ApolloServer({ typeDefs, resolvers });
+    try {
+      const r = await api.executeOperation({
+        query: 'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskId:$task) { type payload } }',
+        variables: { app: app.id, task: build.id },
+      }, { contextValue: ctx() });
+      const body = (r.body as any).singleResult;
+      expect(body.errors).toBeUndefined();
+      expect(body.data.agentTeamEvents).toEqual(expect.arrayContaining([
+        { type: 'review.scheduled', payload: { slots: ['local', 'blind', 'security'] } },
+        { type: 'pr.frozen', payload: { head: H, pullRequest: 'https://github.com/example/project/pull/1' } },
+        { type: 'pr.ready', payload: { head: H } },
+      ]));
+    } finally { await api.stop(); }
+  });
+});
+
+
+describe('gate amendment: frozen actor and negative schedule', () => {
+  it('the newest frozen actor cannot launder a self verdict by reassigning the build', async () => {
+    await schedule(['local']); await freeze();
+    const t = await seat('local', H, author.id);
+    await verdict(t, 'APPROVE', H, author.id); await finish(t, author.id);
+    expect((await readiness()).ready).toBe(false);
+    await M.reassignAgentTask!({}, { taskId: build.id, assignee: { user: other.id } }, ctx());
+    expect((await readiness()).slots[0].counts).toBe(false);
+    expect((await readiness()).ready).toBe(false);
+  });
+  it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('schedule cannot drop a slot holding %s at the frozen head', async v => {
+    await schedule(['local', 'security']); await freeze();
+    const t = await seat('security'); await verdict(t, v);
+    const before = await events(); const properties = (await stored()).properties;
+    await expect(schedule(['local'])).rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
+    expect(await events()).toEqual(before); expect((await stored()).properties).toEqual(properties);
+    // Adding a slot, or dropping the clean slot, does not erase the negative one.
+    await schedule(['local', 'security', 'qa']);
+    await schedule(['security', 'qa']);
+    expect((await readiness()).slots.map((x: any) => x.slot)).toEqual(['security', 'qa']);
+  });
+  it('schedule may drop a slot whose negative verdict belongs to an older frozen head', async () => {
+    await schedule(['local', 'security']); await freeze();
+    const t = await seat('security'); await verdict(t, 'FAIL');
+    await freeze(H2); await schedule(['local']);
+    expect((await readiness(H2)).slots.map((x: any) => x.slot)).toEqual(['local']);
+  });
+});
+
+
+describe('LOCAL delta: finished negative verdicts and seat provenance', () => {
+  it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('a FINISHED %s seat never counts and cannot record ready', async v => {
+    await schedule(['local']); await freeze();
+    const t = await seat('local'); await verdict(t, v); await finish(t);
+    expect((await readiness()).slots[0]).toMatchObject({ state: 'FINISHED', verdict: v, counts: false });
+    expect((await readiness()).ready).toBe(false);
+    await expect(command('recordReadyCall', { taskRef: build.id, head: H }, author.id)).rejects.toMatchObject(error('PR_NOT_READY'));
+    expect((await events()).filter(e => e.type === 'pr.ready')).toHaveLength(0);
+  });
+  it('only the build assignee can create its seat and cannot give it another owner', async () => {
+    const input = { parentTaskId: build.id, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } };
+    await expect(M.createAgentTask!({}, { input }, ctx(other.id))).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE'));
+    await expect(M.createAgentTask!({}, { input: { ...input, owner: { user: other.id } } }, ctx(author.id)))
+      .rejects.toMatchObject(error('TASK_CHILD_OWNER_MISMATCH'));
+    const t = await M.createAgentTask!({}, { input }, ctx(author.id));
+    expect((await stored(t.id)).ownerUserId).toBe(author.id);
+    const api = new ApolloServer({ typeDefs, resolvers });
+    try {
+      const r = await api.executeOperation({ query: '{ __type(name:"UpdateAgentTaskInput") { inputFields { name } } }' });
+      expect((r.body as any).singleResult.data.__type.inputFields.map((f:any) => f.name)).not.toContain('owner');
+    } finally { await api.stop(); }
+  });
+});
+
+
+describe('SECURITY delta: negative history survives bounce and reassignment', () => {
+  it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('a head bounce cannot erase an older %s seat even after replacement and reschedule', async v => {
+    await schedule(['local', 'security']); await freeze();
+    const old = await seat('security'); await verdict(old, v);
+    await freeze(H2); await seat('security', H2, other.id, old.id);
+    await schedule(['local']);
+    const before = await events(); const properties = (await stored()).properties;
+    await expect(freeze(H)).rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
+    expect(await events()).toEqual(before); expect((await stored()).properties).toEqual(properties);
+    expect((await readiness(H2)).head).toBe(H2);
+  });
+  it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('another reviewer cannot replace %s on the same seat and head, but its author may re-rate', async v => {
+    await schedule(['local']); await freeze(); const t = await seat('local'); await verdict(t, v);
+    await M.reassignAgentTask!({}, { taskId: t.id, assignee: { user: other.id } }, ctx(author.id));
+    const before = await events(t.id); const properties = (await stored(t.id)).properties;
+    await expect(command('recordReviewVerdict', { taskRef:t.id, head:H, verdict:'APPROVE' }, other.id))
+      .rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
+    expect(await events(t.id)).toEqual(before); expect((await stored(t.id)).properties).toEqual(properties);
+    await M.reassignAgentTask!({}, { taskId: t.id, assignee: { user: reviewer.id } }, ctx(author.id));
+    await command('recordReviewVerdict', { taskRef:t.id, head:H, verdict:'APPROVE' }, reviewer.id);
+    await finish(t); expect((await readiness()).ready).toBe(true);
+  });
+});
+
+describe('SECURITY delta: ended rows and mirrored property history', () => {
+  async function end(id:string, who:string, ownerId:string, status:string) {
+    if (status === 'cancelled') await M.cancelAgentTask!({}, { taskId:id }, ctx(ownerId));
+    else { await M.startAgentTask!({}, { taskId:id }, ctx(who)); await M.finishAgentTask!({}, { taskId:id, result:{outcome:'done'} }, ctx(who)); }
+  }
+  it.each(['cancelled','finished'])('schedule and freeze refuse a %s build without an event or property change', async status => {
+    await end(build.id, author.id, owner.id, status);
+    const before=await events(), properties=(await stored()).properties;
+    await expect(schedule()).rejects.toMatchObject(error('TASK_ENDED'));
+    await expect(freeze()).rejects.toMatchObject(error('TASK_ENDED'));
+    expect(await events()).toEqual(before); expect((await stored()).properties).toEqual(properties);
+  });
+  it.each(['cancelled','finished'])('ready call refuses a %s build even when every seat counts', async status => {
+    await readySeats(); await end(build.id, author.id, owner.id, status);
+    const before=await events(), properties=(await stored()).properties;
+    await expect(command('recordReadyCall', {taskRef:build.id,head:H}, author.id)).rejects.toMatchObject(error('TASK_ENDED'));
+    expect(await events()).toEqual(before); expect((await stored()).properties).toEqual(properties);
+  });
+  it.each(['cancelled','finished'])('assignment refuses a %s seat', async status => {
+    await schedule(['local']); await freeze();
+    const t=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'Seat',source:'synthetic',assignee:{user:reviewer.id}}},ctx(author.id));
+    await end(t.id,reviewer.id,author.id,status);
+    const before=await events(t.id),properties=(await stored(t.id)).properties;
+    await expect(command('assignReviewSeat',{taskRef:t.id,slot:'local',head:H},author.id)).rejects.toMatchObject(error('TASK_ENDED'));
+    expect(await events(t.id)).toEqual(before);expect((await stored(t.id)).properties).toEqual(properties);
+  });
+  it.each(['cancelled','finished'])('verdict uses the ended-task refusal on a %s seat', async status => {
+    await schedule(['local']);await freeze();const t=await seat('local');await end(t.id,reviewer.id,author.id,status);
+    const before=await events(t.id),properties=(await stored(t.id)).properties;
+    await expect(command('recordReviewVerdict',{taskRef:t.id,head:H,verdict:'APPROVE'},reviewer.id)).rejects.toMatchObject(error('TASK_ENDED'));
+    expect(await events(t.id)).toEqual(before);expect((await stored(t.id)).properties).toEqual(properties);
+  });
+  it('a real mirror change has its ordinary content-free fingerprint event; identical mirrors do not add one', async () => {
+    await freeze();
+    const history=await db.agentTeamEvent.findMany({where:{taskId:build.id,type:'task.properties-changed'}});
+    expect(history).toHaveLength(1);
+    expect(history[0].payload).toEqual({from:null,to:taskProperties.propertiesFingerprint((await stored()).properties)});
+    await freeze();
+    expect(await db.agentTeamEvent.count({where:{taskId:build.id,type:'task.properties-changed'}})).toBe(1);
+  });
+  it('a root task cannot be a review seat',async()=>{
+    const root = await M.createAgentTask!({}, { input:{ appRef:app.id, title:'Root project', project:true, source:'synthetic', assignee:{user:author.id} } }, ctx());
+    expect((await stored(root.id)).parentTaskId).toBeNull();
+    await expect(command('assignReviewSeat',{taskRef:root.id,slot:'local',head:H},owner.id)).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));
   });
 });
