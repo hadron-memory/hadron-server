@@ -32,7 +32,7 @@ import { requireInstructedAct, type ActInstruction } from '../../../lib/auth/ins
 import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor, refuseAutomationGrantPrincipal } from './automationGrantInstruction.js';
 import { callerIsWorkerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
-import { withManagerOrgRoles } from '../../../lib/auth/managerOrgRoles.js';
+import { withManagerOrgRoles, managerPredicateBatches } from '../../../lib/auth/managerOrgRoles.js';
 
 const denied = () => authorizationDenied();
 const badInput = (message: string) => new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -108,10 +108,11 @@ export async function managesReadGrantTarget(ctx: Context, memory: TargetRow,
 async function targetManagers(ctx: Context, memories: readonly TargetRow[]) {
   const fresh = await withManagerOrgRoles(ctx, memories.flatMap(m => m.organizationId ? [m.organizationId] : []));
   const systemIds = memories.filter(m => m.class === 'system').map(m => m.id);
-  const agents = systemIds.length ? await ctx.db.agent.findMany({
-    where: { systemMemoryId: { in: systemIds }, deletedAt: null },
+  const agents: Array<{ systemMemoryId: string | null; organizationId: string | null; ownerUserId: string | null }> = [];
+  for (const batch of managerPredicateBatches(systemIds)) agents.push(...await ctx.db.agent.findMany({
+    where: { systemMemoryId: { in: batch }, deletedAt: null },
     select: { systemMemoryId: true, organizationId: true, ownerUserId: true },
-  }) : [];
+  }));
   const byMemory = new Map<string, typeof agents>();
   for (const agent of agents) {
     const id = agent.systemMemoryId!;
@@ -120,6 +121,15 @@ async function targetManagers(ctx: Context, memories: readonly TargetRow[]) {
   }
   return (memory: TargetRow) => managesReadGrantTarget(fresh, memory,
     (byMemory.get(memory.id) ?? []).filter(a => a.organizationId === memory.organizationId && a.ownerUserId === memory.ownerUserId));
+}
+
+/** Complete metadata, in bounded query inputs; output order remains the grant query's, not this batch order. */
+async function targetRows(ctx: Context, ids: readonly string[], includeDeleted = false): Promise<TargetRow[]> {
+  const out: TargetRow[] = [];
+  for (const batch of managerPredicateBatches([...new Set(ids)])) out.push(...await ctx.db.memory.findMany({
+    where: { id: { in: batch }, ...(includeDeleted ? {} : { deletedAt: null }) }, select: TARGET_SELECT,
+  }));
+  return out;
 }
 
 function project(row: GrantRow, memory: { urn: string } | null) {
@@ -244,11 +254,12 @@ async function readGrantRows(input: ListInput, ctx: Context) {
     include: { app: { select: APP_SELECT } },
   });
   // #3382: retain the grant query's order and complete result, batching only predicate inputs.
-  const appManaged = await managesAppBatch(ctx, [...new Map(rows.map(r => [r.appId, r.app])).values()]);
+  const appManaged = new Map<string, boolean>();
+  for (const batch of managerPredicateBatches([...new Map(rows.map(r => [r.appId, r.app])).values()])) {
+    for (const [id, allowed] of await managesAppBatch(ctx, batch)) appManaged.set(id, allowed);
+  }
   // Include deleted rows for the App-manager's historical URN projection, as findUnique did before.
-  const memories = rows.length ? await ctx.db.memory.findMany({
-    where: { id: { in: [...new Set(rows.map(r => r.memoryId))] } }, select: TARGET_SELECT,
-  }) : [];
+  const memories = await targetRows(ctx, rows.map(r => r.memoryId), true);
   const byId = new Map(memories.map(m => [m.id, m]));
   const managesTarget = await targetManagers(ctx, memories.filter(m => !m.deletedAt));
   const targetManaged = new Map<string, boolean>();
@@ -310,9 +321,7 @@ export const automationReadGrantQueries = {
     }, select: TARGET_SELECT });
     const allows = async (c: Context) => {
       if (await managesApp(c, app)) return true;
-      const live = targets.length ? await c.db.memory.findMany({
-        where: { id: { in: targets.map(m => m.id) }, deletedAt: null }, select: TARGET_SELECT,
-      }) : [];
+      const live = await targetRows(c, targets.map(m => m.id));
       const byId = new Map(live.map(m => [m.id, m]));
       const managesTarget = await targetManagers(c, live);
       for (const observed of targets) {

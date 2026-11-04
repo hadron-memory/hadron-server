@@ -6,6 +6,14 @@
 import type { PrismaClient, Role } from '../../generated/prisma/index.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 
+/** Internal query-input batch, never a list/result cap (#3382). */
+export const MANAGER_PREDICATE_BATCH_SIZE = 32;
+export function* managerPredicateBatches<T>(items: readonly T[]): Generator<T[]> {
+  for (let i = 0; i < items.length; i += MANAGER_PREDICATE_BATCH_SIZE) {
+    yield items.slice(i, i + MANAGER_PREDICATE_BATCH_SIZE);
+  }
+}
+
 type RoleCaller = {
   userId?: string;
   managerOrgRoleCache?: { userId: string | undefined; roles: ReadonlyMap<string, Role | null> };
@@ -20,11 +28,13 @@ export async function withManagerOrgRoles<T extends RoleCaller & { db: Pick<Pris
   ctx: T, orgIds: readonly string[],
 ): Promise<T> {
   const ids = [...new Set(orgIds)];
-  const rows = ctx.userId && ids.length ? await ctx.db.orgMember.findMany({
-    where: { organizationId: { in: ids }, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-    select: { organizationId: true, role: true },
-  }) : [];
   const roles = new Map<string, Role | null>(ids.map(id => [id, null]));
-  for (const row of rows) roles.set(row.organizationId, row.role);
+  if (ctx.userId) for (const batch of managerPredicateBatches(ids)) {
+    const rows = await ctx.db.orgMember.findMany({
+      where: { organizationId: { in: batch }, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
+      select: { organizationId: true, role: true },
+    });
+    for (const row of rows) roles.set(row.organizationId, row.role);
+  }
   return { ...ctx, managerOrgRoleCache: { userId: ctx.userId, roles } };
 }
