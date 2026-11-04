@@ -2,6 +2,7 @@
  * No live/customer inventory, latency, anchor bound or paging claim.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { appendFileSync } from 'node:fs';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -15,29 +16,32 @@ const context = (userId: string, extra: Partial<Context> = {}): Context => ({ db
 beforeEach(async () => { await cleanDb(db); });
 
 async function fixture(n: number) {
-  const holder = await db.user.create({ data: { handle: 'batch-holder', roles: ['READER'] } });
-  const owner = await db.user.create({ data: { handle: 'batch-app-owner', roles: ['READER'] } });
-  const appOrg = await db.organization.create({ data: { name: 'App org', urn: 'batch3382-app.test' } });
-  const orgs = await Promise.all([0, 1, 2].map(i => db.organization.create({ data: { name: 'Target org', urn: 'batch3382-target' + i + '.test' } })));
+  // Stable UUIDv7-shaped synthetic ids let the author compare pre/post JSON bytes directly.
+  let serial = 0;
+  const id = () => '019000000000700080000000' + (++serial).toString(16).padStart(8, '0');
+  const holder = await db.user.create({ data: { id: id(), handle: 'batch-holder', roles: ['READER'] } });
+  const owner = await db.user.create({ data: { id: id(), handle: 'batch-app-owner', roles: ['READER'] } });
+  const appOrg = await db.organization.create({ data: { id: id(), name: 'App org', urn: 'batch3382-app.test' } });
+  const orgs = await Promise.all([0, 1, 2].map(i => db.organization.create({ data: { id: id(), name: 'Target org', urn: 'batch3382-target' + i + '.test' } })));
   await db.orgMember.createMany({ data: orgs.map((o, i) => ({ organizationId: o.id, userId: holder.id, role: i < 2 ? 'ADMIN' as const : 'READER' as const })) });
   await db.orgMember.create({ data: { organizationId: appOrg.id, userId: holder.id, role: 'CONTRIBUTOR' } });
-  const apps = await Promise.all(['a', 'b'].map(name => db.app.create({ data: { name, organizationId: appOrg.id, urn: appOrg.urn + ':' + name } })));
+  const apps = await Promise.all(['a', 'b'].map(name => db.app.create({ data: { id: id(), name, organizationId: appOrg.id, urn: appOrg.urn + ':' + name } })));
   await db.appMember.createMany({ data: apps.map(a => ({ appId: a.id, userId: owner.id, role: 'owner' })) });
-  const casting = await db.agent.create({ data: { name: 'Casting', urn: appOrg.urn + ':casting', organizationId: appOrg.id } });
-  const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, name: 'Caller', slug: 'caller', appId: apps[0].id, agentId: casting.id, heldByUserId: holder.id } });
-  const session = await db.session.create({ data: { appId: apps[0].id, agentId: casting.id, workerId: worker.id, userId: holder.id, tool: 'vitest' } });
-  const memories = [];
+  const casting = await db.agent.create({ data: { id: id(), name: 'Casting', urn: appOrg.urn + ':casting', organizationId: appOrg.id } });
+  const worker = await db.worker.create({ data: { id: id(), ...WORKER_SIGNATURE_DEFAULTS, name: 'Caller', slug: 'caller', appId: apps[0].id, agentId: casting.id, heldByUserId: holder.id } });
+  const session = await db.session.create({ data: { id: id(), appId: apps[0].id, agentId: casting.id, workerId: worker.id, userId: holder.id, tool: 'vitest' } });
+  const memories: Array<Awaited<ReturnType<typeof db.memory.create>>> = [];
   const agents = [];
   for (let i = 0; i <= n; i++) {
     const org = orgs[i === n ? 0 : i % 3];
-    const m = await db.memory.create({ data: { name: 'Target', urn: org.urn + ':target-' + i, class: 'system', organizationId: org.id } });
-    const a = await db.agent.create({ data: { name: 'Target', urn: org.urn + ':agent-' + i, organizationId: org.id, systemMemoryId: m.id } });
+    const m = await db.memory.create({ data: { id: id(), name: 'Target', urn: org.urn + ':target-' + i, class: 'system', organizationId: org.id } });
+    const a = await db.agent.create({ data: { id: id(), name: 'Target', urn: org.urn + ':agent-' + i, organizationId: org.id, systemMemoryId: m.id } });
     await db.appAgent.createMany({ data: apps.map(app => ({ appId: app.id, agentId: a.id })) });
     memories.push(m); agents.push(a);
   }
   let seq = 0;
   const grant = (appId: string, memoryId: string, prefix: string, revoked: boolean) => db.appAutomationReadGrant.create({ data: {
-    appId, memoryId, triggerKind: 'SCHEDULE', triggerId: generateId(), prefix, grantedBy: owner.id,
+    id: id(), appId, memoryId, triggerKind: 'SCHEDULE', triggerId: id(), prefix, grantedBy: owner.id,
     createdAt: new Date(Date.UTC(2025, 0, 1, 0, 0, seq++)),
     ...(revoked ? { revokedAt: new Date('2025-02-01'), revokedBy: owner.id } : {}),
   } });
@@ -89,6 +93,9 @@ describe('#3382 batch-only list contract', () => {
         }));
         expect(JSON.stringify(out)).toBe(JSON.stringify(f.expected(mode === 'cross-app-memory' ? null : f.apps[0].id,
           mode === 'cross-app-memory' ? f.memories[0].id : null, includeRevoked, asOwner)));
+        // Optional author-only evidence capture; CI has no path and writes no artifact here.
+        if (process.env.HADRON_TEST_3382_CAPTURE) appendFileSync(process.env.HADRON_TEST_3382_CAPTURE,
+          JSON.stringify({ n, mode, includeRevoked, rows: out }) + '\n');
         if (mode === 'worker') audit++;
         expect(await events()).toBe(audit);
         metrics.push({ mode, includeRevoked, rows: out.length, queries: m.total(), anchorOrUrnReads: m.counts['Memory.findUnique'] ?? 0, detail: m.counts });
@@ -150,6 +157,31 @@ describe('#3382 batch-only list contract', () => {
     expect(injected).toBe(true);
   });
 
+  it('observed user-owner drift refuses a platform Agent manager who does not manage the App', async () => {
+    const f = await fixture(1);
+    const ids = f.memories.map(m => m.id);
+    await db.app.update({ where: { id: f.apps[0].id }, data: { organizationId: null, ownerUserId: f.owner.id } });
+    await db.memory.updateMany({ where: { id: { in: ids } }, data: { organizationId: null, ownerUserId: f.owner.id } });
+    await db.agent.updateMany({ where: { systemMemoryId: { in: ids } }, data: { organizationId: null, ownerUserId: f.owner.id } });
+    await db.user.update({ where: { id: f.holder.id }, data: { roles: ['ADMIN'] } });
+    let injected = false;
+    const client = db.$extends({ query: { memory: { findMany: async ({ args, query }) => {
+      const rows = await query(args);
+      if (!injected && args.where && 'automationReadGrants' in args.where) {
+        injected = true;
+        await db.$transaction(async tx => {
+          await tx.memory.updateMany({ where: { id: { in: ids } }, data: { ownerUserId: f.holder.id } });
+          await tx.agent.updateMany({ where: { systemMemoryId: { in: ids } }, data: { ownerUserId: f.holder.id } });
+        });
+      }
+      return rows;
+    } } } });
+    await forbidden(Q.automationReadGrants({}, { appRef: f.apps[0].id, instruction: claim }, context(f.holder.id, {
+      db: client as unknown as Context['db'], sessionId: f.session.id, roles: ['ADMIN'],
+    })));
+    expect(injected).toBe(true); expect(await events()).toBe(0);
+  });
+
   it('does not reuse the pre-transaction membership decision in final admission', async () => {
     const f = await fixture(1);
     let demoted = false;
@@ -164,6 +196,16 @@ describe('#3382 batch-only list contract', () => {
     } });
     await forbidden(Q.automationReadGrants({}, { appRef: f.apps[0].id, instruction: claim }, context(f.holder.id, { db: client, sessionId: f.session.id })));
     expect(demoted).toBe(true); expect(await events()).toBe(0);
+  });
+
+  for (const gone of ['membership', 'organization'] as const) it('batch membership data excludes a deleted ' + gone, async () => {
+    const f = await fixture(1);
+    if (gone === 'membership') await db.orgMember.update({
+      where: { organizationId_userId: { organizationId: f.orgs[0].id, userId: f.holder.id } }, data: { deletedAt: new Date() },
+    });
+    else await db.organization.update({ where: { id: f.orgs[0].id }, data: { deletedAt: new Date() } });
+    await forbidden(Q.automationReadGrants({}, { appRef: f.apps[0].id, instruction: claim }, context(f.holder.id, { sessionId: f.session.id })));
+    expect(await events()).toBe(0);
   });
 
   it('a failed audit write never returns a successful list', async () => {
