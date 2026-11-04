@@ -3256,7 +3256,13 @@ export const typeDefs = `#graphql
     App's participants), which is judged before anything is resolved.
     """
     bootPromptServe: BootPromptServeOutcome
+    """Physical row creation time, or the computed earliest install/import witness time for a derived entry."""
     createdAt: DateTime!
+    """
+    Row audit fields are visible only when the caller may read EVERY installed Agent in this App.
+    Otherwise all three are null on EVERY entry, including physical rows. A derived entry has no
+    row audit identity, so these stay null even under the whole-App gate; importer identities are never copied.
+    """
     createdBy: String
     updatedAt: DateTime
     updatedBy: String

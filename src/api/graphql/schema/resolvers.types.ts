@@ -1,5 +1,4 @@
-import { agentInstallationWhere } from '../../../lib/appInstallations.js';
-import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
+import { agentInstallationWhere, listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
 import { authorizedTriggerLabel } from './resolvers.appRun.js';
@@ -298,6 +297,24 @@ export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
     throw error;
   }
+}
+
+// Audit shape itself distinguishes ROW from DERIVED. Ruling6636734542
+// permits it only behind the same whole-App gate as companion #3435. This
+// marker belongs to this response and exact Context, not an authority cache.
+type InstallationAuditRow = {appId:string;createdBy?:string|null;updatedBy?:string|null;updatedAt?:Date|null;
+  _installationAuditRead?: WeakMap<Context,boolean>};
+export async function wholeAppInstallationReadable(ctx:Context, appId:string):Promise<boolean> {
+  const installations = await listAppInstallations(ctx.db,appId);
+  for(const row of installations) if(!(await readableNestedAgent(ctx,row.agent))) return false;
+  return true;
+}
+function installationAuditField(field:'createdBy'|'updatedBy'|'updatedAt') {
+  return async(row:InstallationAuditRow,_:unknown,ctx:Context)=>{
+    const decision=row._installationAuditRead?.get(ctx);
+    const readable=decision !== undefined ? decision : await wholeAppInstallationReadable(ctx,row.appId);
+    return readable ? row[field] ?? null : null;
+  };
 }
 
 /**
@@ -1901,7 +1918,10 @@ export const typeResolvers = {
           agents.set(agent.id,agent);
         }
       }
-      return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId)}));
+      const wholeAppReadable = installs.every(row => agents.has(row.agentId)) &&
+        (await Promise.all(installs.map(row => readableNestedAgent(ctx,agents.get(row.agentId) as NestedAgentRow)))).every(Boolean);
+      return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId),
+        _installationAuditRead:new WeakMap([[ctx,wholeAppReadable]])}));
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
@@ -1912,6 +1932,9 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
+    createdBy: installationAuditField('createdBy'),
+    updatedBy: installationAuditField('updatedBy'),
+    updatedAt: installationAuditField('updatedAt'),
     app: (aa: { appId: string }, _: unknown, ctx: Context) =>
       loadReadableNestedApp(ctx, aa.appId),
     agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) => {

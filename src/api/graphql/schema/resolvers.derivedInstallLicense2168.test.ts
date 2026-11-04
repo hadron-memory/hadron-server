@@ -84,3 +84,9 @@ it.each(['roles','scope'] as const)('unlicensed derived Agents confer no %s auth
   await createDbAgentOrgGrant(db,holder.id,target.id);
   expect(await offered()).toContain(value);
 });
+
+it('PENDING scoped FIT: a licensed derived subscription counts as an App relationship',async()=>{
+  await createDbAgentSubscription(db,stranger.id,target.id);
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(true);
+});

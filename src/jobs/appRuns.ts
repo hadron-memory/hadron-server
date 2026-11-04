@@ -1,5 +1,5 @@
-import { agentInstallationWhere } from '../lib/appInstallations.js';
-import { listAppInstallations, resolveAppInstallation } from '../lib/appInstallations.js';
+import { isAgentInstalledAndLicensed } from '../lib/appAgent.js';
+import { hasAppRelationship } from '../lib/auth/appRelationship.js';
 import { renderScriptArgs, ScriptVariableMissingError } from '../lib/runner/scriptArgs.js';
 import { effectiveRunBudgets, triggerBudgetPatch, type TriggerRunBudgets } from '../lib/automation/runBudgets.js';
 import { configSelection } from '../lib/automation/identities.js';
@@ -436,7 +436,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // review, Codex P1). Checked here (defense in depth) and at trigger
   // creation.
   if (args.agentId) {
-    const installed = await resolveAppInstallation(db,args.appId,args.agentId);
+    const installed = await isAgentInstalledAndLicensed(db,args.appId,args.agentId);
     if (!installed) {
       throw new RunLaunchDeniedError(
         'agentId is not installed in this App.',
@@ -447,27 +447,11 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // On-behalf-of relationship re-verified at launch, not only at trigger
   // creation (cor:agt:010:01): AppMember OR an active AgentSubscription to
   // any of the App's agents.
-  if (args.userId) {
-    const member = await db.appMember.findFirst({
-      where: { appId: args.appId, userId: args.userId },
-      select: { userId: true },
-    });
-    if (!member) {
-      const sub = await db.agentSubscription.findFirst({
-        where: {
-          userId: args.userId,
-          revokedAt: null,
-          agent: agentInstallationWhere(args.appId),
-        },
-        select: { userId: true },
-      });
-      if (!sub) {
-        throw new RunLaunchDeniedError(
-          'The on-behalf-of user has no live relationship with this App.',
-          'RELATIONSHIP_MISSING',
-        );
-      }
-    }
+  if (args.userId && !(await hasAppRelationship(db, args.appId, args.userId))) {
+    throw new RunLaunchDeniedError(
+      'The on-behalf-of user has no live relationship with this App.',
+      'RELATIONSHIP_MISSING',
+    );
   }
   // Encrypted-memory guard (spec 041, D-2026-07-06-B): headless runs are
   // UNAVAILABLE on encrypted memories — the server never holds the key, and

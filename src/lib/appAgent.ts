@@ -1,4 +1,4 @@
-import { listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
+import { loadAppInstallationPage, listAppInstallations, resolveAppInstallation, type InstallationDb } from './appInstallations.js';
 /**
  * AppAgent convenience and license helpers. Installation membership includes
  * one-hop imports through appInstallations.ts. "Primary" remains the oldest
@@ -156,6 +156,16 @@ export async function activeAppInstallLicenseIdsForAgent(
     }
   }
   return licensed;
+}
+
+/** Authority-conferring readers need the App holder's live license as well as membership.
+ * The importer's grant is only an import witness and never licenses the App. */
+export async function listLicensedAppInstallations(db: Db, appId: string) {
+  const {apps, installations:rows} = await loadAppInstallationPage(db, appId);
+  const app = apps[0];
+  if (!app || app.deletedAt || app.uninstalledAt) return [];
+  const licensed = await activeAgentInstallLicenseIds(db, app, rows.map(row => row.agent));
+  return rows.filter(row => licensed.has(row.agentId));
 }
 
 /** A retained AppAgent pointer is authority only while its install is live. */

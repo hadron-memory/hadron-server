@@ -1,5 +1,5 @@
-import { agentInstallationWhere } from '../appInstallations.js';
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import { listLicensedAppInstallations } from '../appAgent.js';
+import type { PrismaClient, Prisma } from '../../generated/prisma/index.js';
 
 /**
  * True if `userId` has a live relationship with the App: an AppMember, or an
@@ -9,7 +9,7 @@ import type { PrismaClient } from '../../generated/prisma/index.js';
  * authorize a run (Codex/Copilot #566). Shared by trigger edits, manual-run pre-checks, and automation evidence.
  */
 export async function hasAppRelationship(
-  db: Pick<PrismaClient, 'appMember' | 'agentSubscription'>,
+  db: PrismaClient | Prisma.TransactionClient,
   appId: string,
   userId: string,
 ): Promise<boolean> {
@@ -18,6 +18,8 @@ export async function hasAppRelationship(
     select: { userId: true },
   });
   if (member) return true;
+  const installations = await listLicensedAppInstallations(db, appId);
+  if (!installations.length) return false;
   const now = new Date();
   const sub = await db.agentSubscription.findFirst({
     where: {
@@ -25,7 +27,7 @@ export async function hasAppRelationship(
       activatedAt: { not: null },
       revokedAt: null,
       OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-      agent: agentInstallationWhere(appId),
+      agentId: { in: installations.map(row => row.agentId) },
     },
     select: { userId: true },
   });
