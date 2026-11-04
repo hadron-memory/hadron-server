@@ -85,8 +85,24 @@ it.each(['roles','scope'] as const)('unlicensed derived Agents confer no %s auth
   expect(await offered()).toContain(value);
 });
 
-it('PENDING scoped FIT: a licensed derived subscription counts as an App relationship',async()=>{
+it('scoped FIT6637143908: a licensed derived subscription counts as an App relationship',async()=>{
   await createDbAgentSubscription(db,stranger.id,target.id);
   await createDbAgentOrgGrant(db,holder.id,target.id);
   expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(true);
+});
+
+it.each(['inactive','revoked','expired'] as const)('same-org derived entries cannot use a retained %s grant',async(state)=>{
+ await db.agent.update({where:{id:target.id},data:{organizationId:holder.id,installationPolicy:{memberRoles:['foreign-role']}}});
+ await createDbAgentSubscription(db,stranger.id,target.id);
+ await createDbAgentOrgGrant(db,holder.id,target.id);
+ expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(true);
+ await db.agentOrgGrant.update({where:{orgId_agentId:{orgId:holder.id,agentId:target.id}},data:
+  state==='inactive'?{activatedAt:null}:state==='revoked'?{revokedAt:new Date()}:{expiresAt:new Date(0)}});
+ expect(await isAgentInstalled(db,app.id,target.id)).toBe(true);
+ expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
+ expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(false);
+ expect((await loadOfferedMemberRoles(db,app.id)).roles).not.toContain('foreign-role');
+ expect((await appContextIfReadable(ctx(),app.id))!.agentIds).not.toContain(target.id);
+ await expect(mint()).rejects.toMatchObject({code:'AGENT_NOT_INSTALLED'});
+ await expect(session()).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
 });
