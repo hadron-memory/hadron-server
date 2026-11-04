@@ -157,6 +157,40 @@ describe('#3382 batch-only list contract', () => {
     expect(await events()).toBe(0);
   });
 
+  for (const mismatch of ['organization', 'owner'] as const) it('#3393 Agent ' + mismatch + ' mismatch cannot authorize its system-memory grant', async () => {
+    const f = await fixture(3);
+    // Only the Agent becomes managed: orgs differ, or both orgs are null and owners differ.
+    const memory = f.memories[2];
+    if (mismatch === 'owner') await db.memory.update({ where: { id: memory.id }, data: { organizationId: null, ownerUserId: f.owner.id } });
+    await db.agent.update({ where: { id: f.agents[2].id }, data: mismatch === 'organization'
+      ? { organizationId: f.orgs[0].id }
+      : { organizationId: null, ownerUserId: f.holder.id } });
+    const agent = await db.agent.findUniqueOrThrow({ where: { id: f.agents[2].id } });
+    expect(await managesAgent(context(f.holder.id), agent)).toBe(true);
+    const rows = await Q.automationReadGrants({}, { appRef: f.apps[0].id, includeRevoked: true }, context(f.holder.id));
+    expect(JSON.stringify(rows)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, false)));
+    expect(rows.some(r => r.memoryUrn === 'hrn:mem:' + memory.urn)).toBe(false);
+    // App management still projects every historical grant, including this target.
+    const appRows = await Q.automationReadGrants({}, { appRef: f.apps[0].id, includeRevoked: true }, context(f.owner.id));
+    expect(JSON.stringify(appRows)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, true)));
+  });
+
+  it('#3393 deleted knowledge target is omitted for its org ADMIN while App-manager history remains complete', async () => {
+    const f = await fixture(3);
+    const memory = f.memories[0];
+    await db.memory.update({ where: { id: memory.id }, data: { class: 'knowledge' } });
+    const args = { appRef: f.apps[0].id, includeRevoked: true };
+    const before = await Q.automationReadGrants({}, args, context(f.holder.id));
+    expect(JSON.stringify(before)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, false)));
+    await db.memory.update({ where: { id: memory.id }, data: { deletedAt: new Date() } });
+    const after = await Q.automationReadGrants({}, args, context(f.holder.id));
+    expect(JSON.stringify(after)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, false)
+      .filter(r => r.memoryUrn !== 'hrn:mem:' + memory.urn)));
+    const appRows = await Q.automationReadGrants({}, args, context(f.owner.id));
+    expect(JSON.stringify(appRows)).toBe(JSON.stringify(f.expected(f.apps[0].id, null, true, true)));
+    expect(await events()).toBe(0);
+  });
+
   it('empty, unknown/foreign selectors and invalid instruction/principal refuse or filter without widening', async () => {
     const f = await fixture(3);
     const outsider = await db.user.create({ data: { handle: 'batch-outsider' } });
