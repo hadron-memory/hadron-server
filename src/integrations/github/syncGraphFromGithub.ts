@@ -980,18 +980,24 @@ const syncGraphFromGithubAsSystem = async (
         // nonconforming record either: the stored objectType is kept and the
         // file is reported in `skippedObjectTypes`, like a protected loc.
         const fileObjectType = 'objectType' in node ? node.objectType : undefined;
-        const objectTypeFor = (properties: unknown): { objectType?: string | null } => {
-          if (fileObjectType == null) return {};
-          if (memorySchema == null) return { objectType: fileObjectType };
+        const judgeObjectType = (properties: unknown): { patch: { objectType?: string | null }; violation: string | null } => {
+          if (fileObjectType == null) return { patch: {}, violation: null };
+          if (memorySchema == null) return { patch: { objectType: fileObjectType }, violation: null };
           try {
             validateNodeAgainstSchema(memorySchema, fileObjectType, (properties ?? null) as Record<string, unknown> | null);
-            return { objectType: fileObjectType };
+            return { patch: { objectType: fileObjectType }, violation: null };
           } catch (e) {
             if (!(e instanceof NodeSchemaViolation)) throw e;
-            skippedObjectTypes.push(`${loc} (${fileObjectType}): ${e.message}`);
-            reportEntries.push({ kind: 'object_type_rejected', loc, code: 'OBJECT_TYPE_REJECTED' });
-            return {};
+            return { patch: {}, violation: e.message };
           }
+        };
+        const objectTypeFor = (properties: unknown): { objectType?: string | null } => {
+          const { patch, violation } = judgeObjectType(properties);
+          if (violation !== null) {
+            skippedObjectTypes.push(`${loc} (${fileObjectType}): ${violation}`);
+            reportEntries.push({ kind: 'object_type_rejected', loc, code: 'OBJECT_TYPE_REJECTED' });
+          }
+          return patch;
         };
         // `byId` and `existingAtLoc` are lookup snapshots. Capture only from
         // the row update's locked, current version, before it writes the file's
@@ -1094,6 +1100,10 @@ const syncGraphFromGithubAsSystem = async (
           // that key is not a change here either (`updateNodeFromGitSync`).
           const comparable: Record<string, unknown> = update.data === Prisma.DbNull ? { ...update, data: null } : { ...update };
           if (prior?.isPlaceholder) delete comparable.role;
+          // The accepted collection joins the patch only under the row lock, so
+          // judge it here too, or a collection-only edit needs no claim and
+          // clears the stamp. Report-free: the write reports a rejected one.
+          Object.assign(comparable, judgeObjectType(prior?.properties).patch);
           const verdict = await judgeAuthoring(tx, graph.id, {
             priorRole: prior?.role ?? null, priorRunnable: prior?.isRunnable ?? null,
             role: merged.role, runnable: merged.isRunnable,
