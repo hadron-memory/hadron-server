@@ -26,7 +26,7 @@ beforeEach(async()=>{
  for(const [id,name,organizationId] of [[BETA,'Beta',orgId],[GAMMA,'Gamma',orgId],[HIDDEN,'Hidden',foreign.id]])
   await db.agent.create({data:{id,name,urn:`${org.urn}:${name.toLowerCase()}`,organizationId,visibility:'ORGANIZATION'}});
  await db.appAgent.create({data:{appId,agentId:HIDDEN,createdAt:T(5),createdBy:userId}});
- await db.appAgent.create({data:{appId,agentId:GAMMA,createdAt:T(9),createdBy:userId}});
+ await db.appAgent.create({data:{appId,agentId:GAMMA,createdAt:T(9),createdBy:userId,updatedBy:userId}});
  await createDbAgentOrgGrant(db,orgId,BETA);
  await createDbAgentOrgGrant(db,foreign.id,BETA);
  await db.agentImport.create({data:{parentAgentId:HIDDEN,importedAgentId:BETA,position:100,required:true,
@@ -94,4 +94,10 @@ it.each([false,true])('a fresh physical install does not sort ahead of a derived
  const app=(await wire(agentsQuery,{ref:appId},full)).app;
  expect(app.agents.map((agent:any)=>agent.id)).toEqual(full?[HIDDEN,BETA,GAMMA,DELTA]:[BETA,GAMMA,DELTA]);
  expect(app.agents.map((agent:any)=>agent.id)).toEqual(app.appAgents.filter((row:any)=>row.agent!==null).map((row:any)=>row.agent.id));
+});
+
+it.each([false,true])('App.agents uses the served key when visible date order opposes id order (full=%s)',async(full)=>{
+ await db.appAgent.update({where:{appId_agentId:{appId,agentId:GAMMA}},data:{createdAt:T(3)}});
+ const app=(await wire(agentsQuery,{ref:appId},full)).app;
+ expect(app.agents.map((agent:any)=>agent.id)).toEqual(full?[GAMMA,HIDDEN,BETA]:[BETA,GAMMA]);
 });
