@@ -330,6 +330,11 @@ describe('#1796 acceptance 3: the header refuses as the argument does', () => {
       expect(face(sealed)).toBe(face(absent));
     });
 
+    it('a fragment cycle is the validation refusal it always was, not a crash in staging', async () => {
+      const reply = await send('mutation { ...F } fragment F on Mutation { ...G } fragment G on Mutation { ...F }', {}, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
+      expect(code(reply)).toBe('NOT_ENCRYPTED');
+    });
+
     it('keeps the ordinary answer on an operation that never reaches encryptMemory (acceptance 4)', async () => {
       const reply = await send(READ, { ref: memory.id }, { bearer: impJwt, keys: [{ memory: memory.id, dataKey }] });
       expect(code(reply)).toBe('NOT_ENCRYPTED');

@@ -105,6 +105,7 @@ import { startGitMirrorSubscriber } from './integrations/github/nodeWrittenSubsc
 import { GraphQLError, buildSchema, printSchema } from 'graphql';
 import {
   encryptMemoryTargetRef,
+  requestSelectsEncryptMemory,
   stageRequestMemoryKeys,
   MemoryUnlockError,
   REQUEST_KEYS_HEADER,
@@ -1309,6 +1310,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           {
             impersonated: !!(auth as { impersonation?: unknown }).impersonation,
             encryptMemoryTarget: () => encryptMemoryTargetRef(req.body),
+            selectsEncryptMemory: () => requestSelectsEncryptMemory(req.body),
           },
         ).catch((err) => {
           if (err instanceof MemoryUnlockError) {
