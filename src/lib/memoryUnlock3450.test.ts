@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertFullyQualifiedUrn, formatCanonicalUrn } from './urn.js';
 import { MemoryNotFoundError } from './asset/gate.js';
 import { AmbiguousLegacyUrnError } from './entityRef/errors.js';
-import { encryptMemoryTargetRef, makeKeyVerifier, MemoryUnlockError, resolveSuppliedKey, stageRequestMemoryKeys } from './memoryUnlock.js';
+import { encryptMemoryTargetRef, makeKeyVerifier, type MemoryUnlockError, resolveSuppliedKey, stageRequestMemoryKeys } from './memoryUnlock.js';
 import {
   getRequestKey,
   hasRequestFirstEncryption,
@@ -105,18 +105,25 @@ describe('#3450 the per-entry catch', () => {
  * an owner, and a secret in the log (F3).
  */
 describe('#3450 a passphrase that is not a string', () => {
-  const salted = { ...encrypted, kdfSalt: Buffer.alloc(16, 1).toString('base64'), kdfParams: { alg: 'scrypt', N: 2, r: 1, p: 1 } };
+  const salted = { ...encrypted, kdfSalt: Buffer.alloc(16, 1).toString('base64'), kdfParams: { alg: 'scrypt', N: 1024, r: 8, p: 1 } };
 
   it.each([[987654321], [true], [{ a: 1 }], [['x']]])('%j on an owner\'s encrypted memory keeps NOT_FOUND', async passphrase => {
     await expect(stage(salted, [{ memory: 'sealed', passphrase }])).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'Memory not found.' });
   });
 
-  it('the shared resolver refuses it before deriving, so no caller can reach the echo', async () => {
-    await expect(resolveSuppliedKey(salted, { passphrase: 987654321 as never })).rejects.toBeInstanceOf(MemoryUnlockError);
+  // The refusals resolveSuppliedKey makes before it would derive keep their order and their answer.
+  it.each([
+    ['falsy', salted, { passphrase: 0 }],
+    ['beside a dataKey', salted, { passphrase: 987654321, dataKey }],
+    ['on a memory with no verifier', { ...salted, keyVerifier: null }, { passphrase: 987654321 }],
+    ['on a memory with no salt', { ...salted, kdfSalt: null }, { passphrase: 987654321 }],
+  ])('%s is still BAD_UNLOCK_INPUT', async (_name, row, secret) => {
+    await expect(stage(row, [{ memory: 'sealed', ...secret }])).rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT' });
   });
 
-  it('a falsy one is still "exactly one of"', async () => {
-    await expect(stage(salted, [{ memory: 'sealed', passphrase: 0 }])).rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT' });
+  it('the guard is the header\'s: the shared resolver is not changed for its typed callers', async () => {
+    await expect(resolveSuppliedKey(salted, { passphrase: 987654321 as never })).rejects.toThrow(TypeError);
+    await expect(resolveSuppliedKey(salted, { passphrase: 'a real string' })).rejects.toMatchObject({ code: 'WRONG_KEY' });
   });
 });
 

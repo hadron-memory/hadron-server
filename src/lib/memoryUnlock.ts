@@ -197,11 +197,8 @@ export async function resolveSuppliedKey(
         'BAD_UNLOCK_INPUT',
       );
     }
-    // #3450: the header's JSON can carry a number here. scrypt's TypeError repeats a number or boolean verbatim, and a
-    // fault goes to the log whole, so this stops before it. The answer is the one this input has always had.
-    if (typeof input.passphrase !== 'string') throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
     key = await deriveDataKeyFromPassphrase(
-      input.passphrase,
+      input.passphrase as string,
       memory.kdfSalt,
       parseKdfParams(memory.kdfParams),
     );
@@ -266,6 +263,20 @@ export interface StageRequestKeysOptions {
   impersonated?: boolean;
   /** Lazily, the ref `encryptMemory` runs on in this request. See {@link encryptMemoryTargetRef}. */
   encryptMemoryTarget?: () => string | null;
+}
+
+/**
+ * #3450: an entry whose passphrase would reach scrypt without being a string. Only the header's JSON can carry one; the
+ * other callers of {@link resolveSuppliedKey} take a typed string. scrypt's TypeError repeats a number or boolean
+ * verbatim, and a fault goes to the log whole, so the header stops it first and gives the answer this input has always
+ * had. Each other condition here is one `resolveSuppliedKey` refuses first, and those keep their BAD_UNLOCK_INPUT.
+ */
+function passphraseWouldReachScrypt(
+  entry: RequestKeyEntry,
+  memory: { kdfSalt: string | null; keyVerifier: string | null },
+): boolean {
+  const passphrase: unknown = entry.passphrase;
+  return !!passphrase && typeof passphrase !== 'string' && !entry.dataKey && !!memory.keyVerifier && !!memory.kdfSalt;
 }
 
 /**
@@ -406,6 +417,7 @@ export async function stageRequestMemoryKeys(
           setRequestFirstEncryption(memoryId, firstEncryptionEntry(entry));
           continue;
         }
+        if (passphraseWouldReachScrypt(entry, memory)) throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
         // Verified before staging; partial staging on a later failure is
         // harmless — the store is request-local and dies with the request.
         setRequestKey(
