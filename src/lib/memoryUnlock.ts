@@ -266,17 +266,20 @@ export interface StageRequestKeysOptions {
 }
 
 /**
- * #3450: an entry whose passphrase would reach scrypt without being a string. Only the header's JSON can carry one; the
- * other callers of {@link resolveSuppliedKey} take a typed string. scrypt's TypeError repeats a number or boolean
+ * #3450: refuses an entry whose passphrase would reach scrypt without being a string. Only the header's JSON can carry
+ * one; the other callers of {@link resolveSuppliedKey} take a typed string. scrypt's TypeError repeats a number or boolean
  * verbatim, and a fault goes to the log whole, so the header stops it first and gives the answer this input has always
- * had. Each other condition here is one `resolveSuppliedKey` refuses first, and those keep their BAD_UNLOCK_INPUT.
+ * had. Every refusal `resolveSuppliedKey` makes before deriving keeps its BAD_UNLOCK_INPUT: those it makes on the input
+ * and the row fall out here, and stored KDF parameters it can't use refuse in `parseKdfParams`, as they do there.
  */
-function passphraseWouldReachScrypt(
+function refuseNonStringPassphrase(
   entry: RequestKeyEntry,
-  memory: { kdfSalt: string | null; keyVerifier: string | null },
-): boolean {
+  memory: { kdfSalt: string | null; kdfParams: unknown; keyVerifier: string | null },
+): void {
   const passphrase: unknown = entry.passphrase;
-  return !!passphrase && typeof passphrase !== 'string' && !entry.dataKey && !!memory.keyVerifier && !!memory.kdfSalt;
+  if (!passphrase || typeof passphrase === 'string' || entry.dataKey || !memory.keyVerifier || !memory.kdfSalt) return;
+  parseKdfParams(memory.kdfParams);
+  throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
 }
 
 /**
@@ -417,7 +420,7 @@ export async function stageRequestMemoryKeys(
           setRequestFirstEncryption(memoryId, firstEncryptionEntry(entry));
           continue;
         }
-        if (passphraseWouldReachScrypt(entry, memory)) throw new MemoryUnlockError('Memory not found.', 'NOT_FOUND');
+        refuseNonStringPassphrase(entry, memory);
         // Verified before staging; partial staging on a later failure is
         // harmless — the store is request-local and dies with the request.
         setRequestKey(
