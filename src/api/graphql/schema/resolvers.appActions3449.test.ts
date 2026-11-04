@@ -47,7 +47,7 @@ describe('App-defined actions', () => {
   });
   it('conceals unauthorized App and refuses impersonation without an event', async () => {
     await refused({}, 'APP_NOT_FOUND', ctx(outsiderId));
-    await refused({}, 'FORBIDDEN', { ...ctx(), impersonation: true } as unknown as Context);
+    await refused({}, 'APP_NOT_FOUND', { ...ctx(), impersonation: true } as unknown as Context);
   });
   it('conceals foreign and missing task refs with the same answer', async () => {
     const task = await M.createAgentTask({}, { input: { appRef: foreignAppId, title: 'Foreign' } }, ctx(outsiderId));
@@ -60,6 +60,7 @@ describe('App-defined actions', () => {
     const rows = await Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.team.' }, ctx());
     expect(rows.map((r: any) => r.id)).toEqual([a.eventId, b.eventId]);
     expect((await Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.team.design.', types: ['app.team.review.ready'] }, ctx())).length).toBe(0);
+    for (const prefix of ['app.%', 'app._', 'app.\\']) expect(await Q.agentTeamEvents({}, { appRef: appId, codePrefix: prefix }, ctx())).toEqual([]);
     await expect(Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.' }, ctx(outsiderId))).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
   });
 });
@@ -91,5 +92,93 @@ describe('App actions are passive', () => {
     await refused({});
     await record({ code: 'app.renamed.design.approved' });
     expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: first.eventId } })).type).toBe('app.team.design.approved');
+  });
+});
+
+describe('register and App-wide access', () => {
+  it('maps a worker through its own Agent and keeps the task loc when unresolved', async () => {
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    const team = await M.createAgent({}, { orgId: app.organizationId, name: 'Team Agent' }, ctx());
+    const coder = await M.createAgent({}, { orgId: app.organizationId, name: 'Coder' }, ctx());
+    const teamRow = await db.agent.findUniqueOrThrow({ where: { id: team.id } });
+    const coderRow = await db.agent.findUniqueOrThrow({ where: { id: coder.id } });
+    await db.appAgent.create({ data: { appId, agentId: team.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: teamRow.systemMemoryId!, loc: 'roles', name: 'Roles' } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: coder.id, name: 'Coder', slug: 'coder' } });
+    const asCoder = (fn: () => Promise<any>) => runAsActor({ workerId: worker.id, agentId: coder.id }, fn);
+    expect((await asCoder(() => record())).action.state).toBe('UNMAPPED');
+    const entry = await db.node.create({ data: { id: generateId(), memoryId: teamRow.systemMemoryId!, loc: 'register:app.team.design.approved', name: 'Action', data: { registerEntry: { code: 'app.team.design.approved', taskLoc: 'tasks:approve' } } } });
+    expect((await asCoder(() => record())).action).toMatchObject({ state: 'UNRESOLVED', taskLoc: 'tasks:approve', taskUrn: null });
+    await db.node.create({ data: { id: generateId(), memoryId: teamRow.systemMemoryId!, loc: 'tasks:approve', name: 'Team approve', isRunnable: true } });
+    const person = (await record()).action;
+    expect(person.state).toBe('MAPPED');
+    expect(person.taskUrn).toBe('hrn:node:' + (await db.memory.findUniqueOrThrow({ where: { id: teamRow.systemMemoryId! } })).urn + ':tasks:approve');
+    expect((await asCoder(() => record())).action.state).toBe('UNRESOLVED');
+    await db.node.create({ data: { id: generateId(), memoryId: coderRow.systemMemoryId!, loc: 'tasks:approve', name: 'Approve', isRunnable: true } });
+    const attributed = await asCoder(() => record());
+    expect(await db.agentTeamEvent.findUnique({ where: { id: attributed.eventId } })).toMatchObject({ actorUserId: userId, actorWorkerId: worker.id, actorAgentId: coder.id });
+    const mapped = attributed.action;
+    expect(mapped).toMatchObject({ code: 'app.team.design.approved', state: 'MAPPED', taskLoc: 'tasks:approve' });
+    expect(mapped.taskUrn).toContain(':tasks:approve');
+    const foreignOrg = await db.organization.create({ data: { id: generateId(), name: 'Foreign', urn: 'foreign-' + generateId().toLowerCase() } });
+    await db.orgMember.create({ data: { organizationId: foreignOrg.id, userId: outsiderId, role: 'ADMIN' } });
+    const hidden = await M.createAgent({}, { orgId: foreignOrg.id, name: 'Hidden base' }, ctx(outsiderId));
+    await db.agent.update({ where: { id: coder.id }, data: { extendsAgentId: hidden.id } });
+    const withheld = await asCoder(() => record());
+    expect(withheld.action).toEqual({ code: 'app.team.design.approved', state: 'WITHHELD', taskLoc: null, taskUrn: null });
+    expect(await db.agentTeamEvent.findUnique({ where: { id: withheld.eventId } })).not.toBeNull();
+    await db.agent.update({ where: { id: coder.id }, data: { extendsAgentId: null } });
+
+    await db.node.update({ where: { id: entry.id }, data: { data: { registerEntry: { code: 'wrong', taskLoc: 'tasks:approve' } } } });
+    expect((await asCoder(() => record())).action.state).toBe('UNMAPPED');
+  });
+  it('an App participant and own key see actions regardless of task, another key never does', async () => {
+    await db.appMember.create({ data: { appId, userId: outsiderId, role: 'member' } });
+    const key = await db.appKey.create({ data: { id: generateId(), appId, keyHash: generateId(), keyPreview: 'test' } });
+    const keyCtx = { db, appId, appKeyId: key.id, roles: [] } as Context;
+    const task = await M.createAgentTask({}, { input: { appRef: appId, title: 'Action task' } }, ctx());
+    const a = await record(), b = await record({ taskRef: task.id });
+    for (const c of [ctx(outsiderId), keyCtx]) {
+      const rows = await Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.team.' }, c);
+      expect(rows.map((r: any) => r.id)).toEqual([a.eventId, b.eventId]);
+    }
+    await refused({}, 'APP_NOT_FOUND', keyCtx);
+    await expect(Q.agentTeamEvents({}, { appRef: foreignAppId, codePrefix: 'app.' }, keyCtx)).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+    await db.agentTeamEvent.create({ data: { appId, type: 'app.manager-act', payload: {} } });
+    expect((await Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.' }, ctx())).length).toBe(3);
+    expect((await Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.team.' }, ctx())).length).toBe(2);
+  });
+});
+
+describe('write-time authority and current slug', () => {
+  it('rechecks a committed membership revocation after the outer gate', async () => {
+    let intercepted = false;
+    const proxied = new Proxy(db, { get(target, prop, receiver) {
+      if (prop === '$transaction') return async (...args: any[]) => {
+        if (!intercepted) { intercepted = true; await db.orgMember.deleteMany({ where: { userId } }); }
+        return (target.$transaction as any)(...args);
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await refused({}, 'APP_NOT_FOUND', { ...ctx(), db: proxied });
+    expect(intercepted).toBe(true);
+  });
+  it('rechecks the slug after a committed rename in the pre-transaction window', async () => {
+    let intercepted = false;
+    const proxied = new Proxy(db, { get(target, prop, receiver) {
+      if (prop === '$transaction') return async (...args: any[]) => {
+        if (!intercepted) {
+          intercepted = true;
+          const a = await db.app.findUniqueOrThrow({ where: { id: appId } });
+          await db.app.update({ where: { id: appId }, data: { urn: a.urn.replace(/:team$/, ':renamed') } });
+        }
+        return (target.$transaction as any)(...args);
+      };
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    await refused({}, 'APP_ACTION_CODE_INVALID', { ...ctx(), db: proxied });
+    expect(intercepted).toBe(true);
   });
 });
