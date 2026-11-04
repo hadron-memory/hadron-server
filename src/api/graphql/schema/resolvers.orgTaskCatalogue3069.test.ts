@@ -1,17 +1,19 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { buildSchema, parse, validate } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
+import { typeDefs } from './typeDefs.js';
 
 /**
  * #3069 (R208 A, cor:api:060:04): the org Task Nodes list and the org skill export leave out App-owned memories,
  * install memories included, and keep an Agent's own system memory (#1689).
  *
  * The rule lands in the portal (seam 3): `orgTaskMemoryIds` drops every id whose `appId` is set from
- * `memories(orgId, [system])`. The server stays permissive on purpose. That list is how a manager finds an install
- * record, retained ones included (#2044 pin in installMemory.lifecycle.test.ts, R45), and a named memory set is
- * legitimate input to findNodes and createScope.
+ * `memories(orgId, [system])`. The server doesn't apply the rule to a named memory set, on purpose: a caller who may
+ * reference an install memory still gets it. That list is how a manager finds an install record, retained ones included
+ * (#2044 pin in installMemory.lifecycle.test.ts, R45), and a named set is legitimate input to findNodes and createScope.
  *
  * Test-only. These pins hold what the portal's composition relies on: the org system list carries `appId`, and the
  * filtered set gives the catalogue the rule asks for. The permissive block says why the filter must exist.
@@ -67,7 +69,7 @@ beforeEach(async () => {
   await cleanDb(db);
   orgId = (await db.organization.create({ data: { id: generateId(), urn: 'catalogue3069.example', name: 'Catalogue' } })).id;
   for (const who of ['owner', 'admin'] as const) {
-    users[who] = (await db.user.create({ data: { id: generateId(), handle: `catalogue3069-${who}`, roles: ['READER'] } })).id;
+    users[who] = (await db.user.create({ data: { id: generateId(), handle: `catalogue3069-${who}`, roles: who === 'admin' ? ['ADMIN'] : ['READER'] } })).id;
     await db.orgMember.create({ data: { userId: users[who], organizationId: orgId, role: who === 'owner' ? 'OWNER' : 'READER' } });
   }
   const appId = (await db.app.create({ data: { id: generateId(), urn: 'catalogue3069.example:app', name: 'App', organizationId: orgId } })).id;
@@ -88,6 +90,11 @@ beforeEach(async () => {
 });
 
 describe('#3069 what the portal filter relies on', () => {
+  it('the portal can select appId on that list: the document it needs validates against the schema', () => {
+    const document = parse('query($orgId: ID!) { memories(orgId: $orgId, filter: { memoryClasses: [system] }) { items { id appId } total } }');
+    expect(validate(buildSchema(typeDefs), document)).toEqual([]);
+  });
+
   it('the org system list carries appId: set on the install memory, null on the Agent system memory', async () => {
     const { system } = await portalHalves('owner');
     expect(Object.fromEntries(system.map(m => [m.id, m.appId != null]))).toEqual({ [installMemoryId]: true, [agentMemoryId]: false });
@@ -102,13 +109,11 @@ describe('#3069 what the portal filter relies on', () => {
   });
 
   it('a platform-ADMIN org member: the export of the filtered set does not fail', async () => {
-    const entries = await exported('admin', await orgTaskSet('admin'));
-    expect(entries).toContain('tasks:org-task');
-    expect(entries).not.toContain('tasks:install-task');
+    expect(await exported('admin', await orgTaskSet('admin'))).toEqual(['tasks:agent-task', 'tasks:org-task']);
   });
 });
 
-describe('#3069 the server stays permissive, so the filter is the portal\'s job', () => {
+describe('#3069 a named set is taken as named, for a caller who may reference it, so the filter is the portal\'s job', () => {
   it('an org OWNER: the unfiltered set still reaches the install task, in the list and the export', async () => {
     const set = await unfilteredSet('owner');
     expect(set).toContain(installMemoryId);
