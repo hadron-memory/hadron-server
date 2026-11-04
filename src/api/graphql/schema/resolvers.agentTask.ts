@@ -1,3 +1,4 @@
+import { hasUnstorableJsonText } from '../../../lib/agentTasks/references.js';
 import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
 import { requireAppActionCode } from '../../../lib/actionRegister/appCode.js';
@@ -2001,8 +2002,8 @@ export const agentTaskMutations = {
     let serialized: string;
     try {
       serialized = JSON.stringify(payload, (key, value) => {
-        // PostgreSQL jsonb cannot represent NUL in either a key or a string value.
-        if (key.includes('\0') || (typeof value === 'string' && value.includes('\0'))) throw new Error('NUL in JSON');
+        // PostgreSQL jsonb cannot represent NUL or an unpaired surrogate in a key/string.
+        if (hasUnstorableJsonText(key) || (typeof value === 'string' && hasUnstorableJsonText(value))) throw new Error('Unstorable JSON text');
         return value;
       });
     } catch { throw badInput('payload must be a JSON object of at most 4096 bytes.'); }
