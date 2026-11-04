@@ -160,6 +160,20 @@ describe('#3450 no secret in a routed fault', () => {
   });
 });
 
+describe('#3450 a stored row with unusable KDF parameters', () => {
+  it('a numeric passphrase keeps the KDF refusal, and nothing is logged', async () => {
+    const m = await newPrivate(owner.id, 'sealed');
+    await resolvers.Mutation.encryptMemory({}, { memoryId: m.id, passphrase: 'an-earlier-passphrase' }, { db, userId: owner.id, roles: ['READER'] } as never);
+    sessionKeyCache.clear();
+    await db.memory.update({ where: { id: m.id }, data: { kdfParams: { alg: 'scrypt', N: 3, r: 8, p: 1 } } });
+    const reply = await send(READ, { ref: m.id }, [{ memory: m.id, passphrase: 987654321 }]);
+    expect(code(reply)).toBe('BAD_UNLOCK_INPUT');
+    expect(reply.errors![0].message).toBe('Memory has no usable KDF parameters.');
+    expect(reply.raw).not.toContain('987654321');
+    expect(faultLog).not.toHaveBeenCalled();
+  });
+});
+
 describe('#3450 unchanged answers, same code and message', () => {
   const missing = 'hrn:memory:enc3450-nobody::nothing';
 
@@ -203,7 +217,10 @@ describe('#3450 unchanged answers, same code and message', () => {
   });
 
   it('an already-encrypted memory: encryptMemory completes under its verifier with the right key, WRONG_KEY otherwise', async () => {
-    await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, dataKey }]);
+    expect((await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, dataKey }])).errors).toBeUndefined();
+    sessionKeyCache.clear();
+    const right = await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, dataKey }]);
+    expect(right.errors).toBeUndefined();
     sessionKeyCache.clear();
     const wrong = await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, dataKey: Buffer.alloc(32, 52).toString('base64') }]);
     expect(code(wrong)).toBe('WRONG_KEY');
@@ -247,6 +264,29 @@ describe('#3450 overlap over HTTP', () => {
   });
 });
 
+/** The stores are per request at the server's own boundary, which a test building its own `run()` can't reach. */
+describe('#3450 nothing staged outlives its request', () => {
+  it('a verified key: the next request without the header is locked', async () => {
+    const create = 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }';
+    const input = { memoryId: memory.id, loc: 'entry', name: 'Entry', content: 'synthetic 3450' };
+    await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, dataKey }]);
+    sessionKeyCache.clear();
+    expect((await send(create, { input }, [{ memory: memory.id, dataKey }])).errors).toBeUndefined();
+    sessionKeyCache.clear();
+    const locked = await send(create, { input: { ...input, loc: 'second' } });
+    expect(code(locked)).toBe('SESSION_EXPIRED');
+  });
+
+  it('a first-encryption entry never claimed: a later encryptMemory without the header has no secret', async () => {
+    const invalid = 'mutation($id: ID!) { encryptMemory(memoryId: $id) { nosuchfield } }';
+    const staged = await send(invalid, { id: memory.id }, [{ memory: memory.id, passphrase: 'never-used-3450' }]);
+    expect(staged.errors?.length).toBeGreaterThan(0);
+    const later = await send(ENCRYPT, { id: memory.id }, undefined);
+    expect(later.errors?.[0].message).toContain('Provide exactly one');
+    expect((await row(memory.id)).isEncrypted).toBe(false);
+  });
+});
+
 /** Riana's k16: the operation key is claimed only on the encrypted branch. */
 describe('#3450 an operation key on a plaintext memory', () => {
   it('the owning App keeps the refusal: nothing staged, nothing claimed, nothing written', async () => {
@@ -276,7 +316,10 @@ describe('control: the ordinary first encryption through the header', () => {
   it('encrypts under the supplied passphrase', async () => {
     const reply = await send(ENCRYPT, { id: memory.id }, [{ memory: memory.id, passphrase: 'ordinary-3450' }]);
     expect(reply.errors).toBeUndefined();
-    expect((await row(memory.id)).isEncrypted).toBe(true);
+    const m = await row(memory.id);
+    expect(m.isEncrypted).toBe(true);
+    const derived = await deriveDataKeyFromPassphrase('ordinary-3450', m.kdfSalt as string, parseKdfParams(m.kdfParams));
+    expect(verifyDataKey(m.keyVerifier as string, derived)).toBe(true);
     expect(faultLog).not.toHaveBeenCalled();
   });
 });

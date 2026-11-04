@@ -121,6 +121,17 @@ describe('#3450 a passphrase that is not a string', () => {
     await expect(stage(row, [{ memory: 'sealed', ...secret }])).rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT' });
   });
 
+  // Stored parameters are parsed before derivation, so a row with unusable ones refuses on its own terms (Dorian, #3468).
+  it.each([
+    ['none', null],
+    ['an empty object', {}],
+    ['N not a power of two', { alg: 'scrypt', N: 3, r: 8, p: 1 }],
+    ['an unknown algorithm', { alg: 'argon2', N: 1024, r: 8, p: 1 }],
+  ])('stored KDF parameters that are %s keep their own refusal', async (_name, kdfParams) => {
+    await expect(stage({ ...salted, kdfParams }, [{ memory: 'sealed', passphrase: 987654321 }]))
+      .rejects.toMatchObject({ code: 'BAD_UNLOCK_INPUT', message: 'Memory has no usable KDF parameters.' });
+  });
+
   it('the guard is the header\'s: the shared resolver is not changed for its typed callers', async () => {
     await expect(resolveSuppliedKey(salted, { passphrase: 987654321 as never })).rejects.toThrow(TypeError);
     await expect(resolveSuppliedKey(salted, { passphrase: 'a real string' })).rejects.toMatchObject({ code: 'WRONG_KEY' });
