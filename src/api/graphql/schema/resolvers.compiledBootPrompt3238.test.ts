@@ -51,6 +51,15 @@ describe('#3238 CompiledBootPrompt.node', () => {
     }
   });
 
+  it('#3387: a platform admin on an org-owned Agent receives the same node as the direct read', async () => {
+    const f = await fixture();
+    const nested = (await compile(f.orgAgent.id, ctx(f.platform.id, ['ADMIN']))).node;
+    const read = await direct(nested.id, ctx(f.platform.id, ['ADMIN']));
+    expect(read).not.toBeNull();
+    expect(read).toMatchObject({ id: nested.id, memoryId: f.orgAgent.systemMemoryId, content: 'Compile parity sentinel' });
+    expect(nested.content).toBe(read!.content);
+  });
+
   it('a non-manager and an outsider receive neither a compiled node nor its direct read', async () => {
     const f = await fixture();
     for (const agent of [f.orgAgent, f.userAgent]) {
