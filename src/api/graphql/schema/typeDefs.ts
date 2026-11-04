@@ -10427,15 +10427,15 @@ export const typeDefs = `#graphql
   }
 
   type Mutation {
-    "#3448 — owner-chain only, never the assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Non-empty unique colon-separated atom slots, at most 64 characters each; latest event replaces the schedule."
+    "#3448 — owner-chain only, never the assignee (hrn:node:hadronmemory.com:specs:cor:agt:050:09). Non-empty unique colon-separated atom slots, at most 64 characters each; latest event replaces the schedule. Dropping a current negative slot at the frozen head refuses REVIEW_SEAT_NOT_SUPERSEDABLE. All five protocol commands refuse finished/cancelled written tasks with TASK_ENDED after checking authority."
     setReviewSchedule(taskRef: ID!, slots: [String!]!): PrProtocolResult!
-    "#3448 — the assignee freezes a full 40-hex head on a task with a pull_request reference (hrn:node:hadronmemory.com:specs:cor:agt:050:08)."
+    "#3448 — the assignee freezes a full 40-hex head on a task with a pull_request reference (hrn:node:hadronmemory.com:specs:cor:agt:050:08). Any child seat's newest negative verdict at that SHA, including a superseded seat or dropped slot, refuses REVIEW_SEAT_NOT_SUPERSEDABLE: returning to an old head cannot erase a finding."
     freezePullRequestHead(taskRef: ID!, head: String!): PrProtocolResult!
     "#3448 — seat owner-chain binds a direct child to a scheduled slot at the frozen head. A current seat's CHANGES_REQUESTED, FAIL or REFUSED at this head prevents replacement, with or without supersedes, and a negative seat cannot move slots (REVIEW_SEAT_NOT_SUPERSEDABLE). A seat task is assigned once (REVIEW_SEAT_ALREADY_ASSIGNED); a replacement must name the current sibling in supersedes (REVIEW_SEAT_SUPERSEDES_REQUIRED). Checks and write hold the build row FOR UPDATE."
     assignReviewSeat(taskRef: ID!, slot: String!, head: String!, supersedes: ID): PrProtocolResult!
-    "#3448 — STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing."
+    "#3448 — STARTED seat's assignee records a verdict at its assigned head, without finishing it (hrn:node:hadronmemory.com:specs:cor:agt:050:08). REVIEW_SEAT_UNASSIGNED or REVIEW_HEAD_MISMATCH writes nothing. A different actor cannot overwrite a same-head negative verdict (REVIEW_SEAT_NOT_SUPERSEDABLE); its original actor may re-rate."
     recordReviewVerdict(taskRef: ID!, head: String!, verdict: ReviewVerdict!, node: String, receipt: String): PrProtocolResult!
-    "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head, by an actor other than the implementer. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
+    "#3448 — build assignee records pr.ready only when every current scheduled seat is finished with APPROVE, PASS or CARRY at the frozen head. Its verdict actor must differ from both the build's current assignee and the newest pr.frozen actor; Worker/person identity stays distinct from holder credentials. PR_NOT_READY carries failing slots; event facts only, never opaque properties (hrn:node:hadronmemory.com:specs:cor:agt:050:28)."
     recordReadyCall(taskRef: ID!, head: String!): PrProtocolResult!
 
     "Platform ADMIN/OWNER human only. Version-checked limits/mode edit, audit recorded; no counter reset (#1793)."

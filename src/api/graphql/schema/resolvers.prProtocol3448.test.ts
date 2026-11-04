@@ -294,8 +294,8 @@ describe('readiness uses only event facts', () => {
   it('an App key never writes protocol facts', async () => {
     const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'test' } });
     const c = { db, appId: app.id, appKeyId: key.id, roles: [] };
-    for (const name of ['setReviewSchedule', 'freezePullRequestHead', 'recordReadyCall']) {
-      await expect(M[name]!({}, { taskRef: build.id, slots: ['local'], head: H }, c)).rejects.toMatchObject(error('TASK_NOT_FOUND'));
+    for (const name of ['setReviewSchedule', 'freezePullRequestHead', 'assignReviewSeat', 'recordReviewVerdict', 'recordReadyCall']) {
+      await expect(M[name]!({}, { taskRef: build.id, slots: ['local'], slot: 'local', verdict: 'PASS', head: H }, c)).rejects.toMatchObject(error('TASK_NOT_FOUND'));
     }
     expect(await events()).toHaveLength(0);
   });
@@ -529,5 +529,124 @@ describe('SECURITY delta: ended rows and mirrored property history', () => {
     const root = await M.createAgentTask!({}, { input:{ appRef:app.id, title:'Root project', project:true, source:'synthetic', assignee:{user:author.id} } }, ctx());
     expect((await stored(root.id)).parentTaskId).toBeNull();
     await expect(command('assignReviewSeat',{taskRef:root.id,slot:'local',head:H},owner.id)).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));
+  });
+});
+
+
+describe('Worker actor floor and register disclosure', () => {
+  let teamAgent:any, roleAgent:any, roleMemory:any, worker:any;
+  const bound = <T>(fn:()=>Promise<T>) => runAsActor({workerId:worker.id,agentId:roleAgent.id},fn);
+  beforeEach(async()=>{
+    const teamMemory=await db.memory.create({data:{name:'Team system',urn:`${app.urn}:team-system`,class:'system',ownerUserId:author.id}});
+    teamAgent=await db.agent.create({data:{name:'Team',urn:`${app.urn}:team-agent`,systemMemoryId:teamMemory.id,ownerUserId:author.id}});
+    await db.appAgent.create({data:{appId:app.id,agentId:teamAgent.id}});
+    for(const loc of ['roles:author','tasks:review']) await db.node.create({data:{id:generateId(),memoryId:teamMemory.id,loc,name:loc,isRunnable:loc.startsWith('tasks:')}});
+    await db.node.create({data:{id:generateId(),memoryId:teamMemory.id,loc:'register:pr.frozen',name:'Freeze',data:{registerEntry:{code:'pr.frozen',taskLoc:'tasks:review'}}}});
+    roleMemory=await db.memory.create({data:{name:'Caller system',urn:`${app.urn}:caller-system`,class:'system',ownerUserId:author.id}});
+    roleAgent=await db.agent.create({data:{name:'Caller',urn:`${app.urn}:caller-agent`,systemMemoryId:roleMemory.id,ownerUserId:author.id}});
+    await db.node.create({data:{id:generateId(),memoryId:roleMemory.id,loc:'tasks:review',name:'Caller task',isRunnable:true}});
+    worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:roleAgent.id,name:'Author',slug:'author',heldByUserId:author.id}});
+  });
+  async function workerSeat() {
+    const t=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'Worker seat',source:'synthetic',assignee:{worker:worker.id}}},ctx(author.id));
+    await command('assignReviewSeat',{taskRef:t.id,slot:'local',head:H},author.id);
+    return t;
+  }
+  async function workerVerdict(t:any) {
+    await bound(async()=>{
+      await M.startAgentTask!({}, {taskId:t.id},ctx(author.id));
+      await command('recordReviewVerdict',{taskRef:t.id,head:H,verdict:'APPROVE'},author.id);
+      await M.finishAgentTask!({}, {taskId:t.id,result:{outcome:'approved'}},ctx(author.id));
+    });
+    const event=await db.agentTeamEvent.findFirstOrThrow({where:{taskId:t.id,type:'review.verdict'}});
+    expect(event.actorWorkerId).toBe(worker.id);
+  }
+  it('excludes the current Worker assignee when a different person froze the head',async()=>{
+    await schedule(['local']);await freeze();const t=await workerSeat();await workerVerdict(t);
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    expect((await readiness()).slots[0].counts).toBe(false);
+  });
+  it('excludes the frozen Worker actor after the build is reassigned to a different person',async()=>{
+    await schedule(['local']);
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    let t:any;
+    await bound(async()=>{await freeze();t=await workerSeat();});
+    await workerVerdict(t);
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
+    expect((await readiness()).slots[0].counts).toBe(false);
+  });
+  it.each(['team','agent'])('withholds loc and URN when an inherited %s chain memory is unreadable, even with a nearer mapping',async side=>{
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
+    const baseMemory=await db.memory.create({data:{name:'Unreadable base',urn:`${app.urn}:hidden-base`,class:'system',ownerUserId:other.id}});
+    const baseAgent=await db.agent.create({data:{name:'Hidden base',urn:`${app.urn}:hidden-agent`,systemMemoryId:baseMemory.id,ownerUserId:other.id}});
+    await db.agent.update({where:{id:side==='team'?teamAgent.id:roleAgent.id},data:{extendsAgentId:baseAgent.id}});
+    const r=await bound(()=>freeze());
+    expect(r.action).toEqual({code:'pr.frozen',state:'WITHHELD'});
+    expect((await events()).filter(e=>e.type==='pr.frozen')).toHaveLength(2);
+  });
+  it('does not resolve the task of an Agent retired after the command committed',async()=>{
+    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    const original=RegisterLookup.prototype.entry;
+    let retired=false;
+    const spy=vi.spyOn(RegisterLookup.prototype,'entry').mockImplementation(async function(this:RegisterLookup,code){
+      const entry=await original.call(this,code);
+      // This is a second DB connection, after protocol commit; the bounded reader's next
+      // statement must observe retirement rather than disclose the old role task URN.
+      await db.agent.update({where:{id:roleAgent.id},data:{deletedAt:new Date()}});retired=true;
+      return entry;
+    });
+    try {
+      const r=await bound(()=>freeze());expect(retired).toBe(true);
+      expect(r.action).toEqual({code:'pr.frozen',state:'UNRESOLVED',taskLoc:'tasks:review'});
+      expect((await events()).filter(e=>e.type==='pr.frozen')).toHaveLength(1);
+    } finally {spy.mockRestore();}
+  });
+});
+
+
+describe('normalization and first-schedule controls', () => {
+  it('the first schedule may be written after a head is frozen',async()=>{
+    await freeze();await schedule(['local']);expect((await readiness()).slots.map((x:any)=>x.slot)).toEqual(['local']);
+  });
+  it('uppercase SHA input is normalized to the same frozen head',async()=>{
+    await schedule(['local']);await freeze('A'.repeat(40));expect((await stored()).properties).toMatchObject({'pr.head':H});
+    expect((await readiness(H)).head).toBe(H);
+  });
+  it.each(['node','receipt'])('a control character in %s is refused before an event or mirror change',async field=>{
+    await schedule(['local']);await freeze();const t=await seat('local');await M.startAgentTask!({}, {taskId:t.id},ctx(reviewer.id));
+    const before=await events(t.id), properties=(await stored(t.id)).properties;
+    await expect(command('recordReviewVerdict',{taskRef:t.id,head:H,verdict:'APPROVE',[field]:'one'+String.fromCharCode(10)+'two'},reviewer.id))
+      .rejects.toMatchObject(error('BAD_USER_INPUT'));
+    expect(await events(t.id)).toEqual(before);expect((await stored(t.id)).properties).toEqual(properties);
+  });
+});
+
+
+describe('controlled same-ms writer clock evidence (harness only)', () => {
+  it('documents refusal of the later accepted head under a harness-forced clock tie and descending UUIDv7 suffixes', async () => {
+    await schedule(['local']);
+    const at = new Date();
+    const prefix = at.getTime().toString(16).padStart(12,'0');
+    const ids = [prefix+'7fff'+'b'+'f'.repeat(15), prefix+'7000'+'8'+'0'.repeat(15)];
+    let creates = 0;
+    // Only clock/id providers are controlled. Real command authority, graph/row locks,
+    // event serialization, append-only table and readiness query are untouched.
+    const clockDb = db.$extends({query:{agentTeamEvent:{create({args,query}) {
+      if (args.data.type === 'pr.frozen') { args.data.createdAt = at; args.data.id = ids[creates++]; }
+      return query(args);
+    }}}});
+    for (const head of [H,H2]) await M.freezePullRequestHead!({}, {taskRef:build.id,head}, {...ctx(author.id),db:clockDb});
+    expect(creates).toBe(2);
+    expect((await stored()).properties).toMatchObject({'pr.head':H2});
+    const written = await db.agentTeamEvent.findMany({where:{taskId:build.id,type:'pr.frozen'}});
+    expect(written).toHaveLength(2);
+    expect(written.every(e=>e.createdAt.getTime()===at.getTime())).toBe(true);
+    expect(written.map(e=>e.id).sort()).toEqual([...ids].reverse());
+    // Documented limit (Xanthos #76647): these are harness-controlled writer metadata,
+    // not a naturally observed interleave. The mirror holds H2 but the stable event sort
+    // selects H, so H2 refuses. No claim about other tied verdict sequences follows.
+    await expect(readiness(H2)).rejects.toMatchObject(error('PR_HEAD_NOT_FROZEN'));
+    expect((await readiness(H)).head).toBe(H);
   });
 });

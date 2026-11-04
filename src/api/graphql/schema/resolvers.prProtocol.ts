@@ -8,11 +8,11 @@
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { withoutRequestCaches } from './resolvers.helpers.js';
-import { mutateTask, mayDirectTask, isAssignee, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
+import { mutateTask, mayDirectTask, isAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { PR_EVENT_TYPES, REVIEW_VERDICTS, type ReviewVerdict, type PrProtocolEvent } from '../../../lib/agentTasks/prProtocol.js';
 import { storedTaskReferences } from '../../../lib/agentTasks/references.js';
-import { checkAgainstTeamSchema, normalizeTaskProperties } from '../../../lib/agentTasks/properties.js';
+import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { lockTaskGraph } from '../../../lib/agentTasks/blockers.js';
 import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 import { boundedRead } from './resolvers.taskWarnings.js';
@@ -72,6 +72,23 @@ async function negativeAtHead(tx: Prisma.TransactionClient, taskId: string, head
   const prior = await tx.agentTeamEvent.findFirst({ where: { taskId, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
   return ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior ?? undefined).verdict));
 }
+function sameEventActor(event: Pick<Event, 'actorWorkerId' | 'actorUserId'>, actor: { workerId: string | null; userId: string | null }): boolean {
+  return event.actorWorkerId ? event.actorWorkerId === actor.workerId
+    : !actor.workerId && !!event.actorUserId && event.actorUserId === actor.userId;
+}
+
+/** The App graph is exclusive: include superseded seats and dropped slots, not just the current schedule. */
+async function refuseNegativeHead(tx: Prisma.TransactionClient, build: TaskRow, head: string): Promise<void> {
+  const [answer] = await tx.$queryRaw<{ blocked: boolean }[]>`SELECT EXISTS (
+    SELECT 1 FROM (
+      SELECT DISTINCT ON (e.task_id) e.payload FROM agent_team_events e
+      JOIN agent_tasks t ON t.id = e.task_id AND t.app_id = ${build.appId} AND t.parent_task_id = ${build.id}
+      WHERE e.app_id = ${build.appId} AND e.type = 'review.verdict' AND e.payload->>'head' = ${head}
+      ORDER BY e.task_id, e.created_at DESC, e.id DESC
+    ) latest WHERE latest.payload->>'verdict' IN ('CHANGES_REQUESTED', 'FAIL', 'REFUSED')
+  ) AS blocked`;
+  if (answer.blocked) throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A head with a negative seat verdict cannot be frozen again; answer the finding with a new head.');
+}
 function assignments(events: Event[]): Event[] {
   return events.filter(e => e.type === 'review.seat.assigned')
     .filter((e, i, all) => all.findIndex(other => other.taskId === e.taskId) === i);
@@ -99,6 +116,12 @@ async function record(tx: Prisma.TransactionClient, c: Context, task: TaskRow, e
     properties, updatedBy: c.userId ?? null, updatedByWorkerId: actor.workerId, updatedByAgentId: actor.agentId,
   } });
   await appendTaskEvent(tx, { appId: task.appId, taskId: task.id, actor: eventActor(c.userId), event });
+  const from = task.properties === null ? null : propertiesFingerprint(task.properties);
+  const to = propertiesFingerprint(properties);
+  if (from === null || from.sha256 !== to.sha256 || from.bytes !== to.bytes) {
+    await appendTaskEvent(tx, { appId: task.appId, taskId: task.id, actor: eventActor(c.userId),
+      event: { type: 'task.properties-changed', from, to } });
+  }
 }
 
 /** Optional guidance is resolved after commit. Failure never turns an accepted command into a refusal. */
@@ -134,11 +157,13 @@ type Readiness = { ready: boolean; head: string; slots: SlotAnswer[] };
 /** Caller holds the App graph (shared for a read, exclusive for a ready call), before these rows. */
 async function readinessInTx(tx: Prisma.TransactionClient, buildId: string, appId: string, head: string): Promise<Readiness> {
   await tx.$queryRaw`SELECT id FROM agent_tasks WHERE app_id = ${appId} AND (id = ${buildId} OR parent_task_id = ${buildId}) ORDER BY id FOR SHARE`;
-  const tasks = await tx.agentTask.findMany({ where: { appId, OR: [{ id: buildId }, { parentTaskId: buildId }] } });
+  const tasks = await tx.agentTask.findMany({ where: { appId, OR: [{ id: buildId }, { parentTaskId: buildId }] },
+    select: { id: true, status: true, assigneeWorkerId: true, assigneeUserId: true } });
   const build = tasks.find(t => t.id === buildId);
   if (!build) throw taskError('TASK_NOT_FOUND', 'Task not found.');
   const events = await taskEvents(tx, tasks.map(t => t.id));
   frozen(events, buildId, head);
+  const freezer = latest(events, 'pr.frozen', buildId)!;
   const slots = scheduled(events, buildId);
   const childEvents = events.filter(e => e.taskId !== buildId);
   const answers = slots.map((slot): SlotAnswer => {
@@ -147,9 +172,8 @@ async function readinessInTx(tx: Prisma.TransactionClient, buildId: string, appI
     const verdict = task ? latest(events, 'review.verdict', task.id) : undefined;
     const payload = data(verdict);
     // Actor identity is the same worker/person distinction as the task writer gate, not the holder's credential.
-    const ownVerdict = !!verdict && (build.assigneeWorkerId
-      ? verdict.actorWorkerId === build.assigneeWorkerId
-      : !verdict.actorWorkerId && !!build.assigneeUserId && verdict.actorUserId === build.assigneeUserId);
+    const ownVerdict = !!verdict && (sameEventActor(verdict, { workerId: build.assigneeWorkerId, userId: build.assigneeUserId })
+      || sameEventActor(verdict, { workerId: freezer.actorWorkerId, userId: freezer.actorUserId }));
     const counts = !!task && task.status === 'finished' && data(assignment).head === head && payload.head === head
       && payload.slot === slot && ['APPROVE', 'PASS', 'CARRY'].includes(String(payload.verdict)) && !ownVerdict;
     return { slot, currentTaskId: task?.id ?? null, state: task?.status.toUpperCase() ?? 'MISSING',
@@ -179,14 +203,29 @@ export const prProtocolMutations = {
   setReviewSchedule: async (_: unknown, { taskRef, slots }: { taskRef: string; slots: string[] }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, app, c) => {
       await ownerChain(tx, c, app, actor, row, true);
+      refuseEnded(row);
       const values = scheduleValue(slots);
+      const prior = await taskEvents(tx, [row.id]);
+      const head = data(latest(prior, 'pr.frozen', row.id)).head;
+      if (typeof head === 'string') {
+        const children = await tx.agentTask.findMany({ where: { appId: row.appId, parentTaskId: row.id }, select: { id: true } });
+        const history = await taskEvents(tx, children.map(t => t.id));
+        const oldSlots = latest(prior, 'review.scheduled', row.id) ? scheduled(prior, row.id) : [];
+        for (const slot of oldSlots.filter(slot => !values.includes(slot))) {
+          const current = currentAssignment(history, slot);
+          if (current?.taskId && await negativeAtHead(tx, current.taskId, head)) {
+            throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'A schedule cannot drop a slot with a negative verdict at the frozen head.');
+          }
+        }
+      }
       await record(tx, c, row, { type: 'review.scheduled', slots: values }, { 'review.schedule': values });
     }, { taskGraph: 'exclusive' });
     return { task, action: await action(ctx, task.appId, 'review.scheduled') };
   },
   freezePullRequestHead: async (_: unknown, { taskRef, head: raw }: { taskRef: string; head: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, _app, c) => {
-      assignee(actor, row); const head = headValue(raw);
+      assignee(actor, row); refuseEnded(row); const head = headValue(raw);
+      await refuseNegativeHead(tx, row, head);
       const pr = storedTaskReferences(row.references).find(r => r.kind === 'pull_request');
       if (!pr) throw taskError('PR_REFERENCE_MISSING', 'The build task needs a pull_request reference.');
       await record(tx, c, row, { type: 'pr.frozen', head, pullRequest: pr.target }, { 'pr.head': head });
@@ -196,6 +235,7 @@ export const prProtocolMutations = {
   assignReviewSeat: async (_: unknown, args: { taskRef: string; slot: string; head: string; supersedes?: string | null }, ctx: Context) => {
     const task = await mutateTask(ctx, args.taskRef, async (tx, row, actor, app, c) => {
       await ownerChain(tx, c, app, actor, row);
+      refuseEnded(row);
       if (!row.parentTaskId) throw taskError('REVIEW_SEAT_UNASSIGNED', 'A seat must be a child of the build task.');
       await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${row.parentTaskId} AND app_id = ${app.id} FOR UPDATE`;
       if (!await tx.agentTask.count({ where: { id: row.parentTaskId, appId: app.id } })) throw taskError('TASK_NOT_FOUND', 'Build task not found.');
@@ -235,11 +275,17 @@ export const prProtocolMutations = {
   recordReviewVerdict: async (_: unknown, args: { taskRef: string; head: string; verdict: ReviewVerdict; node?: string | null; receipt?: string | null }, ctx: Context) => {
     const task = await mutateTask(ctx, args.taskRef, async (tx, row, actor, _app, c) => {
       assignee(actor, row);
+      refuseEnded(row);
       if (row.status !== 'started') throw taskError('TASK_INVALID_TRANSITION', 'A verdict is recorded only on a STARTED seat.');
       const assigned = data(latest(await taskEvents(tx, [row.id]), 'review.seat.assigned', row.id));
       if (typeof assigned.slot !== 'string') throw taskError('REVIEW_SEAT_UNASSIGNED', 'The task has no assigned review seat.');
       const head = headValue(args.head);
       if (head !== assigned.head) throw taskError('REVIEW_HEAD_MISMATCH', 'The verdict head differs from the assigned head.');
+      const prior = await tx.agentTeamEvent.findFirst({ where: { taskId: row.id, type: 'review.verdict', payload: { path: ['head'], equals: head } }, orderBy: [...newest] });
+      if (prior && ['CHANGES_REQUESTED', 'FAIL', 'REFUSED'].includes(String(data(prior).verdict))
+        && !sameEventActor(prior, { workerId: currentActor().workerId, userId: c.userId ?? null })) {
+        throw taskError('REVIEW_SEAT_NOT_SUPERSEDABLE', 'Only the actor who recorded a negative verdict may re-rate it at the same head.');
+      }
       if (!(REVIEW_VERDICTS as readonly string[]).includes(args.verdict)) throw badInput('Unknown review verdict.');
       const node = optionalMetadata(args.node, 'node'), receipt = optionalMetadata(args.receipt, 'receipt');
       await record(tx, c, row, { type: 'review.verdict', slot: assigned.slot, head, verdict: args.verdict, node, receipt }, { 'review.verdict': args.verdict, 'review.node': node, 'review.receipt': receipt });
@@ -248,7 +294,7 @@ export const prProtocolMutations = {
   },
   recordReadyCall: async (_: unknown, { taskRef, head: raw }: { taskRef: string; head: string }, ctx: Context) => {
     const task = await mutateTask(ctx, taskRef, async (tx, row, actor, _app, c) => {
-      assignee(actor, row); const head = headValue(raw);
+      assignee(actor, row); refuseEnded(row); const head = headValue(raw);
       const readiness = await readinessInTx(tx, row.id, row.appId, head);
       if (!readiness.ready) throw taskError('PR_NOT_READY', 'The current seats do not serve this frozen head.', { slots: readiness.slots.filter(s => !s.counts) });
       await record(tx, c, row, { type: 'pr.ready', head }, { 'pr.ready': true });

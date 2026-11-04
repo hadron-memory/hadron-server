@@ -1282,7 +1282,7 @@ async function partyWorkerForLock(ctx: Context, appId: string, input: PartyInput
   return ref ? resolveTaskWorkerId(ctx, appId, ref) : null;
 }
 
-function refuseEnded(task: TaskRow): void {
+export function refuseEnded(task: TaskRow): void {
   if (ENDED.includes(task.status)) {
     throw taskError('TASK_ENDED', `This task is ${task.status}; an ended task never moves again.`, {
       taskId: task.id, status: task.status,

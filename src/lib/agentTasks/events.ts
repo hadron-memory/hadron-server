@@ -91,7 +91,9 @@ export type EventActor = {
   appKeyId?: string | null;
 };
 
-/** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
+/** Closed per-type payloads: ids/counts/outcomes and the explicitly prescribed PR reference fields.
+ * Task properties and free-form task content never ride these events (cor:agt:050:28).
+ */
 export type TaskEventPayload =
   | PrProtocolEvent
   | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean; /** #2646: the task a clone was made from. */ clonedFromTaskId?: string | null }
