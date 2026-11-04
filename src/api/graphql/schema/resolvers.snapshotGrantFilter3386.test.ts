@@ -33,7 +33,7 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, name: 'Caller', slug: 'caller', appId: app.id, agentId: agent.id, heldByUserId: holder.id } });
   const session = await db.session.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, workerId: worker.id, userId: holder.id, tool: 'vitest' } });
-  const schedule = async (appId: string) => db.agentSchedule.create({ data: { organizationId: org.id, appId, name: 'S', cron: '* * * * *', entryNodeUrn: 'hrn:node:filter3386.test:flows:entry' } });
+  const schedule = async (appId: string) => db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId, name: 'S', cron: '* * * * *', entryNodeUrn: 'hrn:node:filter3386.test:flows:entry' } });
   const one = await schedule(app.id), two = await schedule(app.id), foreign = await schedule(other.id);
   const grant = (appId: string, triggerId: string, revoked: boolean, i: number, triggerKind = 'SCHEDULE') => db.appAutomationTeamSnapshotGrant.create({ data: {
     appId, triggerKind, triggerId, grantedBy: holder.id, createdAt: new Date(Date.UTC(2025, 0, 1, 0, 0, i)),
