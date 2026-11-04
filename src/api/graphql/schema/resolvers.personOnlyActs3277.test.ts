@@ -75,6 +75,8 @@ const writes = async () => ({
   grants: await db.appGrant.findMany({ orderBy: { id: 'asc' } }),
   writeGrants: await db.appMemoryWriteGrant.findMany({ orderBy: { id: 'asc' } }),
   readGrants: await db.appAutomationReadGrant.findMany({ orderBy: { id: 'asc' } }),
+  teamSnapshotGrants: await db.appAutomationTeamSnapshotGrant.findMany({ orderBy: { id: 'asc' } }),
+  teamSnapshotGrantEvents: await db.appAutomationTeamSnapshotGrantEvent.findMany({ orderBy: { id: 'asc' } }),
 });
 
 const DOORS: Record<string, (c: Context) => Promise<unknown>> = {
@@ -85,6 +87,8 @@ const DOORS: Record<string, (c: Context) => Promise<unknown>> = {
   setAppMemoryWriteGrant: (c) => M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.dest.id, prefix: 'reports:x' }, c),
   // The sixth door (Ada #68814, Xanthos #68810, folded by Patrick #68818): giving an automation's read grant.
   setAutomationReadGrant: (c) => M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.dest.id, prefix: 'tasks' }, c),
+  // #3373: giving one automation its team snapshot is person-only too.
+  setAutomationTeamSnapshotGrant: (c) => M.setAutomationTeamSnapshotGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id }, c),
 };
 
 const answer = (p: Promise<unknown>) => p.then(
@@ -111,6 +115,7 @@ const EXPECTED: Record<string, Record<keyof typeof CLASSES, { code: string; mess
   // Already on the person gate on main (both grant doors): regression pins for the whole matrix.
   setAppMemoryWriteGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
   setAutomationReadGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
+  setAutomationTeamSnapshotGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
 };
 
 describe('#3277 person-only doors refuse every non-person shape, byte-identical, writing nothing', () => {
@@ -138,7 +143,7 @@ describe('#3277 person-only doors refuse every non-person shape, byte-identical,
 
 describe('#3277 a person who manages the App still succeeds at every door (regression)', () => {
   for (const [label, extra] of [['no session', {}], ['a non-worker session', 'person-session']] as const) {
-    it(`createAppKey, regenerateAppKey, grantAppKeyScope, grantApp, setAppMemoryWriteGrant, setAutomationReadGrant with ${label}`, async () => {
+    it(`createAppKey, regenerateAppKey, grantAppKeyScope, grantApp, setAppMemoryWriteGrant, setAutomationReadGrant, setAutomationTeamSnapshotGrant with ${label}`, async () => {
       const c = person(extra === 'person-session' ? { sessionId: f.personSession.id } : {});
       expect((await DOORS.createAppKey(c) as any).rawKey).toMatch(/^hdr_app_/);
       expect((await DOORS.grantAppKeyScope(c) as any).id).toBe(f.key.id);
@@ -147,6 +152,10 @@ describe('#3277 a person who manages the App still succeeds at every door (regre
       expect((await DOORS.setAppMemoryWriteGrant(c) as any).prefix).toBe('reports:x');
       await DOORS.setAutomationReadGrant(c);
       expect(await db.appAutomationReadGrant.count({ where: { revokedAt: null } })).toBe(1);
+      const snapshotGrant = await DOORS.setAutomationTeamSnapshotGrant(c) as any;
+      expect(snapshotGrant).toMatchObject({ appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, grantedBy: f.mgr.id, revokedAt: null });
+      expect(await db.appAutomationTeamSnapshotGrant.count()).toBe(1);
+      expect(await db.appAutomationTeamSnapshotGrantEvent.findMany()).toEqual([expect.objectContaining({ grantId: snapshotGrant.id, action: 'GRANT', actorUserId: f.mgr.id })]);
       expect(await DOORS.regenerateAppKey(c)).toBeTruthy();
       expect(await db.appKey.count({ where: { appId: f.app.id, revokedAt: null } })).toBe(1);
     });
@@ -179,6 +188,7 @@ describe('#3307 instructed worker remains refused at person-only doors', () => {
  grantApp:c=>M.grantApp({}, {appRef:f.app.id,workerRef:f.target.id,name:'TICKER_SUBSCRIBE_WORKERS',instruction},c),
  setAppMemoryWriteGrant:c=>M.setAppMemoryWriteGrant({}, {appRef:f.app.id,memoryRef:f.dest.id,prefix:'reports:x',instruction},c),
  setAutomationReadGrant:c=>M.setAutomationReadGrant({}, {appRef:f.app.id,triggerKind:'SCHEDULE',triggerId:f.schedule.id,memoryRef:f.dest.id,prefix:'tasks',instruction},c),
+ setAutomationTeamSnapshotGrant:c=>M.setAutomationTeamSnapshotGrant({}, {appRef:f.app.id,triggerKind:'SCHEDULE',triggerId:f.schedule.id,instruction},c),
  startImpersonation:c=>M.startImpersonation({}, {orgRef:f.org.id,userRef:(f as any).impTarget.id,reason:'fixture',instruction},c),
  };
  for(const [name,call] of Object.entries(instructed)) it(name+' refuses instruction byte-identically, no writes',async()=>{
