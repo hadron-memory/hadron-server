@@ -67,6 +67,7 @@ const FILTERS = {
   integration: { type: 'string', description: 'The name of one of this App\'s task integrations.' },
   repository: { type: 'string', description: 'owner/name: only this connected repository.' },
   team: { type: 'string', description: 'A team\'s lead worker (id, URN or name): only items carrying that team\'s label.' },
+  noTeam: { type: 'boolean', description: 'true: only items carrying none of the integration\'s team labels. false or omitted: no such filter. Refused together with team.' },
   ready: READY,
 };
 /** The filters a caller names, and nothing else: no App (the run's own), no creator. */
@@ -74,7 +75,11 @@ const filters = (args: Record<string, unknown>) => ({
   appRef: str(args.appRef) ?? null,
   integration: args.integration as string,
   repository: str(args.repository) ?? null,
-  team: str(args.team) ?? null,
+  // #3422: beside noTeam, any team value counts as supplied, so the refusal cannot be dodged by a non-string. The
+  // resolver judges both, after the run's gate; a tool's arguments are not schema-checked. A marker, never String():
+  // converting a value from the model can throw, and this runs before the gate. The resolver only asks whether it is set.
+  team: args.noTeam === true && args.team != null ? 'supplied' : str(args.team) ?? null,
+  noTeam: args.noTeam as boolean | null | undefined,
   ready: (str(args.ready) ?? null) as never,
 });
 

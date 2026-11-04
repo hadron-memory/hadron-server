@@ -65,7 +65,12 @@ import {
   type MemoryVisibility,
 } from '../../../generated/prisma/index.js';
 import { parseDataKey } from '../../../lib/crypto.js';
-import { getRequestOperationKey } from '../../../lib/requestOperationKey.js';
+import {
+  getRequestOperationKey,
+  hasRequestOperationKey,
+  requestOperationKeyStorage,
+} from '../../../lib/requestOperationKey.js';
+import { getRequestKey, requestKeyStorage, takeRequestFirstEncryption } from '../../../lib/requestKeys.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import {
   generateKdfSalt,
@@ -2446,9 +2451,12 @@ export const memoryMutations = {
         // just installed. The owning App can recover an interrupted pass by
         // proving possession of this existing key; it cannot repeat promotion
         // or choose a replacement verifier (Holger's #1644 completion ruling).
-        await memoryMutations.encryptMemory(
-          {}, { memoryId: resolvedMemoryId, dataKey: key.raw.toString('base64') }, ctx,
-        );
+        // #1796 (cor:sec:040:04): no secret as an argument, even here. The key rides this one call's
+        // request scope. The empty operation-key scope is needed: this request's operation key is
+        // already consumed, and a second claim refuses.
+        await requestKeyStorage.run(new Map([[resolvedMemoryId, key]]), () =>
+          requestOperationKeyStorage.run({}, () =>
+            memoryMutations.encryptMemory({}, { memoryId: resolvedMemoryId }, ctx)));
         return ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
       }
 
@@ -2495,20 +2503,31 @@ export const memoryMutations = {
       _: unknown,
       {
         memoryId,
-        dataKey,
-        passphrase,
+        dataKey: dataKeyArgument,
+        passphrase: passphraseArgument,
       }: { memoryId: string; dataKey?: string | null; passphrase?: string | null },
       ctx: Context,
     ) => {
       // 007-entity-id-or-urn: memoryId may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryId);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
+      // #1796 (cor:sec:040:04): the secret travels beside the operation. A first encryption's entry
+      // comes from x-hadron-memory-keys, unverified because no verifier exists yet. A completion's key
+      // is either that header's verified staged key or the owning App's x-hadron-operation-key. The
+      // arguments stay for the deprecation window. Claiming the operation key waits for the encrypted
+      // branch: it is single-use, and nothing else here needs it.
+      const headerEntry = takeRequestFirstEncryption(resolvedMemoryId);
+      const dataKey = headerEntry ? headerEntry.dataKey : dataKeyArgument;
+      const passphrase = headerEntry ? headerEntry.passphrase : passphraseArgument;
+      const stagedKey = getRequestKey(resolvedMemoryId);
+      const operationKeySupplied = hasRequestOperationKey();
       // #1644: first encryption requires the strict owner. Holger's ruling
       // also permits completion by the owning App's actual key principal,
       // under the existing verifier, without fabricating an owner identity.
       const appCompletionOnly = ctx.userId == null && !ctx.impersonation && !!ctx.appId &&
         memory.appId === ctx.appId && memory.class === 'private' &&
-        memory.userId !== null && memory.isEncrypted && !!dataKey && !passphrase;
+        memory.userId !== null && memory.isEncrypted &&
+        (!!dataKey || !!stagedKey || operationKeySupplied) && !passphrase;
       await concealUnreadableDenial(ctx, resolvedMemoryId, memoryId, async () => {
         if (!isStrictOwner(ctx, memory.userId) && !appCompletionOnly) {
           throw new GraphQLError('Only the memory owner may encrypt it.', {
@@ -2516,6 +2535,11 @@ export const memoryMutations = {
           });
         }
       });
+      if (headerEntry && (dataKeyArgument || passphraseArgument)) {
+        throw new GraphQLError('Provide exactly one of dataKey or passphrase.', {
+          extensions: { code: 'BAD_UNLOCK_INPUT' },
+        });
+      }
       // Class gate (D-2026-07-06-B, #516 resolved): 'private' is the ONLY
       // encryptable class — no exceptions. Tier 2.5's SECRET-mode memories are
       // now born class='private' (resolvers.mutation.session.ts) and the anon→
@@ -2553,7 +2577,17 @@ export const memoryMutations = {
       let kdfFields: { kdfSalt?: string; kdfParams?: InputJsonValue } = {};
       if (memory.isEncrypted) {
         try {
-          key = await resolveSuppliedKey(memory, { dataKey, passphrase });
+          // Beside the operation, not an argument. Every supplied key must prove itself against the
+          // verifier, so a mismatch between channels can't pass: an operation key is verified here,
+          // the staged key was verified at staging, and an argument below.
+          const operationKey = operationKeySupplied ? getRequestOperationKey() : null;
+          if (operationKey && !verifyDataKey(memory.keyVerifier as string, operationKey)) {
+            throw new MemoryUnlockError('Wrong passphrase or data key for this memory.', 'WRONG_KEY');
+          }
+          const besideOperation = operationKey ?? stagedKey;
+          key = besideOperation && !dataKey && !passphrase
+            ? besideOperation
+            : await resolveSuppliedKey(memory, { dataKey, passphrase });
         } catch (e) {
           if (e instanceof MemoryUnlockError) {
             throw new GraphQLError(e.message, { extensions: { code: e.code, memoryId: resolvedMemoryId } });
