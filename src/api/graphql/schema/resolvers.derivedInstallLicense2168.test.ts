@@ -5,6 +5,8 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAgentOrgGrant, createDbAgentSubscription, createDbAgentImport } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
+import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
+import { appContextIfReadable } from '../../../lib/scopes.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isAgentInstalled, isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import { mintAppRun } from '../../../jobs/appRuns.js';
@@ -72,4 +74,13 @@ it('the App holder own live grant admits mint and session, and revocation closes
   await db.agentOrgGrant.update({where:{orgId_agentId:{orgId:holder.id,agentId:target.id}},data:{revokedAt:new Date()}});
   await expect(mint()).rejects.toMatchObject({code:'AGENT_NOT_INSTALLED'});
   await expect(session()).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+});
+
+it.each(['roles','scope'] as const)('unlicensed derived Agents confer no %s authority',async(surface)=>{
+  await db.agent.update({where:{id:target.id},data:{installationPolicy:{memberRoles:['foreign-role']}}});
+  const offered=async()=>surface==='roles'?(await loadOfferedMemberRoles(db,app.id)).roles:(await appContextIfReadable(ctx(),app.id))!.agentIds;
+  const value=surface==='roles'?'foreign-role':target.id;
+  expect(await offered()).not.toContain(value);
+  await createDbAgentOrgGrant(db,holder.id,target.id);
+  expect(await offered()).toContain(value);
 });
