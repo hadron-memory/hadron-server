@@ -790,3 +790,41 @@ it('serialises an explicit install with a concurrent clear of the derived App pr
   ).toBeNull();
   expect(compiled.nodeId).toBeTruthy();
 }, 20000);
+
+it('refuses cast when the old import disappears before the edge fence and a replacement commits after that fence', async () => {
+  const transaction = db.$transaction.bind(db) as any;
+  let removed = false, inserted = false;
+  const spy = vi.spyOn(db, '$transaction').mockImplementation((async (callback: any, options: any) => {
+    if (typeof callback !== 'function') return transaction(callback, options);
+    return transaction((tx: any) => callback(new Proxy(tx, {
+      get(target, property) {
+        if (property !== '$queryRaw') return Reflect.get(target, property);
+        return async (parts: TemplateStringsArray, ...values: unknown[]) => {
+          const result = await target.$queryRaw(parts, ...values);
+          const sql = Array.from(parts).join('?');
+          if (!removed && sql.includes('FROM app_agents aa WHERE')) {
+            await db.agentImport.deleteMany({where:{parentAgentId:parent.id,importedAgentId:role.id}});
+            removed = true;
+          } else if (removed && !inserted && sql.includes('SELECT parent_agent_id,imported_agent_id FROM agent_imports')) {
+            expect(result).toEqual([]);
+            // A separate committed transaction creates an otherwise valid
+            // same-Agent witness after the deciding edge set was captured.
+            await db.agentImport.create({data:{parentAgentId:parent.id,importedAgentId:role.id,
+              position:100,required:true,agentOrgGrantOrgId:org.id,agentOrgGrantAgentId:role.id}});
+            inserted = true;
+          }
+          return result;
+        };
+      },
+    })), options);
+  }) as any);
+  try {
+    await expect(cast()).rejects.toMatchObject({extensions:{code:'WORKER_AGENT_NOT_INSTALLED'}});
+    expect(removed).toBe(true);
+    expect(inserted).toBe(true);
+    expect(await db.agentImport.count({where:{parentAgentId:parent.id,importedAgentId:role.id}})).toBe(1);
+    expect(await db.worker.count({where:{appId:app.id}})).toBe(0);
+  } finally {
+    spy.mockRestore();
+  }
+});

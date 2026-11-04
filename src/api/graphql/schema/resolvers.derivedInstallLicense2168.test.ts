@@ -106,3 +106,30 @@ it.each(['inactive','revoked','expired'] as const)('same-org derived entries can
  await expect(mint()).rejects.toMatchObject({code:'AGENT_NOT_INSTALLED'});
  await expect(session()).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
 });
+
+// Operation doors historically accept a physical ROW without an App-holder
+// license. The same target reached only by an import must not inherit that.
+it.each(['mint', 'manual', 'session'] as const)('preserves physical ROW membership at the %s operation door', async (surface) => {
+  const call = () => surface === 'mint' ? mint() : surface === 'manual'
+    ? assertManualRunAllowed(ctx(), {appRef:app.id,entryNodeUrn:entry,agentRef:target.id}) : session();
+  await expect(call()).rejects.toBeDefined();
+  await db.appAgent.create({data:{appId:app.id,agentId:target.id}});
+  expect(await isAgentInstalledAndLicensed(db,app.id,target.id)).toBe(false);
+  await expect(call()).resolves.toMatchObject({agentId:target.id});
+});
+
+// #2168 changes the installation source, not mint's pre-existing subscriber
+// lifecycle predicate. Shared manual/trigger relationship gates stay stricter.
+it.each(['unactivated', 'expired'] as const)('preserves mint subscriber semantics for a physical ROW with an %s subscription', async (state) => {
+  await db.appAgent.create({data:{appId:app.id,agentId:target.id}});
+  await createDbAgentSubscription(db,stranger.id,target.id);
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:
+    state === 'unactivated' ? {activatedAt:null} : {expiresAt:new Date(0)}});
+  expect(await hasAppRelationship(db,app.id,stranger.id)).toBe(false);
+  const run = await mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
+    triggerKind:'MANUAL',entryNodeUrn:entry,publish:false});
+  expect(run.userId).toBe(stranger.id);
+  await db.agentSubscription.updateMany({where:{userId:stranger.id,agentId:target.id},data:{revokedAt:new Date()}});
+  await expect(mintAppRun(db,{organizationId:holder.id,appId:app.id,agentId:target.id,userId:stranger.id,
+    triggerKind:'MANUAL',entryNodeUrn:entry,publish:false})).rejects.toMatchObject({code:'RELATIONSHIP_MISSING'});
+});
