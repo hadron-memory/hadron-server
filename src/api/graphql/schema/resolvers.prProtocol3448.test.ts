@@ -7,6 +7,8 @@ import { generateId } from '../../../lib/id.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import * as taskProperties from '../../../lib/agentTasks/properties.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
@@ -88,9 +90,9 @@ describe('typed PR schedule and freeze', () => {
     await schedule(['qa:portal']); await freeze();
     expect((await readiness()).slots[0].slot).toBe('qa:portal');
   });
-  it('freeze writes the head, PR reference, actor, mirror and an unmapped action', async () => {
+  it('freeze writes the head, PR reference, actor, mirror and a code-only person action', async () => {
     const r = await freeze();
-    expect(r.action).toEqual({ code: 'pr.frozen', state: 'UNMAPPED' });
+    expect(r.action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' });
     expect((await events())[0]).toMatchObject({ type: 'pr.frozen', actorUserId: author.id, payload: { head: H, pullRequest: 'https://github.com/example/project/pull/1' } });
     expect((await stored()).properties).toMatchObject({ 'pr.head': H });
   });
@@ -305,25 +307,48 @@ describe('readiness uses only event facts', () => {
       const a = await call('mutation($id:ID!){setReviewSchedule(taskRef:$id,slots:["local"]){task{id} action{code state}}}', owner.id);
       expect(a.errors).toBeUndefined(); expect(a.data.setReviewSchedule.action.code).toBe('review.scheduled');
       const b = await call(`mutation($id:ID!){freezePullRequestHead(taskRef:$id,head:"${H}"){task{id} action{code state}}}`, author.id);
-      expect(b.errors).toBeUndefined(); expect(b.data.freezePullRequestHead.action.state).toBe('UNMAPPED');
+      expect(b.errors).toBeUndefined(); expect(b.data.freezePullRequestHead.action.state).toBe('WITHHELD');
       const r = await call(`query($id:ID!){pullRequestReadiness(taskRef:$id,head:"${H}"){ready slots{slot currentTaskId state verdict head counts}}}`, other.id);
       expect(r.errors).toBeUndefined(); expect(r.data.pullRequestReadiness).toMatchObject({ ready: false, slots: [{ slot: 'local', state: 'MISSING', counts: false }] });
     } finally { await api.stop(); }
   });
-  it('resolves the emitted code through the same live register lookup as tick actions', async () => {
+  it('a person gets code-only WITHHELD without any register lookup even when Team has an entry', async () => {
     const memory = await db.memory.create({ data: { name: 'Team system', urn: `${app.urn}:system`, class: 'system', ownerUserId: author.id } });
     const agent = await db.agent.create({ data: { name: 'Team', urn: `${app.urn}:agent`, systemMemoryId: memory.id, ownerUserId: author.id } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     for (const loc of ['roles:author', 'tasks:review']) await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc, isRunnable: loc.startsWith('tasks:') } });
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'register:pr.frozen', name: 'Freeze', data: { registerEntry: { code: 'pr.frozen', taskLoc: 'tasks:review' } } } });
-    // The owning person can read their Agent's system memory. App installation alone grants no owner identity.
-    const result = await freeze();
-    expect(result.action).toEqual({ code: 'pr.frozen', state: 'MAPPED', taskLoc: 'tasks:review', taskUrn: `hrn:node:${memory.urn}:tasks:review` });
+    const spy = vi.spyOn(RegisterLookup.prototype, 'teamMemory');
+    try {
+      const result = await freeze();
+      expect(result.action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' });
+      expect(spy).not.toHaveBeenCalled();
+      expect((await events())[0].type).toBe('pr.frozen');
+    } finally { spy.mockRestore(); }
+  });
+  it('maps an Agent caller through its own chain, never the Team task at the same loc', async () => {
+    const memory = await db.memory.create({ data: { name: 'Team system', urn: `${app.urn}:team-system`, class: 'system', ownerUserId: author.id } });
+    const team = await db.agent.create({ data: { name: 'Team', urn: `${app.urn}:team-agent`, systemMemoryId: memory.id, ownerUserId: author.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: team.id } });
+    for (const loc of ['roles:author', 'tasks:review']) await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc, name: loc, isRunnable: loc.startsWith('tasks:') } });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'register:pr.frozen', name: 'Freeze', data: { registerEntry: { code: 'pr.frozen', taskLoc: 'tasks:review' } } } });
+    const roleMemory = await db.memory.create({ data: { name: 'Caller system', urn: `${app.urn}:caller-system`, class: 'system', ownerUserId: author.id } });
+    const role = await db.agent.create({ data: { name: 'Caller', urn: `${app.urn}:caller-agent`, systemMemoryId: roleMemory.id, ownerUserId: author.id } });
+    await db.node.create({ data: { id: generateId(), memoryId: roleMemory.id, loc: 'tasks:review', name: 'Caller task', isRunnable: true } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: role.id, name: 'Author', slug: 'author', heldByUserId: author.id } });
+    await db.agentTask.update({ where: { id: build.id }, data: { assigneeUserId: null, assigneeWorkerId: worker.id } });
+    const result = await runAsActor({ workerId: worker.id, agentId: role.id }, () => freeze());
+    expect(result.action).toEqual({ code: 'pr.frozen', state: 'MAPPED', taskLoc: 'tasks:review', taskUrn: `hrn:node:${roleMemory.urn}:tasks:review` });
+    await db.node.deleteMany({ where: { memoryId: memory.id, loc: 'register:pr.frozen' } });
+    expect((await runAsActor({ workerId: worker.id, agentId: role.id }, () => freeze())).action).toEqual({ code: 'pr.frozen', state: 'UNMAPPED' });
   });
   it('a failed register lookup never undoes or refuses a committed command', async () => {
+    const memory = await db.memory.create({ data: { name: 'Caller', urn: `${app.urn}:caller`, class: 'system', ownerUserId: author.id } });
+    const agent = await db.agent.create({ data: { name: 'Caller', urn: `${app.urn}:caller-agent`, systemMemoryId: memory.id, ownerUserId: author.id } });
     const spy = vi.spyOn(RegisterLookup.prototype, 'teamMemory').mockRejectedValue(new Error('synthetic lookup failure'));
     try {
-      expect((await freeze()).action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' });
+      expect((await runAsActor({ workerId: null, agentId: agent.id }, () => freeze())).action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' });
+      expect(spy).toHaveBeenCalled();
       expect((await events())[0].type).toBe('pr.frozen');
       expect((await stored()).properties).toMatchObject({ 'pr.head': H });
     } finally { spy.mockRestore(); }
