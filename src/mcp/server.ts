@@ -192,7 +192,6 @@ import {
 } from '../lib/global-search/index.js';
 import { getMemberOrgIds } from '../lib/auth/memberOrgIds.js';
 import { lockAgentDefinitionAuthority } from '../lib/auth/managedSystemMemory.js';
-import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { publishNodeWritten } from '../lib/events/nodeWritten.js';
 import { computeContentHash, isAbstractUnverified } from '../lib/contentHash.js';
 import { validateMemoryNodes, formatFindingLine } from '../lib/memoryValidation.js';
@@ -1250,14 +1249,13 @@ async function resolveParentForRead(
   memoryUrn: string | undefined,
   accessibleMemoryIds: string[] | null,
   auth: AuthContext,
-  sessionMemoryIds: Set<string> | null = null,
 ): Promise<
   | { ok: true; loc: string; memoryId?: string }
   | { ok: false; kind: 'invalid' | 'notFound'; message: string }
 > {
   const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: `Node "${parentRel}" not found.` });
   const readable = async (id: string) =>
-    await canReadMemory(db, auth, id, EXPLICIT_REF) && (!sessionMemoryIds || sessionMemoryIds.has(id));
+    await canReadMemory(db, auth, id, EXPLICIT_REF);
   try {
     const qualified = parseUrnInput(parentRel).type === 'node';
     if (hasSchemePrefix(parentRel) && !qualified) {
@@ -4466,26 +4464,9 @@ export function createMcpServerInstance(
       const trimmedParentRel = parentRel?.trim();
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
 
-      // App Key + active session hard-isolates reads to the session's memory
-      // (+ the agent's system memory) — findNodes enforces this downstream
-      // (getAccessibleMemoryIds, checked first, ahead of any role). The
-      // pre-scope memoryUrn / parentRel gates enforce the SAME boundary and
-      // preserve the contract's not-found envelope for a denied selector.
-      // The MCP point-read map also applies the session scope (#324); this
-      // explicit check keeps the envelope stable even if that map changes.
-      let sessionMemoryIds: Set<string> | null = null;
-      // #934: pure App-key shape only (`!auth.userId`) — mirrors the resolver
-      // branch's guard: a user-credential caller's session binding is
-      // heartbeat attribution, never a scope change.
-      if (auth.appId && auth.sessionId && !auth.userId) {
-        // #945: was a hand-copied duplicate of the resolver branch, so the
-        // admissibility fix would have landed on one surface only. Both now
-        // share `sessionScopedMemoryIds` — a foreign PUBLIC agent bound to the
-        // session no longer drags its system memory into scope here either.
-        sessionMemoryIds = new Set<string>(
-          await sessionScopedMemoryIds(db, auth.appId, auth.sessionId),
-        );
-      }
+      // The canonical point gate confines session-bound keys and admits the sole
+      // 0114 B exception (named PUBLIC knowledge). Do not intersect a second,
+      // narrower session-only map here: it would undo that shared read rule.
 
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
       // memory-resolvable parentRel is supplied, both stay undefined and
@@ -4526,8 +4507,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn);
         if (
           !mem ||
-          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ||
-          (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
+          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
         ) {
           return textResult(
             `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
@@ -4553,8 +4533,7 @@ export function createMcpServerInstance(
             const mem = await resolveMemoryByUrn(urn);
             if (
               !mem ||
-              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ||
-              (sessionMemoryIds && !sessionMemoryIds.has(mem.id))
+              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
             ) {
               return {
                 error: `Memory not found or invalid: '${urn}'. Use hadron_list_memories to see what is available.`,
@@ -4587,7 +4566,7 @@ export function createMcpServerInstance(
       // #2526: the explicit-parent gate is shared with list_nodes; discovery
       // cannot hide a directly readable owner memory before authorization.
       if (trimmedParentRel) {
-        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth, sessionMemoryIds);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth);
         if (!parent.ok) {
           return parent.kind === 'notFound'
             ? textResult(`No nodes found matching "${safeQuery}".`)

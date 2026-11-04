@@ -180,6 +180,8 @@ type AppNodesFilter = {
     locPrefix?: string | null;
     /** #2832 — findNodes only; rejected by both App list forms. */
     childrenOf?: string | null;
+    /** #3427 — findNodes only; rejected by both App list forms (an empty `{}` counts as present). */
+    where?: unknown;
     createdBy?: string | null;
     updatedAfter?: string | null;
     updatedBefore?: string | null;
@@ -205,6 +207,10 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   // #2832: reject an unsupported narrowing filter before any App lookup, in both list forms.
   if (filter?.childrenOf != null) {
     throw new GraphQLError('appNodes: filter.childrenOf is not supported. Use findNodes to read direct children.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  // #3427: `where` is the same kind of refusal, before the App lookup and with a fixed message (the predicate is never echoed).
+  if (filter?.where != null) {
+    throw new GraphQLError('appNodes: filter.where is not supported. Use findNodes to filter on node properties.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   const nodeTypes = nodeTypesOrRefuse(filter, 'appNodes');
   const scope = await resolveAppNodeScope(ctx, appRef);
