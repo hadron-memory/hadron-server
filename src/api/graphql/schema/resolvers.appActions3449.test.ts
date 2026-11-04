@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
+import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { runAsActor } from '../../../lib/requestActor.js';
 import { resolvers, type Context } from './resolvers.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -35,7 +38,7 @@ describe('App-defined actions', () => {
   it('accepts a 64-character code and exactly 4KiB JSON object', async () => {
     await record({ code: 'app.team.' + 'x'.repeat(55), payload: { x: 'x'.repeat(4088) } });
   });
-  it.each([[], 'text', 3, true, { x: 'x'.repeat(4089) }, { x: 'é'.repeat(2045) }])('refuses invalid payload %#', async payload => { await refused({ payload }, 'BAD_USER_INPUT'); });
+  it.each([null, [], 'text', 3, true, { x: 'x'.repeat(4089) }, { x: 'é'.repeat(2045) }].map(payload => [payload]))('refuses invalid payload %#', async payload => { await refused({ payload }, 'BAD_USER_INPUT'); });
   it('refuses an invalid App slug and malformed stored URN', async () => {
     await db.app.update({ where: { id: appId }, data: { urn: 'aa-root:bad_slug' } });
     await refused({});
@@ -58,5 +61,35 @@ describe('App-defined actions', () => {
     expect(rows.map((r: any) => r.id)).toEqual([a.eventId, b.eventId]);
     expect((await Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.team.design.', types: ['app.team.review.ready'] }, ctx())).length).toBe(0);
     await expect(Q.agentTeamEvents({}, { appRef: appId, codePrefix: 'app.' }, ctx(outsiderId))).rejects.toMatchObject({ extensions: { code: 'APP_NOT_FOUND' } });
+  });
+});
+
+describe('App actions are passive', () => {
+  it('keeps both assignment and child-finished wakes due after task-bound actions', async () => {
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    const agent = await M.createAgent({}, { orgId: app.organizationId, name: 'Action worker' }, ctx());
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name: 'Writer', slug: 'writer' } });
+    const root = await M.createAgentTask({}, { input: { appRef: appId, title: 'Parent', owner: { worker: worker.id }, assignee: { worker: worker.id } } }, ctx());
+    const actor = { workerId: worker.id, agentId: agent.id };
+    const before = (await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? [];
+    expect(before.some(w => w.taskId === root.id && w.event === 'ASSIGNED')).toBe(true);
+    await runAsActor(actor, () => record({ taskRef: root.id }));
+    const assigned = (await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? [];
+    expect(assigned.some(w => w.taskId === root.id && w.event === 'ASSIGNED')).toBe(true);
+    const child = await runAsActor(actor, () => M.createAgentTask({}, { input: { parentTaskId: root.id, title: 'Child', assignee: { user: userId } } }, ctx()));
+    await M.startAgentTask({}, { taskId: child.id }, ctx());
+    await M.finishAgentTask({}, { taskId: child.id, result: { outcome: 'succeeded' } }, ctx());
+    const finished = (await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? [];
+    expect(finished.some(w => w.taskId === child.id && w.event === 'CHILD_FINISHED')).toBe(true);
+    await runAsActor(actor, () => record({ taskRef: root.id }));
+    expect(((await pendingTaskWakes(db, [worker.id], new Date())).get(worker.id) ?? []).some(w => w.taskId === child.id && w.event === 'CHILD_FINISHED')).toBe(true);
+  });
+  it('code follows the current App slug; old events keep their original code', async () => {
+    const first = await record();
+    const app = await db.app.findUniqueOrThrow({ where: { id: appId } });
+    await db.app.update({ where: { id: appId }, data: { urn: app.urn.replace(/:team$/, ':renamed') } });
+    await refused({});
+    await record({ code: 'app.renamed.design.approved' });
+    expect((await db.agentTeamEvent.findUniqueOrThrow({ where: { id: first.eventId } })).type).toBe('app.team.design.approved');
   });
 });
