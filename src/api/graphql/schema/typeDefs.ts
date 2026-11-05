@@ -6852,6 +6852,8 @@ export const typeDefs = `#graphql
     ADOPTABLE
     "Create would store this schedule UNADOPTED: summary and hash are null and reason says which kind."
     CANNOT_BE_ADOPTED
+    "#3483 (hrn:node:hadronmemory.com:specs:cor:agt:010:01): the caller is a worker without a live permission for this entry node or the automations.schedule grant, so create would refuse. Hash, summary and reason are null: nothing is promised."
+    WORKER_NEEDS_PERMISSION
   }
 
   enum AgentSchedulePreviewReason {
@@ -6994,6 +6996,24 @@ export const typeDefs = `#graphql
     "The time-limited platform JWT (hpt) — the second factor. Store it now."
     token: String!
   }
+
+  """
+  #3483 (hrn:node:hadronmemory.com:specs:cor:agt:010:01 r40): a person's one-time permission for ONE worker to create ONE headless trigger on ONE entry node in ONE App. Expires 10 minutes after it is given; spent by the create it admits (nothing is presented: the server finds the worker's live permission for that entry node); visible to whoever manages the App. Refused while one is live for the same worker and entry node.
+  """
+  type SchedulePermission {
+    id: ID!
+    appId: ID!
+    workerId: ID!
+    entryNodeUrn: String!
+    givenBy: ID!
+    givenAt: DateTime!
+    expiresAt: DateTime!
+    consumedAt: DateTime
+    "SCHEDULE or WEBHOOK, and the trigger it admitted."
+    consumedKind: String
+    consumedId: ID
+  }
+
 
   input CreateAgentWebhookInput {
     "Optional per-run token limit (#2479): positive, no greater than the platform default at save; narrowed again at launch. Null uses the default."
@@ -8298,6 +8318,8 @@ export const typeDefs = `#graphql
     previewAutomation(triggerKind: AutomationTriggerKind!, triggerRef: String!): JSON!
     "#3457: what a schedule would do before it exists (org ADMIN of the App, checked first; writes nothing). Admin, App, Agent and timing refusals are createAgentSchedule's errors; an entry create would store UNADOPTED is the typed outcome CANNOT_BE_ADOPTED."
     previewAgentSchedule(input: PreviewAgentScheduleInput!): AgentSchedulePreview!
+    "#3483: the permissions given for an App, newest first (at most 200); whoever manages the App."
+    schedulePermissions(appRef: String!): [SchedulePermission!]!
     "#2441: the schedules and webhooks of an App that the caller may adopt, with their adoption state. Authorization first, then ordered by (name, kind, id) and paged: limit defaults to 20, maximum 50; after is the previous page's nextCursor. MANUAL triggers are never listed (consent is per run); omitted says so. Only an adopter sees any row."
     automationApprovals(appRef: String!, limit: Int = 20, after: String): AutomationApprovalPage!
     "#2441: state, hash, plain summary and graph depth for one trigger. MANUAL takes the origin run id. Same gate as approveAutomation."
@@ -11733,6 +11755,10 @@ export const typeDefs = `#graphql
     # Spec 040 — headless runs. Schedule CRUD is org-ADMIN-gated; a schedule
     # fires the launch gate (cor:acl:050) per due tick and mints an AppRun.
     createAgentSchedule(input: CreateAgentScheduleInput!): AgentSchedule!
+    """
+    #3483 (hrn:node:hadronmemory.com:specs:cor:agt:010:01): give a worker a one-time permission to create ONE trigger on this entry node. Only a person signed in to the portal who is an org ADMIN of the App, as themselves; a token, API key, App key, worker session, impersonation or run is refused, and the MCP transport has no such tool.
+    """
+    giveSchedulePermission(appRef: String!, workerRef: String!, entryNodeUrn: String!): SchedulePermission!
     updateAgentSchedule(id: ID!, input: UpdateAgentScheduleInput!): AgentSchedule!
     deleteAgentSchedule(id: ID!): Boolean!
     "Run an entry node now (MANUAL trigger) — same launch gate + kernel as a schedule."
@@ -14711,6 +14737,8 @@ export const typeDefs = `#graphql
     WORKERS_STAFF
     "Named permission for headless App-member add/remove; the holder's own member-management rights still apply. Provisioned before the separate #3308 enforcement rollout."
     APP_MEMBERS
+    "#3483 (hrn:node:hadronmemory.com:specs:cor:agt:080:24): standing permission to create and re-capture headless schedules and webhooks. A person's one-time permission (giveSchedulePermission) is the narrower alternative."
+    AUTOMATIONS_SCHEDULE
   }
 
   enum DueWakeStatus {

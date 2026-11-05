@@ -37,6 +37,7 @@ import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
+import { admissionColumns, admitTrigger, previewAdmission, spendAdmission } from '../../../lib/automation/scheduleAdmission.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
@@ -509,6 +510,9 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    // #3483: a worker-bound caller is judged before any node, Agent or timing read.
+    const admission = await admitTrigger(ctx, app.id, input.entryNodeUrn);
+    const scheduleId = generateId();
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
@@ -538,9 +542,9 @@ export const appRunMutations = {
     // entry keeps the URN path; D20 records the setup failure).
     const entryNodeId = automationPin != null && typeof automationPin === 'object' && 'entryId' in automationPin
       ? (automationPin as { entryId: string }).entryId : null;
-    return ctx.db.agentSchedule.create({
+    const createSchedule = (db: Context['db']) => db.agentSchedule.create({
       data: {
-        id: generateId(),
+        id: scheduleId,
         organizationId: app.organizationId,
         appId: app.id,
         agentId,
@@ -563,7 +567,14 @@ export const appRunMutations = {
         enabled: input.enabled ?? true,
         nextRunAt,
         createdBy: ctx.userId ?? ctx.clientId ?? null,
+        ...admissionColumns(admission),
       },
+    });
+    if (admission.kind === 'person') return createSchedule(ctx.db);
+    // #3483: the spend and the create commit together; a refused create rolls the permission back unspent.
+    return ctx.db.$transaction(async (tx) => {
+      await spendAdmission(tx as never, admission, app.id, input.entryNodeUrn, { kind: 'SCHEDULE', id: scheduleId }, ctx.userId);
+      return createSchedule(tx as never);
     });
   },
 
@@ -581,6 +592,12 @@ export const appRunMutations = {
     // The adjudicated stop-only exception cannot carry any authority-changing field.
     const disableOnly = input.enabled === false && Object.keys(input).every(key => key === 'enabled');
     if (!disableOnly || ctx.impersonation) requireStoredRunOwner(ctx, observed.userId);
+    // #3483: a re-capture (a fresh adopting pin) has create's admission; other edits keep the stored pin and are unchanged.
+    const recaptures = input.entryNodeUrn != null || input.runAsSelf != null || input.aiConfigName !== undefined
+      || (input.agentRef !== undefined && input.agentRef !== '');
+    const admission = recaptures
+      ? await admitTrigger(ctx, observed.appId, input.entryNodeUrn ?? observed.entryNodeUrn)
+      : ({ kind: 'person' } as const);
     let existing = observed;
     return withAuthorizedTx(
       ctx,
@@ -636,10 +653,12 @@ export const appRunMutations = {
             : input.scopeRef.trim() === ''
               ? null
               : await resolveScopeForTrigger(txCtx, existing.appId, input.scopeRef);
+        if (recaptures) await spendAdmission(tx as never, admission, existing.appId, input.entryNodeUrn ?? existing.entryNodeUrn, { kind: 'SCHEDULE', id }, txCtx.userId);
         return tx.agentSchedule.update({
           where: { id },
           data: {
             ...triggerBudgetPatch(input),
+            ...(recaptures && admission.kind !== 'person' ? admissionColumns(admission) : {}),
             ...(input.name != null ? { name: input.name } : {}),
             ...modeFields,
             ...(input.timezone != null ? { timezone } : {}),
@@ -752,6 +771,8 @@ export const appRunMutations = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    const admission = await admitTrigger(ctx, app.id, input.entryNodeUrn);
+    const webhookId = generateId();
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
@@ -782,10 +803,12 @@ export const appRunMutations = {
         // #2438: stamp the entry's stable id from the setup pin's own
         // resolution (same as createAgentSchedule); null on the unadopted
         // marker — that row keeps the URN path.
+        await spendAdmission(tx as never, admission, app.id, input.entryNodeUrn, { kind: 'WEBHOOK', id: webhookId }, ctx.userId);
         const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
         return tx.agentWebhook.create({
         data: {
-        id: generateId(),
+        id: webhookId,
+        ...admissionColumns(admission),
         organizationId: app.organizationId,
         appId: app.id,
         agentId,
@@ -1017,6 +1040,11 @@ export const appRunQueries = {
     ctx: Context,
   ) => {
     const app = await requireScheduleAdmin(ctx, input.appRef);
+    // #3483: a worker-bound caller learns whether create would admit it, before any node read, and gets no hash promise
+    // when it would not. Nothing is spent.
+    if (await previewAdmission(ctx, app.id, input.entryNodeUrn) === null) {
+      return { outcome: 'WORKER_NEEDS_PERMISSION', hash: null, summary: null, reason: null };
+    }
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
     const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);

@@ -74,7 +74,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_grants_live_uniq
 
 ALTER TABLE app_grants DROP CONSTRAINT IF EXISTS chk_app_grants_shape;
 ALTER TABLE app_grants ADD CONSTRAINT chk_app_grants_shape CHECK (
-  name IN ('ticker.subscribe-workers', 'workers.staff', 'app.members')
+  name IN ('ticker.subscribe-workers', 'workers.staff', 'app.members', 'automations.schedule')
 );
 
 CREATE OR REPLACE FUNCTION app_grant_grantee_same_app() RETURNS trigger AS $$

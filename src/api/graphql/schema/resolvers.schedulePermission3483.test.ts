@@ -69,11 +69,27 @@ describe('#3483 rows 2-3: a person gives a one-time permission', () => {
   it('row 2: names one worker, App and entry node; expires in 10 minutes; a manager lists it', async () => {
     const f = await fixture();
     const p = await give(f);
-    expect(p).toMatchObject({ appId: f.app.id, workerId: f.worker.id, entryNodeUrn: f.entry, givenBy: f.user.id, consumedAt: null, revokedAt: null });
+    expect(p).toMatchObject({ appId: f.app.id, workerId: f.worker.id, entryNodeUrn: f.entry, givenBy: f.user.id, consumedAt: null });
     const ms = new Date(p.expiresAt).getTime() - new Date(p.givenAt).getTime();
     expect(ms).toBe(10 * 60 * 1000);
     const listed = await Q.schedulePermissions({}, { appRef: f.app.id }, f.person);
     expect(listed.map((x: any) => x.id)).toEqual([p.id]);
+  });
+  it('row 2a: the read lists live permissions only (not spent, not expired) to a manager, and refuses everyone else', async () => {
+    const f = await fixture();
+    const spent = await give(f);
+    await wcreate(f);
+    const expired = await give(f, f.person, { workerRef: f.other.id });
+    await db.$executeRaw`UPDATE schedule_permissions SET given_at = now() - interval '20 minutes', expires_at = now() - interval '10 minutes' WHERE id = ${expired.id}`;
+    const live = await give(f, f.person, { entryNodeUrn: 'hrn:node:sp3483.test:flow:other' });
+    const rows = await Q.schedulePermissions({}, { appRef: f.app.id }, f.person);
+    expect(rows.map((x: any) => x.id)).toEqual([live.id]);
+    expect(rows.map((x: any) => x.id)).not.toContain(spent.id);
+    const m = await db.user.create({ data: { handle: 'sp3483-reader' } });
+    await db.orgMember.create({ data: { organizationId: f.org.id, userId: m.id, role: 'CONTRIBUTOR' } });
+    for (const c of [{ db, userId: m.id, roles: [] }, { db, roles: [] }]) {
+      expect((await refusal(Q.schedulePermissions({}, { appRef: f.app.id }, c as never)))?.code).toMatch(/FORBIDDEN|UNAUTHENTICATED/);
+    }
   });
   const refused: Array<[string, (f: F) => Context]> = [
     ['an API key or personal token (no portal sign-in)', f => ({ db, userId: f.user.id, roles: [], apiKeyId: 'k' }) as never],
@@ -114,7 +130,7 @@ describe('#3483 rows 4-6, 8: a worker create', () => {
   it('row 4: a live permission admits one create: ADOPTED, runs at its next time, records worker, holder and giver', async () => {
     const f = await fixture();
     const p = await give(f);
-    const s = await wcreate(f, { permissionId: p.id });
+    const s = await wcreate(f);
     expect(s).toMatchObject({ createdByWorkerId: f.worker.id, createdBy: f.user.id, admittedPermissionId: p.id, admittedGrantId: null, enabled: true });
     expect(s.nextRunAt).not.toBeNull();
     const a = await (automationPinQueries as any).automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: s.id }, f.person);
@@ -126,39 +142,69 @@ describe('#3483 rows 4-6, 8: a worker create', () => {
   it('row 5: single-use — a second create is refused; two concurrent creates admit exactly one', async () => {
     const f = await fixture();
     const p = await give(f);
-    await wcreate(f, { permissionId: p.id });
-    expect((await refusal(wcreate(f, { permissionId: p.id })))?.code).toBe('FORBIDDEN');
+    await wcreate(f);
+    expect((await refusal(wcreate(f)))?.code).toBe('FORBIDDEN');
     const q = await give(f);
-    const results = await Promise.all([wcreate(f, { permissionId: q.id, name: 'a' }), wcreate(f, { permissionId: q.id, name: 'b' })].map(refusal));
+    const results = await Promise.all([wcreate(f, { name: 'a' }), wcreate(f, { name: 'b' })].map(refusal));
     expect(results.filter(r => r === null)).toHaveLength(1);
     expect(await nSchedules()).toBe(2);
   });
   it('row 5: a refused create does not burn the permission', async () => {
     const f = await fixture();
     const p = await give(f);
-    expect((await refusal(wcreate(f, { permissionId: p.id, cron: 'garbage' })))?.code).toBe('BAD_USER_INPUT');
+    expect((await refusal(wcreate(f, { cron: 'garbage' })))?.code).toBe('BAD_USER_INPUT');
     expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).consumedAt).toBeNull();
-    await expect(wcreate(f, { permissionId: p.id })).resolves.toBeTruthy();
+    await expect(wcreate(f)).resolves.toBeTruthy();
   });
-  it('row 6: expired, consumed, revoked, another worker, another entry node, another App: one byte-identical refusal, nothing written', async () => {
+  it('row 6: expired, consumed, another worker, another entry node: one byte-identical refusal (row 8\'s), nothing written', async () => {
     const f = await fixture();
+    const none = await refusal(wcreate(f));
+    expect(none?.code).toBe('FORBIDDEN');
     const exp = await give(f);
     await db.$executeRaw`UPDATE schedule_permissions SET given_at = now() - interval '20 minutes', expires_at = now() - interval '10 minutes' WHERE id = ${exp.id}`;
-    const used = await give(f);
-    await wcreate(f, { permissionId: used.id });
-    const rev = await give(f);
-    await M.revokeSchedulePermission({}, { id: rev.id }, f.person);
-    const forOther = await give(f, f.person, { workerRef: f.other.id });
-    const forEntry = await give(f, f.person, { entryNodeUrn: 'hrn:node:sp3483.test:flow:other' });
-    const before = await nSchedules();
-    const outs = [];
-    for (const id of [exp.id, used.id, rev.id, forOther.id, forEntry.id, generateId()]) outs.push(await refusal(wcreate(f, { permissionId: id })));
-    expect(outs[0]?.code).toBe('FORBIDDEN');
-    for (const o of outs) expect(o).toEqual(outs[0]);
-    expect(await nSchedules()).toBe(before);
-    // A rival worker presenting this worker's permission is refused the same way.
-    const mine = await give(f);
-    expect(await refusal(wcreate(f, { permissionId: mine.id }, f.other, f.octx))).toEqual(outs[0]);
+    expect(await refusal(wcreate(f))).toEqual(none);
+    await give(f, f.person, { workerRef: f.other.id });
+    await give(f, f.person, { entryNodeUrn: 'hrn:node:sp3483.test:flow:other' });
+    expect(await refusal(wcreate(f))).toEqual(none);
+    expect(await nSchedules()).toBe(0);
+    // A rival worker holding no permission of its own, with this worker's live permission present, is refused the same way.
+    await give(f);
+    const rival = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: f.app.id, agentId: f.agent.id, name: 'Third', slug: 'third', heldByUserId: f.user.id } });
+    const rs = await db.session.create({ data: { id: generateId(), appId: f.app.id, agentId: f.agent.id, workerId: rival.id, userId: f.user.id, tool: 'vitest' } });
+    expect(await refusal(wcreate(f, {}, rival, { db, userId: f.user.id, roles: [], sessionId: rs.id } as never))).toEqual(none);
+    // The live permission is spent once; the next create is refused identically.
+    await wcreate(f);
+    expect(await refusal(wcreate(f, { name: 'again' }))).toEqual(none);
+  });
+  it('row 6a: mint is refused while one is live for the same worker and entry node; another pair is fine; an expired one does not block', async () => {
+    const f = await fixture();
+    const first = await give(f);
+    const second = await refusal(give(f));
+    expect(second?.code).toBe('BAD_USER_INPUT');
+    expect(second?.message).toMatch(/already has a live permission/);
+    await expect(give(f, f.person, { workerRef: f.other.id })).resolves.toBeTruthy();
+    await expect(give(f, f.person, { entryNodeUrn: 'hrn:node:sp3483.test:flow:other' })).resolves.toBeTruthy();
+    expect(await db.schedulePermission.count({ where: { workerId: f.worker.id, entryNodeUrn: f.entry } })).toBe(1);
+    await db.$executeRaw`UPDATE schedule_permissions SET given_at = now() - interval '20 minutes', expires_at = now() - interval '10 minutes' WHERE id = ${first.id}`;
+    await expect(give(f)).resolves.toBeTruthy();
+  });
+  it('row 6a: two concurrent mints admit one', async () => {
+    const f = await fixture();
+    const out = await Promise.all([give(f), give(f)].map(refusal));
+    expect(out.filter(r => r === null)).toHaveLength(1);
+    expect(await db.schedulePermission.count({ where: { workerId: f.worker.id, entryNodeUrn: f.entry } })).toBe(1);
+  });
+  it('row 8: a host-launched session holding a live permission is refused; the standing grant admits it', async () => {
+    const f = await fixture();
+    await give(f);
+    const launched = await db.session.create({ data: { id: generateId(), appId: f.app.id, agentId: f.agent.id, workerId: f.worker.id, userId: f.user.id, tool: 'vitest',
+      launchHostId: 'host1', launchOperationId: 'op-' + generateId(), launchIssuedBy: 'manager' } });
+    const lctx = { db, userId: f.user.id, roles: [] as never[], sessionId: launched.id } as unknown as Context;
+    expect((await refusal(wcreate(f, {}, f.worker, lctx)))?.code).toBe('FORBIDDEN');
+    expect((await db.schedulePermission.findFirstOrThrow()).consumedAt).toBeNull();
+    expect(await nSchedules()).toBe(0);
+    await grantRow(f);
+    await expect(wcreate(f, {}, f.worker, lctx)).resolves.toMatchObject({ admittedGrantId: expect.any(String), admittedPermissionId: null });
   });
 });
 
@@ -194,7 +240,7 @@ describe('#3483 rows 9-10: the other doors', () => {
     expect((await refusal(upd({ aiConfigName: 'x' })))?.code).toBe('FORBIDDEN');
     await expect(upd({ cron: '0 10 * * 1', name: 'renamed' })).resolves.toMatchObject({ name: 'renamed' });
     const p = await give(f, f.person, { entryNodeUrn: 'hrn:node:sp3483.test:flow:other' });
-    await expect(upd({ entryNodeUrn: 'hrn:node:sp3483.test:flow:other', permissionId: p.id })).resolves.toMatchObject({ entryNodeUrn: 'hrn:node:sp3483.test:flow:other', admittedPermissionId: p.id });
+    await expect(upd({ entryNodeUrn: 'hrn:node:sp3483.test:flow:other' })).resolves.toMatchObject({ entryNodeUrn: 'hrn:node:sp3483.test:flow:other', admittedPermissionId: p.id });
   });
   it('row 9: a person\'s re-capturing update is unchanged', async () => {
     const f = await fixture();
@@ -203,22 +249,24 @@ describe('#3483 rows 9-10: the other doors', () => {
   });
   it('row 10: a worker creates a webhook only with a permission or the grant; a person unchanged', async () => {
     const f = await fixture();
-    const hook = (c: Context, extra: Record<string, unknown> = {}, w = f.worker) =>
-      f.as(w, () => appRunMutations.createAgentWebhook({}, { input: { appRef: f.app.id, name: 'h' + generateId().slice(-6).toLowerCase(), entryNodeUrn: f.entry, agentRef: f.agent.id, runAsSelf: true, ...extra } as never }, c));
+    const hook = (c: Context, extra: Record<string, unknown> = {}) => {
+      const run = () => appRunMutations.createAgentWebhook({}, { input: { appRef: f.app.id, name: 'h' + generateId().slice(-6).toLowerCase(), entryNodeUrn: f.entry, agentRef: f.agent.id, runAsSelf: true, ...extra } as never }, c);
+      return c === f.person ? run() : f.as(f.worker, run);
+    };
     expect((await refusal(hook(f.wctx)))?.code).toBe('FORBIDDEN');
     expect(await db.agentWebhook.count()).toBe(0);
     const p = await give(f);
-    const out = await hook(f.wctx, { permissionId: p.id });
+    const out = await hook(f.wctx);
     expect(out.webhook).toMatchObject({ createdByWorkerId: f.worker.id, admittedPermissionId: p.id });
     expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).consumedKind).toBe('WEBHOOK');
-    expect((await refusal(hook(f.wctx, { permissionId: p.id })))?.code).toBe('FORBIDDEN');
+    expect((await refusal(hook(f.wctx)))?.code).toBe('FORBIDDEN');
     await expect(hook(f.person)).resolves.toBeTruthy();
   });
 });
 
 describe('#3483 row 11: preview for a worker-bound caller', () => {
   const preview = (f: F, extra: Record<string, unknown> = {}) =>
-    f.as(f.worker, () => (appRunQueries as any).previewAgentSchedule({}, { input: { ...f.input, ...extra } }, f.wctx));
+    f.as(f.worker, () => (appRunQueries as any).previewAgentSchedule({}, { input: { ...f.input, ...extra } }, f.wctx)) as Promise<any>;
   it('without a permission or grant: a typed non-admitted outcome, no hash, nothing written', async () => {
     const f = await fixture();
     const out = await preview(f);
@@ -228,7 +276,7 @@ describe('#3483 row 11: preview for a worker-bound caller', () => {
   it('with a live permission or the grant it says ADOPTABLE, and does not consume the permission', async () => {
     const f = await fixture();
     const p = await give(f);
-    expect((await preview(f, { permissionId: p.id })).outcome).toBe('ADOPTABLE');
+    expect((await preview(f)).outcome).toBe('ADOPTABLE');
     expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).consumedAt).toBeNull();
     await grantRow(f);
     expect((await preview(f)).outcome).toBe('ADOPTABLE');

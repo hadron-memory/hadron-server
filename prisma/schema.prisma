@@ -3431,6 +3431,7 @@ model App {
   /// #1747 — tickers (cor:agt:080) and the grants held by this App's workers.
   tickers                 Ticker[]
   appGrants               AppGrant[]
+  schedulePermissions     SchedulePermission[]
   wakeDays                AppWakeDay[]
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
@@ -4006,6 +4007,7 @@ model Worker {
   wakeAcks             WorkerWakeAck[]
   wakeReservation      AppWakeReservation?
   appGrants            AppGrant[]
+  schedulePermissions  SchedulePermission[]
   launchableVia        HostRegistrationWorker[]
   hostOperations       HostOperation[]
   /// #2162 — this worker's context resets (cor:agt:050:27).
@@ -4891,6 +4893,10 @@ model AgentSchedule {
   nextRunAt      DateTime? @map("next_run_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
+  /// #3483 — a worker-bound create/re-capture records the worker, and the permission or grant that admitted it. NULL for a person's own create.
+  createdByWorkerId String? @map("created_by_worker_id")
+  admittedPermissionId String? @map("admitted_permission_id")
+  admittedGrantId String? @map("admitted_grant_id")
   updatedAt      DateTime? @updatedAt @map("updated_at")
   updatedBy      String?   @map("updated_by")
   deletedAt      DateTime? @map("deleted_at")
@@ -5062,6 +5068,10 @@ model AgentWebhook {
   lastCalledAt   DateTime? @map("last_called_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   createdBy      String?   @map("created_by")
+  /// #3483 — as on AgentSchedule: the worker and the permission or grant that admitted a worker-bound create.
+  createdByWorkerId String? @map("created_by_worker_id")
+  admittedPermissionId String? @map("admitted_permission_id")
+  admittedGrantId String? @map("admitted_grant_id")
   updatedAt      DateTime? @updatedAt @map("updated_at")
   updatedBy      String?   @map("updated_by")
   deletedAt      DateTime? @map("deleted_at")
@@ -6954,6 +6964,31 @@ model AgentTaskStopHold {
 
   @@index([taskId, startedAt])
   @@map("agent_task_stop_holds")
+}
+
+/// #3483 / cor:agt:010:01 r40 — a person's one-time permission for ONE worker to create ONE headless trigger on ONE entry
+/// node in ONE App. Given only by a person signed in to the portal who could create that trigger themselves. Expires 10
+/// minutes after it is given; spent exactly once, in the same transaction as the create it admits; visible to whoever
+/// manages the App. Nothing is presented: the create finds the worker's live permission for its entry node. No revoke. A closed record, never a grant: it is not reusable and not transferable.
+model SchedulePermission {
+  id            String    @id
+  appId         String    @map("app_id")
+  workerId      String    @map("worker_id")
+  entryNodeUrn  String    @map("entry_node_urn")
+  givenBy       String    @map("given_by")
+  givenAt       DateTime  @default(now()) @map("given_at")
+  expiresAt     DateTime  @map("expires_at")
+  consumedAt    DateTime? @map("consumed_at")
+  /// 'SCHEDULE' | 'WEBHOOK' and the trigger it admitted.
+  consumedKind  String?   @map("consumed_kind")
+  consumedId    String?   @map("consumed_id")
+
+  app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([appId, givenAt])
+  @@index([workerId])
+  @@map("schedule_permissions")
 }
 
 /// #1747 — a narrow, named App grant held by a WORKER (cor:agt:080:24). One

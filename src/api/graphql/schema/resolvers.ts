@@ -54,6 +54,7 @@ import { dashboardQueries, dashboardMutations } from './resolvers.dashboard.js';
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { objectQueries, objectMutations } from './resolvers.object.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
+import { schedulePermissionMutations, schedulePermissionQueries } from './resolvers.schedulePermission.js';
 import { meteringMutations, meteringQueries } from './resolvers.metering.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
@@ -233,6 +234,7 @@ export const resolvers = {
     ...secretQueries,
     ...dashboardQueries,
     ...appRunQueries,
+    ...schedulePermissionQueries,
     ...automationPinQueries,
     ...appWriteGrantQueries,
     ...automationReadGrantQueries,
@@ -249,6 +251,7 @@ export const resolvers = {
     ...objectMutations,
     ...dashboardMutations,
     ...appRunMutations,
+    ...schedulePermissionMutations,
     ...automationPinMutations,
     ...appWriteGrantMutations,
     ...automationReadGrantMutations,
