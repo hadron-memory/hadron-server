@@ -27,7 +27,7 @@ import {
   renderSpecDocument, wikilinkTargets, inDocumentOrder,
   type ApprovalLine, type DocPart, type LinkResolution,
 } from '../../../lib/specDocument/render.js';
-import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_MAX_BYTES, SPEC_DOCUMENT_TOO_LARGE } from '../../../lib/specDocument/limits.js';
+import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_MAX_BYTES, SPEC_DOCUMENT_MAX_LINK_TARGETS, SPEC_DOCUMENT_TOO_LARGE } from '../../../lib/specDocument/limits.js';
 import { resolveNodeUrnField, typeResolvers } from './resolvers.types.js';
 import { nodeApprovalFieldResolvers } from './resolvers.nodeApproval.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
@@ -75,10 +75,12 @@ function citationOrder(root: NodeRow, nodes: NodeRow[]): NodeRow[] {
   return out;
 }
 
-async function inChunks<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+async function inChunks<T, R>(items: readonly T[], fn: (item: T) => Promise<R>, after?: (chunk: R[]) => void): Promise<R[]> {
   const out: R[] = [];
   for (let i = 0; i < items.length; i += READ_CHUNK) {
-    out.push(...(await Promise.all(items.slice(i, i + READ_CHUNK).map(fn))));
+    const chunk = await Promise.all(items.slice(i, i + READ_CHUNK).map(fn));
+    after?.(chunk);
+    out.push(...chunk);
   }
   return out;
 }
@@ -112,22 +114,24 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
     where: { memoryId, deletedAt: null, loc: { startsWith: escapeLike(prefix) } },
     take: SPEC_DOCUMENT_MAX_NODES,
   })) as unknown as NodeRow[];
-  const rows = fetched.filter((r) => r.loc.startsWith(prefix));
-  const tooLarge = (limit: 'nodes' | 'bytes') => new GraphQLError(
-    limit === 'nodes'
-      ? `A spec document covers at most ${SPEC_DOCUMENT_MAX_NODES} specs.`
-      : `A spec document covers at most ${SPEC_DOCUMENT_MAX_BYTES} bytes of specs.`,
-    { extensions: { code: SPEC_DOCUMENT_TOO_LARGE, cap: SPEC_DOCUMENT_MAX_NODES, maxBytes: SPEC_DOCUMENT_MAX_BYTES, limit } },
+  const rows = fetched;
+  const tooLarge = (limit: 'nodes' | 'bytes' | 'links') => new GraphQLError(
+    limit === 'nodes' ? `A spec document covers at most ${SPEC_DOCUMENT_MAX_NODES} specs.`
+      : limit === 'bytes' ? 'A spec document covers at most 2 MB of specs.'
+        : `A spec document resolves at most ${SPEC_DOCUMENT_MAX_LINK_TARGETS} distinct links.`,
+    { extensions: { code: SPEC_DOCUMENT_TOO_LARGE, cap: SPEC_DOCUMENT_MAX_NODES, maxBytes: SPEC_DOCUMENT_MAX_BYTES, maxLinkTargets: SPEC_DOCUMENT_MAX_LINK_TARGETS, limit } },
   );
+  const bytesOf = (t: string | null | undefined): number => (t ? Buffer.byteLength(t, 'utf8') : 0);
   if (rows.length + 1 > SPEC_DOCUMENT_MAX_NODES) throw tooLarge('nodes');
-  let stored = (rootRow.content ?? '').length;
-  for (const r of rows) stored += (r.content ?? '').length;
+  let stored = bytesOf(rootRow.content);
+  for (const r of rows) stored += bytesOf(r.content);
   if (stored > SPEC_DOCUMENT_MAX_BYTES) throw tooLarge('bytes');
   const root = rootRow as unknown as NodeRow;
   // Document order: the Feature, then the type groups; citation order inside a group.
   const ordered = [root, ...inDocumentOrder(citationOrder(root, [root, ...rows]))];
 
   // Per-part reads, as `node(...)` would answer this caller.
+  let served = 0;
   const reads = await inChunks(ordered, async (n) => {
     const [revision, approval, mint, content] = await Promise.all([
       asField<number>(typeResolvers.Node.revision)(n, {}, ctx),
@@ -136,6 +140,10 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
       n.isPlaceholder ? Promise.resolve(null) : asField<string | null>(typeResolvers.Node.content)(n, {}, ctx),
     ]);
     return { n, revision, approval, mint, content, urn: await resolveNodeUrnField(n, ctx) };
+  }, (chunk) => {
+    // What `entries[].content` serves, includes resolved: counted as each chunk returns, before the next read.
+    for (const r of chunk) served += bytesOf(r.content);
+    if (served > SPEC_DOCUMENT_MAX_BYTES) throw tooLarge('bytes');
   });
 
   // Retirement: the `superseded` tag, with pointers from `superseded-by*` edges (readable targets only).
@@ -173,6 +181,7 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
   const inDoc = new Map(reads.map((r) => [r.n.id, r.n]));
   const targets = new Set<string>();
   for (const p of parts) if (!p.isPlaceholder && p.body) for (const t of wikilinkTargets(p.body)) targets.add(t);
+  if (targets.size > SPEC_DOCUMENT_MAX_LINK_TARGETS) throw tooLarge('links');
   const links = new Map<string, LinkResolution>();
   for (const t of targets) links.set(t, await linkFor(ctx, memoryId, t, inDoc, root));
 
@@ -185,7 +194,7 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
     links,
   });
 
-  if (markdown.length > SPEC_DOCUMENT_MAX_BYTES) throw tooLarge('bytes');
+  if (bytesOf(markdown) > SPEC_DOCUMENT_MAX_BYTES) throw tooLarge('bytes');
 
   return {
     memoryId,

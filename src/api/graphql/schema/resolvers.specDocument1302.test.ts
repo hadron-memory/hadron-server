@@ -11,7 +11,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { specDocumentClock } from './resolvers.specDocument.js';
-import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_MAX_BYTES } from '../../../lib/specDocument/limits.js';
+import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_MAX_BYTES, SPEC_DOCUMENT_MAX_LINK_TARGETS } from '../../../lib/specDocument/limits.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -304,6 +304,34 @@ describe('review round 1 (#3535 LOCAL, SECURITY, UX)', () => {
       const taken = spy.mock.calls.map((c) => (c[0] as { take?: number } | undefined)?.take);
       expect(taken).toContain(SPEC_DOCUMENT_MAX_NODES);
     } finally { spy.mockRestore(); }
+  });
+
+  it('the bound counts what entries serve (includes resolved), though a superseded part shows no Markdown', async () => {
+    await spec('src:1', 'Rule: Big source', 'y'.repeat(900_000));
+    await spec('srv:1', 'Feature: Served', 'root');
+    for (let i = 1; i <= 3; i += 1) {
+      await spec(`srv:1:${i}`, `Rule: Old ${i}`, '{{> src:1}}', { tags: ['superseded'] });
+    }
+    expect(await read('srv:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'bytes' } });
+  });
+
+  it('the bound is UTF-8 bytes, not characters', async () => {
+    await spec('eur:1', 'Feature: Euro', 'root');
+    await spec('eur:1:1', 'Rule: Euro', '€'.repeat(Math.ceil(SPEC_DOCUMENT_MAX_BYTES / 3) + 10));
+    expect(await read('eur:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'bytes' } });
+  });
+
+  it('too many distinct links refuse before any is resolved', async () => {
+    await spec('lnk:1', 'Feature: Links', 'root');
+    const links = Array.from({ length: SPEC_DOCUMENT_MAX_LINK_TARGETS + 1 }, (_, i) => `[[nowhere:${i}]]`).join(' ');
+    await spec('lnk:1:1', 'Rule: Links', links);
+    expect(await read('lnk:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'links' } });
+  });
+
+  it('a deleted descendant is not part of the document', async () => {
+    await spec('del:1', 'Feature: Del', 'root');
+    await spec('del:1:1', 'Rule: Gone', 'gone', { deletedAt: new Date() });
+    expect((await read('del:1')).entries.map((e) => e.loc)).toEqual(['del:1']);
   });
 
   it('over the byte bound it refuses with the named code and shortens nothing', async () => {
