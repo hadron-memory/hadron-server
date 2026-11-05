@@ -28,9 +28,9 @@ let agent: { id: string };
 let teamChannel: { id: string };
 const w: Record<string, { id: string }> = {};
 
-/** The shared base fixture; GitHub identity is unrelated to the alarm/access scenarios (#3118). */
+/** No GitHub ID is needed here: the old randomized ID overlapped all three outsider IDs (#3118). */
 const createBaseUser = (suffix: string) =>
-  db.user.create({ data: { id: generateId(), githubId: 98_100 + Math.floor(Math.random() * 1000), githubUsername: `dark-${suffix}`, roles: ['READER'] } });
+  db.user.create({ data: { id: generateId(), githubUsername: `dark-${suffix}`, roles: ['READER'] } });
 
 beforeEach(async () => {
   await cleanDb(db);
