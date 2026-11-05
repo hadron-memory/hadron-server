@@ -126,7 +126,7 @@ describe('#3426 designation and the save-time gate', () => {
     const cases: Array<[Partial<Context>, string, string | null]> = [
       [as(userA), 'USER', null],
       [as(admin), 'APP', app.id],
-      [as(platformAdmin), 'HADRON_SERVER', null],
+      [as(platformAdmin, { roles: ['ADMIN'] }), 'HADRON_SERVER', null],
     ];
     for (const [ctx, t, o] of cases) {
       const c = await gql(ctx, CREATE_TPL, { t, o, i: { name: `x-${t.toLowerCase()}`, orgDefault: true } });
@@ -163,13 +163,15 @@ describe('#3426 designation and the save-time gate', () => {
     for (const ref of [privTask, groupTask, sysTask, appTask]) {
       const r = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: `d${seq++}`, orgDefault: true, rules: [rule('spec', ref)] } });
       expect(errCode(r), ref.urn).toBe('NODE_NOT_FOUND');
-      // The same rule is fine in a template that is not a default: the org gate is the default's, not the template's.
-      const fine = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: `n${seq++}`, rules: [rule('spec', ref)] } });
-      expect(fine.errors, ref.urn).toBeUndefined();
+      // The same rule is fine in a template that is not a default (where the admin reads it): the org gate is the default's.
+      if (ref === privTask || ref === groupTask) {
+        const fine = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: `n${seq++}`, rules: [rule('spec', ref)] } });
+        expect(fine.errors, ref.urn).toBeUndefined();
+      }
     }
     const foreign = await mkMem({ organizationId: otherOrg.id, urn: 'other.com:secret' });
     const ft = await mkTask(foreign.id, 'other.com', 'secret', 'tasks:f');
-    const r = await gql(as(platformAdmin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'pa', orgDefault: true, rules: [rule('spec', ft)] } });
+    const r = await gql(as(platformAdmin, { roles: ['ADMIN'] }), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'pa', orgDefault: true, rules: [rule('spec', ft)] } });
     expect(errCode(r)).toBe('NODE_NOT_FOUND');
   });
 
@@ -342,7 +344,7 @@ describe('#3426 skipped references leave a concealed record (C6)', () => {
   it('a non-manager creator sees no signal in the response, and cannot read the record', async () => {
     await tpl('skippy', [rule('spec', taskA)], { orgDefault: true });
     await db.node.update({ where: { id: taskA.id }, data: { deletedAt: new Date() } });
-    const r = await gql(as(granted), CREATE_MEMORY, { o: org.id, n: 'skip2', c: 'knowledge' });
+    const r = await gql(as(granted), CREATE_MEMORY, { o: org.id, n: 'quiet2', c: 'knowledge' });
     expect(r.errors).toBeUndefined();
     expect(JSON.stringify(r.data)).not.toMatch(/skip|warn|template|REFERENCE/i);
     const id = r.data!.createMemory.id;
