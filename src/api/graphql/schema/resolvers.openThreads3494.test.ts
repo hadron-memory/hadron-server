@@ -113,9 +113,16 @@ it('ANDs role/prefix/direct-child/type/runnability and preserves SYSTEM memory e
 it('outsider, App key and a real persisted run never discover or count another tenant', async () => {
   const out=await db.user.create({data:{handle:`outsider-${generateId()}`}});
   const org=await db.organization.create({data:{name:'elsewhere',urn:`elsewhere-${generateId()}.test`}});
-  const {app}=await createDbAppWithKey(db,'elsewhere',org.id);
+  const {app,appKey}=await createDbAppWithKey(db,'elsewhere',org.id);
+  await db.orgMember.create({data:{organizationId:org.id,userId:out.id,role:'ADMIN'}});
+  await db.appMember.create({data:{appId:app.id,userId:out.id,role:'member'}});
+  const ownMemory=await db.memory.create({data:{class:'app',appId:app.id,organizationId:org.id,name:'own',urn:`own-${generateId()}.test`}});
+  const ownNode=await db.node.create({data:{memoryId:ownMemory.id,loc:'own:thread',name:'own'}});
+  await M.createComment(null,{targetRef:ownNode.id,body:'own open thread'},ctx(out.id));
   const run=await db.appRun.create({data:{id:generateId(),organizationId:org.id,appId:app.id,triggerKind:'SCHEDULE',triggerId:generateId(),entryNodeUrn:'hrn:node:elsewhere.test:missing:entry',status:'RUNNING'}});
-  for(const principal of [ctx(out.id),{db,appId:app.id,roles:[],organizationId:org.id}, {...runContext(db,run),db}]) {
+  for(const principal of [ctx(out.id),{db,appId:app.id,appKeyId:appKey.id,roles:[],organizationId:org.id}, {...runContext(db,run),db}]) {
+    const own=await Q.findNodes(null,{filter:{memoryIds:[ownMemory.id],hasOpenThreads:true},includeTotal:true},principal);
+    expect(own.hits.map((h:any)=>h.node.id)).toEqual([ownNode.id]);expect(own.total).toBe(1);
     const result=await Q.findNodes(null,{filter:filter(true),includeTotal:true},principal);
     expect(result.hits).toEqual([]);expect(result.total).toBe(0);
   }
