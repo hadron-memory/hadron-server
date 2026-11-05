@@ -102,9 +102,12 @@ export class ContentValidationRefusal extends GraphQLError {
  */
 export async function deriveReporter(
   db: Pick<Prisma.TransactionClient, 'appRun'>,
-  ctx: { clientId?: string | null; appId?: string | null; userId?: string | null; appKeyId?: string | null; impersonation?: unknown },
+  ctx: { clientId?: string | null; appId?: string | null; userId?: string | null; appKeyId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean },
 ): Promise<ContentValidationReporter> {
   if (ctx.impersonation) throw new ContentValidationRefusal('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+  // #1705: the request named a session that did not bind. Its actor would have been that
+  // session's worker; recording it as the bare credential would misattribute the report.
+  if (ctx.sessionBindingRefused) throw new ContentValidationRefusal('CONTENT_VALIDATION_REPORTER_UNKNOWN');
   if (isRunPrincipal(ctx)) {
     const runId = ctx.clientId!.slice(RUN_CLIENT_PREFIX.length);
     const run = runId && ctx.appId
@@ -198,6 +201,8 @@ export interface ContentValidationReportResult {
   report: NodeContentValidationReport;
   /** True when an earlier report with the same runId was returned and nothing was written. */
   replayed: boolean;
+  /** The node's revision number under this transaction's lock, in the authorized memory. */
+  lockedNodeRevision: number;
 }
 
 /** The node's validation rules: each rule key of its current state that names or requires a validation task. */
@@ -285,7 +290,7 @@ export async function recordContentValidationReportInTx(
           stored.nodeRevSeq === input.nodeRevision &&
           stored.validationTaskId === task.id &&
           stored.validationTaskRevSeq === input.validationTaskRevision) {
-        return { report: stored, replayed: true };
+        return { report: stored, replayed: true, lockedNodeRevision: node.rev_seq };
       }
       throw new ContentValidationRefusal('CONTENT_VALIDATION_RUN_ID_CONFLICT');
     }
@@ -304,7 +309,7 @@ export async function recordContentValidationReportInTx(
       ...reporterColumns(input.reporter),
     },
   });
-  return { report, replayed: false };
+  return { report, replayed: false, lockedNodeRevision: node.rev_seq };
 }
 
 /**

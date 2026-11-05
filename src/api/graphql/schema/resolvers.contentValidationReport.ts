@@ -117,7 +117,7 @@ export const contentValidationReportMutations = {
       if (!isValidationRunIdUniqueViolation(error)) throw error;
       result = await record();
     }
-    const { report, replayed } = result;
+    const { report, replayed, lockedNodeRevision } = result;
     const task = await ctx.db.node.findFirst({
       where: { id: report.validationTaskId, deletedAt: null },
       select: { loc: true, memoryId: true },
@@ -125,10 +125,12 @@ export const contentValidationReportMutations = {
     const validationTaskRef = task && (await isMemoryReadableCached(ctx, task.memoryId))
       ? await resolveNodeUrnField(task, ctx)
       : null;
-    const current = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, memoryId: true } });
-    const status = current
-      ? await resolveContentValidation({ nodeId, memoryId: current.memoryId, revSeq: current.revSeq }, ctx)
-      : { state: 'UNVALIDATED' };
+    // The state is projected only inside the memory the write was authorized for. A node that
+    // moved or was deleted after the commit answers from the authorized (node, memory, locked
+    // revision) snapshot: following it would project a memory this call never gated.
+    const current = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, memoryId: true, deletedAt: true } });
+    const revSeq = current && !current.deletedAt && current.memoryId === memoryId ? current.revSeq : lockedNodeRevision;
+    const status = await resolveContentValidation({ nodeId, memoryId, revSeq }, ctx);
     return {
       nodeId,
       replayed,

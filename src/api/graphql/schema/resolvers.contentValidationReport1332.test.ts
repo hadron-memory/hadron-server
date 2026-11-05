@@ -450,7 +450,8 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
         return async (a: { where?: { id?: string }; select?: Record<string, boolean> }) => {
           if (!moved && a.where?.id === nodeId && a.select?.revSeq && (await reportCount()) === 1) {
             moved = true;
-            await db.node.update({ where: { id: nodeId }, data: { memoryId: hidden } });
+            // An edit there (revSeq 2) must not surface either: the receipt would read STALE.
+            await db.node.update({ where: { id: nodeId }, data: { memoryId: hidden, revSeq: 2 } });
             await db.nodeContentValidationReport.create({ data: { nodeId, memoryId: hidden, nodeRevSeq: 1, validationTaskId: validationTask, validationTaskRevSeq: 1, outcome: 'FAIL' } });
           }
           return (model.findUnique as (x: unknown) => unknown)(a);
