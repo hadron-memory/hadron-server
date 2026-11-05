@@ -473,6 +473,10 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
     expect(await refusal(report(refused({ appKeyId: 'ak' } as Partial<Context>)))).toBe('SESSION_NOT_BOUND');
     // Refusals 1-2 still come first: a non-reader learns nothing from a refused binding.
     expect(await refusal(report(person(stranger, { sessionBindingRefused: true } as Partial<Context>)))).toBe('NODE_NOT_FOUND');
+    // LOCAL Bruno P2 on c6aaa739: a reader who is not a writer gets FORBIDDEN, as without a
+    // session; the refused binding never answers ahead of the writer gate.
+    expect(await refusal(report(person(ann, { sessionBindingRefused: true } as Partial<Context>)))).toBe('FORBIDDEN');
+    expect(await refusal(report(person(leo, { sessionBindingRefused: true, impersonation: { orgId } } as Partial<Context>)))).toBe('FORBIDDEN');
     expect(await reportCount()).toBe(0);
     // The reporter derivation refuses it too, for any other caller of the rule.
     const { deriveReporter } = await import('../../../lib/contentValidationReport.js');
