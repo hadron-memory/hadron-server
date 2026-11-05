@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readFileSync, readdirSync } from 'node:fs';
 import ts from 'typescript';
-import { buildSchema, parse } from 'graphql';
+import { buildSchema, parse, type GraphQLObjectType } from 'graphql';
 import { getComplexity, simpleEstimator } from 'graphql-query-complexity';
 import { createServer } from '../../server.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
@@ -100,9 +100,9 @@ it('legacy appNodes omitted/null costs its real20 default, but stated sizes rema
   expect(PAGE_ARGS_FIELDS.has('Query.appNodes')).toBe(false);
 });
 
-it('every direct or local-helper pageArgs-backed Query *Page resolver is registered', () => {
+it('every direct or local-helper pageArgs-backed resolver is registered, including non-Page names', () => {
   const folder = new URL('./schema/', import.meta.url);
-  const queryFields = schema.getQueryType()!.getFields();
+  const types = ['Query', 'AgentTask', 'AgentTaskResult'].map(name => [name, (schema.getType(name) as GraphQLObjectType).getFields()] as const);
   const discovered = new Set<string>();
   for (const file of readdirSync(folder).filter(f => f.startsWith('resolvers.') && f.endsWith('.ts') && !f.endsWith('.test.ts'))) {
     const source = ts.createSourceFile(file, readFileSync(new URL(file, folder), 'utf8'), ts.ScriptTarget.Latest, true);
@@ -111,7 +111,10 @@ it('every direct or local-helper pageArgs-backed Query *Page resolver is registe
     const scan = (n: ts.Node) => {
       if (ts.isFunctionDeclaration(n) && n.name && n.body) functions.set(n.name.text, n.body);
       if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) functions.set(n.name.text, n.initializer);
-      if (ts.isPropertyAssignment(n) && (ts.isIdentifier(n.name) || ts.isStringLiteral(n.name)) && n.name.text.endsWith('Page') && queryFields[n.name.text]) candidates.push([n.name.text, n.initializer]);
+      if (ts.isPropertyAssignment(n) && (ts.isIdentifier(n.name) || ts.isStringLiteral(n.name))) {
+        const name = n.name.text;
+        for (const [type, fields] of types) if (fields[name]) candidates.push([`${type}.${name}`, n.initializer]);
+      }
       ts.forEachChild(n, scan);
     };
     scan(source);
@@ -130,7 +133,7 @@ it('every direct or local-helper pageArgs-backed Query *Page resolver is registe
       };
       visit(n); return found;
     };
-    for (const [name, body] of candidates) if (reachesPageArgs(body)) discovered.add(`Query.${name}`);
+    for (const [name, body] of candidates) if (reachesPageArgs(body)) discovered.add(name);
   }
   expect(discovered.size).toBeGreaterThan(10);
   expect([...discovered].filter(key => !PAGE_ARGS_FIELDS.has(key)).sort()).toEqual([]);
