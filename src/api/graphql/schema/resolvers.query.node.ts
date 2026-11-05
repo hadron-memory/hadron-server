@@ -1633,8 +1633,8 @@ export const nodeQueries = {
         // → run the filtered browse in SQL (ordered ids), then hydrate. The plain
         // browse (no where, no property sort) keeps the Prisma path below.
         // #2832: the direct-children filter is a SQL expression Prisma cannot write, so it takes this path too.
-        // Order A (pending Holger, rulings item 7): a children read is a sibling list, so unless the caller names a sort it
-        // comes in cor:dmo:020:01 order (Node.seq first, then loc). A different ruling changes only this default.
+        // cor:api:090:02, ruling 0121 (A): a children read is a sibling list, so unless the caller names a sort it
+        // comes in cor:dmo:020:01 order (Node.seq first, then loc).
         if (f.where != null || sortProperty != null || f.childrenOf != null) {
           const browseSort: BrowseSort | undefined =
             sort === 'seq' ? 'seq' : sort === 'updatedAt' ? 'updatedAt' : (sort == null || sort === 'relevance') && f.childrenOf != null ? 'seq' : undefined;
