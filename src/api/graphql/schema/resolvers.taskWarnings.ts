@@ -28,14 +28,14 @@
  */
 import type { GraphQLResolveInfo } from 'graphql';
 import type { Prisma } from '../../../generated/prisma/index.js';
-import type { Context } from './resolvers.helpers.js';
+import { withoutRequestCaches, type Context } from './resolvers.helpers.js';
 import { appendTaskEvent, eventActor, RECORDED_TASK_WARNING_CODES, type EventActor, type RecordedTaskWarningCode } from '../../../lib/agentTasks/events.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { loadAvailabilityByFamily } from '../../../lib/agentTasks/availability.js';
 import { loadWorkerCheckStatuses } from '../../../lib/workerCheckStatus.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
-import { locateTeamAgent, maySeeWorkerInternals } from './resolvers.worker.js';
-import { registerEntry, nearestRoleTask } from '../../../lib/actionRegister/lookup.js';
+import { maySeeWorkerInternals } from './resolvers.worker.js';
+import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
+import { answerWithLookup } from '../../../lib/actionRegister/answerCore.js';
 export { registerTaskLoc } from '../../../lib/actionRegister/lookup.js';
 
 export const TASK_WARNING_CODES = [
@@ -74,7 +74,11 @@ export const TASK_WARNING_TEXT: Record<TaskWarningCode, string> = {
 export type TaskWarningRegister =
   | { state: 'mapped'; taskLoc: string; taskUrn: string }
   | { state: 'unmapped' }
-  | { state: 'unresolved' };
+  | { state: 'unresolved' }
+  /** #3491, ruling 0176: an unreadable system memory on a chain, or a failed lookup. Says nothing about what the chain holds. */
+  | { state: 'withheld' };
+
+const WITHHELD_REGISTER: TaskWarningRegister = { state: 'withheld' };
 
 export type TaskWarning = { code: TaskWarningCode; text: string; register?: TaskWarningRegister };
 
@@ -232,7 +236,8 @@ export async function emitTaskWarnings(
           }
         });
       } catch {
-        // The gate stays unanswered ⇒ the three facts are dropped below; the register stays code + text.
+        // The gate stays unanswered ⇒ the three facts are dropped below. A register that was to be read is withheld (#3491).
+        if (agentId) for (const c of decided) if (!state.registers.has(keyOf(c)) && (!isFactCode(c) || state.gate.get(appId) === true)) state.registers.set(keyOf(c), WITHHELD_REGISTER);
       } finally {
         state.spentMs += Date.now() - started;
       }
@@ -307,30 +312,26 @@ async function resolveRegistersIn(
   deadline: number,
 ): Promise<void> {
   if (codes.length === 0) return;
-  const caller = await tx.agent.findUnique({ where: { id: agentId }, select: { systemMemoryId: true, deletedAt: true } });
-  if (!state.team.has(appId)) {
-    let team: Awaited<ReturnType<typeof locateTeamAgent>> | null = null;
-    try {
-      team = await locateTeamAgent(txCtx, appId, undefined);
-    } catch {
-      team = null; // zero or several Team Agents: nothing to map through, never a guess
+  const keyOf = (code: TaskWarningCode) => `${appId}\u0000${agentId}\u0000${code}`;
+  const c = withoutRequestCaches(txCtx, tx);
+  // The ONE gate (#3491, ruling 0176): the shared lookup, whole chains, the same answer as every action answer.
+  const lookup = new RegisterLookup(tx, c, appId, deadline, false, state.team.has(appId) ? state.team.get(appId) : undefined);
+  let reached = 0;
+  try {
+    for (const code of codes) {
+      if (Date.now() >= deadline) break; // aggregate bound: the rest are withheld below
+      const answer = await answerWithLookup(lookup, c, code, agentId);
+      state.registers.set(keyOf(code), answer.state === 'MAPPED' ? { state: 'mapped', taskLoc: answer.taskLoc!, taskUrn: answer.taskUrn! }
+        : answer.state === 'UNMAPPED' ? { state: 'unmapped' } : answer.state === 'UNRESOLVED' ? { state: 'unresolved' } : WITHHELD_REGISTER);
+      reached += 1;
     }
-    state.team.set(appId, team?.systemMemoryId ?? null);
+    if (!state.team.has(appId)) state.team.set(appId, await lookup.teamMemory());
+  } catch {
+    // Fixed category only: never log the caller, the code or the failure.
+    console.warn('task_warning.register_failed');
   }
-  const teamMemoryId = state.team.get(appId) ?? null;
-  const readable = async (memoryId: string): Promise<boolean> => canReadMemory(tx as never, txCtx as never, memoryId);
-  for (const code of codes) {
-    if (Date.now() >= deadline) return; // aggregate bound: the rest stay code + text only
-    const key = `${appId}\u0000${agentId}\u0000${code}`;
-    if (!teamMemoryId) { state.registers.set(key, { state: 'unmapped' }); continue; }
-    const entry = await registerEntry(tx, teamMemoryId, code, readable);
-    const taskLoc = entry?.taskLoc;
-    if (!taskLoc) { state.registers.set(key, { state: 'unmapped' }); continue; }
-    if (!caller || caller.deletedAt || !caller.systemMemoryId) { state.registers.set(key, { state: 'unresolved' }); continue; }
-    const task = (await nearestRoleTask(tx, caller.systemMemoryId, taskLoc, readable))?.task;
-    if (!task) { state.registers.set(key, { state: 'unresolved' }); continue; }
-    state.registers.set(key, { state: 'mapped', taskLoc: task.loc, taskUrn: task.urn });
-  }
+  // A failed or timed-out lookup is withheld, never a guess and never an error to the call.
+  for (const code of codes.slice(reached)) state.registers.set(keyOf(code), WITHHELD_REGISTER);
 }
 
 type RegisterOutcome = Map<TaskWarningCode, TaskWarningRegister>;
@@ -350,7 +351,8 @@ export async function resolveRegisters(ctx: Context, appId: string, codes: reado
       await resolveRegistersIn(tx, txCtx, state, appId, agentId, codes, deadline);
     });
   } catch {
-    state.registers.clear();
+    // The read transaction itself failed: nothing was answered, so every code is withheld.
+    for (const code of codes) state.registers.set(`${appId}\u0000${agentId}\u0000${code}`, WITHHELD_REGISTER);
   }
   for (const code of codes) {
     const r = state.registers.get(`${appId}\u0000${agentId}\u0000${code}`);
