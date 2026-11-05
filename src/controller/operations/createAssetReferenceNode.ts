@@ -169,7 +169,7 @@ export async function createAssetReferenceNode(
     } as never,
     ctx,
     'create',
-    { authoring: attestedAuthoring(null) },
+    { authoring: attestedAuthoring(ctx) },
   );
 
   logAssetEvent({

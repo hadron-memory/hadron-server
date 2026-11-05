@@ -1108,7 +1108,7 @@ const syncGraphFromGithubAsSystem = async (
             priorRole: prior?.role ?? null, priorRunnable: prior?.isRunnable ?? null,
             role: merged.role, runnable: merged.isRunnable,
             authoredChange: prior === null || authoredContentChanged(diffNodeChanges(prior, comparable)),
-          }, attestedAuthoring(parseMirroredAuthoredWith((node as { authoredWith?: unknown }).authoredWith)));
+          }, attestedAuthoring(null, parseMirroredAuthoredWith((node as { authoredWith?: unknown }).authoredWith)));
           if (!verdict.refused) {
             authoredStamp = verdict.stamp;
             return false;

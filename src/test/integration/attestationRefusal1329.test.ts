@@ -20,13 +20,15 @@ import { signJwt } from '../../auth/jwt.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-const fault = vi.hoisted(() => ({ memoryId: null as string | null }));
+const fault = vi.hoisted(() => ({ memoryId: null as string | null, onTransaction: [] as boolean[] }));
 vi.mock('../../api/graphql/schema/resolvers.helpers.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/graphql/schema/resolvers.helpers.js')>();
   return {
     ...actual,
-    isMemoryReadableFresh: (...args: Parameters<typeof actual.isMemoryReadableFresh>) =>
-      (args[1] === fault.memoryId ? Promise.reject(new Error('connection terminated unexpectedly')) : actual.isMemoryReadableFresh(...args)),
+    isMemoryReadableFresh: (...args: Parameters<typeof actual.isMemoryReadableFresh>) => {
+      fault.onTransaction.push(args[2] !== undefined);
+      return args[1] === fault.memoryId ? Promise.reject(new Error('connection terminated unexpectedly')) : actual.isMemoryReadableFresh(...args);
+    },
   };
 });
 
@@ -92,6 +94,7 @@ afterAll(async () => { await new Promise((resolve) => server.close(resolve)); })
 
 beforeEach(async () => {
   fault.memoryId = null;
+  fault.onTransaction = [];
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'attest-1329', urn: 'attest-1329' } });
   const other = await db.organization.create({ data: { id: generateId(), name: 'attest-1329-other', urn: 'attest-1329-other' } });
@@ -170,6 +173,45 @@ describe('#1329 a readable task', () => {
   });
 });
 
+describe('#1329 every MCP writer carries the structured refusal', () => {
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const client = new Client({ name: 'attest-1329', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${apiKey}` } },
+    }));
+    try {
+      return await client.callTool({ name, arguments: args }) as { isError?: boolean; content: Array<{ text: string }>; structuredContent?: { error: Record<string, unknown> } };
+    } finally {
+      await client.close();
+    }
+  };
+  const A = 'hrn:node:attest-1329:mem:a';
+  const P = 'hrn:node:attest-1329:mem:p';
+  const T = 'hrn:node:attest-1329:mem:t';
+  const tools: Array<[string, string, () => Record<string, unknown>]> = [
+    ['hadron_create_node', 'a fresh create', () => ({ urn: `${A}-new`, name: 'n', content: 'x', role: 'guide' })],
+    ['hadron_create_node', 'over a tombstone', () => ({ urn: T, name: 't', content: 'x', role: 'guide' })],
+    ['hadron_update_node', 'an edit', () => ({ urn: A, content: 'changed' })],
+    ['hadron_update_node_data', 'a data merge', () => ({ nodeUrn: A, data: { k: 1 } })],
+    ['hadron_replace_text', 'a replace', () => ({ nodeUrns: [A], oldText: 'first', newText: 'second', fields: ['content'] })],
+    ['hadron_create_parent_node', 'a section re-save', () => ({ urn: P, title: 'renamed' })],
+    ['hadron_move_node', 'a rename', () => ({ urn: A, targetUrn: `${A}-moved`, renameToLeaf: true })],
+  ];
+  it.each(tools)('%s, %s', async (name, _label, args) => {
+    const claim = { task: readableTaskId, revision: 3 };
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'a', name: 'a', content: 'first', role: 'guide' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'p', name: 'p', content: 'first', role: 'guide', nodeType: 'parent' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 't', name: 't', content: 'gone', role: 'guide', deletedAt: new Date() } });
+    const result = await call(name, args());
+    expect(result.content[0]!.text).toContain('authoring_attestation_missing');
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toEqual(expect.objectContaining({
+      code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', ...RECOVERY, taskId: readableTaskId,
+    }));
+    expect((await call(name, { ...args(), authoredWith: claim })).isError).not.toBe(true);
+  });
+});
+
 describe('#1329 a task the writer cannot read', () => {
   /** The whole response, so a stray field, a path or a message difference fails. */
   const projections = async (claim?: { task: string; revision: number }) => ({
@@ -190,6 +232,12 @@ describe('#1329 a task the writer cannot read', () => {
     const unreadable = await projections();
     await breakIt();
     expect(await projections()).toEqual(unreadable);
+  });
+
+  it("is judged on the write's own transaction", async () => {
+    await repoint(hiddenTaskId);
+    await viaCliWire();
+    expect(fault.onTransaction).toEqual([true]);
   });
 
   it('says it is unreadable and names no task', async () => {

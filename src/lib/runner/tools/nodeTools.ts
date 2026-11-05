@@ -124,11 +124,13 @@ export const hadronReadNode: RunToolDef = {
 };
 
 /** #1328 — a run tool states its claim like any other writer. Never the portal path. */
-function runToolAuthoring(args: Record<string, unknown>) {
+function runToolAuthoring(ctx: RunToolContext, args: Record<string, unknown>) {
   const claim = args.authoredWith as Partial<AuthoredWith> | null | undefined;
   return attestedAuthoring(
+    ctx.principal,
     claim && typeof claim.task === 'string' && typeof claim.revision === 'number'
       ? { task: claim.task, revision: claim.revision } : null,
+    'run',
   );
 }
 
@@ -163,7 +165,7 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { authoring: runToolAuthoring(args) },
+        { authoring: runToolAuthoring(ctx, args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
@@ -214,7 +216,7 @@ export const hadronUpdateNode: RunToolDef = {
       } as never,
       ctx.principal,
       'update',
-      { authoring: runToolAuthoring(args), targetNodeId: node.id },
+      { authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
     );
     return { updated: true, urn, id: written.id };
   },

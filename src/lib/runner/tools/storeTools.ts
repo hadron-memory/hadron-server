@@ -220,7 +220,7 @@ export const hadronStoreFile: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { authoring: attestedAuthoring(null) },
+        { authoring: attestedAuthoring(ctx.principal, null, 'run') },
       );
     } catch (err) {
       // Compensate: no asset without its reference node, no bytes without
