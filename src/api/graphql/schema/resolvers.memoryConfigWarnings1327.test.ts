@@ -283,3 +283,75 @@ describe('#1327 — regression: non-managers still get concealment and no warnin
     expect((await gql(as(outsider), CREATE, { m: pub.id, i: { role: 'spec' } })).errors?.[0]?.extensions?.code).toBe('MEMORY_NOT_FOUND');
   });
 });
+
+describe('#1327 — shapes whose audience is not provable warn, and a user-owned target is its owner alone', () => {
+  it('an Agent memory item on the target reaches App participants: warns although the task is same-org knowledge', async () => {
+    const control = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'before', authorTaskRef: tKb2.urn } });
+    expect(warned(control, 'createNodeRoleRule')).toEqual([]);
+    const agent = await db.agent.create({ data: { name: 'Agent', urn: 'acme.com:agent', organizationId: org.id } });
+    await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: kb.id, role: 'read' } });
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'after', authorTaskRef: tKb2.urn } });
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+
+  it('a user-owned target is owner-only: the owner reading the task is enough', async () => {
+    const owned = await mkMemory({ ownerUserId: owner, urn: '@w5:notes', name: 'notes', class: 'knowledge' });
+    const t = await mkTask(owned.id, owned.urn, 'tasks:n');
+    const other = await mkMemory({ ownerUserId: owner, urn: '@w5:other', name: 'other', class: 'knowledge' });
+    const r = await gql(as(owner), CREATE, { m: owned.id, i: { role: 'spec', authorTaskRef: t.urn } });
+    expect(warned(r, 'createNodeRoleRule')).toEqual([]);
+    const ot = await mkTask(other.id, other.urn, 'tasks:o');
+    const r2 = await gql(as(owner), CREATE, { m: owned.id, i: { role: 'two', authorTaskRef: ot.urn } });
+    expect(warned(r2, 'createNodeRoleRule')).toEqual([]); // the owner reads both, and nobody else reads `owned`
+  });
+
+  it('an App-class target is a team audience that cannot be proven: warns', async () => {
+    const app = await db.app.create({ data: { name: 'App', urn: 'acme.com:app', organizationId: org.id } as never });
+    const team = await mkMemory({ organizationId: org.id, appId: app.id, class: 'app', urn: 'acme.com:app:team', name: 'team' });
+    const r = await gql(as(admin), CREATE, { m: team.id, i: { role: 'spec', authorTaskRef: tKb.urn } });
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+
+  it('more explicit grantees than can be point-checked within the bound warn instead of being skipped', async () => {
+    for (let i = 0; i < 51; i++) {
+      const u = await mkUser(200 + i, org.id, 'CONTRIBUTOR');
+      await db.memoryShare.create({ data: { memoryId: mine.id, granteeId: u, grantorId: owner, role: 'reader' } });
+      await db.memoryShare.create({ data: { memoryId: mine2.id, granteeId: u, grantorId: owner, role: 'reader' } });
+    }
+    const r = await gql(as(owner), CREATE, { m: mine.id, i: { role: 'spec', authorTaskRef: tMine2.urn } });
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+});
+
+describe('#1327 — containment shortcuts are each load-bearing', () => {
+  const teamSpace = async () => {
+    const app = await db.app.create({ data: { name: 'App', urn: 'acme.com:app2', organizationId: org.id } as never });
+    const team = await mkMemory({ organizationId: org.id, appId: app.id, class: 'app', urn: 'acme.com:app2:team', name: 'team2' });
+    return { team };
+  };
+
+  it('a task in the target memory itself never warns even where other audiences are unprovable (subscribed target)', async () => {
+    await db.memorySubscription.create({ data: { memoryId: kb.id, organizationId: otherOrg.id } });
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tKb.urn } });
+    expect(warned(r, 'createNodeRoleRule')).toEqual([]);
+  });
+
+  it('a PUBLIC task memory covers an audience that is not enumerable (App team space target)', async () => {
+    const { team } = await teamSpace();
+    const r = await gql(as(admin), CREATE, { m: team.id, i: { role: 'spec', authorTaskRef: tPub.urn } });
+    expect(warned(r, 'createNodeRoleRule')).toEqual([]);
+  });
+
+  it('PUBLIC target and a DIFFERENT PUBLIC task memory: no warning', async () => {
+    const pub2 = await mkMemory({ organizationId: org.id, class: 'knowledge', urn: 'acme.com:pub2', name: 'pub2', visibility: 'PUBLIC' });
+    const t = await mkTask(pub2.id, pub2.urn, 'tasks:p');
+    const r = await gql(as(admin), CREATE, { m: pub.id, i: { role: 'spec', authorTaskRef: t.urn } });
+    expect(warned(r, 'createNodeRoleRule')).toEqual([]);
+  });
+
+  it('org knowledge target, task in ANOTHER org\'s knowledge that the saver can also read: warns', async () => {
+    await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: admin, role: 'CONTRIBUTOR' } });
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tForeign.urn } });
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+});

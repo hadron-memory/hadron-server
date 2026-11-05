@@ -70,6 +70,7 @@ import { assertValidRuleRole, lockMemoryConfigExclusive } from '../../../lib/gov
 import { nodeUrnRoundTrips, safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { generateId } from '../../../lib/id.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
+import { taskVisibilityWarnings } from './resolvers.memoryConfigWarnings.js';
 
 export type Writers = 'ALL' | 'OWNER' | 'ADMIN';
 export type Validator = 'AGENT' | 'PLATFORM';
@@ -413,7 +414,7 @@ async function configForManagedMemory(db: PrismaClient, memoryId: string) {
  */
 type RefView = { urn: string | null; id: string | null; state: RefState };
 const refViewCache = new WeakMap<object, Map<string, Promise<RefView>>>();
-function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<RefView> {
+export function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Promise<RefView> {
   let perRule = refViewCache.get(rule);
   if (!perRule) refViewCache.set(rule, (perRule = new Map()));
   let pending = perRule.get(kind);
@@ -492,7 +493,7 @@ export const memoryConfigMutations = {
         await touchConfig(tx, configId, actor);
         return created;
       });
-      return { rule, warnings: [] };
+      return { rule, warnings: await taskVisibilityWarnings(ctx, memory.id, [rule]) };
     } catch (e) {
       translateRoleTaken(e, role);
     }
@@ -541,7 +542,8 @@ export const memoryConfigMutations = {
       await touchConfig(tx, current.configId, actor);
       return after;
     });
-    return { rule, warnings: [] };
+    // #1327: advisory, computed from the committed rule in the caller's own reference projection.
+    return { rule, warnings: await taskVisibilityWarnings(ctx, memoryId, [rule]) };
   },
 
   deleteNodeRoleRule: async (

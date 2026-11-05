@@ -29,6 +29,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplateRule, type NodeRoleRule } from '../../../generated/prisma/index.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
+import { taskVisibilityWarnings, type MemoryConfigWarning, type WarnableRule } from './resolvers.memoryConfigWarnings.js';
 import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { generateId } from '../../../lib/id.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
@@ -65,7 +66,8 @@ export interface ApplyResult {
   required: boolean;
   dryRun: boolean;
   entries: ApplyEntry[];
-  warnings: never[];
+  /** #1327: TASK_LESS_VISIBLE for every rule this apply wrote, or in a dry run would write. */
+  warnings: MemoryConfigWarning[];
 }
 
 /** Thrown inside a dry run's transaction so nothing it touched commits. */
@@ -123,9 +125,12 @@ export async function applyMemoryConfigTemplate(
   const memory = await managedMemory(ctx, args.memoryRef);
   const template = await managedTemplate(ctx, args.templateRef);
   const notFoundTemplate = () => new MemoryConfigTemplateNotFoundError(args.templateRef);
+  // The rules this apply writes (or would write), as they will read: the same list for a dry run and the real apply.
+  let written: WarnableRule[] = [];
 
+  let result: ApplyResult;
   try {
-    return await ctx.db.$transaction(async (tx) => {
+    result = await ctx.db.$transaction(async (tx) => {
       // The template row under a SHARE lock: its rules cannot change until we
       // commit (an update takes it FOR UPDATE), while two applies of the same
       // template proceed side by side.
@@ -266,7 +271,10 @@ export async function applyMemoryConfigTemplate(
         entries.push({ role: rule.role, outcome, rule: after });
       }
       if (writes) await touchConfig(tx, configId!, actor);
-      const result: ApplyResult = {
+      written = plan
+        .filter((p) => p.outcome === 'APPLIED' || p.outcome === 'REPLACED')
+        .map(({ rule }) => ({ role: rule.role, ...copiedColumns(rule) }));
+      const applied: ApplyResult = {
         memoryId: memory.id,
         template: { id: live.id, name: live.name, deleted: false },
         templateRevision: live.revision,
@@ -275,21 +283,26 @@ export async function applyMemoryConfigTemplate(
         entries,
         warnings: [],
       };
-      if (dryRun) throw new DryRunRollback(result);
-      return result;
+      if (dryRun) throw new DryRunRollback(applied);
+      return applied;
     });
   } catch (e) {
-    if (e instanceof DryRunRollback) return e.result;
-    // A concurrent createNodeRoleRule took a role between our read and our
-    // insert (it does not take the rows we lock). Nothing was written; the
-    // caller re-reads and retries.
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-      throw new GraphQLError("The memory's config changed while the template was being applied; retry.", {
-        extensions: { code: 'CONFLICT' },
-      });
+    if (e instanceof DryRunRollback) result = e.result;
+    else {
+      // A concurrent createNodeRoleRule took a role between our read and our
+      // insert (it does not take the rows we lock). Nothing was written; the
+      // caller re-reads and retries.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new GraphQLError("The memory's config changed while the template was being applied; retry.", {
+          extensions: { code: 'CONFLICT' },
+        });
+      }
+      throw e;
     }
-    throw e;
   }
+  // #1327: advisory, after the commit (or the dry run's rollback), from the rules written, in the caller's own projection.
+  result.warnings = await taskVisibilityWarnings(ctx, memory.id, written);
+  return result;
 }
 
 export const memoryConfigApplyMutations = {

@@ -4387,7 +4387,7 @@ export const typeDefs = `#graphql
     deleted: Boolean!
   }
 
-  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success."
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success. Today the only code is TASK_LESS_VISIBLE (#1327): a task the saver can read that some reader of the memory may not; taskUrn and taskState are the saver's own reference projection, so a task the saver cannot read is named by state alone."
   type MemoryConfigWarning {
     code: String!
     role: String!
@@ -4485,7 +4485,7 @@ export const typeDefs = `#graphql
 
   type MemoryConfigTemplatePayload {
     template: MemoryConfigTemplate!
-    "Empty until #1327 adds its visibility warnings."
+    "Always empty for a template save: less-visible-task warnings are computed when a template is applied to a memory (there is no target memory here)."
     warnings: [MemoryConfigWarning!]!
   }
 
@@ -4517,13 +4517,13 @@ export const typeDefs = `#graphql
     dryRun: Boolean!
     "One per template rule, role-ascending."
     entries: [MemoryConfigApplyEntry!]!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each rule this apply wrote, or on a dry run would write. A dry run and the real apply report the same warnings."
     warnings: [MemoryConfigWarning!]!
   }
 
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
-    "Empty until #1327 adds its visibility warnings."
+    "TASK_LESS_VISIBLE for each task reference of the saved rule that a reader of this memory may not be able to read. Advisory: it never changes the save. Empty for unlock."
     warnings: [MemoryConfigWarning!]!
   }
 
