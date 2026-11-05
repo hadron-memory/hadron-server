@@ -1,3 +1,4 @@
+import { openThreadsVectorSql } from '../../lib/comments/openThreads.js';
 /**
  * 033-rag-vector-retrieval — raw-SQL vector storage + similarity search.
  *
@@ -364,6 +365,8 @@ export async function vectorSearchNodes(
     queryEmbedding: number[];
     limit: number;
     candidateFactor?: number;
+    hasOpenThreads?: boolean | null;
+    syntheticCommentMemoryIds?: string[];
     /** #2421: constrain summary search before ANN ranking. */
     abstractOnly?: boolean;
     candidateNodeIds?: string[];
@@ -380,6 +383,7 @@ export async function vectorSearchNodes(
   const candidateSql = opts.candidateNodeIds == null ? Prisma.empty : opts.candidateNodeIds.length
     ? Prisma.sql`AND ne.node_id IN (${Prisma.join(opts.candidateNodeIds)})` : Prisma.sql`AND FALSE`;
   const abstractSql = opts.abstractOnly ? Prisma.sql`AND ne.kind = 'abstract'` : Prisma.empty;
+  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   if (opts.scope === 'COMMENTS') {
@@ -387,7 +391,7 @@ export async function vectorSearchNodes(
       SELECT ne.node_id, MIN(ne.embedding <=> ${qvec}::vector) AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql} ${threadSql}
       GROUP BY ne.node_id
       ORDER BY distance ASC
       LIMIT ${k}`;
@@ -409,7 +413,7 @@ export async function vectorSearchNodes(
   // count and the exact fallback, so the three can never disagree on scope.
   const eligibleFrom = Prisma.sql`FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id ${scopeSql}
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql}`;
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) ${NOT_A_STUB} ${candidateSql} ${abstractSql} ${threadSql}`;
   type NodeRow = { node_id: string; distance: number; ann_rows: number };
   const rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<NodeRow[]>`
     WITH ann AS (
@@ -533,6 +537,8 @@ export async function vectorSearchChunks(
     queryEmbedding: number[];
     limit: number;
     candidateFactor?: number;
+    hasOpenThreads?: boolean | null;
+    syntheticCommentMemoryIds?: string[];
     /** #1345 — told whether the chunk window was exhausted (fewer rows than it asked for). */
     onWindow?: (w: { exhausted: boolean }) => void;
     /** #1608 — content, comments or both; COMMENTS ranks exactly. Absent = ALL. */
@@ -543,6 +549,7 @@ export async function vectorSearchChunks(
     opts.onWindow?.({ exhausted: true });
     return [];
   }
+  const threadSql = openThreadsVectorSql(opts.hasOpenThreads, opts.syntheticCommentMemoryIds);
   const qvec = toVectorLiteral(opts.queryEmbedding);
   const k = opts.limit;
   if (opts.scope === 'COMMENTS') {
@@ -551,7 +558,7 @@ export async function vectorSearchChunks(
              ne.embedding <=> ${qvec}::vector AS distance
       FROM node_embeddings ne
       JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL AND n.node_type = 'comment'
-      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}
+      WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql}
       ORDER BY distance ASC
       LIMIT ${k}`;
     opts.onWindow?.({ exhausted: rows.length < k });
@@ -567,7 +574,7 @@ export async function vectorSearchChunks(
   // #3054: one eligibility fragment for the ANN window, the count and the exact fallback.
   const eligibleFrom = Prisma.sql`FROM node_embeddings ne
     JOIN nodes n ON n.id = ne.node_id AND n.memory_id = ne.memory_id AND n.deleted_at IS NULL ${chunkScopeSql}
-    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB}`;
+    WHERE ne.memory_id IN (${Prisma.join(opts.memoryIds)}) AND ne.kind = 'chunk' ${NOT_A_STUB} ${threadSql}`;
   type ChunkRow = { node_id: string; chunk_index: number; char_start: number; char_end: number; chunk_text: string; distance: number };
   let rows = await withEfSearch(db, candidateK, (tx) => tx.$queryRaw<ChunkRow[]>`
     SELECT ne.node_id, ne.chunk_index, ne.char_start, ne.char_end, ne.chunk_text,
