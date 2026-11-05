@@ -2601,8 +2601,14 @@ export const agentTaskMutations = {
       }
       // #3267: advice from the locked row's children, in this transaction: it has children and none is still
       // unended (backlog, pending or started), so its own finish is probably due. Recording still succeeds.
-      if ((await tx.agentTask.count({ where: { parentTaskId: task.id, status: { notIn: [...ENDED] } } })) === 0
-        && (await tx.agentTask.count({ where: { parentTaskId: task.id } })) > 0) warn.push('task.progress.children-ended');
+      // ONE statement, so the decision reads one snapshot. A concurrent child create cannot split it anyway: lockTask
+      // holds the parent row FOR UPDATE, and a child INSERT needs FOR KEY SHARE on that row through
+      // agent_tasks_parent_task_id_fkey, which conflicts, so the insert waits for this transaction (#3297). Weakening
+      // lockTask to FOR NO KEY UPDATE would remove that; resolvers.taskProgressChildren3297.test.ts pins it.
+      const [kids] = await tx.$queryRaw<Array<{ total: bigint; unended: bigint }>>`
+        SELECT count(*) AS total, count(*) FILTER (WHERE status NOT IN (${Prisma.join([...ENDED])})) AS unended
+        FROM agent_tasks WHERE parent_task_id = ${task.id}`;
+      if (kids!.total > 0n && kids!.unended === 0n) warn.push('task.progress.children-ended');
       await tx.agentTask.update({ where: { id: task.id }, data: { ...updatedStamp(ctx) } });
       await appendTaskEvent(tx, { appId: app.id, taskId: task.id, actor: eventActor(ctx.userId), event: { type: 'task.progress' } });
     });

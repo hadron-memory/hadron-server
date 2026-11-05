@@ -23,16 +23,20 @@ import { managesAgent, managesApp, managesAppBatch } from '../../../lib/auth/app
 import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { READ_GRANT_MEMORY_SELECT, readGrantTargetRefusal, type ReadGrantTriggerKind } from '../../../lib/automationReadGrant.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { EntityNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { requireMemoryManageAccess, safeCanonicalUrn, type Context } from './resolvers.helpers.js';
+import { requireMemoryManageAccess, type Context } from './resolvers.helpers.js';
 
 import { requireInstructedAct, type ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { automationGrantAdmission, finalAutomationGrantAdmission, lockAutomationGrantActor, refuseAutomationGrantPrincipal } from './automationGrantInstruction.js';
 import { callerIsWorkerSession, readActInstruction } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
 import { withManagerOrgRoles, managerPredicateBatches } from '../../../lib/auth/managerOrgRoles.js';
+
+import { projectAutomationReadGrant as project } from './automationReadGrantProjection.js';
 
 const denied = () => authorizationDenied();
 const badInput = (message: string) => new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -65,8 +69,9 @@ function parsePrefix(raw: string | null | undefined): string | null {
 async function resolveOrDeny<T>(lookup: () => Promise<T>): Promise<T> {
   try { return await lookup(); } catch (e) {
     if (e instanceof GraphQLError) throw e;
-    // Every unknown or unparseable ref is the one Forbidden (the lookups throw typed *_NOT_FOUND errors, not GraphQL ones).
-    if (e instanceof Error && /not[ _]found|not fully qualified|URN/i.test(`${(e as { code?: string }).code ?? ''} ${e.message}`)) throw denied();
+    // #3275: classify expected reference refusals by type, never by words in an infrastructure fault.
+    // Unknown, malformed and ambiguous refs keep the same concealed Forbidden answer.
+    if (e instanceof EntityNotFoundError || e instanceof UrnNotQualifiedError || e instanceof UrnParseError || e instanceof AmbiguousLegacyUrnError) throw denied();
     throw e;
   }
 }
@@ -96,7 +101,7 @@ export async function managesReadGrantTarget(ctx: Context, memory: TargetRow,
     return false;
   }
   try { await requireMemoryManageAccess(ctx, memory); return true; } catch (e) {
-    if (e instanceof Error && e.message === 'Forbidden') return false;
+    if (e instanceof GraphQLError && e.extensions.code === 'FORBIDDEN') return false;
     throw e;
   }
 }
@@ -130,15 +135,6 @@ async function targetRows(ctx: Context, ids: readonly string[], includeDeleted =
     where: { id: { in: batch }, ...(includeDeleted ? {} : { deletedAt: null }) }, select: TARGET_SELECT,
   }));
   return out;
-}
-
-function project(row: GrantRow, memory: { urn: string } | null) {
-  return {
-    id: row.id, appId: row.appId, triggerKind: row.triggerKind, triggerId: row.triggerId,
-    memoryUrn: memory ? safeCanonicalUrn('memory', memory.urn) : null,
-    prefix: row.prefix, grantedBy: row.grantedBy,
-    createdAt: row.createdAt, revokedAt: row.revokedAt, revokedBy: row.revokedBy,
-  };
 }
 
 const anchorsOf = (app: AppRow, memoryId?: string) => [
