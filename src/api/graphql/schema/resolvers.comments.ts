@@ -62,7 +62,7 @@ import {
   type CommentNodeData,
   type CommentOp,
 } from '../../../lib/comments/index.js';
-import { openThreadCounts, viewerOpenThreads } from '../../../lib/comments/summary.js';
+import { openThreadCounts, viewerOpenThreads, type CommentCounts } from '../../../lib/comments/summary.js';
 import { deleteThreadsInTx } from '../../../lib/comments/lifecycle.js';
 
 type Tx = Prisma.TransactionClient;
@@ -1232,7 +1232,7 @@ export const commentFieldResolvers = {
 // Same-tick batching, the pattern of Node.approvalStatus: every Node in one
 // response asks in the same tick, and one grouped query answers all of them.
 type Batch<T> = { ids: Set<string>; flushed: boolean; result: Promise<Map<string, T>> };
-const summaryBatches = new WeakMap<Context, Batch<{ openThreads: number; resolvedThreads: number; comments: number }>>();
+const summaryBatches = new WeakMap<Context, Batch<CommentCounts>>();
 const viewerBatches = new WeakMap<Context, Batch<string>>();
 
 function batched<T>(
@@ -1260,7 +1260,7 @@ function batched<T>(
 
 async function loadSummary(ctx: Context, nodeId: string) {
   const counts = await batched(summaryBatches, ctx, nodeId, (ids) => openThreadCounts(ctx.db, ids));
-  return counts ?? { openThreads: 0, resolvedThreads: 0, comments: 0 };
+  return counts ?? { openThreads: 0, resolvedThreads: 0, comments: 0, oldestOpenThreadAt: null };
 }
 
 async function loadViewerOpen(ctx: Context, nodeId: string): Promise<string | null> {
