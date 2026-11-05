@@ -68,8 +68,11 @@ it('drains an overdue body through its real policy write before the next reset a
   const ring = JSON.parse(process.env.RATE_LIMIT_KEYRING!);
   const subject = ring.current + ':' + createHmac('sha256', Buffer.from(ring.keys[ring.current], 'hex')).update(JSON.stringify(['v1', 'FAN_OUT_READS', 'principal', 'USER:' + user.id])).digest('hex');
   const buckets = await db.rateLimitBucket.findMany({ where: { fieldClass: 'FAN_OUT_READS', dimension: 'principal' } });
-  expect(buckets).toHaveLength(1);
-  expect(buckets[0]).toMatchObject({ subject, used: 2n });
+  // This is an isolation/identity pin, not an assumption that the two
+  // requests cannot straddle a minute boundary (#3074).
+  expect(buckets.length).toBeGreaterThan(0);
+  expect(buckets.every(bucket => bucket.subject === subject)).toBe(true);
+  expect(buckets.reduce((sum, bucket) => sum + bucket.used, 0n)).toBe(2n);
 });
 
 it('retains the original rejection while cleanup drains and closes resources created by the tail', async () => {
@@ -84,4 +87,20 @@ it('retains the original rejection while cleanup drains and closes resources cre
   await rejected;
   await cleanup;
   expect(live).toBe(false);
+});
+
+it('joins one cleanup across hook deadlines and refuses a new body until it settles', async () => {
+  const lifetime = new FixtureLifetime(), entered = deferred(), finish = deferred();
+  const work = lifetime.run(async () => { entered.resolve(); await finish.promise; });
+  await entered.promise;
+  let closes = 0;
+  const closeResources = async () => { closes++; };
+  const first = lifetime.drain(closeResources);
+  const nextBeforeEach = lifetime.drain(closeResources);
+  expect(nextBeforeEach).toBe(first);
+  expect(() => lifetime.run(async () => {})).toThrow('during cleanup');
+  finish.resolve();
+  await work; await first; await nextBeforeEach;
+  expect(closes).toBe(2);
+  await expect(lifetime.run(async () => 'next')).resolves.toBe('next');
 });

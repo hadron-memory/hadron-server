@@ -5,6 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
+import { FixtureLifetime } from '../test/fixtureLifetime.js';
 import { withinOneRateWindow } from '../test/rateWindow.js';
 import { createServer } from '../server.js';
 import { signJwt } from '../auth/jwt.js';
@@ -14,9 +15,20 @@ import { generateId } from '../lib/id.js';
 vi.mock('../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithub:vi.fn().mockResolvedValue({error:null})}));
 let server:Server|undefined,client:Client|undefined;
-beforeEach(async()=>{client=undefined;server=undefined;await cleanDb(db);});
-afterEach(async()=>{await client?.close();server?.closeAllConnections();if(server)await new Promise<void>(r=>server!.close(()=>r()));});
-it('#1793 actual SDK and GraphQL share one search allowance and structured refusal',async()=>{
+const lifetime = new FixtureLifetime();
+const closeResources = async () => {
+  await client?.close();
+  server?.closeAllConnections();
+  if(server) await new Promise<void>(r=>server!.close(()=>r()));
+};
+const fixtureIt = (name: string, body: () => Promise<void>) => it(name, () => lifetime.run(body));
+beforeEach(async()=>{
+  // Also joins a prior afterEach whose runner deadline expired.
+  await lifetime.drain(closeResources);
+  client=undefined;server=undefined;await cleanDb(db);
+});
+afterEach(()=>lifetime.drain(closeResources));
+fixtureIt('#1793 actual SDK and GraphQL share one search allowance and structured refusal',async()=>{
   const u=await db.user.create({data:{githubId:179399,githubUsername:'rate-wire',roles:['ADMIN']}});
   server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -34,7 +46,7 @@ it('#1793 actual SDK and GraphQL share one search allowance and structured refus
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([1n]);
 });
 
-it('#1793 GraphQL threads the trusted transport IP into search and consent admission',async()=>{
+fixtureIt('#1793 GraphQL threads the trusted transport IP into search and consent admission',async()=>{
   const u=await db.user.create({data:{githubId:179398,githubUsername:'rate-http-ip',roles:['ADMIN']}});
   const target=await db.user.create({data:{githubId:179397,githubUsername:'rate-http-target'}});
   const app=await createServer();
@@ -58,7 +70,7 @@ it('#1793 GraphQL threads the trusted transport IP into search and consent admis
   expect(await db.userMergeConsent.count()).toBe(1);
 });
 
-it('#1793 each MCP tool call uses its current request IP, not the initialize address',async()=>{
+fixtureIt('#1793 each MCP tool call uses its current request IP, not the initialize address',async()=>{
   const u=await db.user.create({data:{githubId:179396,githubUsername:'rate-mcp-ip',roles:['ADMIN']}});
   server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -80,7 +92,7 @@ it('#1793 each MCP tool call uses its current request IP, not the initialize add
   expect((await db.rateLimitBucket.findMany({where:{dimension:'principal'}})).map(r=>r.used)).toEqual([2n]);
 });
 
-it('#1793 an App key charges principal, actual key and IP identically over GraphQL and MCP',async()=>{
+fixtureIt('#1793 an App key charges principal, actual key and IP identically over GraphQL and MCP',async()=>{
   const suffix=generateId();
   const org=await db.organization.create({data:{name:'rate-app',urn:`rate-org-${suffix}`}});
   const app=await db.app.create({data:{name:'rate-app',urn:`${org.urn}:rate-app`,organizationId:org.id}});
@@ -103,7 +115,7 @@ it('#1793 an App key charges principal, actual key and IP identically over Graph
     .toEqual(before.map(r=>({dimension:r.dimension,subject:r.subject,windowStart:r.windowStart,used:2n})));
 });
 
-it('#1793 an empty named MCP scope is still one admitted search attempt',async()=>{
+fixtureIt('#1793 an empty named MCP scope is still one admitted search attempt',async()=>{
   const u=await db.user.create({data:{githubId:179395,githubUsername:'rate-empty-scope',roles:['READER']}});
   server=httpServer(await createServer());await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));await withinOneRateWindow(db,'FAN_OUT_READS');
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -118,7 +130,7 @@ it('#1793 an empty named MCP scope is still one admitted search attempt',async()
   expect(await read()).toMatchObject({isError:true,structuredContent:{error:{code:'RATE_LIMITED',fieldClass:'FAN_OUT_READS'}}});
 });
 
-it('#1793 live manifest/key disagreement refuses readiness without restarting healthy liveness',async()=>{
+fixtureIt('#1793 live manifest/key disagreement refuses readiness without restarting healthy liveness',async()=>{
   const {beginRateKeyOverlap}=await import('../lib/rateLimit/lifecycle.js');
   const initial=process.env.RATE_LIMIT_KEYRING!;
   try {
@@ -139,7 +151,7 @@ it('#1793 live manifest/key disagreement refuses readiness without restarting he
 });
 
 
-it('#1793 merged /ready keeps startup and stopping precedence and rejects a live key mismatch',async()=>{
+fixtureIt('#1793 merged /ready keeps startup and stopping precedence and rejects a live key mismatch',async()=>{
   const {beginRateKeyOverlap}=await import('../lib/rateLimit/lifecycle.js');
   const initial=process.env.RATE_LIMIT_KEYRING!;
   let state:'starting'|'settled'='starting';let stopping=false;
@@ -164,7 +176,7 @@ it('#1793 merged /ready keeps startup and stopping precedence and rejects a live
 });
 
 
-it('#1793 transient policy read failure leaves /ready healthy when the DB probe answers',async()=>{
+fixtureIt('#1793 transient policy read failure leaves /ready healthy when the DB probe answers',async()=>{
   server=httpServer(await createServer({readiness:{startup:()=> 'settled',stopping:()=>false}}));
   await new Promise<void>(r=>server!.listen(0,'127.0.0.1',r));
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
