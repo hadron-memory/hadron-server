@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { Prisma } from '../../../generated/prisma/index.js';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -285,6 +286,72 @@ describe('applyMemoryConfigTemplateToMemories: the world changes between targets
     expect(o.results[0].ok).toBe(true);
     expect(o.results[1]).toMatchObject({ ok: false, error: { code: expect.stringMatching(/^(MEMORY_NOT_FOUND|MEMORY_CONFIG_TEMPLATE_NOT_FOUND)$/) } });
     expect(await rulesOf(m2.id)).toEqual([]);
+  });
+
+  const conflictOf = (code: string, meta?: Record<string, unknown>) =>
+    new Prisma.PrismaClientKnownRequestError('driver text must not leak', { code, clientVersion: 'test', meta });
+  /** Reject the FIRST per-target transaction with `err`; the second is real. */
+  async function firstTransactionFails(err: unknown) {
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
+    const real = db.$transaction.bind(db);
+    let n = 0;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((...a: unknown[]) => {
+      n += 1;
+      return n === 1 ? Promise.reject(err) : (real as (...x: unknown[]) => unknown)(...a);
+    }) as never);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      return out(await bulk(as(orgAdmin), t.id, [m1.id, m2.id]));
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
+  }
+
+  it('LOCAL P2: a write conflict or deadlock in one target is CONFLICT (retryable), the others still commit', async () => {
+    for (const err of [conflictOf('P2034'), conflictOf('P2002'), conflictOf('P2010', { code: '40P01' }), conflictOf('P2010', { code: '40001' })]) {
+      await cleanDb(db);
+      org = await db.organization.create({ data: { id: generateId(), name: 'acme', urn: 'acme.com' }, select: { id: true } });
+      orgAdmin = await mkUser(1, org.id, 'ADMIN');
+      m1 = await mkMemory(org.id, 'acme.com:m1');
+      m2 = await mkMemory(org.id, 'acme.com:m2');
+      const o = await firstTransactionFails(err);
+      expect(o.results.map((e) => (e.ok ? 'ok' : e.error.code))).toEqual(['CONFLICT', 'ok']);
+      expect(JSON.stringify(o)).not.toContain('driver text');
+      expect(await rulesOf(m1.id)).toEqual([]);
+      expect((await rulesOf(m2.id)).length).toBe(1);
+    }
+  });
+
+  it('LOCAL P2: any other database error stays a sanitized fault, never a conflict', async () => {
+    for (const err of [conflictOf('P2010', { code: '23505' }), conflictOf('P2025'), conflictOf('P1001')]) {
+      await cleanDb(db);
+      org = await db.organization.create({ data: { id: generateId(), name: 'acme', urn: 'acme.com' }, select: { id: true } });
+      orgAdmin = await mkUser(1, org.id, 'ADMIN');
+      m1 = await mkMemory(org.id, 'acme.com:m1');
+      m2 = await mkMemory(org.id, 'acme.com:m2');
+      const o = await firstTransactionFails(err);
+      expect(o.results[0]).toMatchObject({ ok: false, error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error.' } });
+      expect(JSON.stringify(o)).not.toContain('driver text');
+    }
+  });
+
+  it('LOCAL P3 / BLIND P3: a first occurrence whose apply FAILS still consumes its slot; the alias is DUPLICATE_TARGET with no second transaction', async () => {
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
+    const real = db.$transaction.bind(db);
+    let n = 0;
+    const spy = vi.spyOn(db, '$transaction').mockImplementation(((...a: unknown[]) => {
+      n += 1;
+      return n === 1 ? Promise.reject(conflictOf('P2034')) : (real as (...x: unknown[]) => unknown)(...a);
+    }) as never);
+    for (const d of [false, true]) {
+      n = 0;
+      const o = out(await bulk(as(orgAdmin), t.id, [m1.id, m1.urn], { d }));
+      expect(o.results.map((e) => (e.ok ? 'ok' : e.error.code))).toEqual(['CONFLICT', 'DUPLICATE_TARGET']);
+      expect(n).toBe(1);
+    }
+    spy.mockRestore();
+    expect(await rulesOf(m1.id)).toEqual([]);
   });
 
   it('an unexpected error in one target is INTERNAL_SERVER_ERROR with no driver text; the others still commit', async () => {

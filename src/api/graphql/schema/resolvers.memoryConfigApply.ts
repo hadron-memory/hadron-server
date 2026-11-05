@@ -336,6 +336,22 @@ function badInput(message: string): GraphQLError {
 }
 
 /**
+ * The shapes a concurrent write surfaces as, all meaning "nothing was written, retry": a unique-key race (P2002), a
+ * write conflict or deadlock the transaction layer reports (P2034), and the same two raised by a raw statement
+ * (P2010 carrying SQLSTATE 40P01 deadlock_detected or 40001 serialization_failure). Nothing else is a conflict:
+ * every other database error stays a sanitized fault.
+ */
+function isRetryableConflict(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (e.code === 'P2002' || e.code === 'P2034') return true;
+  if (e.code === 'P2010') {
+    const sqlState = (e.meta as { code?: unknown } | undefined)?.code;
+    return sqlState === '40P01' || sqlState === '40001';
+  }
+  return false;
+}
+
+/**
  * One target's failure as a report entry. A not-found message is built from the ref the caller typed and nothing
  * else, so a missing memory and one the caller cannot manage are byte-identical. A typed refusal keeps its code; an
  * unknown error is logged under a request id and shows only the generic envelope, never driver text.
@@ -351,7 +367,7 @@ function toEntryError(e: unknown): BulkApplyError {
       return { code, message: e.message, currentRevision: typeof rev === 'number' ? rev : null, requestId: null };
     }
   }
-  if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+  if (isRetryableConflict(e)) {
     return { code: 'CONFLICT', message: "The memory's config changed while the template was being applied; retry.", currentRevision: null, requestId: null };
   }
   const requestId = faultRequestId();
