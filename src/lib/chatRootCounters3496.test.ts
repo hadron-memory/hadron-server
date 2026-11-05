@@ -76,7 +76,13 @@ describe('#3496 counters', () => {
         await db.node.create({ data: { id: generateId(), memoryId: chat.memoryId, loc: `${chat.loc}:messages:999-summary`, name: 'summary', nodeType: 'abstract', seq: 999 } });
         expect((await post()).seq).toBe(41);
     });
-    it('does not launder drift when lazily stripping keys', async () => {
+    it.each([false, true])('does not launder drift when lazily stripping keys (encrypted=%s)', async (encrypted) => {
+        if (encrypted) {
+            enc.isEncrypted = true;
+            await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true } });
+            sessionKeyCache.set(generateId(), enc.id, generateDataKey());
+            await db.node.update({ where: { id: chat.id }, data: encryptNodeFields({ data: { messageCount: 9, title: 'keep' } }, enc) });
+        }
         await fingerprint();
         const before = await raw();
         await db.node.update({ where: { id: chat.id }, data: { name: 'outside' } });
@@ -93,7 +99,7 @@ describe('#3496 counters', () => {
             enc.isEncrypted = true;
             await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true } });
             sessionKeyCache.set(generateId(), enc.id, generateDataKey());
-            await db.node.update({ where: { id: chat.id }, data: encryptNodeFields({ data: (await raw()).data }, enc) });
+            await db.node.update({ where: { id: chat.id }, data: encryptNodeFields({ data: { messageCount: 9, lastMessageAt: '2026-01-01T00:00:00.000Z', title: 'keep' } }, enc) });
         }
         await post();
         await fingerprint();

@@ -58,13 +58,24 @@ export async function lockedChatCounter(tx: Prisma.TransactionClient, rootId: st
     }
     const object = chatDataObject(data);
     if (Object.hasOwn(object, 'messageCount') || Object.hasOwn(object, 'lastMessageAt')) {
-        const clean = { ...object };
-        delete clean.messageCount;
-        delete clean.lastMessageAt;
-        const stored = encryptNodeFields({ data: clean }, info).data;
-        await tx.$executeRaw `UPDATE nodes n SET data=${JSON.stringify(stored)}::jsonb,
-      revision_content_hash=CASE WHEN n.revision_content_hash=hadron_node_revision_state_hash(n)
-        THEN 'refresh' ELSE n.revision_content_hash END WHERE n.id=${rootId}`;
+        if (info.isEncrypted) {
+            // Ciphertext contains JS-serialized plaintext; preserve its encryption boundary.
+            const clean = { ...object };
+            delete clean.messageCount;
+            delete clean.lastMessageAt;
+            const stored = encryptNodeFields({ data: clean }, info).data;
+            await tx.$executeRaw`UPDATE nodes n SET data=${JSON.stringify(stored)}::jsonb,
+              revision_content_hash=CASE WHEN n.revision_content_hash=hadron_node_revision_state_hash(n)
+                THEN 'refresh' ELSE n.revision_content_hash END WHERE n.id=${rootId}`;
+        } else {
+            // A JS round-trip would also round unrelated jsonb numbers and certify the
+            // change as synchronized. Strip only these keys, in PostgreSQL, like the migration.
+            await tx.$executeRaw`UPDATE nodes n SET
+              data=CASE WHEN jsonb_typeof(n.data)='object'
+                THEN n.data - 'messageCount' - 'lastMessageAt' ELSE n.data END,
+              revision_content_hash=CASE WHEN n.revision_content_hash=hadron_node_revision_state_hash(n)
+                THEN 'refresh' ELSE n.revision_content_hash END WHERE n.id=${rootId}`;
+        }
     }
     return { messageCount: row.messageCount, lastMessageAt: row.lastMessageAt };
 }
@@ -74,7 +85,8 @@ export async function setChatCounterTime(tx: Prisma.TransactionClient, id: strin
       updated_at=CURRENT_TIMESTAMP AT TIME ZONE 'UTC' WHERE chat_root_node_id=${id}`;
 }
 /** Keep PostgreSQL's entire finite timestamp domain out of JS Date/Prisma DateTime decoding.
- * The public field is a String. Normal dates retain the existing ISO-millisecond spelling;
+ * Chat.lastMessageAt is a nullable GraphQL DateTime, serialized from this string.
+ * Normal dates retain the existing ISO-millisecond spelling;
  * PostgreSQL's BC suffix is retained for an era that cannot be represented by the normal spelling.
  */
 async function counterRows(db: Pick<PrismaClient,'$queryRaw'>, ids:readonly string[]):Promise<(ChatCounter & {chatRootNodeId:string})[]> {
