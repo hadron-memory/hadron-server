@@ -3206,8 +3206,9 @@ export const typeDefs = `#graphql
     agentSessionsExpire: Boolean!
     anonymousTtlDays: Int!
     """
-    023-app-shape US1: Agents installed in this App, via the AppAgent
-    N:M join. Multiple Agents can be installed; one App credential
+    Agents installed in this App, by a physical row or derived from a direct
+    import of a physically installed Agent (#2168). Derived installations do not
+    write an AppAgent row. One App credential
     routes to all of them via the URN supplied in the request.
     """
     appAgents: [AppAgent!]!
@@ -3217,7 +3218,9 @@ export const typeDefs = `#graphql
     omitted here and appears in \`appAgents\` with \`agent: null\`. Only the
     installed Agents this caller may read: the list may be PARTIAL, an unreadable
     Agent is left out, and its length is not the install count (use \`appAgents\`,
-    one entry per install).
+    one entry per install). Order matches the readable non-null entries of
+    \`appAgents\`: served installation creation time, then Agent id. When any
+    installed Agent is withheld, every entry shares the App date, so order is by id.
     """
     agents: [Agent!]!
     "Key inventory, only for whoever manages the App as themselves, never through a worker session, instructed or not: a nested field carries no instruction, so an instructed worker lists through appKeys / appKeysPage (hrn:node:hadronmemory.com:specs:cor:dmo:050:05; hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6)."
@@ -3255,7 +3258,13 @@ export const typeDefs = `#graphql
     App's participants), which is judged before anything is resolved.
     """
     bootPromptServe: BootPromptServeOutcome
+    """When every installed Agent is readable: physical row creation time, or the computed earliest install/import witness time for a derived entry. Otherwise every entry shares the App creation time. The newly created install mutation payload retains its real row time. App.appAgents sorts by the served time, then Agent id."""
     createdAt: DateTime!
+    """
+    Row audit fields are visible only when the caller may read EVERY installed Agent in this App.
+    Otherwise all three are null on EVERY entry, including physical rows. A derived entry has no
+    row audit identity, so these stay null even under the whole-App gate; importer identities are never copied.
+    """
     createdBy: String
     updatedAt: DateTime
     updatedBy: String

@@ -1,3 +1,4 @@
+import { lockAppInstallation } from '../../../lib/appInstallations.js';
 /**
  * #2044 (S7), cor:agt:040:06 — the LIFECYCLE of an App's INSTALL MEMORY: lazy
  * creation by the App's first customisation, and the lookup that creates
@@ -104,10 +105,7 @@ export async function withInstallMemory<T>(
       if (!(await managesApp(txCtx as never, current))) throw memoryWriteForbidden();
     },
     async (tx, txCtx) => {
-      const installed = await tx.appAgent.findUnique({
-        where: { appId_agentId: { appId: app.id, agentId } },
-        select: { appId: true },
-      });
+      const installed = await lockAppInstallation(tx, app.id, agentId);
       if (!installed) {
         throw installError('AGENT_NOT_INSTALLED', 'That Agent is not installed in this App, so there is nothing to customise.');
       }
@@ -129,7 +127,7 @@ export async function withInstallMemory<T>(
  */
 export async function ensureInstallMemory(
   tx: Prisma.TransactionClient,
-  txCtx: Context,
+  txCtx: Pick<Context, 'userId'>,
   appId: string,
   agentId: string,
 ): Promise<{ id: string }> {
@@ -241,7 +239,7 @@ async function lockInstallAuthority(tx: Prisma.TransactionClient, ctx: Context, 
   ], 'shared');
   await tx.$queryRaw`SELECT id FROM apps WHERE id = ${memory.appId} FOR SHARE`;
   if (memory.installOfAgentId) {
-    await tx.$queryRaw`SELECT app_id FROM app_agents WHERE app_id = ${memory.appId} AND agent_id = ${memory.installOfAgentId} FOR SHARE`;
+    await lockAppInstallation(tx, memory.appId!, memory.installOfAgentId);
   }
   if (ctx.userId && !ctx.impersonation) {
     await tx.$queryRaw`SELECT 1 FROM app_members WHERE app_id = ${memory.appId} AND user_id = ${ctx.userId} FOR SHARE`;

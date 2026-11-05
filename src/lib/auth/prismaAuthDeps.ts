@@ -1,3 +1,4 @@
+import { resolveAppInstallation } from '../appInstallations.js';
 /**
  * Prisma-backed `AuthDeps` factory for `resolveMemoryAuthorization`.
  *
@@ -32,10 +33,7 @@ export function prismaAuthDeps(db: PrismaClient): AuthDeps {
       }),
 
     getAppAgent: async (appId, agentId) => {
-      const row = await db.appAgent.findUnique({
-        where: { appId_agentId: { appId, agentId } },
-        select: { appId: true },
-      });
+      const row = await resolveAppInstallation(db,appId,agentId);
       return row ? { exists: true } : null;
     },
 

@@ -1,3 +1,4 @@
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import {
   decryptNodeFields,
@@ -76,7 +77,7 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
     where: {
       userId: ctx.userId,
       app: {
-        appAgents: { some: { agentId: resolvedAgentId } },
+        ...appInstallationWhere(resolvedAgentId),
         deletedAt: null,
       },
     },

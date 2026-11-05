@@ -1,3 +1,4 @@
+import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
 /**
  * MCP access-control: which memories can the caller read/write?
  *
@@ -35,7 +36,7 @@ import { getOrgReadableMemoryIds } from '../lib/auth/orgReadableMemory.js';
 import { getOrgWritableMemoryIds } from '../lib/auth/orgWritableMemory.js';
 import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
-import { LINK_CAP_MEMORY_SELECT, cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
+import { cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
@@ -146,48 +147,16 @@ async function buildAppMemoryMap(
   opts: AppMemoryAccessOptions,
   loadItemUserAccess?: ItemUserAccessLoader,
 ): Promise<Map<string, string>> {
-  const app = await db.app.findUnique({
-    where: { id: appId },
-    select: {
-      id: true,
-      organizationId: true,
-      organization: { select: { deletedAt: true } },
-      ownerUserId: true,
-      deletedAt: true,
-      uninstalledAt: true,
-      appAgents: {
-        orderBy: { createdAt: 'asc' },
-        ...(opts.allAgents ? {} : { take: 1 }),
-        select: {
-          agent: {
-            select: {
-              id: true,
-              organizationId: true,
-              ownerUserId: true,
-              systemMemoryId: true,
-              deletedAt: true,
-              memoryItems: {
-                where: { deletedAt: null, memory: { deletedAt: null } },
-                select: {
-                  memoryId: true,
-                  role: true,
-                  memory: { select: {
-                    ...LINK_CAP_MEMORY_SELECT,
-                    workerOf: { select: { id: true } },
-                  } },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  });
+  const { apps, installations } = await loadAppInstallationPage(db, appId, true);
+  const app = apps[0];
   if (!app || app.deletedAt || app.uninstalledAt || app.organization?.deletedAt) return new Map();
-
-  const agents = app.appAgents
-    .map((install) => install.agent)
-    .filter((agent): agent is NonNullable<typeof agent> => agent !== null && agent.deletedAt === null);
+  // Primary-only callers retain the oldest physical row, even when its
+  // Agent is dead. Filtering it away must not silently promote another row.
+  const primaryAgentId = app.appAgents[0]?.agentId;
+  const selected = opts.allAgents ? installations : installations.filter(row =>
+    row.installationKind === 'ROW' && row.agentId === primaryAgentId);
+  const agents = selected.map(row => ({ ...row.agent, memoryItems: row.agent.memoryItems ?? [] }));
+  const appInstalls = agents.map(agent=>({agent}));
   const licensedAgentIds = await activeAgentInstallLicenseIds(db, app, agents);
   const systemIds = agents
     .filter((agent) => licensedAgentIds.has(agent.id) && agent.systemMemoryId !== null)
@@ -205,7 +174,7 @@ async function buildAppMemoryMap(
       ? await loadItemUserAccess() : new Map<string, string>())
     : undefined;
   const access = new Map<string, string>();
-  for (const install of app.appAgents) {
+  for (const install of appInstalls) {
     const agentAccess = getPrimaryAgentAccess(
       { ...app, appAgents: [install] }, licensedAgentIds, opts.includeSystemMemories === false ? new Set<string>() : liveSystemIds,
       // #1376 (R201): an item is a limit, never a grant, so a credential-only principal gets none of its Agent's items.
@@ -682,15 +651,11 @@ async function installedSystemMemoryFolds(
   ids: string[],
 ): Promise<Array<{ appId: string; map: Map<string, string> }>> {
   if (ids.length === 0) return [];
-  const apps = await db.app.findMany({
-    where: { id: { in: ids }, deletedAt: null, uninstalledAt: null },
-    select: {
-      id: true, organizationId: true, ownerUserId: true,
-      appAgents: { select: { agent: { select: { id: true, organizationId: true, ownerUserId: true, systemMemoryId: true, deletedAt: true } } } },
-    },
-  });
+  const page = await loadAppInstallationPage(db, ids);
+  const apps = page.apps.filter(app => !app.deletedAt && !app.uninstalledAt);
+  const installations = page.installations;
   const perApp = await Promise.all(apps.map(async (app) => {
-    const agents = app.appAgents.map((install) => install.agent).filter((agent) => agent !== null && agent.deletedAt === null);
+    const agents = installations.filter(row=>row.appId===app.id).map(row=>row.agent);
     const licensed = await activeAgentInstallLicenseIds(db, app, agents);
     return { appId: app.id, agents: agents.filter((a) => licensed.has(a.id) && a.systemMemoryId !== null) };
   }));
@@ -1442,10 +1407,7 @@ export async function filterReadableMemoryIds(
       ),
     ];
     const installed = legacyAgentIds.length
-      ? await db.appAgent.findMany({
-          where: { appId: auth.appId, agentId: { in: legacyAgentIds } },
-          select: { agentId: true },
-        })
+      ? (await listAppInstallations(db,auth.appId)).filter(row=>legacyAgentIds.includes(row.agentId))
       : [];
     installedAgentIds = new Set(installed.map((row) => row.agentId));
 

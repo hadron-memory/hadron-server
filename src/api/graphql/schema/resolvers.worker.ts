@@ -1,3 +1,4 @@
+import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { requireInstructedAct, sameActPrincipal, type ActAdmission, type StaffActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
@@ -323,18 +324,11 @@ export async function locateTeamAgent(
       if (e instanceof AgentNotFoundError) throw notInstalled();
       throw e;
     }
-    const row = await ctx.db.appAgent.findUnique({
-      where: { appId_agentId: { appId, agentId: id } },
-      select: { agent: { select: { id: true, name: true, urn: true, systemMemoryId: true } } },
-    });
+    const row = await resolveAppInstallation(ctx.db, appId, id);
     if (!row) throw notInstalled();
     return row.agent;
   }
-  const installed = await ctx.db.appAgent.findMany({
-    where: { appId },
-    orderBy: { createdAt: 'asc' },
-    select: { agent: { select: { id: true, name: true, urn: true, systemMemoryId: true, deletedAt: true } } },
-  });
+  const installed = await listAppInstallations(ctx.db, appId);
   const candidates: TeamAgentRow[] = [];
   for (const { agent } of installed) {
     if (!agent || agent.deletedAt || !agent.systemMemoryId) continue;
@@ -991,15 +985,15 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
       if (e instanceof AgentNotFoundError) throw notInstalled();
       throw e;
     }
-    const row = await ctx.db.appAgent.findUnique({
-      where: { appId_agentId: { appId, agentId: id } },
-      select: {
-        agent: {
-          select: { id: true, name: true, personaRole: true, deletedAt: true },
-        },
-      },
-    });
-    if (!row || row.agent.deletedAt) throw notInstalled();
+    const row = await resolveAppInstallation(ctx.db, appId, id);
+    if (!row || row.agent.deletedAt) {
+      if (expectedAgentId !== undefined && id !== expectedAgentId) throw castTargetChanged();
+      // Raw membership may preserve the existing typed license refusal, but
+      // must never supply identity metadata to an ordinary cast decision.
+      const witness = await resolveUnfilteredAppInstallation(ctx.db, appId, id);
+      if (witness?.installationKind === 'DERIVED') await assertCastable(ctx.db, app, id);
+      throw notInstalled();
+    }
     agent = row.agent;
   } else {
     if (!roleNorm) {
@@ -1007,22 +1001,12 @@ async function resolveCastTarget(ctx: Context, args: CastArgs, expectedAgentId?:
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId },
-      orderBy: { createdAt: 'asc' },
-      select: {
-        agent: {
-          select: { id: true, name: true, urn: true, personaRole: true, deletedAt: true },
-        },
-      },
-    });
+    const installed = await listAppInstallations(ctx.db, appId);
     // In-memory case-insensitive equality — never a LIKE-backed filter
     // (findings:prisma-string-filters-are-unescaped-like).
-    const matches = installed
-      .map((r) => r.agent)
-      .filter(
-        (a) => a && !a.deletedAt && (a.personaRole ?? '').trim().toLowerCase() === roleNorm.toLowerCase(),
-      );
+    const matching = installed.filter(r => (r.agent.personaRole ?? '').trim().toLowerCase() === roleNorm.toLowerCase());
+    const rowMatches = matching.filter(r => r.installationKind === 'ROW');
+    const matches = (rowMatches.length ? rowMatches : matching).map(r => r.agent);
     if (matches.length === 0) {
       throw new GraphQLError(
         `No installed Agent carries personaRole "${roleNorm}" — install the role-agent first, or pass agentRef.`,
@@ -1177,6 +1161,7 @@ export const workerMutations = {
             if (freshApp.uninstalledAt) {
               throw new GraphQLError('Cannot cast a worker in an uninstalled App.', { extensions: { code: 'APP_UNINSTALLED', appId } });
             }
+            if (!(await lockAppInstallation(tx, appId, agent.id))) throw workerAgentNotInstalled(appId);
             const freshTarget = await resolveCastTarget(txCtx, args, agent.id);
             if (freshTarget.agent.id !== agent.id) throw castTargetChanged();
             if (freshTarget.reportingHeadId !== reportingHeadId) throw castTargetChanged();
@@ -1885,6 +1870,7 @@ export const workerMutations = {
         });
       }
       const freshApp = await tx.app.findUniqueOrThrow({ where: { id: app.id } });
+      if (!(await lockAppInstallation(tx, app.id, toAgentId))) throw workerAgentNotInstalled(app.id);
       const { agent, provisionGrantsFor } = await assertCastable(tx, freshApp, toAgentId);
       const toRole = requireWorkerAgentRole(agent, worker.id);
       // #2917: the plan above is a read made before this write, and the write is ON CONFLICT DO NOTHING, so a

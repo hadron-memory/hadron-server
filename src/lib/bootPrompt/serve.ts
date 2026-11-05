@@ -1,3 +1,4 @@
+import { readInstallBootPrompt } from '../appInstallations.js';
 /**
  * #2047 (S10, cor:agt:040:07/:09/:10) — the ONE resolver that decides which boot prompt a bind, a chatbot chat or a
  * headless run is served, and refuses all three the same way.
@@ -65,7 +66,7 @@ async function decidingPointer(
     const w = await db.worker.findUnique({ where: { id: t.workerId }, select });
     if (w?.bootPromptNodeId) return { level: 'WORKER', stored: w };
   }
-  const install = t.appId ? await db.appAgent.findFirst({ where: { appId: t.appId, agentId: t.agent.id }, select }) : null;
+  const install = t.appId ? await readInstallBootPrompt(db, t.appId, t.agent.id) : null;
   if (install?.bootPromptNodeId) return { level: 'APP_AGENT', stored: install };
   const agent = await db.agent.findUnique({ where: { id: t.agent.id }, select });
   if (agent?.bootPromptNodeId) return { level: 'AGENT', stored: agent };

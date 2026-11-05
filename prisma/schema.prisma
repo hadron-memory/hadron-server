@@ -795,6 +795,8 @@ model Memory {
   /// prisma/post-push.sql (Prisma cannot model the WHERE). Enforced by
   /// chk_memory_class_app_id (system ⇒ both set or both NULL).
   installOfAgentId      String? @map("install_of_agent_id")
+
+
   /// R94 C (#2064): TRUE for an App's install memory, for its whole life. The
   /// link to the Agent above is NULLed when the Agent is erased with its
   /// owner's account (the memory stays with its App, a detached install), so
@@ -2148,6 +2150,7 @@ model Agent {
   userSubscriptions  AgentSubscription[] @relation("AgentUserSubscriptions")
   // 023-app-shape Phase 2b: App↔Agent goes through `AppAgent` (N:M).
   // The direct `App[]` back-relation is gone (dropped with App.agentId).
+  appAgentCustomizations AppAgentCustomization[]
   appAgents          AppAgent[]
   imports            AgentImport[]       @relation("ParentAgent")
   importedBy         AgentImport[]       @relation("ImportedAgent")
@@ -3415,6 +3418,7 @@ model App {
   organization            Organization?             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   // 023-app-shape Phase 2b: App↔Agent is N:M through AppAgent. The
   // direct `agent` relation is gone (dropped with `agentId`).
+  appAgentCustomizations AppAgentCustomization[]
   appAgents               AppAgent[]
   /// #974 — this App's STAFF: the named castings of installed agents
   /// (cor:dmo:050:11). Distinct from `appAgents`: the roster join says an
@@ -3803,6 +3807,22 @@ model AppLogEntry {
 /// the row) does NOT cascade-delete the (app_id, agent_id, *) memories
 /// (FR-005; orphan retention preserved). Duplicate inserts for the
 /// same (app_id, agent_id) are rejected by the composite PK.
+/// #2168: App-level customisation state for an installation derived from an
+/// import. This is NOT an install: membership comes only from app_agents or
+/// agent_imports. It outlives deletion of its install memory/compiled target,
+/// so a set pointer whose target is deleted remains a refusal (R27).
+model AppAgentCustomization {
+  appId String @map("app_id")
+  agentId String @map("agent_id")
+  bootPromptNodeId String? @map("boot_prompt_node_id")
+  bootPromptUrn String? @map("boot_prompt_urn")
+  app App @relation(fields:[appId],references:[id],onDelete:Cascade)
+  agent Agent @relation(fields:[agentId],references:[id],onDelete:Cascade)
+  @@id([appId,agentId])
+  @@index([bootPromptNodeId])
+  @@map("app_agent_customizations")
+}
+
 model AppAgent {
   appId            String    @map("app_id")
   agentId          String    @map("agent_id")

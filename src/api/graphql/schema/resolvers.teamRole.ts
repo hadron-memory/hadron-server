@@ -1,3 +1,4 @@
+import { listAppInstallationsWithDerivedLicense } from '../../../lib/appAgent.js';
 // Team roles as a platform surface — #960 (cor:agt:020:01/:02), re-keyed by
 // the Worker model (#974): a role definition is the `roles:<role>` node in the
 // Team Agent's system memory. The boot prompt is NOT here — it is the
@@ -62,15 +63,13 @@ async function loadRoleAgentIndex(
   ctx: Context,
   appId: string,
 ): Promise<Map<string, RoleAgentEntry>> {
-  const installed = await ctx.db.appAgent.findMany({
-    where: { appId },
-    orderBy: { createdAt: 'asc' },
-    select: { agent: true },
-  });
+  const installed = await listAppInstallationsWithDerivedLicense(ctx.db, appId);
   const index = new Map<string, RoleAgentEntry>();
-  for (const { agent } of installed) {
+  const installedRoles = new Set(installed.filter(r=>r.installationKind === 'ROW').map(r=>(r.agent.personaRole ?? '').trim().toLowerCase()));
+  for (const { agent, installationKind } of installed) {
+    if (installationKind === 'DERIVED' && installedRoles.has((agent.personaRole ?? '').trim().toLowerCase())) continue;
     if (!agent || agent.deletedAt || !agent.personaRole) continue;
-    const key = agent.personaRole.toLowerCase();
+    const key = agent.personaRole.trim().toLowerCase();
     const entry = index.get(key);
     if (!entry) {
       index.set(key, { agent: agent as RoleAgentEntry['agent'], matches: 1 });
@@ -196,17 +195,13 @@ async function buildTeamRole(
     // The agent OBJECT runs Query.agent's own read gate, masked to null on
     // deny — the same #552 posture as Worker.agent: a nested Agent hands the
     // caller its field resolvers (its definition included).
-    const agent = entry.agent as unknown as {
-      visibility: string | null;
-      organizationId: string | null;
-      ownerUserId: string | null;
-    };
-    if (agent.visibility === 'PUBLIC') {
-      roleAgent = entry.agent;
-    } else {
+    const agent = await ctx.db.agent.findUnique({where:{id:entry.agent.id as string}});
+    if (agent?.visibility === 'PUBLIC') {
+      roleAgent = agent;
+    } else if (agent) {
       try {
         await requireAgentAccess(ctx, agent, 'READER');
-        roleAgent = entry.agent;
+        roleAgent = agent;
       } catch {
         roleAgent = null;
       }
@@ -643,11 +638,7 @@ export async function loadAppRepoAffinity(
     // environments (PR #1071 review, Copilot) — and the comment below claimed a
     // determinism the query did not provide. Install order is the meaningful
     // one: the agent installed first owns the role by default.
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId },
-      orderBy: [{ createdAt: 'asc' }, { agentId: 'asc' }],
-      select: { agent: { select: { systemMemoryId: true, deletedAt: true } } },
-    });
+    const installed = await listAppInstallationsWithDerivedLicense(ctx.db, appId);
     const memoryIds = [
       ...new Set(
         installed

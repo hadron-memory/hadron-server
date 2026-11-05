@@ -1,3 +1,4 @@
+import { listAppInstallations } from '../lib/appInstallations.js';
 /**
  * Spec 049 Phase 4 — the one-shot Channel backfill (plan §8.7, closes the
  * data half of #1047).
@@ -91,10 +92,7 @@ async function pickTeamSpace(
   try {
     agentId = (await locateTeamAgent(ctx, appId, null)).id;
   } catch {
-    const installed = await db.appAgent.findMany({
-      where: { appId },
-      select: { agent: { select: { id: true, deletedAt: true } } },
-    });
+    const installed = (await listAppInstallations(db,appId));
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length === 1) agentId = live[0].id;
   }
@@ -276,7 +274,7 @@ export async function backfillChannels(db: PrismaClient, opts: { apply: boolean 
     if (opts.apply) {
       report.registerRowsCreated += await ensureInstallRegisterRows(db, app.id, { createdBy: app.createdBy ?? null });
     } else {
-      const installs = await db.appAgent.count({ where: { appId: app.id, agent: { deletedAt: null } } });
+      const installs = (await listAppInstallations(db,app.id)).length;
       const rows = await db.registerEntry.count({ where: { appId: app.id, installDefault: true, deletedAt: null } });
       report.registerRowsCreated += Math.max(0, installs - rows);
     }

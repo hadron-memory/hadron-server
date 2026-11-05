@@ -1,3 +1,5 @@
+import { isNewInstallPayload } from './installationPayload.js';
+import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
 import { authorizedTriggerLabel } from './resolvers.appRun.js';
@@ -246,7 +248,9 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
     // under impersonation (the shared-org session never sees user-owned rows).
     if (!ctx.impersonation) or.push({ ownerUserId: ctx.userId });
   }
-  if (ctx.appId) or.push({ appAgents: { some: { appId: ctx.appId } } });
+  // This is a final row-list audience, not a candidate query: derived parents
+  // need the App holder's usable license before their edge metadata is visible.
+  if (ctx.appId) or.push({ id: { in: (await listAppInstallations(ctx.db, ctx.appId)).map(row => row.agentId) } });
   return { ...live, OR: or };
 }
 
@@ -296,6 +300,32 @@ export async function readableNestedAgent<T extends NestedAgentRow>(ctx: Context
     if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return null;
     throw error;
   }
+}
+
+// Audit shape itself distinguishes ROW from DERIVED. Ruling6636734542
+// permits it only behind the same whole-App gate as companion #3435. This
+// marker belongs to this response and exact Context, not an authority cache.
+type InstallationAuditRow = {appId:string;agentId?:string;createdAt?:Date;
+  _installationAppCreatedAt?:Date;createdBy?:string|null;updatedBy?:string|null;updatedAt?:Date|null;
+  _installationAuditRead?: WeakMap<Context,boolean>};
+export async function wholeAppInstallationReadable(ctx:Context, appId:string):Promise<boolean> {
+  const installations = await listAppInstallations(ctx.db,appId);
+  for(const row of installations) if(!(await readableNestedAgent(ctx,row.agent))) return false;
+  return true;
+}
+// A3/A3.2: partial readers receive one App date for every installation;
+// full readers keep the actual per-entry dates. No public roster groups by kind.
+function servedInstallationOrder(readable:boolean) {
+  return (left:{createdAt:Date;agentId:string},right:{createdAt:Date;agentId:string}) =>
+    (readable ? left.createdAt.getTime()-right.createdAt.getTime() : 0) ||
+      left.agentId.localeCompare(right.agentId);
+}
+function installationAuditField(field:'createdBy'|'updatedBy'|'updatedAt') {
+  return async(row:InstallationAuditRow,_:unknown,ctx:Context)=>{
+    const decision=row._installationAuditRead?.get(ctx);
+    const readable=decision !== undefined ? decision : await wholeAppInstallationReadable(ctx,row.appId);
+    return readable ? row[field] ?? null : null;
+  };
 }
 
 /**
@@ -1797,20 +1827,16 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      const eagerAll = readAllAgentRecordsFromEager(a);
-      if (eagerAll !== undefined) {
-        const visible = await Promise.all(eagerAll.map((ag) =>
-          readableNestedAgent(ctx, ag as (NestedAgentRow & Record<string, unknown>) | null),
-        ));
-        return visible.filter((ag): ag is NonNullable<typeof ag> => ag !== null);
-      }
-      const rows = await ctx.db.appAgent.findMany({
-        where: { appId: a.id },
-        orderBy: { createdAt: 'asc' },
-        include: { agent: { include: AGENT_INCLUDE } },
-      });
+      const installs = await listAppInstallations(ctx.db,a.id);
+      const agents = await ctx.db.agent.findMany({where:{id:{in:installs.map(r=>r.agentId)}},include:AGENT_INCLUDE});
+      const byId = new Map(agents.map(agent=>[agent.id,agent]));
+      const rows = installs.map(row=>({...row,agent:byId.get(row.agentId)!}));
       const visible = await Promise.all(rows.map((r) => readableNestedAgent(ctx, r.agent)));
-      return visible.filter((ag): ag is NonNullable<typeof ag> => ag !== null);
+      const wholeAppReadable = visible.every(agent=>agent!==null);
+      return rows.map((row,index)=>({...row,agent:visible[index]}))
+        .sort(servedInstallationOrder(wholeAppReadable))
+        .map(row=>row.agent)
+        .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
@@ -1898,19 +1924,23 @@ export const typeResolvers = {
     // parent App onto each row so `AppAgent.app` resolves without an
     // N+1 DB lookup per row.
     appAgents: async (a: { id: string; appAgents?: unknown } & Record<string, unknown>, _: unknown, ctx: Context) => {
-      if (Array.isArray(a.appAgents)) {
-        return a.appAgents
-          .filter((aa) => {
-            const agent = (aa as { agent?: { deletedAt?: Date | null } | null }).agent;
-            return agent != null && !agent.deletedAt;
-          })
-          .map((aa) => ({ ...(aa as object), app: a }));
+      const installs = await listAppInstallations(ctx.db,a.id);
+      const eager = readAllAgentRecordsFromEager(a) ?? [];
+      const agents = new Map(eager.map(agent=>[(agent as {id:string}).id,agent] as const));
+      const missing = installs.map(row=>row.agentId).filter(id=>!agents.has(id));
+      if (missing.length) {
+        for (const agent of await ctx.db.agent.findMany({where:{id:{in:missing}},include:AGENT_INCLUDE})) {
+          agents.set(agent.id,agent);
+        }
       }
-      return ctx.db.appAgent.findMany({
-        where: { appId: a.id, agent: { deletedAt: null } },
-        orderBy: { createdAt: 'asc' },
-        include: { app: true, agent: { include: AGENT_INCLUDE } },
-      });
+      const wholeAppReadable = installs.every(row => agents.has(row.agentId)) &&
+        (await Promise.all(installs.map(row => readableNestedAgent(ctx,agents.get(row.agentId) as NestedAgentRow)))).every(Boolean);
+      const appCreatedAt=wholeAppReadable ? undefined : a.createdAt instanceof Date ? a.createdAt :
+        (await ctx.db.app.findUniqueOrThrow({where:{id:a.id},select:{createdAt:true}})).createdAt;
+      return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId),
+        _installationAppCreatedAt:appCreatedAt,
+        _installationAuditRead:new WeakMap([[ctx,wholeAppReadable]])}))
+        .sort(servedInstallationOrder(wholeAppReadable));
     },
     // 298: Canonicalize URN on read. Converts legacy single-colon hierarchy
     // to canonical spec-021 double-colon form for both legacy and migrated rows.
@@ -1921,6 +1951,20 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
+    createdAt: async (row:InstallationAuditRow,_:unknown,ctx:Context) => {
+      // A3.1 is scoped to the exact newly-created payload object and composite
+      // row identity. It grants nothing to a later list/read by the same caller.
+      if (isNewInstallPayload(row,ctx)) return row.createdAt;
+      const decision=row._installationAuditRead?.get(ctx);
+      const readable=decision !== undefined ? decision : await wholeAppInstallationReadable(ctx,row.appId);
+      if (readable) return row.createdAt;
+      if (row._installationAppCreatedAt) return row._installationAppCreatedAt;
+      const app=await ctx.db.app.findUniqueOrThrow({where:{id:row.appId},select:{createdAt:true}});
+      return app.createdAt;
+    },
+    createdBy: installationAuditField('createdBy'),
+    updatedBy: installationAuditField('updatedBy'),
+    updatedAt: installationAuditField('updatedAt'),
     app: (aa: { appId: string }, _: unknown, ctx: Context) =>
       loadReadableNestedApp(ctx, aa.appId),
     agent: async (aa: { agentId: string; agent?: unknown }, _: unknown, ctx: Context) => {
@@ -2501,7 +2545,7 @@ export const typeResolvers = {
     // user's user-owned App (spec 047 strict ownership).
     apps: async (a: { id: string }, _: unknown, ctx: Context) => {
       const where: Record<string, unknown> = {
-        appAgents: { some: { agentId: a.id } },
+        ...appInstallationWhere(a.id),
         deletedAt: null,
       };
       if (!(ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) {
@@ -2526,7 +2570,7 @@ export const typeResolvers = {
         : await isOrgMemberOrAdmin(ctx, a.organizationId);
       if (!owningTenant) return 0;
       return ctx.db.app.count({
-        where: { appAgents: { some: { agentId: a.id } }, deletedAt: null },
+        where: { ...appInstallationWhere(a.id), deletedAt: null },
       });
     },
     // 023-app-shape US1: the AppAgent join rows where this Agent is installed.
@@ -2540,11 +2584,10 @@ export const typeResolvers = {
         if (orgIds.length === 0) return [];
         appWhere.organizationId = { in: orgIds };
       }
-      const rows = await ctx.db.appAgent.findMany({
-        where: { agentId: a.id, app: appWhere, agent: { deletedAt: null } },
-        orderBy: { createdAt: 'asc' },
-        include: { app: true, agent: { include: AGENT_INCLUDE } },
-      });
+      const apps = await ctx.db.app.findMany({where:{...appWhere,...appInstallationWhere(a.id)},orderBy:{createdAt:'asc'}});
+      const installs = await listAppInstallations(ctx.db,apps.map(app=>app.id),a.id);
+      const byId = new Map(apps.map(app=>[app.id,app]));
+      const rows = installs.map(({agent:_agent,...row})=>({...row,app:byId.get(row.appId)!}));
       const readableApps = await filterReadableAppRows(ctx, rows.map((row) => row.app));
       const readableIds = new Set(readableApps.map((app) => app.id));
       return rows.filter((row) => readableIds.has(row.appId));

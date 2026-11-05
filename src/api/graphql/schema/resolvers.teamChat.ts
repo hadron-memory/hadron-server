@@ -1,3 +1,4 @@
+import { listAppInstallations } from '../../../lib/appInstallations.js';
 import { NodeNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { buildTeamSnapshot, isReadableTeamHead, teamTagsEnabled, teamHeadInvalid, type TeamTagSnapshot } from '../../../lib/teamTagSnapshot.js';
@@ -285,10 +286,7 @@ async function bootstrapTeamChat(
     teamAgent = await locateTeamAgent(ctx, app.id, null);
   } catch (e) {
     if (!(e instanceof GraphQLError) || e.extensions?.code !== 'TEAM_AGENT_NOT_FOUND') throw e;
-    const installed = await ctx.db.appAgent.findMany({
-      where: { appId: app.id },
-      select: { agent: { select: { id: true, name: true, urn: true, deletedAt: true } } },
-    });
+    const installed = await listAppInstallations(ctx.db, app.id);
     const live = installed.map((r) => r.agent).filter((a) => a && !a.deletedAt);
     if (live.length !== 1) throw e;
     teamAgent = live[0];

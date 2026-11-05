@@ -1,3 +1,4 @@
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
 import { admitCredentialList } from './resolvers.instruction.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
@@ -116,7 +117,7 @@ export const appQueries = {
           if (!(error instanceof AgentNotFoundError || error instanceof UrnNotQualifiedError || error instanceof AmbiguousLegacyUrnError)) throw error;
         }
         if (!target) return { items: [], total: 0 };
-        agentClause = { appAgents: { some: { agentId: target.id } } };
+        agentClause = appInstallationWhere(target.id);
       }
       let where: Record<string, unknown>;
       if (f.ownedByMe) {

@@ -1,3 +1,4 @@
+import { appInstallationWhere } from '../../../lib/appInstallations.js';
 // chatMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import { assertAuthoring, attestedAuthoring } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
@@ -383,7 +384,7 @@ export const chatMutations = {
           where: {
             userId: ctx.userId,
             app: {
-              appAgents: { some: { agentId: resolvedAgentId } },
+              ...appInstallationWhere(resolvedAgentId),
               deletedAt: null,
             },
           },
@@ -502,7 +503,7 @@ export const chatMutations = {
             ownerOrgIds.length > 0
               ? await ctx.db.app.findFirst({
                   where: {
-                    appAgents: { some: { agentId: resolvedAgentId } },
+                    ...appInstallationWhere(resolvedAgentId),
                     organizationId: { in: ownerOrgIds },
                     deletedAt: null,
                   },
