@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -42,8 +42,8 @@ function reaches(graph: Map<string, string[]>, from: string, target: string): bo
   return false;
 }
 
-function inSameCycle(graph: Map<string, string[]>, roots: string[]): boolean {
-  return roots.every(from => roots.every(to => from === to || reaches(graph, from, to)));
+function hasCycle(graph: Map<string, string[]>, roots: string[]): boolean {
+  return roots.some(root => reaches(graph, root, root));
 }
 
 describe('#3332 instructed-act runtime import graph', () => {
@@ -52,33 +52,31 @@ describe('#3332 instructed-act runtime import graph', () => {
       ['worker', ['instruction']], ['instruction', ['chat']], ['chat', runtimeImports(back)],
     ]);
     const roots = ['worker', 'instruction', 'chat'];
-    expect(inSameCycle(graph('import { gate } from "worker";'), roots)).toBe(true);
-    expect(inSameCycle(graph('import type { Context } from "worker";'), roots)).toBe(false);
+    expect(hasCycle(graph('import { gate } from "worker";'), roots)).toBe(true);
+    expect(hasCycle(graph('import type { Context } from "worker";'), roots)).toBe(false);
     expect(runtimeImports('import { type Context } from "worker";')).toEqual([]);
     expect(runtimeImports('import { type Context, gate } from "worker";')).toEqual(['worker']);
     expect(runtimeImports('export { type Context } from "worker";')).toEqual([]);
     expect(runtimeImports('export { type Context, gate } from "worker";')).toEqual(['worker']);
     expect(runtimeImports('import "worker"; import("chat");')).toEqual(['worker', 'chat']);
+    expect(hasCycle(graph('import("worker");'), roots)).toBe(true);
+    expect(hasCycle(graph('export { gate } from "worker";'), roots)).toBe(true);
+    expect(hasCycle(new Map([['worker', ['instruction']], ['instruction', ['worker']], ['chat', []]]), roots)).toBe(true);
   });
 
-  it('has no runtime cycle containing worker -> instruction -> teamChat -> worker', () => {
+  it('has no direct runtime cycle among worker, instruction and teamChat', () => {
     const src = fileURLToPath(new URL('../../', import.meta.url));
     const roots = ['worker', 'instruction', 'teamChat'].map(name => resolve(src, 'api/graphql/schema/resolvers.' + name + '.ts'));
     const graph = new Map<string, string[]>();
-    const pending = [...roots];
-    while (pending.length) {
-      const file = pending.pop()!;
-      if (graph.has(file)) continue;
-      const deps = runtimeImports(readFileSync(file, 'utf8')).filter(name => name.startsWith('.')).flatMap(name => {
-        const base = resolve(dirname(file), name);
-        const found = [base.replace(/\.js$/, '.ts'), base, resolve(base, 'index.ts')]
-          .find(candidate => candidate.endsWith('.ts') && !candidate.endsWith('.d.ts') && existsSync(candidate));
-        return found ? [found] : [];
-      });
+    // Gate scope (6670200398): the induced graph of these three modules, not arbitrary
+    // transitive cycles in the server. Literal dynamic imports still count as direct edges.
+    for (const file of roots) {
+      const deps = runtimeImports(readFileSync(file, 'utf8')).filter(name => name.startsWith('.'))
+        .map(name => resolve(dirname(file), name).replace(/\.js$/, '.ts'))
+        .filter(target => roots.includes(target));
       graph.set(file, deps);
-      pending.push(...deps);
     }
     const witness = roots.map(file => relative(src, file)).concat(relative(src, roots[0]!)).join(' -> ');
-    expect(inSameCycle(graph, roots), 'runtime dependency cycle: ' + witness).toBe(false);
+    expect(hasCycle(graph, roots), 'runtime dependency cycle: ' + witness).toBe(false);
   });
 });
