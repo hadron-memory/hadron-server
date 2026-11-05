@@ -366,6 +366,43 @@ describe('#1332 runId replay (refusal 5)', () => {
   });
 });
 
+describe('#1332 mutant pins (every reporter id, every broken-task shape, impersonation)', () => {
+  type Reporter = Parameters<typeof import('../../../lib/contentValidationReport.js').recordContentValidationReportInTx>[1]['reporter'];
+  const inTx = async (reporter: Reporter, runId = 'm1') => {
+    const { recordContentValidationReportInTx } = await import('../../../lib/contentValidationReport.js');
+    return db.$transaction((tx) => recordContentValidationReportInTx(tx, {
+      nodeId, memoryId, nodeRevision: 1, validationTaskRef: validationTask, validationTaskRevision: 1, outcome: 'PASS', runId, reporter,
+    }));
+  };
+
+  it('the same worker under another agent, and another App key, are other reporters: a conflict, never a replay', async () => {
+    await inTx({ kind: 'WORKER', workerId: 'w-1', agentId: 'agent-a' });
+    expect((await inTx({ kind: 'WORKER', workerId: 'w-1', agentId: 'agent-a' })).replayed).toBe(true);
+    expect(await refusal(inTx({ kind: 'WORKER', workerId: 'w-1', agentId: 'agent-b' }))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
+    await inTx({ kind: 'APP_KEY', appKeyId: 'key-a' }, 'm2');
+    expect((await inTx({ kind: 'APP_KEY', appKeyId: 'key-a' }, 'm2')).replayed).toBe(true);
+    expect(await refusal(inTx({ kind: 'APP_KEY', appKeyId: 'key-b' }, 'm2'))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
+    expect(await reportCount()).toBe(2);
+  });
+
+  it('a task in a deleted memory, or no longer runnable, is broken: refused, nothing written', async () => {
+    await db.node.update({ where: { id: validationTask }, data: { isRunnable: false } });
+    expect(await refusal(report(person(leo)))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
+    await db.node.update({ where: { id: validationTask }, data: { isRunnable: true } });
+    // The task lives in another memory, which is deleted.
+    const elsewhere = (await db.node.create({ data: { id: generateId(), memoryId: otherMemoryId, loc: 'v-elsewhere', name: 'V', isRunnable: true, content: 'c' } })).id;
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { validationTaskId: elsewhere } });
+    await db.memory.update({ where: { id: otherMemoryId }, data: { deletedAt: new Date() } });
+    expect(await refusal(report(person(leo), { validationTaskRef: elsewhere }))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
+    expect(await reportCount()).toBe(0);
+  });
+
+  it('impersonation is FORBIDDEN (read-only on every surface), before any reporter is derived', async () => {
+    expect(await refusal(report(person(leo, { impersonation: { orgId } } as Partial<Context>)))).toBe('FORBIDDEN');
+    expect(await reportCount()).toBe(0);
+  });
+});
+
 describe('#1332 storage invariants', () => {
   it('the report is append-only except a merge moving the person reporter', async () => {
     await report(person(leo), { runId: 'imm' });
