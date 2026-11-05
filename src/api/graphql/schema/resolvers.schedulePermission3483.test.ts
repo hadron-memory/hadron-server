@@ -13,6 +13,7 @@ import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { resolvers, type Context } from './resolvers.js';
+import { spendAdmission } from '../../../lib/automation/scheduleAdmission.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
@@ -102,7 +103,8 @@ describe('#3483 rows 2-3: a person gives a one-time permission', () => {
   for (const [label, ctx] of refused) {
     it(`row 3: ${label} is refused and writes nothing`, async () => {
       const f = await fixture();
-      const out = await f.as(f.worker, () => refusal(give(f, ctx(f))));
+      // Only the worker-bound case runs under a worker actor; the others must be refused by their own check.
+      const out = await (label.startsWith('a worker') ? f.as(f.worker, () => refusal(give(f, ctx(f)))) : refusal(give(f, ctx(f))));
       expect(out?.code).toBe('FORBIDDEN');
       expect(await db.schedulePermission.count()).toBe(0);
     });
@@ -241,6 +243,7 @@ describe('#3483 rows 9-10: the other doors', () => {
     await expect(upd({ cron: '0 10 * * 1', name: 'renamed' })).resolves.toMatchObject({ name: 'renamed' });
     const p = await give(f, f.person, { entryNodeUrn: 'hrn:node:sp3483.test:flow:other' });
     await expect(upd({ entryNodeUrn: 'hrn:node:sp3483.test:flow:other' })).resolves.toMatchObject({ entryNodeUrn: 'hrn:node:sp3483.test:flow:other', admittedPermissionId: p.id });
+    expect(await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).toMatchObject({ consumedKind: 'SCHEDULE', consumedId: s.id });
   });
   it('row 9: a person\'s re-capturing update is unchanged', async () => {
     const f = await fixture();
@@ -293,5 +296,23 @@ describe('#3483 row 12: approval doors still refuse workers', () => {
     const s = await appRunMutations.createAgentSchedule({}, { input: { name: 'P', ...f.input } as never }, f.person);
     const out = await f.as(f.worker, () => refusal((automationPinMutations as any).approveAutomation({}, { input: { triggerKind: 'SCHEDULE', triggerRef: s.id, hash: 'x' } }, f.wctx)));
     expect(out?.code).toBe('FORBIDDEN');
+  });
+});
+
+describe('#3483 row 5: the spend is its own guard, inside the create\'s transaction', () => {
+  const spend = (f: F, id: string, over: Record<string, string> = {}, holder: string | undefined = f.user.id) =>
+    db.$transaction(tx => spendAdmission(tx as never, { kind: 'permission', workerId: over.workerId ?? f.worker.id, permissionId: id }, f.app.id, over.entry ?? f.entry, { kind: 'SCHEDULE', id: 'sched-x' }, holder)).then(() => null, (e: any) => e.extensions?.code);
+  it('spends once; refuses a spent, expired, other-entry, other-worker or other-holder spend, leaving it unspent', async () => {
+    const f = await fixture();
+    const p = await give(f);
+    expect(await spend(f, p.id, { entry: 'hrn:node:sp3483.test:flow:other' })).toBe('FORBIDDEN');
+    expect(await spend(f, p.id, { workerId: f.other.id })).toBe('FORBIDDEN');
+    expect(await spend(f, p.id, {}, generateId())).toBe('FORBIDDEN');
+    expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).consumedAt).toBeNull();
+    await db.$executeRaw`UPDATE schedule_permissions SET given_at = now() - interval '20 minutes', expires_at = now() - interval '10 minutes' WHERE id = ${p.id}`;
+    expect(await spend(f, p.id)).toBe('FORBIDDEN');
+    const q = await give(f);
+    expect(await spend(f, q.id)).toBeNull();
+    expect(await spend(f, q.id)).toBe('FORBIDDEN');
   });
 });
