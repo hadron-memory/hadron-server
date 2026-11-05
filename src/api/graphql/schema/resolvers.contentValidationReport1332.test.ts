@@ -700,7 +700,7 @@ describe('#1332 §10 delta at 864efb6d (Ralion)', () => {
     expect(await reportCount()).toBe(0);
   });
 
-  it('P3-10 (ruling 0199 "every report"): a hidden task that is broken answers WRONG_TASK; a task in a deleted memory stays TASK_BROKEN', async () => {
+  it('P3-10 (ruling 0199 "every report", Vera 6672675613): a hidden live task that is broken answers WRONG_TASK; a reference that no longer resolves stays TASK_BROKEN', async () => {
     const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden-b', urn: 'cv-hidden-b' } })).id;
     const hiddenMem = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden-b:tasks', name: 'Tasks', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
     const hiddenTask = (await db.node.create({ data: { id: generateId(), memoryId: hiddenMem, loc: 'validate', name: 'V', isRunnable: false, content: 'check' } })).id;
@@ -712,8 +712,11 @@ describe('#1332 §10 delta at 864efb6d (Ralion)', () => {
     await db.orgMember.create({ data: { organizationId: hiddenOrg, userId: leo, role: 'READER' } });
     expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask }))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
     await db.orgMember.delete({ where: { organizationId_userId: { organizationId: hiddenOrg, userId: leo } } });
-    // A task whose memory is deleted is broken for everyone, readable or not.
-    await db.node.update({ where: { id: hiddenTask }, data: { isRunnable: true } });
+    // A reference that no longer resolves has no task left to hide: TASK_BROKEN for every caller
+    // (Vera's reading, 6672675613). First the task itself deleted, then its memory.
+    await db.node.update({ where: { id: hiddenTask }, data: { isRunnable: true, deletedAt: new Date() } });
+    expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask }))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
+    await db.node.update({ where: { id: hiddenTask }, data: { deletedAt: null } });
     await db.memory.update({ where: { id: hiddenMem }, data: { deletedAt: new Date() } });
     expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask }))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
     expect(await reportCount()).toBe(0);

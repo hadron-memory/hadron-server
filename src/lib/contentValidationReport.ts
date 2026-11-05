@@ -269,10 +269,11 @@ export async function recordContentValidationReportInTx(
   // before anything else about them: before the broken-rule check (or TASK_BROKEN would say a
   // hidden task is broken), before the reference is matched (or the check's cost would confirm
   // a right URN, §10 P3-11), and before the revision, author and run-id checks (or they would
-  // confirm the hidden task and its revision). A task in a deleted memory is broken for every
-  // caller and is left to the broken-rule check.
+  // confirm the hidden task and its revision). A reference that no longer resolves (the task
+  // deleted, or its memory deleted) has no task left to hide: it is broken for every caller and
+  // is left to the broken-rule check (Vera's reading of 0199, PR #3534 comment 6672675613).
   for (const t of tasks) {
-    if (t.memory.deletedAt) continue;
+    if (t.deletedAt || t.memory.deletedAt) continue;
     if (!(input.canReadTaskMemory && (await input.canReadTaskMemory(t.memoryId)))) {
       throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
     }
