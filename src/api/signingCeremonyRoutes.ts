@@ -107,6 +107,7 @@ function render(out){
  meta.appendChild(el('p','Requested by '+v.requester.name+(v.requester.via?' (through '+v.requester.via+')':'')+'. Revision '+v.revision+'. Expires '+new Date(v.expiresAt).toLocaleString()+'.'));
  view.appendChild(meta);
  const what=section('Exactly what you are signing');
+ what.appendChild(el('h3','Node'));what.appendChild(el('p',v.node.urn));
  what.appendChild(el('h3','Title'));what.appendChild(el('p',v.node.title));
  if(v.node.abstract){what.appendChild(el('h3','Abstract'));what.appendChild(el('p',v.node.abstract));}
  what.appendChild(el('h3','Content'));

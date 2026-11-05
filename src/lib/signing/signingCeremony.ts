@@ -33,6 +33,7 @@ import {
   completeSigningRequestInTransaction, declineSigningRequestInTransaction, effectiveRequestState, SigningRefusal,
 } from './requests.js';
 import { lineDiff, type DiffLine } from './lineDiff.js';
+import { emitNodeUrnV2 } from '../urnEmit.js';
 import { loadSignatureStatuses } from './status.js';
 
 export const SIGN_PROOF_TTL_SECONDS = 300;
@@ -91,7 +92,7 @@ const mayWriteIn = (tx: Prisma.TransactionClient) => async (userId: string, memo
 };
 
 export interface CeremonyView {
-  node: { title: string; abstract: string | null; contentSegments: Array<{ text: string; include: boolean }> };
+  node: { urn: string; title: string; abstract: string | null; contentSegments: Array<{ text: string; include: boolean }> };
   revision: number;
   requester: { name: string; via: string | null };
   expiresAt: string;
@@ -190,14 +191,14 @@ export async function proveForSigning(db: PrismaClient, a: {
       const state = effectiveRequestState(row, new Date((await tx.$queryRaw<Array<{ now: Date }>>`SELECT hadron_signing_now() AS now`)[0].now));
       if (state !== 'open') return { outcome: 'ended' as const, state: state.toUpperCase() };
 
-      const node = await tx.node.findFirst({ where: { id: row.nodeId, memoryId, deletedAt: null }, select: { name: true, abstract: true, content: true } });
-      const encrypted = await tx.memory.findUnique({ where: { id: memoryId }, select: { isEncrypted: true } });
-      if (!node || encrypted?.isEncrypted) return { outcome: 'ended' as const, state: 'STALE' };
+      const node = await tx.node.findFirst({ where: { id: row.nodeId, memoryId, deletedAt: null }, select: { loc: true, name: true, abstract: true, content: true } });
+      const memory = await tx.memory.findUnique({ where: { id: memoryId }, select: { urn: true, isEncrypted: true } });
+      if (!node || !memory || memory.isEncrypted) return { outcome: 'ended' as const, state: 'STALE' };
       // The text shown is the text hashed. A change would already have staled the request; this is the belt to that brace.
       if (computeApprovalHash(approvalFieldsOf(node, null)) !== row.approvalHash) return { outcome: 'ended' as const, state: 'STALE' };
 
       const view: CeremonyView = {
-        node: { title: node.name, abstract: node.abstract, contentSegments: contentSegments(node.content) },
+        node: { urn: emitNodeUrnV2(memory.urn, node.loc), title: node.name, abstract: node.abstract, contentSegments: contentSegments(node.content) },
         revision: row.revision,
         requester: await requesterOf(tx, row),
         expiresAt: row.expiresAt.toISOString(),
