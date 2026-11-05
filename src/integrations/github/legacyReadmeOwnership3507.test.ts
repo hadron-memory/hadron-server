@@ -1,3 +1,6 @@
+import { gitMirrorSweepTick } from '../../jobs/sweepGitMirrorObligations.js';
+import { takeAttemptSeq } from './mirrorObligations.js';
+import { mirrorNodeMoveToGit } from './mirrorNodeMove.js';
 import { syncGraphFromGithub } from './syncGraphFromGithub.js';
 /** #3507: real Git file-transport export, with no GitHub/network dependency. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -84,6 +87,7 @@ for (const route of ['incremental', 'bulk'] as const) {
       expect((await pushMemoryToGit(memoryId)).error).toBeUndefined();
       expect(git(env.bare, 'show', 'refs/heads/main:a/README.md')).toBe(before.trim());
     } else await incremental(a);
+    expect(existsSync(legacyPath())).toBe(true);
     expect(readFileSync(legacyPath(), 'utf8')).toBe(before);
     expect(readNodeFileId(legacyPath())).toBe(child.id);
     expect(rmSync).not.toHaveBeenCalledWith(legacyPath(), { force: true });
@@ -144,5 +148,28 @@ for (const route of ['incremental', 'bulk'] as const) {
   if (route === 'bulk') expect((await pushMemoryToGit(memoryId)).error).toBeUndefined();
   else await incremental(a);
   expect(existsSync(legacyPath())).toBe(false);
+ });
+}
+
+for (const route of ['move', 'retry'] as const) {
+ it(`${route}: the shared writer carries same-memory live-child protection`, async () => {
+  const a = await parent();
+  const child = await db.node.create({ data: { memoryId, loc: 'a:README', name: 'child', content: 'live child' } });
+  expect((await pushMemoryToGit(memoryId)).error).toBeUndefined();
+  const before = readFileSync(legacyPath(), 'utf8');
+  await db.node.update({ where: { id: a.id }, data: { content: 'updated by ' + route } });
+  vi.mocked(rmSync).mockClear();
+  if (route === 'move') await mirrorNodeMoveToGit(db, { srcMemoryId: memoryId, destMemoryId: memoryId, moved: [{ id: a.id, previousLoc: 'old-a' }] });
+  else {
+   await db.gitMirrorObligation.create({ data: { memoryId, nodeId: a.id, kind: 'WRITE', removeLoc: '', branch: 'main', state: 'FAILED', errorClass: 'PUSH_FAILED', attempts: 1, attemptSeq: await takeAttemptSeq(db), lastAttemptAt: new Date(Date.now() - 86400000) } });
+   expect(await gitMirrorSweepTick(db)).toBe(1);
+   expect(await db.gitMirrorObligation.count({ where: { memoryId, nodeId: a.id } })).toBe(0);
+  }
+  expect(readFileSync(join(checkout(), 'a.md'), 'utf8')).toContain('updated by ' + route);
+  expect(git(env.bare, 'show', 'refs/heads/main:a.md')).toContain('updated by ' + route);
+  expect(existsSync(legacyPath())).toBe(true);
+  expect(readFileSync(legacyPath(), 'utf8')).toBe(before);
+  expect(readNodeFileId(legacyPath())).toBe(child.id);
+  expect(rmSync).not.toHaveBeenCalledWith(legacyPath(), { force: true });
  });
 }
