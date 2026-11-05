@@ -136,7 +136,9 @@ export async function recordContentValidationReport(
         nodeId, memoryId, nodeRevision: args.nodeRevision,
         validationTaskRef: args.validationTaskRef, validationTaskRevision: args.validationTaskRevision,
         outcome: args.outcome, runId, reporter,
-        canReadTaskMemory: (taskMemoryId) => isMemoryReadableCached(ctx, taskMemoryId),
+        // On the transaction's own client: asked on ctx.db it would need a second connection
+        // while this one is held, and concurrent reports would starve the pool (§10 P2-9).
+        canReadTaskMemory: async (taskMemoryId) => isMemoryReadableCached(await liveTxContext(ctx, tx), taskMemoryId),
       }),
     );
     let result;

@@ -197,7 +197,9 @@ export interface ContentValidationReportInput {
   reporter: ContentValidationReporter;
   /**
    * Whether the caller may read the task's memory. A caller who cannot gets WRONG_TASK on every
-   * report (ruling 0199); absent means unreadable (fail closed).
+   * report (ruling 0199); absent means unreadable (fail closed). Called inside the report's
+   * transaction, so it must read through that transaction's client, never a second pool
+   * connection (§10 P2-9; the #1360 failure in resolvers.helpers.ts).
    */
   canReadTaskMemory?: (memoryId: string) => Promise<boolean>;
 }
@@ -262,6 +264,19 @@ export async function recordContentValidationReportInTx(
     select: { id: true, loc: true, memoryId: true, revSeq: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } },
   });
   const byId = new Map(tasks.map((task) => [task.id, task]));
+  // Ruling 0199 (cor:dmo:160:01 r6, refusal 3): a caller who cannot read a validation task the
+  // rule names gets the same wrong-task refusal on EVERY report. Judged over the rule's tasks
+  // before anything else about them: before the broken-rule check (or TASK_BROKEN would say a
+  // hidden task is broken), before the reference is matched (or the check's cost would confirm
+  // a right URN, §10 P3-11), and before the revision, author and run-id checks (or they would
+  // confirm the hidden task and its revision). A task in a deleted memory is broken for every
+  // caller and is left to the broken-rule check.
+  for (const t of tasks) {
+    if (t.memory.deletedAt) continue;
+    if (!(input.canReadTaskMemory && (await input.canReadTaskMemory(t.memoryId)))) {
+      throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
+    }
+  }
   for (const rule of rules) {
     const task = rule.validationTaskId ? byId.get(rule.validationTaskId) : undefined;
     // D-2026-09-25-E: an operation relying on a broken rule fails closed.
@@ -271,14 +286,6 @@ export async function recordContentValidationReportInTx(
   }
   const task = tasks.find((t) => input.validationTaskRef === t.id || input.validationTaskRef === safeNodeUrnV2(t.memory.urn, t.loc));
   if (!task) throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
-  // Ruling 0199 (cor:dmo:160:01 r6, refusal 3): a caller who cannot read the validation task
-  // gets the same wrong-task refusal on EVERY report, whatever revision it names, before the
-  // revision, author and run-id checks. Otherwise an accepted reference would reach
-  // TASK_REVISION_INVALID, REPORTER_IS_AUTHOR or RUN_ID_CONFLICT, which write nothing but
-  // differ from WRONG_TASK, and confirm the hidden task and its revision for free.
-  if (!(input.canReadTaskMemory && (await input.canReadTaskMemory(task.memoryId)))) {
-    throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
-  }
   if (input.validationTaskRevision > task.revSeq) throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_REVISION_INVALID');
 
   // 4. The author of R. The current revision's stamp is on the locked row; an older one is on
