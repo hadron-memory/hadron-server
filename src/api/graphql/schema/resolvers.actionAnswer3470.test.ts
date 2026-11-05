@@ -138,6 +138,11 @@ describe('one disclosure threshold and fault state for every action answer', () 
   });
   it('resolveActionAnswer itself contains a fault outside RegisterLookup (the read transaction): WITHHELD, never a throw', async () => {
     const broken = new Proxy(db, { get: (t, p, r) => p === '$transaction' ? () => Promise.reject(new Error('injected')) : Reflect.get(t, p, r) });
-    expect(await resolveActionAnswer({ ...ctx(), db: broken as any }, app.id, 'pr.frozen', roleAgent.id)).toEqual({ code: 'pr.frozen', state: 'WITHHELD', taskLoc: null, taskUrn: null });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(await resolveActionAnswer({ ...ctx(), db: broken as any }, app.id, 'pr.frozen', roleAgent.id)).toEqual({ code: 'pr.frozen', state: 'WITHHELD', taskLoc: null, taskUrn: null });
+      // Fixed category only: never the error, the caller, the code or the task loc (§10 P3-1).
+      expect(warn.mock.calls).toEqual([['action_register.answer_failed']]);
+    } finally { warn.mockRestore(); }
   });
 });
