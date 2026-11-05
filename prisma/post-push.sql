@@ -866,3 +866,8 @@ CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organizatio
 \ir agent-task-dispositions-invariants.sql
 
 \ir app-automation-team-snapshot-grant-invariants.sql
+
+-- #3473: the same statement as the 20261105010000_pr_frozen_head_index migration (the freezer lookup's access path).
+CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
+  ON "agent_team_events" ("app_id", (("payload" ->> 'head')))
+  WHERE "type" = 'pr.frozen';
