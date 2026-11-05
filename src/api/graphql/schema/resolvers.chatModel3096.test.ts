@@ -58,7 +58,7 @@ const records = async (chatId: string) => {
   const chat = await chatNodeByLocOrThrow(db, chatId);
   return db.servedPrompt.findMany({ where: { chatId: chat.id }, orderBy: { ordinal: 'asc' } });
 };
-/** Everything a start could provision: nodes, holding memories and agent subscriptions. */
+/** Row counts for nodes, holding memories and agent subscriptions: a sample of what a start could provision, not every table it can write. */
 const footprint = async () => ({ nodes: await db.node.count(), memories: await db.memory.count(), subscriptions: await db.agentSubscription.count() });
 const report = (r: { variables: unknown }) => r.variables as Record<string, string>;
 
@@ -98,9 +98,15 @@ describe('#3096 client-reported chat model', () => {
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'one', llmModel: 'provider/model-Y' }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'two', llmModel: 'provider/model-Y' }, ctx());
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'three', llmModel: 'provider/model-Y' }, ctx());
-    expect((await records(start.chatId)).map(r => report(r)['session.llmModel'])).toEqual(['provider/model-X', 'provider/model-Y']);
+    const afterY = await records(start.chatId);
+    expect(afterY.map(r => [r.ordinal, report(r)['session.llmModel']])).toEqual([[1, 'provider/model-X'], [2, 'provider/model-Y']]);
+    expect(afterY.map(r => report(r)['session.llmModel.source'])).toEqual(['client-reported', 'client-reported']);
+    // Deduplicating the RECORD must not skip the turn: every user message still persisted.
+    const persisted = async () => (await db.node.findMany({ where: { content: { in: ['one', 'two', 'three', 'four'] } }, select: { content: true } })).map(n => n.content).sort();
+    expect(await persisted()).toEqual(['one', 'three', 'two']);
     await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'four', llmModel: 'provider/model-X' }, ctx());
-    expect((await records(start.chatId)).map(r => report(r)['session.llmModel'])).toEqual(['provider/model-X', 'provider/model-Y', 'provider/model-X']);
+    expect((await records(start.chatId)).map(r => [r.ordinal, report(r)['session.llmModel']])).toEqual([[1, 'provider/model-X'], [2, 'provider/model-Y'], [3, 'provider/model-X']]);
+    expect(await persisted()).toEqual(['four', 'one', 'three', 'two']);
   });
 
   it('old omitted and null arguments keep an empty model, with no invented identity', async () => {
