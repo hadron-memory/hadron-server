@@ -34,10 +34,12 @@ export async function requirePersonAsThemselves(ctx: PersonGateContext, refuse: 
  *    Listing and revoking keys are NOT on the list (allowed on an instruction once S1 lands; S3b).
  *  - `grant.give`: giving a grant, any grant door; a worker never gives a grant to itself (0099). Revoking one is not
  *    on the list either (S3b).
+ *  - `agent-webhook.rotate`: rotating a webhook's credentials returns the new secret path and a platform token, which
+ *    would land in a model transcript (#3511, ruling 0177, cor:dmo:050:12 r40). Creating and deleting one are not on it.
  * The rule's older person-only acts (adoption, passkeys, impersonation, account merge) have their own doors on
  * {@link requirePersonAsThemselves} and are not repeated here. CLOSED: a new door joins by naming one of these acts.
  */
-export const PERSON_ONLY_ACTS = ['app-key.mint', 'app-key.rotate', 'grant.give'] as const;
+export const PERSON_ONLY_ACTS = ['app-key.mint', 'app-key.rotate', 'grant.give', 'agent-webhook.rotate'] as const;
 export type PersonOnlyAct = (typeof PERSON_ONLY_ACTS)[number];
 
 /**
