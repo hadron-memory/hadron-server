@@ -436,6 +436,46 @@ describe('#1332 mutant pins (every reporter id, every broken-task shape, imperso
   });
 });
 
+describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', () => {
+  it('the receipt never projects state from a memory the node moved into after commit', async () => {
+    // An org the caller (leo) is not a member of; its memory carries a FAIL for this node.
+    const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden', urn: 'cv-hidden' } })).id;
+    const hidden = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden:secret', name: 'Secret', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    let moved = false;
+    // Move the node at the first post-commit read, after the authorized write committed.
+    const racing = new Proxy(db, { get(target, key, receiver) {
+      if (key !== 'node') return Reflect.get(target, key, receiver);
+      return new Proxy(target.node, { get(model, op, r) {
+        if (op !== 'findUnique') return Reflect.get(model, op, r);
+        return async (a: { where?: { id?: string }; select?: Record<string, boolean> }) => {
+          if (!moved && a.where?.id === nodeId && a.select?.revSeq && (await reportCount()) === 1) {
+            moved = true;
+            await db.node.update({ where: { id: nodeId }, data: { memoryId: hidden } });
+            await db.nodeContentValidationReport.create({ data: { nodeId, memoryId: hidden, nodeRevSeq: 1, validationTaskId: validationTask, validationTaskRevSeq: 1, outcome: 'FAIL' } });
+          }
+          return (model.findUnique as (x: unknown) => unknown)(a);
+        };
+      } });
+    } });
+    const result = await report(person(leo, { db: racing as typeof db }));
+    expect(moved).toBe(true);
+    expect(await Q.node({}, { ref: nodeId }, person(leo))).toBeNull();
+    // The authorized (node, memory, revision) snapshot: the caller's own PASS, nothing of the destination.
+    expect(result.state).toBe('PASS');
+    expect((result.report as Record<string, unknown>).outcome).toBe('PASS');
+  });
+
+  it('a named session that failed to bind (#1705) is refused, never recorded as the bare credential', async () => {
+    expect(await refusal(report(person(leo, { sessionBindingRefused: true } as Partial<Context>)))).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+    expect(await refusal(asWorker('w', leo, () => report(person(leo, { sessionBindingRefused: true } as Partial<Context>))))).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+    expect(await refusal(report(person(leo, { appKeyId: 'ak', sessionBindingRefused: true } as Partial<Context>)))).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+    expect(await reportCount()).toBe(0);
+    const { deriveReporter } = await import('../../../lib/contentValidationReport.js');
+    const refused = await deriveReporter(db, { userId: leo, sessionBindingRefused: true } as never).then(() => null, (e: GraphQLError) => e.extensions?.code);
+    expect(refused).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+  });
+});
+
 describe('#1332 storage invariants', () => {
   it('the report is append-only except a merge moving the person reporter', async () => {
     await report(person(leo), { runId: 'imm' });
