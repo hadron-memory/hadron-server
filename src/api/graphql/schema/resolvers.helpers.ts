@@ -438,6 +438,8 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
       (ids) => ids === null || ids.includes(memoryId),
     );
     cache.set(memoryId, pending);
+    // A rejection is not an answer: drop it so a one-shot fault is not replayed (#1327).
+    pending.catch(() => cache.delete(memoryId));
   }
   return pending;
 }

@@ -422,6 +422,10 @@ export function refViewOnce(ctx: Context, rule: RuleRefRow, kind: RefKind): Prom
     const cols = REF_COLUMNS[kind];
     pending = refView(ctx, rule[cols.id], cols.required ? rule[cols.required] : false);
     perRule.set(kind, pending);
+    // Keep no rejection in the memo (#1327): a one-shot projection fault must
+    // not replay through `authorTaskState` on a rule that was already saved.
+    const memo = perRule;
+    pending.catch(() => memo.delete(kind));
   }
   return pending;
 }

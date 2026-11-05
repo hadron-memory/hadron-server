@@ -472,6 +472,34 @@ describe('#1327 — a fault in the advisory reads never changes the save and nev
     expect(await rules('spec')).toBe(1);
   });
 
+  it('a ONE-SHOT projection fault with the standard selection: the saved rule is returned, no replay through authorTaskState (create, update, real apply)', async () => {
+    const real = db.node.findUnique.bind(db.node);
+    const oneShot = () => {
+      let hit = false;
+      vi.spyOn(db.node, 'findUnique').mockImplementation(((args: { select?: { loc?: boolean; memory?: unknown } }) => {
+        if (!hit && args?.select?.loc && args.select.memory) { hit = true; return Promise.reject(FAULT); }
+        return real(args as never);
+      }) as never);
+    };
+    oneShot();
+    const created = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tKb2.urn } });
+    expect(created.errors, JSON.stringify(created.errors)).toBeUndefined();
+    expect(created.data!.createNodeRoleRule.rule.id).toBeTruthy();
+    expect(await rules('spec')).toBe(1);
+    vi.restoreAllMocks();
+    oneShot();
+    const updated = await gql(as(admin), UPDATE, { r: created.data!.createNodeRoleRule.rule.id, i: { enabled: false } });
+    expect(updated.errors, JSON.stringify(updated.errors)).toBeUndefined();
+    expect(updated.data!.updateNodeRoleRule.rule.id).toBeTruthy();
+    vi.restoreAllMocks();
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'oneshot', rules: [{ role: 'spec2', authorTaskRef: tKb2.urn }] } });
+    expect(tpl.errors, JSON.stringify(tpl.errors)).toBeUndefined();
+    oneShot();
+    const done = await gql(as(admin), APPLY, { t: tpl.data!.createMemoryConfigTemplate.template.id, m: kb.id, d: false });
+    expect(done.errors, JSON.stringify(done.errors)).toBeUndefined();
+    expect(await rules('spec2')).toBe(1);
+  });
+
   it('a known NONE reference stays silent even while the advisory reads are failing', async () => {
     vi.spyOn(db.memorySubscription, 'count').mockRejectedValue(FAULT);
     const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'plain' } });
