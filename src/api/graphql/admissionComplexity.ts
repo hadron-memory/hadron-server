@@ -22,7 +22,7 @@
  * The state of the argument decides `size`, and every fallback is chosen so the model does not UNDERCOUNT work:
  *   - a non-negative or negative integer: `max(1, |value|)`. Zero is not free (a resolver may bump it to 1), and a
  *     negative `take` pages from the end, so its magnitude is the work;
- *   - omitted or null: the field's own default when it is known to exceed the common one (`OMITTED_PAGE_SIZE`),
+ *   - omitted or null: the field's own reviewed default (`OMITTED_PAGE_SIZE`),
  *     otherwise `DEFAULT_OMITTED_PAGE_SIZE`, the largest default in common use;
  *   - caps a resolver applies to a large request are NOT modelled, so a clamped field is over-counted, never under-counted;
  *     the one exception is a field listed in `PAGE_ARGS_FIELDS`, charged for the page its resolver really reads.
@@ -81,6 +81,23 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'AgentTaskResult.findings',
   'AgentTask.findingDispositions',
   'Query.appNodesPage',
+  // #3210: these resolvers use the same pageArgs/pageTake cap.
+  'Query.sessionsPage',
+  'Query.nodeRevisionsPage',
+  'Query.usageEventsPage',
+  'Query.appKeysPage',
+  'Query.myUserApiKeysPage',
+  'Query.myAgentSubscriptionsPage',
+  'Query.agentSubscriptionsPage',
+  'Query.exchangeConnectionsPage',
+  'Query.dashboardWidgetPresetsPage',
+  'Query.tickersPage',
+  // Helper-backed fields use pageArgs too, despite not ending in Page.
+  'Query.actionRegisterIndex',
+  'Query.compiledPromptProvenance',
+  'AgentTask.blockedBy',
+  'AgentTask.blocks',
+  'AgentTask.clones',
   // #3223 (#2212 A3): pinned in admissionMyChatsPage2212A3.test.ts.
   'Query.myChatsPage',
   // #3222 (#2213 S3): pinned in admissionSpecReferencePages2213S3.test.ts.
@@ -89,12 +106,12 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
-/** Fields whose resolver default, when the argument is omitted, exceeds the common one (reviewed against the resolvers). */
+/** Explicit resolver defaults that differ from the common fallback (reviewed against the resolvers). */
 export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
   'Query.memoryNodes': 1000,
   'Query.memoryEdges': 1000,
   'Query.validateMemory': 200,
-  'Query.appNodes': 500,
+  'Query.appNodes': 20,
 };
 /** The library's fragment expansion is not memoized; this bounds it (L3 runs earlier at validation). */
 export const MAX_QUERY_NODES = 10_000;

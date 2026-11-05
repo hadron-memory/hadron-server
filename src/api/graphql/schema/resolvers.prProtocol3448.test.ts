@@ -350,7 +350,7 @@ describe('readiness uses only event facts', () => {
     const agent = await db.agent.create({ data: { name: 'Caller', urn: `${app.urn}:caller-agent`, systemMemoryId: memory.id, ownerUserId: author.id } });
     const spy = vi.spyOn(RegisterLookup.prototype, 'teamMemory').mockRejectedValue(new Error('synthetic lookup failure'));
     try {
-      expect((await runAsActor({ workerId: null, agentId: agent.id }, () => freeze())).action).toEqual({ code: 'pr.frozen', state: 'UNRESOLVED' });
+      expect((await runAsActor({ workerId: null, agentId: agent.id }, () => freeze())).action).toEqual({ code: 'pr.frozen', state: 'WITHHELD' }); // #3470, ruling 0164: a fault is code-only WITHHELD
       expect(spy).toHaveBeenCalled();
       expect((await events())[0].type).toBe('pr.frozen');
       expect((await stored()).properties).toMatchObject({ 'pr.head': H });
@@ -594,17 +594,17 @@ describe('Worker actor floor and register disclosure', () => {
     await db.appAgent.create({data:{appId:app.id,agentId:teamAgent.id}});
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
   });
-  it.each(['team','agent'])('a nearer readable mapping wins over an inherited unreadable %s chain memory',async side=>{
+  it.each(['team','agent'])('an inherited unreadable %s chain memory withholds even a nearer readable mapping (#3470, ruling 0163)',async side=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
     const baseMemory=await db.memory.create({data:{name:'Unreadable base',urn:`${app.urn}:hidden-base`,class:'system',ownerUserId:other.id}});
     const baseAgent=await db.agent.create({data:{name:'Hidden base',urn:`${app.urn}:hidden-agent`,systemMemoryId:baseMemory.id,ownerUserId:other.id}});
     await db.agent.update({where:{id:side==='team'?teamAgent.id:roleAgent.id},data:{extendsAgentId:baseAgent.id}});
     const r=await bound(()=>freeze());
-    expect(r.action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
+    expect(r.action).toEqual({code:'pr.frozen',state:'WITHHELD'});
     expect((await events()).filter(e=>e.type==='pr.frozen')).toHaveLength(2);
   });
-  it('an unreadable nearer entry is unmapped and does not fall through to a readable farther entry',async()=>{
+  it('an unreadable chain memory withholds the answer, with or without a readable nearer entry (#3470, ruling 0163)',async()=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
     await db.node.deleteMany({where:{memoryId:teamAgent.systemMemoryId,loc:'register:pr.frozen'}});
     const farMemory=await db.memory.create({data:{name:'Readable far entry',urn:`${app.urn}:far-entry`,class:'system',ownerUserId:author.id}});
@@ -613,12 +613,12 @@ describe('Worker actor floor and register disclosure', () => {
     const hidden=await db.agent.create({data:{name:'Hidden entry',urn:`${app.urn}:hidden-entry-agent`,systemMemoryId:hiddenMemory.id,ownerUserId:other.id,extendsAgentId:far.id}});
     await db.agent.update({where:{id:teamAgent.id},data:{extendsAgentId:hidden.id}});
     for(const memoryId of [hiddenMemory.id,farMemory.id]) await db.node.create({data:{id:generateId(),memoryId,loc:'register:pr.frozen',name:'Entry',data:{registerEntry:{code:'pr.frozen',taskLoc:'tasks:review'}}}});
-    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'UNMAPPED'});
-    // Restoring a readable nearer entry makes a positive mapping without reading the ancestor.
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'WITHHELD'});
+    // A readable nearer entry does not help: the caller must read every system memory on the chain.
     await db.node.create({data:{id:generateId(),memoryId:teamAgent.systemMemoryId,loc:'register:pr.frozen',name:'Own entry',data:{registerEntry:{code:'pr.frozen',taskLoc:'tasks:review'}}}});
-    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
+    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'WITHHELD'});
   });
-  it.each(['unreadable','missing'])('a readable entry with a %s nearest task is unresolved without a task URN',async mode=>{
+  it.each(['unreadable','missing'])('a readable entry with a %s nearest task: unreadable chain is WITHHELD, missing task is UNRESOLVED without a task URN (#3470)',async mode=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
     await db.node.deleteMany({where:{memoryId:roleMemory.id,loc:'tasks:review'}});
     if(mode==='unreadable'){
@@ -630,10 +630,10 @@ describe('Worker actor floor and register disclosure', () => {
       for(const memoryId of [hiddenMemory.id,farMemory.id]) await db.node.create({data:{id:generateId(),memoryId,loc:'tasks:review',name:'Task',isRunnable:true}});
     }
     const result=(await bound(()=>freeze())).action;
-    expect(result.state).toBe('UNRESOLVED');expect(result.code).toBe('pr.frozen');expect(result.taskUrn).toBeUndefined();
-    expect(result.taskLoc).toBe('tasks:review');
+    expect(result.state).toBe(mode==='unreadable'?'WITHHELD':'UNRESOLVED');expect(result.code).toBe('pr.frozen');expect(result.taskUrn).toBeUndefined();
+    expect(result.taskLoc).toBe(mode==='unreadable'?undefined:'tasks:review');
     await db.node.create({data:{id:generateId(),memoryId:roleMemory.id,loc:'tasks:review',name:'Own task',isRunnable:true}});
-    expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
+    expect((await bound(()=>freeze())).action).toEqual(mode==='unreadable'?{code:'pr.frozen',state:'WITHHELD'}:{code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
   });
   it.each(['team','agent'])('root-memory readability probe: unreadable %s root does not disclose a task URN',async kind=>{
     await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
@@ -644,7 +644,7 @@ describe('Worker actor floor and register disclosure', () => {
     await bound(async()=>{
       expect(await canReadMemory(db,ctx(author.id),rootId)).toBe(false);
       const result=await freeze();
-      expect(result.action).toEqual(kind==='team'?{code:'pr.frozen',state:'UNMAPPED'}:{code:'pr.frozen',state:'UNRESOLVED',taskLoc:'tasks:review'});
+      expect(result.action).toEqual({code:'pr.frozen',state:'WITHHELD'});
       expect(result.action.taskUrn).toBeUndefined();
     });
     await db.agent.update({where:{id:rootAgent.id},data:{ownerUserId:author.id}});

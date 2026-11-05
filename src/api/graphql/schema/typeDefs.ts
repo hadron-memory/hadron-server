@@ -4521,6 +4521,36 @@ export const typeDefs = `#graphql
     warnings: [MemoryConfigWarning!]!
   }
 
+  type MemoryConfigBulkApplyError {
+    "MEMORY_NOT_FOUND (an unknown ref and a memory you cannot manage read byte-identically), DUPLICATE_TARGET, CONFLICT, NODE_NOT_FOUND, NOT_A_TASK, NODE_ROLE_RULE_REF_BROKEN, MEMORY_CONFIG_TEMPLATE_NOT_FOUND, BAD_USER_INPUT, or INTERNAL_SERVER_ERROR."
+    code: String!
+    message: String!
+    "Set only for a CONFLICT on the template revision."
+    currentRevision: Int
+    "Set only for INTERNAL_SERVER_ERROR: the id the server log carries for this fault."
+    requestId: String
+  }
+
+  type MemoryConfigBulkApplyEntry {
+    "The position of the ref in memoryRefs; results[i] answers memoryRefs[i]."
+    index: Int!
+    "Your input string, verbatim. Never a resolved id, name or URN."
+    memoryRef: String!
+    ok: Boolean!
+    "Non-null exactly when ok. SKIPPED_CONFLICT and SKIPPED_LOCKED entries are outcomes of a successful apply, so ok stays true."
+    result: MemoryConfigApplyResult
+    "Non-null exactly when not ok."
+    error: MemoryConfigBulkApplyError
+  }
+
+  type MemoryConfigBulkApplyResult {
+    dryRun: Boolean!
+    "One per input position, in input order."
+    results: [MemoryConfigBulkApplyEntry!]!
+    succeeded: Int!
+    failed: Int!
+  }
+
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
     "Empty until #1327 adds its visibility warnings."
@@ -13132,6 +13162,28 @@ export const typeDefs = `#graphql
     changed since you read it. dryRun: the same report with nothing written.
     """
     applyMemoryConfigTemplate(templateRef: ID!, memoryRef: ID!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigApplyResult!
+
+    """
+    #1334 bulk apply — applyMemoryConfigTemplate over a list of memories (at most 50; more is
+    BULK_TARGETS_TOO_MANY naming the cap and the count, checked before any work, never a truncation).
+    Targets run one at a time, in input order, each in its OWN transaction exactly as the singular
+    mutation runs one: one target failing never rolls back another, and there is no promise that the
+    whole call saw one version of the template. Each success reports the templateRevision it applied.
+
+    Refused for the whole call, nothing written: an empty or blank list (BAD_USER_INPUT), an unknown or
+    unmanageable template (MEMORY_CONFIG_TEMPLATE_NOT_FOUND), a stale expectedTemplateRevision (CONFLICT
+    with currentRevision). expectedTemplateRevision is also enforced per target, so a template edited
+    mid-call fails every later target with CONFLICT while earlier ones stay applied. Everything else is
+    per target (see MemoryConfigBulkApplyError). MANAGE on each memory and on the template is asked
+    fresh for every target. A memory you cannot manage reads exactly like one that does not exist, and
+    a memory named twice (by any spelling) is applied once: later positions are DUPLICATE_TARGET with no
+    write, but only for memories you manage.
+
+    Retrying is safe for FAILED targets only: re-sending a target that succeeded under a required
+    template replaces its rule again. dryRun rolls every target back and is not a preview of a later
+    apply; bind them with expectedTemplateRevision.
+    """
+    applyMemoryConfigTemplateToMemories(templateRef: ID!, memoryRefs: [ID!]!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigBulkApplyResult!
 
     """
     #1325 part (c) — create a template. ownerRef names the organization, user

@@ -306,16 +306,19 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(cost('{ memoryNodes(memoryRef: "m") { nodes { id } } }')).toBe(1 + 100 * (1 + 10));
   });
 
-  it('every field whose resolver default exceeds the common one is costed at THAT default when the size is omitted or null', () => {
+  it('every reviewed resolver default is used when the size is omitted or null', () => {
     const pagedList = (name: string) => `{ ${name} }`;
-    expect(OMITTED_PAGE_SIZE['Query.appNodes']).toBe(500); // take: limit ?? 500
-    expect(cost('{ appNodes(appRef: "a") { id } }')).toBe(1 + 500);
-    expect(cost('{ appNodes(appRef: "a", limit: null) { id } }')).toBe(1 + 500);
+    expect(OMITTED_PAGE_SIZE['Query.appNodes']).toBe(20); // #3210: legacy take: limit ?? 20
+    expect(cost('{ appNodes(appRef: "a") { id } }')).toBe(1 + 20);
+    expect(cost('{ appNodes(appRef: "a", limit: null) { id } }')).toBe(1 + 20);
     expect(cost('{ appNodes(appRef: "a", limit: 500) { id } }')).toBe(1 + 500);
     expect(cost('{ memoryEdges(memoryRef: "m") { edges { id } } }')).toBe(1 + 100 * (1 + 10));
     expect(cost('{ validateMemory(memoryRef: "m") { total } }')).toBeGreaterThan(0);
     void pagedList;
-    for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
+    for (const [field, size] of Object.entries(OMITTED_PAGE_SIZE)) {
+      if (field === 'Query.appNodes') expect(size).toBe(20); // The explicit lower legacy default (#3210).
+      else expect(size).toBeGreaterThan(DEFAULT_OMITTED_PAGE_SIZE - 1);
+    }
     expect(DEFAULT_OMITTED_PAGE_SIZE).toBe(100);
   });
 

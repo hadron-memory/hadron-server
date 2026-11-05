@@ -8,8 +8,8 @@
  *   - a valid Int of 1000000 and Int max, as literal and as variable, answer HTTP 200 with 200 items, total 241,
  *     hasMore true (the page-of-the-cap contract)
  *   - zero, negative, null and omitted agree with pageArgs
- *   - controls: the old `appNodes` and an unrelated paged field keep their raw-size costing (still refused at
- *     1000000), and a genuinely expensive appNodesPage operation is still refused before execution
+ *   - controls: the old `appNodes` keeps raw-size costing; sessionsPage now shares the capped cost (#3210),
+ *     and a genuinely expensive appNodesPage operation is still refused before execution
  *   - drift guard: the cost admission charges equals the cost derived from the resolver's own `pageArgs` for every
  *     stated size, and the effective cap and default are pinned as literals so a shared constant cannot drift both.
  */
@@ -87,13 +87,14 @@ describe('appNodesPage serves the cap over real HTTP (cor:api:120:04 S2)', () =>
 });
 
 describe('controls: nothing else is loosened', () => {
-  it('the old appNodes and an unrelated paged field keep raw-size costing', async () => {
+  it('legacy appNodes keeps raw costing; sessionsPage now charges its cap (#3210)', async () => {
     const old = await post('query($a: ID!) { appNodes(appRef: $a, limit: 1000000) { id } }', { a: appId });
     expect(old.status).toBe(400);
     expect(old.body.errors?.[0]?.extensions?.code).toBe('QUERY_TOO_COMPLEX');
     const sessions = await post('{ sessionsPage(limit: 1000000) { items { id } } }');
-    expect(sessions.status).toBe(400);
-    expect(sessions.body.errors?.[0]?.extensions?.code).toBe('QUERY_TOO_COMPLEX');
+    expect(sessions.status).toBe(200);
+    expect(sessions.body.errors).toBeUndefined();
+    expect(sessions.body.data.sessionsPage.items).toEqual([]);
   });
 
   it('a genuinely expensive appNodesPage operation is still refused before execution', async () => {
