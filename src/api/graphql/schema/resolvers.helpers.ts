@@ -110,6 +110,11 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 export const CONTENT_RAW_DEFAULT: unique symbol = Symbol('contentRawDefault');
 
 export interface Context {
+  /**
+   * #3532 (cor:aut:010:05): what this request's own credential came to, set ONLY by the /graphql context builder.
+   * Read by `Query.authenticationStatus` alone; absent everywhere else (MCP, tests, internal callers).
+   */
+  credentialStatus?: import('../../../middleware/auth.js').CredentialStatus;
   limiterIdentity?: Readonly<import('../../../lib/rateLimit/identity.js').RateIdentity>;
   login?: import('../../../auth/jwt.js').HadronJwtPayload['login'];
   db: PrismaClient;

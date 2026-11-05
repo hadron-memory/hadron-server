@@ -391,7 +391,7 @@ const CONCEALED_FIELDS: Record<string, () => unknown> = {
   signingRequests: () => [],
   outgoingEdges: () => [],
   incomingEdges: () => [],
-  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null }),
+  commentSummary: () => ({ openThreads: 0, resolvedThreads: 0, comments: 0, viewerOpenThreadId: null, oldestOpenThreadAt: null }),
   approvalStatus: () => ({ state: 'NOT_APPLICABLE', approval: null }),
   mintStatus: () => ({ minted: false, mintedAt: null, mintedBy: null, mintedByInfo: null, revision: null, hash: null }),
   signatureStatus: () => ({ state: null, signatures: [], integrityProblems: 0 }),
