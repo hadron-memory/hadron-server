@@ -9,17 +9,24 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
+import { waitForLockWaiters, waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { formatGraphQLError } from '../formatError.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
 // A switch that makes the config write of an application fail, to prove the creation rolls back as a whole.
-const faults: { materialize: boolean } = { materialize: false };
+const faults: { materialize: boolean; beforeLockRefs: (() => Promise<void>) | null } = { materialize: false, beforeLockRefs: null };
 vi.mock('./resolvers.memoryConfig.js', async (orig) => {
   const m = await orig<typeof import('./resolvers.memoryConfig.js')>();
   return {
     ...m,
+    lockRuleRefs: async (...a: Parameters<typeof m.lockRuleRefs>) => {
+      const hook = faults.beforeLockRefs;
+      faults.beforeLockRefs = null;
+      if (hook) await hook();
+      return m.lockRuleRefs(...a);
+    },
     materializeConfig: async (...a: Parameters<typeof m.materializeConfig>) => {
       if (faults.materialize) throw new Error('injected materialize failure');
       return m.materializeConfig(...a);
@@ -88,6 +95,7 @@ const rule = (role: string, ref: { urn: string } | null, extra: Record<string, u
 
 beforeEach(async () => {
   faults.materialize = false;
+  faults.beforeLockRefs = null;
   seq = 0;
   await cleanDb(db);
   org = await db.organization.create({ data: { id: generateId(), name: 'acme', urn: 'acme.com' }, select: { id: true, urn: true } });
@@ -195,11 +203,42 @@ describe('#3426 designation and the save-time gate', () => {
     await db.node.delete({ where: { id: taskA.id } });
     const name = await gql(as(admin), UPDATE_TPL, { r: t.id, i: { description: 'still editable' } });
     expect(name.errors, JSON.stringify(name.errors)).toBeUndefined();
-    const clear = await gql(as(admin), UPDATE_TPL, { r: t.id, i: { orgDefault: false } });
+    const clear = await gql(as(admin), UPDATE_TPL, { r: t.id, i: { orgDefault: false, required: true } });
     expect(clear.errors, JSON.stringify(clear.errors)).toBeUndefined();
     expect(clear.data!.updateMemoryConfigTemplate.template.orgDefault).toBe(false);
   });
 
+  it('refuses CONFLICT when the stored rules moved between the unlocked read and the lock', async () => {
+    const t = await tpl('moving', [rule('spec', taskA)]);
+    faults.beforeLockRefs = async () => {
+      await db.memoryConfigTemplateRule.updateMany({ where: { templateId: t.id }, data: { role: 'moved' } });
+    };
+    const r = await gql(as(admin), UPDATE_TPL, { r: t.id, i: { orgDefault: true } });
+    expect(errCode(r)).toBe('CONFLICT');
+    expect((await db.memoryConfigTemplate.findUniqueOrThrow({ where: { id: t.id } })).orgDefault).toBe(false);
+  });
+
+  it('two concurrent saves for the 10th default admit exactly one: the second waits on the org\'s advisory lock', async () => {
+    for (let i = 0; i < 9; i++) await tpl(`d${i}`, undefined, { orgDefault: true });
+    const mk = (n: string) => gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: n, orgDefault: true } });
+    // The first save is parked inside its transaction (after the advisory lock, before the count) while the second starts.
+    let reached!: () => void;
+    let go!: () => void;
+    const atHook = new Promise<void>((r) => { reached = r; });
+    const goOn = new Promise<void>((r) => { go = r; });
+    faults.beforeLockRefs = async () => { reached(); await goOn; };
+    const a = mk('race-a');
+    await atHook;
+    const b = mk('race-b');
+    try {
+      await waitForLockWaitersOfType(db, 'advisory', 1, 4000);
+    } finally {
+      go();
+    }
+    const results = await Promise.all([a, b]);
+    expect(results.filter((x) => !x.errors)).toHaveLength(1);
+    expect(await db.memoryConfigTemplate.count({ where: { organizationId: org.id, orgDefault: true } })).toBe(10);
+  });
   it('refuses an 11th live default for the org (ORG_DEFAULT_LIMIT)', async () => {
     for (let i = 0; i < 10; i++) await tpl(`d${i}`, undefined, { orgDefault: true });
     const r = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'd10', orgDefault: true } });
@@ -311,9 +350,11 @@ describe('#3426 references at creation are judged for the ORG, live (C1, C5)', (
     await tpl('live', [rule('via.sub', subTask), rule('via.del', taskB)], { orgDefault: true });
     await db.memorySubscription.update({ where: { id: sub.id }, data: { deletedAt: new Date() } });
     await db.node.update({ where: { id: taskB.id }, data: { deletedAt: new Date() } });
+    await tpl('untasked', [rule('via.nat', taskA)], { orgDefault: true });
+    await db.node.update({ where: { id: taskA.id }, data: { isRunnable: false } });
     const m = await newMemory('live1');
     expect(await rulesOf(m.id)).toEqual([]);
-    expect((await skipsOf(m.id)).map((s) => s.role)).toEqual(['via.del', 'via.sub']);
+    expect((await skipsOf(m.id)).map((s) => s.role)).toEqual(['via.del', 'via.nat', 'via.sub']);
   });
 
   it('two required defaults on one role give the same result for an admin and a granted creator (C5)', async () => {
@@ -356,6 +397,37 @@ describe('#3426 skipped references leave a concealed record (C6)', () => {
 });
 
 describe('#3426 atomicity (C8)', () => {
+  it('a template update in flight is waited for: a creation sees the flag as committed, not a stale one', async () => {
+    const t = await tpl('base', [rule('spec', taskA)], { orgDefault: true });
+    let release!: () => void;
+    let held!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    const holding = new Promise<void>((r) => { held = r; });
+    const updater = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1 FROM "memory_config_templates" WHERE "id" = ${t.id} FOR UPDATE`;
+      held();
+      await hold;
+      await tx.memoryConfigTemplate.update({ where: { id: t.id }, data: { orgDefault: false } });
+    }, { timeout: 30_000 });
+    await holding;
+    const creating = gql(as(admin), CREATE_MEMORY, { o: org.id, n: 'inflight1', c: 'knowledge' });
+    await waitForLockWaiters(db, 1);
+    release();
+    await updater;
+    const r = await creating;
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(await rulesOf(r.data!.createMemory.id)).toEqual([]);
+  });
+
+  it('defaultSkips re-checks the manage gate itself, not the parent\'s', async () => {
+    await tpl('skippy', [rule('spec', taskA)], { orgDefault: true });
+    await db.node.update({ where: { id: taskA.id }, data: { deletedAt: new Date() } });
+    const m = await newMemory('direct1');
+    const fieldResolvers = (resolvers as unknown as { MemoryConfig: { defaultSkips: (c: unknown, a: unknown, ctx: Context) => Promise<unknown[]> } }).MemoryConfig;
+    await expect(fieldResolvers.defaultSkips({ memoryId: m.id }, {}, { db, roles: [], userId: granted } as Context)).rejects.toBeTruthy();
+    await expect(fieldResolvers.defaultSkips({ memoryId: m.id }, {}, { db, roles: [], userId: admin } as Context)).resolves.toHaveLength(1);
+  });
+
   it('an application failure rolls back the memory, its root node, rules and skip records', async () => {
     await tpl('base', [rule('spec', taskA)], { orgDefault: true });
     faults.materialize = true;
@@ -372,7 +444,7 @@ describe('#3426 atomicity (C8)', () => {
 describe('#3426 Q1 (ruling 0200): a broken REQUIRED default is planted fail-closed', () => {
   it('plants a locked rule with the marker set and a null id; the creation succeeds and writes of the role refuse AUTHOR_TASK_BROKEN', async () => {
     await tpl('policy', [rule('guide', taskA)], { orgDefault: true, required: true });
-    await db.node.delete({ where: { id: taskA.id } });
+    await db.node.update({ where: { id: taskA.id }, data: { deletedAt: new Date() } }); // the id stays on the template rule
     const m = await newMemory('q1a');
     const rules = await rulesOf(m.id);
     expect(rules).toMatchObject([{ role: 'guide', locked: true, authorTaskId: null, authorTaskRequired: true }]);
@@ -386,9 +458,16 @@ describe('#3426 Q1 (ruling 0200): a broken REQUIRED default is planted fail-clos
       .rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
   });
 
+  it('a required default whose task was hard-deleted earlier is planted fail-closed too', async () => {
+    await tpl('policy', [rule('guide', taskA)], { orgDefault: true, required: true });
+    await db.node.delete({ where: { id: taskA.id } });
+    const m = await newMemory('q1d');
+    expect(await rulesOf(m.id)).toMatchObject([{ role: 'guide', locked: true, authorTaskId: null, authorTaskRequired: true }]);
+  });
+
   it('a broken description in a required default drops only the description', async () => {
     await tpl('policy', [rule('guide', taskA, { descriptionNodeRef: docNode.urn, writers: 'ADMIN' })], { orgDefault: true, required: true });
-    await db.node.delete({ where: { id: docNode.id } });
+    await db.node.update({ where: { id: docNode.id }, data: { deletedAt: new Date() } });
     const m = await newMemory('q1b');
     expect(await rulesOf(m.id)).toMatchObject([{ role: 'guide', writers: 'ADMIN', authorTaskId: taskA.id, descriptionNodeId: null }]);
   });
