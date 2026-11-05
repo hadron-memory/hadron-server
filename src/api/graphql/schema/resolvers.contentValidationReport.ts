@@ -58,7 +58,7 @@ function validateArgs(args: RecordContentValidationArgs): { runId: string | null
   }
   if (!OUTCOMES.includes(args.outcome)) throw badInput('outcome must be PASS, FAIL or ERROR.');
   const runId = args.runId ?? null;
-  if (runId !== null && (runId.length === 0 || runId.length > RUN_ID_MAX_LENGTH || runId.trim() !== runId)) {
+  if (runId !== null && (typeof runId !== 'string' || runId.length === 0 || runId.length > RUN_ID_MAX_LENGTH || runId.trim() !== runId)) {
     throw badInput(`runId must be 1-${RUN_ID_MAX_LENGTH} characters with no surrounding whitespace.`);
   }
   return { runId };
