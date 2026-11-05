@@ -4,6 +4,7 @@
  */
 import { readFileSync } from 'fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -14,6 +15,7 @@ import { DIRECT_USER_REFERENCES } from '../../../controller/operations/mergeUser
 import { mergeUsers } from '../../../test/mergeConsent.js';
 import { resolvers, type Context } from './resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { ContentValidationRefusal, recordContentValidationReportInTx } from '../../../lib/contentValidationReport.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -662,6 +664,62 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
   });
 });
 
+describe('#1332 §10 delta at 864efb6d (Ralion)', () => {
+  it('P2-9: the task readability check reads on the report\'s own transaction, so concurrent reports above the pool size all record', async () => {
+    // Each report holds its transaction's connection. A check asked on ctx.db would wait for a
+    // second one, so more concurrent reports than connections stall until the pool timeout
+    // (the #1360 failure, resolvers.helpers.ts withoutRequestCaches).
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '2');
+    url.searchParams.set('pool_timeout', '3');
+    const limitedDb = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const results = await Promise.allSettled(Array.from({ length: 4 }, (_, i) =>
+        report(person(leo, { db: limitedDb } as Partial<Context>), { runId: `pool-${i}` })));
+      expect(results.map((r) => r.status === 'fulfilled' ? 'OK' : String((r.reason as Error).message).slice(0, 120))).toEqual(['OK', 'OK', 'OK', 'OK']);
+      expect(await reportCount()).toBe(4);
+    } finally {
+      await limitedDb.$disconnect();
+    }
+  });
+
+  it('P3-11: the readability check runs before the reference is matched, so a wrong ref costs the same check as a right one', async () => {
+    const asked: string[] = [];
+    const run = (validationTaskRef: string) => db.$transaction((tx) => recordContentValidationReportInTx(tx, {
+      nodeId, memoryId, nodeRevision: 1, validationTaskRef, validationTaskRevision: 1, outcome: 'PASS', runId: null,
+      reporter: { kind: 'PERSON', userId: leo },
+      canReadTaskMemory: async (id) => { asked.push(id); return false; },
+    }));
+    for (const ref of [validationTask, generateId()]) {
+      asked.length = 0;
+      const error = await run(ref).then(() => null, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ContentValidationRefusal);
+      expect((error as ContentValidationRefusal).code, ref).toBe('CONTENT_VALIDATION_WRONG_TASK');
+      expect(asked, ref).toEqual([memoryId]);
+    }
+    expect(await reportCount()).toBe(0);
+  });
+
+  it('P3-10 (ruling 0199 "every report"): a hidden task that is broken answers WRONG_TASK; a task in a deleted memory stays TASK_BROKEN', async () => {
+    const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden-b', urn: 'cv-hidden-b' } })).id;
+    const hiddenMem = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden-b:tasks', name: 'Tasks', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    const hiddenTask = (await db.node.create({ data: { id: generateId(), memoryId: hiddenMem, loc: 'validate', name: 'V', isRunnable: false, content: 'check' } })).id;
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { validationTaskId: hiddenTask } });
+    for (const validationTaskRef of [hiddenTask, generateId()]) {
+      expect(await refusal(report(person(leo), { validationTaskRef })), validationTaskRef).toBe('CONTENT_VALIDATION_WRONG_TASK');
+    }
+    // Control: a reader of the task gets the precise TASK_BROKEN.
+    await db.orgMember.create({ data: { organizationId: hiddenOrg, userId: leo, role: 'READER' } });
+    expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask }))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
+    await db.orgMember.delete({ where: { organizationId_userId: { organizationId: hiddenOrg, userId: leo } } });
+    // A task whose memory is deleted is broken for everyone, readable or not.
+    await db.node.update({ where: { id: hiddenTask }, data: { isRunnable: true } });
+    await db.memory.update({ where: { id: hiddenMem }, data: { deletedAt: new Date() } });
+    expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask }))).toBe('CONTENT_VALIDATION_TASK_BROKEN');
+    expect(await reportCount()).toBe(0);
+  });
+});
+
 describe('#1332 storage invariants', () => {
   it('the report is append-only except a recorded merge moving the person reporter', async () => {
     await report(person(leo), { runId: 'imm' });
@@ -674,6 +732,9 @@ describe('#1332 storage invariants', () => {
     await expect(db.$executeRaw`UPDATE node_content_validation_reports SET reporter_user_id = ${mia} WHERE run_id = 'imm'`).rejects.toThrow(/append-only/);
     // Exactly the recorded source to its target is admitted.
     await db.userMerge.create({ data: { sourceUserId: leo, targetUserId: mia } });
+    // §10 P3-12: the receipt names the target too. With leo -> mia on record, leo's row may not
+    // move to anyone else.
+    await expect(db.$executeRaw`UPDATE node_content_validation_reports SET reporter_user_id = ${ann} WHERE run_id = 'imm'`).rejects.toThrow(/append-only/);
     await db.$executeRaw`UPDATE node_content_validation_reports SET reporter_user_id = ${mia} WHERE run_id = 'imm'`;
     expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'imm' } })).toMatchObject({ reporterUserId: mia });
   });
