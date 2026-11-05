@@ -11,7 +11,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { specDocumentClock } from './resolvers.specDocument.js';
-import { SPEC_DOCUMENT_MAX_NODES } from '../../../lib/specDocument/limits.js';
+import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_MAX_BYTES } from '../../../lib/specDocument/limits.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -253,6 +253,66 @@ describe('refusals (acceptance 3, 4, 8, 9)', () => {
   });
 });
 
+describe('review round 1 (#3535 LOCAL, SECURITY, UX)', () => {
+  it('a loc with a LIKE wildcard covers only its own subtree (a_b does not pull aXb:02)', async () => {
+    await spec('a_b', 'Feature: Under', 'root');
+    await spec('a_b:01', 'Rule: Mine', 'mine');
+    await spec('aXb:02', 'Rule: Not mine', 'theirs');
+    await spec('a%b:03', 'Rule: Percent sibling', 'theirs');
+    const doc = await read('a_b');
+    expect(doc.entries.map((e) => e.loc)).toEqual(['a_b', 'a_b:01']);
+    expect(doc.markdown).not.toContain('Not mine');
+  });
+
+  it('a descendant of the same loc in another memory is never read', async () => {
+    await spec('fx:110', 'Feature: Mine', 'root');
+    await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'fx:110:01', name: 'Rule: Foreign', content: 'FOREIGNBODY', role: 'spec', nodeType: 'info' } });
+    const doc = await read('fx:110');
+    expect(doc.entries.map((e) => e.loc)).toEqual(['fx:110']);
+    expect(doc.markdown).not.toContain('FOREIGN');
+  });
+
+  it('a superseded-by pointer into a memory the caller cannot read is omitted', async () => {
+    await spec('fx:110', 'Feature: Mine', 'root');
+    const old = await spec('fx:110:01', 'Rule: Old', 'old', { tags: ['superseded'] });
+    const target = await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'zz:99', name: 'SECRETTARGET', content: 'x' } });
+    await db.edge.create({ data: { memoryId: draft.id, sourceId: old.id, targetId: target.id, loc: `${old.id}:superseded-by:zz:99`, name: 'superseded-by' } });
+    const doc = await read('fx:110');
+    expect(doc.markdown).not.toContain('zz:99');
+    expect(doc.markdown).not.toContain('SECRETTARGET');
+    expect(doc.markdown).toContain('Superseded.');
+  });
+
+  it('a cap race: rows inserted after the first look are still refused, never rendered', async () => {
+    await spec('big:1', 'Feature: Big', 'root');
+    await db.node.createMany({
+      data: Array.from({ length: SPEC_DOCUMENT_MAX_NODES - 1 }, (_, i) => ({
+        id: generateId(), memoryId: draft.id, loc: `big:1:${i + 1}`, name: `Rule: R${i}`, content: 'x', role: 'spec', nodeType: 'info',
+      })),
+    });
+    // Exactly at the cap: allowed. One more arrives: refused. The refusal comes from the fetched set itself.
+    expect((await read('big:1')).entries).toHaveLength(SPEC_DOCUMENT_MAX_NODES);
+    await spec(`big:1:${SPEC_DOCUMENT_MAX_NODES}`, 'Rule: One more', 'x');
+    expect(await read('big:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'nodes' } });
+  });
+
+  it('the descendant read is bounded in the statement itself (a concurrent insert cannot widen it)', async () => {
+    await spec('fx:110', 'Feature: Mine', 'root');
+    const spy = vi.spyOn(db.node, 'findMany');
+    try {
+      await read('fx:110');
+      const taken = spy.mock.calls.map((c) => (c[0] as { take?: number } | undefined)?.take);
+      expect(taken).toContain(SPEC_DOCUMENT_MAX_NODES);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('over the byte bound it refuses with the named code and shortens nothing', async () => {
+    await spec('fat:1', 'Feature: Fat', 'root');
+    await spec('fat:1:1', 'Rule: Fat', 'x'.repeat(SPEC_DOCUMENT_MAX_BYTES + 1));
+    expect(await read('fat:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'bytes' } });
+  });
+});
+
 describe('includes (acceptance 6)', () => {
   it('a body including a node from a memory the caller cannot read shows the broken-include notice and none of its text or name', async () => {
     const { secret } = await (async () => {
@@ -294,7 +354,9 @@ function GOLDEN(memoryUrn: string, foreignUrn: string): string {
   const mem = memoryUrn.replace(/::/g, ':');
   const foreignMem = foreignUrn.replace(/::/g, ':');
   return `# Feature: The action register [fx:110]
+
 ${mem} · rendered 2026-11-04T10:12Z
+
 Readiness: 11 specs · 1 approved · 1 minted · 1 superseded · open questions in fx:110:01
 
 - **Status:** Proposed
@@ -328,6 +390,7 @@ A code is a name.
 
 ## Entity: Reserved [fx:110:05]
 Approval: NOT_APPROVED · Mint: unminted
+
 Placeholder.
 
 # Rules
@@ -368,6 +431,7 @@ Changed text.
 
 ## Rule: An earlier routing rule [fx:110:04]
 Approval: APPROVED (rev 1) · Mint: minted
+
 Superseded by fx:110:03.
 
 <a id="fx-110-a"></a>
@@ -406,7 +470,7 @@ Nested body.
 
 <a id="fx-110-06"></a>
 
-## fx:110:06 — An older name [fx:110:06]
+## fx:110:06 — An older name
 Approval: NOT_APPROVED · Mint: unminted
 
 - **Status:** Proposed

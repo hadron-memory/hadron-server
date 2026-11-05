@@ -27,11 +27,14 @@ import {
   renderSpecDocument, wikilinkTargets, inDocumentOrder,
   type ApprovalLine, type DocPart, type LinkResolution,
 } from '../../../lib/specDocument/render.js';
-import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_TOO_LARGE } from '../../../lib/specDocument/limits.js';
+import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_MAX_BYTES, SPEC_DOCUMENT_TOO_LARGE } from '../../../lib/specDocument/limits.js';
 import { resolveNodeUrnField, typeResolvers } from './resolvers.types.js';
 import { nodeApprovalFieldResolvers } from './resolvers.nodeApproval.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 
+
+/** Escapes the LIKE wildcards (and the escape character) so a prefix matches literally. */
+const escapeLike = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /** The render time comes from here, so the golden can fix it. */
 export const specDocumentClock: { now: () => Date } = { now: () => new Date() };
@@ -102,15 +105,24 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
   // A deleted spec and a loc never written answer the same.
   const rootRow = await ctx.db.node.findFirst({ where: { memoryId, loc, deletedAt: null } });
   if (!rootRow) throw new NodeNotFoundError(loc);
-  const below = await ctx.db.node.count({ where: { memoryId, deletedAt: null, loc: { startsWith: `${loc}:` } } });
-  if (below + 1 > SPEC_DOCUMENT_MAX_NODES) {
-    throw new GraphQLError(`A spec document covers at most ${SPEC_DOCUMENT_MAX_NODES} specs; this one has ${below + 1}.`, {
-      extensions: { code: SPEC_DOCUMENT_TOO_LARGE, cap: SPEC_DOCUMENT_MAX_NODES },
-    });
-  }
-  const rows = (await ctx.db.node.findMany({
-    where: { memoryId, deletedAt: null, loc: { startsWith: `${loc}:` } },
+  // ONE bounded read, so the cap is judged on the rows the document is built from (a count first lets a
+  // concurrent insert slip past it). The prefix is escaped: `_` and `%` are LIKE wildcards and legal in a loc.
+  const prefix = `${loc}:`;
+  const fetched = (await ctx.db.node.findMany({
+    where: { memoryId, deletedAt: null, loc: { startsWith: escapeLike(prefix) } },
+    take: SPEC_DOCUMENT_MAX_NODES,
   })) as unknown as NodeRow[];
+  const rows = fetched.filter((r) => r.loc.startsWith(prefix));
+  const tooLarge = (limit: 'nodes' | 'bytes') => new GraphQLError(
+    limit === 'nodes'
+      ? `A spec document covers at most ${SPEC_DOCUMENT_MAX_NODES} specs.`
+      : `A spec document covers at most ${SPEC_DOCUMENT_MAX_BYTES} bytes of specs.`,
+    { extensions: { code: SPEC_DOCUMENT_TOO_LARGE, cap: SPEC_DOCUMENT_MAX_NODES, maxBytes: SPEC_DOCUMENT_MAX_BYTES, limit } },
+  );
+  if (rows.length + 1 > SPEC_DOCUMENT_MAX_NODES) throw tooLarge('nodes');
+  let stored = (rootRow.content ?? '').length;
+  for (const r of rows) stored += (r.content ?? '').length;
+  if (stored > SPEC_DOCUMENT_MAX_BYTES) throw tooLarge('bytes');
   const root = rootRow as unknown as NodeRow;
   // Document order: the Feature, then the type groups; citation order inside a group.
   const ordered = [root, ...inDocumentOrder(citationOrder(root, [root, ...rows]))];
@@ -172,6 +184,8 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
     parts: parts.slice(1),
     links,
   });
+
+  if (markdown.length > SPEC_DOCUMENT_MAX_BYTES) throw tooLarge('bytes');
 
   return {
     memoryId,

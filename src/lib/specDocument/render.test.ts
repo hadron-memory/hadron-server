@@ -32,6 +32,29 @@ describe('the closing rule', () => {
   });
 });
 
+describe('fences (review round 1)', () => {
+  const nested = '````markdown\n```\n---\nKEEP CODE\n```\n````\n\nREAL BODY\n---\nTAIL';
+  it('a shorter fence inside a longer one is body text, so the separator inside stays code', () => {
+    expect(splitAtClosingRule(nested)).toEqual({
+      body: '````markdown\n```\n---\nKEEP CODE\n```\n````\n\nREAL BODY', tail: 'TAIL',
+    });
+  });
+  it('a closer needs the same character, at least the opening length and nothing after it', () => {
+    expect(splitAtClosingRule('```\n~~~\n---\n```x\n---\n```\nafter\n---\nt').tail).toBe('t');
+    expect(splitAtClosingRule('~~~\n```\n---\n~~~\n---\nt')).toEqual({ body: '~~~\n```\n---\n~~~', tail: 't' });
+    expect(splitAtClosingRule('    ```\n---\nt')).toEqual({ body: '    ```', tail: 't' });
+  });
+  it('wikilinks inside the nested example stay unlinked', () => {
+    expect(wikilinkTargets('````\n```\n[[a:b]]\n```\n[[c:d]]\n````\n[[e:f]]')).toEqual(['e:f']);
+  });
+  it('a lone part has "1 spec", and a name that already starts with its citation is not suffixed', () => {
+    const md = renderSpecDocument({ memory: 'o:m', renderedAt: at, feature: part('x:1', 'x:1 — Old name', 'b'), links: new Map(), parts: [] });
+    expect(md).toContain('Readiness: 1 spec ·');
+    expect(md).toContain('# x:1 — Old name\n');
+    expect(md).not.toContain('[x:1]');
+  });
+});
+
 describe('open questions and links', () => {
   it('an Open Questions section counts only with a bullet in it', () => {
     expect(hasOpenQuestions('## Open Questions\n\n- Who decides?')).toBe(true);
@@ -54,7 +77,7 @@ describe('the document', () => {
       memory: 'o:m', renderedAt: at, feature, links: new Map(),
       parts: [part('x:1:1', 'Rule: R', 'gone', { superseded: true }), part('x:1:2', 'Rule: S', 'gone', { superseded: true, supersededBy: ['x:1:3', 'x:1:4'] })],
     });
-    expect(md).toContain('[x:1:1]\nApproval: NOT_APPROVED · Mint: unminted\nSuperseded.\n');
+    expect(md).toContain('[x:1:1]\nApproval: NOT_APPROVED · Mint: unminted\n\nSuperseded.\n');
     expect(md).toContain('Superseded by x:1:3, x:1:4.\n');
     expect(md).not.toContain('gone');
   });

@@ -93,18 +93,33 @@ export function wikilinkTargets(text: string): string[] {
   return [...out];
 }
 
+/** An open fenced code block: the delimiter character and the length it opened with (CommonMark 4.5). */
+interface OpenFence { ch: string; len: number }
+
+/**
+ * One line against the fence state. A fence opens with 3+ backticks or tildes (up to 3 spaces of indent; a
+ * backtick fence's info string holds no backtick) and closes only on the same character, at least as long,
+ * with nothing after it but whitespace. A shorter or different delimiter inside is body text.
+ */
+function stepFence(line: string, open: OpenFence | null): { open: OpenFence | null; fenceLine: boolean } {
+  if (open === null) {
+    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (f && !(f[1][0] === '`' && f[2].includes('`'))) return { open: { ch: f[1][0], len: f[1].length }, fenceLine: true };
+    return { open: null, fenceLine: false };
+  }
+  const c = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  if (c && c[1][0] === open.ch && c[1].length >= open.len) return { open: null, fenceLine: true };
+  return { open, fenceLine: false };
+}
+
 function eachOutsideFence(text: string, fn: (line: string) => string | null): string {
-  let fence: string | null = null;
+  let fence: OpenFence | null = null;
   const out: string[] = [];
   for (const line of text.split('\n')) {
-    const f = /^\s*(```+|~~~+)/.exec(line);
-    if (f) {
-      if (fence === null) fence = f[1][0];
-      else if (f[1][0] === fence) fence = null;
-      out.push(line);
-      continue;
-    }
-    if (fence !== null) { out.push(line); continue; }
+    const step = stepFence(line, fence);
+    const wasOpen = fence !== null;
+    fence = step.open;
+    if (step.fenceLine || wasOpen) { out.push(line); continue; }
     const r = fn(line);
     if (r !== null) out.push(r);
   }
@@ -116,16 +131,14 @@ function eachOutsideFence(text: string, fn: (line: string) => string | null): st
  * the tail dropped for a part (kept, at the end, for the Feature). A body with no `---` is all body.
  */
 export function splitAtClosingRule(text: string): { body: string; tail: string } {
-  let fence: string | null = null;
+  let fence: OpenFence | null = null;
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i += 1) {
-    const f = /^\s*(```+|~~~+)/.exec(lines[i]);
-    if (f) {
-      if (fence === null) fence = f[1][0];
-      else if (f[1][0] === fence) fence = null;
-      continue;
-    }
-    if (fence === null && /^---\s*$/.test(lines[i])) {
+    const wasOpen = fence !== null;
+    const step = stepFence(lines[i], fence);
+    fence = step.open;
+    if (step.fenceLine || wasOpen) continue;
+    if (/^---\s*$/.test(lines[i])) {
       return { body: lines.slice(0, i).join('\n'), tail: lines.slice(i + 1).join('\n') };
     }
   }
@@ -182,7 +195,7 @@ const approvalText = (a: ApprovalLine): string => {
 
 const stateLine = (p: DocPart): string => `Approval: ${approvalText(p.approval)} · Mint: ${p.minted ? 'minted' : 'unminted'}`;
 
-const heading = (p: DocPart): string => `${p.name} [${p.loc}]`;
+const heading = (p: DocPart): string => (p.name.startsWith(p.loc) ? p.name : `${p.name} [${p.loc}]`);
 
 /** The part's body as shown, or null when it shows none (placeholder, superseded, empty). */
 function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>): string | null {
@@ -202,7 +215,7 @@ export function renderSpecDocument(input: DocInput): string {
     .filter((p) => !p.isPlaceholder && !p.superseded && p.body != null && hasOpenQuestions(splitAtClosingRule(p.body).body))
     .map((p) => p.loc);
   const readiness = [
-    `${all.length} specs`,
+    `${all.length} ${all.length === 1 ? 'spec' : 'specs'}`,
     `${all.filter((p) => p.approval.state === 'APPROVED').length} approved`,
     `${all.filter((p) => p.minted).length} minted`,
     `${all.filter((p) => p.superseded).length} superseded`,
@@ -210,7 +223,7 @@ export function renderSpecDocument(input: DocInput): string {
   ].join(' · ');
 
   const blocks: string[] = [
-    `# ${heading(feature)}\n${input.memory} · rendered ${renderedStamp(input.renderedAt)}\nReadiness: ${readiness}`,
+    `# ${heading(feature)}\n\n${input.memory} · rendered ${renderedStamp(input.renderedAt)}\n\nReadiness: ${readiness}`,
   ];
   if (feature.isPlaceholder) blocks.push('Placeholder.');
   else {
@@ -225,9 +238,9 @@ export function renderSpecDocument(input: DocInput): string {
     for (const p of members) {
       const head = `<a id="${anchorOf(p.loc)}"></a>\n\n## ${heading(p)}\n${stateLine(p)}`;
       if (p.superseded) {
-        blocks.push(`${head}\n${p.supersededBy.length ? `Superseded by ${p.supersededBy.join(', ')}.` : 'Superseded.'}`);
+        blocks.push(`${head}\n\n${p.supersededBy.length ? `Superseded by ${p.supersededBy.join(', ')}.` : 'Superseded.'}`);
       } else if (p.isPlaceholder) {
-        blocks.push(`${head}\nPlaceholder.`);
+        blocks.push(`${head}\n\nPlaceholder.`);
       } else {
         const body = shownBody(p, true, links);
         blocks.push(body ? `${head}\n\n${body}` : head);

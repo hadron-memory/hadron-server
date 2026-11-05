@@ -56,7 +56,7 @@ import {
 import { getComplexity, simpleEstimator, type ComplexityEstimator } from 'graphql-query-complexity';
 import type { GraphqlAdmissionConfig } from './admission.js';
 import { pageTake } from './pageBounds.js';
-import { SPEC_DOCUMENT_MAX_NODES } from '../../lib/specDocument/limits.js';
+import { SPEC_DOCUMENT_MAX_NODES, SPEC_DOCUMENT_CALL_COST } from '../../lib/specDocument/limits.js';
 
 export const QUERY_TOO_COMPLEX = 'QUERY_TOO_COMPLEX';
 
@@ -114,6 +114,14 @@ export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
   'SpecDocument.entries': SPEC_DOCUMENT_MAX_NODES,
 };
 
+/**
+ * Fields whose resolver does heavy work whatever is selected: a fixed cost added to the children's.
+ * #1302: `specDocument` reads and renders the whole document for `{ markdown }` as much as for `entries`.
+ */
+export const FIXED_FIELD_COST: Readonly<Record<string, number>> = {
+  'Query.specDocument': SPEC_DOCUMENT_CALL_COST,
+};
+
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
 /** Explicit resolver defaults that differ from the common fallback (reviewed against the resolvers). */
 export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
@@ -146,6 +154,8 @@ export function hadronListEstimator(limits: Pick<GraphqlAdmissionConfig, 'maxCos
   const ceiling = limits.maxCost + 1;
   return ({ type, field, args, childComplexity }) => {
     if (field.name === '__schema' || field.name === '__type' || field.name === '__typename') return 0;
+    const fixed = FIXED_FIELD_COST[`${type.name}.${field.name}`];
+    if (fixed !== undefined) return Math.min(fixed + childComplexity, ceiling);
     const isList = isListType(getNullableType(field.type));
     // #2421: agentTaskList's limit is conditional on symptom. Its legacy
     // unfiltered form ignores limit, so keep that form's unpaged cost too.
