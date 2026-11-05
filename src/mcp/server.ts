@@ -7195,13 +7195,18 @@ export function createMcpServerInstance(
               runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
               mintHuman: true, authoredChange,
             }, attestedAuthoring(authoredWith));
-            await createNodeRevision(tx, {
-              id: generateId(),
-              ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
-                revLabel: reason,
-                changes: changedFields,
-              }),
-            });
+            // #3497 / rulings0149+0198: the token was checked above; an
+            // edge-only replacement applies below without consuming it.
+            // Mixed writes retain exactly one pre-edit snapshot.
+            if (changedFields.length > 0) {
+              await createNodeRevision(tx, {
+                id: generateId(),
+                ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), {
+                  revLabel: reason,
+                  changes: changedFields,
+                }),
+              });
+            }
             if (authoredChange) Object.assign(data, authoredStamp ?? clearNodeAuthorship());
             data.revisionContentHash = revisionStateHashRefreshMarker();
             const updated = Object.keys(data).length > 0
