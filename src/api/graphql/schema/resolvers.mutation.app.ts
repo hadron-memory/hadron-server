@@ -89,6 +89,25 @@ import { forbiddenError } from '../../../lib/refusals.js';
 import { ensureProjectZero } from '../../../lib/agentTasks/projectZero.js';
 
 /**
+ * #3474 (cor:acl:040:07 S7): an App's policy link is exactly `{ allow: string[] }`, or null, or left out. `parsePolicyLink`
+ * reads `allow` and ignores the rest, and the mutations store what the caller sent, so this also takes the own keys. It
+ * counts own keys, so a name `Object.prototype` has isn't mistaken for an allowed one, and JSON's own `__proto__` is seen
+ * (Prisma would drop that key without saying so). A null prototype is what the JSON scalar builds from an inline literal.
+ * The refusal is fixed text: it names no key and no value. Callers run this after their own gate and before any write.
+ */
+function assertAppPolicyShape(policy: unknown): void {
+  if (policy === undefined || policy === null) return;
+  const prototype = typeof policy === 'object' ? Object.getPrototypeOf(policy) : undefined;
+  const plain = prototype === Object.prototype || prototype === null;
+  // One own key on a plain object, and the parser found `allow` on it: that key is `allow`.
+  if (parsePolicyLink(policy) == null || !plain || Reflect.ownKeys(policy as object).length !== 1) {
+    throw new GraphQLError('policy must be { allow: string[] } or null.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+}
+
+/**
  * cor:aut:010:02 rule 9: revoke one of `userId`'s keys and every recorded descendant, returning the ids it revoked
  * (sorted). Run under the user's exclusive authority anchor, which serializes the traversal with every mint: a mint
  * that wins is in this subtree, one that waits rechecks its now-revoked credential. Each existing revokedAt is kept.
@@ -487,11 +506,7 @@ export const appMutations = {
       // #2403: after the org ADMIN / authenticated-user gate, before any write or agent lookup.
       assertPositiveSessionTimeout(sessionTimeoutSeconds);
       // The same shape check as updateApp, under this mutation's own gate above.
-      if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
-        throw new GraphQLError('policy must be { allow: string[] } or null.', {
-          extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
+      assertAppPolicyShape(policy);
       // URN format matches memories and agents: "{namespace}:{slug}" — the
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
@@ -929,11 +944,7 @@ export const appMutations = {
       await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
       // #510: the app-layer action-policy link (cor:acl:040:02) — validate
       // shape before storing; explicit null clears (= no restriction).
-      if (policy !== undefined && policy !== null && parsePolicyLink(policy) == null) {
-        throw new GraphQLError('policy must be { allow: string[] } or null.', {
-          extensions: { code: 'BAD_USER_INPUT' },
-        });
-      }
+      assertAppPolicyShape(policy);
       // Ruling DY-5: a dormancy threshold is a positive whole number of days.
       // Loud rather than clamped: a 0 would make every lapsed session dormant.
       if (sessionDormancyDays != null && (!Number.isInteger(sessionDormancyDays) || sessionDormancyDays < 1)) {

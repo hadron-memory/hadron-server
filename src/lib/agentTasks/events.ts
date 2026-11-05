@@ -20,6 +20,8 @@ import { currentActor } from '../requestActor.js';
 import { generateId } from '../id.js';
 import { toNaiveUtc } from '../sessionActivity.js';
 import type { PropertiesFingerprint } from './properties.js';
+import type { PrProtocolEvent } from './prProtocol.js';
+export { PR_EVENT_TYPES } from './prProtocol.js';
 
 /** The task event types T1 writes (cor:agt:050:11; `task.reassigned` is Proposed there). */
 export const TASK_EVENT_TYPES = [
@@ -89,8 +91,11 @@ export type EventActor = {
   appKeyId?: string | null;
 };
 
-/** The payload each type carries. Ids, counts, outcome words and flags only — never text. */
+/** Closed per-type payloads: ids/counts/outcomes and the explicitly prescribed PR reference fields.
+ * Task properties and free-form task content never ride these events (cor:agt:050:28).
+ */
 export type TaskEventPayload =
+  | PrProtocolEvent
   | { type: 'task.created'; parentTaskId: string | null; owner: TaskParty; hasAssignee: boolean; /** #2646: the task a clone was made from. */ clonedFromTaskId?: string | null }
   | { type: 'task.assigned'; assignee: TaskParty; closeSessionWhenDone: boolean }
   | { type: 'task.reassigned'; from: TaskParty; to: TaskParty; closeSessionWhenDone: boolean }
@@ -136,6 +141,11 @@ function partyJson(p: TaskParty): Prisma.InputJsonObject {
 /** The stored `payload` for a typed event. Exhaustive over the union, so a new type must be built here. */
 function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
   switch (e.type) {
+    case 'review.scheduled': return { slots: e.slots };
+    case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
+    case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
+    case 'review.verdict': return { slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt };
+    case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
       return { fields: [...new Set(e.fields)] };

@@ -106,6 +106,18 @@ describe('#1328 MCP parity', () => {
     expect(await stored('c')).toMatchObject({ name: 'c', authoredByTask: taskId });
   });
 
+  // #3437 (m4): the in-handler door. Same slot, so `moveNodeSubtree` never runs.
+  it('a rename in place attests: no claim changes nothing, and a claim stamps it', async () => {
+    const srv = createTestableMcpServer(auth());
+    await srv.callToolText('hadron_create_node', { urn: urn('a'), name: 'A', role: 'guide', content: 'one', authoredWith: claim() });
+    await db.node.update({ where: { id: taskId }, data: { revSeq: 2 } });
+    expect(await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: urn('a'), renameToLeaf: true }))
+      .toMatch(/authoring_attestation_missing/);
+    expect(await stored('a')).toMatchObject({ name: 'A', authoredByRevision: 1 });
+    await srv.callToolText('hadron_move_node', { urn: urn('a'), targetUrn: urn('a'), renameToLeaf: true, authoredWith: claim(2) });
+    expect(await stored('a')).toMatchObject({ name: 'a', authoredByTask: taskId, authoredByRevision: 2 });
+  });
+
   describe('a rename out of a memory answers to the rules it leaves', () => {
     const other = (loc: string) => `hrn:node:attest-mcp:other:${loc}`;
     let otherId: string;
