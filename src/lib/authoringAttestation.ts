@@ -261,19 +261,19 @@ export async function judgeAuthoring(
   });
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const reader = authoring.reader;
-  const brokenRecovery = reader ? NO_RECOVERY : null;
+  const readable = new Map<string, boolean>();
+  const canRead = async (memoryId: string): Promise<boolean> => {
+    if (!reader) return true;
+    if (!readable.has(memoryId)) readable.set(memoryId, await isMemoryReadableFresh(reader, memoryId, tx));
+    return readable.get(memoryId)!;
+  };
+  // One pass in rule order: the first rule that fails either way is named, so
+  // the role cannot reveal which way a hidden task failed.
   for (const { key, rule } of required) {
     const task = rule.authorTaskId ? byId.get(rule.authorTaskId) : undefined;
-    if (!task || task.deletedAt || task.memory.deletedAt || task.isRunnable !== true) {
-      return { refused: 'AUTHOR_TASK_BROKEN', role: key, recovery: brokenRecovery };
-    }
-  }
-  if (reader) {
-    const readable = new Map<string, boolean>();
-    for (const { key, rule } of required) {
-      const { memoryId: taskMemoryId } = byId.get(rule.authorTaskId!)!;
-      if (!readable.has(taskMemoryId)) readable.set(taskMemoryId, await isMemoryReadableFresh(reader, taskMemoryId, tx));
-      if (!readable.get(taskMemoryId)) return { refused: 'AUTHOR_TASK_BROKEN', role: key, recovery: NO_RECOVERY };
+    const usable = task && !task.deletedAt && !task.memory.deletedAt && task.isRunnable === true;
+    if (!usable || !(await canRead(task.memoryId))) {
+      return { refused: 'AUTHOR_TASK_BROKEN', role: key, recovery: reader ? NO_RECOVERY : null };
     }
   }
   const recoveryOf = (rule: NodeRoleRule) => (reader ? readableRecovery(byId.get(rule.authorTaskId!)!) : null);
