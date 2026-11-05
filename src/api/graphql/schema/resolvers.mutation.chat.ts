@@ -65,6 +65,7 @@ import {
   ChatScopeError,
 } from './chat-scope.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
+import { reportPartialTurn } from '../../../lib/chatPartialTurn.js';
 import { recordNodeUsage, recordNodeWrite } from '../../../lib/usageRecorder.js';
 import {
   type Context,
@@ -1426,7 +1427,7 @@ export const chatMutations = {
           const authoredChange = authoredContentChanged(diffNodeChanges({ data: existingData }, { data: merged }));
           const stamp = await assertAuthoring(tx, chatNode.memoryId, {
             priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
-            role: dataNode.role, runnable: dataNode.isRunnable, authoredChange,
+            role: dataNode.role, runnable: dataNode.isRunnable, mintHuman: true, authoredChange,
           }, attestedAuthoring(null));
           // Nothing changed, so nothing is written. Rewriting would re-encrypt
           // an encrypted row, and fresh ciphertext reads as drift that clears the stamp.
@@ -1472,7 +1473,8 @@ export const chatMutations = {
           // #1061 — first extraction into this memory mints the `data` node.
           return { id: dataNodeId, loc: 'data', memoryId: chatNode.memoryId };
         }
-      }), ctx);
+      // #3514: the assistant message and counter are already committed above; a refused extraction says so.
+      }).catch(reportPartialTurn), ctx);
 
       // Handle stage transition + edge evaluation
       let stageTransitioned = false;

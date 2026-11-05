@@ -15,6 +15,7 @@ const checkout = vi.mocked(withMirrorCheckout);
 const dirs: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.resetAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -23,11 +24,12 @@ describe('Node Git mirror ordering', () => {
   it('reads the latest Node only after entering the serialized checkout', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hadron-mirror-order-'));
     dirs.push(dir);
+    const ownerRead = vi.spyOn(db.node, 'findFirst').mockResolvedValue(null);
     let enterCheckout!: () => void;
     const checkoutGate = new Promise<void>((resolve) => { enterCheckout = resolve; });
     checkout.mockImplementationOnce(async (_opts, mutate) => {
       await checkoutGate;
-      await mutate({ localPath: dir, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory' });
+      await mutate({ localPath: dir, branch: 'hadron-updates', memoryUrn: 'test-org:root-memory', memoryId: 'memory-1' });
       return 'mirrored';
     });
 
@@ -37,13 +39,15 @@ describe('Node Git mirror ordering', () => {
     };
     let latest = { ...initial, content: 'new' };
     const refresh = vi.fn(async () => latest);
-    const writing = writeNodeToGit(initial, 'owner/repo', null, 'memory-1', refresh);
+    const writing = writeNodeToGit(initial, 'owner/repo', null, undefined, refresh);
     expect(refresh).not.toHaveBeenCalled();
+    expect(ownerRead).not.toHaveBeenCalled();
     latest = { ...latest, content: 'newest' };
     enterCheckout();
     await writing;
 
     expect(refresh).toHaveBeenCalledOnce();
+    expect(ownerRead).toHaveBeenCalledWith({ where: { memoryId: 'memory-1', loc: 'source:README', deletedAt: null }, select: { id: true } });
     expect(readFileSync(join(dir, 'source.md'), 'utf8')).toContain('newest');
     expect(readFileSync(join(dir, 'source.md'), 'utf8')).not.toContain('old\n');
   });

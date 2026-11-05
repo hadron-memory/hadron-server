@@ -4521,6 +4521,36 @@ export const typeDefs = `#graphql
     warnings: [MemoryConfigWarning!]!
   }
 
+  type MemoryConfigBulkApplyError {
+    "MEMORY_NOT_FOUND (an unknown ref and a memory you cannot manage read byte-identically), DUPLICATE_TARGET, CONFLICT, NODE_NOT_FOUND, NOT_A_TASK, NODE_ROLE_RULE_REF_BROKEN, MEMORY_CONFIG_TEMPLATE_NOT_FOUND, BAD_USER_INPUT, or INTERNAL_SERVER_ERROR."
+    code: String!
+    message: String!
+    "Set only for a CONFLICT on the template revision."
+    currentRevision: Int
+    "Set only for INTERNAL_SERVER_ERROR: the id the server log carries for this fault."
+    requestId: String
+  }
+
+  type MemoryConfigBulkApplyEntry {
+    "The position of the ref in memoryRefs; results[i] answers memoryRefs[i]."
+    index: Int!
+    "Your input string, verbatim. Never a resolved id, name or URN."
+    memoryRef: String!
+    ok: Boolean!
+    "Non-null exactly when ok. SKIPPED_CONFLICT and SKIPPED_LOCKED entries are outcomes of a successful apply, so ok stays true."
+    result: MemoryConfigApplyResult
+    "Non-null exactly when not ok."
+    error: MemoryConfigBulkApplyError
+  }
+
+  type MemoryConfigBulkApplyResult {
+    dryRun: Boolean!
+    "One per input position, in input order."
+    results: [MemoryConfigBulkApplyEntry!]!
+    succeeded: Int!
+    failed: Int!
+  }
+
   type NodeRoleRulePayload {
     rule: NodeRoleRule!
     "Empty until #1327 adds its visibility warnings."
@@ -10606,7 +10636,13 @@ export const typeDefs = `#graphql
     cancelAgentTask, alarm.ack.outside-chain on acknowledgeAlarm, and #2733 ticker.code.unmapped on createTicker);
     a client must tolerate unknown codes. \`text\` is
     fixed per code. \`register\` appears only for a caller that has an Agent:
-    { state: mapped (taskLoc, taskUrn) | unmapped | unresolved }. A warning never
+    { state: mapped (taskLoc, taskUrn) | unmapped | unresolved | withheld }.
+    #3491 (ruling 0176): the first three are given only when the caller may read every
+    system memory on the chains looked up (the Team Agent's and the caller's own Agent's),
+    as for every action answer (hrn:node:hadronmemory.com:specs:cor:agt:110:03);
+    otherwise, or when the lookup fails or runs out of time, it is { state: withheld },
+    which says nothing about what the chains hold. A warning filed after the request has
+    spent its whole read budget carries no register at all (nothing was looked up). A warning never
     blocks and never reveals another worker's state to a caller who could not
     already see it on the roster.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.
@@ -12932,6 +12968,14 @@ export const typeDefs = `#graphql
     sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
     """
     Process the LLM's tool response (extract data, transition stage, save assistant message)
+
+    NOT atomic: the assistant message and message counter commit first, the extracted data is then judged and
+    written in a separate transaction, and the stage advances last. When the authoring gate refuses the extraction
+    (AUTHORING_ATTESTATION_MISSING, AUTHOR_TASK_BROKEN or its other typed reasons) the call errors with that same
+    code and role, and the error's extensions.partialTurn says what the turn did: persisted = [ASSISTANT_MESSAGE,
+    MESSAGE_COUNTER], refused = [{ component: EXTRACTION, code }], notRun = [STAGE_PROGRESSION]. The target data
+    node is untouched. The report names no id, task or revision. Do NOT treat this as a retry-safe call: repeating
+    it may append another assistant message. Success shapes are unchanged.
     """
     processChatResponse(chatId: String!, toolResponse: JSON!): ChatResponseResult!
     """
@@ -13125,6 +13169,28 @@ export const typeDefs = `#graphql
     changed since you read it. dryRun: the same report with nothing written.
     """
     applyMemoryConfigTemplate(templateRef: ID!, memoryRef: ID!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigApplyResult!
+
+    """
+    #1334 bulk apply — applyMemoryConfigTemplate over a list of memories (at most 50; more is
+    BULK_TARGETS_TOO_MANY naming the cap and the count, checked before any work, never a truncation).
+    Targets run one at a time, in input order, each in its OWN transaction exactly as the singular
+    mutation runs one: one target failing never rolls back another, and there is no promise that the
+    whole call saw one version of the template. Each success reports the templateRevision it applied.
+
+    Refused for the whole call, nothing written: an empty or blank list (BAD_USER_INPUT), an unknown or
+    unmanageable template (MEMORY_CONFIG_TEMPLATE_NOT_FOUND), a stale expectedTemplateRevision (CONFLICT
+    with currentRevision). expectedTemplateRevision is also enforced per target, so a template edited
+    mid-call fails every later target with CONFLICT while earlier ones stay applied. Everything else is
+    per target (see MemoryConfigBulkApplyError). MANAGE on each memory and on the template is asked
+    fresh for every target. A memory you cannot manage reads exactly like one that does not exist, and
+    a memory named twice (by any spelling) is applied once: later positions are DUPLICATE_TARGET with no
+    write, but only for memories you manage.
+
+    Retrying is safe for FAILED targets only: re-sending a target that succeeded under a required
+    template replaces its rule again. dryRun rolls every target back and is not a preview of a later
+    apply; bind them with expectedTemplateRevision.
+    """
+    applyMemoryConfigTemplateToMemories(templateRef: ID!, memoryRefs: [ID!]!, expectedTemplateRevision: Int, dryRun: Boolean): MemoryConfigBulkApplyResult!
 
     """
     #1325 part (c) — create a template. ownerRef names the organization, user

@@ -637,8 +637,9 @@ async function runMergeTxn(
       WHERE sender_user_id = ${sourceUserId} OR new_user_id = ${sourceUserId}`;
     await tx.$executeRaw`UPDATE node_revisions SET
       edited_by = CASE WHEN edited_by = ${sourceUserId} THEN ${targetUserId} ELSE edited_by END,
-      approved_by = CASE WHEN approved_by = ${sourceUserId} THEN ${targetUserId} ELSE approved_by END
-      WHERE edited_by = ${sourceUserId} OR approved_by = ${sourceUserId}`;
+      approved_by = CASE WHEN approved_by = ${sourceUserId} THEN ${targetUserId} ELSE approved_by END,
+      authored_by_human = CASE WHEN authored_by_human = ${sourceUserId} THEN ${targetUserId} ELSE authored_by_human END
+      WHERE edited_by = ${sourceUserId} OR approved_by = ${sourceUserId} OR authored_by_human = ${sourceUserId}`;
 
     // The remaining two rewrites interpolate table/column IDENTIFIERS, which a
     // tagged template cannot bind (Postgres parameters are values, not
@@ -661,6 +662,20 @@ async function runMergeTxn(
       WHERE user_id = ${sourceUserId} AND origin_sign_in_id IS NOT NULL AND revoked_at IS NULL`;
     await tx.$executeRaw`DELETE FROM auth_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
     await tx.$executeRaw`DELETE FROM auth_handoff_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
+
+    // #1336 (§10 P2-1/P2-2): a HUMAN authorship stamp names a person (no FK), so
+    // it follows the survivor. `authored_by_human` is part of the node's state
+    // fingerprint, so the rewrite carries the sanctioned 'refresh' marker: left
+    // out, the next read sees drift and the reconcile clears the stamp. rev_seq
+    // does not move. The revision-row copy is rewritten with the other
+    // node_revisions actor columns above.
+    // The marker is conditional (§10 P2-3): a node with unreconciled drift keeps
+    // its stored hash, so the next read still reconciles it instead of the merge
+    // laundering a tampered body into a clean one.
+    await tx.$executeRaw`UPDATE nodes SET authored_by_human = ${targetUserId},
+      revision_content_hash = CASE WHEN revision_content_hash = hadron_node_revision_state_hash(nodes)
+        THEN 'refresh' ELSE revision_content_hash END
+      WHERE authored_by_human = ${sourceUserId}`;
 
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay

@@ -661,7 +661,7 @@ export async function moveNodeSubtree(
   const renameStamp = renamed
     ? await assertRenameAuthoring(tx, srcMemoryId, destMemoryId, {
         priorRole: renamed.role, priorRunnable: renamed.isRunnable,
-        role: renamed.role, runnable: renamed.isRunnable, authoredChange: true,
+        role: renamed.role, runnable: renamed.isRunnable, mintHuman: true, authoredChange: true,
       }, renameAuthoring ?? attestedAuthoring(null))
     : null;
   for (const n of subtree) {
