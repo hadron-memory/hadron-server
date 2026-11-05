@@ -30,10 +30,6 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // else would carry it). The revision-row copy is rewritten above.
   ['nodes', 'approved_by'],
   ['nodes', 'minted_by'],
-  // #1336: a HUMAN authorship stamp names a person (no FK), so it follows the
-  // survivor; the revision-row copy is rewritten with the other node_revisions
-  // actor columns below.
-  ['nodes', 'authored_by_human'],
   // #1705: a task's owner and assignee are authorization identities
   // (cor:agt:050:08/:09), so they follow the merged person.
   // agent_team_events' actor / acknowledger ids are deliberately NOT
@@ -666,6 +662,15 @@ async function runMergeTxn(
       WHERE user_id = ${sourceUserId} AND origin_sign_in_id IS NOT NULL AND revoked_at IS NULL`;
     await tx.$executeRaw`DELETE FROM auth_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
     await tx.$executeRaw`DELETE FROM auth_handoff_codes WHERE user_id = ${sourceUserId} AND sign_in_id IS NOT NULL`;
+
+    // #1336 (§10 P2-1/P2-2): a HUMAN authorship stamp names a person (no FK), so
+    // it follows the survivor. `authored_by_human` is part of the node's state
+    // fingerprint, so the rewrite carries the sanctioned 'refresh' marker: left
+    // out, the next read sees drift and the reconcile clears the stamp. rev_seq
+    // does not move. The revision-row copy is rewritten with the other
+    // node_revisions actor columns above.
+    await tx.$executeRaw`UPDATE nodes SET authored_by_human = ${targetUserId}, revision_content_hash = 'refresh'
+      WHERE authored_by_human = ${sourceUserId}`;
 
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay

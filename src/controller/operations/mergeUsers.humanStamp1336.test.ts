@@ -36,6 +36,7 @@ describe('mergeUsers: HUMAN authorship stamp (#1336)', () => {
   it('moves the source id on the live node and its revision snapshot, leaves other persons alone', async () => {
     const mine = await humanNode('n:mine', source.id);
     const theirs = await humanNode('n:theirs', other.id);
+    const mineRevSeq = (await db.node.findUniqueOrThrow({ where: { id: mine.id } })).revSeq;
     await db.nodeRevision.create({ data: {
       nodeId: mine.id, memoryId, revNo: 1, loc: 'n:mine', name: 'n', abstract: 'n', content: 'x',
       authorshipKind: 'HUMAN', authoredByHuman: source.id, authoredAt: AT,
@@ -44,10 +45,30 @@ describe('mergeUsers: HUMAN authorship stamp (#1336)', () => {
       sourceUserId: source.id, targetUserId: target.id, actorUserId: admin.id,
       consentProof: await approvedMergeProof(db, source.id, target.id, admin.id),
     });
-    expect((await db.node.findUniqueOrThrow({ where: { id: mine.id } })).authoredByHuman).toBe(target.id);
+    const live = await db.node.findUniqueOrThrow({ where: { id: mine.id } });
+    expect(live.authoredByHuman).toBe(target.id);
+    // P2-2: the fingerprint follows the new stamp, so a later read finds no drift.
+    const [{ same }] = await db.$queryRaw<{ same: boolean }[]>`
+      SELECT revision_content_hash = hadron_node_revision_state_hash(n) AS same FROM nodes n WHERE id = ${mine.id}`;
+    expect(same).toBe(true);
+    expect(live.revSeq).toBe(mineRevSeq);
     expect((await db.node.findUniqueOrThrow({ where: { id: theirs.id } })).authoredByHuman).toBe(other.id);
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: mine.id, revNo: 1 } });
     expect(rev.authoredByHuman).toBe(target.id);
     expect(rev.authoredAt).toEqual(AT);
+  });
+});
+
+describe('mergeUsers: HUMAN stamp survives the next read (#1336 P2-2)', () => {
+  it('a read after the merge neither clears the stamp nor bumps the revision', async () => {
+    const { resolvers } = await import('../../api/graphql/schema/resolvers.js');
+    const mine = await humanNode('n:read', source.id);
+    await mergeUsers(db, {
+      sourceUserId: source.id, targetUserId: target.id, actorUserId: admin.id,
+      consentProof: await approvedMergeProof(db, source.id, target.id, admin.id),
+    });
+    await resolvers.Query.node(null, { ref: mine.id } as never, { db, userId: admin.id, roles: ['ADMIN'] } as never).catch(() => null);
+    const after = await db.node.findUniqueOrThrow({ where: { id: mine.id } });
+    expect(after).toMatchObject({ authorshipKind: 'HUMAN', authoredByHuman: target.id, revSeq: mine.revSeq });
   });
 });
