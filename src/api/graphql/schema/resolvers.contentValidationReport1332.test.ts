@@ -11,6 +11,7 @@ import { generateId } from '../../../lib/id.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { DIRECT_USER_REFERENCES } from '../../../controller/operations/mergeUsers.js';
+import { mergeUsers } from '../../../test/mergeConsent.js';
 import { resolvers, type Context } from './resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 
@@ -355,9 +356,9 @@ describe('#1332 runId replay (refusal 5)', () => {
     expect(fresh.replayed).toBe(false);
     // The node moves from mem to other: the old report stays in mem's snapshot.
     await db.node.delete({ where: { id: other } });
-    await M.moveNode({}, { input: { nodeRef: nodeId, targetMemoryId: otherMemoryId } }, person(leo)).catch(async () => {
-      await db.node.update({ where: { id: nodeId }, data: { memoryId: otherMemoryId } });
-    });
+    // BLIND P3: the public move, with no fallback.
+    await M.moveNode({}, { sourceRef: nodeId, targetMemoryRef: otherMemoryId }, person(leo));
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).memoryId).toBe(otherMemoryId);
     const moved = await report(person(mia), { runId: 'shared', nodeRevision: (await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq });
     expect(moved.replayed).toBe(false);
     expect(await db.nodeContentValidationReport.count({ where: { nodeId, runId: 'shared' } })).toBe(2);
@@ -377,9 +378,15 @@ describe('#1332 runId replay (refusal 5)', () => {
 
     // The merge rewrites reporter_user_id with the other direct user references (mergeUsers).
     expect(DIRECT_USER_REFERENCES).toContainEqual(['node_content_validation_reports', 'reporter_user_id']);
+    // BLIND P2-2: the real merge, which records itself before it reassigns; then a chained merge follows it.
     await report(await viaKey(mia), { runId: 'merged' });
-    await db.$executeRawUnsafe('UPDATE "node_content_validation_reports" SET "reporter_user_id" = $1 WHERE "reporter_user_id" = $2', leo, mia);
+    await mergeUsers(db, { sourceUserId: mia, targetUserId: leo });
     expect((await report(await viaKey(leo), { runId: 'merged' })).replayed).toBe(true);
+    const cleo = (await db.user.create({ data: { handle: 'cv-cleo' } })).id;
+    await db.orgMember.create({ data: { organizationId: orgId, userId: cleo, role: 'CONTRIBUTOR' } });
+    await mergeUsers(db, { sourceUserId: leo, targetUserId: cleo });
+    expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'merged' } })).toMatchObject({ reporterUserId: cleo });
+    expect((await report(await viaKey(cleo), { runId: 'merged' })).replayed).toBe(true);
   });
 
   it('5e. concurrent identical reports make one row; different reporters get one row and a conflict', async () => {
@@ -605,11 +612,19 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
 });
 
 describe('#1332 storage invariants', () => {
-  it('the report is append-only except a merge moving the person reporter', async () => {
+  it('the report is append-only except a recorded merge moving the person reporter', async () => {
     await report(person(leo), { runId: 'imm' });
     await expect(db.$executeRaw`UPDATE node_content_validation_reports SET outcome = 'FAIL' WHERE run_id = 'imm'`).rejects.toThrow(/append-only/);
     await expect(db.$executeRaw`UPDATE node_content_validation_reports SET reporter_kind = 'APP_KEY', reporter_user_id = NULL, reporter_app_key_id = 'k' WHERE run_id = 'imm'`).rejects.toThrow();
+    // BLIND P2-2: an ordinary reassignment, with no merge recorded, is refused.
+    await expect(db.$executeRaw`UPDATE node_content_validation_reports SET reporter_user_id = ${mia} WHERE run_id = 'imm'`).rejects.toThrow(/append-only/);
+    // A merge recorded for another pair does not admit this one.
+    await db.userMerge.create({ data: { sourceUserId: ann, targetUserId: mia } });
+    await expect(db.$executeRaw`UPDATE node_content_validation_reports SET reporter_user_id = ${mia} WHERE run_id = 'imm'`).rejects.toThrow(/append-only/);
+    // Exactly the recorded source to its target is admitted.
+    await db.userMerge.create({ data: { sourceUserId: leo, targetUserId: mia } });
     await db.$executeRaw`UPDATE node_content_validation_reports SET reporter_user_id = ${mia} WHERE run_id = 'imm'`;
+    expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'imm' } })).toMatchObject({ reporterUserId: mia });
   });
 
   it('the migration carries the shared invariants file verbatim', () => {
