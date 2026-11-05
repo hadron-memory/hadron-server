@@ -6,7 +6,7 @@
  * access gate and default exclusions are the existing ones), and page and count like any findNodes read.
  */
 import { randomUUID } from 'node:crypto';
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -165,6 +165,22 @@ describe('#2832 every search mode returns only direct children', () => {
       provider: 'test', model: 'stub-model', dim: DIM,
       async embed(texts: string[]) { return texts.map(() => oneHot(1)); },
     });
+    // #3315: supply a value outside the fixture and check what its real teardown leaves behind.
+    let outerUrl: string | undefined;
+    beforeAll(() => {
+      outerUrl = process.env.EMBEDDING_API_URL;
+      process.env.EMBEDDING_API_URL = 'http://sentinel.invalid/3315';
+    });
+    afterAll(() => {
+      try { expect(process.env.EMBEDDING_API_URL).toBe('http://sentinel.invalid/3315'); }
+      finally {
+        if (outerUrl === undefined) delete process.env.EMBEDDING_API_URL;
+        else process.env.EMBEDDING_API_URL = outerUrl;
+      }
+    });
+    describe('isolated embedding fixture', () => {
+    let fixtureUrl: string | undefined;
+    beforeAll(() => { fixtureUrl = process.env.EMBEDDING_API_URL; });
     afterAll(() => { resetEmbeddingClientForTests(); delete process.env.EMBEDDING_API_URL; });
 
     it('vector, hybrid and chunk passages are narrowed to the direct children', async () => {
@@ -184,6 +200,7 @@ describe('#2832 every search mode returns only direct children', () => {
       const parentLocs = (await db.node.findMany({ where: { id: { in: chunks.passages.map((p: any) => p.parentNodeId) } }, select: { loc: true } })).map((n) => n.loc);
       expect(parentLocs.length).toBeGreaterThan(0);
       expect([...new Set(parentLocs)].sort()).toEqual(['q:one', 'q:two']);
+    });
     });
   });
 });
