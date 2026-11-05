@@ -17,7 +17,7 @@ beforeEach(async()=>{
  const holder=await db.organization.create({data:{name:'Holder',urn:`holder-${generateId().toLowerCase()}.example`}});holderOrgId=holder.id;
  const vendor=await db.organization.create({data:{name:'Vendor',urn:`vendor-${generateId().toLowerCase()}.example`}});vendorOrgId=vendor.id;
  const app=await db.app.create({data:{name:'Consumer',urn:`${holder.urn}:consumer`,organizationId:holder.id}});appId=app.id;
- const make=(name:string,visibility:string)=>db.agent.create({data:{name,urn:`${vendor.urn}:${name.toLowerCase()}`,organizationId:vendor.id,visibility}});
+ const make=(name:string,visibility:'ORGANIZATION'|'PUBLIC')=>db.agent.create({data:{name,urn:`${vendor.urn}:${name.toLowerCase()}`,organizationId:vendor.id,visibility}});
  installedId=(await make('Installed','ORGANIZATION')).id;
  privateId=(await make('Private','ORGANIZATION')).id;
  publicId=(await make('Public','PUBLIC')).id;
