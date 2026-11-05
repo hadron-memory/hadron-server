@@ -17,6 +17,9 @@ import { canReadMemory } from '../../../mcp/access-control.js';
 import { runHoldsReadGrant } from '../../../lib/automationReadGrant.js';
 import { hadronReadNode, hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
+import { judgeAuthoring } from '../../../lib/authoringAttestation.js';
+import { runAuthoring, runReadsNode } from '../../../lib/runner/runAuthoring.js';
+import { isMemoryReadableFresh } from './resolvers.helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
@@ -371,7 +374,7 @@ describe('#1329 an author task the run reads through its grant', () => {
     );
     return { t, dest, write, claim: { task: t.id, revision: t.revSeq } };
   };
-  const refusal = (promise: Promise<unknown>) => promise.then(() => null, (e: { extensions?: Record<string, unknown> }) => e.extensions);
+  const refusal = (promise: Promise<unknown>) => promise.then(() => null, (e: { message?: string; extensions?: Record<string, unknown> }) => e.extensions ?? { thrown: e.message });
 
   it('a live covering grant reads the task, so the refusal gives it and an exact claim writes', async () => {
     const { t, dest, write, claim } = await setUp();
@@ -396,13 +399,24 @@ describe('#1329 an author task the run reads through its grant', () => {
     const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
     await expect(readAs(r, elsewhere.urn, 'hidden')).rejects.toThrow();
     const principal = { db, appId: r.appId, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
-    const write = (authoredWith?: { task: string; revision: number }) => hadronUpdateNode.execute(
-      { db, run: r, principal, log: () => {} } as never,
-      { urn: `hrn:node:${dest.urn}:a`, content: 'updated', ...(authoredWith ? { authoredWith } : {}) },
-    );
-    const unavailable = { code: 'AUTHOR_TASK_BROKEN', taskAccess: 'UNAVAILABLE', task: null, taskId: null };
-    expect(await refusal(write())).toMatchObject(unavailable);
-    expect(await refusal(write({ task: hidden.id, revision: hidden.revSeq }))).toMatchObject(unavailable);
+    // The shared gate admits this memory, which is why the run's own read has to decide.
+    expect(await isMemoryReadableFresh(principal, elsewhere.id)).toBe(true);
+    const judged = (claim: { task: string; revision: number } | null) => db.$transaction((tx) => judgeAuthoring(tx, dest.id, {
+      priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, authoredChange: true,
+    }, runAuthoring(principal, r, claim)));
+    const unavailable = { refused: 'AUTHOR_TASK_BROKEN', recovery: { taskAccess: 'UNAVAILABLE', task: null, taskId: null } };
+    expect(await judged(null)).toMatchObject(unavailable);
+    expect(await judged({ task: hidden.id, revision: hidden.revSeq })).toMatchObject(unavailable);
+  });
+
+  it('runs are unavailable on encrypted memories, even PUBLIC knowledge in another org', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'rg-enc', urn: 'rg-enc' } });
+    const open = await db.memory.create({ data: { id: generateId(), name: 'open', urn: 'rg-enc:open', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id } });
+    const sealed = await db.memory.create({ data: { id: generateId(), name: 'sealed', urn: 'rg-enc:sealed', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id, isEncrypted: true } });
+    const r = await run('SCHEDULE', f.s1.id);
+    const principal = { db, appId: r.appId, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    expect(await runReadsNode(db, principal, r, open.id, 'x')).toBe(true);
+    expect(await runReadsNode(db, principal, r, sealed.id, 'x')).toBe(false);
   });
 
   it('a grant that does not cover the task, and a revoked one, read as unavailable', async () => {

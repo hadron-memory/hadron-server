@@ -324,7 +324,7 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
         ctx,
         exists ? 'update' : 'create',
         // #1328: generated output states no task, so a governed target refuses.
-        { authoring: runAuthoring(ctx, run.id) },
+        { authoring: runAuthoring(ctx, run) },
       );
       return written.id as string;
     },

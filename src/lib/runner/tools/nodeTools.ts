@@ -14,10 +14,8 @@
 
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
 import type { AuthoredWith } from '../../authoringAttestation.js';
-import { runAuthoring, runReadAdmits } from '../runAuthoring.js';
-import { canReadMemory } from '../../../mcp/access-control.js';
+import { runAuthoring, runReadsNode } from '../runAuthoring.js';
 import type { AuthContext } from '../../../middleware/auth.js';
-import { runHoldsReadGrant } from '../../automationReadGrant.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
 import type { RunToolDef, RunToolContext } from './types.js';
@@ -103,13 +101,11 @@ export const hadronReadNode: RunToolDef = {
         select: { id: true, urn: true, isEncrypted: true },
       });
       // #3306 / ruling 0104: or the memory is PUBLIC knowledge, which a run with no user reads in any org, read-only.
-      if (!foreign || !(await runReadAdmits(ctx.db, ctx.principal, ctx.run.id, foreign.id, loc))) throw err;
+      if (!foreign || !(await runReadsNode(ctx.db, ctx.principal, ctx.run, foreign.id, loc))) throw err;
       memory = foreign;
       viaGrant = true;
     }
-    if (!viaGrant && !(await canReadMemory(ctx.db, principalAuth(ctx), memory.id)) &&
-        // #2883: the automation's read grant, consulted here only (the run data read), after the shared gate refused.
-        !(await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, memory.id, loc))) {
+    if (!viaGrant && !(await runReadsNode(ctx.db, ctx.principal, ctx.run, memory.id, loc))) {
       throw new Error(`Memory not readable for "${urn}" under the run principal.`);
     }
     const node = await ctx.db.node.findUnique({
@@ -126,7 +122,7 @@ function runToolAuthoring(ctx: RunToolContext, args: Record<string, unknown>) {
   const claim = args.authoredWith as Partial<AuthoredWith> | null | undefined;
   return runAuthoring(
     ctx.principal,
-    ctx.run.id,
+    ctx.run,
     claim && typeof claim.task === 'string' && typeof claim.revision === 'number'
       ? { task: claim.task, revision: claim.revision } : null,
   );
