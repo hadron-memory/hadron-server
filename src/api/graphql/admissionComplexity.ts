@@ -56,6 +56,7 @@ import {
 import { getComplexity, simpleEstimator, type ComplexityEstimator } from 'graphql-query-complexity';
 import type { GraphqlAdmissionConfig } from './admission.js';
 import { pageTake } from './pageBounds.js';
+import { SPEC_DOCUMENT_MAX_NODES } from '../../lib/specDocument/limits.js';
 
 export const QUERY_TOO_COMPLEX = 'QUERY_TOO_COMPLEX';
 
@@ -105,6 +106,14 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'Query.specUnresolvedReferencesPage',
 ]);
 
+/**
+ * Lists with no page argument whose length is bounded by a refusal instead: costed at that bound, not at
+ * `GRAPHQL_LIST_FACTOR`. #1302: `specDocument` refuses a document over its cap, so `entries` never exceeds it.
+ */
+export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
+  'SpecDocument.entries': SPEC_DOCUMENT_MAX_NODES,
+};
+
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
 /** Explicit resolver defaults that differ from the common fallback (reviewed against the resolvers). */
 export const OMITTED_PAGE_SIZE: Readonly<Record<string, number>> = {
@@ -143,7 +152,7 @@ export function hadronListEstimator(limits: Pick<GraphqlAdmissionConfig, 'maxCos
     const unfilteredTaskList = type.name === 'Query' && field.name === 'agentTaskList' && args.symptom == null;
     const declared = unfilteredTaskList ? undefined : field.args.find((a) => PAGE_ARG.test(a.name))?.name;
     if (!isList && declared === undefined) return undefined;
-    const size = pageSizeOf(`${type.name}.${field.name}`, declared, args) ?? limits.listFactor;
+    const size = FIXED_LIST_SIZE[`${type.name}.${field.name}`] ?? pageSizeOf(`${type.name}.${field.name}`, declared, args) ?? limits.listFactor;
     // A list multiplies its children by its size; a wrapper around a list corrects the factor its list child was
     // costed at (the list inside it carries no argument of its own).
     const factor = isList ? size : Math.max(1, size / limits.listFactor);
