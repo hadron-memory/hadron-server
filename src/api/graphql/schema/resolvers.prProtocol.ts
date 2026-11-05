@@ -77,6 +77,14 @@ function sameEventActor(event: Pick<Event, 'actorWorkerId' | 'actorUserId'>, act
     : !actor.workerId && !!event.actorUserId && event.actorUserId === actor.userId;
 }
 
+/** Who froze this exact head anywhere in the App. A named function so a test can EXPLAIN the very statement the gate runs (#3473). */
+export function freezersAtHeadSql(appId: string, head: string): Prisma.Sql {
+  return Prisma.sql`SELECT DISTINCT
+    actor_worker_id AS "workerId", CASE WHEN actor_worker_id IS NULL THEN actor_user_id ELSE NULL END AS "userId"
+    FROM agent_team_events WHERE app_id = ${appId}
+      AND type = 'pr.frozen' AND payload->>'head' = ${head}`;
+}
+
 /** Caller holds the App graph lock: include superseded seats and dropped slots, not just the current schedule. */
 async function negativeHead(tx: Prisma.TransactionClient, build: Pick<TaskRow, 'id' | 'appId'>, head: string): Promise<boolean> {
   const [answer] = await tx.$queryRaw<{ blocked: boolean }[]>`SELECT EXISTS (
@@ -166,10 +174,7 @@ async function readinessInTx(tx: Prisma.TransactionClient, buildId: string, appI
   frozen(events, buildId, head);
   // Every actor who froze this exact head anywhere in this App is excluded,
   // even on a sibling build or after another actor re-freezes it.
-  const freezers = await tx.$queryRaw<{ workerId: string | null; userId: string | null }[]>`SELECT DISTINCT
-    actor_worker_id AS "workerId", CASE WHEN actor_worker_id IS NULL THEN actor_user_id ELSE NULL END AS "userId"
-    FROM agent_team_events WHERE app_id = ${appId}
-      AND type = 'pr.frozen' AND payload->>'head' = ${head}`;
+  const freezers = await tx.$queryRaw<{ workerId: string | null; userId: string | null }[]>(freezersAtHeadSql(appId, head));
   // The same predicate as freeze: even an unscheduled/superseded child's newest
   // negative at H blocks this head. Positive counting still uses the scheduled slots.
   const blockedHead = await negativeHead(tx, { id: buildId, appId }, head);
