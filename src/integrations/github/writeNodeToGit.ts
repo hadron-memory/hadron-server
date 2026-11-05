@@ -145,7 +145,8 @@ export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: s
   // deletions. Skipped for the root, whose file IS README.md.
   if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
     const legacy = orphanedLegacyPaths(localPath, node.loc);
-    rmSync(legacy.readme, { force: true });
+    // The legacy address may now hold a live child (a:README); unknown ownership is preserved too (#3507).
+    if (readNodeFileId(legacy.readme) === node.id) rmSync(legacy.readme, { force: true });
     rmSync(legacy.sidecar, { recursive: true, force: true });
   }
   return true;
