@@ -20,7 +20,13 @@ import { signJwt } from '../../auth/jwt.js';
 import { mintUserApiKey } from '../../middleware/auth.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
-const fault = vi.hoisted(() => ({ memoryId: null as string | null, onTransaction: [] as boolean[] }));
+const fault = vi.hoisted(() => ({
+  memoryId: null as string | null,
+  onTransaction: [] as boolean[],
+  /** The memory whose MCP read gate calls are recorded, and whether each ran on a transaction. */
+  mcpWatch: null as string | null,
+  mcpOnTransaction: [] as boolean[],
+}));
 vi.mock('../../api/graphql/schema/resolvers.helpers.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../api/graphql/schema/resolvers.helpers.js')>();
   return {
@@ -32,9 +38,22 @@ vi.mock('../../api/graphql/schema/resolvers.helpers.js', async (importOriginal) 
   };
 });
 
+vi.mock('../../mcp/access-control.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../mcp/access-control.js')>();
+  const { db: pooled } = await import('../../integrations/db/client.js');
+  return {
+    ...actual,
+    canReadMemory: (...args: Parameters<typeof actual.canReadMemory>) => {
+      if (args[2] === fault.mcpWatch) fault.mcpOnTransaction.push(args[0] !== pooled);
+      return args[2] === fault.memoryId ? Promise.reject(new Error('connection terminated unexpectedly')) : actual.canReadMemory(...args);
+    },
+  };
+});
+
 let server: Server;
 let baseUrl: string;
 let writerId: string;
+let orgId: string;
 let memoryId: string;
 let readableTaskId: string;
 let hiddenMemoryId: string;
@@ -95,8 +114,11 @@ afterAll(async () => { await new Promise((resolve) => server.close(resolve)); })
 beforeEach(async () => {
   fault.memoryId = null;
   fault.onTransaction = [];
+  fault.mcpWatch = null;
+  fault.mcpOnTransaction = [];
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'attest-1329', urn: 'attest-1329' } });
+  orgId = org.id;
   const other = await db.organization.create({ data: { id: generateId(), name: 'attest-1329-other', urn: 'attest-1329-other' } });
   // A plain member: writes the memory, may not read its config.
   writerId = (await db.user.create({ data: { githubId: 13290, githubUsername: 'attest-1329', handle: 'attest-1329', email: 'attest-1329@example.test' } })).id;
@@ -330,5 +352,116 @@ describe('#1329 a failure while judging readability', () => {
     expect(mcp.structuredContent?.error.code).toBe('INTERNAL_SERVER_ERROR');
     expect(JSON.stringify(mcp)).not.toMatch(/unreadable|author task|connection terminated|author_task_broken/i);
     expect(await db.node.count({ where: { memoryId, loc: 'a' } })).toBe(0);
+  });
+});
+
+/**
+ * Xan's ruling 6661007376, option (a). The MCP read gate and GraphQL's disagree for
+ * user-backed principals (hadron-server#3519). On MCP, READABLE promises that
+ * hadron_get_node loads the task, so the MCP gate decides there; GraphQL keeps its
+ * own gate. The memory here: a holding the writer created, in an App they aren't in.
+ */
+describe('#1329 on MCP, readable means hadron_get_node can load it', () => {
+  const HOLDING_URN = 'hrn:node:attest-1329:holding:task';
+  const claim = { task: HOLDING_URN, revision: 4 };
+  let holdingMemoryId: string;
+  let holdingTaskId: string;
+
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const client = new Client({ name: 'attest-1329', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${apiKey}` } },
+    }));
+    try {
+      return await client.callTool({ name, arguments: args }) as { isError?: boolean; content: Array<{ text: string }>; structuredContent?: { error: Record<string, unknown> } };
+    } finally {
+      await client.close();
+    }
+  };
+
+  beforeEach(async () => {
+    const app = await db.app.create({ data: { organizationId: orgId, name: 'c', urn: 'attest-1329:c' } });
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'ag', urn: 'attest-1329:ag' } as never });
+    holdingMemoryId = (await db.memory.create({ data: {
+      id: generateId(), organizationId: orgId, urn: 'attest-1329:holding', name: 'holding', class: 'knowledge',
+      appId: app.id, userMemoryOfAgentId: agent.id, createdBy: writerId,
+    } })).id;
+    holdingTaskId = (await db.node.create({ data: { id: generateId(), memoryId: holdingMemoryId, loc: 'task', name: 'Task', isRunnable: true, content: 'how to', revSeq: 4 } })).id;
+    await repoint(holdingTaskId);
+    const { configId } = await db.nodeRoleRule.findUniqueOrThrow({ where: { id: ruleId } });
+    for (const role of ['task', 'review']) {
+      await db.nodeRoleRule.create({ data: { id: generateId(), configId, role, authorTaskId: holdingTaskId, authorTaskRequired: true } });
+    }
+    fault.mcpWatch = holdingMemoryId;
+  });
+
+  it('the surfaces differ on this memory, and each answers for its own read', async () => {
+    const read = await post(apiKey, 'query($ref: ID!) { node(ref: $ref) { id } }', { ref: HOLDING_URN });
+    expect(read.data).toEqual({ node: { id: holdingTaskId } });
+    const cli = await viaCliWire();
+    expect(cli.errors?.[0]?.extensions).toEqual(expect.objectContaining({ code: 'AUTHORING_ATTESTATION_MISSING', taskAccess: 'READABLE', task: HOLDING_URN }));
+
+    expect((await call('hadron_get_node', { urn: HOLDING_URN })).content[0]!.text).toContain('Memory not found');
+    const mcp = await viaMcp();
+    expect(mcp.isError).toBe(true);
+    expect(mcp.structuredContent?.error).toEqual(expect.objectContaining({ code: 'AUTHOR_TASK_BROKEN', ...NO_RECOVERY }));
+    expect(JSON.stringify(mcp)).not.toContain('holding');
+  });
+
+  it('the MCP refusal is byte-identical to a task that does not exist, whatever the claim', async () => {
+    const concealed = [JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp(claim)), JSON.stringify(await viaMcp({ task: holdingTaskId, revision: 1 }))];
+    await repoint(null);
+    expect(concealed).toEqual([JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp()), JSON.stringify(await viaMcp())]);
+  });
+
+  it('an exact claim is admitted on GraphQL and refused on MCP: the disclosed admission difference', async () => {
+    const mcp = await viaMcp(claim);
+    expect(mcp.structuredContent?.error.code).toBe('AUTHOR_TASK_BROKEN');
+    expect(await db.node.count({ where: { memoryId, loc: 'a' } })).toBe(0);
+    expect((await viaCliWire(claim)).errors).toBeUndefined();
+    expect(await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' } })).toMatchObject({ authoredByTask: holdingTaskId });
+  });
+
+  it("is judged on the write's own transaction", async () => {
+    await viaMcp();
+    expect(fault.mcpOnTransaction).toEqual([true]);
+  });
+
+  it('a failure in the MCP read gate is the generic internal error, never "unreadable"', async () => {
+    fault.memoryId = holdingMemoryId;
+    const mcp = await viaMcp(claim);
+    expect(mcp.isError).toBe(true);
+    expect(mcp.structuredContent?.error.code).toBe('INTERNAL_SERVER_ERROR');
+    expect(JSON.stringify(mcp)).not.toMatch(/unreadable|author task|connection terminated|author_task_broken/i);
+    expect(await db.node.count({ where: { memoryId, loc: 'a' } })).toBe(0);
+  });
+
+  const M = 'hrn:node:attest-1329:mem';
+  const writers: Array<[string, string, Record<string, unknown>]> = [
+    ['hadron_create_node', 'a fresh create', { urn: `${M}:new`, name: 'n', content: 'x', role: 'guide', authoredWith: claim }],
+    ['hadron_create_node', 'over a tombstone', { urn: `${M}:t`, name: 't', content: 'x', role: 'guide', authoredWith: claim }],
+    ['hadron_update_node', 'an edit', { urn: `${M}:a`, content: 'changed', authoredWith: claim }],
+    ['hadron_update_node_data', 'a data merge, delegated', { nodeUrn: `${M}:a`, data: { k: 1 }, authoredWith: claim }],
+    ['hadron_replace_text', 'a replace, delegated', { nodeUrns: [`${M}:a`], oldText: 'first', newText: 'second', fields: ['content'], authoredWith: claim }],
+    ['hadron_create_parent_node', 'a section re-save', { urn: `${M}:p`, description: 'renamed', authoredWith: claim }],
+    ['hadron_move_node', 'a rename', { urn: `${M}:a`, targetUrn: `${M}:a-moved`, renameToLeaf: true, authoredWith: claim }],
+    ['hadron_move_node', 'a same-slot rename', { urn: `${M}:b`, targetUrn: `${M}:b`, renameToLeaf: true, authoredWith: claim }],
+    ['hadron_create_task', 'the task door, delegated', { urn: `${M}:new-task`, name: 'n', content: 'x', authoredWith: claim }],
+    ['hadron_update_task', 'the task door, delegated', { urn: `${M}:rt`, content: 'changed', authoredWith: claim }],
+    ['hadron_create_review', 'the review door, delegated', { urn: `${M}:new-review`, name: 'n', content: 'x', authoredWith: claim }],
+    ['hadron_update_review', 'the review door, delegated', { urn: `${M}:rv`, content: 'changed', authoredWith: claim }],
+    ['hadron_update_object', 'an object merge, delegated, no claim', { ref: `${M}:a`, fields: { k: 1 } }],
+  ];
+  it.each(writers)('%s, %s', async (name, _label, args) => {
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'a', name: 'a', content: 'first', role: 'guide' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'b', name: 'Other name', content: 'first', role: 'guide' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'p', name: 'p', content: 'first', role: 'guide', nodeType: 'parent' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 't', name: 't', content: 'gone', role: 'guide', deletedAt: new Date() } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'rt', name: 'rt', content: 'first', isRunnable: true } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'rv', name: 'rv', content: 'first', role: 'review' } });
+    const result = await call(name, args);
+    expect(result.structuredContent?.error ?? result.content[0]!.text).toEqual(expect.objectContaining({ code: 'AUTHOR_TASK_BROKEN', ...NO_RECOVERY }));
+    expect(fault.mcpOnTransaction).toContain(true);
+    expect(fault.mcpOnTransaction).not.toContain(false);
   });
 });
