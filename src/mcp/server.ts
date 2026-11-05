@@ -3438,11 +3438,19 @@ export function createMcpServerInstance(
       + 'if you started a worker session with hadron_start_session, the report is recorded as that worker. runId makes a retry idempotent (same runId, same reporter, same revisions returns the first report); '
       + 'any other reuse is refused [content_validation_run_id_conflict]. A [conflict] means the node changed during the call: nothing was written, re-read it and decide whether to report again.',
     SHAPE_HADRON_RECORD_CONTENT_VALIDATION,
-    async ({ nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId }) => {
+    async ({ nodeRef, nodeRevision, validationTaskRef, validationTaskRevision, outcome, runId, session }) => {
+      // The #1701 gate already published the named session's actor, or cleared it when the
+      // session did not validate. A refused argument is carried to the resolver, which refuses
+      // SESSION_NOT_BOUND only after the not-found and writer gates; it never falls back to
+      // recording the report as the caller's own principal.
+      const requestSession = mcpRequestSessionContext(auth);
+      const argumentRefused = typeof session === 'string' && session.length > 0
+        && !(await validateSessionBinding(db, auth, session));
       const ctx: Context = {
         db, userId: auth.userId, clientId: auth.clientId,
         appId: auth.appId, appKeyId: auth.appKeyId,
-        ...mcpRequestSessionContext(auth),
+        ...requestSession,
+        sessionBindingRefused: requestSession.sessionBindingRefused || argumentRefused,
         apiKeyId: auth.apiKeyId, signInId: auth.signInId,
         roles: auth.roles, organizationId: auth.organizationId,
         impersonation: auth.impersonation,
@@ -12870,6 +12878,10 @@ const SHAPE_HADRON_RECORD_CONTENT_VALIDATION = {
   validationTaskRevision: z.number().int().min(1).describe('The task revision that ran.'),
   outcome: z.enum(['PASS', 'FAIL', 'ERROR']).describe('PASS, FAIL, or ERROR when the task could not be run to a verdict.'),
   runId: z.string().min(1).max(200).optional().describe('Your own label for this run (1-200 characters); makes a retry idempotent. Never an identity.'),
+  // #1332 (Xanthos FIT 6670593797, Xavier #81384): the recorder owns its session argument, so a
+  // refused session is judged after the not-found and writer refusals (cor:dmo:160:01), not by
+  // the #1701 gate before them.
+  session: z.string().optional().describe('Your worker session id, to record the report as that worker. A session that is not one of your open sessions is refused [session_not_bound] after the read and write checks; nothing is written.'),
 };
 
 const SHAPE_HADRON_CREATE_APP_MEMORY = {

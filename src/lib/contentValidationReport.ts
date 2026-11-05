@@ -196,8 +196,8 @@ export interface ContentValidationReportInput {
   runId: string | null;
   reporter: ContentValidationReporter;
   /**
-   * Whether the caller may read the task's memory. Consulted only to choose between WRONG_TASK
-   * and TASK_REVISION_INVALID; absent means unreadable (fail closed).
+   * Whether the caller may read the task's memory. A caller who cannot gets WRONG_TASK on every
+   * report (ruling 0199); absent means unreadable (fail closed).
    */
   canReadTaskMemory?: (memoryId: string) => Promise<boolean>;
 }
@@ -271,12 +271,15 @@ export async function recordContentValidationReportInTx(
   }
   const task = tasks.find((t) => input.validationTaskRef === t.id || input.validationTaskRef === safeNodeUrnV2(t.memory.urn, t.loc));
   if (!task) throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
-  if (input.validationTaskRevision > task.revSeq) {
-    // A caller who cannot read the task learns nothing from the refusal: not which task the rule
-    // names, nor its current revision (Vera's P3-1 reading, Proposed in cor:dmo:160:01 r4).
-    const readable = input.canReadTaskMemory ? await input.canReadTaskMemory(task.memoryId) : false;
-    throw new ContentValidationRefusal(readable ? 'CONTENT_VALIDATION_TASK_REVISION_INVALID' : 'CONTENT_VALIDATION_WRONG_TASK');
+  // Ruling 0199 (cor:dmo:160:01 r6, refusal 3): a caller who cannot read the validation task
+  // gets the same wrong-task refusal on EVERY report, whatever revision it names, before the
+  // revision, author and run-id checks. Otherwise an accepted reference would reach
+  // TASK_REVISION_INVALID, REPORTER_IS_AUTHOR or RUN_ID_CONFLICT, which write nothing but
+  // differ from WRONG_TASK, and confirm the hidden task and its revision for free.
+  if (!(input.canReadTaskMemory && (await input.canReadTaskMemory(task.memoryId)))) {
+    throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
   }
+  if (input.validationTaskRevision > task.revSeq) throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_REVISION_INVALID');
 
   // 4. The author of R. The current revision's stamp is on the locked row; an older one is on
   // its snapshot (a snapshot captures the pre-edit state at its number). A snapshot pruned past
