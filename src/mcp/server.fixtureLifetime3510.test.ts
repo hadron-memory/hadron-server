@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { FixtureLifetime } from '../test/fixtureLifetime.js';
@@ -103,4 +104,53 @@ it('joins one cleanup across hook deadlines and refuses a new body until it sett
   await work; await first; await nextBeforeEach;
   expect(closes).toBe(2);
   await expect(lifetime.run(async () => 'next')).resolves.toBe('next');
+});
+
+
+it.each([
+  { name: 'first close', firstFailure: new Error('first close failed'), tailFails: false },
+  { name: 'both closes', firstFailure: new Error('first close failed'), tailFails: true },
+  { name: 'undefined rejection', firstFailure: undefined, tailFails: false },
+])('keeps bodies fenced after a rejecting $name and preserves the first error', async ({ firstFailure, tailFails }) => {
+  const lifetime = new FixtureLifetime(), entered = deferred(), finish = deferred(), closing = deferred();
+  let live = false, calls = 0, settled = false;
+  const work = lifetime.run(async () => { entered.resolve(); await finish.promise; live = true; });
+  await entered.promise;
+  const closeResources = async () => {
+    calls++;
+    if (calls === 1) { closing.resolve(); throw firstFailure; }
+    live = false;
+    if (tailFails) throw new Error('later close failed');
+  };
+  const cleanup = lifetime.drain(closeResources);
+  const outcome = cleanup.then(() => { settled = true; return { rejected: false, error: undefined }; },
+    error => { settled = true; return { rejected: true, error }; });
+  try {
+    await closing.promise;
+    await Promise.resolve(); await Promise.resolve();
+    expect(settled).toBe(false);
+    const joined = lifetime.drain(closeResources);
+    void joined.catch(() => {}); // Observe even a broken implementation's extra drain.
+    expect(joined).toBe(cleanup);
+    expect(() => lifetime.run(async () => {})).toThrow('during cleanup');
+  } finally {
+    finish.resolve(); await work; await outcome;
+  }
+  expect(await outcome).toEqual({ rejected: true, error: firstFailure });
+  expect(calls).toBe(2);
+  expect(live).toBe(false);
+  await expect(lifetime.run(async () => 'next')).resolves.toBe('next');
+});
+
+it('keeps every rate parity case registered and joins cleanup before reset', () => {
+  // A source wiring guard complements the executable helper/deadline probes:
+  // unwiring the integration file must not silently retain green unit tests.
+  const source = readFileSync(new URL('./server.rateLimit1793.test.ts', import.meta.url), 'utf8');
+  expect(source.match(/^fixtureIt\(/gm)).toHaveLength(8);
+  expect(source).not.toMatch(/^it\(/m);
+  expect(source).toMatch(/const fixtureIt[^\n]*lifetime\.run\(body\)/);
+  const setup = source.slice(source.indexOf('beforeEach('), source.indexOf('afterEach('));
+  expect(setup.indexOf('await lifetime.drain(closeResources)')).toBeGreaterThanOrEqual(0);
+  expect(setup.indexOf('await lifetime.drain(closeResources)')).toBeLessThan(setup.indexOf('await cleanDb(db)'));
+  expect(source).toContain('afterEach(()=>lifetime.drain(closeResources))');
 });
