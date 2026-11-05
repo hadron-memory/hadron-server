@@ -15,6 +15,10 @@ import { compileTemplate } from '../../../lib/template.js';
 import { buildPrismaMemoryLayer } from '../../../lib/edge-conditions/prisma-memory-layer.js';
 import { computeRevisionStateHash } from '../../../lib/nodeRevisionSnapshot.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
+import { drainNodeUsage } from '../../../lib/usageRecorder.js';
+import { parseDataKey } from '../../../lib/crypto.js';
+import { encryptNodeFieldsWithKey, isAuthenticatedDataEnvelope } from '../../../lib/nodeCrypto.js';
+import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -480,7 +484,57 @@ describe('#1328 — extraction into a data node a rule governs', () => {
     const { memoryId } = await dataNodeOf(chat.chatId);
     const where = { loc_memoryId: { loc: 'data', memoryId } };
     const before = await db.node.findUniqueOrThrow({ where });
+    const writeEvents = () => db.usageEvent.count({ where: { type: 'write', nodeId: before.id } });
+    await drainNodeUsage(db);
+    const eventsBefore = await writeEvents();
     await extract(alice.id, chat.chatId, { region: 'EU' });
+    await drainNodeUsage(db);
     expect((await db.node.findUniqueOrThrow({ where })).updatedAt).toEqual(before.updatedAt);
+    // #3437: the title promises history too, and a write event is a claim that a write happened.
+    expect(await db.nodeRevision.count({ where: { nodeId: before.id } })).toBe(0);
+    expect(await writeEvents()).toBe(eventsBefore);
+
+    // The counts can move: a turn that does change the row records its write.
+    await extract(alice.id, chat.chatId, { region: 'US' });
+    await drainNodeUsage(db);
+    expect(await writeEvents()).toBe(eventsBefore + 1);
+  });
+
+  // #3437: real ciphertext under a real session key. A chat root cannot live on a
+  // private memory, so this encrypts the host of an ordinary chat and its `data` row.
+  it('on ciphertext, a no-op keeps the row, the stamp and the history; a change is refused', async () => {
+    const chat = await startShared(alice.id);
+    await extract(alice.id, chat.chatId, { region: 'EU' });
+    await governedDataNode(chat.chatId);
+    const { memoryId } = await dataNodeOf(chat.chatId);
+    const where = { loc_memoryId: { loc: 'data', memoryId } };
+    const task = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'author-task', memoryId } } });
+    const key = parseDataKey(Buffer.alloc(32, 5).toString('base64'));
+    const plain = await db.node.findUniqueOrThrow({ where });
+    await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
+    sessionKeyCache.set('chat-910-3437', memoryId, key);
+    await db.node.update({
+      where,
+      data: {
+        data: encryptNodeFieldsWithKey({ content: null, data: plain.data }, key).data as never,
+        authorshipKind: 'TASK', authoredByTask: task.id, authoredByRevision: task.revSeq, authoredAt: new Date(),
+      },
+    });
+    const before = await db.node.findUniqueOrThrow({ where });
+    expect(isAuthenticatedDataEnvelope(before.data, key)).toBe(true);
+
+    try {
+      await extract(alice.id, chat.chatId, { region: 'EU' });
+      expect(await db.node.findUniqueOrThrow({ where })).toMatchObject({
+        data: before.data, updatedAt: before.updatedAt, authoredByTask: task.id, authoredByRevision: task.revSeq,
+      });
+      expect(await db.nodeRevision.count({ where: { nodeId: before.id } })).toBe(0);
+
+      const refused = await extract(alice.id, chat.chatId, { region: 'US' }).then(() => null, (e) => e);
+      expect(refused?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
+      expect((await db.node.findUniqueOrThrow({ where })).data).toEqual(before.data);
+    } finally {
+      sessionKeyCache.clear();
+    }
   });
 });

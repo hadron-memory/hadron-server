@@ -22,6 +22,7 @@ import { passkeyQueries } from './resolvers.passkeys.js';
 import { withInstallConcealment } from './installMemory.js';
 import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { type Context } from './resolvers.helpers.js';
+import { prProtocolMutations, prProtocolQueries } from './resolvers.prProtocol.js';
 export type { Context };
 
 import { dateTimeScalar } from './dateTimeScalar.js';
@@ -200,6 +201,7 @@ export const resolvers = {
     ...teamAttentionQueries,
     ...teamWorkQueries,
     ...agentTaskQueries,
+    ...prProtocolQueries,
     ...untrackedTaskItemQueries,
     ...tickerQueries,
     ...agentTickerTemplateQueries,
@@ -270,6 +272,7 @@ export const resolvers = {
     ...teamAttentionMutations,
     ...teamWorkMutations,
     ...agentTaskMutations,
+    ...prProtocolMutations,
     ...tickerMutations,
     ...agentTickerTemplateMutations,
     ...modelGroupMutations,
