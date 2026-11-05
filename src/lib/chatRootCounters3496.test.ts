@@ -4,7 +4,7 @@ import { Prisma } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
-import { appendChatMessage, updateChatRootData, type ChatRootRef } from './chatRoot.js';
+import { appendChatMessage, updateChatRootData, withChatRootLock, type ChatRootRef } from './chatRoot.js';
 import { computeRevisionStateHash, ensureCurrentNodeRevisionInTransaction } from './nodeRevisionSnapshot.js';
 import { encryptNodeFields, decryptNodeFields } from './nodeCrypto.js';
 import { generateDataKey } from './crypto.js';
@@ -37,6 +37,42 @@ async function fingerprint() { await db.node.update({ where: { id: chat.id }, da
 async function reconcile() { return db.$transaction(tx => ensureCurrentNodeRevisionInTransaction(tx, chat.id, { expectedMemoryId: chat.memoryId })); }
 async function raw() { return db.node.findUniqueOrThrow({ where: { id: chat.id } }); }
 describe('#3496 counters', () => {
+    it.each(
+        [false, true].flatMap(encrypted =>
+            [false, true].flatMap(nested =>
+                [false, true].map(spread => ({ encrypted, nested, spread })))),
+    )('persists in-place callback edits without aliasing the baseline ($encrypted/$nested/$spread)', async ({ encrypted, nested, spread }) => {
+        if (encrypted) {
+            enc.isEncrypted = true;
+            await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true } });
+            sessionKeyCache.set(generateId(), enc.id, generateDataKey());
+        }
+        await db.node.update({
+            where: { id: chat.id },
+            data: encryptNodeFields({ data: { messageCount: 9, title: 'before', settings: { mode: 'before' } } }, enc),
+        });
+        await post();
+        await fingerprint();
+        const before = await raw();
+        const countBefore = await counter();
+        const result = await withChatRootLock(db, chat, enc, async ({ chatData }) => {
+            if (nested) (chatData.settings as { mode: string }).mode = 'after';
+            else chatData.title = 'after';
+            return { chatData: spread ? { ...chatData } : chatData, value: 'applied' };
+        });
+        expect(result).toBe('applied');
+        const actual = decryptNodeFields({ data: (await raw()).data }, enc).data;
+        expect(actual).toEqual({
+            title: nested ? 'before' : 'after',
+            settings: { mode: nested ? 'after' : 'before' },
+        });
+        expect(await counter()).toEqual(countBefore);
+        await reconcile();
+        const after = await raw();
+        expect(after.revSeq).toBe(before.revSeq + 1);
+        expect(after.authoredByTask).toBeNull();
+    });
+
     it('a send preserves a synchronized fingerprint, revision and authorship, and strips the keys', async () => {
         await fingerprint();
         const before = await raw();
