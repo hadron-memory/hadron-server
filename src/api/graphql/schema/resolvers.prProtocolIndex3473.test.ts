@@ -22,6 +22,12 @@ const indexDef = async (tx: Prisma.TransactionClient) =>
 async function event(appId: string, type: string, payload: object, actor: { actorWorkerId?: string; actorUserId?: string } = {}) {
   return db.agentTeamEvent.create({ data: { appId, type, payload, ...actor } });
 }
+/** DDL is transactional: run `work`, hand back its result, and roll everything back so no test leaves the index dropped. */
+async function rolledBack<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  const out: { value?: T } = {};
+  await db.$transaction(async tx => { out.value = await work(tx); throw new Error('rollback'); }).catch(e => { if ((e as Error).message !== 'rollback') throw e; });
+  return out.value as T;
+}
 async function freezers(tx: Prisma.TransactionClient, appId: string, head: string) {
   const rows = await tx.$queryRaw<{ workerId: string | null; userId: string | null }[]>(freezersAtHeadSql(appId, head));
   return rows.map(r => `${r.workerId ?? '-'}/${r.userId ?? '-'}`).sort();
@@ -61,7 +67,7 @@ describe('#3473 pr.frozen head index', () => {
     await event(appA, 'pr.frozen', {}, { actorUserId: 'u5' });
     const expected = ['-/u1'];
     const withIndex = await db.$transaction(async tx => [await freezers(tx, appA, H), await freezers(tx, appA, H2), await freezers(tx, appB, H)]);
-    const without = await db.$transaction(async tx => {
+    const without = await rolledBack(async tx => {
       await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
       return [await freezers(tx, appA, H), await freezers(tx, appA, H2), await freezers(tx, appB, H)];
     });
@@ -71,7 +77,7 @@ describe('#3473 pr.frozen head index', () => {
 
   it('the migration rebuilds the very index post-push builds, and is idempotent on a populated table', async () => {
     await event(appA, 'pr.frozen', { head: H }, { actorUserId: 'u1' });
-    const [before, afterDrop, again] = await db.$transaction(async tx => {
+    const [before, afterDrop, again] = await rolledBack(async tx => {
       const built = await indexDef(tx);
       await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
       await tx.$executeRawUnsafe(migrationSql());
