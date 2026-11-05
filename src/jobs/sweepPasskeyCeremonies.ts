@@ -68,9 +68,15 @@ export function startPasskeyCeremonySweepLoop(
       try {
         const count = await sweepPasskeyCeremonies(db);
         if (count) console.log(`[passkey-ceremony-sweep] deleted ${count} retired ceremonies`);
-      } catch {
-        // No authentication artifacts, SQL parameters or browser hashes in logs.
-        console.error('[passkey-ceremony-sweep] failed');
+      } catch (error) {
+        // Bounded diagnostics only: never serialize error messages, queries or parameters.
+        const record = error && typeof error === 'object' ? error as { code?: unknown; meta?: unknown } : undefined;
+        const code = typeof record?.code === 'string' && /^P[0-9]{4}$/.test(record.code) ? record.code : 'UNKNOWN';
+        const meta = record?.meta && typeof record.meta === 'object' ? record.meta as { code?: unknown } : undefined;
+        const state = typeof meta?.code === 'string' ? meta.code : record?.code;
+        const sqlState = typeof state === 'string' &&
+          ['42501', '23503', '42703', '42P01', '42804', '22P02', '42883', '42601', '57014', '40P01', '40001'].includes(state) ? state : 'UNKNOWN';
+        console.error('[passkey-ceremony-sweep] failed', { code, sqlState });
       }
     })().finally(() => {
       running = null;

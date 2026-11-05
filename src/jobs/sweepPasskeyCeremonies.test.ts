@@ -48,7 +48,7 @@ it('default and smallest retention strictly exceed every production ceremony TTL
  expect(passkeyCeremonyRetentionSeconds()).toBeGreaterThan(Math.max(...ttls));
  vi.stubEnv('PASSKEY_CEREMONY_RETENTION_SECONDS','86400');
  expect(passkeyCeremonyRetentionSeconds()).toBeGreaterThan(Math.max(...ttls));
- for(const value of ['600','0','-1','NaN','86400.5','Infinity']){
+ for(const value of ['600','0','-1','NaN','86400.5','Infinity','315360001']){
   vi.stubEnv('PASSKEY_CEREMONY_RETENTION_SECONDS',value); expect(()=>passkeyCeremonyRetentionSeconds()).toThrow();
  }
 });
@@ -106,4 +106,32 @@ it.each([
   expect(error.mock.calls).toEqual([['[passkey-ceremony-sweep] failed',expected]]);
   expect(JSON.stringify(error.mock.calls)).not.toContain('private browser hash');
  } finally {await loop.stop();error.mockRestore();}
+});
+
+it('accepts the ceiling and refuses invalid active-loop configuration before scheduling',()=>{
+ vi.stubEnv('PASSKEY_CEREMONY_RETENTION_SECONDS','315360000');
+ expect(passkeyCeremonyRetentionSeconds()).toBe(315360000);
+ vi.stubEnv('NODE_ENV','production');vi.stubEnv('DISABLE_PASSKEY_CEREMONY_SWEEP','false');
+ vi.stubEnv('PASSKEY_CEREMONY_RETENTION_SECONDS','600');
+ expect(()=>startPasskeyCeremonySweepLoop(db)).toThrow('RETENTION_SECONDS');
+});
+it('skips an expired row locked by another connection and collects it on a later run',async()=>{
+ await row('locked-old',31*86400); await row('available-old',31*86400);
+ let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ let ready!:()=>void;const locked=new Promise<void>(resolve=>{ready=resolve;});
+ const holder=db.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT id FROM passkey_ceremonies WHERE id = 'locked-old' FOR UPDATE`;
+  ready();await gate;
+ });
+ try {
+  await locked;
+  // PostgreSQL's lock timeout makes a no-SKIP-LOCKED mutant fail without a floating blocked query.
+  const count=await db.$transaction(async tx=>{
+   await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '250ms'");
+   return sweepPasskeyCeremonies(tx as unknown as typeof db);
+  });
+  expect(count).toBe(1);
+  expect((await db.passkeyCeremony.findMany()).map(r=>r.id)).toEqual(['locked-old']);
+ } finally {release();await holder;}
+ expect(await sweepPasskeyCeremonies(db)).toBe(1);
 });
