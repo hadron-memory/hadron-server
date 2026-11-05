@@ -22,6 +22,8 @@
     "ScopeExplanation": "value",
     "ChannelsPage": "envelope",
     "RegisterEntriesPage": "envelope",
+    "SpecDocument": "envelope",
+    "SpecDocumentEntry": "value",
     "RegisterViewRow": "value",
     "ChannelReadState": "value",
     "TeamAttentionChannel": "value",
