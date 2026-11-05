@@ -669,7 +669,12 @@ async function runMergeTxn(
     // out, the next read sees drift and the reconcile clears the stamp. rev_seq
     // does not move. The revision-row copy is rewritten with the other
     // node_revisions actor columns above.
-    await tx.$executeRaw`UPDATE nodes SET authored_by_human = ${targetUserId}, revision_content_hash = 'refresh'
+    // The marker is conditional (§10 P2-3): a node with unreconciled drift keeps
+    // its stored hash, so the next read still reconciles it instead of the merge
+    // laundering a tampered body into a clean one.
+    await tx.$executeRaw`UPDATE nodes SET authored_by_human = ${targetUserId},
+      revision_content_hash = CASE WHEN revision_content_hash = hadron_node_revision_state_hash(nodes)
+        THEN 'refresh' ELSE revision_content_hash END
       WHERE authored_by_human = ${sourceUserId}`;
 
     // Non-conflicting ownership, attribution, credential, and history links.

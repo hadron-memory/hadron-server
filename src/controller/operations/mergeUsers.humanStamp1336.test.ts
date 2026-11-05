@@ -67,8 +67,23 @@ describe('mergeUsers: HUMAN stamp survives the next read (#1336 P2-2)', () => {
       sourceUserId: source.id, targetUserId: target.id, actorUserId: admin.id,
       consentProof: await approvedMergeProof(db, source.id, target.id, admin.id),
     });
-    await resolvers.Query.node(null, { ref: mine.id } as never, { db, userId: admin.id, roles: ['ADMIN'] } as never).catch(() => null);
+    await resolvers.Query.node(null, { ref: mine.id } as never, { db, userId: admin.id, roles: ['ADMIN'] } as never);
     const after = await db.node.findUniqueOrThrow({ where: { id: mine.id } });
     expect(after).toMatchObject({ authorshipKind: 'HUMAN', authoredByHuman: target.id, revSeq: mine.revSeq });
+  });
+
+  it('does not launder drift: a raw write unreconciled at merge time still reconciles on the next read (§10 P2-3)', async () => {
+    const { resolvers } = await import('../../api/graphql/schema/resolvers.js');
+    const mine = await humanNode('n:drift', source.id);
+    await db.$executeRaw`UPDATE nodes SET content = 'raw write' WHERE id = ${mine.id}`;
+    await mergeUsers(db, {
+      sourceUserId: source.id, targetUserId: target.id, actorUserId: admin.id,
+      consentProof: await approvedMergeProof(db, source.id, target.id, admin.id),
+    });
+    await resolvers.Query.node(null, { ref: mine.id } as never, { db, userId: admin.id, roles: ['ADMIN'] } as never);
+    const after = await db.node.findUniqueOrThrow({ where: { id: mine.id } });
+    expect(after.authorshipKind).toBeNull();
+    expect(after.revSeq).toBeGreaterThan(mine.revSeq);
+    expect(await db.nodeRevision.count({ where: { nodeId: mine.id, editedByInfo: 'system:revision-reconcile' } })).toBeGreaterThan(0);
   });
 });
