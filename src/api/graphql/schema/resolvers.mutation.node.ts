@@ -1405,7 +1405,7 @@ async function writeNodeCoreRaw(
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: input.role === undefined ? current.role : input.role,
               runnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
-              authoredChange: authoredContentChanged(changes),
+              mintHuman: true, authoredChange: authoredContentChanged(changes),
             }, opts.authoring);
 
             // A guarded claim happens only after the no-op decision and inside
@@ -1696,7 +1696,7 @@ async function writeNodeCoreRaw(
               priorRole: authoritative?.role ?? null, priorRunnable: authoritative?.isRunnable ?? null,
               role: input.role === undefined ? (authoritative?.role ?? null) : input.role,
               runnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
-              authoredChange: authoredByWrite,
+              mintHuman: true, authoredChange: authoredByWrite,
             }, opts.authoring);
 
             // #1460 — a tombstone still owns its old abstract and chunk
@@ -3159,7 +3159,7 @@ export const nodeMutations = {
           // like every check here.
           authoredStamps.set(p.raw.id, await assertAuthoring(tx, p.raw.memoryId, {
             priorRole: locked.role, priorRunnable: locked.isRunnable,
-            role: locked.role, runnable: locked.isRunnable, authoredChange: p.authoredChange,
+            role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
           }, authoring));
         }
         for (const p of plans) {
@@ -4457,6 +4457,7 @@ export const nodeMutations = {
           priorRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable,
           role: lockedTarget.role, runnable: lockedTarget.isRunnable,
           authoredChange: Object.keys(changed).length > 0,
+          mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
         }, authoringFromRequest(ctx, input.authoredWith));
         await createNodeRevision(
           tx,
