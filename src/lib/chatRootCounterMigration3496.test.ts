@@ -98,3 +98,18 @@ it('backfills a finite PostgreSQL timestamp beyond JS Date range and a next send
  expect((await readChatCounters(db,[await db.node.findUniqueOrThrow({where:{id:n.id}})])).get(n.id)?.lastMessageAt).toBe('280000-01-01T00:00:00.000Z');
  expect((await appendChatMessage(db,n,{id:memoryId,isEncrypted:false},async()=>{})).seq).toBe(10);
 });
+
+it('creates the real table with cascading root identity and deletion, rolled back privately',async()=>{
+ const n=await root({messageCount:3});
+ const c=new pg.Client({connectionString:process.env.DATABASE_URL});await c.connect();
+ try {
+  await c.query('BEGIN');
+  await c.query('DROP TABLE chat_root_counters');
+  await c.query(migration);
+  const fk=await c.query("SELECT confdeltype,confupdtype FROM pg_constraint WHERE conrelid='chat_root_counters'::regclass AND contype='f'");
+  expect(fk.rows).toEqual([{confdeltype:'c',confupdtype:'c'}]);
+  expect((await c.query('SELECT message_count FROM chat_root_counters WHERE chat_root_node_id=$1',[n.id])).rows).toEqual([{message_count:3}]);
+  await c.query('DELETE FROM nodes WHERE id=$1',[n.id]);
+  expect((await c.query('SELECT count(*)::int AS n FROM chat_root_counters')).rows).toEqual([{n:0}]);
+ } finally {await c.query('ROLLBACK');await c.end();}
+});

@@ -1,7 +1,7 @@
 -- #3496: operational state, explicitly classified plaintext (cor:sec:040:03).
 -- A hard-deleted message's former high-water count/time survive; deleting the root cascades.
 CREATE TABLE IF NOT EXISTS chat_root_counters (
-  chat_root_node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  chat_root_node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE ON UPDATE CASCADE,
   message_count INTEGER NOT NULL DEFAULT 0,
   last_message_at TIMESTAMP(3),
   updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP

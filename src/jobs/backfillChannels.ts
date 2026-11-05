@@ -72,7 +72,7 @@ async function highWater(
 ): Promise<{ lastSeq: number; encrypted: boolean }> {
   const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : {};
   const encrypted = '__enc' in data;
-  const row = await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id}});
+  const row = await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id},select:{messageCount:true}});
   const counter = row?.messageCount ?? (!encrypted ? legacyMessageCount(data) : 0);
   const top = await maxMessageSeqAtLiteralLocPrefix(db, root.memoryId, `${root.loc}:messages:`);
   return { lastSeq: Math.max(counter, top), encrypted };

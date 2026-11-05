@@ -83,7 +83,7 @@ async function counterRows(db: Pick<PrismaClient,'$queryRaw'>, ids:readonly stri
       CASE WHEN last_message_at IS NULL THEN NULL ELSE
         to_char(last_message_at,'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ||
         CASE WHEN extract(year FROM last_message_at)<0 THEN ' BC' ELSE '' END END AS "lastMessageAt"
-      FROM chat_root_counters WHERE chat_root_node_id IN (${Prisma.join([...ids])})`);
+      FROM chat_root_counters WHERE chat_root_node_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb))`);
 }
 /** Read only after the root's existing access gate. Row lookups and encryption metadata are batched.
  * A locked memory always answers 0/null, even when its plaintext counter exists.
