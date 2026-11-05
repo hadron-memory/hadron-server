@@ -290,7 +290,11 @@
     "TeamRoleFamilyCount": "value",
     "TeamAvailability": "value",
     "AgentTaskStallSchedule": "value",
-    "AutomationTeamSnapshotGrantPage": "envelope"
+    "AutomationTeamSnapshotGrantPage": "envelope",
+    "PrProtocolResult": "envelope",
+    "PrProtocolAction": "value",
+    "PullRequestReadiness": "envelope",
+    "ReviewSlotReadiness": "value"
   },
   "entries": {
     "ActionTicketsPage.items": {
@@ -2040,6 +2044,12 @@
       "projection": "AutomationTeamSnapshotGrant",
       "target": "AutomationTeamSnapshotGrant",
       "why": "The root automationTeamSnapshotGrants checks a live App and its manager under authority anchors before counting/paging. Items expose only that App grant audit scalars, no User/App/trigger object or private target; the same manager gate gives/revokes these rows. No independently readable entity is attached."
+    },
+    "PrProtocolResult.task": {
+      "class": "parent-implies-child",
+      "audience": "the command writer is re-gated as a participant in the task App; every participant reads all tasks of that App (cor:agt:050:21), and no App key writes these commands",
+      "resolver": "src/api/graphql/schema/resolvers.prProtocol.ts::prProtocolMutations",
+      "target": "AgentTask"
     }
   }
 }
