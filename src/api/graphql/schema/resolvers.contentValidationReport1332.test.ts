@@ -466,14 +466,46 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
     expect((result.report as Record<string, unknown>).outcome).toBe('PASS');
   });
 
-  it('a named session that failed to bind (#1705) is refused, never recorded as the bare credential', async () => {
-    expect(await refusal(report(person(leo, { sessionBindingRefused: true } as Partial<Context>)))).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
-    expect(await refusal(asWorker('w', leo, () => report(person(leo, { sessionBindingRefused: true } as Partial<Context>))))).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
-    expect(await refusal(report(person(leo, { appKeyId: 'ak', sessionBindingRefused: true } as Partial<Context>)))).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+  it('a named session that failed to bind (#1705) is SESSION_NOT_BOUND, never recorded as the bare credential', async () => {
+    const refused = (extra: Partial<Context> = {}) => person(leo, { sessionBindingRefused: true, ...extra } as Partial<Context>);
+    expect(await refusal(report(refused()))).toBe('SESSION_NOT_BOUND');
+    expect(await refusal(asWorker('w', leo, () => report(refused())))).toBe('SESSION_NOT_BOUND');
+    expect(await refusal(report(refused({ appKeyId: 'ak' } as Partial<Context>)))).toBe('SESSION_NOT_BOUND');
+    // Refusals 1-2 still come first: a non-reader learns nothing from a refused binding.
+    expect(await refusal(report(person(stranger, { sessionBindingRefused: true } as Partial<Context>)))).toBe('NODE_NOT_FOUND');
     expect(await reportCount()).toBe(0);
+    // The reporter derivation refuses it too, for any other caller of the rule.
     const { deriveReporter } = await import('../../../lib/contentValidationReport.js');
-    const refused = await deriveReporter(db, { userId: leo, sessionBindingRefused: true } as never).then(() => null, (e: GraphQLError) => e.extensions?.code);
-    expect(refused).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+    const code = await deriveReporter(db, { userId: leo, sessionBindingRefused: true }).then(() => null, (e: GraphQLError) => e.extensions?.code);
+    expect(code).toBe('CONTENT_VALIDATION_REPORTER_UNKNOWN');
+  });
+
+  it('§10 P3-2: write access lost before the transaction is refused by its own gate, nothing written', async () => {
+    let demoted = false;
+    const racing = new Proxy(db, { get(target, key, receiver) {
+      if (key !== '$transaction') return Reflect.get(target, key, receiver);
+      return async (...a: unknown[]) => {
+        if (!demoted) {
+          demoted = true;
+          await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: leo } }, data: { role: 'READER' } });
+        }
+        return (target.$transaction as (...x: unknown[]) => unknown).apply(target, a);
+      };
+    } });
+    expect(await refusal(report(person(leo, { db: racing as typeof db })))).toBe('FORBIDDEN');
+    expect(demoted).toBe(true);
+    expect(await reportCount()).toBe(0);
+  });
+
+  it('§10 P3-3: a runId replays only for the same node revision and the same task', async () => {
+    await report(person(leo), { runId: 'r' });
+    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(mia));
+    expect(await refusal(report(person(leo), { runId: 'r', nodeRevision: 2 }))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
+    // The rule now names another task: the same runId with it conflicts, never replays.
+    const next = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'validate-2', name: 'V2', isRunnable: true, content: 'c' } })).id;
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { validationTaskId: next } });
+    expect(await refusal(report(person(leo), { runId: 'r', validationTaskRef: next }))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
+    expect(await reportCount()).toBe(1);
   });
 });
 

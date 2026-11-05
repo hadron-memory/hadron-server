@@ -180,4 +180,30 @@ describe('#1332 run tool hadron_record_content_validation', () => {
     expect(await gqlCode(runTool(await mintRun(validationTask), args({ runId: 42 })))).toBe('BAD_USER_INPUT');
     expect(await reports()).toHaveLength(0);
   });
+
+  it('§10 P2-1: the flow guards hold: a user-owned, an encrypted or a foreign-org memory is refused before anything is written', async () => {
+    /** A guide node under a validation rule in the given memory, its revision fingerprint current. */
+    const docIn = async (data: Record<string, unknown>) => {
+      const mem = (await db.memory.create({ data: { id: generateId(), name: 'x', ...data } as never })).id;
+      const configId = (await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem } })).id;
+      await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'guide', validationTaskId: validationTask, validationTaskRequired: true } });
+      const id = (await db.node.create({ data: { id: generateId(), memoryId: mem, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } })).id;
+      await db.$executeRaw`UPDATE nodes SET revision_content_hash = hadron_node_revision_state_hash(nodes) WHERE id = ${id}`;
+      return id;
+    };
+    const otherOrg = (await db.organization.create({ data: { id: generateId(), name: 'cvm-other', urn: 'cvm-other' } })).id;
+    await db.orgMember.create({ data: { organizationId: otherOrg, userId: leo, role: 'CONTRIBUTOR' } });
+    const cases: Array<[string, string, RegExp]> = [
+      ['user-owned', await docIn({ urn: 'cvm-leo:own', class: 'knowledge', ownerUserId: leo }), /Flow memory not found/],
+      ['encrypted', await docIn({ urn: 'cvm-org:enc', organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true }), /encrypted/],
+      ['foreign org', await docIn({ urn: 'cvm-other:mem', organizationId: otherOrg, class: 'knowledge', visibility: 'ORGANIZATION' }), /Flow memory not found/],
+    ];
+    const run = await mintRun(validationTask);
+    for (const [label, ref, refusal] of cases) {
+      expect(await gqlCode(runTool(run, args({ nodeRef: ref }))), label).toMatch(refusal);
+    }
+    expect(await reports()).toHaveLength(0);
+    // The same run still records in its own org's plain memory.
+    expect(await gqlCode(runTool(run, args()))).toBe('NO_ERROR');
+  });
 });
