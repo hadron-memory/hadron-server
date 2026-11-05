@@ -36,6 +36,8 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
+import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 
@@ -819,12 +821,16 @@ export const appRunMutations = {
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #3511 (ruling 0177, cor:dmo:050:12 r40): person-only, decided before any secret or token is minted, with the
+    // door's existing non-admin refusal.
+    await requirePersonOnlyAct(ctx, 'agent-webhook.rotate', authorizationDenied);
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     requireStoredRunOwner(ctx, existing.userId);
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: existing.organizationId }, { kind: 'app', id: existing.appId }],
       async (txCtx) => {
+        await requirePersonOnlyAct(txCtx, 'agent-webhook.rotate', authorizationDenied);
         await requireOrgRole(txCtx, existing.organizationId, 'ADMIN');
         const current = await txCtx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
         if (!current || current.appId !== existing.appId || current.organizationId !== existing.organizationId) {
