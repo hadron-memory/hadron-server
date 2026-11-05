@@ -33,7 +33,7 @@ import {
   completeSigningRequestInTransaction, declineSigningRequestInTransaction, effectiveRequestState, SigningRefusal,
 } from './requests.js';
 import { lineDiff, type DiffLine } from './lineDiff.js';
-import { emitNodeUrnV2 } from '../urnEmit.js';
+import { safeNodeUrnV2 } from '../urnEmit.js';
 import { loadSignatureStatuses } from './status.js';
 
 export const SIGN_PROOF_TTL_SECONDS = 300;
@@ -198,7 +198,7 @@ export async function proveForSigning(db: PrismaClient, a: {
       if (computeApprovalHash(approvalFieldsOf(node, null)) !== row.approvalHash) return { outcome: 'ended' as const, state: 'STALE' };
 
       const view: CeremonyView = {
-        node: { urn: emitNodeUrnV2(memory.urn, node.loc), title: node.name, abstract: node.abstract, contentSegments: contentSegments(node.content) },
+        node: { urn: safeNodeUrnV2(memory.urn, node.loc), title: node.name, abstract: node.abstract, contentSegments: contentSegments(node.content) },
         revision: row.revision,
         requester: await requesterOf(tx, row),
         expiresAt: row.expiresAt.toISOString(),

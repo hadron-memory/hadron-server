@@ -269,12 +269,12 @@ describe('#3121 canonical node identity is post-proof only', () => {
     expect(signed.status).toBe(200);
   });
 
-  it('uses emitNodeUrnV2 for the displayed identity, not hand-built URN text', async () => {
+  it('uses the shared safe node emitter for displayed identity, not hand-built URN text', async () => {
     const req = await openRequest();
     const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-    const original = urnEmit.emitNodeUrnV2;
+    const original = urnEmit.safeNodeUrnV2;
     const emitted = original(memory.urn, 'emitter:sentinel');
-    const spy = vi.spyOn(urnEmit, 'emitNodeUrnV2').mockImplementation((mem, loc) =>
+    const spy = vi.spyOn(urnEmit, 'safeNodeUrnV2').mockImplementation((mem, loc) =>
       mem === memory.urn && loc === 'policies:retention' ? emitted : original(mem, loc));
     try {
       const p = await prove(req.id, signer);
