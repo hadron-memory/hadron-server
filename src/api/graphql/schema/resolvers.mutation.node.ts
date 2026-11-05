@@ -4457,6 +4457,7 @@ export const nodeMutations = {
           priorRole: lockedTarget.role, priorRunnable: lockedTarget.isRunnable,
           role: lockedTarget.role, runnable: lockedTarget.isRunnable,
           authoredChange: Object.keys(changed).length > 0,
+          mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
         }, authoringFromRequest(ctx, input.authoredWith));
         await createNodeRevision(
           tx,

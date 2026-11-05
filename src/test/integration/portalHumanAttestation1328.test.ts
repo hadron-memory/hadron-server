@@ -53,11 +53,11 @@ beforeEach(async () => {
 });
 
 describe('#1328 the portal path over HTTP', () => {
-  it('a sign-in JWT writes without a claim and records no task', async () => {
+  it('a sign-in JWT writes without a claim and records the person, no task (#1336)', async () => {
     const res = await send(jwt, input('a'));
     expect(res.errors).toBeUndefined();
     expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'a', memoryId } } }))
-      .toMatchObject({ role: 'guide', authorshipKind: null, authoredByTask: null });
+      .toMatchObject({ role: 'guide', authorshipKind: 'HUMAN', authoredByHuman: userId, authoredByTask: null, authoredByRevision: null });
   });
 
   it('a user API key, the CLI credential, attests', async () => {

@@ -182,7 +182,7 @@ describe('#1328 a broken required task fails closed (H5)', () => {
 describe('#1328 trusted portal human', () => {
   it('the portal path writes without a claim and records no task', async () => {
     await create('a', {}, portal());
-    expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: null });
+    expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: 'HUMAN', authoredByHuman: userId }); // #1336
   });
 
   it('no write input carries a human flag', () => {
