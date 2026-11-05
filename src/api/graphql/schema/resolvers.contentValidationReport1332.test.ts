@@ -534,6 +534,29 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
     expect([onTwo.replayed, onTwo.state]).toEqual([false, 'PASS']);
   });
 
+  it('P3-1 (Vera, Proposed 160:01 r4): a caller who cannot read the validation task gets one WRONG_TASK for any ref and revision', async () => {
+    const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden-t', urn: 'cv-hidden-t' } })).id;
+    const hiddenMem = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden-t:tasks', name: 'Tasks', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    const hiddenTask = (await db.node.create({ data: { id: generateId(), memoryId: hiddenMem, loc: 'validate', name: 'V', isRunnable: true, content: 'check' } })).id;
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { validationTaskId: hiddenTask } });
+    // The named task with a revision past its current one, the named task's URN, and a wrong ref:
+    // one answer, so a refusal confirms neither which task the rule names nor its revSeq.
+    for (const extra of [
+      { validationTaskRef: hiddenTask, validationTaskRevision: 99 },
+      { validationTaskRef: 'hrn:node:cv-hidden-t:tasks:validate', validationTaskRevision: 99 },
+      { validationTaskRef: generateId(), validationTaskRevision: 99 },
+      { validationTaskRef: generateId(), validationTaskRevision: 1 },
+    ]) {
+      expect(await refusal(report(person(leo), extra)), JSON.stringify(extra)).toBe('CONTENT_VALIDATION_WRONG_TASK');
+    }
+    expect(await reportCount()).toBe(0);
+    // A caller who can read the task keeps the precise refusal (the 6d pin covers the readable case
+    // in the node's own memory); here a member of the task's org reads it.
+    await db.orgMember.create({ data: { organizationId: hiddenOrg, userId: leo, role: 'READER' } });
+    expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask, validationTaskRevision: 99 }))).toBe('CONTENT_VALIDATION_TASK_REVISION_INVALID');
+    expect(await reportCount()).toBe(0);
+  });
+
   it('a named session that failed to bind (#1705) is SESSION_NOT_BOUND, never recorded as the bare credential', async () => {
     const refused = (extra: Partial<Context> = {}) => person(leo, { sessionBindingRefused: true, ...extra } as Partial<Context>);
     expect(await refusal(report(refused()))).toBe('SESSION_NOT_BOUND');
