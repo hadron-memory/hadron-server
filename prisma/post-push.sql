@@ -282,6 +282,12 @@ ALTER TABLE memory_config_templates
 ALTER TABLE memory_config_templates
   ADD CONSTRAINT chk_memory_config_template_owner
   CHECK (num_nonnulls(hadron_server_id, organization_id, owner_user_id, app_id) = 1);
+-- #3426 — an organization default is org-owned only (synced with 20261105230000_org_default_templates).
+ALTER TABLE memory_config_templates
+  DROP CONSTRAINT IF EXISTS chk_memory_config_template_org_default_org_only;
+ALTER TABLE memory_config_templates
+  ADD CONSTRAINT chk_memory_config_template_org_default_org_only
+  CHECK (NOT org_default OR organization_id IS NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_server_name_uniq
   ON memory_config_templates (hadron_server_id, name) WHERE hadron_server_id IS NOT NULL AND deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS memory_config_templates_org_name_uniq
