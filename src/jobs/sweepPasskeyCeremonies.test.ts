@@ -67,3 +67,27 @@ it('schedules, avoids overlapping runs, drains in-flight work on stop, then neve
  let stopped=false;const drain=loop.stop().then(()=>{stopped=true;});await Promise.resolve();expect(stopped).toBe(false);
  finish([]);await drain;await vi.advanceTimersByTimeAsync(100);expect(query).toHaveBeenCalledTimes(1);
 });
+
+it('refuses larger work caps before any query and supports a smaller retention dial',async()=>{
+ for(const options of [{batchSize:501},{batchSize:0},{maxPasses:21},{maxPasses:0}])
+  await expect(sweepPasskeyCeremonies(db,options)).rejects.toThrow('bounds');
+ vi.stubEnv('PASSKEY_CEREMONY_RETENTION_SECONDS','86400');
+ await row('two-days',2*86400); await row('one-hour',3600);
+ expect(await sweepPasskeyCeremonies(db)).toBe(1);
+ expect((await db.passkeyCeremony.findMany()).map(r=>r.id)).toEqual(['one-hour']);
+});
+it('concurrent sweeps divide a backlog without charging or deleting anything twice',async()=>{
+ for(let i=0;i<5;i++)await row(`parallel${i}`,31*86400);
+ const counts=await Promise.all([sweepPasskeyCeremonies(db,{batchSize:2}),sweepPasskeyCeremonies(db,{batchSize:2})]);
+ expect(counts[0]+counts[1]).toBe(5); expect(await db.passkeyCeremony.count()).toBe(0);
+});
+it('a failed run logs no artifacts and schedules the next run',async()=>{
+ vi.useFakeTimers();vi.stubEnv('NODE_ENV','production');vi.stubEnv('DISABLE_PASSKEY_CEREMONY_SWEEP','false');
+ const error=vi.spyOn(console,'error').mockImplementation(()=>{});
+ const query=vi.fn().mockRejectedValueOnce(new Error('private browser hash')).mockResolvedValue([]);
+ const loop=startPasskeyCeremonySweepLoop({$queryRaw:query} as unknown as typeof db,{initialDelayMs:1,intervalMs:10})!;
+ try {
+  await vi.advanceTimersByTimeAsync(1);expect(error.mock.calls).toEqual([['[passkey-ceremony-sweep] failed']]);
+  await vi.advanceTimersByTimeAsync(10);expect(query).toHaveBeenCalledTimes(2);
+ } finally {await loop.stop();error.mockRestore();}
+});
