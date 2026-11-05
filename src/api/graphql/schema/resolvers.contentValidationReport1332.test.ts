@@ -494,6 +494,46 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
     expect((replay.report as Record<string, unknown>).outcome).toBe('PASS');
   });
 
+  it('§10 P3-6: the snapshot is the LOCKED revision (a late report) on fresh and replay, and a node deleted after commit answers from it', async () => {
+    const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden-l', urn: 'cv-hidden-l' } })).id;
+    const hidden = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden-l:secret', name: 'Secret', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    /** A db whose first post-commit node read (the only one selecting revSeq) first applies `change`. */
+    const racingWith = (change: () => Promise<unknown>) => {
+      let fired = false;
+      const proxy = new Proxy(db, { get(target, key, receiver) {
+        if (key !== 'node') return Reflect.get(target, key, receiver);
+        return new Proxy(target.node, { get(model, op, r) {
+          if (op !== 'findUnique') return Reflect.get(model, op, r);
+          return async (a: { where?: { id?: string }; select?: Record<string, boolean> }) => {
+            if (!fired && a.where?.id === nodeId && a.select?.revSeq) { fired = true; await change(); }
+            return (model.findUnique as (x: unknown) => unknown)(a);
+          };
+        } });
+      } });
+      return { db: proxy as typeof db, fired: () => fired };
+    };
+    // The content reached revision 2; a late PASS for revision 1 leaves revision 2 STALE.
+    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    const moveOut = () => db.node.update({ where: { id: nodeId }, data: { memoryId: hidden, revSeq: 3 } });
+    const fresh = racingWith(moveOut);
+    const late = await report(person(mia, { db: fresh.db }), { nodeRevision: 1, runId: 'late' });
+    expect(fresh.fired()).toBe(true);
+    expect([late.replayed, late.state]).toEqual([false, 'STALE']);
+    // Back in the authorized memory at revision 2, the replay of that late report, moved again.
+    await db.node.update({ where: { id: nodeId }, data: { memoryId, revSeq: 2 } });
+    const again = racingWith(moveOut);
+    const replay = await report(person(mia, { db: again.db }), { nodeRevision: 1, runId: 'late' });
+    expect(again.fired()).toBe(true);
+    expect([replay.replayed, replay.state]).toEqual([true, 'STALE']);
+    // Deleted after commit, in place, with a later revision: the receipt answers from the
+    // locked revision, not the deleted row's.
+    await db.node.update({ where: { id: nodeId }, data: { memoryId, revSeq: 2 } });
+    const del = racingWith(() => db.node.update({ where: { id: nodeId }, data: { deletedAt: new Date(), revSeq: 3 } }));
+    const onTwo = await report(person(mia, { db: del.db }), { nodeRevision: 2, runId: 'on-two' });
+    expect(del.fired()).toBe(true);
+    expect([onTwo.replayed, onTwo.state]).toEqual([false, 'PASS']);
+  });
+
   it('a named session that failed to bind (#1705) is SESSION_NOT_BOUND, never recorded as the bare credential', async () => {
     const refused = (extra: Partial<Context> = {}) => person(leo, { sessionBindingRefused: true, ...extra } as Partial<Context>);
     expect(await refusal(report(refused()))).toBe('SESSION_NOT_BOUND');
