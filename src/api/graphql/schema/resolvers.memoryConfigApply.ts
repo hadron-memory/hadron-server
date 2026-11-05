@@ -33,7 +33,7 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplateRule, type NodeRoleRule } from '../../../generated/prisma/index.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
-import { taskVisibilityWarnings, type MemoryConfigWarning, type WarnableRule } from './resolvers.memoryConfigWarnings.js';
+import { newWarningScope, taskVisibilityWarnings, type MemoryConfigWarning, type WarnableRule, type WarningScope } from './resolvers.memoryConfigWarnings.js';
 import { AmbiguousLegacyUrnError, MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../../lib/entityRef/entityNotFound.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
@@ -143,6 +143,8 @@ async function applyToTarget(
   memory: { id: string },
   template: { id: string; ownerUserId: string | null; appId: string | null },
   args: { templateRef: string; memoryRef: string; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
+  // One memo and one read budget per CALL: a bulk apply hands every target the same scope (#1327).
+  warningScope: WarningScope = newWarningScope(),
 ): Promise<ApplyResult> {
   const dryRun = args.dryRun === true;
   const notFoundTemplate = () => new MemoryConfigTemplateNotFoundError(args.templateRef);
@@ -322,7 +324,7 @@ async function applyToTarget(
     }
   }
   // #1327: advisory, after the commit (or the dry run's rollback), from the rules written, in the caller's own projection.
-  result.warnings = await taskVisibilityWarnings(ctx, memory.id, written);
+  result.warnings = await taskVisibilityWarnings(ctx, memory.id, written, warningScope);
   return result;
 }
 
@@ -436,6 +438,7 @@ export async function applyMemoryConfigTemplateToMemories(
 
   const seen = new Set<string>();
   const results: BulkApplyEntry[] = [];
+  const warningScope = newWarningScope();
   for (let index = 0; index < refs.length; index += 1) {
     const memoryRef = refs[index]!;
     try {
@@ -452,7 +455,7 @@ export async function applyMemoryConfigTemplateToMemories(
       const template = await managedTemplate(fresh, args.templateRef);
       const result = await applyToTarget(fresh, actor, memory, template, {
         templateRef: args.templateRef, memoryRef, expectedTemplateRevision: args.expectedTemplateRevision, dryRun,
-      });
+      }, warningScope);
       results.push({ index, memoryRef, ok: true, result, error: null });
     } catch (e) {
       results.push({ index, memoryRef, ok: false, result: null, error: toEntryError(e) });

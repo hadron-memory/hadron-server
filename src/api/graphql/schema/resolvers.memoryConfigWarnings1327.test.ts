@@ -23,8 +23,15 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { formatGraphQLError } from '../formatError.js';
+import { newWarningScope, taskVisibilityWarnings, type WarningScope } from './resolvers.memoryConfigWarnings.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+// The bulk apply builds its ONE scope through this export; a test can hand it a smaller budget (the default stays real).
+const scopeBudget = vi.hoisted(() => ({ override: null as number | null }));
+vi.mock('./resolvers.memoryConfigWarnings.js', async (orig) => {
+  const actual = await orig<typeof import('./resolvers.memoryConfigWarnings.js')>();
+  return { ...actual, newWarningScope: (b?: number) => actual.newWarningScope(scopeBudget.override ?? b) };
+});
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers, formatError: formatGraphQLError });
@@ -508,7 +515,18 @@ describe('#1327 — a fault in the advisory reads never changes the save and nev
     expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
     const out = r.data!.applyMemoryConfigTemplateToMemories;
     expect(out.succeeded).toBe(1);
-    expect(Array.isArray(out.results[0].result.warnings)).toBe(true);
+    expect(out.results[0].result.warnings).toEqual([]); // org knowledge, task in same-org knowledge: contained
+  });
+
+  it('bulk apply: a target that does not contain the task warns, naming it, beside one that does', async () => {
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'bulk1327b', rules: [{ role: 'specb', authorTaskRef: tKb2.urn }] } });
+    expect(tpl.errors, JSON.stringify(tpl.errors)).toBeUndefined();
+    const r = await gql(as(admin), `mutation($t: ID!, $m: [ID!]!, $d: Boolean) { applyMemoryConfigTemplateToMemories(templateRef: $t, memoryRefs: $m, dryRun: $d) { succeeded results { ok result { ${W} } } } }`,
+      { t: tpl.data!.createMemoryConfigTemplate.template.id, m: [kb.id, pub.id], d: false });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    const res = r.data!.applyMemoryConfigTemplateToMemories.results;
+    expect(res[0].result.warnings).toEqual([]);
+    expect(res[1].result.warnings).toEqual([{ code: 'TASK_LESS_VISIBLE', role: 'specb', field: 'authorTask', taskUrn: tKb2.urn, taskState: 'OK' }]);
   });
 
   it('a known NONE reference stays silent even while the advisory reads are failing', async () => {
@@ -599,5 +617,64 @@ describe('#1327 — the target App guard and the group bound are each load-beari
     await db.memoryMember.create({ data: { memoryId: grp.id, userId: extra, role: 'reader' } });
     const over = await gql(as(admin), CREATE, { m: grp.id, i: { role: 'fiftyone', authorTaskRef: tKb2.urn } });
     expect(warned(over, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+});
+
+describe('#1327 — one memo and one read budget per call (Rook P2 at 23b6cd69)', () => {
+  afterEach(() => { vi.restoreAllMocks(); scopeBudget.override = null; });
+
+  it('bulk apply hands every target the ONE budgeted scope: an exhausted budget warns even where containment holds', async () => {
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'bulkbudget', rules: [{ role: 'specb', authorTaskRef: tKb2.urn }] } });
+    const BULK = `mutation($t: ID!, $m: [ID!]!) { applyMemoryConfigTemplateToMemories(templateRef: $t, memoryRefs: $m, dryRun: true) { results { ok result { ${W} } } } }`;
+    const vars = { t: tpl.data!.createMemoryConfigTemplate.template.id, m: [kb.id, group.id] };
+    const ample = await gql(as(admin), BULK, vars);
+    expect(ample.data!.applyMemoryConfigTemplateToMemories.results.map((x: any) => x.result.warnings)).toEqual([[], []]);
+    scopeBudget.override = 0;
+    const spent = await gql(as(admin), BULK, vars);
+    for (const x of spent.data!.applyMemoryConfigTemplateToMemories.results) expect(x.result.warnings).toHaveLength(1);
+  });
+
+  const rule = (taskId: string) => ({ role: 'x', authorTaskId: taskId, authorTaskRequired: false, validationTaskId: null, validationTaskRequired: false, descriptionNodeId: null });
+  const run = async (target: string, scope?: WarningScope) =>
+    taskVisibilityWarnings({ db, userId: admin, roles: [] } as unknown as Context, target, [rule(tKb2.id)], scope);
+
+  it('control: an ample budget proves containment (no warning)', async () => {
+    expect(await run(kb.id, newWarningScope())).toEqual([]);
+  });
+
+  it('an exhausted budget warns conservatively, never stays silent', async () => {
+    const w = await run(kb.id, newWarningScope(0));
+    expect(w).toEqual([{ code: 'TASK_LESS_VISIBLE', role: 'x', field: 'authorTask', taskUrn: tKb2.urn, taskState: 'OK' }]);
+  });
+
+  it('a shared scope answers a repeated (target, task memory) pair from the memo: no second lookup', async () => {
+    const scope = newWarningScope();
+    const spy = vi.spyOn(db.memory, 'findFirst');
+    await run(kb.id, scope);
+    const first = spy.mock.calls.length;
+    expect(first).toBeGreaterThan(0);
+    await run(kb.id, scope);
+    expect(spy.mock.calls.length).toBe(first);
+  });
+
+  it('the budget bounds the per-user point reads too, not only the coverage lookups', async () => {
+    // mine: personal, strict owner only. Coverage is one lookup, the owner's read is the second.
+    expect(await run(mine.id, newWarningScope(2))).toEqual([]);
+    expect(await run(mine.id, newWarningScope(1))).toHaveLength(1);
+  });
+
+  it('bulk apply spends ONE budget across its targets, not one per target', async () => {
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'bulkshared', rules: [{ role: 'specb', authorTaskRef: tKb2.urn }] } });
+    const BULK = `mutation($t: ID!, $m: [ID!]!) { applyMemoryConfigTemplateToMemories(templateRef: $t, memoryRefs: $m, dryRun: true) { results { ok result { ${W} } } } }`;
+    // kb costs 1 lookup; the group target costs 2 (coverage + its member's read). Alone each fits in 2; together they do not.
+    scopeBudget.override = 2;
+    const r = await gql(as(admin), BULK, { t: tpl.data!.createMemoryConfigTemplate.template.id, m: [kb.id, group.id] });
+    expect(r.data!.applyMemoryConfigTemplateToMemories.results.map((x: any) => x.result.warnings.length)).toEqual([0, 1]);
+  });
+
+  it('the shared scope spends its budget across calls', async () => {
+    const scope = newWarningScope(1);
+    expect(await run(kb.id, scope)).toEqual([]); // spent the one lookup
+    expect(await run(pub.id, scope)).not.toEqual([]); // a new pair, budget gone: warns
   });
 });

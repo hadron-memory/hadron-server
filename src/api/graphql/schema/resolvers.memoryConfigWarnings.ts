@@ -80,6 +80,24 @@ export type WarnableRule = RuleRefRow & { role: string };
 
 type CoverageMemo = Map<string, Promise<boolean>>;
 
+/**
+ * The most uncached coverage and point-read lookups ONE call may spend across every target it warns for.
+ * Past it a lookup answers "not established", which warns: the budget fails toward the warning, never toward silence.
+ * A singular rule write spends at most a few hundred; the bulk apply shares one scope so 50 targets cannot
+ * multiply the reads (#1327, Rook P2 at 23b6cd69).
+ */
+export const WARNING_READ_BUDGET = 1000;
+
+/** One memo and one read budget, shared by every `taskVisibilityWarnings` call that is handed the same scope. */
+export interface WarningScope {
+  memo: CoverageMemo;
+  budget: { left: number };
+}
+
+export function newWarningScope(budget: number = WARNING_READ_BUDGET): WarningScope {
+  return { memo: new Map(), budget: { left: budget } };
+}
+
 const TASK_KINDS = ['authorTask', 'validationTask'] as const;
 
 /**
@@ -90,8 +108,8 @@ export async function taskVisibilityWarnings(
   ctx: Context,
   targetMemoryId: string,
   rules: readonly WarnableRule[],
+  scope: WarningScope = newWarningScope(),
 ): Promise<MemoryConfigWarning[]> {
-  const memo: CoverageMemo = new Map();
   const out: MemoryConfigWarning[] = [];
   for (const rule of rules) {
     for (const field of TASK_KINDS) {
@@ -112,7 +130,7 @@ export async function taskVisibilityWarnings(
       if (view.state === 'OK') {
         try {
           const node = await ctx.db.node.findUnique({ where: { id: view.id! }, select: { memoryId: true } });
-          if (node && (await coverageOnce(ctx.db, memo, targetMemoryId, node.memoryId))) continue;
+          if (node && (await coverageOnce(ctx.db, scope, targetMemoryId, node.memoryId))) continue;
         } catch (error) {
           logAdvisoryFault(rule.role, field, error);
         }
@@ -128,28 +146,31 @@ function logAdvisoryFault(role: string, field: string, error: unknown): void {
   console.warn(`[#1327] task visibility check failed (${error instanceof Error ? error.name : 'unknown'}); warning conservatively`, { role, field });
 }
 
-function coverageOnce(db: PrismaClient, memo: CoverageMemo, targetId: string, taskMemoryId: string): Promise<boolean> {
+function coverageOnce(db: PrismaClient, scope: WarningScope, targetId: string, taskMemoryId: string): Promise<boolean> {
   const key = `${targetId}:${taskMemoryId}`;
-  let pending = memo.get(key);
-  if (!pending) memo.set(key, (pending = taskMemoryCoversTargetReaders(db, memo, targetId, taskMemoryId)));
-  return pending;
-}
-
-/** Can `userId` read `memoryId` under the shared node-content gate? Asked as that user, with no platform role. */
-async function userReadsMemory(db: PrismaClient, memo: CoverageMemo, userId: string, memoryId: string): Promise<boolean> {
-  const key = `u:${userId}:${memoryId}`;
-  let pending = memo.get(key);
+  let pending = scope.memo.get(key);
   if (!pending) {
-    pending = getAccessibleMemoryIds({ db, userId, roles: [] } as Context, memoryId).then(
-      (ids) => ids === null || ids.includes(memoryId),
-    );
-    memo.set(key, pending);
+    pending = scope.budget.left-- > 0 ? taskMemoryCoversTargetReaders(db, scope, targetId, taskMemoryId) : Promise.resolve(false);
+    scope.memo.set(key, pending);
   }
   return pending;
 }
 
-async function everyUserReads(db: PrismaClient, memo: CoverageMemo, userIds: readonly string[], memoryId: string): Promise<boolean> {
-  for (const id of userIds) if (!(await userReadsMemory(db, memo, id, memoryId))) return false;
+/** Can `userId` read `memoryId` under the shared node-content gate? Asked as that user, with no platform role. */
+async function userReadsMemory(db: PrismaClient, scope: WarningScope, userId: string, memoryId: string): Promise<boolean> {
+  const key = `u:${userId}:${memoryId}`;
+  let pending = scope.memo.get(key);
+  if (!pending) {
+    pending = scope.budget.left-- > 0
+      ? getAccessibleMemoryIds({ db, userId, roles: [] } as Context, memoryId).then((ids) => ids === null || ids.includes(memoryId))
+      : Promise.resolve(false);
+    scope.memo.set(key, pending);
+  }
+  return pending;
+}
+
+async function everyUserReads(db: PrismaClient, scope: WarningScope, userIds: readonly string[], memoryId: string): Promise<boolean> {
+  for (const id of userIds) if (!(await userReadsMemory(db, scope, id, memoryId))) return false;
   return true;
 }
 
@@ -164,7 +185,7 @@ const MEMORY_SHAPE = {
  */
 export async function taskMemoryCoversTargetReaders(
   db: PrismaClient,
-  memo: CoverageMemo,
+  scope: WarningScope,
   targetId: string,
   taskMemoryId: string,
 ): Promise<boolean> {
@@ -200,18 +221,18 @@ export async function taskMemoryCoversTargetReaders(
       ? await db.memoryShare.findMany({ where: { memoryId: target.id }, select: { granteeId: true }, take: MAX_POINT_CHECKED_PRINCIPALS + 1 })
       : [];
     if (grantees.length > MAX_POINT_CHECKED_PRINCIPALS) return false;
-    return everyUserReads(db, memo, [target.userId, ...grantees.map((g) => g.granteeId)], task.id);
+    return everyUserReads(db, scope, [target.userId, ...grantees.map((g) => g.granteeId)], task.id);
   }
 
   // Other classes can be reached through an Agent's memory item (an App participant's audience).
   if (await db.agentMemoryItem.count({ where: { memoryId: target.id, deletedAt: null } }) > 0) return false;
 
-  if (target.ownerUserId !== null) return userReadsMemory(db, memo, target.ownerUserId, task.id);
+  if (target.ownerUserId !== null) return userReadsMemory(db, scope, target.ownerUserId, task.id);
 
   if (target.class === 'group') {
     const members = await db.memoryMember.findMany({ where: { memoryId: target.id }, select: { userId: true }, take: MAX_POINT_CHECKED_PRINCIPALS + 1 });
     if (members.length > MAX_POINT_CHECKED_PRINCIPALS) return false;
-    return everyUserReads(db, memo, members.map((m) => m.userId), task.id);
+    return everyUserReads(db, scope, members.map((m) => m.userId), task.id);
   }
 
   if (target.class === 'knowledge' && target.organizationId !== null && target.visibility !== 'PUBLIC') {
