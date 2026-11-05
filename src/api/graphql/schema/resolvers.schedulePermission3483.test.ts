@@ -13,6 +13,8 @@ import { serveAgentBootPrompt } from '../../../test/servedBootPrompt.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
 import { resolvers, type Context } from './resolvers.js';
+import { mergeUsers } from '../../../controller/operations/mergeUsers.js';
+import { approvedMergeProof } from '../../../test/mergeConsent.js';
 import { spendAdmission } from '../../../lib/automation/scheduleAdmission.js';
 
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -349,5 +351,35 @@ describe('#3483 BLIND head 485ba634 findings', () => {
       return spendAdmission(tx as never, { kind: 'permission', workerId: f.worker.id, permissionId: p.id }, f.app.id, f.entry, { kind: 'SCHEDULE', id: 'sched-late' }, f.user.id).then(() => null, (e: any) => e.extensions?.code);
     });
     expect(out).toBe('FORBIDDEN');
+  });
+
+  it('Ralion P2-1: a user merge moves who gave the permission to the survivor', async () => {
+    const f = await fixture();
+    const p = await give(f);
+    const target = await db.user.create({ data: { handle: 'sp3483-target' } });
+    const admin = await db.user.create({ data: { handle: 'sp3483-merge-admin', roles: ['ADMIN'] } });
+    await mergeUsers(db, { sourceUserId: f.user.id, targetUserId: target.id, actorUserId: admin.id, consentProof: await approvedMergeProof(db, f.user.id, target.id, admin.id) });
+    expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).givenBy).toBe(target.id);
+  });
+  it('Ralion P3-2: a spend rolls back with its transaction (the permission is not burned by a later failure)', async () => {
+    const f = await fixture();
+    const p = await give(f);
+    await expect(db.$transaction(async (tx) => {
+      await spendAdmission(tx as never, { kind: 'permission', workerId: f.worker.id, permissionId: p.id }, f.app.id, f.entry, { kind: 'SCHEDULE', id: 'sched-rb' }, f.user.id);
+      throw new Error('create failed after the spend');
+    })).rejects.toThrow('create failed after the spend');
+    expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).consumedAt).toBeNull();
+  });
+  it('Ralion P3-2: the live list never shows another App\'s permission', async () => {
+    const f = await fixture();
+    const mine = await give(f);
+    const app2 = await db.app.create({ data: { name: 'Sp3483b', urn: 'sp3483b.test:app', organizationId: f.org.id } });
+    const w2 = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app2.id, agentId: f.agent.id, name: 'Far', slug: 'far', heldByUserId: f.user.id } });
+    const foreign = { id: generateId() };
+    await db.$executeRaw`INSERT INTO schedule_permissions (id, app_id, worker_id, entry_node_urn, given_by, given_at, expires_at)
+      VALUES (${foreign.id}, ${app2.id}, ${w2.id}, ${f.entry}, ${f.user.id}, now(), now() + interval '10 minutes')`;
+    const rows = await Q.schedulePermissions({}, { appRef: f.app.id }, f.person);
+    expect(rows.map((x: any) => x.id)).toEqual([mine.id]);
+    expect(rows.map((x: any) => x.id)).not.toContain(foreign.id);
   });
 });

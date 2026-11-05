@@ -12,12 +12,16 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { SCHEDULE_PERMISSION_MINUTES, workerShapedCaller } from '../../../lib/automation/scheduleAdmission.js';
 import { requireOrgRole, type Context } from './resolvers.helpers.js';
 import { assertFullyQualifiedUrn } from '../../../lib/urn.js';
+import { requirePersonAsThemselves } from '../../../lib/auth/personAsThemselves.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 
 const refused = () => new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
 
 /** The portal person, or a refusal: the one admission for giving and revoking. */
 async function requirePortalPerson(ctx: Context): Promise<string> {
+  // The shared person gate first (no user, impersonation, run principal, worker-bound session or ambiguous actor),
+  // then the portal-only checks this door adds.
+  await requirePersonAsThemselves(ctx, refused);
   if (!ctx.userId || ctx.portalHumanUserId !== ctx.userId || ctx.impersonation || ctx.appId || ctx.appKeyId
     || ctx.sessionId || ctx.sessionBindingRefused || isRunPrincipal(ctx) || await workerShapedCaller(ctx)) throw refused();
   return ctx.userId;

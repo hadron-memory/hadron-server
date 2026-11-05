@@ -76,6 +76,7 @@ describe('mergeUsers audit actor registry', () => {
           OR (table_name = 'workers' AND column_name = 'retired_by')
           OR (table_name = 'ticker_subscriptions' AND column_name IN ('ended_by', 'via_grant_person_id', 'ended_via_grant_person_id'))
           OR (table_name = 'app_grants' AND column_name = 'granted_by')
+          OR (table_name = 'schedule_permissions' AND column_name = 'given_by')
           OR (table_name = 'app_key_scopes' AND column_name IN ('granted_by_user_id', 'revoked_by_user_id'))
           OR (table_name = 'agent_team_events' AND column_name IN ('actor_user_id', 'acknowledged_by_user_id'))
           OR (table_name = 'automation_adoption_events' AND column_name = 'actor_user_id')
