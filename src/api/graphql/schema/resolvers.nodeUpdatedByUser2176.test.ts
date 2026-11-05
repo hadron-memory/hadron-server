@@ -176,6 +176,7 @@ describe('raw-SQL Node writers: the covered and the intentionally exempt (#2176 
     'src/services/embedding/vectors.ts': '#887 vector replacement/purges update truncation/work-token metadata only, never authored fields or attribution',
     'src/lib/channels.ts': 'wake-stamp strip on adopting a pre-Channel row (server repair) and the soft-delete tombstone move: no authored edit',
     'src/api/graphql/schema/resolvers.specCorpus.ts': 'mint columns only: operational, already stamps minted_by',
+    'src/controller/operations/mergeUsers.ts': '#1336 a user merge retargets the HUMAN stamp person (authored_by_human) to the survivor: an identity rewrite, no authored field or edit attribution changes (the updated_by actor columns follow in the audit loop)',
   };
   const walk = (dir: string): string[] => readdirSync(dir).flatMap((f) => {
     const p = join(dir, f);

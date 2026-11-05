@@ -12,25 +12,7 @@ export function registerTaskLoc(data: unknown, code: string): string | null {
   return typeof loc === 'string' && loc.trim() !== '' && loc.length <= 512 ? loc : null;
 }
 
-/** Legacy warning semantics: nearest effective entry, then gate; never fall through on refusal/malformed data. */
-export async function registerEntry(tx: Prisma.TransactionClient, memoryId: string, code: string, readable: (id: string) => Promise<boolean>): Promise<{ taskLoc: string; memoryId: string } | null> {
-  const hit = await findEffectiveNodeIdByLoc(tx, memoryId, 'register:' + code);
-  const node = hit && await readable(hit.memoryId) ? await tx.node.findFirst({ where: { id: hit.id, memoryId: hit.memoryId, deletedAt: null }, select: { data: true, deletedAt: true } }) : null;
-  const taskLoc = registerTaskLoc(node?.deletedAt ? null : node?.data, code);
-  return taskLoc && hit ? { taskLoc, memoryId: hit.memoryId } : null;
-}
-
 export type RoleTask = { memoryId: string; task: { loc: string; urn: string } | null };
-/** Locate once, gate the chosen memory, and never substitute a farther task after refusal. */
-export async function nearestRoleTask(tx: Prisma.TransactionClient, memoryId: string, loc: string, readable: (id: string) => Promise<boolean>): Promise<RoleTask | null> {
-  const hit = await findEffectiveNodeIdByLoc(tx, memoryId, loc);
-  if (!hit) return null;
-  if (!await readable(hit.memoryId)) return { memoryId: hit.memoryId, task: null };
-  const node = await tx.node.findFirst({ where: { id: hit.id, memoryId: hit.memoryId, deletedAt: null }, select: { loc: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } } });
-  return { memoryId: hit.memoryId, task: node && !node.deletedAt && !node.memory.deletedAt && node.isRunnable
-    ? { loc: node.loc, urn: 'hrn:node:' + node.memory.urn + ':' + node.loc } : null };
-}
-
 export type RegisterEntry =
   | { state: 'UNMAPPED'; checkedMemoryIds: string[] }
   | { state: 'WITHHELD'; checkedMemoryIds: string[] }
@@ -177,7 +159,7 @@ export class PrincipalReadability {
  */
 export class RegisterLookup {
   private entries = new Map<string, Promise<RegisterEntry>>();
-  private tasks = new Map<string, ReturnType<typeof nearestRoleTask>>();
+  private tasks = new Map<string, Promise<RoleTask | null>>();
   private readability = new Map<string, Promise<boolean>>();
   private chains = new Map<string, Promise<string[]>>();
   private team: Promise<string | null> | undefined;
@@ -257,7 +239,7 @@ export class RegisterLookup {
     return { state: 'UNMAPPED', checkedMemoryIds };
   }
 
-  task(memoryId: string, loc: string): ReturnType<typeof nearestRoleTask> {
+  task(memoryId: string, loc: string): Promise<RoleTask | null> {
     this.checkDeadline();
     const key = memoryId + '\u0000' + loc;
     let result = this.tasks.get(key);
@@ -265,7 +247,7 @@ export class RegisterLookup {
     return result;
   }
 
-  /** {@link nearestRoleTask} over the shared rows: locate once, gate the chosen memory as THIS principal, never substitute a farther task. */
+  /** Locate once over the shared rows, gate the chosen memory as THIS principal, never substitute a farther task. */
   private async resolveTask(memoryId: string, loc: string): Promise<RoleTask | null> {
     const hit = await this.data.taskLocation(memoryId, loc);
     if (!hit) return null;
