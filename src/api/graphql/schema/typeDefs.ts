@@ -12999,6 +12999,14 @@ export const typeDefs = `#graphql
     sendChatMessage(chatId: String!, userMessage: String!, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String): ChatPromptResult!
     """
     Process the LLM's tool response (extract data, transition stage, save assistant message)
+
+    NOT atomic: the assistant message and message counter commit first, the extracted data is then judged and
+    written in a separate transaction, and the stage advances last. When the authoring gate refuses the extraction
+    (AUTHORING_ATTESTATION_MISSING, AUTHOR_TASK_BROKEN or its other typed reasons) the call errors with that same
+    code and role, and the error's extensions.partialTurn says what the turn did: persisted = [ASSISTANT_MESSAGE,
+    MESSAGE_COUNTER], refused = [{ component: EXTRACTION, code }], notRun = [STAGE_PROGRESSION]. The target data
+    node is untouched. The report names no id, task or revision. Do NOT treat this as a retry-safe call: repeating
+    it may append another assistant message. Success shapes are unchanged.
     """
     processChatResponse(chatId: String!, toolResponse: JSON!): ChatResponseResult!
     """

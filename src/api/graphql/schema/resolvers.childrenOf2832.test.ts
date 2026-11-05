@@ -6,7 +6,7 @@
  * access gate and default exclusions are the existing ones), and page and count like any findNodes read.
  */
 import { randomUUID } from 'node:crypto';
-import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -165,25 +165,46 @@ describe('#2832 every search mode returns only direct children', () => {
       provider: 'test', model: 'stub-model', dim: DIM,
       async embed(texts: string[]) { return texts.map(() => oneHot(1)); },
     });
-    afterAll(() => { resetEmbeddingClientForTests(); delete process.env.EMBEDDING_API_URL; });
-
-    it('vector, hybrid and chunk passages are narrowed to the direct children', async () => {
-      process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
-      setEmbeddingClientForTests(stub());
-      await db.memory.update({ where: { id: graph.id }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
-      for (const n of await db.node.findMany({ where: { memoryId: graph.id, abstract: 'zebra' } })) {
-        await db.node.update({ where: { id: n.id }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
-        expect(await embedNode(db, n.id)).toBe('embedded');
+    // #3315: supply a value outside the fixture and check what its real teardown leaves behind.
+    let outerUrl: string | undefined;
+    beforeAll(() => {
+      outerUrl = process.env.EMBEDDING_API_URL;
+      process.env.EMBEDDING_API_URL = 'http://sentinel.invalid/3315';
+    });
+    afterAll(() => {
+      try { expect(process.env.EMBEDDING_API_URL).toBe('http://sentinel.invalid/3315'); }
+      finally {
+        if (outerUrl === undefined) delete process.env.EMBEDDING_API_URL;
+        else process.env.EMBEDDING_API_URL = outerUrl;
       }
-      const f = { memoryIds: [graph.id], childrenOf: 'q' };
-      expect(sorted(await findNodes({ query: 'zebra', mode: 'vector', filter: f }))).toEqual(['q:one', 'q:two']);
-      expect(sorted(await findNodes({ query: 'zebra', mode: 'hybrid', filter: f }))).toEqual(['q:one', 'q:two']);
-      const root = await findNodes({ query: 'zebra', mode: 'vector', filter: { memoryIds: [graph.id], childrenOf: '' } });
-      expect(sorted(root)).toEqual(['elsewhere']);
-      const chunks = await findNodes({ query: 'zebra', mode: 'vector', granularity: 'chunk', filter: f });
-      const parentLocs = (await db.node.findMany({ where: { id: { in: chunks.passages.map((p: any) => p.parentNodeId) } }, select: { loc: true } })).map((n) => n.loc);
-      expect(parentLocs.length).toBeGreaterThan(0);
-      expect([...new Set(parentLocs)].sort()).toEqual(['q:one', 'q:two']);
+    });
+    describe('isolated embedding fixture', () => {
+      let fixtureUrl: string | undefined;
+      beforeAll(() => { fixtureUrl = process.env.EMBEDDING_API_URL; });
+      afterAll(() => {
+        resetEmbeddingClientForTests();
+        if (fixtureUrl === undefined) delete process.env.EMBEDDING_API_URL;
+        else process.env.EMBEDDING_API_URL = fixtureUrl;
+      });
+
+      it('vector, hybrid and chunk passages are narrowed to the direct children', async () => {
+        process.env.EMBEDDING_API_URL = 'http://stub.local/api/embed';
+        setEmbeddingClientForTests(stub());
+        await db.memory.update({ where: { id: graph.id }, data: { vectorIndexEnabled: true, embeddingSource: 'contentChunks' } });
+        for (const n of await db.node.findMany({ where: { memoryId: graph.id, abstract: 'zebra' } })) {
+          await db.node.update({ where: { id: n.id }, data: { embeddingWorkToken: randomUUID(), embeddingPendingAt: new Date() } });
+          expect(await embedNode(db, n.id)).toBe('embedded');
+        }
+        const f = { memoryIds: [graph.id], childrenOf: 'q' };
+        expect(sorted(await findNodes({ query: 'zebra', mode: 'vector', filter: f }))).toEqual(['q:one', 'q:two']);
+        expect(sorted(await findNodes({ query: 'zebra', mode: 'hybrid', filter: f }))).toEqual(['q:one', 'q:two']);
+        const root = await findNodes({ query: 'zebra', mode: 'vector', filter: { memoryIds: [graph.id], childrenOf: '' } });
+        expect(sorted(root)).toEqual(['elsewhere']);
+        const chunks = await findNodes({ query: 'zebra', mode: 'vector', granularity: 'chunk', filter: f });
+        const parentLocs = (await db.node.findMany({ where: { id: { in: chunks.passages.map((p: any) => p.parentNodeId) } }, select: { loc: true } })).map((n) => n.loc);
+        expect(parentLocs.length).toBeGreaterThan(0);
+        expect([...new Set(parentLocs)].sort()).toEqual(['q:one', 'q:two']);
+      });
     });
   });
 });
