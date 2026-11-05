@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { dirname } from 'path';
 import { stringify } from 'yaml';
 import { withMirrorCheckout } from './gitMirrorCheckout.js';
+import { db as defaultDb } from '../db/client.js';
 import { isCiphertext } from '../../lib/crypto.js';
 import {
   buildNodeFrontmatter,
@@ -93,7 +94,9 @@ export function nodePayloadHasCiphertext(node: Pick<NodeForGit, 'content' | 'abs
  * SEVERAL nodes (the move mirror) can batch them into one commit. Returns
  * false for a ciphertext-shaped payload without touching the filesystem.
  */
-export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string): boolean {
+/** Async mirror callers supply the same-memory live-child decision under the checkout lock (#3507).
+ * Pure file fixtures default to legacy cleanup; a disk id alone cannot distinguish a stale parent README. */
+export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: string, hasLiveReadmeChild = false): boolean {
   // #1273: inspect the actual payload, independently of raced memory flags
   // or key probes. Refuse before writes OR legacy-path cleanup.
   if (nodePayloadHasCiphertext(node)) {
@@ -145,7 +148,8 @@ export function writeNodeFile(localPath: string, node: NodeForGit, memoryUrn?: s
   // deletions. Skipped for the root, whose file IS README.md.
   if (node.loc !== '' && mdPath === nodeFilePath(localPath, node.loc)) {
     const legacy = orphanedLegacyPaths(localPath, node.loc);
-    rmSync(legacy.readme, { force: true });
+    // Xan #3507: only a live <loc>:README in THIS memory protects the path. A stale/id-less parent can overwrite on sync.
+    if (!hasLiveReadmeChild) rmSync(legacy.readme, { force: true });
     rmSync(legacy.sidecar, { recursive: true, force: true });
   }
   return true;
@@ -223,13 +227,17 @@ export async function writeNodeToGit(
       // announcements, recovery, merges, search-replace) reaches the repository through here, so none needs an edit.
       obligations: [{ nodeId: node.id, kind: 'WRITE' }],
     },
-    async ({ localPath, memoryUrn }) => {
+    async ({ localPath, memoryUrn, memoryId: checkoutMemoryId }) => {
       // The node.written subscriber supplies a loader. It must run AFTER the
       // checkout lock is acquired: a snapshot taken while waiting could land
       // after a newer write and roll the Git file backwards.
       const latest = refresh ? await refresh() : ('loc' in node ? node : null);
       if (!latest) return false;
-      return writeNodeFile(localPath, latest, memoryUrn);
+      if (!checkoutMemoryId) throw new Error('Mirror checkout omitted memory identity');
+      const child = latest.loc ? await (retryOptions.db ?? defaultDb).node.findFirst({
+        where: { memoryId: checkoutMemoryId, loc: latest.loc + ':README', deletedAt: null }, select: { id: true },
+      }) : null;
+      return writeNodeFile(localPath, latest, memoryUrn, child !== null);
     },
   );
 }
