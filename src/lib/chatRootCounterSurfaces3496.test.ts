@@ -13,6 +13,7 @@ import { cloneMemoryGraphInTx } from '../controller/operations/cloneMemory.js';
 import { sessionKeyCache } from './sessionKeyCache.js';
 import { generateDataKey } from './crypto.js';
 import { encryptNodeFields } from './nodeCrypto.js';
+import { requestKeyStorage } from './requestKeys.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
 let orgId: string, userId: string, agentId: string, memoryId: string, ctx: Context;
@@ -49,13 +50,24 @@ it.each([false, true])('encrypted chat without a key reads 0/null and does not f
     await db.memory.update({ where: { id: memoryId }, data: { isEncrypted: true } });
     await db.node.update({ where: { id: r.id }, data: encryptNodeFields({ data: { messageCount: 40, lastMessageAt: '2026-01-01T00:00:00Z' } }, { id: memoryId, isEncrypted: true }) });
     if (seeded)
-        await db.chatRootCounter.create({ data: { chatRootNodeId: r.id, messageCount: 40, lastMessageAt: new Date('2026-01-01T00:00:00Z') } });
+        await db.chatRootCounter.create({ data: { chatRootNodeId: r.id, messageCount: 57, lastMessageAt: new Date('2026-02-02T00:00:00Z') } });
     ctx.sessionId = 'without-key';
     const locked = await chatQueries.myChatsPage(null, { agentRef: agentId }, ctx);
     expect(locked.items[0]).toMatchObject({ messageCount: 0, lastMessageAt: null });
     ctx.sessionId = 's';
     const open = await chatQueries.myChats(null, { agentRef: agentId }, ctx);
-    expect(open[0]).toMatchObject({ messageCount: 40, lastMessageAt: '2026-01-01T00:00:00.000Z' });
+    expect(open[0]).toMatchObject(seeded
+        ? { messageCount: 57, lastMessageAt: '2026-02-02T00:00:00.000Z' }
+        : { messageCount: 40, lastMessageAt: '2026-01-01T00:00:00.000Z' });
+    sessionKeyCache.clear();
+    ctx.sessionId = 'request-only';
+    const requested = await requestKeyStorage.run(new Map([[memoryId, key]]), () =>
+        chatQueries.myChatsPage(null, { agentRef: agentId }, ctx));
+    expect(requested.items[0]).toMatchObject(seeded
+        ? { messageCount: 57, lastMessageAt: '2026-02-02T00:00:00.000Z' }
+        : { messageCount: 40, lastMessageAt: '2026-01-01T00:00:00.000Z' });
+    const outside = await chatQueries.myChatsPage(null, { agentRef: agentId }, ctx);
+    expect(outside.items[0]).toMatchObject({ messageCount: 0, lastMessageAt: null });
 });
 it('counter reads are batched across a page, not one query per row', async () => {
     const roots = await Promise.all([root('chats:a'), root('chats:b')]);

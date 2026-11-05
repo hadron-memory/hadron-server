@@ -1,5 +1,6 @@
 /** #3496 — operational counters do not participate in a root's revision state. */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { Prisma } from '../generated/prisma/index.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
@@ -48,6 +49,21 @@ describe('#3496 counters', () => {
         expect(after.data).toEqual({ title: 'keep' });
         expect((await counter()).message_count).toBe(10);
     });
+    it('strips only the legacy keys without round-tripping unrelated plaintext jsonb numbers', async () => {
+        await db.$executeRaw`UPDATE nodes SET data='{"messageCount":9,"big":12345678901234567890,"dec":1.10,"nested":{"big":12345678901234567890}}'::jsonb WHERE id=${chat.id}`;
+        await fingerprint();
+        const before = await raw();
+        const [expected] = await db.$queryRaw<Array<{ value: string }>>`SELECT (data - 'messageCount' - 'lastMessageAt')::text AS value FROM nodes WHERE id=${chat.id}`;
+        await post();
+        const [stored] = await db.$queryRaw<Array<{ value: string }>>`SELECT data::text AS value FROM nodes WHERE id=${chat.id}`;
+        expect(stored.value).toBe(expected.value);
+        await reconcile();
+        const after = await raw();
+        expect(after.revSeq).toBe(before.revSeq);
+        expect(after.authoredByTask).toBe(before.authoredByTask);
+        expect(after.revisionContentHash).toBe(await computeRevisionStateHash(db, chat.id));
+        expect((await counter()).message_count).toBe(10);
+    });
     it('a row wins over restored or overlap keys and retains hard-deleted allocation history', async () => {
         await post();
         await db.node.deleteMany({ where: { memoryId: chat.memoryId, seq: 10 } });
@@ -72,7 +88,13 @@ describe('#3496 counters', () => {
         await reconcile();
         expect((await raw()).revSeq).toBe(after.revSeq);
     });
-    it('ordinary root-data edits still drift; counter-only timestamp updates do not', async () => {
+    it.each([false, true])('ordinary root-data edits still drift; counter-only timestamp updates do not (encrypted=%s)', async (encrypted) => {
+        if (encrypted) {
+            enc.isEncrypted = true;
+            await db.memory.update({ where: { id: enc.id }, data: { isEncrypted: true } });
+            sessionKeyCache.set(generateId(), enc.id, generateDataKey());
+            await db.node.update({ where: { id: chat.id }, data: encryptNodeFields({ data: (await raw()).data }, enc) });
+        }
         await post();
         await fingerprint();
         const before = await raw();
@@ -120,4 +142,34 @@ it('accepts a finite PostgreSQL timestamp outside JS Date range without poisonin
  await updateChatRootData(db,chat,enc,f=>({...f}));
  expect((await readChatCounters(db,[await raw()])).get(chat.id)?.lastMessageAt).toBe('280000-01-01T00:00:00.000Z');
  expect((await post()).seq).toBe(10);
+});
+
+it('a persistent database fault in legacyTime surfaces and rolls back the send', async () => {
+    const transaction = db.$transaction.bind(db);
+    const fault = new Prisma.PrismaClientKnownRequestError('injected database fault', {
+        code: 'P2010', clientVersion: '6.19.2', meta: { code: '08006' },
+    });
+    let injected = false;
+    const spy = vi.spyOn(db, '$transaction');
+    spy.mockImplementation(((callback: (tx: unknown) => Promise<unknown>) => transaction(async tx => {
+        const wrapped = new Proxy(tx, { get(target, key, receiver) {
+            if (key !== '$queryRaw') return Reflect.get(target, key, receiver);
+            return async (...args: unknown[]) => {
+                if (Array.isArray(args[0]) && args[0].join('').includes('SELECT CASE WHEN isfinite')) {
+                    injected = true;
+                    throw fault;
+                }
+                return Reflect.apply(target.$queryRaw, target, args);
+            };
+        } });
+        return callback(wrapped);
+    })) as typeof db.$transaction);
+    try {
+        await expect(post()).rejects.toBe(fault);
+        expect(injected).toBe(true);
+    } finally {
+        spy.mockRestore();
+    }
+    expect(await db.chatRootCounter.count()).toBe(0);
+    expect(await db.node.count({ where: { memoryId: chat.memoryId, loc: { startsWith: `${chat.loc}:messages:` } } })).toBe(0);
 });
