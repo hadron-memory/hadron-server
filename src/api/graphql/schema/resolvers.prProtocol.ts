@@ -7,16 +7,14 @@
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { withoutRequestCaches } from './resolvers.helpers.js';
 import { mutateTask, mayDirectTask, isAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { PR_EVENT_TYPES, REVIEW_VERDICTS, type ReviewVerdict, type PrProtocolEvent } from '../../../lib/agentTasks/prProtocol.js';
 import { storedTaskReferences } from '../../../lib/agentTasks/references.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { lockTaskGraph } from '../../../lib/agentTasks/blockers.js';
-import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
-import { boundedRead } from './resolvers.taskWarnings.js';
 import { currentActor } from '../../../lib/requestActor.js';
+import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
 import type { PublicTickAction } from '../../../lib/tickers/tickActions.js';
 
 const badInput = (text: string) => taskError('BAD_USER_INPUT', text);
@@ -135,29 +133,15 @@ async function record(tx: Prisma.TransactionClient, c: Context, task: TaskRow, e
   }
 }
 
-/** Optional guidance is resolved after commit. Failure never turns an accepted command into a refusal. */
+/**
+ * Optional guidance is resolved after commit. Failure never turns an accepted command into a refusal.
+ * #3470 (rulings 0163, 0164; cor:agt:110:03): the same whole-chain gate and fault state as every other
+ * action answer, so this delegates to the shared producer instead of keeping a node-by-node reading.
+ * No Agent means no register answer (never the Team Agent for a person; #3448 gate clarification 76106).
+ */
 async function action(ctx: Context, appId: string, code: string): Promise<PublicTickAction> {
-  // No Agent means no register answer, not an assertion that an entry is absent. In particular,
-  // never substitute the Team Agent for a person (cor:agt:110:03; #3448 gate clarification 76106).
-  const agentId = currentActor().agentId;
-  if (!agentId) return { code, state: 'WITHHELD' };
-  try {
-    return await boundedRead(ctx, async (tx, deadline) => {
-      const c = withoutRequestCaches(ctx, tx);
-      const lookup = new RegisterLookup(tx, c, appId, deadline);
-      const team = await lookup.teamMemory();
-      if (!team) return { code, state: 'UNMAPPED' };
-      const entry = await lookup.entry(code);
-      if (entry.state !== 'FOUND') return { code, state: 'UNMAPPED' };
-      const agent = await tx.agent.findUnique({ where: { id: agentId }, select: { systemMemoryId: true, deletedAt: true } });
-      const memoryId = agent?.deletedAt ? null : agent?.systemMemoryId;
-      if (memoryId) {
-        const task = await lookup.task(memoryId, entry.taskLoc);
-        if (task?.task) return { code, state: 'MAPPED', taskLoc: task.task.loc, taskUrn: task.task.urn };
-      }
-      return { code, state: 'UNRESOLVED', taskLoc: entry.taskLoc };
-    });
-  } catch { return { code, state: 'UNRESOLVED' }; }
+  const answer = await resolveActionAnswer(ctx, appId, code, currentActor().agentId);
+  return { code: answer.code, state: answer.state, ...(answer.taskLoc ? { taskLoc: answer.taskLoc } : {}), ...(answer.taskUrn ? { taskUrn: answer.taskUrn } : {}) };
 }
 
 type SlotAnswer = { slot: string; currentTaskId: string | null; state: string; verdict: string | null; head: string | null; counts: boolean };
