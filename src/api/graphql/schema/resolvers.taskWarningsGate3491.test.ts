@@ -109,6 +109,7 @@ describe('task warnings join the whole-chain gate', () => {
     try {
       expect(await register()).toEqual({ state: 'withheld' });
       expect(JSON.stringify(warn.mock.calls)).not.toContain('secret-detail');
+      expect(JSON.stringify(warn.mock.calls)).toContain('task_warning.register_failed');
     } finally { spy.mockRestore(); warn.mockRestore(); }
   });
   it('a failed read transaction files the warning WITH register withheld and never fails the mutation', async () => {
@@ -127,6 +128,17 @@ describe('task warnings join the whole-chain gate', () => {
       const out = await asCaller(() => resolveRegisters(ctx(member.id), app.id, ['task.create.no-source', CODE]));
       expect(out.get(CODE)).toEqual({ state: 'withheld' });
     } finally { clock.mockRestore(); }
+  });
+  it('a budget spent before the first code is routine: withheld, no further read, and no register_failed log (BLIND P2-1)', async () => {
+    const real = Date.now.bind(Date);
+    let calls = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => (++calls <= 2 ? real() : real() + 60_000));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const out = await asCaller(() => resolveRegisters(ctx(member.id), app.id, ['task.create.no-source', CODE]));
+      expect(out.get(CODE)).toEqual({ state: 'withheld' });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('task_warning.register_failed');
+    } finally { clock.mockRestore(); warn.mockRestore(); }
   });
   it('no Agent: no register field and no lookup, as before', async () => {
     const spy = vi.spyOn(db, '$transaction');

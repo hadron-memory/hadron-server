@@ -78,7 +78,7 @@ export type TaskWarningRegister =
   /** #3491, ruling 0176: an unreadable system memory on a chain, or a failed lookup. Says nothing about what the chain holds. */
   | { state: 'withheld' };
 
-const WITHHELD_REGISTER: TaskWarningRegister = { state: 'withheld' };
+const WITHHELD_REGISTER: TaskWarningRegister = Object.freeze({ state: 'withheld' as const });
 
 export type TaskWarning = { code: TaskWarningCode; text: string; register?: TaskWarningRegister };
 
@@ -327,10 +327,12 @@ async function resolveRegistersIn(
         : answer.state === 'UNMAPPED' ? { state: 'unmapped' } : answer.state === 'UNRESOLVED' ? { state: 'unresolved' } : WITHHELD_REGISTER);
       reached += 1;
     }
-    if (!state.team.has(appId)) state.team.set(appId, await lookup.teamMemory());
+    // Only while budget remains: a spent deadline is routine (the codes are withheld below), not a failed lookup, and does no further read.
+    if (!state.team.has(appId) && Date.now() < deadline) state.team.set(appId, await lookup.teamMemory());
   } catch {
     // Fixed category only: never log the caller, the code or the failure.
-    console.warn('task_warning.register_failed');
+    // A throw once the budget is spent is routine exhaustion (the codes not reached are withheld below), not a failed lookup.
+    if (Date.now() < deadline) console.warn('task_warning.register_failed');
   }
   // A failed or timed-out lookup is withheld, never a guess and never an error to the call.
   for (const code of codes.slice(reached)) state.registers.set(keyOf(code), WITHHELD_REGISTER);
