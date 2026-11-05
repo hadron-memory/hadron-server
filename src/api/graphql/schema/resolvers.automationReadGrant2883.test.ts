@@ -382,6 +382,29 @@ describe('#1329 an author task the run reads through its grant', () => {
       .toMatchObject({ content: 'updated', authoredByTask: t.id });
   });
 
+  it("a run never outruns its own read: another App's personal memory the on-behalf-of user owns is unavailable", async () => {
+    const owned = (slug: string, appId: string) => db.memory.create({ data: {
+      id: generateId(), name: slug, urn: `${f.org.urn}:${slug}`, class: 'personal', organizationId: f.org.id,
+      userId: f.member.id, appId, userMemoryOfAgentId: f.first.id,
+    } });
+    const dest = await owned('mine', f.app.id);
+    const elsewhere = await owned('elsewhere', f.otherApp.id);
+    const hidden = await db.node.create({ data: { id: generateId(), memoryId: elsewhere.id, loc: 'hidden', name: 'Hidden', isRunnable: true } });
+    await db.node.create({ data: { id: generateId(), memoryId: dest.id, loc: 'a', name: 'a', content: 'initial', role: 'guide' } });
+    const cfg = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dest.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: cfg.id, role: 'guide', authorTaskId: hidden.id, authorTaskRequired: true } });
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    await expect(readAs(r, elsewhere.urn, 'hidden')).rejects.toThrow();
+    const principal = { db, appId: r.appId, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    const write = (authoredWith?: { task: string; revision: number }) => hadronUpdateNode.execute(
+      { db, run: r, principal, log: () => {} } as never,
+      { urn: `hrn:node:${dest.urn}:a`, content: 'updated', ...(authoredWith ? { authoredWith } : {}) },
+    );
+    const unavailable = { code: 'AUTHOR_TASK_BROKEN', taskAccess: 'UNAVAILABLE', task: null, taskId: null };
+    expect(await refusal(write())).toMatchObject(unavailable);
+    expect(await refusal(write({ task: hidden.id, revision: hidden.revSeq }))).toMatchObject(unavailable);
+  });
+
   it('a grant that does not cover the task, and a revoked one, read as unavailable', async () => {
     const { write, claim } = await setUp();
     const unavailable = { code: 'AUTHOR_TASK_BROKEN', taskAccess: 'UNAVAILABLE', task: null };

@@ -121,7 +121,24 @@ describe('#1329 scoped credentials', () => {
   });
 });
 
+describe('#1329 two readable tasks', () => {
+  it('each memory is asked on its own', async () => {
+    const second = await db.memory.create({ data: { id: generateId(), organizationId, urn: 'refuse-org:second', name: 'second', class: 'knowledge' } });
+    const task = await db.node.create({ data: { id: generateId(), memoryId: second.id, loc: 'task', name: 'Task', isRunnable: true } });
+    await rule('guide', taskId);
+    await rule('other', task.id);
+    expect(await judge(ctx(), { priorRole: 'other', priorRunnable: false, role: 'guide' }))
+      .toMatchObject({ refused: 'AUTHORING_ATTESTATION_MISSING', recovery: { taskAccess: 'READABLE' } });
+  });
+});
+
 describe('#1329 a writer with no reader', () => {
+  it('a thrown refusal with no reader still carries every field, all empty', () => {
+    expect(new AuthoringAttestationError('AUTHORING_ATTESTATION_MISSING', 'guide').extensions).toEqual({
+      code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', taskAccess: 'UNAVAILABLE', task: null, taskId: null, taskRevision: null, load: null,
+    });
+  });
+
   it('keeps the code, because git sync reports it, and discloses nothing', async () => {
     await rule('guide', foreignTaskId);
     expect(await judge(null, {})).toEqual({ refused: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', recovery: null });

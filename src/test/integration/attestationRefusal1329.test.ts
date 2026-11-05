@@ -215,6 +215,32 @@ describe('#1329 every MCP writer carries the structured refusal', () => {
   });
 });
 
+describe('#1329 every MCP writer asks whether the task is readable', () => {
+  it.each([
+    ['hadron_update_node', () => ({ urn: 'hrn:node:attest-1329:mem:a', content: 'changed' })],
+    ['hadron_update_node_data', () => ({ nodeUrn: 'hrn:node:attest-1329:mem:a', data: { k: 1 } })],
+    ['hadron_replace_text', () => ({ nodeUrns: ['hrn:node:attest-1329:mem:a'], oldText: 'first', newText: 'second', fields: ['content'] })],
+    ['hadron_create_parent_node', () => ({ urn: 'hrn:node:attest-1329:mem:p', description: 'renamed' })],
+    ['hadron_move_node', () => ({ urn: 'hrn:node:attest-1329:mem:a', targetUrn: 'hrn:node:attest-1329:mem:a-moved', renameToLeaf: true })],
+    ['hadron_create_node', () => ({ urn: 'hrn:node:attest-1329:mem:t', name: 't', content: 'x', role: 'guide' })],
+  ] as Array<[string, () => Record<string, unknown>]>)('%s, an exact claim on an unreadable task', async (name, args) => {
+    await repoint(hiddenTaskId);
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'a', name: 'a', content: 'first', role: 'guide' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 'p', name: 'p', content: 'first', role: 'guide', nodeType: 'parent' } });
+    await db.node.create({ data: { id: generateId(), memoryId, loc: 't', name: 't', content: 'gone', role: 'guide', deletedAt: new Date() } });
+    const client = new Client({ name: 'attest-1329', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${apiKey}` } },
+    }));
+    try {
+      const result = await client.callTool({ name, arguments: { ...args(), authoredWith: { task: HIDDEN_URN, revision: 5 } } }) as { structuredContent?: { error: Record<string, unknown> } };
+      expect(result.structuredContent?.error).toEqual(expect.objectContaining({ code: 'AUTHOR_TASK_BROKEN', ...NO_RECOVERY }));
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe('#1329 a task the writer cannot read', () => {
   /** The whole response, so a stray field, a path or a message difference fails. */
   const projections = async (claim?: { task: string; revision: number }) => ({
