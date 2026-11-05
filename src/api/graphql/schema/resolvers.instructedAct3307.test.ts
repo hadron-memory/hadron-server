@@ -213,15 +213,33 @@ function observeActTransactions() {
   if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => {
    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
    observedPids.push(pid);
-   // Legacy first-PID behavior, kept for the red-first controlled fixture.
-   if (observedPids.length === 1) activePids.add(pid);
+   activePids.add(pid);
    try { return await callback(tx); }
-   finally { /* the fix must retire completed attempts too */ }
+   finally { activePids.delete(pid); }
   }, options);
   const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
  }});
  return { client, activePids, observedPids };
 }
+
+it('#3335 transaction observer retires failed and successful retry attempts', async () => {
+ const { Prisma } = await import('../../../generated/prisma/index.js');
+ const { retryOnSerializationFailure } = await import('../../../lib/serializableRetry.js');
+ const observer = observeActTransactions();
+ let attempts = 0;
+ await retryOnSerializationFailure(async () => {
+  expect(observer.activePids.size).toBe(0);
+  return observer.client.$transaction(async tx => {
+   attempts++;
+   const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+   expect([...observer.activePids]).toEqual([pid]);
+   if (attempts === 1) throw new Prisma.PrismaClientKnownRequestError('controlled retry fixture', { code: 'P2034', clientVersion: 'test' });
+  }, { isolationLevel: 'Serializable' });
+ });
+ expect(attempts).toBe(2);
+ expect(observer.observedPids).toHaveLength(2);
+ expect(observer.activePids.size).toBe(0);
+});
 
 for (const door of ['signature', 'agent']) for (const earlierTransaction of [false, true])
 it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ? 'an earlier transaction' : 'one transaction'}`, async () => {
@@ -278,6 +296,7 @@ it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ?
   if (call) outcome = await call;
  }
  expect(outcome.code).toBe('RESOLVED');
+ expect(observer.activePids.size).toBe(0);
  expect(await instructionEvents()).toHaveLength(1);
 }, 20000);
 
