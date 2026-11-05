@@ -153,10 +153,28 @@ describe('#3514 — the refused extraction reports what the turn did and did not
     const e = await refusal(respond(chatId, { message: 'second', data: { region: 'US' }, onTrack: true }));
     const partial = e?.extensions?.partialTurn;
     expect(Object.keys(partial).sort()).toEqual(['notRun', 'persisted', 'refused']);
-    expect(Object.keys(partial.refused[0]).sort()).toEqual(['code', 'component']);
     const task = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'author-task', memoryId: (await state(chatId)).memoryId } } });
-    expect(JSON.stringify(e?.extensions)).not.toContain(task.id);
-    expect(Object.keys(e!.extensions!).sort()).toEqual(['code', 'partialTurn', 'role']);
+    expect(JSON.stringify(partial)).not.toContain(task.id);
+    expect(Object.keys(partial.refused[0]).sort()).toEqual(['code', 'component']);
+    // #1329 rides beside the report, not in it: this caller reads the task, so the refusal says which one.
+    expect(Object.keys(e!.extensions!).sort()).toEqual(['code', 'load', 'partialTurn', 'role', 'task', 'taskAccess', 'taskId', 'taskRevision']);
+    expect(e?.extensions).toMatchObject({ taskAccess: 'READABLE', taskId: task.id });
+  });
+
+  it('#1329: a task the caller cannot read stays concealed on a refusal that carries the report', async () => {
+    const chatId = await seeded();
+    await governed(chatId);
+    const { memoryId } = await state(chatId);
+    const other = await db.organization.create({ data: { id: generateId(), name: 'other-3514', urn: 'other-3514' } });
+    const foreign = await db.memory.create({ data: { id: generateId(), organizationId: other.id, urn: 'other-3514:hidden', name: 'hidden', class: 'knowledge' } });
+    const hidden = await db.node.create({ data: { id: generateId(), memoryId: foreign.id, loc: 'task', name: 'Hidden', isRunnable: true } });
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { authorTaskId: hidden.id } });
+    const e = await refusal(respond(chatId, { message: 'second', data: { region: 'US' }, onTrack: true }));
+    expect(e?.extensions).toEqual({
+      code: 'AUTHOR_TASK_BROKEN', role: 'guide', taskAccess: 'UNAVAILABLE', task: null, taskId: null, taskRevision: null, load: null,
+      partialTurn: PARTIAL('AUTHOR_TASK_BROKEN'),
+    });
+    expect(JSON.stringify(e)).not.toContain(hidden.id);
   });
 
   it('an error that is not an extraction refusal carries no report', async () => {
@@ -167,7 +185,9 @@ describe('#3514 — the refused extraction reports what the turn did and did not
 
   it('reportPartialTurn labels only the authoring gate\'s typed refusal; any other error passes through as the same object', () => {
     const labelled = (() => { try { reportPartialTurn(new AuthoringAttestationError('AUTHORING_ATTESTATION_MISSING', 'guide')); } catch (e) { return e as GraphQLError; } })();
-    expect(labelled?.extensions).toEqual({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', partialTurn: PARTIAL('AUTHORING_ATTESTATION_MISSING') });
+    const gate = new AuthoringAttestationError('AUTHORING_ATTESTATION_MISSING', 'guide');
+    expect(labelled?.extensions).toEqual({ ...gate.extensions, partialTurn: PARTIAL('AUTHORING_ATTESTATION_MISSING') });
+    expect(labelled?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide' });
     // The rewrap keeps the message and the original error (stack, class) for logging and Sentry consumers.
     expect(labelled?.message).toBe(new AuthoringAttestationError('AUTHORING_ATTESTATION_MISSING', 'guide').message);
     expect(labelled?.originalError).toBeInstanceOf(AuthoringAttestationError);
