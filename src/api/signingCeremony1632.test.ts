@@ -253,6 +253,22 @@ describe('#3121 canonical node identity is post-proof only', () => {
     expect(texts(what!)).toContain(await expectedUrn());
   });
 
+  for (const loc of ['', 'legacy::leaf']) it('keeps a stored root/legacy loc signable after proof: ' + JSON.stringify(loc), async () => {
+    await db.node.update({ where: { id: nodeId }, data: { loc } });
+    const req = await openRequest();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const expected = urnEmit.safeNodeUrnV2(memory.urn, loc);
+    expect((await fetch(base + '/signing/' + req.id)).status).toBe(200);
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.outcome).toBe('open');
+    expect(p.json.view.node.urn).toBe(expected);
+    const { ids, texts } = await renderedProof(req.id, p.json);
+    expect(texts(ids.view)).toContain(expected);
+    const signed = await post(req.id, 'complete', signingBody(p, signer.key), p.cookie);
+    expect(signed.status).toBe(200);
+  });
+
   it('uses emitNodeUrnV2 for the displayed identity, not hand-built URN text', async () => {
     const req = await openRequest();
     const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
