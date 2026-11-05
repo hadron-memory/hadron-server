@@ -84,10 +84,26 @@ it('concurrent sweeps divide a backlog without charging or deleting anything twi
 it('a failed run logs no artifacts and schedules the next run',async()=>{
  vi.useFakeTimers();vi.stubEnv('NODE_ENV','production');vi.stubEnv('DISABLE_PASSKEY_CEREMONY_SWEEP','false');
  const error=vi.spyOn(console,'error').mockImplementation(()=>{});
- const query=vi.fn().mockRejectedValueOnce(new Error('private browser hash')).mockResolvedValue([]);
+ const query=vi.fn().mockRejectedValueOnce(Object.assign(new Error('private browser hash'), { code: 'P2010', meta: { code: '42501', message: 'private browser hash' } })).mockResolvedValue([]);
  const loop=startPasskeyCeremonySweepLoop({$queryRaw:query} as unknown as typeof db,{initialDelayMs:1,intervalMs:10})!;
  try {
-  await vi.advanceTimersByTimeAsync(1);expect(error.mock.calls).toEqual([['[passkey-ceremony-sweep] failed']]);
+  await vi.advanceTimersByTimeAsync(1);expect(error.mock.calls).toEqual([['[passkey-ceremony-sweep] failed', { code: 'P2010', sqlState: '42501' }]]);
+  expect(JSON.stringify(error.mock.calls)).not.toContain('private browser hash');
   await vi.advanceTimersByTimeAsync(10);expect(query).toHaveBeenCalledTimes(2);
+ } finally {await loop.stop();error.mockRestore();}
+});
+it.each([
+ ['untrusted fields', { code: 'private browser hash', meta: { code: 'private browser hash' } }, { code: 'UNKNOWN', sqlState: 'UNKNOWN' }],
+ ['direct database code', { code: '42501' }, { code: 'UNKNOWN', sqlState: '42501' }],
+ ['Prisma code', { code: 'P2003' }, { code: 'P2003', sqlState: 'UNKNOWN' }],
+] as const)('failure diagnostics: %s',async(_label,fields,expected)=>{
+ vi.useFakeTimers();vi.stubEnv('NODE_ENV','production');vi.stubEnv('DISABLE_PASSKEY_CEREMONY_SWEEP','false');
+ const error=vi.spyOn(console,'error').mockImplementation(()=>{});
+ const query=vi.fn().mockRejectedValue(Object.assign(new Error('private browser hash'),fields));
+ const loop=startPasskeyCeremonySweepLoop({$queryRaw:query} as unknown as typeof db,{initialDelayMs:1})!;
+ try {
+  await vi.advanceTimersByTimeAsync(1);
+  expect(error.mock.calls).toEqual([['[passkey-ceremony-sweep] failed',expected]]);
+  expect(JSON.stringify(error.mock.calls)).not.toContain('private browser hash');
  } finally {await loop.stop();error.mockRestore();}
 });
