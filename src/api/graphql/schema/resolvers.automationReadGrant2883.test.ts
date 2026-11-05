@@ -9,6 +9,9 @@
  * installed Agent's own system memory) refuses it, so only the grant can admit it. The system-memory cases
  * (who may give, the live installed check) name the second Agent's system memory explicitly.
  */
+import { GraphQLError } from 'graphql';
+import { managesReadGrantTarget } from './resolvers.automationReadGrant.js';
+import { READ_GRANT_MEMORY_SELECT } from '../../../lib/automationReadGrant.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
@@ -18,6 +21,8 @@ import { runHoldsReadGrant, rootTriggerOfRun } from '../../../lib/automationRead
 import { hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { MemoryNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -421,6 +426,29 @@ describe('#3275 read-grant follow-up pins', () => {
       } finally { lookup.mockRestore(); }
     }
     console.info('#3275 synthetic local lineage measurements (not a production bound)', samples);
+  });
+  it.each([
+    ['missing', () => new MemoryNotFoundError('opaque')],
+    ['unqualified', () => new UrnNotQualifiedError('opaque')],
+    ['malformed', () => new UrnParseError('opaque', 'malformed-grammar')],
+    ['ambiguous', () => new AmbiguousLegacyUrnError('opaque')],
+  ] as const)('conceals typed %s reference errors independently of their message', async (_, makeError) => {
+    const fault = makeError();
+    fault.message = 'opaque reference refusal';
+    const lookup = vi.spyOn(db.memory, 'findFirst').mockRejectedValueOnce(fault);
+    try { expect(await Q.automationReadGrants({}, { memoryRef: f.know.id }, f.adminCtx)).toEqual([]); }
+    finally { lookup.mockRestore(); }
+  });
+  it('target management recognizes typed FORBIDDEN independently of its text, and rethrows faults', async () => {
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: f.know.id }, select: { ...READ_GRANT_MEMORY_SELECT, urn: true } });
+    const lookup = vi.spyOn(db.orgMember, 'findFirst');
+    try {
+      lookup.mockRejectedValueOnce(new GraphQLError('opaque refusal', { extensions: { code: 'FORBIDDEN' } }));
+      expect(await managesReadGrantTarget(f.adminCtx, memory)).toBe(false);
+      const fault = new Error('Forbidden');
+      lookup.mockRejectedValueOnce(fault);
+      await expect(managesReadGrantTarget(f.adminCtx, memory)).rejects.toBe(fault);
+    } finally { lookup.mockRestore(); }
   });
   it('an unexpected lookup fault containing URN is not concealed as an empty list', async () => {
     const fault = new Error('URN storage failed');
