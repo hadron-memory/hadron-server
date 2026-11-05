@@ -1,13 +1,15 @@
 /** #3096 / cor:dmo:150:08: caller-reported chat model is prompt/record text only. */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { chatNodeByLocOrThrow, cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
+import { buildSchema } from 'graphql';
 import { resolvers, type Context } from './resolvers.js';
 import { recordChatServedIfChanged, serveChatPrompt } from './resolvers.mutation.chat.js';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -32,13 +34,6 @@ async function compiled(content: string) {
   await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: node.id, bootPromptUrn: `u:${node.id}` } });
   return node.id as string;
 }
-async function recompileApproved(nodeId: string, content: string) {
-  const n = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
-  await db.nodeRevision.create({ data: { nodeId, memoryId: systemMemoryId, loc: n.loc, name: n.name, content: n.content, revNo: n.revSeq, tags: [], approvedAt: n.approvedAt, approvedByInfo: n.approvedByInfo, approvalHash: n.approvalHash } as never });
-  await withCompileWrite(() => db.node.update({ where: { id: nodeId }, data: { content, revSeq: n.revSeq + 1, contentRevSeq: n.revSeq + 1 } }));
-  await db.compiledPromptRevision.create({ data: { compiledNodeId: nodeId, compiledRevNo: n.revSeq + 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agent.id, provenance: provenance() as never, occurrenceCount: 1 } });
-  await approve(nodeId);
-}
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -59,13 +54,12 @@ beforeEach(async () => {
   for (const n of nodes) await db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: n.loc, name: n.name, nodeType: n.nodeType, data: ((n as any).data ?? null) as any, content: ((n as any).content ?? null) as any } });
 });
 
-
-import { buildSchema } from 'graphql';
-import { typeDefs } from './typeDefs.js';
 const records = async (chatId: string) => {
   const chat = await chatNodeByLocOrThrow(db, chatId);
   return db.servedPrompt.findMany({ where: { chatId: chat.id }, orderBy: { ordinal: 'asc' } });
 };
+/** Row counts for nodes, holding memories and agent subscriptions: a sample of what a start could provision, not every table it can write. */
+const footprint = async () => ({ nodes: await db.node.count(), memories: await db.memory.count(), subscriptions: await db.agentSubscription.count() });
 const report = (r: { variables: unknown }) => r.variables as Record<string, string>;
 
 describe('#3096 client-reported chat model', () => {
@@ -98,6 +92,23 @@ describe('#3096 client-reported chat model', () => {
     expect(report(all[2]!)).toMatchObject({ 'session.llmModel': '', 'session.llmModel.source': 'unspecified' });
   });
 
+  it('an identical non-empty model sent again is deduplicated, a changed one is recorded', async () => {
+    await compiled('Model={{session.llmModel}}.');
+    const start = await M.startChat({}, { agentId: agent.id, llmModel: 'provider/model-X' }, ctx());
+    await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'one', llmModel: 'provider/model-Y' }, ctx());
+    await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'two', llmModel: 'provider/model-Y' }, ctx());
+    await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'three', llmModel: 'provider/model-Y' }, ctx());
+    const afterY = await records(start.chatId);
+    expect(afterY.map(r => [r.ordinal, report(r)['session.llmModel']])).toEqual([[1, 'provider/model-X'], [2, 'provider/model-Y']]);
+    expect(afterY.map(r => report(r)['session.llmModel.source'])).toEqual(['client-reported', 'client-reported']);
+    // Deduplicating the RECORD must not skip the turn: every user message still persisted.
+    const persisted = async () => (await db.node.findMany({ where: { content: { in: ['one', 'two', 'three', 'four'] } }, select: { content: true } })).map(n => n.content).sort();
+    expect(await persisted()).toEqual(['one', 'three', 'two']);
+    await M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'four', llmModel: 'provider/model-X' }, ctx());
+    expect((await records(start.chatId)).map(r => [r.ordinal, report(r)['session.llmModel']])).toEqual([[1, 'provider/model-X'], [2, 'provider/model-Y'], [3, 'provider/model-X']]);
+    expect(await persisted()).toEqual(['four', 'one', 'three', 'two']);
+  });
+
   it('old omitted and null arguments keep an empty model, with no invented identity', async () => {
     await compiled('Model={{session.llmModel}}.');
     for (const llmModel of [undefined, null]) {
@@ -127,26 +138,26 @@ describe('#3096 client-reported chat model', () => {
   it.each(['x'.repeat(257), 'bad\nmodel', 'bad\0model', 'bad\u007fmodel', 'bad\u0085model', 'bad\u202emodel', 'bad\u2028model', 'bad\ud800model', 'bad\udfffmodel'])(
     'refuses a malformed report before start/send writes and never echoes the input (%#)', async llmModel => {
       await compiled('Model={{session.llmModel}}.');
-      const before = await db.node.count();
+      const before = await footprint();
       let error: any;
       try { await M.startChat({}, { agentId: agent.id, llmModel }, ctx()); } catch (e) { error = e; }
       expect(error?.extensions?.code).toBe('BAD_USER_INPUT');
       expect(error?.message).toBe('Invalid client-reported chat model.');
       expect(JSON.stringify(error)).not.toContain(llmModel);
-      expect(await db.node.count()).toBe(before);
+      expect(await footprint()).toEqual(before);
       const start = await M.startChat({}, { agentId: agent.id }, ctx());
-      const count = await db.node.count();
+      const count = await footprint();
       expect(await code(M.sendChatMessage({}, { chatId: start.chatId, userMessage: 'must not persist', llmModel }, ctx()))).toBe('BAD_USER_INPUT');
-      expect(await db.node.count()).toBe(count);
+      expect(await footprint()).toEqual(count);
       expect(await records(start.chatId)).toHaveLength(1);
     },
   );
 
   it.each([123, true, {}, []])('refuses non-string reports even for a direct resolver caller (%#)', async llmModel => {
     await compiled('Model={{session.llmModel}}.');
-    const before = await db.node.count();
+    const before = await footprint();
     expect(await code(M.startChat({}, { agentId: agent.id, llmModel }, ctx()))).toBe('BAD_USER_INPUT');
-    expect(await db.node.count()).toBe(before);
+    expect(await footprint()).toEqual(before);
   });
 
   it('a fabricated model grants no authority, and an accepted report touches no quota or credit ledger', async () => {

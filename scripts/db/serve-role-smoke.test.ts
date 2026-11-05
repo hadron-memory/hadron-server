@@ -12,6 +12,7 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
 import { EXIT, main } from './serve-role-smoke.js';
+import { cleanupOwnedSmokeFixture } from './smokeTeardown.js';
 
 const GRANTS_SQL = fileURLToPath(new URL('../../prisma/runtime-role.sql', import.meta.url));
 const suffix = randomBytes(4).toString('hex');
@@ -71,12 +72,14 @@ beforeAll(async () => {
   grant();
 }, 180_000);
 
+// #2683: 30s is a margin over the observed 9.4s healthy hosted DROP, not a
+// measured upper bound or a diagnosis of the hosted timeout cause. Keep step
+// timing; a recurrence at 30s needs cause investigation, not another increase.
+// Only this invocation's generated DB and two roles are named or removed.
 afterAll(async () => {
-  await admin(async (c) => {
-    await c.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
-    for (const r of [OWNER, SERVE]) await c.query(`DROP ROLE IF EXISTS ${r}`);
-  });
-});
+  const c = new Client({ connectionString: urlFor(new URL(maintenanceUrl()).username, 'postgres') });
+  await cleanupOwnedSmokeFixture(c, { database: DB, roles: [OWNER, SERVE] });
+}, 30_000);
 
 describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {
   it('passes on a correctly granted serve role and leaves no fixture behind', async () => {

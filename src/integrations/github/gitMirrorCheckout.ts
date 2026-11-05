@@ -39,6 +39,8 @@ import {
 
 /** The prepared checkout handed to a mutate callback. */
 export interface MirrorRepo {
+  /** Resolved checkout memory, including legacy ownerRepo-only callers. */
+  memoryId: string;
   /** Current memory identity, used for the root README loc (#1228). */
   memoryUrn: string;
   /** Absolute path of the memory's local clone, already on the write branch. */
@@ -313,7 +315,7 @@ export async function withMirrorCheckout(
           await restoreRemote(localPath, memory.source);
           return current ? 'refused-encrypted' : 'skipped';
         }
-        const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn, obligations });
+        const shouldCommit = await mutate({ localPath, branch, memoryUrn: memory.urn, memoryId: memory.id, obligations });
         if (typeof shouldCommit === 'object' && shouldCommit !== null) {
           if (!opts.retry || attemptSeq === null) throw new Error('Row-local outcomes require an admitted retry');
           const ids = new Set(shouldCommit.failedWrites);
@@ -359,7 +361,7 @@ export async function withMirrorCheckout(
           // ahead state) lands in the catch below as 'failed', never 'no-changes'.
           if ((await unpublishedCommitCount(localPath, branch, memory.readBranch ?? undefined)) === 0) {
             await restoreRemote(localPath, memory.source);
-            if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, obligations })) return fail('TREE_WRITE');
+            if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, memoryId: memory.id, obligations })) return fail('TREE_WRITE');
             return 'no-changes';
           }
         } else {
@@ -388,7 +390,7 @@ export async function withMirrorCheckout(
         } finally {
           await restoreRemote(localPath, memory.source);
         }
-        if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, obligations })) return fail('TREE_WRITE');
+        if (opts.verify && !await opts.verify({ localPath, branch, memoryUrn: memory.urn, memoryId: memory.id, obligations })) return fail('TREE_WRITE');
         return 'mirrored';
       } catch (err) {
         console.error(`${logPrefix} Commit/push failed for ${commitSubject}`, mirrorFailureMetadata(err, 'push', 'PUSH_FAILED'));

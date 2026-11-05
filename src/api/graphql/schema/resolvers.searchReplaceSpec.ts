@@ -389,7 +389,7 @@ export async function searchReplaceInSpecNodes(
       // #1328 — a spec's role rule answers to the same claim as any other writer.
       const authoredStamp = await assertAuthoring(tx, memoryId, {
         priorRole: node.raw.role, priorRunnable: node.raw.isRunnable,
-        role: node.raw.role, runnable: node.raw.isRunnable, authoredChange: node.authoredChange,
+        role: node.raw.role, runnable: node.raw.isRunnable, mintHuman: true, authoredChange: node.authoredChange,
       }, authoringFromRequest(ctx, input.authoredWith));
       await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
         revLabel: input.reason,
