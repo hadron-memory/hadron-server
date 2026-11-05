@@ -20,3 +20,15 @@ export async function timedCleanupStep<T>(
     throw error;
   }
 }
+
+type CleanupClient = {
+  connect(): Promise<unknown>;
+  query(sql: string): Promise<unknown>;
+  end(): Promise<unknown>;
+};
+
+/** #2683: only the fixture resources generated and retained by this invocation. */
+export async function cleanupOwnedSmokeFixture(client: CleanupClient, owned: OwnedResources, report: (line: string) => void = console.error): Promise<void> {
+  await client.connect();
+  await client.end();
+}
