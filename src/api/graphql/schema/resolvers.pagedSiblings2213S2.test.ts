@@ -63,6 +63,28 @@ async function walk<T>(read: (offset: number) => Promise<{ items: T[]; total: nu
   return out;
 }
 
+/**
+ * #3218 (cor:api:120:04): with 201 rows, a limit at or over the cap serves exactly 200 and says more
+ * remain, and the 201st row is the next page, not lost. `key` names a row, so "not on the page" is a real check.
+ */
+async function capAt200<T>(
+  read: (args: Record<string, unknown>) => Promise<{ items: T[]; total: number; hasMore: boolean }>,
+  key: (row: T) => string,
+) {
+  const all = (await Promise.all([0, 200].map((offset) => read({ limit: 200, offset })))).flatMap((p) => p.items.map(key));
+  expect(new Set(all).size).toBe(201);
+  for (const limit of [200, 201, 100_000]) {
+    const p = await read({ limit });
+    expect(p.items.map(key), `limit ${limit}`).toEqual(all.slice(0, 200));
+    expect(p.items.map(key), `limit ${limit}`).not.toContain(all[200]);
+    expect(p.total, `limit ${limit}`).toBe(201);
+    expect(p.hasMore, `limit ${limit}`).toBe(true);
+  }
+  const rest = await read({ limit: 200, offset: 200 });
+  expect(rest.items.map(key)).toEqual([all[200]]);
+  expect(rest).toMatchObject({ total: 201, hasMore: false });
+}
+
 async function sizeEdges(read: (args: Record<string, unknown>) => Promise<{ items: unknown[]; total: number; hasMore: boolean }>, total: number) {
   expect((await read({})).items).toHaveLength(Math.min(20, total));
   expect((await read({ limit: null, offset: null })).items).toHaveLength(Math.min(20, total));
@@ -347,6 +369,11 @@ describe('agent subscription pages', () => {
       await sizeEdges((a) => Q.myAgentSubscriptionsPage({}, a, ctx(subscriber)), 21);
     });
 
+    it('#3218: of 201 subscriptions a page serves 200, hasMore true, and the 201st is the next page', async () => {
+      await seedSubscriptions(subscriber, 201);
+      await capAt200((a) => Q.myAgentSubscriptionsPage({}, a, ctx(subscriber)), (s: any) => s.agentId);
+    }, 30_000);
+
     it('another user\'s subscriptions are in neither items nor total', async () => {
       await seedSubscriptions(subscriber, 2);
       await seedSubscribers(agent.id, 3);
@@ -406,6 +433,11 @@ describe('agent subscription pages', () => {
       await seedSubscribers(agent.id, 21);
       await sizeEdges((a) => Q.agentSubscriptionsPage({}, { agentRef: agent.id, ...a }, ctx(admin)), 21);
     });
+
+    it('#3218: of 201 subscribers a page serves 200, hasMore true, and the 201st is the next page', async () => {
+      await seedSubscribers(agent.id, 201);
+      await capAt200((a) => Q.agentSubscriptionsPage({}, { agentRef: agent.id, ...a }, ctx(admin)), (s: any) => s.userId);
+    }, 30_000);
 
     it('another agent\'s subscribers are in neither items nor total', async () => {
       await seedSubscribers(agent.id, 2);
