@@ -12,6 +12,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { DIRECT_USER_REFERENCES } from '../../../controller/operations/mergeUsers.js';
 import { resolvers, type Context } from './resolvers.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -108,6 +109,10 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId: leo, role: 'member' } });
   await db.appMember.create({ data: { appId, userId: mia, role: 'member' } });
   for (const mem of [memoryId, otherMemoryId]) await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: mem, role: 'read-write' } });
+  // #1162: a WORKER reporter is a fenced Worker reference, so the workers the pins act as exist.
+  for (const id of ['worker-held-by-mia', 'worker-that-wrote-r', 'w', 'wa', 'wb', 'w-1']) {
+    await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id, appId, agentId: agent.id, name: `cv-${id}`, slug: `cv-${id}` } });
+  }
 });
 
 describe('#1332 who may record (cor:dmo:160:01 table)', () => {
@@ -272,6 +277,28 @@ describe('#1332 refusal order and the report\'s own checks', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(1);
   });
 
+  it('(4) access lost between the gate and the reconcile fence: not found, and nothing is reconciled or written', async () => {
+    await db.$executeRaw`UPDATE nodes SET content = 'raw edit' WHERE id = ${nodeId}`;
+    let revoked = false;
+    // The first transaction of the call is the reconcile's: revoke leo's membership just before it, after the gate passed.
+    const racing = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key === '$transaction' && !revoked) {
+          return async (...a: unknown[]) => {
+            revoked = true;
+            await db.orgMember.deleteMany({ where: { organizationId: orgId, userId: leo } });
+            return (target.$transaction as (...x: unknown[]) => unknown)(...a);
+          };
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    expect(await refusal(report({ ...person(leo), db: racing } as Context))).toBe('NODE_NOT_FOUND');
+    expect(revoked).toBe(true);
+    expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).revSeq).toBe(1);
+    expect(await reportCount()).toBe(0);
+  });
+
   it('BAD_USER_INPUT for malformed arguments, before any read', async () => {
     expect(await refusal(report(person(stranger), { runId: ' padded ' }))).toBe('BAD_USER_INPUT');
     expect(await refusal(report(person(stranger), { runId: 'x'.repeat(201) }))).toBe('BAD_USER_INPUT');
@@ -383,6 +410,12 @@ describe('#1332 mutant pins (every reporter id, every broken-task shape, imperso
     expect((await inTx({ kind: 'APP_KEY', appKeyId: 'key-a' }, 'm2')).replayed).toBe(true);
     expect(await refusal(inTx({ kind: 'APP_KEY', appKeyId: 'key-b' }, 'm2'))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
     expect(await reportCount()).toBe(2);
+  });
+
+  it('#1162: a WORKER reporter naming no Worker is refused by the reference fence and writes nothing', async () => {
+    const error = await inTx({ kind: 'WORKER', workerId: 'no-such-worker', agentId: null }).then(() => null, (e: unknown) => e);
+    expect((error as GraphQLError).extensions?.code).toBe('WORKER_REFERENCE_NOT_FOUND');
+    expect(await reportCount()).toBe(0);
   });
 
   it('a task in a deleted memory, or no longer runnable, is broken: refused, nothing written', async () => {

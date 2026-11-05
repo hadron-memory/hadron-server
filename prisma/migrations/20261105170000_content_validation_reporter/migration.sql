@@ -62,3 +62,10 @@ DROP TRIGGER IF EXISTS node_content_validation_reports_immutable ON "node_conten
 CREATE TRIGGER node_content_validation_reports_immutable
   BEFORE UPDATE ON "node_content_validation_reports"
   FOR EACH ROW EXECUTE FUNCTION hadron_node_content_validation_report_immutable();
+
+-- #1162: a WORKER reporter is a typed Worker reference, under the same writer fence as every
+-- other one. A new report must name a Worker that exists; an existing report keeps its id after
+-- the Worker is deleted (the fence compares identity sets, so a retained id is legal).
+DROP TRIGGER IF EXISTS worker_reference_fence_1162 ON "node_content_validation_reports";
+CREATE TRIGGER worker_reference_fence_1162 AFTER INSERT OR UPDATE ON "node_content_validation_reports"
+  FOR EACH ROW EXECUTE FUNCTION worker_reference_fence_1162('w:$.reporter_worker_id');

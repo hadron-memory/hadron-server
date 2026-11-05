@@ -582,8 +582,6 @@ ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_nod
 ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
   CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
 
--- #1332: the report's author check and server-derived reporter (shape + append-only).
-\ir content-validation-report-invariants.sql
 
 -- Preserve a pre-existing drift mismatch when widening the fingerprint. On a
 -- fresh DB the old function is absent, so there is no old hash to translate.
@@ -856,6 +854,10 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
+
+-- #1332: the report's author check and server-derived reporter (shape, append-only, and its
+-- worker fence: after the #1162 fence function).
+\ir content-validation-report-invariants.sql
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql

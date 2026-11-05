@@ -14,7 +14,7 @@ import type { Context } from './resolvers.helpers.js';
 import { isMemoryHiddenForWrite, isMemoryReadableCached, memoryWriteForbidden, requireMemoryWriteAccess } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveContentValidation, resolveNodeUrnField } from './resolvers.types.js';
-import { withAuthorizedMemoryTx } from './authorizedTx.js';
+import { liveReadSnapshotContext, liveTxContext, withAuthorizedMemoryTx } from './authorizedTx.js';
 import { memoryAuthorityAnchors } from './installMemory.js';
 import { NodeNotFoundError } from '../../../lib/entityRef/errors.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
@@ -90,8 +90,13 @@ export const contentValidationReportMutations = {
     await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
     const reporter = await deriveReporter(ctx.db, ctx);
     // Settle a raw writer's unrecorded change first, so the current revision and its stamp
-    // are the reconciled ones (the transaction refuses a writer that races this).
-    await withReconciledNodeRead(ctx.db, nodeId, memoryId, async () => true, async () => null);
+    // are the reconciled ones (the transaction refuses a writer that races this). Like every
+    // reconciling read, readability is re-checked inside the fence, after any wait: a caller
+    // who lost access since the gate above publishes nothing and gets the not-found.
+    const settled = await withReconciledNodeRead(ctx.db, nodeId, memoryId,
+      async (tx, mayReconcile) => isMemoryReadableCached(await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx), memoryId),
+      async () => true);
+    if (!settled) throw nodeNotFound(args.nodeRef);
     const authorityAnchors = await memoryAuthorityAnchors(ctx.db, ctx, memoryId);
     const record = () => withAuthorizedMemoryTx(
       ctx, memoryId, authorityAnchors,
