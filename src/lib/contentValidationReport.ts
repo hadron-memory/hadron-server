@@ -195,6 +195,11 @@ export interface ContentValidationReportInput {
   outcome: NodeContentValidationOutcome;
   runId: string | null;
   reporter: ContentValidationReporter;
+  /**
+   * Whether the caller may read the task's memory. Consulted only to choose between WRONG_TASK
+   * and TASK_REVISION_INVALID; absent means unreadable (fail closed).
+   */
+  canReadTaskMemory?: (memoryId: string) => Promise<boolean>;
 }
 
 export interface ContentValidationReportResult {
@@ -254,7 +259,7 @@ export async function recordContentValidationReportInTx(
   const taskIds = [...new Set(rules.flatMap((rule) => (rule.validationTaskId ? [rule.validationTaskId] : [])))];
   const tasks = await tx.node.findMany({
     where: { id: { in: taskIds } },
-    select: { id: true, loc: true, revSeq: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } },
+    select: { id: true, loc: true, memoryId: true, revSeq: true, isRunnable: true, deletedAt: true, memory: { select: { urn: true, deletedAt: true } } },
   });
   const byId = new Map(tasks.map((task) => [task.id, task]));
   for (const rule of rules) {
@@ -266,7 +271,12 @@ export async function recordContentValidationReportInTx(
   }
   const task = tasks.find((t) => input.validationTaskRef === t.id || input.validationTaskRef === safeNodeUrnV2(t.memory.urn, t.loc));
   if (!task) throw new ContentValidationRefusal('CONTENT_VALIDATION_WRONG_TASK');
-  if (input.validationTaskRevision > task.revSeq) throw new ContentValidationRefusal('CONTENT_VALIDATION_TASK_REVISION_INVALID');
+  if (input.validationTaskRevision > task.revSeq) {
+    // A caller who cannot read the task learns nothing from the refusal: not which task the rule
+    // names, nor its current revision (Vera's P3-1 reading, Proposed in cor:dmo:160:01 r4).
+    const readable = input.canReadTaskMemory ? await input.canReadTaskMemory(task.memoryId) : false;
+    throw new ContentValidationRefusal(readable ? 'CONTENT_VALIDATION_TASK_REVISION_INVALID' : 'CONTENT_VALIDATION_WRONG_TASK');
+  }
 
   // 4. The author of R. The current revision's stamp is on the locked row; an older one is on
   // its snapshot (a snapshot captures the pre-edit state at its number). A snapshot pruned past

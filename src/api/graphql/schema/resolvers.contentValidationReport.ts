@@ -136,6 +136,7 @@ export async function recordContentValidationReport(
         nodeId, memoryId, nodeRevision: args.nodeRevision,
         validationTaskRef: args.validationTaskRef, validationTaskRevision: args.validationTaskRevision,
         outcome: args.outcome, runId, reporter,
+        canReadTaskMemory: (taskMemoryId) => isMemoryReadableCached(ctx, taskMemoryId),
       }),
     );
     let result;
