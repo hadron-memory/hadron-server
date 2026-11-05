@@ -65,7 +65,7 @@ import {
   canSeeUserPersonalFields,
   canSeeOrgMemberRole,
 } from '../../../lib/auth/userVisibility.js';
-import { Prisma, type AgentVisibility, type NodeContentValidationOutcome } from '../../../generated/prisma/index.js';
+import { Prisma, type AgentVisibility, type NodeContentValidationAuthorCheck, type NodeContentValidationOutcome } from '../../../generated/prisma/index.js';
 import {
   deserializeTags,
   deserializeJson,
@@ -751,7 +751,7 @@ function revisionStateMatchesWithoutAuthorship(parent: SnapshotSourceNode, curre
   );
 }
 
-async function resolveContentValidation(
+export async function resolveContentValidation(
   state: { id?: string; nodeId?: string; memoryId?: string | null; revSeq?: number; revNo?: number | null },
   ctx: Context,
 ) {
@@ -778,6 +778,7 @@ async function resolveContentValidation(
       validationTaskRevision: taskRef ? report.validationTaskRevSeq : null,
       outcome: report.outcome,
       reportedAt: report.reportedAt,
+      authorCheck: report.authorCheck,
     },
   };
 }
@@ -789,6 +790,7 @@ type ValidationReportRow = {
   validationTaskRevSeq: number;
   outcome: NodeContentValidationOutcome;
   reportedAt: Date;
+  authorCheck: NodeContentValidationAuthorCheck | null;
 };
 type ValidationLookup = { report: ValidationReportRow | null; taskRef: string | null };
 type PendingValidation = {
@@ -840,10 +842,10 @@ async function flushValidationBatch(
       SELECT w.request_key AS "requestKey", r.node_rev_seq AS "nodeRevSeq",
              r.validation_task_id AS "validationTaskId",
              r.validation_task_rev_seq AS "validationTaskRevSeq", r.outcome,
-             r.reported_at AS "reportedAt"
+             r.reported_at AS "reportedAt", r.author_check AS "authorCheck"
       FROM wanted w
       JOIN LATERAL (
-        SELECT node_rev_seq, validation_task_id, validation_task_rev_seq, outcome, reported_at
+        SELECT node_rev_seq, validation_task_id, validation_task_rev_seq, outcome, reported_at, author_check
         FROM node_content_validation_reports
         WHERE node_id = w.node_id AND memory_id = w.memory_id AND node_rev_seq <= w.rev_seq
         ORDER BY node_rev_seq DESC, reported_at DESC, id DESC

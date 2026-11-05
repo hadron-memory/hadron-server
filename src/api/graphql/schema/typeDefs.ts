@@ -2084,12 +2084,26 @@ export const typeDefs = `#graphql
 
   enum NodeContentValidationOutcome { PASS FAIL ERROR }
   enum NodeContentValidationState { UNVALIDATED STALE PASS FAIL ERROR }
+  "#1332 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — CHECKED: R's recorded author was compared with the reporter and differs, never a claim of independence. AUTHOR_UNKNOWN: there was nothing recorded to compare."
+  enum NodeContentValidationAuthorCheck { CHECKED AUTHOR_UNKNOWN }
   type NodeContentValidationReport {
     nodeRevision: Int!
     validationTaskRef: String
     validationTaskRevision: Int
     outcome: NodeContentValidationOutcome!
     reportedAt: DateTime!
+    "#1332 — the author check made when the report was recorded. Null on a report recorded before #1332."
+    authorCheck: NodeContentValidationAuthorCheck
+  }
+  "#1332 — the answer of recordNodeContentValidationReport."
+  type NodeContentValidationReportReceipt {
+    "The node the report is about."
+    nodeId: ID!
+    "True when an earlier report with the same runId, from the same reporter, for the same node revision and task revision, was returned and nothing was written."
+    replayed: Boolean!
+    report: NodeContentValidationReport!
+    "The validation state of the node's current revision after this call. A report for an older revision leaves it UNVALIDATED or STALE."
+    state: NodeContentValidationState!
   }
   type NodeContentValidationStatus {
     state: NodeContentValidationState!
@@ -11563,6 +11577,23 @@ export const typeDefs = `#graphql
     cached session key.
     """
     approveNode(nodeRef: ID!, revision: Int): NodeApprovalReceipt!
+    """
+    #1332 (hrn:node:hadronmemory.com:specs:cor:dmo:160:01) — record the result of running the node's validation task on revision nodeRevision of the node. Advisory: it never edits the node or blocks a write, and a report for an older revision is stored as history without changing the current revision's state. validationTaskRef is the task the node's role rule names NOW (its id or node URN; read it from NodeRoleRule.validationTask) and validationTaskRevision the task revision that ran.
+
+    Any writer of the node's memory may record one except the author of nodeRevision, decided from its authorship stamp: for HUMAN, that person acting as themselves through any credential is refused (a worker they hold may report); for TASK, a headless run whose entry task is the author task is refused (another run is CHECKED; any other caller is AUTHOR_UNKNOWN); with no stamp every writer is AUTHOR_UNKNOWN. The reporter is derived by the server (a run, a worker session, a person by user id, or an App key), never from the request.
+
+    runId (1-200 characters) makes a retry idempotent: within this node in this memory, the same runId from the same reporter for the same nodeRevision and task revision returns the first report (replayed: true); any other use of it is CONTENT_VALIDATION_RUN_ID_CONFLICT, which carries nothing from the stored report.
+
+    Refusals, in order, each writing nothing: NODE_NOT_FOUND (unreadable or missing memory, missing node); FORBIDDEN (not a writer); CONTENT_VALIDATION_REPORTER_UNKNOWN; CONTENT_VALIDATION_NODE_REVISION_INVALID (newer than the current revision); CONTENT_VALIDATION_NOT_CONFIGURED (no validation task for the node's role); CONTENT_VALIDATION_TASK_BROKEN; CONTENT_VALIDATION_WRONG_TASK; CONTENT_VALIDATION_TASK_REVISION_INVALID (newer than the task's current revision); CONTENT_VALIDATION_REPORTER_IS_AUTHOR; CONTENT_VALIDATION_RUN_ID_CONFLICT. BAD_USER_INPUT for a malformed argument, and a retryable CONFLICT if the node changed during the call.
+    """
+    recordNodeContentValidationReport(
+      nodeRef: ID!
+      nodeRevision: Int!
+      validationTaskRef: ID!
+      validationTaskRevision: Int!
+      outcome: NodeContentValidationOutcome!
+      runId: String
+    ): NodeContentValidationReportReceipt!
     """
     #1632 (hrn:node:hadronmemory.com:specs:cor:dmo:130:03) — ask for a node's current content to be signed. Any reader of the node may ask, agents included; agents never sign. expectedRevision, when given, must still be current (REVISION_MISMATCH). signerRef names one signer (a user id); omitted, any writer of the memory may sign. Refusals: NODE_NOT_FOUND, ENCRYPTED_MEMORY_NOT_APPLICABLE, and (hrn:node:hadronmemory.com:specs:cor:dmo:130:02, Holger #10430) COMMENT_NOT_SIGNABLE, NODE_IS_PLACEHOLDER, REVISION_MISMATCH, SIGNER_NOT_FOUND, and (Holger #11094, #1904) SIGNER_NOT_A_WRITER when the named signer may not write the node's memory (checked again when they sign or decline). No call takes an assertion: the signer signs on the server-hosted ceremony page (S2b-2).
     """

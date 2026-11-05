@@ -582,6 +582,9 @@ ALTER TABLE "node_content_validation_reports" DROP CONSTRAINT IF EXISTS "chk_nod
 ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_validation_revisions_positive"
   CHECK ("node_rev_seq" > 0 AND "validation_task_rev_seq" > 0);
 
+-- #1332: the report's author check and server-derived reporter (shape + append-only).
+\ir content-validation-report-invariants.sql
+
 -- Preserve a pre-existing drift mismatch when widening the fingerprint. On a
 -- fresh DB the old function is absent, so there is no old hash to translate.
 CREATE TEMP TABLE node_revision_hash_before_1326 (id TEXT, stored_hash TEXT, old_actual_hash TEXT);

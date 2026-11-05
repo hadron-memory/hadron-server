@@ -44,6 +44,9 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   // like the actor ids above, and is not rewritten.
   ['worker_availability', 'set_by_user_id'],
   ['model_family_availability', 'set_by_user_id'],
+  // #1332 (cor:dmo:160:01): a PERSON reporter is the user, never the key, so the survivor's retry
+  // replays the report. Only the user id moves; run, worker, agent and App key ids stay.
+  ['node_content_validation_reports', 'reporter_user_id'],
 ];
 
 /**
