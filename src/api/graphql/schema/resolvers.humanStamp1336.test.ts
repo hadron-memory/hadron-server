@@ -169,7 +169,11 @@ describe('#1336 paired controls and read side', () => {
     await update('a', { content: 'by hand' }, portal());
     const current = await stored('a');
     const reader = { db, roles: [], userId } as Context;
-    expect((await typeResolvers.Node.authorship(current as never, null, reader))).toMatchObject({ kind: 'HUMAN', taskRef: null, taskRevision: null });
+    expect((await typeResolvers.Node.authorship(current as never, null, reader))).toMatchObject({
+      kind: 'HUMAN', taskRef: null, taskRevision: null, human: { handle: 'human-admin' },
+    });
+    // The person is the authenticated user, not any other reader-visible identity.
+    expect((await typeResolvers.Node.authorship(current as never, null, reader) as { human: { handle: string } }).human.handle).not.toBe('human-other');
     expect((await typeResolvers.Node.contentValidation(current as never, null, reader)).state).toBe('STALE');
   });
 });

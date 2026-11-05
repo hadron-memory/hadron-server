@@ -341,7 +341,7 @@ describe('#1328 races: the rulebook lock orders the check against a rule change'
       data: { id: generateId(), configId, role: 'guide', authorTaskId: taskId, authorTaskRequired: true },
     }).then(() => undefined));
     const judged = db.$transaction((tx) => judgeAuthoring(tx, memoryId, {
-      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, authoredChange: true,
+      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, mintHuman: true, authoredChange: true,
     }, attestedAuthoring(null)));
     await waitForLockWaitersOfType(db, 'advisory', 1);
     rule.release();

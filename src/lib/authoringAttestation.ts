@@ -116,7 +116,7 @@ export interface AuthoredWrite {
    * rather than authors (a node merge, D-2026-09-26-D) sets false: it keeps the
    * exemption from attestation but never names a person as the author.
    */
-  mintHuman?: boolean;
+  mintHuman: boolean;
 }
 
 export type AuthoringVerdict =
@@ -160,7 +160,7 @@ export async function judgeAuthoring(
   if (authoring.kind === 'trustedHuman') {
     // #1336: the only mint of a person's identity. The task and revision stay NULL:
     // the person did not attest to the required task (D-2026-09-24-004).
-    if (write.mintHuman === false) return NO_STAMP;
+    if (!write.mintHuman) return NO_STAMP;
     return {
       stamp: {
         authorshipKind: 'HUMAN',
