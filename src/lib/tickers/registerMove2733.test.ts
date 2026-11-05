@@ -7,6 +7,7 @@ import { computeDueWakes } from './dueWakes.js';
 import * as effectiveMemory from '../effectiveSystemMemory.js';
 import { canReadMemory } from '../../mcp/access-control.js';
 import { resolvers } from '../../api/graphql/schema/resolvers.js';
+import { RegisterData } from '../actionRegister/lookup.js';
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 afterEach(() => vi.restoreAllMocks());
@@ -51,16 +52,24 @@ it.each(['entry', 'task'])('keeps warning %s resolution inside its gated memory 
   const selected = kind === 'entry' ? entry : task;
   const memory = kind === 'entry' ? f.team.systemMemoryId : f.roleA.systemMemoryId;
   const loc = kind === 'entry' ? 'register:' + code : tickTaskLoc2733;
-  const original = effectiveMemory.findEffectiveNodeIdByLoc;
+  const move = () => runAsActor({ workerId: null, agentId: null, userId: f.admin.id }, () => (resolvers.Mutation as any).moveNode(null, { sourceRef: selected.id, targetMemoryRef: foreign.systemMemoryId }, f.context()));
   let moved = false;
-  vi.spyOn(effectiveMemory, 'findEffectiveNodeIdByLoc').mockImplementation(async (tx, memoryId, candidateLoc, inheritRoot) => {
-    const hit = await original(tx, memoryId, candidateLoc, inheritRoot);
-    if (!moved && memoryId === memory && candidateLoc === loc) {
-      moved = true;
-      await runAsActor({ workerId: null, agentId: null, userId: f.admin.id }, () => (resolvers.Mutation as any).moveNode(null, { sourceRef: selected.id, targetMemoryRef: foreign.systemMemoryId }, f.context()));
-    }
-    return hit;
-  });
+  if (kind === 'entry') {
+    // #3491: the entry is read through the shared lookup's rows, after the whole-chain gate. Move it into the hidden
+    // memory between that gate and the row read: the read must find nothing there, never the hidden copy.
+    const entryRow = RegisterData.prototype.entryRow;
+    vi.spyOn(RegisterData.prototype, 'entryRow').mockImplementation(async function (this: RegisterData, memoryId: string, rowCode: string) {
+      if (!moved && memoryId === memory && rowCode === code) { moved = true; await move(); }
+      return entryRow.call(this, memoryId, rowCode);
+    });
+  } else {
+    const original = effectiveMemory.findEffectiveNodeIdByLoc;
+    vi.spyOn(effectiveMemory, 'findEffectiveNodeIdByLoc').mockImplementation(async (tx, memoryId, candidateLoc, inheritRoot) => {
+      const hit = await original(tx, memoryId, candidateLoc, inheritRoot);
+      if (!moved && memoryId === memory && candidateLoc === loc) { moved = true; await move(); }
+      return hit;
+    });
+  }
   const out = await runAsActor({ workerId: w.id, agentId: f.roleA.id, userId: f.member.id }, () => resolveRegisters(f.context(f.member.id), f.app.id, [code]));
   expect(moved).toBe(true);
   expect((await db.node.findUniqueOrThrow({ where: { id: selected.id } })).memoryId).toBe(foreign.systemMemoryId);

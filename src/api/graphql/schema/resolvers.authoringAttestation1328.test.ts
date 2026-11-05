@@ -180,7 +180,7 @@ describe('#1328 a broken required task fails closed (H5)', () => {
 describe('#1328 trusted portal human', () => {
   it('the portal path writes without a claim and records no task', async () => {
     await create('a', {}, portal());
-    expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: null });
+    expect(await stored('a')).toMatchObject({ role: 'guide', authoredByTask: null, authorshipKind: 'HUMAN', authoredByHuman: userId }); // #1336
   });
 
   it('no write input carries a human flag', () => {
@@ -340,7 +340,7 @@ describe('#1328 races: the rulebook lock orders the check against a rule change'
       data: { id: generateId(), configId, role: 'guide', authorTaskId: taskId, authorTaskRequired: true },
     }).then(() => undefined));
     const judged = db.$transaction((tx) => judgeAuthoring(tx, memoryId, {
-      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, authoredChange: true,
+      priorRole: null, priorRunnable: null, role: 'guide', runnable: null, mintHuman: true, authoredChange: true,
     }, attestedAuthoring(null)));
     await waitForLockWaitersOfType(db, 'advisory', 1);
     rule.release();

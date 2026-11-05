@@ -19,7 +19,7 @@ vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.
 let n = 900;
 const mem = (urn: string, d: Record<string, unknown>) => db.memory.create({ data: { id: generateId(), urn, name: urn, ...d } as never });
 const user = (h: string) => db.user.create({ data: { githubId: n++, githubUsername: h, handle: h } });
-const write = { priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, authoredChange: true };
+const write = { priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, mintHuman: true, authoredChange: true };
 
 describe('#1329 the MCP refusal and the MCP read', () => {
   let dest: string;
@@ -89,7 +89,7 @@ describe('#1329 the MCP refusal and the MCP read', () => {
     const task = await db.node.findFirstOrThrow({ where: { memoryId: taskMemoryId, loc: 'task' } });
     await db.nodeRoleRule.deleteMany({ where: { configId } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'guide', authorTaskId: task.id, authorTaskRequired: true } });
-    return db.$transaction((tx) => judgeAuthoring(tx, dest, write as never, attestedAuthoring(ctx, null, 'mcp')));
+    return db.$transaction((tx) => judgeAuthoring(tx, dest, write, attestedAuthoring(ctx, null, 'mcp')));
   };
 
   it('READABLE on MCP exactly where the MCP read gate admits, on every principal and memory', async () => {

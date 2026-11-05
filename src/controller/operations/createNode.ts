@@ -110,7 +110,7 @@ const createNodeAsSystem = async (
       // before its revision. Its callers write a new memory's root, which has no rule.
       await assertAuthoring(tx, node.memoryId, {
         priorRole: existing.role, priorRunnable: existing.isRunnable,
-        role: existing.role, runnable: existing.isRunnable, authoredChange: authoredEdit,
+        role: existing.role, runnable: existing.isRunnable, mintHuman: true, authoredChange: authoredEdit,
       }, attestedAuthoring(null));
       // An identical re-save is not a revision (@codex P2, PR #1339): a
       // snapshot here would manufacture history on every idempotent save and

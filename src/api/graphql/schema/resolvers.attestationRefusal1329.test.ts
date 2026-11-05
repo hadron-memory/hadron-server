@@ -31,7 +31,7 @@ const refusal = async (promise: Promise<unknown>) => {
 };
 const judge = (reader: Context | null, write: Partial<Parameters<typeof judgeAuthoring>[2]>) =>
   db.$transaction((tx) => judgeAuthoring(tx, memoryId, {
-    priorRole: null, priorRunnable: null, role: 'guide', runnable: false, authoredChange: true, ...write,
+    priorRole: null, priorRunnable: null, role: 'guide', runnable: false, mintHuman: true, authoredChange: true, ...write,
   }, attestedAuthoring(reader)));
 
 beforeEach(async () => {

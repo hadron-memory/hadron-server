@@ -4366,7 +4366,7 @@ export function createMcpServerInstance(
             // (`findings:parent-node-upsert-is-authoring`).
             sectionStamp = await assertAuthoring(tx, memoryId, {
               priorRole: current.role, priorRunnable: current.isRunnable,
-              role: current.role, runnable: current.isRunnable, authoredChange: sectionChanged,
+              role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
             }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
@@ -6717,7 +6717,7 @@ export function createMcpServerInstance(
             priorRole: pre?.role ?? null, priorRunnable: pre?.isRunnable ?? null,
             role: role === undefined ? (pre?.role ?? null) : role,
             runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
-            authoredChange: true,
+            mintHuman: true, authoredChange: true,
           }, attestedAuthoring(recoveryCtx(), authoredWith));
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
@@ -7180,7 +7180,7 @@ export function createMcpServerInstance(
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: role === undefined ? current.role : role,
               runnable: mergedGovernedState(current, { role, isRunnable }).isRunnable,
-              authoredChange,
+              mintHuman: true, authoredChange,
             }, attestedAuthoring(recoveryCtx(), authoredWith));
             await createNodeRevision(tx, {
               id: generateId(),
@@ -8291,7 +8291,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 // #1328 — the name is authored; the address is not.
                 const renameStamp = await assertRenameAuthoring(tx, fromMemory.id, toMemory.id, {
                   priorRole: locked.role, priorRunnable: locked.isRunnable,
-                  role: locked.role, runnable: locked.isRunnable, authoredChange: true,
+                  role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: true,
                 }, attestedAuthoring(recoveryCtx(), authoredWith));
                 await createNodeRevision(tx, {
                   id: generateId(),

@@ -1426,7 +1426,7 @@ export const chatMutations = {
           const authoredChange = authoredContentChanged(diffNodeChanges({ data: existingData }, { data: merged }));
           const stamp = await assertAuthoring(tx, chatNode.memoryId, {
             priorRole: dataNode.role, priorRunnable: dataNode.isRunnable,
-            role: dataNode.role, runnable: dataNode.isRunnable, authoredChange,
+            role: dataNode.role, runnable: dataNode.isRunnable, mintHuman: true, authoredChange,
           }, attestedAuthoring(ctx));
           // Nothing changed, so nothing is written. Rewriting would re-encrypt
           // an encrypted row, and fresh ciphertext reads as drift that clears the stamp.

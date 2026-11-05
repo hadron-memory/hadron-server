@@ -402,7 +402,7 @@ describe('#1329 an author task the run reads through its grant', () => {
     // The shared gate admits this memory, which is why the run's own read has to decide.
     expect(await isMemoryReadableFresh(principal, elsewhere.id)).toBe(true);
     const judged = (claim: { task: string; revision: number } | null) => db.$transaction((tx) => judgeAuthoring(tx, dest.id, {
-      priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, authoredChange: true,
+      priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, mintHuman: true, authoredChange: true,
     }, runAuthoring(principal, r, claim)));
     const unavailable = { refused: 'AUTHOR_TASK_BROKEN', recovery: { taskAccess: 'UNAVAILABLE', task: null, taskId: null } };
     expect(await judged(null)).toMatchObject(unavailable);

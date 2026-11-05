@@ -212,6 +212,12 @@ export interface AuthoredWrite {
   runnable: boolean | null | undefined;
   /** Whether the write changes authored state: a create, or an edit by `authoredContentChanged`. */
   authoredChange: boolean;
+  /**
+   * #1336: a trusted portal human's authoring write records HUMAN. A site that FOLDS
+   * rather than authors (a node merge, D-2026-09-26-D) sets false: it keeps the
+   * exemption from attestation but never names a person as the author.
+   */
+  mintHuman: boolean;
 }
 
 export type AuthoringVerdict =
@@ -255,7 +261,22 @@ export async function judgeAuthoring(
   write: AuthoredWrite,
   authoring: AuthoringContext,
 ): Promise<AuthoringVerdict> {
-  if (authoring.kind !== 'attested' || !write.authoredChange) return NO_STAMP;
+  if (!write.authoredChange) return NO_STAMP;
+  if (authoring.kind === 'trustedHuman') {
+    // #1336: the only mint of a person's identity. The task and revision stay NULL:
+    // the person did not attest to the required task (D-2026-09-24-004).
+    if (!write.mintHuman) return NO_STAMP;
+    return {
+      stamp: {
+        authorshipKind: 'HUMAN',
+        authoredByTask: null,
+        authoredByRevision: null,
+        authoredByHuman: authoring.authenticatedUserId,
+        authoredAt: new Date(),
+      },
+    };
+  }
+  if (authoring.kind !== 'attested') return NO_STAMP;
   if (ruleKeysOf(write.role, write.runnable).length === 0 && ruleKeysOf(write.priorRole, write.priorRunnable).length === 0) {
     return NO_STAMP;
   }
