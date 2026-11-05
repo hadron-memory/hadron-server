@@ -9,12 +9,12 @@
  * installed Agent's own system memory) refuses it, so only the grant can admit it. The system-memory cases
  * (who may give, the live installed check) name the second Agent's system memory explicitly.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
-import { runHoldsReadGrant } from '../../../lib/automationReadGrant.js';
+import { runHoldsReadGrant, rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
 import { hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
@@ -359,8 +359,8 @@ describe('audit', () => {
 
 describe('#3275 read-grant follow-up pins', () => {
   async function workerContext() {
-    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: f.app.id, agentId: f.first.id, name: 'Worker3275', slug: 'worker3275' } });
-    const session = await db.session.create({ data: { appId: f.app.id, userId: f.admin.id, agentId: f.first.id, workerId: worker.id } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: f.app.id, agentId: f.first.id, name: 'Worker3275', slug: 'worker3275', heldByUserId: f.admin.id, heldAt: new Date() } });
+    const session = await db.session.create({ data: { id: generateId(), appId: f.app.id, userId: f.admin.id, agentId: f.first.id, workerId: worker.id } });
     return { ...f.adminCtx, sessionId: session.id };
   }
   it('A3: an approval lists only its own trigger kind/id/App live rows', async () => {
@@ -404,6 +404,30 @@ describe('#3275 read-grant follow-up pins', () => {
     await give(uctx(user.id), { memoryRef: target.id, prefix: 'tasks:report' });
     for (const loc of ['tasks:report', 'tasks:report:child']) expect(await readAs(r, target.urn, loc)).toMatchObject({ content: `body of ${loc}` });
     for (const loc of ['tasks:reportX', 'other:x']) await expect(readAs(r, target.urn, loc)).rejects.toThrow('Flow memory not found');
+  });
+  it('measures uncached lineage reads before introducing any cache', async () => {
+    const root = await run('SCHEDULE', f.s1.id);
+    let current = root;
+    const samples = [];
+    for (let depth = 1; depth <= 64; depth++) {
+      if (depth > 1) current = await run('SPAWN', null, current.id);
+      if (![1, 4, 16, 64].includes(depth)) continue;
+      const lookup = vi.spyOn(db.appRun, 'findUnique');
+      try {
+        const start = performance.now();
+        expect(await rootTriggerOfRun(db, current.id)).toEqual({ kind: 'SCHEDULE', id: f.s1.id });
+        samples.push({ depth, runReads: lookup.mock.calls.length, elapsedMs: performance.now() - start });
+        expect(lookup).toHaveBeenCalledTimes(depth);
+      } finally { lookup.mockRestore(); }
+    }
+    console.info('#3275 synthetic local lineage measurements (not a production bound)', samples);
+  });
+  it('an unexpected lookup fault containing URN is not concealed as an empty list', async () => {
+    const fault = new Error('URN storage failed');
+    const lookup = vi.spyOn(db.memory, 'findFirst').mockRejectedValueOnce(fault);
+    try {
+      await expect(Q.automationReadGrants({}, { memoryRef: f.know.id }, f.adminCtx)).rejects.toBe(fault);
+    } finally { lookup.mockRestore(); }
   });
   it('MCP give/list/revoke wrappers reach the same live grant and terminal state', async () => {
     const mcp = createTestableMcpServer({ userId: f.admin.id, roles: ['READER'], clientId: `user:${f.admin.id}` });
