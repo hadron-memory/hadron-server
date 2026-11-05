@@ -24,12 +24,17 @@
  * that fails closed on first use. All-or-nothing per memory.
  *
  * dryRun computes the same report under the same checks and writes nothing.
+ *
+ * #1334 bulk slice — `applyMemoryConfigTemplateToMemories` runs this SAME per-target body (`applyToTarget`) over up
+ * to BULK_APPLY_MAX_TARGETS memories, one transaction per target, one after another. The singular mutation calls the
+ * same function, so the two cannot drift. See `applyMemoryConfigTemplateToMemories` for the report boundary.
  */
 
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplateRule, type NodeRoleRule } from '../../../generated/prisma/index.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
 import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
+import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../../lib/internalFault.js';
 import { generateId } from '../../../lib/id.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import {
@@ -119,9 +124,23 @@ export async function applyMemoryConfigTemplate(
   args: { templateRef: string; memoryRef: string; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
 ): Promise<ApplyResult> {
   const actor = requireWriter(ctx);
-  const dryRun = args.dryRun === true;
   const memory = await managedMemory(ctx, args.memoryRef);
   const template = await managedTemplate(ctx, args.templateRef);
+  return applyToTarget(ctx, actor, memory, template, args);
+}
+
+/**
+ * One target's apply, from the pre-checked memory and template: the unchanged slice-1 transaction. The singular
+ * mutation and every bulk target run exactly this.
+ */
+async function applyToTarget(
+  ctx: Context,
+  actor: string,
+  memory: { id: string },
+  template: { id: string; ownerUserId: string | null; appId: string | null },
+  args: { templateRef: string; memoryRef: string; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
+): Promise<ApplyResult> {
+  const dryRun = args.dryRun === true;
   const notFoundTemplate = () => new MemoryConfigTemplateNotFoundError(args.templateRef);
 
   try {
@@ -292,10 +311,124 @@ export async function applyMemoryConfigTemplate(
   }
 }
 
+/** The most memories one bulk call may name (#1334, Vera's recommended value; cor:api:040:02 analog). */
+export const BULK_APPLY_MAX_TARGETS = 50;
+
+export interface BulkApplyError {
+  code: string;
+  message: string;
+  currentRevision: number | null;
+  requestId: string | null;
+}
+export interface BulkApplyEntry {
+  index: number;
+  memoryRef: string;
+  ok: boolean;
+  result: ApplyResult | null;
+  error: BulkApplyError | null;
+}
+
+/** The typed refusals a single target's apply can raise; anything else is a fault and is sanitized. */
+const TARGET_REFUSALS = new Set(['CONFLICT', 'NODE_NOT_FOUND', 'NOT_A_TASK', 'NODE_ROLE_RULE_REF_BROKEN', 'BAD_USER_INPUT']);
+
+function badInput(message: string): GraphQLError {
+  return new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
+}
+
+/**
+ * One target's failure as a report entry. A not-found message is built from the ref the caller typed and nothing
+ * else, so a missing memory and one the caller cannot manage are byte-identical. A typed refusal keeps its code; an
+ * unknown error is logged under a request id and shows only the generic envelope, never driver text.
+ */
+function toEntryError(e: unknown): BulkApplyError {
+  if (e instanceof MemoryNotFoundError || e instanceof MemoryConfigTemplateNotFoundError) {
+    return { code: e.code, message: e.message, currentRevision: null, requestId: null };
+  }
+  if (e instanceof GraphQLError) {
+    const code = e.extensions?.code;
+    if (typeof code === 'string' && TARGET_REFUSALS.has(code)) {
+      const rev = e.extensions?.currentRevision;
+      return { code, message: e.message, currentRevision: typeof rev === 'number' ? rev : null, requestId: null };
+    }
+  }
+  if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+    return { code: 'CONFLICT', message: "The memory's config changed while the template was being applied; retry.", currentRevision: null, requestId: null };
+  }
+  const requestId = faultRequestId();
+  logInternalFault('graphql', 'applyMemoryConfigTemplateToMemories', requestId, e);
+  return { code: INTERNAL_ERROR_CODE, message: INTERNAL_ERROR_MESSAGE, currentRevision: null, requestId };
+}
+
+/**
+ * Apply one template to a list of memories (#1334 bulk slice; contract: Vera's FIT 6416599124 + Xylon's fixes).
+ *
+ * Boundary: the CALL is refused before any write for a bad list (empty, blank, over the cap), an unknown or
+ * unmanageable template, or a stale expectedTemplateRevision. After that every target is its own atomic transaction
+ * (the singular body, unchanged), processed in input order with no lock held across targets, so one target's failure
+ * never rolls another back and a committed target stays committed. There is no snapshot of the template across the
+ * call: each success reports the templateRevision its own transaction saw, and expectedTemplateRevision is judged
+ * again inside every target. MANAGE on the template and the memory is asked fresh per target (no request memos).
+ *
+ * Duplicates are judged on the RESOLVED id and only AFTER the manage gate, so DUPLICATE_TARGET is only ever said
+ * about a memory the caller manages; the first occurrence consumes the slot even if its apply fails.
+ */
+export async function applyMemoryConfigTemplateToMemories(
+  ctx: Context,
+  args: { templateRef: string; memoryRefs: string[]; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
+): Promise<{ dryRun: boolean; results: BulkApplyEntry[]; succeeded: number; failed: number }> {
+  const actor = requireWriter(ctx);
+  const refs = args.memoryRefs;
+  if (!Array.isArray(refs) || refs.length === 0) throw badInput('Name at least one memory.');
+  if (refs.some((r) => typeof r !== 'string' || r.trim() === '')) throw badInput('A memory reference cannot be blank.');
+  if (refs.length > BULK_APPLY_MAX_TARGETS) {
+    throw new GraphQLError(`One call applies a template to at most ${BULK_APPLY_MAX_TARGETS} memories; this one names ${refs.length}.`, {
+      extensions: { code: 'BULK_TARGETS_TOO_MANY', max: BULK_APPLY_MAX_TARGETS, count: refs.length },
+    });
+  }
+  const dryRun = args.dryRun === true;
+  // Resolved before any target, so a template the caller cannot manage can never act as a target oracle.
+  const first = await managedTemplate(ctx, args.templateRef);
+  if (args.expectedTemplateRevision != null && first.revision !== args.expectedTemplateRevision) {
+    throw conflict(first.revision, 'template');
+  }
+
+  const seen = new Set<string>();
+  const results: BulkApplyEntry[] = [];
+  for (let index = 0; index < refs.length; index += 1) {
+    const memoryRef = refs[index]!;
+    try {
+      const fresh = withoutRequestCaches(ctx);
+      const memory = await managedMemory(fresh, memoryRef);
+      if (seen.has(memory.id)) {
+        results.push({
+          index, memoryRef, ok: false, result: null,
+          error: { code: 'DUPLICATE_TARGET', message: 'This memory was already named earlier in the list.', currentRevision: null, requestId: null },
+        });
+        continue;
+      }
+      seen.add(memory.id);
+      const template = await managedTemplate(fresh, args.templateRef);
+      const result = await applyToTarget(fresh, actor, memory, template, {
+        templateRef: args.templateRef, memoryRef, expectedTemplateRevision: args.expectedTemplateRevision, dryRun,
+      });
+      results.push({ index, memoryRef, ok: true, result, error: null });
+    } catch (e) {
+      results.push({ index, memoryRef, ok: false, result: null, error: toEntryError(e) });
+    }
+  }
+  const succeeded = results.filter((r) => r.ok).length;
+  return { dryRun, results, succeeded, failed: results.length - succeeded };
+}
+
 export const memoryConfigApplyMutations = {
   applyMemoryConfigTemplate: (
     _: unknown,
     args: { templateRef: string; memoryRef: string; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
     ctx: Context,
   ) => applyMemoryConfigTemplate(ctx, args),
+  applyMemoryConfigTemplateToMemories: (
+    _: unknown,
+    args: { templateRef: string; memoryRefs: string[]; expectedTemplateRevision?: number | null; dryRun?: boolean | null },
+    ctx: Context,
+  ) => applyMemoryConfigTemplateToMemories(ctx, args),
 };
