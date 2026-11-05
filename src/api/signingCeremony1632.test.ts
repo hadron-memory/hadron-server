@@ -14,6 +14,8 @@
  */
 import { lineDiff } from '../lib/signing/lineDiff.js';
 import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
+import * as urnEmit from '../lib/urnEmit.js';
 import { createServer as httpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -137,6 +139,32 @@ function signingBody(p: Proved, key: SoftPasskey, over: { uv?: boolean; origin?:
 
 const FORBIDDEN = '{"error":"forbidden"}';
 
+/** Execute the served renderer with the proven HTTP response; transport/auth are exercised above it. */
+async function renderedProof(requestId: string, proof: unknown) {
+  type Element = { tag: string; textContent: string; children: Element[]; hidden: boolean;
+    listeners: Record<string, () => Promise<void>>; appendChild: (child: Element) => void;
+    replaceChildren: (...children: Element[]) => void; addEventListener: (event: string, fn: () => Promise<void>) => void; focus: () => void };
+  const make = (tag: string): Element => {
+    const e: Element = { tag, textContent: '', children: [], hidden: false, listeners: {},
+      appendChild: child => { e.children.push(child); }, replaceChildren: (...children) => { e.children = children; },
+      addEventListener: (event, fn) => { e.listeners[event] = fn; }, focus: () => undefined };
+    return e;
+  };
+  const ids = Object.fromEntries(['title', 'msg', 'view', 'start', 'go'].map(id => [id, make(id)]));
+  const document = { getElementById: (id: string) => ids[id], createElement: make,
+    createTextNode: (text: string) => Object.assign(make('#text'), { textContent: text }), title: '' };
+  const responses = [{ ceremonyId: 'proof', challenge: 'AA', rpId: RP }, proof];
+  const script = await (await fetch(`${base}/signing/ceremony.js`)).text();
+  runInNewContext(script, { document, location: { pathname: `/signing/${requestId}` },
+    fetch: async () => ({ ok: true, json: async () => responses.shift() }),
+    navigator: { credentials: { get: async () => ({ rawId: new Uint8Array([1]), response: {
+      authenticatorData: new Uint8Array([1]), clientDataJSON: new Uint8Array([1]), signature: new Uint8Array([1]) } }) } },
+    window: { PublicKeyCredential: function () {} }, btoa, atob, Uint8Array, JSON, Date, Error });
+  await ids.go.listeners.click();
+  const texts = (e: Element): string[] => [e.textContent, ...e.children.flatMap(texts)];
+  return { ids, texts };
+}
+
 describe('the surface is mounted only through signingSurfacePolicy()', () => {
   it('is an ordinary 404 while the switch is off, byte-identical to a path that never existed', async () => {
     const req = await openRequest();
@@ -208,6 +236,57 @@ describe('a link alone reveals nothing (cor:dmo:130:08)', () => {
     expect(cookie).toMatch(/HttpOnly/i);
     expect(cookie).toMatch(/SameSite=Strict/i);
     expect(cookie).toMatch(/Path=\/signing/i);
+  });
+});
+
+describe('#3121 canonical node identity is post-proof only', () => {
+  const expectedUrn = async () => urnEmit.emitNodeUrnV2((await db.memory.findUniqueOrThrow({ where: { id: memoryId } })).urn, 'policies:retention');
+
+  it('shows the canonical URN in Exactly what you are signing after a real proof', async () => {
+    const req = await openRequest();
+    const p = await prove(req.id, signer);
+    expect(p.status).toBe(200);
+    expect(p.json.view.node.urn).toBe(await expectedUrn());
+    const { ids, texts } = await renderedProof(req.id, p.json);
+    const what = ids.view.children.find(section => texts(section).includes('Exactly what you are signing'));
+    expect(what).toBeDefined();
+    expect(texts(what!)).toContain(await expectedUrn());
+  });
+
+  it('uses emitNodeUrnV2 for the displayed identity, not hand-built URN text', async () => {
+    const req = await openRequest();
+    const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
+    const original = urnEmit.emitNodeUrnV2;
+    const emitted = original(memory.urn, 'emitter:sentinel');
+    const spy = vi.spyOn(urnEmit, 'emitNodeUrnV2').mockImplementation((mem, loc) =>
+      mem === memory.urn && loc === 'policies:retention' ? emitted : original(mem, loc));
+    try {
+      const p = await prove(req.id, signer);
+      expect(spy).toHaveBeenCalledWith(memory.urn, 'policies:retention');
+      expect(p.json.view.node.urn).toBe(emitted);
+      const { ids, texts } = await renderedProof(req.id, p.json);
+      expect(texts(ids.view)).toContain(emitted);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('no response to an unproved caller carries the node URN', async () => {
+    const req = await openRequest();
+    const urn = await expectedUrn();
+    for (const path of [`/signing/${req.id}`, '/signing/ceremony.js']) {
+      expect(await (await fetch(base + path)).text()).not.toContain(urn);
+    }
+    const challenge = await post(req.id, 'proof/challenge', {});
+    expect(challenge.status).toBe(200);
+    const cookie = (challenge.headers.get('set-cookie') ?? '').split(';')[0];
+    expect(await challenge.text()).not.toContain(urn);
+    for (const path of ['proof', 'challenge', 'complete', 'decline']) {
+      const response = await post(req.id, path, {}, cookie);
+      expect(response.status, path).toBe(403);
+      expect(await response.text(), path).toBe(FORBIDDEN);
+    }
+    const denied = await prove(req.id, outsider);
+    expect(denied.json).toEqual({ error: 'forbidden' });
+    expect(JSON.stringify(denied.json)).not.toContain(urn);
   });
 });
 
