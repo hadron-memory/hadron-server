@@ -33,7 +33,9 @@
 import { GraphQLError } from 'graphql';
 import { Prisma, type MemoryConfigTemplateRule, type NodeRoleRule } from '../../../generated/prisma/index.js';
 import { type Context, withoutRequestCaches } from './resolvers.helpers.js';
-import { MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
+import { AmbiguousLegacyUrnError, MemoryNotFoundError } from '../../../lib/entityRef/errors.js';
+import { EntityNotFoundError } from '../../../lib/entityRef/entityNotFound.js';
+import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../../lib/internalFault.js';
 import { generateId } from '../../../lib/id.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
@@ -357,8 +359,19 @@ function isRetryableConflict(e: unknown): boolean {
  * unknown error is logged under a request id and shows only the generic envelope, never driver text.
  */
 function toEntryError(e: unknown): BulkApplyError {
-  if (e instanceof MemoryNotFoundError || e instanceof MemoryConfigTemplateNotFoundError) {
+  // A miss on a CALLER-SUPPLIED ref (a memory, the template, or a node a template rule points at) keeps its code, as
+  // formatError gives it on the singular path. AmbiguousLegacyUrnError is excluded on purpose: it is raised while a
+  // ref is resolved, before the manage gate, so naming it would tell a caller something about a memory it may not
+  // manage; it falls through to the generic fault.
+  if (e instanceof EntityNotFoundError && !(e instanceof AmbiguousLegacyUrnError)) {
     return { code: e.code, message: e.message, currentRevision: null, requestId: null };
+  }
+  // A malformed ref is a fact about the caller's own string, never about a stored row.
+  if (e instanceof UrnNotQualifiedError) {
+    return { code: 'URN_NOT_QUALIFIED', message: e.message, currentRevision: null, requestId: null };
+  }
+  if (e instanceof UrnParseError) {
+    return { code: 'BAD_USER_INPUT', message: e.message, currentRevision: null, requestId: null };
   }
   if (e instanceof GraphQLError) {
     const code = e.extensions?.code;

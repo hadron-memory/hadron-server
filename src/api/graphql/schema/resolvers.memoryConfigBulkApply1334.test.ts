@@ -354,11 +354,31 @@ describe('applyMemoryConfigTemplateToMemories: the world changes between targets
     expect(await rulesOf(m1.id)).toEqual([]);
   });
 
+  it('§10 P2: known refusals keep the code the singular mutation gives them (NODE_NOT_FOUND, URN_NOT_QUALIFIED), message free of stored ids', async () => {
+    const kb = await mkMemory(org.id, 'acme.com:kb');
+    const task = await db.node.create({ data: { id: generateId(), memoryId: kb.id, loc: 'tasks:author', name: 'Author', isRunnable: true } });
+    const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec', authorTaskRef: task.id }] });
+    await db.node.update({ where: { id: task.id }, data: { deletedAt: new Date() } });
+    const single = await gql(as(orgAdmin), SINGULAR, { t: t.id, m: m1.id });
+    expect(code(single)).toBe('NODE_NOT_FOUND');
+    const bad = await gql(as(orgAdmin), SINGULAR, { t: t.id, m: 'not-a-urn' });
+    expect(code(bad)).toBe('URN_NOT_QUALIFIED');
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const o = out(await bulk(as(orgAdmin), t.id, [m1.id, 'not-a-urn']));
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    expect(o.results.map((e) => e.error.code)).toEqual(['NODE_NOT_FOUND', 'URN_NOT_QUALIFIED']);
+    expect(JSON.stringify(o.results[0])).not.toContain(task.id);
+    expect(o.results.every((e) => e.error.requestId === null)).toBe(true);
+  });
+
   it('an unexpected error in one target is INTERNAL_SERVER_ERROR with no driver text; the others still commit', async () => {
     const t = await tpl(as(orgAdmin), 'ORGANIZATION', org.id, { name: 'base', rules: [{ role: 'spec' }] });
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     hooks.beforeTarget = async (n) => { if (n === 2) throw new Error('driver: relation "secret_table" violates something'); };
     const o = out(await bulk(as(orgAdmin), t.id, [m1.id, m2.id, m3.id]));
+    // The detail goes to the server log under the id the caller was shown.
+    expect(spy).toHaveBeenCalledWith('[graphql] internal_fault', expect.objectContaining({ requestId: o.results[1].error.requestId, site: 'applyMemoryConfigTemplateToMemories' }));
     spy.mockRestore();
     expect(o.results.map((e) => e.ok)).toEqual([true, false, true]);
     expect(o.results[1].error).toMatchObject({ code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error.', requestId: expect.any(String) });
