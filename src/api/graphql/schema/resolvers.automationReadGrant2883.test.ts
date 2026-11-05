@@ -15,7 +15,7 @@ import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/hel
 import { generateId } from '../../../lib/id.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { runHoldsReadGrant } from '../../../lib/automationReadGrant.js';
-import { hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
+import { hadronReadNode, hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -351,5 +351,44 @@ describe('audit', () => {
       await db.$executeRawUnsafe('DROP TRIGGER t_fail_ev_trg ON app_automation_read_grant_events');
       await db.$executeRawUnsafe('DROP FUNCTION t_fail_ev()');
     }
+  });
+});
+
+describe('#1329 an author task the run reads through its grant', () => {
+  const setUp = async () => {
+    const t = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'tasks:report', memoryId: f.know.id } } });
+    await db.node.update({ where: { id: t.id }, data: { isRunnable: true } });
+    const dest = await db.memory.create({ data: { id: generateId(), name: 'dest', urn: `${f.org.urn}:dest`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.org.id } });
+    await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: dest.id, prefix: 'reports', registerNodeUrn: 'hrn:node:example.com:register:grants' }, f.adminCtx);
+    await db.node.create({ data: { id: generateId(), memoryId: dest.id, loc: 'reports:a', name: 'a', content: 'initial', role: 'guide' } });
+    const cfg = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dest.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: cfg.id, role: 'guide', authorTaskId: t.id, authorTaskRequired: true } });
+    const r = await run('SCHEDULE', f.s1.id);
+    const principal = { db, appId: r.appId, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    const write = (authoredWith?: { task: string; revision: number }) => hadronUpdateNode.execute(
+      { db, run: r, principal, log: () => {} } as never,
+      { urn: `hrn:node:${dest.urn}:reports:a`, content: 'updated', ...(authoredWith ? { authoredWith } : {}) },
+    );
+    return { t, dest, write, claim: { task: t.id, revision: t.revSeq } };
+  };
+  const refusal = (promise: Promise<unknown>) => promise.then(() => null, (e: { extensions?: Record<string, unknown> }) => e.extensions);
+
+  it('a live covering grant reads the task, so the refusal gives it and an exact claim writes', async () => {
+    const { t, dest, write, claim } = await setUp();
+    await give();
+    expect(await refusal(write())).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', taskAccess: 'READABLE', taskId: t.id });
+    await write(claim);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dest.id, loc: 'reports:a' } }))
+      .toMatchObject({ content: 'updated', authoredByTask: t.id });
+  });
+
+  it('a grant that does not cover the task, and a revoked one, read as unavailable', async () => {
+    const { write, claim } = await setUp();
+    const unavailable = { code: 'AUTHOR_TASK_BROKEN', taskAccess: 'UNAVAILABLE', task: null };
+    await give(f.adminCtx, { prefix: 'tasks:reportX' });
+    expect(await refusal(write(claim))).toMatchObject(unavailable);
+    const covering = await give();
+    await M.revokeAutomationReadGrant({}, { id: covering.id }, f.adminCtx);
+    expect(await refusal(write(claim))).toMatchObject(unavailable);
   });
 });

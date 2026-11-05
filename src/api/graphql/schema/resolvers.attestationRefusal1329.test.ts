@@ -5,7 +5,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { attestedAuthoring, AuthoringAttestationError, judgeAuthoring } from '../../../lib/authoringAttestation.js';
 import { hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
@@ -99,6 +99,25 @@ describe('#1329 two hidden tasks', () => {
     expect(await judge(ctx(), write)).toEqual(both);
     await db.node.update({ where: { id: second.id }, data: { deletedAt: null, isRunnable: false } });
     expect(await judge(ctx(), write)).toEqual(both);
+  });
+});
+
+describe('#1329 scoped credentials', () => {
+  const app = async () => (await createDbAppWithKey(db, 'refuse-app', organizationId)).app.id;
+
+  it('a pure App key reads PUBLIC knowledge by name, as the node read does, so the task is readable', async () => {
+    await db.memory.update({ where: { id: (await db.node.findUniqueOrThrow({ where: { id: foreignTaskId } })).memoryId }, data: { visibility: 'PUBLIC' } });
+    await rule('guide', foreignTaskId);
+    const key = { db, roles: [], appId: await app(), organizationId } as unknown as Context;
+    const read = await resolvers.Query.node({}, { ref: foreignTaskId }, key) as { id: string } | null;
+    expect(read?.id).toBe(foreignTaskId);
+    expect(await judge(key, {})).toMatchObject({ refused: 'AUTHORING_ATTESTATION_MISSING', recovery: { taskAccess: 'READABLE', taskId: foreignTaskId } });
+  });
+
+  it('an App key whose session does not reach the task memory reads it as unavailable', async () => {
+    await rule('guide', foreignTaskId);
+    const key = { db, roles: [], appId: await app(), sessionId: generateId(), organizationId } as unknown as Context;
+    expect(await judge(key, {})).toMatchObject({ refused: 'AUTHOR_TASK_BROKEN', recovery: { taskAccess: 'UNAVAILABLE', task: null } });
   });
 });
 
