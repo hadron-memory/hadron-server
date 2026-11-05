@@ -417,6 +417,19 @@ describe("sendChatMessage hands the model the most recent window (#1111)", () =>
     expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
   }, DRIVE_60_TIMEOUT_MS);
 
+  it('#3496: a real chatbot turn leaves the counter keys outside record-root data', async () => {
+    const start = await resolvers.Mutation.startChat({}, { agentId: agent.id }, adminCtx());
+    const root = await chatNodeByLocOrThrow(db, start.chatId);
+    expect(root.nodeType).toBe('record');
+    expect(root.data).not.toHaveProperty('messageCount');
+    expect(await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id}})).toMatchObject({messageCount:0});
+    await resolvers.Mutation.sendChatMessage({}, {chatId:start.chatId,userMessage:'counter turn'}, adminCtx());
+    const after = await db.node.findUniqueOrThrow({where:{id:root.id}});
+    expect(after.data).not.toHaveProperty('messageCount');
+    expect(after.data).not.toHaveProperty('lastMessageAt');
+    expect((await db.chatRootCounter.findUniqueOrThrow({where:{chatRootNodeId:root.id}})).messageCount).toBeGreaterThan(0);
+  });
+
   it('CONTROL: under the window the current turn is present too', async () => {
     const contents = await driveTurns(12);
     expect(contents).toContain('turn-12');

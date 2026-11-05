@@ -63,7 +63,10 @@ async function state(chatId: string) {
   const assistants = await db.node.count({ where: { memoryId: chat.memoryId, loc: { startsWith: `${chatId}:messages:` }, name: { endsWith: '-assistant' } } });
   const root = (await db.node.findUniqueOrThrow({ where: { id: chat.id } })).data as Record<string, unknown>;
   const revisions = data ? await db.nodeRevision.count({ where: { nodeId: data.id } }) : 0;
-  return { memoryId: chat.memoryId, assistants, count: root.messageCount, stage: root.stageName, data: data?.data ?? null, revisions };
+  // #3496: the operational counter moved out of revisioned root data; stage remains there.
+  const counter = await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: chat.id }, select: { messageCount: true } });
+  expect(root).not.toHaveProperty('messageCount');
+  return { memoryId: chat.memoryId, assistants, count: counter.messageCount, stage: root.stageName, data: data?.data ?? null, revisions };
 }
 
 /** Seed the data node, then govern it: role `guide` with a required author task (runnable unless told otherwise). */
