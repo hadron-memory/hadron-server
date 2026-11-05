@@ -157,7 +157,23 @@ function cleanBody(text: string, shift: boolean): string {
     if (!droppedH1 && h[1].length === 1) { droppedH1 = true; return null; }
     return shift ? `${'#'.repeat(Math.min(6, h[1].length + 1))}${h[2]}` : line;
   });
-  return lines.replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '');
+  return collapseBlankRuns(lines).replace(/^\n+|\n+$/g, '');
+}
+
+/** Runs of blank lines become one blank line OUTSIDE fenced code; inside a fence every byte stays (a code sample may hold blank runs). */
+function collapseBlankRuns(text: string): string {
+  let fence: OpenFence | null = null;
+  let blanks = 0;
+  const out: string[] = [];
+  for (const line of text.split('\n')) {
+    const wasOpen = fence !== null;
+    const step = stepFence(line, fence);
+    fence = step.open;
+    if (step.fenceLine || wasOpen) { blanks = 0; out.push(line); continue; }
+    if (line.trim() === '') { blanks += 1; if (blanks > 1) continue; } else blanks = 0;
+    out.push(line);
+  }
+  return out.join('\n');
 }
 
 /** True when an Open Questions section holds a bullet (the way the mint report reads it, cor:dmo:120:07). */
@@ -195,7 +211,8 @@ const approvalText = (a: ApprovalLine): string => {
 
 const stateLine = (p: DocPart): string => `Approval: ${approvalText(p.approval)} · Mint: ${p.minted ? 'minted' : 'unminted'}`;
 
-const heading = (p: DocPart): string => (p.name.startsWith(p.loc) ? p.name : `${p.name} [${p.loc}]`);
+/** A name that already leads with its citation as a whole word (not a longer loc like `fx:110:06x`) is not suffixed. */
+const heading = (p: DocPart): string => (p.name === p.loc || p.name.startsWith(`${p.loc} `) ? p.name : `${p.name} [${p.loc}]`);
 
 /** The part's body as shown, or null when it shows none (placeholder, superseded, empty). */
 function shownBody(p: DocPart, shift: boolean, links: ReadonlyMap<string, LinkResolution>): string | null {

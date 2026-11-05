@@ -328,6 +328,13 @@ describe('review round 1 (#3535 LOCAL, SECURITY, UX)', () => {
     expect(await read('lnk:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'links' } });
   });
 
+  it('links in a superseded part (never shown) do not use the link budget', async () => {
+    await spec('sup:1', 'Feature: Sup', 'root');
+    const links = Array.from({ length: SPEC_DOCUMENT_MAX_LINK_TARGETS + 1 }, (_, i) => `[[nowhere:${i}]]`).join(' ');
+    await spec('sup:1:1', 'Rule: Old', links, { tags: ['superseded'] });
+    expect((await read('sup:1')).entries.map((e) => e.loc)).toEqual(['sup:1', 'sup:1:1']);
+  });
+
   it('a deleted descendant is not part of the document', async () => {
     await spec('del:1', 'Feature: Del', 'root');
     await spec('del:1:1', 'Rule: Gone', 'gone', { deletedAt: new Date() });

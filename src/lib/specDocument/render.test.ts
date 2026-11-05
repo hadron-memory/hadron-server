@@ -55,6 +55,19 @@ describe('fences (review round 1)', () => {
   });
 });
 
+describe('blank runs (BLIND round 1)', () => {
+  const feature = part('x:1', 'Feature: F', 'f');
+  it('a fenced code block keeps every blank line byte for byte; blank runs outside collapse', () => {
+    const body = '# Rule: R\n\n\n\ntext\n\n\n```\na\n\n\n\nb\n```\n\n\nafter';
+    const md = renderSpecDocument({ memory: 'o:m', renderedAt: at, feature, links: new Map(), parts: [part('x:1:1', 'Rule: R', body)] });
+    expect(md).toContain('text\n\n```\na\n\n\n\nb\n```\n\nafter');
+  });
+  it('a name with the citation as a longer prefix still gets its own suffix', () => {
+    const md = renderSpecDocument({ memory: 'o:m', renderedAt: at, feature: part('x:1', 'x:10 — Other', 'b'), links: new Map(), parts: [] });
+    expect(md).toContain('# x:10 — Other [x:1]');
+  });
+});
+
 describe('open questions and links', () => {
   it('an Open Questions section counts only with a bullet in it', () => {
     expect(hasOpenQuestions('## Open Questions\n\n- Who decides?')).toBe(true);

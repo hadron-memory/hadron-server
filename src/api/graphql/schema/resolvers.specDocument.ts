@@ -180,7 +180,8 @@ export async function specDocumentOf(ctx: Context, memoryRef: string, loc: strin
   // Links: every wikilink target, once, resolved as this caller.
   const inDoc = new Map(reads.map((r) => [r.n.id, r.n]));
   const targets = new Set<string>();
-  for (const p of parts) if (!p.isPlaceholder && p.body) for (const t of wikilinkTargets(p.body)) targets.add(t);
+  // A superseded part shows no body, so its links are never rendered and never resolved (the Feature always shows).
+  for (const [i, p] of parts.entries()) if (!p.isPlaceholder && p.body && (i === 0 || !p.superseded)) for (const t of wikilinkTargets(p.body)) targets.add(t);
   if (targets.size > SPEC_DOCUMENT_MAX_LINK_TARGETS) throw tooLarge('links');
   const links = new Map<string, LinkResolution>();
   for (const t of targets) links.set(t, await linkFor(ctx, memoryId, t, inDoc, root));
