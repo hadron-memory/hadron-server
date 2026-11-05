@@ -108,6 +108,8 @@ it('creates the real table with cascading root identity and deletion, rolled bac
   await c.query(migration);
   const fk=await c.query("SELECT confdeltype,confupdtype FROM pg_constraint WHERE conrelid='chat_root_counters'::regclass AND contype='f'");
   expect(fk.rows).toEqual([{confdeltype:'c',confupdtype:'c'}]);
+  const defaults=await c.query("SELECT column_default FROM information_schema.columns WHERE table_schema='public' AND table_name='chat_root_counters' AND column_name='updated_at'");
+  expect(defaults.rows).toEqual([{column_default:null}]);
   expect((await c.query('SELECT message_count FROM chat_root_counters WHERE chat_root_node_id=$1',[n.id])).rows).toEqual([{message_count:3}]);
   await c.query('DELETE FROM nodes WHERE id=$1',[n.id]);
   expect((await c.query('SELECT count(*)::int AS n FROM chat_root_counters')).rows).toEqual([{n:0}]);

@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS chat_root_counters (
   chat_root_node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE ON UPDATE CASCADE,
   message_count INTEGER NOT NULL DEFAULT 0,
   last_message_at TIMESTAMP(3),
-  updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at TIMESTAMP(3) NOT NULL
 );
 -- Tenant JSON is untrusted. These helpers exist only during this total, restartable data step.
 CREATE OR REPLACE FUNCTION hadron_3496_count(d jsonb) RETURNS integer LANGUAGE plpgsql AS $$
