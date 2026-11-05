@@ -409,6 +409,16 @@ describe('#1329 an author task the run reads through its grant', () => {
     expect(await judged({ task: hidden.id, revision: hidden.revSeq })).toMatchObject(unavailable);
   });
 
+  it("a user-backed run does not reach another org through its user's membership", async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'rg-other-org', urn: 'rg-other-org' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: f.member.id, role: 'CONTRIBUTOR' } });
+    const other = await db.memory.create({ data: { id: generateId(), name: 'other', urn: 'rg-other-org:other', class: 'knowledge', organizationId: org.id } });
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    const principal = { db, appId: null, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    expect(await canReadMemory(db, { userId: f.member.id, roles: [] } as never, other.id)).toBe(true);
+    expect(await runReadsNode(db, principal, r, other.id, 'x')).toBe(false);
+  });
+
   it('runs are unavailable on encrypted memories, even PUBLIC knowledge in another org', async () => {
     const org = await db.organization.create({ data: { id: generateId(), name: 'rg-enc', urn: 'rg-enc' } });
     const open = await db.memory.create({ data: { id: generateId(), name: 'open', urn: 'rg-enc:open', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id } });
