@@ -135,6 +135,9 @@ export async function withChatRootLock<T>(
     const chatData = {...chatDataObject(decrypted.data)};
     delete chatData.messageCount; delete chatData.lastMessageAt;
 
+    // The callback may mutate this object (including nested values) in place.
+    // Capture the comparison before handing it out, not from its later alias.
+    const baseline = JSON.stringify(chatData);
     const outcome = await body({ tx, chatData, counter });
 
     if (outcome.chatData) {
@@ -145,7 +148,7 @@ export async function withChatRootLock<T>(
       }
       delete clean.messageCount; delete clean.lastMessageAt;
       // A counter-only update must not re-encrypt/rewrite the root or bless other operational keys.
-      if (JSON.stringify(clean) === JSON.stringify(chatData)) return outcome.value;
+      if (JSON.stringify(clean) === baseline) return outcome.value;
       const enc = encryptNodeFields(
         { content: null, data: clean },
         memEncInfo,
