@@ -1268,6 +1268,18 @@
       "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::managedMemory",
       "target": "NodeRoleRule"
     },
+    "MemoryConfigBulkApplyEntry.error": {
+      "class": "parent-implies-child",
+      "audience": "the entry exists only in the applyMemoryConfigTemplateToMemories answer; its error is built from the caller's own input string and the generic fault envelope, never from a resolved row",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::toEntryError",
+      "target": "MemoryConfigBulkApplyError"
+    },
+    "MemoryConfigBulkApplyResult.results": {
+      "class": "parent-implies-child",
+      "audience": "the report exists only in the applyMemoryConfigTemplateToMemories answer, which requires managedTemplate and, per entry, managedMemory",
+      "resolver": "src/api/graphql/schema/resolvers.memoryConfigApply.ts::managedMemory",
+      "target": "MemoryConfigBulkApplyEntry"
+    },
     "MemoryConfigApplyResult.template": {
       "class": "closed-projection",
       "projection": "NodeRoleRuleSourceTemplate",

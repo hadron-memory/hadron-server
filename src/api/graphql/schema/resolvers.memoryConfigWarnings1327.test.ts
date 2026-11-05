@@ -500,6 +500,17 @@ describe('#1327 — a fault in the advisory reads never changes the save and nev
     expect(await rules('spec2')).toBe(1);
   });
 
+  it('bulk apply: each target reports its own warnings, as the singular apply does', async () => {
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'bulk1327', rules: [{ role: 'specb', authorTaskRef: tKb2.urn }] } });
+    expect(tpl.errors, JSON.stringify(tpl.errors)).toBeUndefined();
+    const r = await gql(as(admin), `mutation($t: ID!, $m: [ID!]!) { applyMemoryConfigTemplateToMemories(templateRef: $t, memoryRefs: $m) { succeeded failed results { ok result { ${W} } } } }`,
+      { t: tpl.data!.createMemoryConfigTemplate.template.id, m: [kb.id] });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    const out = r.data!.applyMemoryConfigTemplateToMemories;
+    expect(out.succeeded).toBe(1);
+    expect(Array.isArray(out.results[0].result.warnings)).toBe(true);
+  });
+
   it('a known NONE reference stays silent even while the advisory reads are failing', async () => {
     vi.spyOn(db.memorySubscription, 'count').mockRejectedValue(FAULT);
     const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'plain' } });
