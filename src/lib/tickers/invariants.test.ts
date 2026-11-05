@@ -18,7 +18,7 @@ describe('ticker-invariants.sql (#1747)', () => {
     const migration = readFileSync(new URL('../../../prisma/migrations/20261011020000_tickers/migration.sql', import.meta.url), 'utf8');
     // Applied migrations stay immutable. The separate #3308 DDL expands this one closed list;
     // its replay and resulting DB constraints are exercised in resolvers.staffGrantNames3308.test.ts.
-    const original = source.replace("name IN ('ticker.subscribe-workers', 'workers.staff', 'app.members')", "name IN ('ticker.subscribe-workers')");
+    const original = source.replace("name IN ('ticker.subscribe-workers', 'workers.staff', 'app.members', 'automations.schedule')", "name IN ('ticker.subscribe-workers')");
     expect(migration.endsWith(original)).toBe(true);
   });
 

@@ -56,6 +56,16 @@ const refusal = (p: Promise<unknown>) => p.then(() => null, (e: any) => ({ code:
 const grantRow = (f: F, name = 'automations.schedule') => db.appGrant.create({ data: { appId: f.app.id, granteeWorkerId: f.worker.id, name, grantedBy: f.user.id } });
 const nSchedules = () => db.agentSchedule.count();
 
+describe('#3483 invariants file', () => {
+  it('the migration carries a byte-identical copy and post-push includes it', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../../../../prisma/schedule-permission-invariants.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../../../prisma/migrations/20261105090000_schedule_permissions/migration.sql', import.meta.url), 'utf8');
+    expect(migration.endsWith(`\n${source}`)).toBe(true);
+    expect(readFileSync(new URL('../../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir schedule-permission-invariants.sql');
+  });
+});
+
 describe('#3483 row 1: a person creates unchanged', () => {
   it('a person creates an ADOPTED schedule with no permission or grant, recording no worker', async () => {
     const f = await fixture();

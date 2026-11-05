@@ -772,7 +772,6 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1631 PR1b slice 2: fresh sign-ins bound to the ceremony browser. One source, shared verbatim with migration
 -- 20261021080000_fresh_sign_ins (pinned by src/lib/passkeys/freshSignIn1631.test.ts).
 \ir fresh-sign-in-invariants.sql
-\ir schedule-permission-invariants.sql
 
 -- #2204: OIDC nonce hash on pending logins. One source, shared verbatim with migration
 -- 20261023120000_pending_login_provider_nonce (pinned by src/auth/providerNonce.test.ts).
@@ -854,6 +853,7 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #2014: the team-chat post limit's episodes and their worker fence.
 \ir post-limit-invariants.sql
+\ir schedule-permission-invariants.sql
 
 -- #2479: per-trigger run budget limits.
 \ir trigger-run-budget-invariants.sql
