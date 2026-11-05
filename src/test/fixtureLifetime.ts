@@ -17,11 +17,15 @@ export class FixtureLifetime {
     // cleanup before resetting anything, rather than begin a new fixture.
     if (!this.draining) {
       this.draining = (async () => {
-        // Interrupt network waits before awaiting the body.
-        await closeResources();
+        // A failed close must not release the fixture while bodies are live.
+        // Retain the first rejection (including `undefined`) until both phases
+        // complete, rather than losing the body/tail guarantees on error.
+        const errors: unknown[] = [];
+        try { await closeResources(); } catch (error) { errors.push(error); }
         while (this.pending.size) await Promise.allSettled([...this.pending]);
         // A tail may have created a client/server after the first close.
-        await closeResources();
+        try { await closeResources(); } catch (error) { errors.push(error); }
+        if (errors.length) throw errors[0];
       })().finally(() => { this.draining = undefined; });
     }
     return this.draining;

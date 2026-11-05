@@ -53,7 +53,6 @@ it('drains an overdue body through its real policy write before the next reset a
     await body; await cleanup;
   }
   expect(phases).toEqual(['old-policy-write', 'old-body-settled', 'drained']);
-  phases.push('next-reset');
   await cleanDb(db);
   const user = await db.user.create({ data: { githubUsername: 'late-rate-next', roles: ['ADMIN'] } });
   expect(user.id).not.toBe(first.id);
@@ -66,7 +65,9 @@ it('drains an overdue body through its real policy write before the next reset a
     const response = await fetch(base + '/graphql', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token, 'X-Forwarded-For': ip }, body: JSON.stringify({ query: 'query { findNodes(limit:0) { total } }' }) });
     expect((await response.json() as { errors?: unknown }).errors).toBeUndefined();
   }
+  expect(process.env.RATE_LIMIT_KEYRING, 'test rate-limit keyring must be configured').toBeTruthy();
   const ring = JSON.parse(process.env.RATE_LIMIT_KEYRING!);
+  // Mirrors src/lib/rateLimit/index.ts's versioned HMAC tuple: independent identity oracle.
   const subject = ring.current + ':' + createHmac('sha256', Buffer.from(ring.keys[ring.current], 'hex')).update(JSON.stringify(['v1', 'FAN_OUT_READS', 'principal', 'USER:' + user.id])).digest('hex');
   const buckets = await db.rateLimitBucket.findMany({ where: { fieldClass: 'FAN_OUT_READS', dimension: 'principal' } });
   // This is an isolation/identity pin, not an assumption that the two
@@ -79,15 +80,27 @@ it('drains an overdue body through its real policy write before the next reset a
 it('retains the original rejection while cleanup drains and closes resources created by the tail', async () => {
   const lifetime = new FixtureLifetime(), finish = deferred(), entered = deferred();
   const failure = new Error('synthetic failed body');
-  let live = false;
-  const work = lifetime.run(async () => { entered.resolve(); await finish.promise; live = true; throw failure; });
+  let tailServer: Server | undefined;
+  const closeTail = async () => {
+    tailServer?.closeAllConnections();
+    if (tailServer?.listening) await new Promise<void>(r => tailServer!.close(() => r()));
+  };
+  const work = lifetime.run(async () => {
+    entered.resolve(); await finish.promise;
+    tailServer = httpServer();
+    await new Promise<void>(r => tailServer!.listen(0, '127.0.0.1', r));
+    throw failure;
+  });
   const rejected = expect(work).rejects.toBe(failure);
   await entered.promise;
-  const cleanup = lifetime.drain(async () => { live = false; });
+  const cleanup = lifetime.drain(closeTail);
   finish.resolve();
-  await rejected;
-  await cleanup;
-  expect(live).toBe(false);
+  try {
+    await rejected;
+    await cleanup;
+    expect(tailServer).toBeDefined();
+    expect(tailServer!.listening).toBe(false);
+  } finally { await closeTail(); }
 });
 
 it('joins one cleanup across hook deadlines and refuses a new body until it settles', async () => {

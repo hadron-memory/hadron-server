@@ -17,9 +17,13 @@ vi.mock('../integrations/github/syncGraphFromGithub.js',()=>({syncGraphFromGithu
 let server:Server|undefined,client:Client|undefined;
 const lifetime = new FixtureLifetime();
 const closeResources = async () => {
-  await client?.close();
-  server?.closeAllConnections();
-  if(server) await new Promise<void>(r=>server!.close(()=>r()));
+  const currentClient = client;
+  await currentClient?.close();
+  if (client === currentClient) client = undefined;
+  const currentServer = server;
+  currentServer?.closeAllConnections();
+  if(currentServer) await new Promise<void>(r=>currentServer.close(()=>r()));
+  if (server === currentServer) server = undefined;
 };
 const fixtureIt = (name: string, body: () => Promise<void>) => it(name, () => lifetime.run(body));
 beforeEach(async()=>{
