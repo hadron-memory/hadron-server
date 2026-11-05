@@ -54,7 +54,7 @@ beforeEach(async () => {
   } finally { rmSync(seed, { recursive: true, force: true }); }
   await cleanDb(db);
   const org = await db.organization.create({ data: { id: generateId(), name: 'Export fixture', urn: 'data3507-org', githubInstallationId: 123 } });
-  const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, name: 'Export', urn: 'data3507-org:fixture', class: 'knowledge', source: SOURCE } });
+  const memory = await db.memory.create({ data: { id: generateId(), organizationId: org.id, name: 'Export', urn: 'data3507-org:fixture', class: 'knowledge', source: SOURCE, readBranch: 'main', writeBranch: 'main' } });
   memoryId = memory.id;
 });
 afterEach(() => {
