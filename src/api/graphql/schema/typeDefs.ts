@@ -243,6 +243,18 @@ export const typeDefs = `#graphql
     #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04)
     """
     isRunnable: Boolean
+    """
+    #3494 — true selects nodes with a live OPEN top-level comment; false selects nodes with none.
+    Deleted roots and deleted-with-replies stubs never count (hrn:node:hadronmemory.com:specs:cor:dmo:110:05 / hrn:node:hadronmemory.com:specs:cor:dmo:110:10).
+    Null or omitted leaves results unchanged. AND-combined before ranking, counts and paging in every
+    findNodes mode; it grants no access. Inherited projections have a zero summary: true
+    excludes them, false includes them. Concealed install-write responses are not search projections.
+    Unscored expansion context adds only this thread check to its existing memory/deletion/content-scope
+    checks; other filters keep their candidate-only behavior there. Counts exclude appended context.
+    appNodes/appNodesPage refuse either boolean with BAD_USER_INPUT.
+    Proposed addition built on the #3494 gate to hrn:node:hadronmemory.com:specs:cor:api:090:02; comment result scope stays hrn:node:hadronmemory.com:specs:cor:dmo:110:08.
+    """
+    hasOpenThreads: Boolean
     "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
     role: String
     locPrefix: String
@@ -2890,6 +2902,8 @@ export const typeDefs = `#graphql
 
   "#1606 — the trust cue (hrn:node:hadronmemory.com:specs:cor:dmo:110:07). Counts live threads; zeros on a memory that cannot hold comments."
   type CommentSummary {
+    "Earliest creation time of a live open root comment, or null. Replies, edits and reopen times do not move it. Null on synthetic inherited/install summaries. Proposed addition built on the #3494 gate (hrn:node:hadronmemory.com:specs:cor:api:090:02)."
+    oldestOpenThreadAt: DateTime
     openThreads: Int!
     resolvedThreads: Int!
     "Every live comment, top-level and replies, deleted stubs included."
