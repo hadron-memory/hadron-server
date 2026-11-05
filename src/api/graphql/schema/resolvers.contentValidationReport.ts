@@ -77,14 +77,41 @@ async function resolveLiveNode(ctx: Context, nodeRef: string): Promise<{ id: str
   return { id, memoryId: node.memoryId };
 }
 
-export const contentValidationReportMutations = {
-  recordNodeContentValidationReport: async (_: unknown, args: RecordContentValidationArgs, ctx: Context) => {
+export interface RecordContentValidationOptions {
+  /**
+   * An adapter's own reach rule for the node's memory, judged after refusals 1-2 and before the
+   * reconcile or any write. The run tool passes the flow guards here (same org, never an
+   * encrypted memory). The transaction locks the node in THIS memory, so a move after the guard
+   * is a not-found, never a write elsewhere.
+   */
+  memoryGuard?: (memoryId: string) => Promise<void>;
+}
+
+function sessionNotBound(): GraphQLError {
+  return new GraphQLError(
+    'The session this request names is not one of your open sessions (it may have ended). '
+      + 'Nothing was written. Bind a live session, or send no session to report as yourself.',
+    { extensions: { code: 'SESSION_NOT_BOUND' } },
+  );
+}
+
+/** The one write path; the GraphQL mutation, the MCP tool and the run tool all call it. */
+export async function recordContentValidationReport(
+  args: RecordContentValidationArgs,
+  ctx: Context,
+  options: RecordContentValidationOptions = {},
+) {
     const { runId } = validateArgs(args);
     // 1. Not found, for a missing node and for a memory the caller cannot read.
     const { id: nodeId, memoryId } = await resolveLiveNode(ctx, args.nodeRef);
     if (await isMemoryHiddenForWrite(ctx, memoryId, 'node')) throw nodeNotFound(args.nodeRef);
     // 2. Not a writer. Impersonation never records (it is read-only on every surface).
     if (ctx.impersonation) throw memoryWriteForbidden();
+    if (options.memoryGuard) await options.memoryGuard(memoryId);
+    // #1705: the request named a session that did not bind. Its actor would have been that
+    // session's worker, so it is refused rather than recorded as the bare credential (the MCP
+    // `session` argument answers the same code).
+    if (ctx.sessionBindingRefused) throw sessionNotBound();
     // #2043: an install memory's pooled write decision is a pre-flight only; the fenced
     // transaction below re-runs the gate.
     await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
@@ -144,5 +171,9 @@ export const contentValidationReportMutations = {
       },
       state: status.state,
     };
-  },
+}
+
+export const contentValidationReportMutations = {
+  recordNodeContentValidationReport: (_: unknown, args: RecordContentValidationArgs, ctx: Context) =>
+    recordContentValidationReport(args, ctx),
 };

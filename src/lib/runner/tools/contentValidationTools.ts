@@ -6,10 +6,13 @@
  * principal and its AppRun row; `runId` is only the caller's idempotency label, so naming another
  * run's id there changes nothing about who reported.
  *
+ * The flow guards every node tool inherits (same org only, encrypted memories denied) are applied
+ * to the node's memory before the reconcile or any write, through the resolver's memoryGuard.
+ *
  * Arguments are passed through as written: a run tool's arguments are not schema-checked, and the
  * resolver judges a malformed one (BAD_USER_INPUT) before reading anything.
  */
-import { contentValidationReportMutations } from '../../../api/graphql/schema/resolvers.contentValidationReport.js';
+import { recordContentValidationReport } from '../../../api/graphql/schema/resolvers.contentValidationReport.js';
 import type { RunToolDef } from './types.js';
 
 export const hadronRecordContentValidation: RunToolDef = {
@@ -33,8 +36,8 @@ export const hadronRecordContentValidation: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
-    const receipt = await contentValidationReportMutations.recordNodeContentValidationReport(
-      {},
+    const nodeRef = String(args.nodeRef ?? '');
+    const receipt = await recordContentValidationReport(
       {
         nodeRef: args.nodeRef as string,
         nodeRevision: args.nodeRevision as number,
@@ -44,6 +47,16 @@ export const hadronRecordContentValidation: RunToolDef = {
         runId: (args.runId ?? null) as string | null,
       },
       ctx.principal,
+      {
+        // The flow guards of resolveFlowMemory, judged on the memory the resolver will lock.
+        memoryGuard: async (memoryId) => {
+          const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, deletedAt: true, isEncrypted: true } });
+          if (!memory || memory.deletedAt || memory.organizationId !== ctx.run.organizationId) {
+            throw new Error(`Flow memory not found for "${nodeRef}".`);
+          }
+          if (memory.isEncrypted) throw new Error(`Headless runs are unavailable on encrypted memories — flow routed into "${nodeRef}".`);
+        },
+      },
     );
     ctx.log(`${receipt.replayed ? 'replayed' : 'recorded'} validation ${receipt.report.outcome} for revision ${receipt.report.nodeRevision} of node ${receipt.nodeId}`);
     return {
