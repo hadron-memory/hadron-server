@@ -41,7 +41,9 @@ async function ask(authorization?: string, query = Q): Promise<{ status: number;
     body: JSON.stringify({ query }),
   });
   const text = await res.text();
-  return { status: res.status, text, json: JSON.parse(text) };
+  let json: any = null;
+  try { json = JSON.parse(text); } catch { /* a non-JSON body fails the byte assertions with its text */ }
+  return { status: res.status, text, json };
 }
 
 const REFUSED_BODY = '{"data":{"authenticationStatus":"REFUSED"}}\n';
@@ -76,7 +78,7 @@ beforeEach(async () => {
   const endedImp = await db.impersonationSession.create({
     data: { adminUserId: admin.id, targetUserId: target.id, organizationId: org.id, expiresAt: new Date(Date.now() + 60_000), endedAt: new Date() },
   });
-  const revokedImp = await db.impersonationSession.create({
+  const demotedTargetImp = await db.impersonationSession.create({
     data: { adminUserId: admin.id, targetUserId: target.id, organizationId: org.id, expiresAt: new Date(Date.now() + 60_000) },
   });
   // Role change after mint: the target is removed from the org, so the live session fails the peer-or-below check.
@@ -90,7 +92,9 @@ beforeEach(async () => {
   const badSig = await new SignJWT({ sub: user.id, roles: [], sid: liveSignInId })
     .setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setIssuer('hadron-server').setAudience('hadron').setExpirationTime('7d').sign(wrongKey);
 
+  const ghost = generateId();
   tokens = {
+    unknownSubLegacy: await signJwt({ sub: ghost, roles: [], email: 'ghost@example.com' }),
     live: await signJwt({ sub: user.id, roles: [], email: 'u@example.com', sid: liveSignInId }),
     garbage: 'not.a.jwt-at-all',
     garbageOpaque: 'zzzz',
@@ -100,7 +104,7 @@ beforeEach(async () => {
     neverValidSid: await signJwt({ sub: user.id, roles: [], email: 'u@example.com', sid: generateId() }),
     deletedUser: await signJwt({ sub: doomed.id, roles: [], email: 'd@example.com', sid: doomedSignIn.id }),
     endedImpersonation: await signJwt({ sub: target.id, roles: [], imp: { sid: endedImp.id, act: admin.id, org: org.id } }),
-    revokedImpersonationTarget: await signJwt({ sub: target.id, roles: [], imp: { sid: revokedImp.id, act: admin.id, org: org.id } }),
+    demotedTargetImpersonationTarget: await signJwt({ sub: target.id, roles: [], imp: { sid: demotedTargetImp.id, act: admin.id, org: org.id } }),
     liveImpersonation: await signJwt({ sub: user.id, roles: [], imp: { sid: liveImp.id, act: admin.id, org: org.id } }),
   };
 
@@ -118,8 +122,8 @@ beforeEach(async () => {
 
 describe('#3532 pin 1/S3 — every invalid credential is the byte-identical REFUSED answer', () => {
   const causes = [
-    'garbage', 'garbageOpaque', 'badSignature', 'expired', 'endedSignIn', 'neverValidSid', 'deletedUser',
-    'endedImpersonation', 'revokedImpersonationTarget', 'revokedUserKey', 'unknownAppKey',
+    'unknownSubLegacy', 'garbage', 'garbageOpaque', 'badSignature', 'expired', 'endedSignIn', 'neverValidSid', 'deletedUser',
+    'endedImpersonation', 'demotedTargetImpersonationTarget', 'revokedUserKey', 'unknownAppKey',
   ] as const;
   for (const cause of causes) {
     it(`${cause} ⇒ HTTP 200 and exactly ${REFUSED_BODY}`, async () => {
@@ -188,6 +192,20 @@ describe('#3532 pin 4/S5 — an incomplete check is the ordinary internal error,
     expect(r.json.errors?.[0]?.message).toBe('Internal server error.');
   });
 
+  // #3537 BLIND P2-1: the key resolvers have no catch, so a database fault there propagates out of the context
+  // builder; it must never read as REFUSED either.
+  it.each([
+    ['hdr_user_ key lookup', () => vi.spyOn(db.userApiKey, 'findUnique'), () => userKey],
+    ['hdr_app_ key lookup', () => vi.spyOn(db.appKey, 'findUnique'), () => appKey],
+  ])('a database failure during %s is an internal error, never REFUSED', async (_label, spy, token) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    spy().mockRejectedValue(new Error('connection reset'));
+    const r = await ask(`Bearer ${token()}`);
+    expect(r.text).not.toContain('REFUSED');
+    expect(r.text).not.toContain('AUTHENTICATED');
+    expect(JSON.stringify(r.json)).toContain('INTERNAL_SERVER_ERROR');
+  });
+
   it('a missing JWT secret is also an incomplete check, not a refusal', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const saved = process.env.JWT_SECRET;
@@ -206,6 +224,16 @@ describe('#3532 pin 4/S5 — an incomplete check is the ordinary internal error,
     vi.spyOn(db.signIn, 'findFirst').mockRejectedValue(new Error('connection reset'));
     const r = await ask(`Bearer ${tokens.live}`, '{ me { id } authContext { principalType } }');
     expect(r.json).toEqual({ data: { me: null, authContext: null } });
+  });
+});
+
+describe('#3537 BLIND P2-3 — a surface that never resolves a status', () => {
+  it('the resolver answers the internal error rather than guessing (only /graphql sets it; MCP never runs this field)', async () => {
+    const { resolvers } = await import('./schema/resolvers.js');
+    const field = (resolvers.Query as any).authenticationStatus;
+    await expect(field(null, {}, { db })).rejects.toThrow(/did not complete/);
+    await expect(field(null, {}, { db, credentialStatus: 'unavailable' })).rejects.toThrow(/did not complete/);
+    await expect(field(null, {}, { db, credentialStatus: 'refused' })).resolves.toBe('REFUSED');
   });
 });
 

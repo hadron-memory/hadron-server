@@ -641,6 +641,9 @@ async function resolveJwt(token: string, db: PrismaClient): Promise<AuthContext>
     // An invalid, expired, wrongly signed or ended-sign-in JWT is a VERDICT: `{}`, the anonymous identity. Anything
     // else (a database error, a missing JWT_SECRET) is a check that could not complete. It still returns `{}` so
     // every existing consumer behaves exactly as before, but authenticationStatus must not call it a refusal (#3532).
+    // The list of VERDICT errors is deliberately the closed one: a fault nobody classified fails safe as incomplete,
+    // never as REFUSED (#3537 BLIND P2-2). A verdict that returns `{}` without throwing (unknown sub, deleted user,
+    // impersonation mismatch) never reaches this catch.
     const ctx: AuthContext = {};
     if (!(err instanceof joseErrors.JOSEError) && !(err instanceof SignInNotLive)) incompleteChecks.add(ctx);
     return ctx;

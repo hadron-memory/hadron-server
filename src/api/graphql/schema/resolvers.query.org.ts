@@ -420,6 +420,10 @@ export const orgQueries = {
      * context only: no database access, no argument, so it is no token oracle and adds no per-cause branch. A check
      * that could not complete is the ordinary internal error (cor:api:260:01), never REFUSED.
      */
+    // `async` only to match the resolver map's type. Only the /graphql context builder (the single ApolloServer) sets
+    // `credentialStatus`; MCP calls resolver functions directly and never executes this field, so a context without
+    // a status can only be a plumbing fault, which this field answers as the internal error rather than guess (#3537
+    // BLIND P2-3, decided).
     authenticationStatus: async (_: unknown, __: unknown, ctx: Context) => {
       switch (ctx.credentialStatus) {
         case 'authenticated': return 'AUTHENTICATED';
