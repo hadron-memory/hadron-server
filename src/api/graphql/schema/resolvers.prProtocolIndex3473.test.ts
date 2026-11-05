@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { Prisma } from '../../../generated/prisma/index.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { freezersAtHeadSql } from './resolvers.prProtocol.js';
 
@@ -49,6 +49,10 @@ describe('#3473 pr.frozen head index', () => {
       return JSON.stringify(rows);
     });
     expect(plan).toContain(INDEX);
+    // Not merely a scan of that index: the Index Cond must constrain both the App and the head expression.
+    const cond = [...plan.matchAll(/"Index Cond":"([^"]*)"/g)].map(m => m[1]).join(' ');
+    expect(cond).toMatch(/app_id/);
+    expect(cond).toMatch(/payload/);
   });
 
   it('is a partial index on pr.frozen rows only, keyed by App and head', async () => {
@@ -75,18 +79,38 @@ describe('#3473 pr.frozen head index', () => {
     expect(withIndex).toEqual([expected, ['-/u2'], ['-/u4']]);
   });
 
-  it('the migration rebuilds the very index post-push builds, and is idempotent on a populated table', async () => {
+  it('answers the same for worker actors: worker ids returned, duplicates collapse, the user id is suppressed', async () => {
+    const user = await db.user.create({ data: { email: `w-${generateId()}@index.test` } });
+    const workerId = generateId();
+    await createDbWorkerAttribution(db, user.id, workerId);
+    const w = await db.worker.findUniqueOrThrow({ where: { id: workerId } });
+    await event(w.appId, 'pr.frozen', { head: H }, { actorWorkerId: workerId, actorUserId: user.id });
+    await event(w.appId, 'pr.frozen', { head: H }, { actorWorkerId: workerId, actorUserId: user.id });
+    const withIndex = await db.$transaction(tx => freezers(tx, w.appId, H));
+    const without = await rolledBack(async tx => { await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`); return freezers(tx, w.appId, H); });
+    expect(withIndex).toEqual([`${workerId}/-`]);
+    expect(without).toEqual(withIndex);
+  });
+
+  it('the migration is ONE CONCURRENTLY statement that rebuilds the very index post-push builds, idempotently, outside a transaction', async () => {
+    const sql = migrationSql();
+    expect(sql).toMatch(/CREATE INDEX CONCURRENTLY IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"/);
+    // One statement: prisma migrate deploy runs a single statement outside a transaction (CONCURRENTLY needs that).
+    expect(sql.replace(/--.*$/gm, '').split(';').filter(x => x.trim()).length).toBe(1);
     await event(appA, 'pr.frozen', { head: H }, { actorUserId: 'u1' });
-    const [before, afterDrop, again] = await rolledBack(async tx => {
-      const built = await indexDef(tx);
-      await tx.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
-      await tx.$executeRawUnsafe(migrationSql());
-      const rebuilt = await indexDef(tx);
-      await tx.$executeRawUnsafe(migrationSql());
-      return [built, rebuilt, await indexDef(tx)];
-    });
+    const before = await db.$transaction(indexDef);
     expect(before).not.toBeNull();
-    expect(afterDrop).toBe(before);
-    expect(again).toBe(before);
+    // Autocommit, as migrate deploy runs it. The per-worker clone is this file's alone and the index is rebuilt below.
+    await db.$executeRawUnsafe(`DROP INDEX ${INDEX}`);
+    try {
+      await db.$executeRawUnsafe(sql);
+      expect(await db.$transaction(indexDef)).toBe(before);
+      await db.$executeRawUnsafe(sql);
+      expect(await db.$transaction(indexDef)).toBe(before);
+      const [valid] = await db.$queryRaw<{ v: boolean }[]>`SELECT indisvalid AS v FROM pg_index WHERE indexrelid = ${INDEX}::regclass`;
+      expect(valid.v).toBe(true);
+    } finally {
+      await db.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS ${INDEX} ON agent_team_events (app_id, ((payload ->> 'head'))) WHERE type = 'pr.frozen'`);
+    }
   });
 });
