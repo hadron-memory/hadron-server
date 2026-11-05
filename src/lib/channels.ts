@@ -1,3 +1,4 @@
+import { lockedChatCounter } from './chatRootCounters.js';
 import { isRawChatNode } from '../services/embedding/rawChat.js';
 import { randomUUID } from 'node:crypto';
 /**
@@ -203,7 +204,8 @@ export async function ensureChannelRow(
     // pre-dates the Channel was written some other way, so whatever stamps it carries were never decided by that
     // rule: they are cleared as the row is adopted, not trusted (Rook, #1751 P3-1).
     await db.$executeRaw(Prisma.sql`
-      UPDATE nodes SET data = data - 'broadcastWakes' - 'managerPost'
+      UPDATE nodes n SET data = data - 'broadcastWakes' - 'managerPost',
+        revision_content_hash = CASE WHEN n.revision_content_hash=hadron_node_revision_state_hash(n) THEN 'refresh' ELSE n.revision_content_hash END
       WHERE memory_id = ${args.memoryId} AND starts_with(loc, ${prefix}) AND node_type = 'chat-message'
         AND deleted_at IS NULL AND message_channel_id IS NULL
         AND jsonb_typeof(data) = 'object' AND (data ? 'broadcastWakes' OR data ? 'managerPost')`);
@@ -273,10 +275,14 @@ async function resetReusedChannel(
     where: { id: args.rootId },
     select: { abstract: true, content: true, data: true, embeddingPendingAt: true, embeddingWorkToken: true, nodeType: true, loc: true },
   });
+  const seedData = translateSessionExpired(args.memoryId, () => decryptNodeFields(root, args.memEncInfo).data);
+  await lockedChatCounter(tx, args.rootId, args.memEncInfo, seedData);
+  await tx.chatRootCounter.update({where:{chatRootNodeId:args.rootId},data:{lastMessageAt:null}});
   const encrypted = translateSessionExpired(args.memoryId, () => {
     const plain = decryptNodeFields(root, args.memEncInfo);
     const rootData = { ...((plain.data as Record<string, unknown> | null) ?? {}) };
     delete rootData.lastMessageAt;
+    delete rootData.messageCount;
     // Pre-#1196 team-chat roots stamped this retired audience marker. Reuse is
     // the canonical migration point: a new Channel derives access solely from
     // its host memory and must not inherit the legacy assertion.
@@ -434,7 +440,7 @@ export async function ensureChannelWithRoot(
   // now keys on `nodeType: 'chat'` instead (see its header).
   const rootFields = translateSessionExpired(args.memoryId, () =>
     encryptNodeFields(
-      { content: null, data: { messageCount: 0, createdAt: new Date().toISOString() } },
+      { content: null, data: { createdAt: new Date().toISOString() } },
       memEncInfo,
     ),
   );
@@ -546,6 +552,9 @@ export async function ensureChannelWithRoot(
       // was a chat, so it is refused too.
       (row) => row.nodeType === 'chat',
     );
+    const counterRoot = await tx.node.findUniqueOrThrow({where:{id:rootId},select:{data:true}});
+    await lockedChatCounter(tx, rootId, memEncInfo,
+      translateSessionExpired(args.memoryId, () => decryptNodeFields(counterRoot,memEncInfo).data));
     await restoreOrCreate(messagesLoc, () =>
       tx.node.create({
         data: { id: generateId(), memoryId: args.memoryId, loc: messagesLoc, name: 'messages', nodeType: 'record', createdBy: args.createdBy,

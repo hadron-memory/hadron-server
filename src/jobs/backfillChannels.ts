@@ -1,3 +1,4 @@
+import { legacyMessageCount } from '../lib/chatRootCounters.js';
 import { listAppInstallations } from '../lib/appInstallations.js';
 /**
  * Spec 049 Phase 4 — the one-shot Channel backfill (plan §8.7, closes the
@@ -67,11 +68,12 @@ export interface BackfillReport {
 /** The allocator's high-water mark for one root, computed the way it computes it. */
 async function highWater(
   db: PrismaClient | Prisma.TransactionClient,
-  root: { memoryId: string; loc: string; data: unknown },
+  root: { id: string; memoryId: string; loc: string; data: unknown },
 ): Promise<{ lastSeq: number; encrypted: boolean }> {
   const data = root.data && typeof root.data === 'object' && !Array.isArray(root.data) ? (root.data as Record<string, unknown>) : {};
   const encrypted = '__enc' in data;
-  const counter = !encrypted && typeof data.messageCount === 'number' ? data.messageCount : 0;
+  const row = await db.chatRootCounter.findUnique({where:{chatRootNodeId:root.id}});
+  const counter = row?.messageCount ?? (!encrypted ? legacyMessageCount(data) : 0);
   const top = await maxMessageSeqAtLiteralLocPrefix(db, root.memoryId, `${root.loc}:messages:`);
   return { lastSeq: Math.max(counter, top), encrypted };
 }
