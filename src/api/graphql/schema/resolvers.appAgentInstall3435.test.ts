@@ -143,7 +143,7 @@ it('multiple importers: the derived entry names the earliest witness, and a with
   await importEdge(c.id, b.id, T(6));
   const full = await rosterWire();
   expect(full.by(b.id)).toMatchObject({ installMethod: 'DERIVED', importer: { id: a.id } });
-  expect(new Date(full.by(b.id).createdAt).getTime()).toBe(T(3).getTime()); // earliest of (importer install, import) over importers
+  expect(new Date(full.by(b.id).createdAt).getTime()).toBe(T(3).getTime()); // min over importers of max(importer install, import): a installs T(3) and imports at T(2) -> T(3); c installs T(5), imports T(6) -> T(6)
   const f = await foreignAgent('Hidden');
   await db.appAgent.create({ data: { appId: app.id, agentId: f.agent.id } });
   const part = await rosterWire();
@@ -162,6 +162,7 @@ it('Agent.appAgents answers installMethod null and importer null for ROW and DER
     const out = await wire(`query($ref: ID!) { agent(ref: $ref) { appAgents { installMethod importer { id } } } }`, { ref: id });
     expect(out.errors).toBeUndefined();
     const rows = (out.data as any).agent.appAgents as any[];
+    expect(rows).toHaveLength(1); // one entry per Agent here (the derived one too), so the null pair is not vacuous
     for (const row of rows) expect(row).toEqual({ installMethod: null, importer: null });
   }
 });
