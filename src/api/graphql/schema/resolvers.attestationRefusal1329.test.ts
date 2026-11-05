@@ -84,6 +84,24 @@ describe('#1329 a write that answers to two tasks', () => {
   });
 });
 
+describe('#1329 two hidden tasks', () => {
+  it("names the same role whatever state either hidden task is in", async () => {
+    const second = await db.node.create({ data: {
+      id: generateId(), memoryId: (await db.node.findUniqueOrThrow({ where: { id: foreignTaskId } })).memoryId,
+      loc: 'second', name: 'Second', isRunnable: true,
+    } });
+    await rule('guide', foreignTaskId);
+    await rule('other', second.id);
+    const write = { priorRole: 'other', priorRunnable: false, role: 'guide' };
+    const both = await judge(ctx(), write);
+    expect(both).toMatchObject({ refused: 'AUTHOR_TASK_BROKEN', role: 'guide' });
+    await db.node.update({ where: { id: second.id }, data: { deletedAt: new Date() } });
+    expect(await judge(ctx(), write)).toEqual(both);
+    await db.node.update({ where: { id: second.id }, data: { deletedAt: null, isRunnable: false } });
+    expect(await judge(ctx(), write)).toEqual(both);
+  });
+});
+
 describe('#1329 a writer with no reader', () => {
   it('keeps the code, because git sync reports it, and discloses nothing', async () => {
     await rule('guide', foreignTaskId);

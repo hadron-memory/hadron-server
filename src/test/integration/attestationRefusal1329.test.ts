@@ -188,16 +188,17 @@ describe('#1329 every MCP writer carries the structured refusal', () => {
   const A = 'hrn:node:attest-1329:mem:a';
   const P = 'hrn:node:attest-1329:mem:p';
   const T = 'hrn:node:attest-1329:mem:t';
-  const tools: Array<[string, string, () => Record<string, unknown>]> = [
-    ['hadron_create_node', 'a fresh create', () => ({ urn: `${A}-new`, name: 'n', content: 'x', role: 'guide' })],
-    ['hadron_create_node', 'over a tombstone', () => ({ urn: T, name: 't', content: 'x', role: 'guide' })],
-    ['hadron_update_node', 'an edit', () => ({ urn: A, content: 'changed' })],
-    ['hadron_update_node_data', 'a data merge', () => ({ nodeUrn: A, data: { k: 1 } })],
-    ['hadron_replace_text', 'a replace', () => ({ nodeUrns: [A], oldText: 'first', newText: 'second', fields: ['content'] })],
-    ['hadron_create_parent_node', 'a section re-save', () => ({ urn: P, title: 'renamed' })],
-    ['hadron_move_node', 'a rename', () => ({ urn: A, targetUrn: `${A}-moved`, renameToLeaf: true })],
+  const live = (loc: string) => db.node.findFirstOrThrow({ where: { memoryId, loc, deletedAt: null } });
+  const tools: Array<[string, string, () => Record<string, unknown>, () => Promise<unknown>]> = [
+    ['hadron_create_node', 'a fresh create', () => ({ urn: `${A}-new`, name: 'n', content: 'x', role: 'guide' }), async () => expect(await live('a-new')).toMatchObject({ authoredByTask: readableTaskId })],
+    ['hadron_create_node', 'over a tombstone', () => ({ urn: T, name: 't', content: 'x', role: 'guide' }), async () => expect(await live('t')).toMatchObject({ content: 'x', authoredByTask: readableTaskId })],
+    ['hadron_update_node', 'an edit', () => ({ urn: A, content: 'changed' }), async () => expect(await live('a')).toMatchObject({ content: 'changed', authoredByTask: readableTaskId })],
+    ['hadron_update_node_data', 'a data merge', () => ({ nodeUrn: A, data: { k: 1 } }), async () => expect(await live('a')).toMatchObject({ data: { k: 1 }, authoredByTask: readableTaskId })],
+    ['hadron_replace_text', 'a replace', () => ({ nodeUrns: [A], oldText: 'first', newText: 'second', fields: ['content'] }), async () => expect(await live('a')).toMatchObject({ content: 'second', authoredByTask: readableTaskId })],
+    ['hadron_create_parent_node', 'a section re-save', () => ({ urn: P, description: 'renamed' }), async () => expect(await live('p')).toMatchObject({ authoredByTask: readableTaskId })],
+    ['hadron_move_node', 'a rename', () => ({ urn: A, targetUrn: `${A}-moved`, renameToLeaf: true }), async () => expect(await live('a-moved')).toMatchObject({ name: 'a-moved', authoredByTask: readableTaskId })],
   ];
-  it.each(tools)('%s, %s', async (name, _label, args) => {
+  it.each(tools)('%s, %s', async (name, _label, args, written) => {
     const claim = { task: readableTaskId, revision: 3 };
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'a', name: 'a', content: 'first', role: 'guide' } });
     await db.node.create({ data: { id: generateId(), memoryId, loc: 'p', name: 'p', content: 'first', role: 'guide', nodeType: 'parent' } });
@@ -208,7 +209,9 @@ describe('#1329 every MCP writer carries the structured refusal', () => {
     expect(result.structuredContent?.error).toEqual(expect.objectContaining({
       code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', ...RECOVERY, taskId: readableTaskId,
     }));
-    expect((await call(name, { ...args(), authoredWith: claim })).isError).not.toBe(true);
+    const retried = await call(name, { ...args(), authoredWith: claim });
+    expect(retried.isError).not.toBe(true);
+    await written();
   });
 });
 
