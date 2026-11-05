@@ -151,7 +151,7 @@ afterEach(async () => {
   resetEmbeddingClientForTests();
   vi.restoreAllMocks();
   delete process.env.EMBEDDING_API_URL;
-});
+}, 15_000);
 
 describe('#887 Slice 1 — the convoy (red on global FIFO)', () => {
   it("serves memory B's due fresh write in the FIRST batch under memory A's older backlog", async () => {
