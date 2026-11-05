@@ -36,7 +36,6 @@ export const hadronRecordContentValidation: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
-    const nodeRef = String(args.nodeRef ?? '');
     const receipt = await recordContentValidationReport(
       {
         nodeRef: args.nodeRef as string,
@@ -48,13 +47,11 @@ export const hadronRecordContentValidation: RunToolDef = {
       },
       ctx.principal,
       {
-        // The flow guards of resolveFlowMemory, judged on the memory the resolver will lock.
+        // The flow guards of resolveFlowMemory, judged on the memory the resolver will lock. A
+        // memory outside them answers the resolver's NODE_NOT_FOUND, exactly like a missing node.
         memoryGuard: async (memoryId) => {
           const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, deletedAt: true, isEncrypted: true } });
-          if (!memory || memory.deletedAt || memory.organizationId !== ctx.run.organizationId) {
-            throw new Error(`Flow memory not found for "${nodeRef}".`);
-          }
-          if (memory.isEncrypted) throw new Error(`Headless runs are unavailable on encrypted memories — flow routed into "${nodeRef}".`);
+          return !!memory && !memory.deletedAt && memory.organizationId === ctx.run.organizationId && !memory.isEncrypted;
         },
       },
     );

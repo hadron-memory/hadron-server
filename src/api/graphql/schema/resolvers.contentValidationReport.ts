@@ -79,12 +79,15 @@ async function resolveLiveNode(ctx: Context, nodeRef: string): Promise<{ id: str
 
 export interface RecordContentValidationOptions {
   /**
-   * An adapter's own reach rule for the node's memory, judged after refusals 1-2 and before the
-   * reconcile or any write. The run tool passes the flow guards here (same org, never an
-   * encrypted memory). The transaction locks the node in THIS memory, so a move after the guard
-   * is a not-found, never a write elsewhere.
+   * An adapter's own reach rule for the node's memory: false means the adapter may not reach it.
+   * Judged after the not-found and impersonation refusals and before the write gate, the
+   * reconcile or any write (the same pre-transaction window as resolveFlowMemory). An
+   * unreachable memory answers the same not-found as a missing node, so the adapter learns
+   * nothing about a node it may not reach. The run tool passes the flow guards here (same org,
+   * never an encrypted memory). The transaction locks the node in THIS memory, so a move after
+   * the guard is a not-found, never a write elsewhere.
    */
-  memoryGuard?: (memoryId: string) => Promise<void>;
+  memoryGuard?: (memoryId: string) => Promise<boolean>;
 }
 
 function sessionNotBound(): GraphQLError {
@@ -107,7 +110,7 @@ export async function recordContentValidationReport(
     if (await isMemoryHiddenForWrite(ctx, memoryId, 'node')) throw nodeNotFound(args.nodeRef);
     // 2. Not a writer. Impersonation never records (it is read-only on every surface).
     if (ctx.impersonation) throw memoryWriteForbidden();
-    if (options.memoryGuard) await options.memoryGuard(memoryId);
+    if (options.memoryGuard && !(await options.memoryGuard(memoryId))) throw nodeNotFound(args.nodeRef);
     // #2043: an install memory's pooled write decision is a pre-flight only; the fenced
     // transaction below re-runs the gate.
     await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
