@@ -28,11 +28,15 @@ let agent: { id: string };
 let teamChannel: { id: string };
 const w: Record<string, { id: string }> = {};
 
+/** The shared base fixture; GitHub identity is unrelated to the alarm/access scenarios (#3118). */
+const createBaseUser = (suffix: string) =>
+  db.user.create({ data: { id: generateId(), githubId: 98_100 + Math.floor(Math.random() * 1000), githubUsername: `dark-${suffix}`, roles: ['READER'] } });
+
 beforeEach(async () => {
   await cleanDb(db);
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
   org = await db.organization.create({ data: { id: generateId(), name: 'dark-org', urn: `dark-${suffix}.com` } });
-  user = await db.user.create({ data: { id: generateId(), githubId: 98_100 + Math.floor(Math.random() * 1000), githubUsername: `dark-${suffix}`, roles: ['READER'] } });
+  user = await createBaseUser(suffix);
   agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Engineer', urn: `${org.urn}:engineer`, visibility: 'ORGANIZATION' } });
   app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` } });
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
@@ -73,6 +77,23 @@ async function liamOverdue() {
   await assign('Liam', 100);
   await checked('Liam', 40);
 }
+
+describe('#3118 the base fixture does not reserve an outsider GitHub identity', () => {
+  it.each([98_999, 98_998, 98_997])('leaves githubId %i free even at its old collision draw', async (githubId) => {
+    // The enclosing fixture is unrelated to this probe. Do not let its original random draw preoccupy the target.
+    await db.user.update({ where: { id: user.id }, data: { githubId: null } });
+    // Every value is a legal draw from the old 98100..99099 allocator, forced without stochastic retries.
+    const random = vi.spyOn(Math, 'random').mockReturnValue((githubId - 98_100 + 0.25) / 1000);
+    try {
+      await createBaseUser(`collision-${githubId}`);
+    } finally {
+      random.mockRestore();
+    }
+    await expect(db.user.create({ data: {
+      id: generateId(), githubId, githubUsername: `outsider-${githubId}`, roles: ['READER'],
+    } })).resolves.toMatchObject({ githubId });
+  });
+});
 
 describe('#2755 OVERDUE raises one task-less alarm per episode', () => {
   it('raises on the first pass that sees OVERDUE, with the reason and evidence, and a second pass inserts nothing', async () => {
