@@ -156,6 +156,12 @@ function coverageOnce(db: PrismaClient, scope: WarningScope, targetId: string, t
   return pending;
 }
 
+/** The anonymous gate's answer. Like `userReadsMemory`, a null id list means "no restriction", i.e. readable. */
+async function anonymousReads(db: PrismaClient, memoryId: string): Promise<boolean> {
+  const ids = await getAccessibleMemoryIds({ db, roles: [] } as Context, memoryId);
+  return ids === null || ids.includes(memoryId);
+}
+
 /** Can `userId` read `memoryId` under the shared node-content gate? Asked as that user, with no platform role. */
 async function userReadsMemory(db: PrismaClient, scope: WarningScope, userId: string, memoryId: string): Promise<boolean> {
   const key = `u:${userId}:${memoryId}`;
@@ -200,7 +206,7 @@ export async function taskMemoryCoversTargetReaders(
   if (
     task.visibility === 'PUBLIC' && task.appId === null && task.userMemoryOfAgentId === null && task.ownerUserId === null &&
     task.class !== 'personal' && task.class !== 'private' && task.class !== 'system' &&
-    (await getAccessibleMemoryIds({ db, roles: [] } as Context, task.id))?.includes(task.id)
+    (await anonymousReads(db, task.id))
   ) return true;
 
   // App, team, session, worker and install audiences are not enumerable here.
@@ -217,9 +223,8 @@ export async function taskMemoryCoversTargetReaders(
 
   if (target.class === 'personal' || target.class === 'private') {
     if (!target.userId) return false;
-    const grantees = target.class === 'personal'
-      ? await db.memoryShare.findMany({ where: { memoryId: target.id }, select: { granteeId: true }, take: MAX_POINT_CHECKED_PRINCIPALS + 1 })
-      : [];
+    // Shares are read for BOTH classes: a private memory that carries a share must not be judged by its owner alone.
+    const grantees = await db.memoryShare.findMany({ where: { memoryId: target.id }, select: { granteeId: true }, take: MAX_POINT_CHECKED_PRINCIPALS + 1 });
     if (grantees.length > MAX_POINT_CHECKED_PRINCIPALS) return false;
     return everyUserReads(db, scope, [target.userId, ...grantees.map((g) => g.granteeId)], task.id);
   }

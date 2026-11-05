@@ -672,6 +672,38 @@ describe('#1327 — one memo and one read budget per call (Rook P2 at 23b6cd69)'
     expect(r.data!.applyMemoryConfigTemplateToMemories.results.map((x: any) => x.result.warnings.length)).toEqual([0, 1]);
   });
 
+  it('disjoint-member worst case: targets with no members in common stay inside the one budget and warn once it is spent', async () => {
+    const mkGroup = async (n: number) => {
+      const g = await mkMemory({ organizationId: org.id, class: 'group', urn: `acme.com:dg${n}`, name: `dg${n}`, visibility: 'GROUP' });
+      for (let k = 0; k < 3; k += 1) {
+        const u = await mkUser(100 + n * 10 + k, org.id, 'CONTRIBUTOR');
+        await db.memoryMember.create({ data: { memoryId: g.id, userId: u, role: 'reader' } });
+      }
+      return g.id;
+    };
+    const groups = [await mkGroup(1), await mkGroup(2), await mkGroup(3)];
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'disjoint', rules: [{ role: 'specb', authorTaskRef: tKb2.urn }] } });
+    const BULK = `mutation($t: ID!, $m: [ID!]!, $d: Boolean) { applyMemoryConfigTemplateToMemories(templateRef: $t, memoryRefs: $m, dryRun: $d) { succeeded results { ok result { ${W} } } } }`;
+    const vars = { t: tpl.data!.createMemoryConfigTemplate.template.id, m: groups };
+    const ample = await gql(as(admin), BULK, { ...vars, d: true });
+    expect(ample.errors, JSON.stringify(ample.errors)).toBeUndefined();
+    expect(ample.data!.applyMemoryConfigTemplateToMemories.results.map((x: any) => x.result.warnings.length)).toEqual([0, 0, 0]);
+    // Each target costs 1 coverage + 3 member reads = 4; a budget of 5 funds the first and only the coverage of the second.
+    scopeBudget.override = 5;
+    const spent = await gql(as(admin), BULK, { ...vars, d: false });
+    const out = spent.data!.applyMemoryConfigTemplateToMemories;
+    expect(out.succeeded).toBe(3); // exhaustion never fails a committed target
+    expect(out.results.map((x: any) => x.result.warnings.length)).toEqual([0, 1, 1]);
+    expect(out.results[1].result.warnings[0]).toEqual({ code: 'TASK_LESS_VISIBLE', role: 'specb', field: 'authorTask', taskUrn: tKb2.urn, taskState: 'OK' });
+  });
+
+  it('a private target that carries a share to someone who cannot read the task warns (shares are checked for private too)', async () => {
+    const priv = await mkMemory({ organizationId: org.id, class: 'private', userId: owner, urn: 'acme.com:priv', name: 'priv' });
+    expect(await run(priv.id, newWarningScope())).toEqual([]); // owner alone reads org knowledge
+    await db.memoryShare.create({ data: { memoryId: priv.id, granteeId: outsider, grantorId: owner, role: 'reader' } });
+    expect(await run(priv.id, newWarningScope())).toHaveLength(1);
+  });
+
   it('the shared scope spends its budget across calls', async () => {
     const scope = newWarningScope(1);
     expect(await run(kb.id, scope)).toEqual([]); // spent the one lookup
