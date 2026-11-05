@@ -1,4 +1,4 @@
-type OwnedResources = { database: string; roles: readonly string[] };
+type OwnedResources = { database: string; roles: readonly [string, string] };
 
 /** #2683: report the active run-owned cleanup operation before awaiting it. */
 export async function timedCleanupStep<T>(
@@ -29,6 +29,14 @@ type CleanupClient = {
 
 /** #2683: only the fixture resources generated and retained by this invocation. */
 export async function cleanupOwnedSmokeFixture(client: CleanupClient, owned: OwnedResources, report: (line: string) => void = console.error): Promise<void> {
-  await client.connect();
-  await client.end();
+  const step = <T,>(name: string, operation: () => Promise<T>) => timedCleanupStep(name, owned, operation, report);
+  const identifier = (name: string) => `"${name.replace(/"/g, '""')}"`;
+  await step('connect', () => client.connect());
+  try {
+    await step('drop-database', () => client.query(`DROP DATABASE IF EXISTS ${identifier(owned.database)} WITH (FORCE)`));
+    await step('drop-owner-role', () => client.query(`DROP ROLE IF EXISTS ${identifier(owned.roles[0])}`));
+    await step('drop-serve-role', () => client.query(`DROP ROLE IF EXISTS ${identifier(owned.roles[1])}`));
+  } finally {
+    await step('close', () => client.end());
+  }
 }
