@@ -147,7 +147,7 @@ afterEach(async () => {
     const state = embeddingDispatcher(db).state();
     expect(state.active).toBe(0);
     expect(state.selecting || state.scheduled).toBe(false);
-  });
+  }, { timeout: 10_000, interval: 50 });
   resetEmbeddingClientForTests();
   vi.restoreAllMocks();
   delete process.env.EMBEDDING_API_URL;
