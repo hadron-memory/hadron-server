@@ -12,9 +12,9 @@
  * no on-behalf-of user cannot touch personal/private memories.
  */
 
-import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../auth/publicKnowledgeRead.js';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
-import { attestedAuthoring, type AuthoredWith } from '../../authoringAttestation.js';
+import type { AuthoredWith } from '../../authoringAttestation.js';
+import { runAuthoring, runReadAdmits } from '../runAuthoring.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { runHoldsReadGrant } from '../../automationReadGrant.js';
@@ -103,9 +103,7 @@ export const hadronReadNode: RunToolDef = {
         select: { id: true, urn: true, isEncrypted: true },
       });
       // #3306 / ruling 0104: or the memory is PUBLIC knowledge, which a run with no user reads in any org, read-only.
-      const publicRead = foreign !== null && !foreign.isEncrypted && readsPublicKnowledgeWithoutUser(principalAuth(ctx)) &&
-        (await publicKnowledgeAmong(ctx.db, [foreign.id])).has(foreign.id);
-      if (!foreign || foreign.isEncrypted || !(publicRead || await runHoldsReadGrant(ctx.db, principalAuth(ctx), ctx.run.id, foreign.id, loc))) throw err;
+      if (!foreign || !(await runReadAdmits(ctx.db, ctx.principal, ctx.run.id, foreign.id, loc))) throw err;
       memory = foreign;
       viaGrant = true;
     }
@@ -126,11 +124,11 @@ export const hadronReadNode: RunToolDef = {
 /** #1328 — a run tool states its claim like any other writer. Never the portal path. */
 function runToolAuthoring(ctx: RunToolContext, args: Record<string, unknown>) {
   const claim = args.authoredWith as Partial<AuthoredWith> | null | undefined;
-  return attestedAuthoring(
+  return runAuthoring(
     ctx.principal,
+    ctx.run.id,
     claim && typeof claim.task === 'string' && typeof claim.revision === 'number'
       ? { task: claim.task, revision: claim.revision } : null,
-    'run',
   );
 }
 

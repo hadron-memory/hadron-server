@@ -58,9 +58,12 @@ export interface AuthoredWith {
 /** The server-generated records a rule cannot require a task for. A closed list, by design. */
 export type PlatformAuthoring = 'decision' | 'boot-prompt-compile' | 'session-handoff' | 'spec-reservation' | 'spec-renumber';
 
+/** A read the writer holds beyond the shared memory gate: one node, on this transaction. */
+export type TaskReadArm = (tx: Prisma.TransactionClient, memoryId: string, loc: string) => Promise<boolean>;
+
 /** What a writer is doing, stated at every authoring seam. See the module comment. */
 export type AuthoringContext =
-  | { kind: 'attested'; authoredWith: AuthoredWith | null; reader: Context | null; surface: AttestationSurface }
+  | { kind: 'attested'; authoredWith: AuthoredWith | null; reader: Context | null; surface: AttestationSurface; alsoReads?: TaskReadArm }
   | { kind: 'trustedHuman'; authenticatedUserId: string }
   | { kind: 'carry' }
   | { kind: 'platform'; record: PlatformAuthoring };
@@ -174,8 +177,9 @@ export function attestedAuthoring(
   reader: Context | null,
   authoredWith?: AuthoredWith | null,
   surface: AttestationSurface = 'graphql',
+  alsoReads?: TaskReadArm,
 ): AuthoringContext {
-  return { kind: 'attested', authoredWith: authoredWith ?? null, reader, surface };
+  return { kind: 'attested', authoredWith: authoredWith ?? null, reader, surface, ...(alsoReads ? { alsoReads } : {}) };
 }
 
 /**
@@ -262,17 +266,17 @@ export async function judgeAuthoring(
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const reader = authoring.reader;
   const readable = new Map<string, boolean>();
-  const canRead = async (memoryId: string): Promise<boolean> => {
+  const canRead = async ({ memoryId, loc }: { memoryId: string; loc: string }): Promise<boolean> => {
     if (!reader) return true;
     if (!readable.has(memoryId)) readable.set(memoryId, await isMemoryReadableFresh(reader, memoryId, tx));
-    return readable.get(memoryId)!;
+    return readable.get(memoryId)! || (authoring.alsoReads ? authoring.alsoReads(tx, memoryId, loc) : false);
   };
   // One pass in rule order: the first rule that fails either way is named, so
   // the role cannot reveal which way a hidden task failed.
   for (const { key, rule } of required) {
     const task = rule.authorTaskId ? byId.get(rule.authorTaskId) : undefined;
     const usable = task && !task.deletedAt && !task.memory.deletedAt && task.isRunnable === true;
-    if (!usable || !(await canRead(task.memoryId))) {
+    if (!usable || !(await canRead(task))) {
       return { refused: 'AUTHOR_TASK_BROKEN', role: key, recovery: reader ? NO_RECOVERY : null };
     }
   }
