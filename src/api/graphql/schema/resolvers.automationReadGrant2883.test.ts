@@ -18,12 +18,15 @@ import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/hel
 import { generateId } from '../../../lib/id.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
 import { runHoldsReadGrant, rootTriggerOfRun } from '../../../lib/automationReadGrant.js';
-import { hadronReadNode } from '../../../lib/runner/tools/nodeTools.js';
+import { hadronReadNode, hadronUpdateNode } from '../../../lib/runner/tools/nodeTools.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { MemoryNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../../lib/urn.js';
 import { RUN_CLIENT_PREFIX } from '../../../lib/auth/runPrincipal.js';
+import { judgeAuthoring } from '../../../lib/authoringAttestation.js';
+import { runAuthoring, runReadsNode } from '../../../lib/runner/runAuthoring.js';
+import { isMemoryReadableFresh } from './resolvers.helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
@@ -361,6 +364,88 @@ describe('audit', () => {
   });
 });
 
+describe('#1329 an author task the run reads through its grant', () => {
+  const setUp = async () => {
+    const t = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'tasks:report', memoryId: f.know.id } } });
+    await db.node.update({ where: { id: t.id }, data: { isRunnable: true } });
+    const dest = await db.memory.create({ data: { id: generateId(), name: 'dest', urn: `${f.org.urn}:dest`, class: 'knowledge', visibility: 'PUBLIC', organizationId: f.org.id } });
+    await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: dest.id, prefix: 'reports', registerNodeUrn: 'hrn:node:example.com:register:grants' }, f.adminCtx);
+    await db.node.create({ data: { id: generateId(), memoryId: dest.id, loc: 'reports:a', name: 'a', content: 'initial', role: 'guide' } });
+    const cfg = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dest.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: cfg.id, role: 'guide', authorTaskId: t.id, authorTaskRequired: true } });
+    const r = await run('SCHEDULE', f.s1.id);
+    const principal = { db, appId: r.appId, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    const write = (authoredWith?: { task: string; revision: number }) => hadronUpdateNode.execute(
+      { db, run: r, principal, log: () => {} } as never,
+      { urn: `hrn:node:${dest.urn}:reports:a`, content: 'updated', ...(authoredWith ? { authoredWith } : {}) },
+    );
+    return { t, dest, write, claim: { task: t.id, revision: t.revSeq } };
+  };
+  const refusal = (promise: Promise<unknown>) => promise.then(() => null, (e: { message?: string; extensions?: Record<string, unknown> }) => e.extensions ?? { thrown: e.message });
+
+  it('a live covering grant reads the task, so the refusal gives it and an exact claim writes', async () => {
+    const { t, dest, write, claim } = await setUp();
+    await give();
+    expect(await refusal(write())).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', taskAccess: 'READABLE', taskId: t.id });
+    await write(claim);
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: dest.id, loc: 'reports:a' } }))
+      .toMatchObject({ content: 'updated', authoredByTask: t.id });
+  });
+
+  it("a run never outruns its own read: another App's personal memory the on-behalf-of user owns is unavailable", async () => {
+    const owned = (slug: string, appId: string) => db.memory.create({ data: {
+      id: generateId(), name: slug, urn: `${f.org.urn}:${slug}`, class: 'personal', organizationId: f.org.id,
+      userId: f.member.id, appId, userMemoryOfAgentId: f.first.id,
+    } });
+    const dest = await owned('mine', f.app.id);
+    const elsewhere = await owned('elsewhere', f.otherApp.id);
+    const hidden = await db.node.create({ data: { id: generateId(), memoryId: elsewhere.id, loc: 'hidden', name: 'Hidden', isRunnable: true } });
+    await db.node.create({ data: { id: generateId(), memoryId: dest.id, loc: 'a', name: 'a', content: 'initial', role: 'guide' } });
+    const cfg = await db.memoryConfig.create({ data: { id: generateId(), memoryId: dest.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: cfg.id, role: 'guide', authorTaskId: hidden.id, authorTaskRequired: true } });
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    await expect(readAs(r, elsewhere.urn, 'hidden')).rejects.toThrow();
+    const principal = { db, appId: r.appId, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    // The shared gate admits this memory, which is why the run's own read has to decide.
+    expect(await isMemoryReadableFresh(principal, elsewhere.id)).toBe(true);
+    const judged = (claim: { task: string; revision: number } | null) => db.$transaction((tx) => judgeAuthoring(tx, dest.id, {
+      priorRole: 'guide', priorRunnable: false, role: 'guide', runnable: false, mintHuman: true, authoredChange: true,
+    }, runAuthoring(principal, r, claim)));
+    const unavailable = { refused: 'AUTHOR_TASK_BROKEN', recovery: { taskAccess: 'UNAVAILABLE', task: null, taskId: null } };
+    expect(await judged(null)).toMatchObject(unavailable);
+    expect(await judged({ task: hidden.id, revision: hidden.revSeq })).toMatchObject(unavailable);
+  });
+
+  it("a user-backed run does not reach another org through its user's membership", async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'rg-other-org', urn: 'rg-other-org' } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: f.member.id, role: 'CONTRIBUTOR' } });
+    const other = await db.memory.create({ data: { id: generateId(), name: 'other', urn: 'rg-other-org:other', class: 'knowledge', organizationId: org.id } });
+    const r = await run('SCHEDULE', f.s1.id, null, f.member.id);
+    const principal = { db, appId: null, userId: f.member.id, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    expect(await canReadMemory(db, { userId: f.member.id, roles: [] } as never, other.id)).toBe(true);
+    expect(await runReadsNode(db, principal, r, other.id, 'x')).toBe(false);
+  });
+
+  it('runs are unavailable on encrypted memories, even PUBLIC knowledge in another org', async () => {
+    const org = await db.organization.create({ data: { id: generateId(), name: 'rg-enc', urn: 'rg-enc' } });
+    const open = await db.memory.create({ data: { id: generateId(), name: 'open', urn: 'rg-enc:open', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id } });
+    const sealed = await db.memory.create({ data: { id: generateId(), name: 'sealed', urn: 'rg-enc:sealed', class: 'knowledge', visibility: 'PUBLIC', organizationId: org.id, isEncrypted: true } });
+    const r = await run('SCHEDULE', f.s1.id);
+    const principal = { db, appId: r.appId, organizationId: f.org.id, clientId: `${RUN_CLIENT_PREFIX}${r.id}`, roles: [] } as unknown as Context;
+    expect(await runReadsNode(db, principal, r, open.id, 'x')).toBe(true);
+    expect(await runReadsNode(db, principal, r, sealed.id, 'x')).toBe(false);
+  });
+
+  it('a grant that does not cover the task, and a revoked one, read as unavailable', async () => {
+    const { write, claim } = await setUp();
+    const unavailable = { code: 'AUTHOR_TASK_BROKEN', taskAccess: 'UNAVAILABLE', task: null };
+    await give(f.adminCtx, { prefix: 'tasks:reportX' });
+    expect(await refusal(write(claim))).toMatchObject(unavailable);
+    const covering = await give();
+    await M.revokeAutomationReadGrant({}, { id: covering.id }, f.adminCtx);
+    expect(await refusal(write(claim))).toMatchObject(unavailable);
+  });
+});
 
 describe('#3275 read-grant follow-up pins', () => {
   async function workerContext() {

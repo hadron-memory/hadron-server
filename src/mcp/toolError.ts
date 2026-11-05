@@ -3,6 +3,7 @@ import { isPrismaClientError } from '../lib/prismaErrors.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
 import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFault } from '../lib/internalFault.js';
 import { textResult } from './textResult.js';
+import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -71,8 +72,10 @@ export function toolErrorResult(
   error: unknown,
   domainText: () => string,
   site = 'mcp_tool',
-): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult> {
+): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
   if (error instanceof RateLimited) return rateLimitedResult(error);
+  const attestation = attestationRefusalResult(error);
+  if (attestation) return attestation;
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
   return refusalResult(domainText());
 }
@@ -87,6 +90,8 @@ export function withToolErrorBoundary(
       return await callback(args, extra);
     } catch (error) {
       if (error instanceof RateLimited) return rateLimitedResult(error);
+      const attestation = attestationRefusalResult(error);
+      if (attestation) return attestation;
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.
       if (!containsDatabaseDiagnostic(error) && isTrustedRefusal(error)) throw error;
       return toolFaultResult(error, `${name}:handler`);
