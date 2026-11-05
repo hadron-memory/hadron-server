@@ -6,8 +6,9 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
  * `task.start.parent-ended`: the task's parent has finished or been cancelled.
  * `task.progress.children-ended`: the task has children and every one has ended, so its own finish is probably due.
  *
- * Each is pinned both ways (fires / does not), the call still succeeds, a refused or rolled-back call files none, the
- * two that describe worker or other-task state sit behind `maySeeWorkerInternals` (the gate the assign codes use), and
+ * Each is pinned both ways (fires / does not), the call still succeeds, a refused start (not the assignee, already
+ * started, blocked) files none, a start or progress record whose transaction fails after the code was computed files
+ * none and leaves the task unchanged (#3296), the two that describe worker or other-task state sit behind `maySeeWorkerInternals` (the gate the assign codes use), and
  * none is recorded as a team event (gate ruling 2 on #3267).
  */
 import { ApolloServer } from '@apollo/server';
@@ -24,6 +25,15 @@ import { emitTaskWarnings, TASK_WARNING_TEXT, type TaskWarningCode } from './res
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
+// #3296: a deterministic failure AFTER the warning code was pushed: the task event is written last in the transaction.
+const fail = vi.hoisted(() => ({ taskEvent: false }));
+vi.mock('../../../lib/agentTasks/events.js', async importOriginal => {
+  const real = await importOriginal<typeof import('../../../lib/agentTasks/events.js')>();
+  return { ...real, appendTaskEvent: (...a: Parameters<typeof real.appendTaskEvent>) => {
+    if (fail.taskEvent) throw new Error('injected task-event failure');
+    return real.appendTaskEvent(...a);
+  } };
+});
 
 const M = resolvers.Mutation as any;
 
@@ -76,6 +86,7 @@ async function expectCode(p: Promise<unknown>, code: string) {
 }
 
 beforeEach(async () => {
+  fail.taskEvent = false;
   await cleanDb(db);
   const suffix = generateId().toLowerCase();
   org = await db.organization.create({ data: { id: generateId(), name: 'tw3267-org', urn: `tw3267-${suffix}.example` } });
@@ -134,7 +145,7 @@ describe('task.start.other-started', () => {
     expect(codes(c)).toEqual([]);
   });
 
-  it('a refused start files none (not the assignee, already started, blocked)', async () => {
+  it('a refused start files none (not the assignee, already started)', async () => {
     await task('started', { assigneeWorkerId: anne.id });
     const t = await task('pending', { assigneeWorkerId: anne.id });
     const c = ctx(member.id);
@@ -143,6 +154,38 @@ describe('task.start.other-started', () => {
     const started = await task('started', { assigneeWorkerId: anne.id });
     await expectCode(start(c, anne, started.id), 'TASK_INVALID_TRANSITION');
     expect(codes(c)).toEqual([]);
+  });
+
+  it('a blocked start is refused TASK_BLOCKED and files none, though an unblocked start would warn (#3296)', async () => {
+    await task('started', { assigneeWorkerId: anne.id }); // Anne holds a started task: an unblocked start warns
+    const blocker = await task('pending');
+    const t = await task('pending', { assigneeWorkerId: anne.id, blocked: true });
+    await db.agentTaskBlocker.create({ data: { taskId: t.id, blockerTaskId: blocker.id } });
+    const c = ctx(member.id);
+    await expectCode(start(c, anne, t.id), 'TASK_BLOCKED');
+    expect(codes(c)).toEqual([]);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+    // The precondition: the same setup, unblocked, does warn.
+    await db.agentTask.update({ where: { id: t.id }, data: { blocked: false } });
+    const c2 = ctx(member.id);
+    expect((await start(c2, anne, t.id)).status).toBe('started');
+    expect(codes(c2)).toEqual([OTHER_STARTED]);
+  });
+
+  it('a start whose transaction fails after the warning was computed files none and changes nothing (#3296)', async () => {
+    await task('started', { assigneeWorkerId: anne.id });
+    const t = await task('pending', { assigneeWorkerId: anne.id });
+    fail.taskEvent = true;
+    const c = ctx(member.id);
+    const e = await start(c, anne, t.id).then(() => null, (err) => err);
+    expect((e as Error).message).toContain('injected task-event failure');
+    expect(codes(c)).toEqual([]);
+    expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
+    // The precondition: the same setup without the fault warns.
+    fail.taskEvent = false;
+    const c2 = ctx(member.id);
+    await start(c2, anne, t.id);
+    expect(codes(c2)).toEqual([OTHER_STARTED]);
   });
 });
 
@@ -219,6 +262,26 @@ describe('task.progress.children-ended', () => {
     await task('finished', { assigneeWorkerId: liam.id, parentTaskId: pending.id });
     await expectCode(progress(c, anne, pending.id), 'TASK_INVALID_TRANSITION');
     expect(codes(c)).toEqual([]);
+  });
+});
+
+describe('a failed transaction files none (#3296)', () => {
+  it('a progress record whose transaction fails after the warning was computed files none and stamps nothing', async () => {
+    const parent = await task('started', { assigneeWorkerId: anne.id });
+    await task('finished', { assigneeWorkerId: liam.id, parentTaskId: parent.id });
+    const before = await db.agentTask.findUniqueOrThrow({ where: { id: parent.id } });
+    fail.taskEvent = true;
+    const c = ctx(member.id);
+    const e = await progress(c, anne, parent.id).then(() => null, (err) => err);
+    expect((e as Error).message).toContain('injected task-event failure');
+    expect(codes(c)).toEqual([]);
+    const after = await db.agentTask.findUniqueOrThrow({ where: { id: parent.id } });
+    expect(after.updatedAt).toEqual(before.updatedAt);
+    // The precondition: the same setup without the fault warns.
+    fail.taskEvent = false;
+    const c2 = ctx(member.id);
+    await progress(c2, anne, parent.id);
+    expect(codes(c2)).toEqual([CHILDREN_ENDED]);
   });
 });
 
