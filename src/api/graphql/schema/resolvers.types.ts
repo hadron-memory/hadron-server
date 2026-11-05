@@ -1,5 +1,5 @@
 import { isNewInstallPayload } from './installationPayload.js';
-import { agentInstallationWhere, listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
+import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { batchReadEdges, batchInheritedEndpoint } from './resolvers.nodeBatchEdges.js';
 import { authorizedTriggerLabel } from './resolvers.appRun.js';
@@ -248,7 +248,9 @@ async function callerReadableAgentFilter(ctx: Context): Promise<Record<string, u
     // under impersonation (the shared-org session never sees user-owned rows).
     if (!ctx.impersonation) or.push({ ownerUserId: ctx.userId });
   }
-  if (ctx.appId) or.push(agentInstallationWhere(ctx.appId));
+  // This is a final row-list audience, not a candidate query: derived parents
+  // need the App holder's usable license before their edge metadata is visible.
+  if (ctx.appId) or.push({ id: { in: (await listAppInstallations(ctx.db, ctx.appId)).map(row => row.agentId) } });
   return { ...live, OR: or };
 }
 
