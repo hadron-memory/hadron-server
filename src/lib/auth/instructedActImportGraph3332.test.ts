@@ -20,7 +20,7 @@ function runtimeImports(source: string): string[] {
         && node.exportClause.elements.length > 0 && node.exportClause.elements.every(item => item.isTypeOnly));
       if (!typesOnly) imports.push(node.moduleSpecifier.text);
     } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
-      && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0]!)) {
+      && node.arguments.length >= 1 && ts.isStringLiteralLike(node.arguments[0]!)) {
       imports.push(node.arguments[0]!.text);
     }
     ts.forEachChild(node, visit);
@@ -59,6 +59,7 @@ describe('#3332 instructed-act runtime import graph', () => {
     expect(runtimeImports('export { type Context } from "worker";')).toEqual([]);
     expect(runtimeImports('export { type Context, gate } from "worker";')).toEqual(['worker']);
     expect(runtimeImports('import "worker"; import("chat");')).toEqual(['worker', 'chat']);
+    expect(runtimeImports('import(`worker`); import("chat", { with: { type: "json" } });')).toEqual(['worker', 'chat']);
     expect(hasCycle(graph('import("worker");'), roots)).toBe(true);
     expect(hasCycle(graph('export { gate } from "worker";'), roots)).toBe(true);
     expect(hasCycle(new Map([['worker', ['instruction']], ['instruction', ['worker']], ['chat', []]]), roots)).toBe(true);
@@ -72,8 +73,12 @@ describe('#3332 instructed-act runtime import graph', () => {
     // transitive cycles in the server. Literal dynamic imports still count as direct edges.
     for (const file of roots) {
       const deps = runtimeImports(readFileSync(file, 'utf8')).filter(name => name.startsWith('.'))
-        .map(name => resolve(dirname(file), name).replace(/\.js$/, '.ts'))
-        .filter(target => roots.includes(target));
+        .flatMap(name => {
+          const base = resolve(dirname(file), name);
+          const target = [base, base.replace(/\.js$/, '.ts'), base + '.ts', resolve(base, 'index.ts')]
+            .find(candidate => roots.includes(candidate));
+          return target ? [target] : [];
+        });
       graph.set(file, deps);
     }
     const witness = roots.map(file => relative(src, file)).concat(relative(src, roots[0]!)).join(' -> ');
