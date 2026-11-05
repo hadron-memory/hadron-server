@@ -120,12 +120,14 @@ it('outsider, App key and a real persisted run never discover or count another t
     expect(result.hits).toEqual([]);expect(result.total).toBe(0);
   }
 });
-it('expansion on lexical and hybrid paths never reintroduces nodes with the wrong summary', async () => {
-  await db.node.update({where:{id:nodes.A.id},data:{name:'uniquegroomseed'}});
+it('expansion preserves candidate-only filters as context but rejects the wrong thread flag', async () => {
+  await db.node.update({where:{id:nodes.A.id},data:{name:'uniquegroomseed',role:'process.groom'}});
+  await db.node.update({where:{id:nodes.F.id},data:{role:'other.context'}});
   for(const k of ['F','E'])await db.edge.create({data:{memoryId,sourceId:nodes.A.id,targetId:nodes[k].id,name:'near',loc:`edge:${k}`}});
   for(const mode of ['keyword','hybrid']) {
-    const out=await Q.findNodes(null,{query:'uniquegroomseed',mode,expand:1,filter:filter(true)},ctx());
-    expect(locs(out)).toEqual(['A','F']);
+    const out=await Q.findNodes(null,{query:'uniquegroomseed',mode,expand:1,includeTotal:true,filter:{...filter(true),locPrefix:'case:A',role:'process.groom'}},ctx());
+    // F fails the candidate role and prefix, but is retained as unscored context. E has no open thread.
+    expect(locs(out)).toEqual(['A','F']);expect(out.total).toBeNull();
   }
 });
 it('true/false root filtering is inside BOTH real vector/chunk candidate windows and hybrid fusion', async () => {

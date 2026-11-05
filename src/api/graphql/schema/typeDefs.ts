@@ -247,8 +247,11 @@ export const typeDefs = `#graphql
     #3494 — true selects nodes with a live OPEN top-level comment; false selects nodes with none.
     Deleted roots and deleted-with-replies stubs never count (hrn:node:hadronmemory.com:specs:cor:dmo:110:05 / hrn:node:hadronmemory.com:specs:cor:dmo:110:10).
     Null or omitted leaves results unchanged. AND-combined before ranking, counts and paging in every
-    findNodes mode; it grants no access. Inherited/install projections have a zero summary: true
-    excludes them, false includes them. appNodes/appNodesPage refuse either boolean with BAD_USER_INPUT.
+    findNodes mode; it grants no access. Inherited projections have a zero summary: true
+    excludes them, false includes them. Concealed install-write responses are not search projections.
+    Unscored expansion context adds only this thread check to its existing memory/deletion/content-scope
+    checks; other filters keep their candidate-only behavior there. Counts exclude appended context.
+    appNodes/appNodesPage refuse either boolean with BAD_USER_INPUT.
     Proposed addition built on the #3494 gate to hrn:node:hadronmemory.com:specs:cor:api:090:02; comment result scope stays hrn:node:hadronmemory.com:specs:cor:dmo:110:08.
     """
     hasOpenThreads: Boolean
