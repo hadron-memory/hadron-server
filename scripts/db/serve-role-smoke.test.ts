@@ -12,6 +12,7 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { maintenanceUrl } from '../../src/test/dbWorkers.js';
 import { EXIT, main } from './serve-role-smoke.js';
+import { cleanupOwnedSmokeFixture } from './smokeTeardown.js';
 
 const GRANTS_SQL = fileURLToPath(new URL('../../prisma/runtime-role.sql', import.meta.url));
 const suffix = randomBytes(4).toString('hex');
@@ -71,11 +72,11 @@ beforeAll(async () => {
   grant();
 }, 180_000);
 
+// #2683: keep the original hook budget while identifying the exact awaited step.
+// Only this invocation's generated DB and two roles are named or removed.
 afterAll(async () => {
-  await admin(async (c) => {
-    await c.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
-    for (const r of [OWNER, SERVE]) await c.query(`DROP ROLE IF EXISTS ${r}`);
-  });
+  const c = new Client({ connectionString: urlFor(new URL(maintenanceUrl()).username, 'postgres') });
+  await cleanupOwnedSmokeFixture(c, { database: DB, roles: [OWNER, SERVE] });
 });
 
 describe('serve-role-smoke (#2413 S3)', { timeout: 120_000 }, () => {

@@ -130,7 +130,10 @@ export async function gitMirrorSweepTick(db: PrismaClient, now = new Date()): Pr
             };
             const rejected = new Set(failedWrites);
             for (const node of writes) if (!rejected.has(node.id)) {
-              try { mutateMirrorFiles(localPath, paths(node.loc), () => { writeNodeFile(localPath, node, memoryUrn); }); }
+              try {
+                const child = node.loc ? await liveOwner(node.loc + ':README') : null;
+                mutateMirrorFiles(localPath, paths(node.loc), () => { writeNodeFile(localPath, node, memoryUrn, child !== null); });
+              }
               catch (err) {
                 failedOperation(err); failedWrites.push(node.id);
                 if (hasIncompleteMirrorMutation(localPath)) return { failedWrites, failedRemoves };
