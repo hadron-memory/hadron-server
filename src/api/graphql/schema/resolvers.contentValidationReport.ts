@@ -108,13 +108,14 @@ export async function recordContentValidationReport(
     // 2. Not a writer. Impersonation never records (it is read-only on every surface).
     if (ctx.impersonation) throw memoryWriteForbidden();
     if (options.memoryGuard) await options.memoryGuard(memoryId);
-    // #1705: the request named a session that did not bind. Its actor would have been that
-    // session's worker, so it is refused rather than recorded as the bare credential (the MCP
-    // `session` argument answers the same code).
-    if (ctx.sessionBindingRefused) throw sessionNotBound();
     // #2043: an install memory's pooled write decision is a pre-flight only; the fenced
     // transaction below re-runs the gate.
     await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
+    // 3. #1705: the request named a session that did not bind. Its actor would have been that
+    // session's worker, so it is refused rather than recorded as the bare credential (the MCP
+    // `session` argument answers the same code). Judged only after the writer gate, so a
+    // reader who cannot write gets FORBIDDEN exactly as without a session.
+    if (ctx.sessionBindingRefused) throw sessionNotBound();
     const reporter = await deriveReporter(ctx.db, ctx);
     // Settle a raw writer's unrecorded change first, so the current revision and its stamp
     // are the reconciled ones (the transaction refuses a writer that races this). Like every
