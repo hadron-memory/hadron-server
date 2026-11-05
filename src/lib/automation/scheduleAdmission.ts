@@ -103,9 +103,9 @@ export async function spendAdmission(
   if (held.length !== 1) throw scheduleAdmissionRefused();
   if (admission.kind === 'permission') {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`UPDATE schedule_permissions
-      SET consumed_at = now(), consumed_kind = ${trigger.kind}, consumed_id = ${trigger.id}
+      SET consumed_at = clock_timestamp(), consumed_kind = ${trigger.kind}, consumed_id = ${trigger.id}
       WHERE id = ${admission.permissionId} AND app_id = ${appId} AND worker_id = ${admission.workerId}
-        AND entry_node_urn = ${entryNodeUrn} AND consumed_at IS NULL AND expires_at > now()
+        AND entry_node_urn = ${entryNodeUrn} AND consumed_at IS NULL AND expires_at > clock_timestamp()
       RETURNING id`;
     if (rows.length !== 1) throw scheduleAdmissionRefused();
     return;

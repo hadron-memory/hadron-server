@@ -48,13 +48,13 @@ export const schedulePermissionMutations = {
     await ctx.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'schedule-permission:' + worker.id + ':' + a.entryNodeUrn}))`;
       const live = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM schedule_permissions
-        WHERE worker_id = ${worker.id} AND entry_node_urn = ${a.entryNodeUrn} AND consumed_at IS NULL AND expires_at > now()`;
+        WHERE worker_id = ${worker.id} AND entry_node_urn = ${a.entryNodeUrn} AND consumed_at IS NULL AND expires_at > clock_timestamp()`;
       if (live.length > 0) {
         throw new GraphQLError('This worker already has a live permission for that entry node. It expires within 10 minutes; use it or wait.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await tx.$executeRaw`INSERT INTO schedule_permissions
           (id, app_id, worker_id, entry_node_urn, given_by, given_at, expires_at)
-        VALUES (${id}, ${app.id}, ${worker.id}, ${a.entryNodeUrn}, ${userId}, now(), now() + make_interval(mins => ${SCHEDULE_PERMISSION_MINUTES}::int))`;
+        VALUES (${id}, ${app.id}, ${worker.id}, ${a.entryNodeUrn}, ${userId}, clock_timestamp(), clock_timestamp() + make_interval(mins => ${SCHEDULE_PERMISSION_MINUTES}::int))`;
     });
     return ctx.db.schedulePermission.findUniqueOrThrow({ where: { id } });
   },

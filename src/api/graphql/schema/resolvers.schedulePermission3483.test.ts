@@ -119,7 +119,7 @@ describe('#3483 rows 2-3: a person gives a one-time permission', () => {
       expect(await db.schedulePermission.count()).toBe(0);
     });
   }
-  it('row 3: a portal person who is not an org ADMIN cannot give one; a worker of another App cannot be named', async () => {
+  it('row 3: a portal person who is not an org ADMIN cannot give one', async () => {
     const f = await fixture();
     const m = await db.user.create({ data: { handle: 'sp3483-member' } });
     await db.orgMember.create({ data: { userId: m.id, organizationId: f.org.id, role: 'CONTRIBUTOR' } });
@@ -324,5 +324,30 @@ describe('#3483 row 5: the spend is its own guard, inside the create\'s transact
     const q = await give(f);
     expect(await spend(f, q.id)).toBeNull();
     expect(await spend(f, q.id)).toBe('FORBIDDEN');
+  });
+});
+
+describe('#3483 BLIND head 485ba634 findings', () => {
+  it('P2-1: the consumed CHECK rejects every partial NULL shape', async () => {
+    const f = await fixture();
+    const shapes = [
+      ['now()', 'NULL', "'x'"], ['now()', 'NULL', 'NULL'], ['now()', "'SCHEDULE'", 'NULL'],
+      ['NULL', "'SCHEDULE'", "'x'"], ['NULL', 'NULL', "'x'"], ['NULL', "'SCHEDULE'", 'NULL'],
+    ];
+    const p = await give(f);
+    for (const [at, kind, cid] of shapes) {
+      await expect(db.$executeRawUnsafe(`UPDATE schedule_permissions SET consumed_at = ${at}, consumed_kind = ${kind}, consumed_id = ${cid} WHERE id = '${p.id}'`)).rejects.toThrow(/chk_schedule_permissions_consumed/);
+    }
+  });
+  it('P2-2: a spend whose transaction started before expiry but resumes after it is refused', async () => {
+    const f = await fixture();
+    const p = await give(f);
+    const out = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT now()`;
+      await tx.$executeRaw`UPDATE schedule_permissions SET expires_at = clock_timestamp() + interval '1 second' WHERE id = ${p.id}`;
+      await tx.$executeRaw`SELECT pg_sleep(1.5)`;
+      return spendAdmission(tx as never, { kind: 'permission', workerId: f.worker.id, permissionId: p.id }, f.app.id, f.entry, { kind: 'SCHEDULE', id: 'sched-late' }, f.user.id).then(() => null, (e: any) => e.extensions?.code);
+    });
+    expect(out).toBe('FORBIDDEN');
   });
 });
