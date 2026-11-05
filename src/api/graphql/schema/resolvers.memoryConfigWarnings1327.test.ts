@@ -15,7 +15,7 @@
  *  - template save carries none; dry run and real apply agree; a warning never
  *    changes the mutation's success.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -353,5 +353,212 @@ describe('#1327 — containment shortcuts are each load-bearing', () => {
     await db.orgMember.create({ data: { organizationId: otherOrg.id, userId: admin, role: 'CONTRIBUTOR' } });
     const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tForeign.urn } });
     expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+});
+
+// ---- fix head: App run grants, a fault in the advisory reads, the no-comparison read traps ----
+
+const WARN = (role: string, field: 'authorTask' | 'validationTask', taskUrn: string | null, taskState: string | null) =>
+  ({ code: 'TASK_LESS_VISIBLE', role, field, taskUrn, taskState });
+
+describe('#1327 — a live App write or automation read grant on the target is an audience not provable here', () => {
+  const mkApp = (urn: string) => db.app.create({ data: { name: urn, urn, organizationId: org.id } as never });
+  const writeGrant = (appId: string, memoryId: string, revokedAt: Date | null = null) =>
+    db.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix: 'notes', grantedBy: admin, revokedAt, revokedBy: revokedAt ? admin : null } });
+  const autoGrant = (appId: string, memoryId: string, revokedAt: Date | null = null) =>
+    db.appAutomationReadGrant.create({ data: { appId, memoryId, triggerKind: 'SCHEDULE', triggerId: generateId(), grantedBy: admin, revokedAt, revokedBy: revokedAt ? admin : null } });
+
+  it('org knowledge target: a live write grant warns; the same save without it, or with the grant revoked, does not', async () => {
+    const app = await mkApp('acme.com:wg');
+    const control = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'ctl', authorTaskRef: tKb2.urn } });
+    expect(warned(control, 'createNodeRoleRule')).toEqual([]);
+    await writeGrant(app.id, kb.id, new Date());
+    const revoked = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'rev', authorTaskRef: tKb2.urn } });
+    expect(warned(revoked, 'createNodeRoleRule')).toEqual([]);
+    await writeGrant(app.id, kb.id);
+    const live = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'live', authorTaskRef: tKb2.urn } });
+    expect(warned(live, 'createNodeRoleRule')).toEqual([WARN('live', 'authorTask', tKb2.urn, 'OK')]);
+  });
+
+  it('org knowledge target: a live automation read grant warns; a revoked one does not', async () => {
+    const app = await mkApp('acme.com:ag');
+    await autoGrant(app.id, kb.id, new Date());
+    const revoked = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'rev', authorTaskRef: tKb2.urn } });
+    expect(warned(revoked, 'createNodeRoleRule')).toEqual([]);
+    await autoGrant(app.id, kb.id);
+    const live = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'live', authorTaskRef: tKb2.urn } });
+    expect(warned(live, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+
+  it('a personal target that the owner alone reads: a live write grant warns, though the owner reads the task', async () => {
+    const control = await gql(as(owner), CREATE, { m: mine.id, i: { role: 'ctl', authorTaskRef: tMine2.urn } });
+    expect(warned(control, 'createNodeRoleRule')).toEqual([]);
+    const app = await mkApp('acme.com:wp');
+    await writeGrant(app.id, mine.id);
+    const r = await gql(as(owner), CREATE, { m: mine.id, i: { role: 'live', authorTaskRef: tMine2.urn } });
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+
+  it('a grant on ANOTHER memory changes nothing', async () => {
+    const app = await mkApp('acme.com:wo');
+    await writeGrant(app.id, kb2.id);
+    await autoGrant(app.id, kb2.id);
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tKb2.urn } });
+    expect(warned(r, 'createNodeRoleRule')).toEqual([]);
+  });
+});
+
+describe('#1327 — a fault in the advisory reads never changes the save and never reads as clean', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const FAULT = new Error('LOCAL diagnostic unavailable');
+  const rules = (role?: string) => db.nodeRoleRule.count(role ? { where: { role } } : undefined);
+
+  it('create: the committed rule is answered with a conservative warning from the caller\'s own projection, with one read and one write', async () => {
+    const spy = vi.spyOn(db.memorySubscription, 'count').mockRejectedValueOnce(FAULT);
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tKb2.urn } });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data!.createNodeRoleRule.warnings).toEqual([WARN('spec', 'authorTask', tKb2.urn, 'OK')]);
+    expect(r.data!.createNodeRoleRule.rule.authorTask).toBe(tKb2.urn);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await rules('spec')).toBe(1);
+    expect(JSON.stringify(r)).not.toContain(FAULT.message);
+  });
+
+  it('update: same, and the update is applied once', async () => {
+    const created = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec' } });
+    const id = created.data!.createNodeRoleRule.rule.id;
+    const spy = vi.spyOn(db.memorySubscription, 'count').mockRejectedValueOnce(FAULT);
+    const r = await gql(as(admin), UPDATE, { r: id, i: { validationTaskRef: tKb2.urn } });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data!.updateNodeRoleRule.warnings).toEqual([WARN('spec', 'validationTask', tKb2.urn, 'OK')]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((await db.nodeRoleRule.findUniqueOrThrow({ where: { id } })).validationTaskId).toBe(tKb2.id);
+  });
+
+  it('apply, real and dry run: both answer the same conservative warning, the real one writes once and the dry run writes nothing', async () => {
+    const tpl = await gql(as(admin), CREATE_TPL, { t: 'ORGANIZATION', o: org.id, i: { name: 'base', rules: [{ role: 'spec', authorTaskRef: tKb2.urn }] } });
+    const t = tpl.data!.createMemoryConfigTemplate.template;
+    const dryRun = vi.spyOn(db.memorySubscription, 'count').mockRejectedValueOnce(FAULT);
+    const dry = await gql(as(admin), APPLY, { t: t.id, m: kb.id, d: true });
+    expect(dry.errors, JSON.stringify(dry.errors)).toBeUndefined();
+    expect(dryRun).toHaveBeenCalledTimes(1);
+    expect(await rules()).toBe(0);
+    const real = vi.spyOn(db.memorySubscription, 'count').mockRejectedValueOnce(FAULT);
+    const done = await gql(as(admin), APPLY, { t: t.id, m: kb.id, d: false });
+    expect(done.errors, JSON.stringify(done.errors)).toBeUndefined();
+    expect(real).toHaveBeenCalledTimes(2);
+    const expected = [WARN('spec', 'authorTask', tKb2.urn, 'OK')];
+    expect(dry.data!.applyMemoryConfigTemplate.warnings).toEqual(expected);
+    expect(done.data!.applyMemoryConfigTemplate.warnings).toEqual(expected);
+    expect(await rules('spec')).toBe(1);
+  });
+
+  it('a fault in the first reference does not hide the second: each reference is judged on its own', async () => {
+    vi.spyOn(db.memorySubscription, 'count').mockRejectedValueOnce(FAULT);
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tKb2.urn, validationTaskRef: tKb2.urn } });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    // The coverage is memoised per (target, task memory): the one rejected read serves both references.
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.field)).toEqual(['authorTask', 'validationTask']);
+  });
+
+  it('the projection itself failing: both nullable fields are null, nothing invented, and the save stands', async () => {
+    const real = db.node.findUnique.bind(db.node);
+    vi.spyOn(db.node, 'findUnique').mockImplementation(((args: { select?: { loc?: boolean; memory?: unknown } }) =>
+      args?.select?.loc && args.select.memory ? Promise.reject(FAULT) : real(args as never)) as never);
+    const r = await gql(as(admin), `mutation($m: ID!, $i: CreateNodeRoleRuleInput!) { createNodeRoleRule(memoryRef: $m, input: $i) { rule { id role } ${W} } }`,
+      { m: kb.id, i: { role: 'spec', authorTaskRef: tKb2.urn } });
+    expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
+    expect(r.data!.createNodeRoleRule.warnings).toEqual([WARN('spec', 'authorTask', null, null)]);
+    expect(await rules('spec')).toBe(1);
+  });
+
+  it('a known NONE reference stays silent even while the advisory reads are failing', async () => {
+    vi.spyOn(db.memorySubscription, 'count').mockRejectedValue(FAULT);
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'plain' } });
+    expect(warned(r, 'createNodeRoleRule')).toEqual([]);
+  });
+
+  it('control: a deciding refusal is still an error, is not turned into a warning, and persists nothing', async () => {
+    vi.spyOn(db.memorySubscription, 'count').mockRejectedValue(FAULT);
+    const r = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec', authorTaskRef: tForeign.urn } });
+    expect(r.errors?.length).toBeGreaterThan(0);
+    expect(r.data?.createNodeRoleRule ?? null).toBeNull();
+    expect(await rules()).toBe(0);
+    const unauthorized = await gql(as(outsider), CREATE, { m: kb.id, i: { role: 'spec' } });
+    expect(unauthorized.errors?.[0]?.extensions?.code ?? unauthorized.errors?.[0]?.message).toBeDefined();
+    expect(await rules()).toBe(0);
+  });
+});
+
+describe('#1327 — UNREADABLE, BROKEN and NONE run no audience comparison (read traps)', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const traps = () => [
+    vi.spyOn(db.memorySubscription, 'count'),
+    vi.spyOn(db.agentMemoryItem, 'count'),
+    vi.spyOn(db.memoryShare, 'findMany'),
+    vi.spyOn(db.memoryMember, 'findMany'),
+    vi.spyOn(db.appMemoryWriteGrant, 'count'),
+    vi.spyOn(db.appAutomationReadGrant, 'count'),
+  ];
+  const seed = async (data: Record<string, unknown>) => {
+    const created = await gql(as(admin), CREATE, { m: kb.id, i: { role: 'spec' } });
+    const id = created.data!.createNodeRoleRule.rule.id;
+    await db.nodeRoleRule.update({ where: { id }, data });
+    return id;
+  };
+
+  it('UNREADABLE: warns from the projection and reads no audience', async () => {
+    const id = await seed({ authorTaskId: tForeign.id, authorTaskRequired: true });
+    const spies = traps();
+    const r = await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
+    expect(warned(r, 'updateNodeRoleRule')).toEqual([WARN('spec', 'authorTask', null, 'UNREADABLE')]);
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
+  });
+
+  it('BROKEN: warns from the projection and reads no audience', async () => {
+    const id = await seed({ authorTaskId: null, authorTaskRequired: true });
+    const spies = traps();
+    const r = await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
+    expect(warned(r, 'updateNodeRoleRule')).toEqual([WARN('spec', 'authorTask', null, 'BROKEN')]);
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
+  });
+
+  it('NONE: no warning and no audience read', async () => {
+    const id = await seed({});
+    const spies = traps();
+    const r = await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
+    expect(warned(r, 'updateNodeRoleRule')).toEqual([]);
+    for (const s of spies) expect(s).not.toHaveBeenCalled();
+  });
+
+  it('control: an OK task in another memory does read the audience', async () => {
+    const id = await seed({ authorTaskId: tKb2.id, authorTaskRequired: true });
+    const spies = traps();
+    await gql(as(admin), UPDATE, { r: id, i: { enabled: false } });
+    expect(spies.some((s) => s.mock.calls.length > 0)).toBe(true);
+  });
+});
+
+describe('#1327 — the target App guard and the group bound are each load-bearing', () => {
+  it('an App-scoped knowledge target warns although it is org knowledge and the task is same-org knowledge', async () => {
+    const app = await db.app.create({ data: { name: 'App', urn: 'acme.com:appk', organizationId: org.id } as never });
+    const target = await mkMemory({ organizationId: org.id, appId: app.id, class: 'knowledge', urn: 'acme.com:appk:kb', name: 'appkb', visibility: 'ORGANIZATION' });
+    const r = await gql(as(admin), CREATE, { m: target.id, i: { role: 'spec', authorTaskRef: tKb2.urn } });
+    expect(warned(r, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
+  });
+
+  it('a group of 50 members who all read the task does not warn; a 51st member does', async () => {
+    const grp = await mkMemory({ organizationId: org.id, class: 'group', urn: 'acme.com:grp50', name: 'grp50', visibility: 'GROUP' });
+    await db.memoryMember.create({ data: { memoryId: grp.id, userId: admin, role: 'owner' } });
+    for (let i = 0; i < 49; i++) {
+      const u = await mkUser(400 + i, org.id, 'CONTRIBUTOR');
+      await db.memoryMember.create({ data: { memoryId: grp.id, userId: u, role: 'reader' } });
+    }
+    const ok = await gql(as(admin), CREATE, { m: grp.id, i: { role: 'fifty', authorTaskRef: tKb2.urn } });
+    expect(warned(ok, 'createNodeRoleRule')).toEqual([]);
+    const extra = await mkUser(499, org.id, 'CONTRIBUTOR');
+    await db.memoryMember.create({ data: { memoryId: grp.id, userId: extra, role: 'reader' } });
+    const over = await gql(as(admin), CREATE, { m: grp.id, i: { role: 'fiftyone', authorTaskRef: tKb2.urn } });
+    expect(warned(over, 'createNodeRoleRule').map((x) => x.code)).toEqual(['TASK_LESS_VISIBLE']);
   });
 });

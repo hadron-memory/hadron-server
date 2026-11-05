@@ -35,14 +35,24 @@
  *     share grantee read the task's memory under the shared node-content gate; or
  *   - the target is a user-owned memory: its owner does; or
  *   - the target is a group memory: each MemoryMember does; or
- *   - the target is org-owned knowledge with no subscriber, App or Agent link and
- *     not PUBLIC, and the task's memory is org knowledge of that SAME org.
+ *   - the target is org-owned knowledge with no subscriber, App or Agent link, no
+ *     unrevoked App write or automation read grant, and not PUBLIC, and the task's memory is org knowledge of that SAME org.
  *
+ * A live App write grant or automation read grant on the target makes any non-public
+ * task unproven for every class, because those runs reach the memory outside the read gate.
  * Every other shape (an App, team, session, worker or system memory, a PUBLIC
  * target, a target with subscribers or Agent links, more explicit principals than
  * {@link MAX_POINT_CHECKED_PRINCIPALS}) cannot be proven and WARNS. A false
  * warning costs a manager one line; a false silence is the defect, so there is no
  * capped scan and no "same org means access" shorthand.
+ *
+ * ## A fault in these advisory reads
+ *
+ * The rule is already saved by the time this runs. A failed read for one reference
+ * therefore never errors the mutation and never reads as clean: it emits the same
+ * `TASK_LESS_VISIBLE` (containment not established, which is not proof that an extra
+ * reader exists). `taskUrn`/`taskState` come only from the caller's own projection when
+ * that read worked; when the projection itself failed both are null. Nothing is retried.
  *
  * Explicit principals are point-checked with the shared gate
  * (`getAccessibleMemoryIds`), asked as that user with no platform role, which can
@@ -85,16 +95,37 @@ export async function taskVisibilityWarnings(
   const out: MemoryConfigWarning[] = [];
   for (const rule of rules) {
     for (const field of TASK_KINDS) {
-      const view = await refViewOnce(ctx, rule, field);
+      // Only the advisory reads are caught, per reference, and never retried: this function runs after
+      // the deciding gates and the commit, so a fault here must not turn a saved rule into an error.
+      // A fault fails toward the warning (containment not established), never toward `warnings: []`.
+      let view: Awaited<ReturnType<typeof refViewOnce>>;
+      try {
+        view = await refViewOnce(ctx, rule, field);
+      } catch (error) {
+        // The projection itself is unavailable, so no state or URN is invented. A reference that is
+        // absent never reads anything, so a fault here means one exists.
+        logAdvisoryFault(rule.role, field, error);
+        out.push({ code: TASK_LESS_VISIBLE, role: rule.role, field, taskUrn: null, taskState: null });
+        continue;
+      }
       if (view.state === 'NONE') continue;
       if (view.state === 'OK') {
-        const node = await ctx.db.node.findUnique({ where: { id: view.id! }, select: { memoryId: true } });
-        if (node && (await coverageOnce(ctx.db, memo, targetMemoryId, node.memoryId))) continue;
+        try {
+          const node = await ctx.db.node.findUnique({ where: { id: view.id! }, select: { memoryId: true } });
+          if (node && (await coverageOnce(ctx.db, memo, targetMemoryId, node.memoryId))) continue;
+        } catch (error) {
+          logAdvisoryFault(rule.role, field, error);
+        }
       }
       out.push({ code: TASK_LESS_VISIBLE, role: rule.role, field, taskUrn: view.urn, taskState: view.state });
     }
   }
   return out;
+}
+
+/** Names the rule's role and field and the error's class only: never the error text, a URL or any task content. */
+function logAdvisoryFault(role: string, field: string, error: unknown): void {
+  console.warn(`[#1327] task visibility check failed (${error instanceof Error ? error.name : 'unknown'}); warning conservatively`, { role, field });
 }
 
 function coverageOnce(db: PrismaClient, memo: CoverageMemo, targetId: string, taskMemoryId: string): Promise<boolean> {
@@ -154,6 +185,14 @@ export async function taskMemoryCoversTargetReaders(
   // App, team, session, worker and install audiences are not enumerable here.
   if (target.appId !== null || target.userMemoryOfAgentId !== null || target.isInstallMemory ||
       target.class === 'app' || target.class === 'system') return false;
+
+  // An App's runs reach a memory through a live write or automation read grant on it, a reach that does not
+  // pass through the shared read gate and is not enumerable here. Any unrevoked grant makes containment unproven.
+  const [writeGrants, automationGrants] = await Promise.all([
+    db.appMemoryWriteGrant.count({ where: { memoryId: target.id, revokedAt: null } }),
+    db.appAutomationReadGrant.count({ where: { memoryId: target.id, revokedAt: null } }),
+  ]);
+  if (writeGrants > 0 || automationGrants > 0) return false;
 
   if (target.class === 'personal' || target.class === 'private') {
     if (!target.userId) return false;

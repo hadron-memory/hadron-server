@@ -4387,7 +4387,7 @@ export const typeDefs = `#graphql
     deleted: Boolean!
   }
 
-  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success. Today the only code is TASK_LESS_VISIBLE (#1327): a task the saver can read that some reader of the memory may not; taskUrn and taskState are the saver's own reference projection, so a task the saver cannot read is named by state alone."
+  "#1325 — a non-fatal finding about a saved rule. Never changes the mutation's success. Today the only code is TASK_LESS_VISIBLE (#1327): a task the saver can read that some reader of the memory may not; taskUrn and taskState are the saver's own reference projection, so a task the saver cannot read is named by state alone. It is also what a save answers when that check could not be completed after the rule was saved (containment not established, not proof that a reader is missing): the save still succeeds, and taskUrn and taskState are then null when the saver's own projection was unavailable. An App write or automation read grant on the memory counts as a reader that cannot be proven to read the task."
   type MemoryConfigWarning {
     code: String!
     role: String!
