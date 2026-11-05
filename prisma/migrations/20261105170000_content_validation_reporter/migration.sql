@@ -48,12 +48,23 @@ ALTER TABLE "node_content_validation_reports" ADD CONSTRAINT "chk_node_content_v
   ELSE false END);
 
 -- Reports are append-only history. The one permitted change is a user merge
--- moving a PERSON reporter's user id to the survivor (mergeUsers); a row may
--- still be deleted with its node (the node FK cascades).
+-- moving a PERSON reporter's user id to the survivor (mergeUsers), and only
+-- along a merge already recorded in user_merges (mergeUsers writes that row
+-- before it reassigns); a row may still be deleted with its node (the node FK
+-- cascades).
 CREATE OR REPLACE FUNCTION hadron_node_content_validation_report_immutable() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   IF (to_jsonb(NEW) - 'reporter_user_id') IS DISTINCT FROM (to_jsonb(OLD) - 'reporter_user_id') THEN
+    RAISE EXCEPTION 'node_content_validation_reports is append-only';
+  END IF;
+  IF NEW."reporter_user_id" IS DISTINCT FROM OLD."reporter_user_id" AND NOT (
+    OLD."reporter_kind" = 'PERSON' AND OLD."reporter_user_id" IS NOT NULL AND NEW."reporter_user_id" IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM "user_merges" m
+      WHERE m."source_user_id" = OLD."reporter_user_id" AND m."target_user_id" = NEW."reporter_user_id"
+    )
+  ) THEN
     RAISE EXCEPTION 'node_content_validation_reports is append-only';
   END IF;
   RETURN NEW;
