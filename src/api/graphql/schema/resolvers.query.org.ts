@@ -415,6 +415,21 @@ export const orgQueries = {
       return ctx.db.user.findUnique({ where: { id: ctx.userId } });
     },
 
+    /**
+     * #3532 (cor:aut:010:05, rulings 0171-0174, 0192-0194): the answer for THIS request's own credential. Reads the
+     * context only: no database access, no argument, so it is no token oracle and adds no per-cause branch. A check
+     * that could not complete is the ordinary internal error (cor:api:260:01), never REFUSED.
+     */
+    authenticationStatus: async (_: unknown, __: unknown, ctx: Context) => {
+      switch (ctx.credentialStatus) {
+        case 'authenticated': return 'AUTHENTICATED';
+        case 'refused': return 'REFUSED';
+        case 'anonymous': return 'ANONYMOUS';
+        // 'unavailable', and a context nothing resolved a status for: the credential check is incomplete.
+        default: throw new Error('authenticationStatus: the credential check did not complete');
+      }
+    },
+
     // #562: expose the request's already-resolved AuthContext (cor:aut:020:02)
     // read-only. Current-request only — there is no token argument, so this is
     // never an oracle. A credential that didn't resolve leaves both appId and

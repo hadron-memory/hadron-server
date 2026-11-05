@@ -44,7 +44,7 @@ async function ask(authorization?: string, query = Q): Promise<{ status: number;
   return { status: res.status, text, json: JSON.parse(text) };
 }
 
-const REFUSED_BODY = '{"data":{"authenticationStatus":"REFUSED"}}';
+const REFUSED_BODY = '{"data":{"authenticationStatus":"REFUSED"}}\n';
 
 let userId: string;
 let liveSignInId: string;
@@ -152,15 +152,15 @@ describe('#3532 pin 2/S4 — an ended sign-in is not distinguishable from a neve
 
 describe('#3532 pin 3/S1/S2 — authenticated and anonymous', () => {
   it('S2 — no header, and a non-Bearer scheme (ruling 0192), are ANONYMOUS', async () => {
-    expect((await ask()).text).toBe('{"data":{"authenticationStatus":"ANONYMOUS"}}');
-    expect((await ask('Basic dXNlcjpwYXNz')).text).toBe('{"data":{"authenticationStatus":"ANONYMOUS"}}');
+    expect((await ask()).text).toBe('{"data":{"authenticationStatus":"ANONYMOUS"}}\n');
+    expect((await ask('Basic dXNlcjpwYXNz')).text).toBe('{"data":{"authenticationStatus":"ANONYMOUS"}}\n');
   });
 
   it('S1 — a live sign-in JWT, a live hdr_user_ key, a live hdr_app_ key and a live impersonation JWT are AUTHENTICATED', async () => {
     for (const token of [tokens.live, userKey, appKey, tokens.liveImpersonation]) {
       const r = await ask(`Bearer ${token}`);
       expect(r.status).toBe(200);
-      expect(r.text).toBe('{"data":{"authenticationStatus":"AUTHENTICATED"}}');
+      expect(r.text).toBe('{"data":{"authenticationStatus":"AUTHENTICATED"}}\n');
     }
   });
 
@@ -170,7 +170,7 @@ describe('#3532 pin 3/S1/S2 — authenticated and anonymous', () => {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${userKey}`, 'x-hadron-session': generateId() },
       body: JSON.stringify({ query: Q }),
     });
-    expect(await res.text()).toBe('{"data":{"authenticationStatus":"AUTHENTICATED"}}');
+    expect(await res.text()).toBe('{"data":{"authenticationStatus":"AUTHENTICATED"}}\n');
   });
 });
 

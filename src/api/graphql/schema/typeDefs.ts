@@ -3861,6 +3861,24 @@ export const typeDefs = `#graphql
   }
 
   """
+  What the credential presented on THIS request came to (hrn:node:hadronmemory.com:specs:cor:aut:010:05).
+  """
+  enum AuthenticationStatus {
+    """
+    The credential resolved a user or an App.
+    """
+    AUTHENTICATED
+    """
+    A credential was presented and did not authenticate. One answer for every cause, with no reason.
+    """
+    REFUSED
+    """
+    No credential was presented.
+    """
+    ANONYMOUS
+  }
+
+  """
   The resolved principal for the credential presented on THIS request
   (issue #562). Exposes the AuthContext the server already resolves per
   request (cor:aut:020:02) read-only, so any surface (CLI, portal) can
@@ -9102,6 +9120,16 @@ export const typeDefs = `#graphql
     AuthContext type for the full security posture.
     """
     authContext: AuthContext
+
+    """
+    Whether the credential THIS request presented authenticated
+    (hrn:node:hadronmemory.com:specs:cor:aut:010:05). REFUSED is the identical answer, in status and body for the same
+    operation, for every cause: garbage, expired, wrongly signed, revoked, from an ended sign-in, for a deleted user, or
+    an ended impersonation. Timing is an accepted limit. It takes no argument, so it cannot test a token the caller does
+    not hold. A credential check that could not complete is the ordinary internal error for this field, never REFUSED;
+    every other field answers as before. me and authContext are unchanged (null for a refused credential).
+    """
+    authenticationStatus: AuthenticationStatus!
 
     """
     One admin-impersonation audit record by id. Resolvable to the session's
