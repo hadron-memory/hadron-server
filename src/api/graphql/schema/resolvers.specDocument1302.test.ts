@@ -328,6 +328,12 @@ describe('review round 1 (#3535 LOCAL, SECURITY, UX)', () => {
     expect(await read('lnk:1').catch((e) => e)).toMatchObject({ extensions: { code: 'SPEC_DOCUMENT_TOO_LARGE', limit: 'links' } });
   });
 
+  it('exactly the link budget is served', async () => {
+    await spec('lk5:1', 'Feature: Links', 'root');
+    await spec('lk5:1:1', 'Rule: Links', Array.from({ length: SPEC_DOCUMENT_MAX_LINK_TARGETS }, (_, i) => `[[nowhere:${i}]]`).join(' '));
+    expect((await read('lk5:1')).entries).toHaveLength(2);
+  });
+
   it('links in a superseded part (never shown) do not use the link budget', async () => {
     await spec('sup:1', 'Feature: Sup', 'root');
     const links = Array.from({ length: SPEC_DOCUMENT_MAX_LINK_TARGETS + 1 }, (_, i) => `[[nowhere:${i}]]`).join(' ');

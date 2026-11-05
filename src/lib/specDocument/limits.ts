@@ -8,9 +8,9 @@ export const SPEC_DOCUMENT_MAX_NODES = 300;
 export const SPEC_DOCUMENT_TOO_LARGE = 'SPEC_DOCUMENT_TOO_LARGE';
 
 /**
- * Bytes (UTF-8): the cap on nodes does not bound a document (300 parts of 96 KB is 28.8 MB), so the stored bodies
+ * Bytes (UTF-8): the cap on nodes does not bound a document (300 large bodies is tens of MB), so the stored bodies
  * of the covered parts, the bodies as served (`entries[].content`, includes resolved, superseded and tails included)
- * and the rendered Markdown are each bounded too. Over either the call refuses with
+ * and the rendered Markdown are each bounded too. Over any bound the call refuses with
  * `SPEC_DOCUMENT_TOO_LARGE` and `limit: 'bytes'`; it never shortens the document.
  */
 export const SPEC_DOCUMENT_MAX_BYTES = 2_000_000;

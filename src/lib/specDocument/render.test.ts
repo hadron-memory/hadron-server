@@ -1,7 +1,7 @@
 /** #1302 — the grammar pieces of cor:spc:030:02 that the integration golden does not reach. */
 import { describe, expect, it } from 'vitest';
 import {
-  hasOpenQuestions, inDocumentOrder, renderSpecDocument, specGroupOf, splitAtClosingRule, wikilinkTargets, type DocPart,
+  hasOpenQuestions, inDocumentOrder, renderSpecDocument, specGroupOf, splitAtClosingRule, trimNewlines, wikilinkTargets, type DocPart,
 } from './render.js';
 
 const part = (loc: string, name: string, body: string | null, extra: Partial<DocPart> = {}): DocPart => ({
@@ -65,6 +65,30 @@ describe('blank runs (BLIND round 1)', () => {
   it('a name with the citation as a longer prefix still gets its own suffix', () => {
     const md = renderSpecDocument({ memory: 'o:m', renderedAt: at, feature: part('x:1', 'x:10 — Other', 'b'), links: new Map(), parts: [] });
     expect(md).toContain('# x:10 — Other [x:1]');
+  });
+});
+
+describe('linear trim (§10 delta P1)', () => {
+  // A newline run that is not at the string's end made `/^\n+|\n+$/g` quadratic: synchronous, so it blocks every tenant.
+  const run = '\n'.repeat(60_000);
+  const timed = (fn: () => string): number => { const t = Date.now(); fn(); return Date.now() - t; };
+  it('a mid-string newline run inside a fence renders in linear time (cleanBody site)', () => {
+    const body = `# Rule: R\n\n\`\`\`\na${run}b\n\`\`\`\n\ntext`;
+    let md = '';
+    expect(timed(() => { md = renderSpecDocument({ memory: 'o:m', renderedAt: at, feature: part('x:1', 'Feature: F', 'f'), links: new Map(), parts: [part('x:1:1', 'Rule: R', body)] }); return md; })).toBeLessThan(1000);
+    expect(md).toContain(`a${run}b`);
+  });
+  it('a mid-string newline run in the Feature tail renders in linear time (tail site)', () => {
+    const feature = part('x:1', 'Feature: F', `f\n---\n\nt${run}u\n\nv`);
+    let md = '';
+    expect(timed(() => { md = renderSpecDocument({ memory: 'o:m', renderedAt: at, feature, links: new Map(), parts: [] }); return md; })).toBeLessThan(1000);
+    expect(md).toContain(`t${run}u`);
+  });
+  it('trimNewlines strips only the ends', () => {
+    expect(trimNewlines('\n\na\n\nb\n\n')).toBe('a\n\nb');
+    expect(trimNewlines('\n\n')).toBe('');
+    expect(trimNewlines('')).toBe('');
+    expect(trimNewlines('a')).toBe('a');
   });
 });
 

@@ -157,7 +157,16 @@ function cleanBody(text: string, shift: boolean): string {
     if (!droppedH1 && h[1].length === 1) { droppedH1 = true; return null; }
     return shift ? `${'#'.repeat(Math.min(6, h[1].length + 1))}${h[2]}` : line;
   });
-  return collapseBlankRuns(lines).replace(/^\n+|\n+$/g, '');
+  return trimNewlines(collapseBlankRuns(lines));
+}
+
+/** `text` without leading and trailing newlines, in one pass from each end (a `/^\n+|\n+$/g` regex is quadratic on a mid-string run). */
+export function trimNewlines(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text[start] === '\n') start += 1;
+  while (end > start && text[end - 1] === '\n') end -= 1;
+  return text.slice(start, end);
 }
 
 /** Runs of blank lines become one blank line OUTSIDE fenced code; inside a fence every byte stays (a code sample may hold blank runs). */
@@ -266,7 +275,7 @@ export function renderSpecDocument(input: DocInput): string {
   }
 
   if (!feature.isPlaceholder && feature.body != null) {
-    const tail = renderLinks(splitAtClosingRule(feature.body).tail.replace(/^\n+|\n+$/g, ''), links);
+    const tail = renderLinks(trimNewlines(splitAtClosingRule(feature.body).tail), links);
     if (tail !== '') blocks.push(tail);
   }
   return `${blocks.join('\n\n')}\n`;
