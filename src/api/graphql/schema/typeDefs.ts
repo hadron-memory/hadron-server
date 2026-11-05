@@ -10611,7 +10611,8 @@ export const typeDefs = `#graphql
     system memory on the chains looked up (the Team Agent's and the caller's own Agent's),
     as for every action answer (hrn:node:hadronmemory.com:specs:cor:agt:110:03);
     otherwise, or when the lookup fails or runs out of time, it is { state: withheld },
-    which says nothing about what the chains hold. A warning never
+    which says nothing about what the chains hold. A warning filed after the request has
+    spent its whole read budget carries no register at all (nothing was looked up). A warning never
     blocks and never reveals another worker's state to a caller who could not
     already see it on the roster.
     #3323: the App-manager arm also admits the manager's held worker on an instruction (hrn:node:hadronmemory.com:specs:cor:dmo:050:12), recorded as one app.manager-act event, ids only.

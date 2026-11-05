@@ -192,8 +192,8 @@ export async function boundedRead<T>(
 /**
  * After the write committed: file the warnings the transaction decided. The fixed-text codes (no-source,
  * open-children) are filed whatever happens to the optional enrichment; the three assignee facts also need the
- * roster's privacy gate and fail CLOSED (dropped) if it cannot be answered; the register is optional guidance and
- * fails open to code + text. Never throws, and does no work once the response is full or the request has spent its
+ * roster's privacy gate and fail CLOSED (dropped) if it cannot be answered; the register is optional guidance whose
+ * lookup failing or timing out is `withheld` (#3491, ruling 0176). Never throws, and does no work once the response is full or the request has spent its
  * read budget.
  */
 export async function emitTaskWarnings(
@@ -230,7 +230,8 @@ export async function emitTaskWarnings(
         await boundedRead(ctx, async (tx, deadline) => {
           const txCtx = { ...ctx, db: tx, workerInternalsCache: new Map() } as unknown as Context;
           if (needsGate) state.gate.set(appId, await maySeeWorkerInternals(txCtx, appId));
-          if (agentId && Date.now() < deadline) {
+          if (agentId) {
+            // A deadline already spent by the gate read withholds the codes (resolveRegistersIn breaks before any read).
             const wanted = decided.filter((c) => (!isFactCode(c) || state.gate.get(appId) === true) && !state.registers.has(keyOf(c)));
             await resolveRegistersIn(tx, txCtx, state, appId, agentId, wanted, deadline);
           }
@@ -298,9 +299,10 @@ export async function flushTaskWarningHistory(ctx: Context, erroredPaths: Readon
 
 /**
  * Resolve each code through the register inside an open bounded read, storing the outcomes in the request state. The
- * deadline is checked between codes (the aggregate bound); a code not reached keeps no outcome ⇒ code + text only.
- * Both chosen nodes (the register entry and the role task) must be readable by the CALLER under the canonical memory
- * read gate, else the code degrades to unmapped / unresolved with nothing disclosed.
+ * deadline is checked between codes (the aggregate bound); a code not reached, or any failure, is `withheld`.
+ * #3491 (ruling 0176): every system memory on the chains looked up (the Team Agent's and the caller Agent's) must be
+ * readable by the CALLER under the canonical memory read gate, else `withheld`; the shared {@link answerWithLookup}
+ * is the one gate, the same as for every action answer.
  */
 async function resolveRegistersIn(
   tx: Prisma.TransactionClient,
@@ -338,7 +340,7 @@ type RegisterOutcome = Map<TaskWarningCode, TaskWarningRegister>;
 
 /**
  * Resolve the register for `codes` for the current actor's Agent, standalone (its own request state): the map holds
- * an outcome per code reached. No Agent ⇒ empty and no lookup; any error ⇒ empty.
+ * an outcome per code. No Agent ⇒ empty and no lookup; a failed read ⇒ `withheld` for every code.
  */
 export async function resolveRegisters(ctx: Context, appId: string, codes: readonly TaskWarningCode[]): Promise<RegisterOutcome> {
   const out: RegisterOutcome = new Map();

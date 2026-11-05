@@ -73,6 +73,26 @@ describe('task warnings join the whole-chain gate', () => {
       await db.worker.update({ where: { id: worker.id }, data: { agentId: caller.id } });
       expect(await runAsActor({ workerId: worker.id, agentId: caller.id }, () => resolveRegisters(ctx(member.id), app.id, [CODE])).then(m => m.get(CODE))).toEqual({ state: 'withheld' });
     });
+  it('a distinct caller Agent: an unreadable Team base withholds even when the entry sits in the readable Team memory and the caller chain is readable (§10 P3-1)', async () => {
+    // The caller is NOT the Team Agent, so the caller-chain loop cannot answer for the Team chain: only the team-chain gate can.
+    const callerMade = await M.createAgent({}, { orgId: org.id, name: 'Caller' }, ctx(admin.id));
+    const caller = await db.agent.findUniqueOrThrow({ where: { id: callerMade.id } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: caller.id } });
+    await task(caller.systemMemoryId!);
+    await db.worker.update({ where: { id: worker.id }, data: { agentId: caller.id } });
+    const run = () => runAsActor({ workerId: worker.id, agentId: caller.id }, () => resolveRegisters(ctx(member.id), app.id, [CODE])).then(m => m.get(CODE));
+    expect(await run()).toMatchObject({ state: 'mapped' }); // control: both chains readable
+    const base = await hiddenBase('team-base-distinct');
+    await db.agent.update({ where: { id: team.id }, data: { extendsAgentId: base.id } });
+    expect(await run()).toEqual({ state: 'withheld' });
+  });
+  it('resolveRegisters: a failed read transaction withholds every code (§10 P3-4)', async () => {
+    const spy = vi.spyOn(db, '$transaction').mockRejectedValueOnce(new Error('boom'));
+    try {
+      const out = await asCaller(() => resolveRegisters(ctx(member.id), app.id, [CODE, 'task.create.no-source']));
+      expect([...out.values()]).toEqual([{ state: 'withheld' }, { state: 'withheld' }]);
+    } finally { spy.mockRestore(); }
+  });
   it('an outsider who reads none of it gets withheld, not unmapped', async () => {
     const outsider = await db.user.create({ data: { handle: 'gate-out' } });
     expect(await register(ctx(outsider.id))).toEqual({ state: 'withheld' });
