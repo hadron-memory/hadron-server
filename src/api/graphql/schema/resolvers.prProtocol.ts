@@ -7,15 +7,12 @@
  */
 import { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { withoutRequestCaches } from './resolvers.helpers.js';
 import { mutateTask, mayDirectTask, isAssignee, refuseEnded, withReadableTask, resolveTaskRef, taskError, type TaskRow, type TaskActor, type TaskApp } from './resolvers.agentTask.js';
 import { appendTaskEvent, eventActor } from '../../../lib/agentTasks/events.js';
 import { PR_EVENT_TYPES, REVIEW_VERDICTS, type ReviewVerdict, type PrProtocolEvent } from '../../../lib/agentTasks/prProtocol.js';
 import { storedTaskReferences } from '../../../lib/agentTasks/references.js';
 import { checkAgainstTeamSchema, normalizeTaskProperties, propertiesFingerprint } from '../../../lib/agentTasks/properties.js';
 import { lockTaskGraph } from '../../../lib/agentTasks/blockers.js';
-import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
-import { boundedRead } from './resolvers.taskWarnings.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { resolveActionAnswer } from '../../../lib/actionRegister/answer.js';
 import type { PublicTickAction } from '../../../lib/tickers/tickActions.js';
