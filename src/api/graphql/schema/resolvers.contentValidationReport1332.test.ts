@@ -466,6 +466,34 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
     expect((result.report as Record<string, unknown>).outcome).toBe('PASS');
   });
 
+  it('§10 P3-6: a replayed receipt answers from the authorized snapshot too, never the memory the node moved into', async () => {
+    const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden-r', urn: 'cv-hidden-r' } })).id;
+    const hidden = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden-r:secret', name: 'Secret', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    const first = await report(person(leo), { runId: 'replay-move' });
+    expect(first.replayed).toBe(false);
+    let moved = false;
+    // Move the node at the replay's first post-commit read (the only node read selecting revSeq).
+    const racing = new Proxy(db, { get(target, key, receiver) {
+      if (key !== 'node') return Reflect.get(target, key, receiver);
+      return new Proxy(target.node, { get(model, op, r) {
+        if (op !== 'findUnique') return Reflect.get(model, op, r);
+        return async (a: { where?: { id?: string }; select?: Record<string, boolean> }) => {
+          if (!moved && a.where?.id === nodeId && a.select?.revSeq) {
+            moved = true;
+            await db.node.update({ where: { id: nodeId }, data: { memoryId: hidden, revSeq: 2 } });
+            await db.nodeContentValidationReport.create({ data: { nodeId, memoryId: hidden, nodeRevSeq: 1, validationTaskId: validationTask, validationTaskRevSeq: 1, outcome: 'FAIL' } });
+          }
+          return (model.findUnique as (x: unknown) => unknown)(a);
+        };
+      } });
+    } });
+    const replay = await report(person(leo, { db: racing as typeof db }), { runId: 'replay-move' });
+    expect(moved).toBe(true);
+    expect(replay.replayed).toBe(true);
+    expect(replay.state).toBe('PASS');
+    expect((replay.report as Record<string, unknown>).outcome).toBe('PASS');
+  });
+
   it('a named session that failed to bind (#1705) is SESSION_NOT_BOUND, never recorded as the bare credential', async () => {
     const refused = (extra: Partial<Context> = {}) => person(leo, { sessionBindingRefused: true, ...extra } as Partial<Context>);
     expect(await refusal(report(refused()))).toBe('SESSION_NOT_BOUND');

@@ -149,6 +149,26 @@ describe('#1332 MCP hadron_record_content_validation', () => {
     expect(await reports()).toHaveLength(0);
   });
 
+  it('refusal precedence with a refused X-Hadron-Session (Xavier #81077): not-found, then FORBIDDEN, then SESSION_NOT_BOUND', async () => {
+    const reader = (await db.user.create({ data: { handle: 'cvm-reader' } })).id;
+    await db.orgMember.create({ data: { organizationId: orgId, userId: reader, role: 'READER' } });
+    const refusedHeader = { requestSession: { sessionId: generateId(), refused: true } } as Partial<AuthContext>;
+    const matrix: Array<[string, string, string]> = [
+      ['unreadable caller', stranger, 'NODE_NOT_FOUND'],
+      ['readable non-writer', reader, 'FORBIDDEN'],
+      ['authorized writer', leo, 'SESSION_NOT_BOUND'],
+    ];
+    for (const [label, userId, expected] of matrix) {
+      const text = await asUser(userId, refusedHeader).callToolText('hadron_record_content_validation', args({ runId: `p-${label}` }));
+      expect(mcpCode(text), `${label}: ${text}`).toBe(expected);
+      // The GraphQL delegate answers the same for the same request.
+      expect(await gqlCode(M.recordNodeContentValidationReport({}, args(), { db, roles: [], userId, sessionBindingRefused: true } as Context)), label).toBe(expected);
+    }
+    expect(await reports()).toHaveLength(0);
+    // Control: the writer without the refused header records.
+    expect(await asUser(leo).callToolText('hadron_record_content_validation', args())).toMatch(/^Recorded: PASS/);
+  });
+
   it('a malformed argument is refused by the schema before the resolver runs', async () => {
     const text = await asUser(leo).callToolText('hadron_record_content_validation', args({ outcome: 'MAYBE' }));
     expect(text).not.toMatch(/^Recorded/);
@@ -193,14 +213,21 @@ describe('#1332 run tool hadron_record_content_validation', () => {
     };
     const otherOrg = (await db.organization.create({ data: { id: generateId(), name: 'cvm-other', urn: 'cvm-other' } })).id;
     await db.orgMember.create({ data: { organizationId: otherOrg, userId: leo, role: 'CONTRIBUTOR' } });
-    const cases: Array<[string, string, RegExp]> = [
-      ['user-owned', await docIn({ urn: 'cvm-leo:own', class: 'knowledge', ownerUserId: leo }), /Flow memory not found/],
-      ['encrypted', await docIn({ urn: 'cvm-org:enc', organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true }), /encrypted/],
-      ['foreign org', await docIn({ urn: 'cvm-other:mem', organizationId: otherOrg, class: 'knowledge', visibility: 'ORGANIZATION' }), /Flow memory not found/],
+    const cases: Array<[string, string]> = [
+      ['user-owned', await docIn({ urn: 'cvm-leo:own', class: 'knowledge', ownerUserId: leo })],
+      ['encrypted', await docIn({ urn: 'cvm-org:enc', organizationId: orgId, class: 'knowledge', visibility: 'ORGANIZATION', isEncrypted: true })],
+      ['foreign org', await docIn({ urn: 'cvm-other:mem', organizationId: otherOrg, class: 'knowledge', visibility: 'ORGANIZATION' })],
+      ['missing node', generateId()],
     ];
     const run = await mintRun(validationTask);
-    for (const [label, ref, refusal] of cases) {
-      expect(await gqlCode(runTool(run, args({ nodeRef: ref }))), label).toMatch(refusal);
+    // §10 P3-5: a node the run may not reach answers exactly like a missing one (code and text),
+    // so a run learns nothing about whether it exists.
+    const answer = (ref: string) => runTool(run, args({ nodeRef: ref })).then(
+      () => 'NO_ERROR',
+      (e: unknown) => e instanceof GraphQLError ? `${String(e.extensions.code)}: ${e.message}` : `untyped: ${(e as Error).message}`,
+    );
+    for (const [label, ref] of cases) {
+      expect(await answer(ref), label).toBe('NODE_NOT_FOUND: Node not found');
     }
     expect(await reports()).toHaveLength(0);
     // The same run still records in its own org's plain memory.
