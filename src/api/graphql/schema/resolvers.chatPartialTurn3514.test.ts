@@ -94,6 +94,7 @@ describe('#3514 — the refused extraction reports what the turn did and did not
     await governed(chatId);
     const before = await state(chatId);
     const e = await refusal(respond(chatId, { message: 'second', data: { region: 'US' }, next_stage: 'wrap', onTrack: true }));
+    expect(e).not.toBeNull();
     expect(e?.extensions).toMatchObject({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', partialTurn: PARTIAL('AUTHORING_ATTESTATION_MISSING') });
     const after = await state(chatId);
     expect(after.assistants).toBe(before.assistants + 1);
@@ -108,10 +109,12 @@ describe('#3514 — the refused extraction reports what the turn did and did not
     await governed(chatId, { runnable: false });
     const before = await state(chatId);
     const e = await refusal(respond(chatId, { message: 'second', data: { region: 'US' }, next_stage: 'wrap', onTrack: true }));
+    expect(e).not.toBeNull();
     expect(e?.extensions).toMatchObject({ code: 'AUTHOR_TASK_BROKEN', partialTurn: PARTIAL('AUTHOR_TASK_BROKEN') });
     const after = await state(chatId);
     expect([after.assistants, after.count, after.stage]).toEqual([before.assistants + 1, Number(before.count) + 1, before.stage]);
     expect(after.data).toEqual(before.data);
+    expect(after.revisions).toBe(before.revisions);
   });
 
   const SUCCESS_KEYS = ['chatEnded', 'conversationHandoff', 'displayMessage', 'newStageName', 'offTrackReason', 'onTrack', 'stageTransitioned'];
@@ -131,7 +134,9 @@ describe('#3514 — the refused extraction reports what the turn did and did not
     const ok = await respond(chatId, { message: 'x', data: { region: 'EU' }, next_stage: 'wrap', onTrack: true });
     expect(Object.keys(ok).sort()).toEqual(SUCCESS_KEYS);
     expect(ok).toMatchObject({ stageTransitioned: true });
-    expect((await state(chatId)).data).toEqual(before.data);
+    const after = await state(chatId);
+    expect(after.data).toEqual(before.data);
+    expect(after.revisions).toBe(before.revisions);
   });
 
   it('case 5: a governed target and a message-only turn: success, stage advances', async () => {
@@ -163,6 +168,9 @@ describe('#3514 — the refused extraction reports what the turn did and did not
   it('reportPartialTurn labels only the authoring gate\'s typed refusal; any other error passes through as the same object', () => {
     const labelled = (() => { try { reportPartialTurn(new AuthoringAttestationError('AUTHORING_ATTESTATION_MISSING', 'guide')); } catch (e) { return e as GraphQLError; } })();
     expect(labelled?.extensions).toEqual({ code: 'AUTHORING_ATTESTATION_MISSING', role: 'guide', partialTurn: PARTIAL('AUTHORING_ATTESTATION_MISSING') });
+    // The rewrap keeps the message and the original error (stack, class) for logging and Sentry consumers.
+    expect(labelled?.message).toBe(new AuthoringAttestationError('AUTHORING_ATTESTATION_MISSING', 'guide').message);
+    expect(labelled?.originalError).toBeInstanceOf(AuthoringAttestationError);
     for (const other of [new Error('lock timeout'), new GraphQLError('other', { extensions: { code: 'BAD_USER_INPUT' } })]) {
       let caught: unknown;
       try { reportPartialTurn(other); } catch (e) { caught = e; }

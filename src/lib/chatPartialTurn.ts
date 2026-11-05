@@ -37,6 +37,7 @@ export function reportPartialTurn(e: unknown): never {
   if (e instanceof AuthoringAttestationError) {
     throw new GraphQLError(e.message, {
       extensions: { ...e.extensions, partialTurn: extractionRefusedReport(e.code) },
+      originalError: e,
     });
   }
   throw e;
