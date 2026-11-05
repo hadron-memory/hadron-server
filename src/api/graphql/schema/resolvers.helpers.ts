@@ -1,5 +1,5 @@
 import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
-import type { AuthoredWith } from '../../../lib/authoringAttestation.js';
+import type { AuthoredWith, TaskReadGate } from '../../../lib/authoringAttestation.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
 import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
@@ -134,6 +134,12 @@ export interface Context {
    * names no MCP door (@codex, PR #1305).
    */
   governedCanReplay?: (kind: 'task' | 'review' | 'spec' | 'decision') => boolean;
+  /**
+   * #1329 — set by every MCP context that can reach an authoring write: the gate
+   * `hadron_get_node` applies, so a refusal on MCP calls a task READABLE only if
+   * MCP can load it. Unset means the GraphQL gate.
+   */
+  readsAuthorTask?: TaskReadGate;
   /**
    * #1328 — the trusted portal human: set ONLY by the /graphql Apollo context, from the sign-in credential
    * (`portalHumanUserId`). Never built from input, and absent from every MCP, runner and job context.

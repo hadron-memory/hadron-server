@@ -212,12 +212,12 @@ describe('#1329 every MCP writer carries the structured refusal', () => {
   const T = 'hrn:node:attest-1329:mem:t';
   const live = (loc: string) => db.node.findFirstOrThrow({ where: { memoryId, loc, deletedAt: null } });
   const tools: Array<[string, string, () => Record<string, unknown>, () => Promise<unknown>]> = [
-    ['hadron_create_node', 'a fresh create', () => ({ urn: `${A}-new`, name: 'n', content: 'x', role: 'guide' }), async () => expect(await live('a-new')).toMatchObject({ authoredByTask: readableTaskId })],
+    ['hadron_create_node', 'a fresh create', () => ({ urn: `${A}-new`, name: 'n', content: 'x', role: 'guide' }), async () => expect(await live('a-new')).toMatchObject({ name: 'n', content: 'x', authoredByTask: readableTaskId })],
     ['hadron_create_node', 'over a tombstone', () => ({ urn: T, name: 't', content: 'x', role: 'guide' }), async () => expect(await live('t')).toMatchObject({ content: 'x', authoredByTask: readableTaskId })],
     ['hadron_update_node', 'an edit', () => ({ urn: A, content: 'changed' }), async () => expect(await live('a')).toMatchObject({ content: 'changed', authoredByTask: readableTaskId })],
     ['hadron_update_node_data', 'a data merge', () => ({ nodeUrn: A, data: { k: 1 } }), async () => expect(await live('a')).toMatchObject({ data: { k: 1 }, authoredByTask: readableTaskId })],
     ['hadron_replace_text', 'a replace', () => ({ nodeUrns: [A], oldText: 'first', newText: 'second', fields: ['content'] }), async () => expect(await live('a')).toMatchObject({ content: 'second', authoredByTask: readableTaskId })],
-    ['hadron_create_parent_node', 'a section re-save', () => ({ urn: P, description: 'renamed' }), async () => expect(await live('p')).toMatchObject({ authoredByTask: readableTaskId })],
+    ['hadron_create_parent_node', 'a section re-save', () => ({ urn: P, description: 'renamed' }), async () => expect(await live('p')).toMatchObject({ description: 'renamed', authoredByTask: readableTaskId })],
     ['hadron_move_node', 'a rename', () => ({ urn: A, targetUrn: `${A}-moved`, renameToLeaf: true }), async () => expect(await live('a-moved')).toMatchObject({ name: 'a-moved', authoredByTask: readableTaskId })],
   ];
   it.each(tools)('%s, %s', async (name, _label, args, written) => {
@@ -434,6 +434,25 @@ describe('#1329 on MCP, readable means hadron_get_node can load it', () => {
     expect(mcp.structuredContent?.error.code).toBe('INTERNAL_SERVER_ERROR');
     expect(JSON.stringify(mcp)).not.toMatch(/unreadable|author task|connection terminated|author_task_broken/i);
     expect(await db.node.count({ where: { memoryId, loc: 'a' } })).toBe(0);
+  });
+
+  it("an install write takes the MCP gate too", async () => {
+    const app = await db.app.findFirstOrThrow({ where: { urn: 'attest-1329:c' } });
+    const agent = await db.agent.findFirstOrThrow({ where: { urn: 'attest-1329:ag' } });
+    await db.appMember.create({ data: { appId: app.id, userId: writerId, role: 'owner' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } as never });
+    const install = await db.memory.create({ data: {
+      id: generateId(), class: 'system', name: 'install', urn: 'attest-1329:install', organizationId: orgId, appId: app.id, installOfAgentId: agent.id, isInstallMemory: true,
+    } });
+    // The holding reads over MCP once its App is the caller's own, so the task moves to one that does not.
+    const elsewhere = await db.app.create({ data: { organizationId: orgId, name: 'd', urn: 'attest-1329:d' } });
+    await db.memory.update({ where: { id: holdingMemoryId }, data: { appId: elsewhere.id } });
+    const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: install.id } });
+    await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'guide', authorTaskId: holdingTaskId, authorTaskRequired: true } });
+    const result = await call('hadron_create_node', {
+      urn: 'hrn:node:attest-1329:install:new', name: 'n', content: 'x', role: 'guide', install: { app: app.id, agent: agent.id }, authoredWith: claim,
+    });
+    expect(result.structuredContent?.error ?? result.content[0]!.text).toEqual(expect.objectContaining({ code: 'AUTHOR_TASK_BROKEN', ...NO_RECOVERY }));
   });
 
   const M = 'hrn:node:attest-1329:mem';

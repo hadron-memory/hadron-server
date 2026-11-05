@@ -56,6 +56,7 @@ import {
   diffNodeChanges,
 } from '../lib/nodeRevisionSnapshot.js';
 import { assertAuthoring, assertRenameAuthoring, attestedAuthoring } from '../lib/authoringAttestation.js';
+import { mcpReadsTask } from './taskReadGate.js';
 import { authoredContentChanged, clearNodeAuthorship, type NodeAuthorshipStamp } from '../lib/nodeAuthorship.js';
 import {
   parseUrnInput,
@@ -3759,6 +3760,7 @@ export function createMcpServerInstance(
   /** GraphQL Context for the scope tools — appId + sessionId are load-bearing (#206). */
   const scopeCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329: every direct writer's reader comes from here, through recoveryCtx()
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -6224,18 +6226,7 @@ export function createMcpServerInstance(
     install: { app: string; agent: string },
     fields: Record<string, unknown>,
   ) => {
-    const ctx: Context = {
-      db,
-      transport: 'mcp',
-      governedCanReplay: () => true,
-      clientId: auth.clientId ?? undefined,
-      userId: auth.userId ?? undefined,
-      apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId,
-      appId: auth.appId ?? undefined,
-      sessionId: auth.sessionId ?? undefined,
-      roles: auth.roles as Context['roles'],
-      organizationId: auth.organizationId ?? undefined,
-    };
+    const ctx = doorCtx(() => true);
     const input = { ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), install: { appRef: install.app, agentRef: install.agent } };
     try {
       const node = op === 'create'
@@ -7315,6 +7306,7 @@ export function createMcpServerInstance(
   /** The GraphQL context for a delegated door call — same shape as chatCtx below. */
   const doorCtx = (canReplay?: Context['governedCanReplay']): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     // #1301: a refusal from the delegated door addresses an MCP caller, and
     // names an MCP door only if this call could be replayed through it.
     transport: 'mcp',
@@ -7477,6 +7469,7 @@ export function createMcpServerInstance(
       // the chatbot tools, #1141; the requirement it got wrong is not.)
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         // #1301: a refusal from the delegated resolver addresses an MCP caller;
         // a door takes a whole `data` object, so the replace it names replays.
         transport: 'mcp',
@@ -7516,6 +7509,7 @@ export function createMcpServerInstance(
 
   const objectCtx = (): Context => ({
     db,
+    readsAuthorTask: mcpReadsTask(auth), // #1329
     clientId: auth.clientId ?? undefined,
     userId: auth.userId ?? undefined,
     apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
@@ -7623,6 +7617,7 @@ export function createMcpServerInstance(
       // same way it does for hadron_create_node / hadron_update_node.
       const ctx: Context = {
         db,
+        readsAuthorTask: mcpReadsTask(auth), // #1329
         clientId: auth.clientId ?? undefined,
         userId: auth.userId ?? undefined,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key

@@ -60,8 +60,8 @@ export type PlatformAuthoring = 'decision' | 'boot-prompt-compile' | 'session-ha
 
 /**
  * The read decision of a surface whose read is not the shared memory gate (a
- * run). It replaces that gate: one node, on this transaction, the same answer
- * the surface's own read gives, neither wider nor narrower.
+ * run, MCP). It replaces that gate: one node, on this transaction, the same
+ * answer the surface's own read gives, neither wider nor narrower.
  */
 export type TaskReadGate = (tx: Prisma.TransactionClient, memoryId: string, loc: string) => Promise<boolean>;
 
@@ -183,7 +183,9 @@ export function attestedAuthoring(
   surface: AttestationSurface = 'graphql',
   readsTask?: TaskReadGate,
 ): AuthoringContext {
-  return { kind: 'attested', authoredWith: authoredWith ?? null, reader, surface, ...(readsTask ? { readsTask } : {}) };
+  // An MCP tool can delegate to a GraphQL resolver, so the surface's gate rides on the reader.
+  const gate = readsTask ?? reader?.readsAuthorTask;
+  return { kind: 'attested', authoredWith: authoredWith ?? null, reader, surface, ...(gate ? { readsTask: gate } : {}) };
 }
 
 /**
