@@ -85,6 +85,10 @@ type CoverageMemo = Map<string, Promise<boolean>>;
  * Past it a lookup answers "not established", which warns: the budget fails toward the warning, never toward silence.
  * A singular rule write spends at most a few hundred; the bulk apply shares one scope so 50 targets cannot
  * multiply the reads (#1327, Rook P2 at 23b6cd69).
+ *
+ * The FULL cost of one call is: this budget (coverage and point reads, memo hits free) PLUS, per target and per set
+ * task reference, the reference projection and one `node.findUnique` for the task's memory, which are NOT budgeted.
+ * That second part grows as rules x targets, the same order as the apply's own per-target work, and not with members.
  */
 export const WARNING_READ_BUDGET = 1000;
 
