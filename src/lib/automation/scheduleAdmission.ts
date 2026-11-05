@@ -102,6 +102,9 @@ export async function spendAdmission(
     WHERE id = ${admission.workerId} AND app_id = ${appId} AND held_by_user_id = ${holderUserId ?? null} AND retired_at IS NULL FOR SHARE`;
   if (held.length !== 1) throw scheduleAdmissionRefused();
   if (admission.kind === 'permission') {
+    // Take the permission row's lock BEFORE the wall-clock judgement: an UPDATE that waits on a lock-only holder
+    // is not re-evaluated afterwards, so the expiry must be read after the lock is ours.
+    await tx.$queryRaw`SELECT id FROM schedule_permissions WHERE id = ${admission.permissionId} FOR UPDATE`;
     const rows = await tx.$queryRaw<Array<{ id: string }>>`UPDATE schedule_permissions
       SET consumed_at = clock_timestamp(), consumed_kind = ${trigger.kind}, consumed_id = ${trigger.id}
       WHERE id = ${admission.permissionId} AND app_id = ${appId} AND worker_id = ${admission.workerId}

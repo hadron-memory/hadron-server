@@ -353,6 +353,23 @@ describe('#3483 BLIND head 485ba634 findings', () => {
     expect(out).toBe('FORBIDDEN');
   });
 
+  it('BLIND delta P2: a spend that waits on a lock-only holder judges expiry after the lock, on a second connection', async () => {
+    const f = await fixture();
+    const p = await give(f);
+    await db.$executeRaw`UPDATE schedule_permissions SET expires_at = clock_timestamp() + interval '1 second' WHERE id = ${p.id}`;
+    let locked!: () => void;
+    const lockedP = new Promise<void>(r => { locked = r; });
+    const holder = db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM schedule_permissions WHERE id = ${p.id} FOR UPDATE`;
+      locked();
+      await tx.$executeRaw`SELECT pg_sleep(1.6)`;
+    });
+    await lockedP;
+    const out = await db.$transaction(tx => spendAdmission(tx as never, { kind: 'permission', workerId: f.worker.id, permissionId: p.id }, f.app.id, f.entry, { kind: 'SCHEDULE', id: 'sched-wait' }, f.user.id)).then(() => null, (e: any) => e.extensions?.code);
+    await holder;
+    expect(out).toBe('FORBIDDEN');
+    expect((await db.schedulePermission.findUniqueOrThrow({ where: { id: p.id } })).consumedAt).toBeNull();
+  });
   it('Ralion P2-1: a user merge moves who gave the permission to the survivor', async () => {
     const f = await fixture();
     const p = await give(f);
