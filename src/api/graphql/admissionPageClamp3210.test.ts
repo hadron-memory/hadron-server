@@ -81,7 +81,7 @@ describe.each(fields)('%s S2 over real GraphQL HTTP', (field, base) => {
     }
   });
   it('still refuses excessive cost at the CLAMPED size', async () => {
-    // Ten scalar aliases => 2021 cost at 200 rows, greater than this server's configured 1000. Minimal id-only is221.
+    // Ten scalar aliases => 2021 cost at 200 rows, greater than this server's configured 1000. Minimal id-only is 221.
     const minimal = `{ ${field}(${args(base(), '1000000')}) { items { id } } }`;
     expect((await post(minimal, {}, strict)).status).toBe(200);
     const selection = Array.from({ length: 10 }, (_, i) => `v${i}: id`).join(' ');
@@ -91,8 +91,16 @@ describe.each(fields)('%s S2 over real GraphQL HTTP', (field, base) => {
   });
 });
 
+it.each(['omitted', 'null'])('legacy appNodes %s limit reads exactly its real default of 20 over HTTP', async spelling => {
+  const limit = spelling === 'omitted' ? '' : ', limit: null';
+  const r = await post(`{ appNodes(appRef: "${appId}"${limit}) { id } }`);
+  expect(r.status).toBe(200);
+  expect(r.body.errors).toBeUndefined();
+  expect(r.body.data!.appNodes).toHaveLength(20);
+});
+
 const cost = (query: string) => getComplexity({ schema, query: parse(query), variables: {}, estimators: [hadronListEstimator({ maxCost: 200000, listFactor: 10 }), simpleEstimator({ defaultComplexity: 1 })] });
-it('legacy appNodes omitted/null costs its real20 default, but stated sizes remain raw', () => {
+it('legacy appNodes omitted/null costs its real 20 default, but stated sizes remain raw', () => {
   expect(cost('{ appNodes(appRef:"a") { id } }')).toBe(21);
   expect(cost('{ appNodes(appRef:"a", limit:null) { id } }')).toBe(21);
   expect(cost('{ appNodes(appRef:"a", limit:500) { id } }')).toBe(501);
@@ -100,7 +108,7 @@ it('legacy appNodes omitted/null costs its real20 default, but stated sizes rema
   expect(PAGE_ARGS_FIELDS.has('Query.appNodes')).toBe(false);
 });
 
-it('every direct or local-helper pageArgs-backed resolver is registered, including non-Page names', () => {
+it('current Query/AgentTask/AgentTaskResult direct or local-helper pageArgs resolvers are registered', () => {
   const folder = new URL('./schema/', import.meta.url);
   const types = ['Query', 'AgentTask', 'AgentTaskResult'].map(name => [name, (schema.getType(name) as GraphQLObjectType).getFields()] as const);
   const discovered = new Set<string>();
@@ -144,7 +152,7 @@ it.each([...PAGE_ARGS_FIELDS])('%s cost follows the shared pageTake for every st
   const field = (schema.getType(typeName) as any).getFields()[name];
   const estimator = hadronListEstimator({ maxCost: 200000, listFactor: 10 });
   for (const limit of [undefined, null, -5, 0, 1, 20, 200, 201, 1000, 1000000]) {
-    // A non-list Page wrapper scales its children; actual schema types/args are used, with fixed child cost11.
+    // A non-list Page wrapper scales its children; actual schema types/args are used, with fixed child cost 11.
     expect(estimator({ type: schema.getType(typeName) as never, field, args: limit === undefined ? {} : { limit }, childComplexity: 11 } as never))
       .toBe(1 + Math.max(1, Math.max(1, pageTake(limit)) / 10) * 11);
   }
