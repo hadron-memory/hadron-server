@@ -406,6 +406,7 @@ describe('#1332 mutant pins (every reporter id, every broken-task shape, imperso
     const { recordContentValidationReportInTx } = await import('../../../lib/contentValidationReport.js');
     return db.$transaction((tx) => recordContentValidationReportInTx(tx, {
       nodeId, memoryId, nodeRevision: 1, validationTaskRef: validationTask, validationTaskRevision: 1, outcome: 'PASS', runId, reporter,
+      canReadTaskMemory: async () => true,
     }));
   };
 
@@ -562,6 +563,56 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
     await db.orgMember.create({ data: { organizationId: hiddenOrg, userId: leo, role: 'READER' } });
     expect(await refusal(report(person(leo), { validationTaskRef: hiddenTask, validationTaskRevision: 99 }))).toBe('CONTENT_VALIDATION_TASK_REVISION_INVALID');
     expect(await reportCount()).toBe(0);
+  });
+
+  it('ruling 0199 (160:01 r6): a writer who cannot read the validation task gets one byte-identical WRONG_TASK on EVERY report, before the author and run-id checks', async () => {
+    const hiddenOrg = (await db.organization.create({ data: { id: generateId(), name: 'cv-hidden-0199', urn: 'cv-hidden-0199' } })).id;
+    const hiddenMem = (await db.memory.create({ data: { id: generateId(), organizationId: hiddenOrg, urn: 'cv-hidden-0199:tasks', name: 'Tasks', class: 'knowledge', visibility: 'ORGANIZATION' } })).id;
+    const hiddenTask = (await db.node.create({ data: { id: generateId(), memoryId: hiddenMem, loc: 'validate', name: 'V', isRunnable: true, content: 'check' } })).id;
+    await db.node.update({ where: { id: hiddenTask }, data: { revSeq: 3 } });
+    await db.nodeRoleRule.updateMany({ where: { config: { memoryId } }, data: { validationTaskId: hiddenTask } });
+    // While leo can read the task he records a run id, so (c) has one on record.
+    const membership = await db.orgMember.create({ data: { organizationId: hiddenOrg, userId: leo, role: 'READER' } });
+    await report(person(leo), { validationTaskRef: hiddenTask, validationTaskRevision: 3, runId: 'on-record' });
+    // R is leo's own revision, so (d) would be REPORTER_IS_AUTHOR for a reader of the task.
+    await db.$executeRaw`UPDATE nodes SET authorship_kind = 'HUMAN'::"NodeAuthorshipKind", authored_by_human = ${leo}, authored_at = now() WHERE id = ${nodeId}`;
+    await db.$executeRaw`UPDATE nodes SET revision_content_hash = hadron_node_revision_state_hash(nodes) WHERE id = ${nodeId}`;
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['(a) current task revision', { validationTaskRef: hiddenTask, validationTaskRevision: 3, runId: 'a' }],
+      ['(b) old valid task revision', { validationTaskRef: hiddenTask, validationTaskRevision: 1, runId: 'b' }],
+      ['(b) by URN', { validationTaskRef: 'hrn:node:cv-hidden-0199:tasks:validate', validationTaskRevision: 2, runId: 'b2' }],
+      ['(c) run id on record', { validationTaskRef: hiddenTask, validationTaskRevision: 3, runId: 'on-record' }],
+      ['(d) own-authored revision, no run id', { validationTaskRef: hiddenTask, validationTaskRevision: 3 }],
+      ['wrong ref', { validationTaskRef: generateId(), validationTaskRevision: 1 }],
+    ];
+    const answer = (extra: Record<string, unknown>) => report(person(leo), extra).then(
+      () => 'NO_ERROR',
+      (e: unknown) => e instanceof GraphQLError ? JSON.stringify({ message: e.message, extensions: e.extensions }) : `untyped: ${(e as Error).message}`,
+    );
+    // Control first: a reader of the task gets the precise answers (so the cases are live probes).
+    expect(await refusal(report(person(leo), cases[0][1]))).toBe('CONTENT_VALIDATION_REPORTER_IS_AUTHOR');
+    expect(await refusal(report(person(leo), cases[3][1]))).toBe('CONTENT_VALIDATION_REPORTER_IS_AUTHOR');
+    await stamp(null);
+    expect(await refusal(report(person(leo), { ...cases[3][1], validationTaskRevision: 2 }))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
+    await db.$executeRaw`UPDATE nodes SET authorship_kind = 'HUMAN'::"NodeAuthorshipKind", authored_by_human = ${leo}, authored_at = now() WHERE id = ${nodeId}`;
+    await db.$executeRaw`UPDATE nodes SET revision_content_hash = hadron_node_revision_state_hash(nodes) WHERE id = ${nodeId}`;
+    const before = await reportCount();
+    expect(before).toBe(1);
+    // Now leo cannot read the task: one answer, byte for byte, and nothing written.
+    await db.orgMember.delete({ where: { organizationId_userId: { organizationId: membership.organizationId, userId: leo } } });
+    const answers = new Set<string>();
+    for (const [label, extra] of cases) {
+      const a = await answer(extra);
+      expect(a, label).toContain('CONTENT_VALIDATION_WRONG_TASK');
+      answers.add(a);
+    }
+    expect([...answers]).toHaveLength(1);
+    expect(await reportCount()).toBe(before);
+    // Without the author stamp, (a) and (b) would otherwise be accepted inserts: still refused.
+    await stamp(null);
+    expect(await refusal(report(person(leo), cases[0][1]))).toBe('CONTENT_VALIDATION_WRONG_TASK');
+    expect(await refusal(report(person(leo), cases[1][1]))).toBe('CONTENT_VALIDATION_WRONG_TASK');
+    expect(await reportCount()).toBe(before);
   });
 
   it('a named session that failed to bind (#1705) is SESSION_NOT_BOUND, never recorded as the bare credential', async () => {

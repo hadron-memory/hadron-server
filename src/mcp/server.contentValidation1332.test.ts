@@ -126,7 +126,7 @@ describe('#1332 MCP hadron_record_content_validation', () => {
 
   it('a worker session presented to MCP reports as the worker, not the binding person (the HUMAN author holds it: CHECKED)', async () => {
     const sessionId = await startWorkerSessionGql({ workerRef: workerId, userId: mia, appId });
-    // In process the worker session is named on the call (the gate's own `session` argument); over HTTP the
+    // In process the worker session is named on the call (the recorder's own `session` argument); over HTTP the
     // X-Hadron-Session header settles the same actor before the tool runs.
     const text = await asUser(mia, { appId }).callToolText('hadron_record_content_validation', { ...args(), session: sessionId });
     expect(text, text).toMatch(/^Recorded: PASS/);
@@ -135,7 +135,7 @@ describe('#1332 MCP hadron_record_content_validation', () => {
   });
 
   it('an unknown reporter writes nothing: a session the caller does not hold, or an App principal with no write', async () => {
-    // A worker session named on the call that is not one of the caller's own: the gate refuses before the resolver.
+    // A worker session named on the call that is not one of the caller's own: the writer leo gets SESSION_NOT_BOUND.
     const sessionId = await startWorkerSessionGql({ workerRef: workerId, userId: mia, appId });
     const forged = await asUser(leo, { appId }).callToolText('hadron_record_content_validation', { ...args(), session: sessionId });
     expect(mcpCode(forged), forged).toBe('SESSION_NOT_BOUND');
@@ -167,6 +167,30 @@ describe('#1332 MCP hadron_record_content_validation', () => {
     expect(await reports()).toHaveLength(0);
     // Control: the writer without the refused header records.
     expect(await asUser(leo).callToolText('hadron_record_content_validation', args())).toMatch(/^Recorded: PASS/);
+  });
+
+  it('refusal precedence with a refused `session` ARGUMENT (Xanthos FIT 6670593797, Xavier #81384): not-found, then FORBIDDEN, then SESSION_NOT_BOUND, nothing written', async () => {
+    const reader = (await db.user.create({ data: { handle: 'cvm-reader-arg' } })).id;
+    await db.orgMember.create({ data: { organizationId: orgId, userId: reader, role: 'READER' } });
+    // A real worker session held by mia: valid for her, refused for anyone else; and an id that is nobody's.
+    const miasSession = await startWorkerSessionGql({ workerRef: workerId, userId: mia, appId });
+    for (const session of [miasSession, generateId()]) {
+      const matrix: Array<[string, string, string]> = [
+        ['unreadable caller', stranger, 'NODE_NOT_FOUND'],
+        ['readable non-writer', reader, 'FORBIDDEN'],
+        ['authorized writer', leo, 'SESSION_NOT_BOUND'],
+      ];
+      for (const [label, userId, expected] of matrix) {
+        const text = await asUser(userId, { appId }).callToolText('hadron_record_content_validation', { ...args({ runId: `arg-${label}` }), session });
+        expect(mcpCode(text), `${label}: ${text}`).toBe(expected);
+      }
+    }
+    // Never recorded as the caller's own principal instead.
+    expect(await reports()).toHaveLength(0);
+    // Positive control: the holder's own valid session still records as the worker.
+    const ok = await asUser(mia, { appId }).callToolText('hadron_record_content_validation', { ...args(), session: miasSession });
+    expect(ok, ok).toMatch(/^Recorded: PASS/);
+    expect(await reports()).toMatchObject([{ reporterKind: 'WORKER', reporterWorkerId: workerId, reporterUserId: null }]);
   });
 
   it('a malformed argument is refused by the schema before the resolver runs', async () => {
