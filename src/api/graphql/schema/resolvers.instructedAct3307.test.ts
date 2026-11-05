@@ -205,35 +205,81 @@ it('#3307 a refused mixed signature update records no instruction or partial cha
  const before=await snapshot();expect((await answer(M.updateWorker({}, {workerRef:f.target.id,signature:'new',trailer:null,instruction:live},bound()))).code).toBe('BAD_USER_INPUT');expect(await snapshot()).toEqual(before);
 });
 
-for(const door of ['signature','agent']) it('#3307 '+door+' holds the live manager membership while waiting for its worker row',async()=>{
- let held!:()=>void, release!:()=>void;
- let blockerPid!:number;
- let publishActPid!:(pid:number)=>void;
- const actPidReady=new Promise<number>(resolve=>{publishActPid=resolve;});
- const ready=new Promise<void>(r=>{held=r;}), gate=new Promise<void>(r=>{release=r;});
- const side=db.$transaction(async tx=>{const [{pid}]=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`;blockerPid=pid;await tx.$queryRaw`SELECT id FROM workers WHERE id=${f.target.id} FOR UPDATE`;held();await gate;},{timeout:30000});
- await ready;
- const client=new Proxy(db,{get(target,key){
-  if(key==='$transaction')return (callback:any,options:any)=>db.$transaction(async tx=>{
-   const [{pid}]=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid() AS pid`;publishActPid(pid);return callback(tx);
-  },options);
-  const value=(target as any)[key];return typeof value==='function'?value.bind(target):value;
+/** #3335: observe the current transaction backends, not one PID from an earlier attempt. */
+function observeActTransactions() {
+ const activePids = new Set<number>();
+ const observedPids: number[] = [];
+ const client = new Proxy(db, { get(target, key) {
+  if (key === '$transaction') return (callback: any, options: any) => db.$transaction(async tx => {
+   const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+   observedPids.push(pid);
+   // Legacy first-PID behavior, kept for the red-first controlled fixture.
+   if (observedPids.length === 1) activePids.add(pid);
+   try { return await callback(tx); }
+   finally { /* the fix must retire completed attempts too */ }
+  }, options);
+  const value = (target as any)[key]; return typeof value === 'function' ? value.bind(target) : value;
  }});
- const call=answer(calls[door](live,bound({db:client})));
- let outcome:any;
+ return { client, activePids, observedPids };
+}
+
+for (const door of ['signature', 'agent']) for (const earlierTransaction of [false, true])
+it(`#3335 ${door} holds the live manager membership after ${earlierTransaction ? 'an earlier transaction' : 'one transaction'}`, async () => {
+ let held!: () => void, release!: () => void;
+ let earlierReady!: () => void, releaseEarlier!: () => void;
+ let blockerPid!: number;
+ const ready = new Promise<void>(r => { held = r; });
+ const gate = new Promise<void>(r => { release = r; });
+ const earlierGate = new Promise<void>(r => { releaseEarlier = r; });
+ const earlierStarted = new Promise<void>(r => { earlierReady = r; });
+ const observer = observeActTransactions();
+ let side: Promise<unknown> | undefined, earlier: Promise<unknown> | undefined, call: Promise<any> | undefined;
+ let outcome: any, settled = false;
  try {
-  const actPid=await Promise.race([actPidReady,call.then(()=>{throw new Error('worker act did not publish its backend PID');})]);
-  for(let i=0;;i++) {
-   const [{n}]=await db.$queryRaw<Array<{n:number}>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND pid=${actPid} AND wait_event_type='Lock' AND ${blockerPid}=ANY(pg_blocking_pids(pid))`;
-   if(n>0)break;if(i>200)throw new Error('worker act never waited');await new Promise(r=>setTimeout(r,25));
+  side = db.$transaction(async tx => {
+   const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+   blockerPid = pid;
+   await tx.$queryRaw`SELECT id FROM workers WHERE id=${f.target.id} FOR UPDATE`;
+   held(); await gate;
+  }, { timeout: 30000 });
+  void side.catch(() => {});
+  await Promise.race([ready, side.then(() => { throw new Error('blocker ended before readiness'); })]);
+  if (earlierTransaction) {
+   // Controlled multi-transaction fixture: keep the earlier backend occupied so a later
+   // admission must use another PID. This exercises retry/preflight robustness without
+   // pretending a synthetic serialization error is a real production retry.
+   earlier = observer.client.$transaction(async () => { earlierReady(); await earlierGate; }, { timeout: 30000 });
+   void earlier.catch(() => {});
+   await Promise.race([earlierStarted, earlier.then(() => { throw new Error('earlier transaction ended before readiness'); })]);
   }
-  let denied=false;
-  try {await db.$transaction(async tx=>{await tx.$executeRawUnsafe("SET LOCAL lock_timeout='100ms'");await tx.appMember.delete({where:{appId_userId:{appId:f.app.id,userId:f.holder.id}}});});}
-  catch(e){expect(String(e)).toMatch(/lock timeout/);denied=true;}
+  call = answer(calls[door](live, bound({ db: observer.client }))).then(result => { settled = true; return result; });
+  const deadline = Date.now() + 5000;
+  for (;;) {
+   const pids = [...observer.activePids];
+   const [{ n }] = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY(${pids}::int[]) AND wait_event_type='Lock' AND ${blockerPid}=ANY(pg_blocking_pids(pid))`;
+   if (n > 0) break;
+   if (settled) throw new Error('worker act completed before its blocked backend was observed');
+   if (Date.now() >= deadline) throw new Error('worker act never waited on the known blocker');
+   await new Promise(r => setTimeout(r, 25));
+  }
+  if (earlierTransaction) expect(new Set(observer.observedPids).size).toBeGreaterThanOrEqual(2);
+  let denied = false;
+  try {
+   await db.$transaction(async tx => {
+    await tx.$executeRawUnsafe("SET LOCAL lock_timeout='100ms'");
+    await tx.appMember.delete({ where: { appId_userId: { appId: f.app.id, userId: f.holder.id } } });
+   });
+  } catch (e) { expect(String(e)).toMatch(/lock timeout/); denied = true; }
   expect(denied).toBe(true);
- }finally{release();await side;outcome=await call;}
- expect(outcome.code).toBe('RESOLVED');expect(await instructionEvents()).toHaveLength(1);
-});
+ } finally {
+  release(); releaseEarlier();
+  const results = await Promise.allSettled([side, earlier, call].filter((p): p is Promise<any> => p !== undefined));
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+  if (call) outcome = await call;
+ }
+ expect(outcome.code).toBe('RESOLVED');
+ expect(await instructionEvents()).toHaveLength(1);
+}, 20000);
 
 for (const door of ['signature', 'agent']) it(`#3314 ${door}: a worker held in another App cannot carry its holder's target-App manager right`, async () => {
   const foreign = await db.app.create({ data: { organizationId: f.org.id, name: 'Foreign team', urn: 'instruct3307.test:foreign-team' } });
@@ -309,7 +355,7 @@ it('#3307 malformed live-chat references refuse before writing',async()=>{
 
 describe('#3314 BLIND P2: person controls and instruction-claim limits', () => {
   for (const [door, call] of Object.entries(calls)) {
-    it(`${door}: a worker may instruct an act on itself without duplicating locks or records`, async () => {
+    it(`${door}: a worker may instruct an act on itself with one attributed record`, async () => {
       f.target = f.worker;
       await runAsActor({ workerId: f.worker.id, agentId: f.agent.id }, () => call(live, bound()));
       const events = await instructionEvents();
