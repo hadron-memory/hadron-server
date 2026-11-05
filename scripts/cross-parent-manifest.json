@@ -574,6 +574,11 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::loadReadableNestedApp",
       "gate": "loadReadableNestedApp"
     },
+    "AppAgent.importer": {
+      "target": "Agent",
+      "class": "child-gated",
+      "test": "src/api/graphql/schema/resolvers.appAgentInstall3435.test.ts::withheld (B readable, its only importer A unreadable): installMethod and importer are null on B AND on every ROW entry; agent: null for A"
+    },
     "AppCreated.app": {
       "class": "open",
       "evidence": "private follow-up (hadron-internal#30); details withheld",

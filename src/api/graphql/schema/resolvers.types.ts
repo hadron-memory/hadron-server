@@ -1935,9 +1935,12 @@ export const typeResolvers = {
       }
       const wholeAppReadable = installs.every(row => agents.has(row.agentId)) &&
         (await Promise.all(installs.map(row => readableNestedAgent(ctx,agents.get(row.agentId) as NestedAgentRow)))).every(Boolean);
+      // #3435: how each Agent is installed is answered only under the same whole-App read gate (cor:dmo:050:03); null on EVERY entry otherwise.
       const appCreatedAt=wholeAppReadable ? undefined : a.createdAt instanceof Date ? a.createdAt :
         (await ctx.db.app.findUniqueOrThrow({where:{id:a.id},select:{createdAt:true}})).createdAt;
       return installs.map(row=>({...row,app:a,agent:agents.get(row.agentId),
+        exposedInstallMethod: wholeAppReadable ? row.installationKind : null,
+        exposedImporter: wholeAppReadable && row.installationKind === 'DERIVED' && row.importerAgentId ? agents.get(row.importerAgentId) ?? null : null,
         _installationAppCreatedAt:appCreatedAt,
         _installationAuditRead:new WeakMap([[ctx,wholeAppReadable]])}))
         .sort(servedInstallationOrder(wholeAppReadable));
@@ -1951,6 +1954,9 @@ export const typeResolvers = {
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
+    // #3435: set only by App.appAgents, after the whole-App read gate; any other route to an AppAgent answers null.
+    installMethod: (row: {exposedInstallMethod?: string | null}) => row.exposedInstallMethod ?? null,
+    importer: (row: {exposedImporter?: unknown}) => row.exposedImporter ?? null,
     createdAt: async (row:InstallationAuditRow,_:unknown,ctx:Context) => {
       // A3.1 is scoped to the exact newly-created payload object and composite
       // row identity. It grants nothing to a later list/read by the same caller.
