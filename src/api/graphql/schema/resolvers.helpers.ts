@@ -439,7 +439,7 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
     );
     cache.set(memoryId, pending);
     // A rejection is not an answer: drop it so a one-shot fault is not replayed (#1327).
-    pending.catch(() => cache.delete(memoryId));
+    pending.catch(() => { if (cache.get(memoryId) === pending) cache.delete(memoryId); });
   }
   return pending;
 }
@@ -482,6 +482,7 @@ export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prism
   const cache = (ctx.memoryReadCache ??= new Map<string, Promise<boolean>>());
   const pending = getAccessibleMemoryIds(uncached, memoryId).then((ids) => ids === null || ids.includes(memoryId));
   cache.set(memoryId, pending);
+  pending.catch(() => { if (cache.get(memoryId) === pending) cache.delete(memoryId); });
   return pending;
 }
 
@@ -2215,7 +2216,7 @@ export async function granteeShareAccess(
  * direct consumer, not just this one.
  */
 async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
-  const all = await (ctx.appDerivedMemoryIdCache ??= (async () => {
+  const memo = (ctx.appDerivedMemoryIdCache ??= (async () => {
     const folded = [...(await getPrincipalAppMemoryAccess(ctx.db, ctx)).keys()];
     if (ctx.userId) folded.push(...await getWorkerMemoryAccess(ctx.db, ctx));
     if (folded.length === 0) return [];
@@ -2229,6 +2230,9 @@ async function appDerivedMemoryIds(ctx: Context, onlyMemoryId?: string): Promise
     });
     return rows.map((m: { id: string }) => m.id);
   })());
+  // A rejection is not an answer: drop it so a one-shot fold fault is not replayed (#1327).
+  memo.catch(() => { if (ctx.appDerivedMemoryIdCache === memo) delete ctx.appDerivedMemoryIdCache; });
+  const all = await memo;
   return onlyMemoryId ? all.filter((id) => id === onlyMemoryId) : all;
 }
 
