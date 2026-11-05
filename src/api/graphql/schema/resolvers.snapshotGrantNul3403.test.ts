@@ -29,7 +29,7 @@ async function fixture() {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, name: 'Caller', slug: 'caller', appId: app.id, agentId: agent.id, heldByUserId: holder.id } });
   const session = await db.session.create({ data: { id: generateId(), appId: app.id, agentId: agent.id, workerId: worker.id, userId: holder.id, tool: 'vitest' } });
-  const schedule = await db.agentSchedule.create({ data: { organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: 'hrn:node:nul3403.test:flows:entry' } });
+  const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: app.id, name: 'S', cron: '* * * * *', entryNodeUrn: 'hrn:node:nul3403.test:flows:entry' } });
   const grant = (revoked: boolean, second: number) => db.appAutomationTeamSnapshotGrant.create({ data: {
     appId: app.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, grantedBy: holder.id,
     createdAt: new Date(Date.UTC(2025, 0, 1, 0, 0, second)),
