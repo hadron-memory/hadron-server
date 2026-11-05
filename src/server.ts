@@ -90,6 +90,7 @@ import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/request
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
 import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
+import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
 import { startOauthClientGcLoop } from './jobs/gcOauthClients.js';
@@ -1895,6 +1896,9 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
   }
+
+  // #3122: transient passkey/signing ceremonies; independent of feature flags so old rows still retire.
+  startPasskeyCeremonySweepLoop(db);
 
   // #155 — collect unused DCR OAuth clients 7 days past their expiry (soft delete). Dry run, logging
   // the count it would collect, until OAUTH_CLIENT_GC_ENABLED=true (R220).
