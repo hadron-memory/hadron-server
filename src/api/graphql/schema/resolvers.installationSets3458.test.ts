@@ -57,17 +57,31 @@ afterEach(() => vi.restoreAllMocks());
 function permuteUnorderedQueries() {
   // These reads are awaited individually, never passed to a Prisma transaction;
   // the spy unwraps PrismaPromise solely to permute the real result rows.
+  const permutations: Array<{ model: 'app' | 'agent'; before: string[]; after: string[] }> = [];
+  const reorder = (model: 'app' | 'agent', rows: any[]) => {
+    const reversed = [...rows].reverse();
+    permutations.push({ model, before: rows.map(row => row.id), after: reversed.map(row => row.id) });
+    return reversed;
+  };
   const apps = db.app.findMany.bind(db.app);
   const agents = db.agent.findMany.bind(db.agent);
   const appSpy = vi.spyOn(db.app as any, 'findMany').mockImplementation(async (args: any) => {
     const rows = await apps(args);
-    return args?.orderBy ? rows : [...rows].reverse();
+    return args?.orderBy ? rows : reorder('app', rows);
   });
   const agentSpy = vi.spyOn(db.agent as any, 'findMany').mockImplementation(async (args: any) => {
     const rows = await agents(args);
-    return args?.orderBy ? rows : [...rows].reverse();
+    return args?.orderBy ? rows : reorder('agent', rows);
   });
-  return { appSpy, agentSpy };
+  const assertPermuted = (model: 'app' | 'agent') => {
+    const changed = permutations.filter(p => p.model === model && new Set(p.before).size >= 2);
+    expect(changed.length).toBeGreaterThan(0);
+    for (const p of changed) {
+      expect(p.after).toEqual([...p.before].reverse());
+      expect(p.after).not.toEqual(p.before);
+    }
+  };
+  return { appSpy, agentSpy, assertPermuted };
 }
 
 describe('#3458 reverse NO-order / scope SET disposition', () => {
@@ -75,11 +89,15 @@ describe('#3458 reverse NO-order / scope SET disposition', () => {
     const reverse = () => (resolvers.Agent as any).appAgents(derived, {}, ctx());
     const before = await reverse();
     expect(members(before.map((r: any) => r.appId))).toEqual(new Set([appId, otherAppId]));
-    expect(new Set(before.map((r: any) => r.installationKind))).toEqual(new Set(['ROW', 'DERIVED']));
-    const { appSpy } = permuteUnorderedQueries();
+    const expectedPairs = new Set([`${appId}:DERIVED`, `${otherAppId}:ROW`]);
+    const pairs = (rows: any[]) => members(rows.map(r => `${r.appId}:${r.installationKind}`));
+    expect(pairs(before)).toEqual(expectedPairs);
+    const { appSpy, assertPermuted } = permuteUnorderedQueries();
     const after = await reverse();
-    expect(appSpy.mock.calls.some(([args]: any) => !args.orderBy && args.select?.appAgents)).toBe(true);
+    expect(appSpy.mock.calls.some(([args]: any) => !args?.orderBy && args?.select?.appAgents)).toBe(true);
     expect(members(after.map((r: any) => r.appId))).toEqual(new Set([appId, otherAppId]));
+    expect(pairs(after)).toEqual(expectedPairs);
+    assertPermuted('app');
     // Intentionally no equality assertion on array positions or install dates.
   });
 
@@ -87,10 +105,11 @@ describe('#3458 reverse NO-order / scope SET disposition', () => {
     const expected = new Set([shared, firstOnly, secondOnly, own]);
     const before = await appScopeMemoryIds(db, appId);
     expect(members(before)).toEqual(expected);
-    const { agentSpy } = permuteUnorderedQueries();
+    const { agentSpy, assertPermuted } = permuteUnorderedQueries();
     const after = await appScopeMemoryIds(db, appId);
-    expect(agentSpy.mock.calls.some(([args]: any) => !args.orderBy && args.select?.memoryItems)).toBe(true);
+    expect(agentSpy.mock.calls.some(([args]: any) => !args?.orderBy && args?.select?.memoryItems)).toBe(true);
     expect(members(after)).toEqual(expected);
+    assertPermuted('agent');
     expect(after).not.toContain(alien); expect(after).not.toContain(unreadable);
   });
 
@@ -105,10 +124,12 @@ describe('#3458 reverse NO-order / scope SET disposition', () => {
       const result = await (resolvers.Query as any).findNodes({}, { scope: 'app', appRef: appId }, ctx());
       expect(result.scope).toMatchObject({ kind: 'app', droppedCount: 0 });
       expect(members(result.hits.map((hit: any) => hit.node.memoryId))).toEqual(new Set([shared, firstOnly, secondOnly, own]));
-      return result.hits.map((hit: any) => hit.node.id);
+      return members(result.hits.map((hit: any) => hit.node.id));
     };
     const ordinaryResults = await select();
-    permuteUnorderedQueries();
-    expect(await select()).toEqual(ordinaryResults); // ordinary search ordering, not scope ordering
+    const { agentSpy, assertPermuted } = permuteUnorderedQueries();
+    expect(await select()).toEqual(ordinaryResults); // membership only: no new search tie-order contract
+    expect(agentSpy.mock.calls.some(([args]: any) => !args?.orderBy && args?.select?.memoryItems)).toBe(true);
+    assertPermuted('agent');
   });
 });
