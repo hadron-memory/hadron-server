@@ -15,7 +15,7 @@ export function assertFixtureWiring(source: string): void {
     if (id(d.name, 'fixtureIt') && d.initializer && ts.isArrowFunction(d.initializer)) wrapper = d.initializer;
   }
   const wrapped = wrapper?.body;
-  if (!call(wrapped, 'it')) fail('fixtureIt must call it');
+  if (!call(wrapped, 'it')) return fail('fixtureIt must call it');
   const callback = wrapped.arguments[1];
   if (!callback || !ts.isArrowFunction(callback) || !method(callback.body, 'run') || !id(callback.body.arguments[0], 'body')) fail('wrapper must enter lifetime.run(body)');
   const hook = (name: string) => {
@@ -30,7 +30,7 @@ export function assertFixtureWiring(source: string): void {
   const before = hook('beforeEach');
   // The very first executable statement must await the shared drain. This
   // precedes every reset/delete, not just one spelling of cleanDb.
-  if (!ts.isBlock(before)) fail('beforeEach block required');
+  if (!ts.isBlock(before)) return fail('beforeEach block required');
   const first = before.statements.find(s => !ts.isEmptyStatement(s));
   if (!first || !ts.isExpressionStatement(first) || !ts.isAwaitExpression(first.expression) || !drain(first.expression.expression)) fail('await drain before any setup');
   const after = hook('afterEach');
