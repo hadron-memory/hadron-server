@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -31,19 +31,29 @@ function runtimeImports(source: string): string[] {
 
 // A closed witness, not an invented sequence of every declared root.
 function cycleWitness(graph: Map<string, string[]>, roots: string[]): string[] | null {
-  function reaches(from: string, target: string): boolean {
-    const seen = new Set<string>();
-    const pending = [...(graph.get(from) ?? [])];
-    while (pending.length) {
-      const next = pending.pop()!;
-      if (next === target) return true;
-      if (seen.has(next)) continue;
-      seen.add(next);
-      pending.push(...(graph.get(next) ?? []));
+  const finished = new Set<string>();
+  const stack: string[] = [];
+  const active = new Map<string, number>();
+  function visit(node: string): string[] | null {
+    const start = active.get(node);
+    if (start !== undefined) return [...stack.slice(start), node];
+    if (finished.has(node)) return null;
+    active.set(node, stack.length);
+    stack.push(node);
+    for (const next of graph.get(node) ?? []) {
+      const found = visit(next);
+      if (found) return found;
     }
-    return false;
+    stack.pop();
+    active.delete(node);
+    finished.add(node);
+    return null;
   }
-  return roots.some(root => reaches(root, root)) ? [...roots, roots[0]!] : null;
+  for (const root of roots) {
+    const found = visit(root);
+    if (found) return found;
+  }
+  return null;
 }
 
 function hasCycle(graph: Map<string, string[]>, roots: string[]): boolean {
@@ -104,4 +114,111 @@ describe('#3560 discovered cycle diagnostics (synthetic)', () => {
     expect(cycleWitness(new Map([['a', ['b']], ['b', []]]), ['a', 'b'])).toBeNull();
     expect(cycleWitness(new Map([['a', ['a']]]), ['a'])).toEqual(['a', 'a']);
   });
+});
+
+// #3560 engineering policy, not corpus law or runtime/global acyclicity proof.
+// Parse handwritten relative TS only. External packages, generated clients and
+// nonliteral dynamic imports are outside this model; no module is evaluated.
+type SourceReader = { read: (file: string) => string; has: (file: string) => boolean };
+const disk: SourceReader = {
+  read: file => readFileSync(file, 'utf8'),
+  has: file => existsSync(file) && statSync(file).isFile(),
+};
+
+function leafGraph(root: string, io: SourceReader): Map<string, string[]> {
+  const graph = new Map<string, string[]>();
+  const pending: string[][] = [[root]];
+  while (pending.length) {
+    const path = pending.pop()!;
+    const file = path.at(-1)!;
+    if (graph.has(file)) continue;
+    const deps: string[] = [];
+    for (const name of runtimeImports(io.read(file))) {
+      if (!name.startsWith('.')) continue;
+      const base = resolve(dirname(file), name);
+      if (base.includes('/generated/')) continue; // generated, not handwritten TS
+      const target = [base.replace(/\.js$/, '.ts'), base + '.ts', resolve(base, 'index.ts')]
+        .find(candidate => candidate.endsWith('.ts') && io.has(candidate));
+      if (!target) throw new Error('unresolved handwritten runtime edge: ' + [...path, name].join(' -> '));
+      deps.push(target);
+      pending.push([...path, target]);
+    }
+    graph.set(file, deps);
+  }
+  return graph;
+}
+
+function schemaPath(root: string, graph: Map<string, string[]>): string[] | null {
+  const pending: string[][] = [[root]];
+  const seen = new Set<string>();
+  while (pending.length) {
+    const path = pending.pop()!;
+    const file = path.at(-1)!;
+    if (file.includes('/api/graphql/schema/')) return path;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    for (const dep of graph.get(file) ?? []) pending.push([...path, dep]);
+  }
+  return null;
+}
+
+const leaves = ['workerRead', 'appParticipantRead'];
+
+describe('#3560 bounded leaf guards (actual source, AST reads only)', () => {
+  it.each(leaves)('%s has no relative runtime path into GraphQL resolver sources', name => {
+    const root = fileURLToPath(new URL(name + '.ts', import.meta.url));
+    const graph = leafGraph(root, disk);
+    const witness = schemaPath(root, graph);
+    expect(witness, 'runtime leaf back-edge: ' + witness?.join(' -> ') +
+      '; Context imports are type-only, erased at compile').toBeNull();
+  });
+});
+
+function fixtureReader(sources: Map<string, string>): SourceReader {
+  return { read: file => {
+    const source = sources.get(file);
+    if (source === undefined) throw new Error('missing fixture ' + file);
+    return source;
+  }, has: file => sources.has(file) };
+}
+
+describe('#3560 bounded leaf guard controls (synthetic source, not runtime imports)', () => {
+  for (const name of leaves) {
+    const root = '/fixture/lib/auth/' + name + '.ts';
+    const target = '/fixture/api/graphql/schema/resolvers.worker.ts';
+    const via = '/fixture/lib/auth/via.ts';
+    const forms = [
+      'import { gate } from "../../api/graphql/schema/resolvers.worker.js";',
+      'export { gate } from "../../api/graphql/schema/resolvers.worker.js";',
+      'import("../../api/graphql/schema/resolvers.worker.js");',
+      'import(`../../api/graphql/schema/resolvers.worker.js`);',
+    ];
+    it.each(forms)(name + ' diagnoses direct and intermediate edge: %s', form => {
+      for (const indirect of [false, true]) {
+        const sources = new Map([[root, indirect ? 'import "./via.js";' : form], [via, form], [target, 'export const gate = 1;']]);
+        const graph = leafGraph(root, fixtureReader(sources));
+        const witness = schemaPath(root, graph);
+        expect(witness).toEqual(indirect ? [root, via, target] : [root, target]);
+        for (let i = 1; i < witness!.length; i++) expect(graph.get(witness![i - 1]!)).toContain(witness![i]);
+      }
+    });
+    it.each([
+      'import type { Context } from "../../api/graphql/schema/resolvers.worker.js";',
+      'import { type Context } from "../../api/graphql/schema/resolvers.worker.js";',
+      'export type { Context } from "../../api/graphql/schema/resolvers.worker.js";',
+      'export { type Context } from "../../api/graphql/schema/resolvers.worker.js";',
+    ])(name + ' ignores type-only, erased at compile: %s', form => {
+      const graph = leafGraph(root, fixtureReader(new Map([[root, form]])));
+      expect(graph.get(root)).toEqual([]);
+      expect(schemaPath(root, graph)).toBeNull();
+    });
+    it('diagnoses unresolved handwritten relative dependencies from ' + name, () => {
+      const sources = new Map([[root, 'import "./via.js";'], [via, 'export { gate } from "./missing.js";']]);
+      expect(() => leafGraph(root, fixtureReader(sources))).toThrow([root, via, './missing.js'].join(' -> '));
+    });
+    it('does not evaluate/resolve external, generated or nonliteral targets from ' + name, () => {
+      const source = 'import "some-package"; import "../../generated/prisma/index.js"; import(name);';
+      expect(leafGraph(root, fixtureReader(new Map([[root, source]]))).get(root)).toEqual([]);
+    });
+  }
 });
