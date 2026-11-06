@@ -57,28 +57,30 @@ afterEach(() => vi.restoreAllMocks());
 function permuteUnorderedQueries() {
   // These reads are awaited individually, never passed to a Prisma transaction;
   // the spy unwraps PrismaPromise solely to permute the real result rows.
-  const permutations: Array<{ model: 'app' | 'agent'; before: string[]; after: string[] }> = [];
-  const reorder = (model: 'app' | 'agent', rows: any[]) => {
+  const permutations: Array<{ model: 'app' | 'agent'; args: any; before: string[]; after: string[] }> = [];
+  const reorder = (model: 'app' | 'agent', args: any, rows: any[]) => {
     const reversed = [...rows].reverse();
-    permutations.push({ model, before: rows.map(row => row.id), after: reversed.map(row => row.id) });
+    permutations.push({ model, args, before: rows.map(row => row.id), after: reversed.map(row => row.id) });
     return reversed;
   };
   const apps = db.app.findMany.bind(db.app);
   const agents = db.agent.findMany.bind(db.agent);
   const appSpy = vi.spyOn(db.app as any, 'findMany').mockImplementation(async (args: any) => {
     const rows = await apps(args);
-    return args?.orderBy ? rows : reorder('app', rows);
+    return args?.orderBy ? rows : reorder('app', args, rows);
   });
   const agentSpy = vi.spyOn(db.agent as any, 'findMany').mockImplementation(async (args: any) => {
     const rows = await agents(args);
-    return args?.orderBy ? rows : reorder('agent', rows);
+    return args?.orderBy ? rows : reorder('agent', args, rows);
   });
-  const assertPermuted = (model: 'app' | 'agent') => {
-    const changed = permutations.filter(p => p.model === model && new Set(p.before).size >= 2);
-    expect(changed.length).toBeGreaterThan(0);
-    for (const p of changed) {
-      expect(p.after).toEqual([...p.before].reverse());
-      expect(p.after).not.toEqual(p.before);
+  const assertPermuted = (model: 'app' | 'agent', matchesQuery: (args: any) => boolean) => {
+    // Bind nontrivial perturbation to THIS query, not another read of the model.
+    const matching = permutations.filter(p => p.model === model && matchesQuery(p.args));
+    expect(matching.length, 'guarded query was actually permuted').toBeGreaterThan(0);
+    for (const p of matching) {
+      expect(p.before.every(id => typeof id === 'string'), 'guarded query selects row ids').toBe(true);
+      expect(new Set(p.before).size, 'guarded query has multiple distinct rows').toBeGreaterThan(1);
+      expect(p.after, 'guarded query changed row order').not.toEqual(p.before);
     }
   };
   return { appSpy, agentSpy, assertPermuted };
@@ -97,7 +99,7 @@ describe('#3458 reverse NO-order / scope SET disposition', () => {
     expect(appSpy.mock.calls.some(([args]: any) => !args?.orderBy && args?.select?.appAgents)).toBe(true);
     expect(members(after.map((r: any) => r.appId))).toEqual(new Set([appId, otherAppId]));
     expect(pairs(after)).toEqual(expectedPairs);
-    assertPermuted('app');
+    assertPermuted('app', args => !args?.orderBy && args?.select?.appAgents);
     // Intentionally no equality assertion on array positions or install dates.
   });
 
@@ -109,7 +111,7 @@ describe('#3458 reverse NO-order / scope SET disposition', () => {
     const after = await appScopeMemoryIds(db, appId);
     expect(agentSpy.mock.calls.some(([args]: any) => !args?.orderBy && args?.select?.memoryItems)).toBe(true);
     expect(members(after)).toEqual(expected);
-    assertPermuted('agent');
+    assertPermuted('agent', args => !args?.orderBy && args?.select?.memoryItems);
     expect(after).not.toContain(alien); expect(after).not.toContain(unreadable);
   });
 
@@ -130,6 +132,6 @@ describe('#3458 reverse NO-order / scope SET disposition', () => {
     const { agentSpy, assertPermuted } = permuteUnorderedQueries();
     expect(await select()).toEqual(ordinaryResults); // membership only: no new search tie-order contract
     expect(agentSpy.mock.calls.some(([args]: any) => !args?.orderBy && args?.select?.memoryItems)).toBe(true);
-    assertPermuted('agent');
+    assertPermuted('agent', args => !args?.orderBy && args?.select?.memoryItems);
   });
 });
