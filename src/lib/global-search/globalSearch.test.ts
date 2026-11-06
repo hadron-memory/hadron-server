@@ -196,6 +196,32 @@ describe('globalSearch — smart-sniff', () => {
     }
   });
 
+  it('does not starve a name match with memory-only URN candidates (#1586 cap)', async () => {
+    const memory = await db.memory.create({ data: {
+      organizationId: fx.orgA, urn: 'org-a:capneedle-kb', name: 'Cap fixture', class: 'knowledge',
+    } });
+    await db.node.createMany({ data: Array.from({ length: 250 }, (_, i) => ({
+      id: generateId(), memoryId: memory.id, loc: `plain:${i}`, name: `Plain ${i}`,
+    })) });
+    const target = await db.node.create({ data: {
+      id: generateId(), memoryId: fx.memoryA, loc: 'cap-target', name: 'Capneedle',
+    } });
+    const principal = { ...viewerP(), accessibleMemoryIds: [...viewerP().accessibleMemoryIds!, memory.id] };
+    const params = { query: 'capneedle', entityTypes: ['node'] as SearchEntityType[], limit: 200 };
+    const result = await globalSearch(db, params, principal);
+    expect(ids(result.hits)).toContain(target.id);
+    expect(result.hits[0].id).toBe(target.id);
+    expect(result.hits[0].matchedField).toBe('name');
+    expect(result.total).toBeLessThanOrEqual(200);
+    // Plain words still match memory URNs when urn is explicitly requested.
+    // Restricting that branch to colon queries would violate the match set.
+    const onlyUrn = await globalSearch(db, { ...params, fields: ['urn'] }, principal);
+    expect(onlyUrn.hits).toHaveLength(200);
+    expect(onlyUrn.hits.every(hit => hit.memoryId === memory.id)).toBe(true);
+    const onlyName = await globalSearch(db, { ...params, fields: ['name'] }, principal);
+    expect(ids(onlyName.hits)).toEqual(new Set([target.id]));
+  });
+
   it('bare-loc search finds its node even amid many same-tail locs (#301)', async () => {
     // Regression: the loc predicate once fell back to the query's LAST atom
     // ("01"), which matches a huge fraction of a spec corpus. With take: 100
