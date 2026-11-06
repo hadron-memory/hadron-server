@@ -753,6 +753,9 @@ const syncGraphFromGithubAsSystem = async (
             memoryId: graph.id, deletedAt: null,
             OR: [{ id: fileId }, { loc: parentLoc }],
           } });
+          if (rows.some(row => !ids.includes(row.id))) {
+            throw new EdgeEndpointPreflightStale('README candidate arrived after its row-lock scan');
+          }
         }
         const child = rows.find(row => row.id === fileId);
         const parent = rows.find(row => row.loc === parentLoc);
@@ -767,6 +770,10 @@ const syncGraphFromGithubAsSystem = async (
         const parentSources = sources.filter(source => source !== candidate && source.node.loc === parentLoc);
         if (parentSources.length !== 1) continue;
         const parentFile = parentSources[0].node;
+        // A loc-fallback parent can omit or carry a foreign id. Its stored
+        // row must still have no competing claimant elsewhere in this load:
+        // otherwise that file can move P after this classification.
+        if ((idOccurrences.get(parent.id) ?? 0) > (parentFile.id === parent.id ? 1 : 0)) continue;
         if (parentFile.id) {
           if (idOccurrences.get(parentFile.id) !== 1) continue;
           const claimedParent = await tx.node.findUnique({ where: { id: parentFile.id }, select: { id: true, memoryId: true } });

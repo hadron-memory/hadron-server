@@ -5,11 +5,9 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir } from '../../test/helpers.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
-import { loadGraphFromFs } from '../localFs/loadGraphFromFs.js';
 import { acquireLockSet } from '../../lib/nodeSubtreeLock.js';
 import { moveNodeSubtree } from '../../lib/nodeSubtreeMove.js';
 import { waitForLockWaitersOfType } from '../../test/lockWait.js';
-import { execGit } from './execGit.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
 vi.mock('child_process', () => ({ execFile: vi.fn((...args: unknown[]) => {
   (args.at(-1) as Function)(null, { stdout: (args[1] as string[]).includes('rev-list') ? '0\n' : '', stderr: '' });
@@ -48,7 +46,7 @@ it.each([false,true])('keeps separate parent/child sources and stable incoming e
     const result=await original(...args);if(reverse)result.graph.nodes.reverse();return result;
   });
   const beforeChild=await db.node.findUniqueOrThrow({where:{id:f.child.id}});
-  const hashes=['p.md','p/README.md'].map(p=>readFileSync(join(root(),p),'utf8'));
+  const fileBytes=['p.md','p/README.md'].map(p=>readFileSync(join(root(),p),'utf8'));
   for(let attempt=0;attempt<2;attempt++) {
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.findUniqueOrThrow({where:{id:f.child.id}})).toEqual(beforeChild);
@@ -61,7 +59,7 @@ it.each([false,true])('keeps separate parent/child sources and stable incoming e
     const report=JSON.parse((await db.memory.findUniqueOrThrow({where:{id:graph.id}})).lastSyncReport!);
     expect(report).toMatchObject({version:1,outcome:'partial',entries:[{kind:'held_move',loc:'p',fromLoc:'p:README',code:'MOVE_HELD'}]});
     expect(await db.node.findUnique({where:{id:f.deleted.id}})).toBeNull();
-    expect(['p.md','p/README.md'].map(p=>readFileSync(join(root(),p),'utf8'))).toEqual(hashes);
+    expect(['p.md','p/README.md'].map(p=>readFileSync(join(root(),p),'utf8'))).toEqual(fileBytes);
   }
 });
 it('does not admit the refused child bytes into the parent include overlay or validation',async()=>{
@@ -125,7 +123,7 @@ it('keeps a parsed governance-refused parent present while reporting only the ch
   expect((await report()).entries).toEqual(expect.arrayContaining([collisionEntry,{kind:'protected',loc:'p',code:'PROTECTED_DECISION'}]));
   expect(await db.edge.findUniqueOrThrow({where:{id:f.stored.id}})).toEqual(f.stored);
 });
-it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted-parent','wrong-child-loc','duplicate-child','duplicate-parent','duplicate-invalid-child','ordinary-source','wrong-parent-resolution'].flatMap(shape=>[false,true].map(reverse=>({shape,reverse}))))('keeps baseline for $shape (reverse=$reverse, no guessed pair)',async({shape,reverse})=>{
+it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted-parent','wrong-child-loc','duplicate-child','duplicate-parent','duplicate-invalid-child','ordinary-source','ambiguous-parent-source','wrong-parent-resolution'].flatMap(shape=>[false,true].map(reverse=>({shape,reverse}))))('keeps baseline for $shape (reverse=$reverse, no guessed pair)',async({shape,reverse})=>{
   const load=await import('../localFs/loadGraphFromFs.js');const original=load.loadGraphFromFs;
   const run=async(disable:boolean)=>{
     rmSync(root(),{recursive:true,force:true}); await resetDb();const f=await fixture();
@@ -148,10 +146,11 @@ it.each(['absent-parent','idless-child','foreign-child','deleted-child','deleted
     if(shape==='duplicate-parent')file('z.md',f.parent.id,'duplicate parent');
     if(shape==='duplicate-invalid-child')file('evil--> x.md',f.child.id,'duplicate unusable-path claim');
     if(shape==='ordinary-source'){rmSync(join(root(),'p/README.md'));file('.hadron/p.md',f.child.id,'ordinary duplicate loc');}
+    if(shape==='ambiguous-parent-source')file('.hadron/p.md','bbbbbbbbbbbb7bbb8bbbbbbbbbbbbbbb','another parsed parent source');
     const spy=vi.spyOn(load,'loadGraphFromFs').mockImplementation(async(...args)=>{
       const result=await original(...args);if(reverse)result.graph.nodes.reverse();return disable?{...result,sources:[]}:result;
     });
-    const result=await syncGraphFromGithub(graph);spy.mockRestore();
+    const result=await syncGraphFromGithub(graph).finally(()=>spy.mockRestore());
     const nodes=await db.node.findMany({where:{memoryId:graph.id},select:{loc:true,content:true,deletedAt:true},orderBy:{loc:'asc'}});
     const edges=await db.edge.findMany({where:{memoryId:graph.id},select:{name:true,source:{select:{loc:true}},target:{select:{loc:true}}},orderBy:{loc:'asc'}});
     const value=await report();if(value)delete value.recordedAt;
@@ -204,8 +203,10 @@ it('takes the complete candidate set before resolving a concurrently moved child
   },{timeout:15_000});
   await ready;
   const syncing=syncGraphFromGithub(graph);
+  const settled=Promise.allSettled([moving,syncing]);
   try {await waitForLockWaitersOfType(db,'advisory',1,2_000);}
-  finally {release();await moving;}
+  finally {release();await settled;}
+  await moving;
   expect((await syncing).error).toBeUndefined();
   // Revalidation sees Q and uses the baseline move path, never invents P:README.
   expect((await report())?.entries??[]).not.toContainEqual(collisionEntry);
@@ -237,8 +238,10 @@ it.each(['p','p:README'])('waits on exact candidate key %s independently',async 
   // Barrier owns exactly one key and takes no later locks: no artificial inversion.
   const barrier=db.$transaction(async tx=>{await acquireLockSet(tx,[{memoryId:graph.id,loc:key}]);held();await gate;},{timeout:15_000});
   await ready;const syncing=syncGraphFromGithub(graph);
+  const settled=Promise.allSettled([barrier,syncing]);
   try {await waitForLockWaitersOfType(db,'advisory',1,2_000);}
-  finally {release();await barrier;}
+  finally {release();await settled;}
+  await barrier;
   expect((await syncing).error).toBeUndefined();expect((await report()).entries).toEqual([collisionEntry]);
 },15_000);
 
@@ -281,9 +284,10 @@ it('preserves the existing canonical-root duplicate-source refusal before any im
   expect((await report()).outcome).toBe('failed');
 });
 
-it.each(['idless','foreign'].flatMap(parentKind=>[false,true].map(reverse=>({parentKind,reverse}))))('does not recognize an ambiguous $parentKind parent with another claimant (reverse=$reverse)',async({parentKind,reverse})=>{
+it.each(['idless','foreign','unknown'].flatMap(parentKind=>[false,true].map(reverse=>({parentKind,reverse}))))('does not recognize an ambiguous $parentKind parent with another claimant (reverse=$reverse)',async({parentKind,reverse})=>{
   const f=await fixture();
   if(parentKind==='idless')writeFileSync(join(root(),'p.md'),readFileSync(join(root(),'p.md'),'utf8').replace(`id: ${f.parent.id}\n`,''));
+  else if(parentKind==='unknown')file('p.md','aaaaaaaaaaaa7aaa8aaaaaaaaaaaaaaa','edited parent',[{targetId:f.a.id,name:'E1'}]);
   else{
     const other=await db.memory.create({data:{urn:'test-org:foreign-parent',name:'other',organizationId:graph.organizationId!,class:'knowledge'}});
     const foreign=await db.node.create({data:{memoryId:other.id,loc:'parent',name:'foreign parent'}});
@@ -312,3 +316,57 @@ it('does not let a refused child role suppress its independently admitted parent
   expect((await report()).entries).toEqual([collisionEntry]);
   expect(await db.node.findUniqueOrThrow({where:{id:f.child.id}})).toEqual(f.child);
 });
+
+it('takes the candidate-child row fence before accepting a concurrent row change',async()=>{
+  const f=await fixture();await db.edge.deleteMany({where:{memoryId:graph.id}});
+  file('p.md',f.parent.id,'edited parent');file('p/README.md',f.child.id,'child');file('third.md',f.third.id,'third');
+  let held!:()=>void,release!:()=>void;
+  const ready=new Promise<void>(r=>{held=r});const gate=new Promise<void>(r=>{release=r});
+  // Controlled DB injection, distinct from the real complete-set move pin.
+  // No incident FK edge or ordinary child write can mask this candidate fence.
+  const changing=db.$transaction(async tx=>{
+    await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${f.child.id} FOR UPDATE`;
+    held();await gate;await tx.node.update({where:{id:f.child.id},data:{loc:'q'}});
+  },{timeout:15_000});
+  await ready;const syncing=syncGraphFromGithub(graph);
+  const settled=Promise.allSettled([changing,syncing]);
+  try {await waitForLockWaitersOfType(db,'transactionid',1,2_000);}
+  finally {release();await settled;}
+  await changing;expect((await syncing).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({where:{id:f.child.id}})).toMatchObject({loc:'q'});
+  expect((await report())?.entries??[]).not.toContainEqual(collisionEntry);
+},15_000);
+
+it('keeps protected parent/child sources on their existing refusal path',async()=>{
+  const f=await fixture();
+  file('p.md',f.parent.id,'edited parent');file('p/README.md',f.child.id,'child');file('third.md',f.third.id,'third');
+  await db.channel.create({data:{memoryId:graph.id,loc:'p',name:'protected p',chatRootNodeId:f.parent.id}});
+  expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+  expect(await db.node.findUniqueOrThrow({where:{id:f.parent.id}})).toEqual(f.parent);
+  expect(await db.node.findUniqueOrThrow({where:{id:f.child.id}})).toEqual(f.child);
+  expect((await report()).entries).not.toContainEqual(collisionEntry);
+  expect(await db.edge.findUniqueOrThrow({where:{id:f.stored.id}})).toEqual(f.stored);
+});
+it('rebuilds candidate locks when a parent arrives during the child row wait',async()=>{
+  const f=await fixture();await db.edge.deleteMany({where:{memoryId:graph.id}});
+  await db.node.delete({where:{id:f.parent.id}});
+  file('p.md',f.parent.id,'edited parent');file('p/README.md',f.child.id,'child');file('third.md',f.third.id,'third');
+  const transaction=db.$transaction.bind(db);const retried:string[]=[];
+  vi.spyOn(db,'$transaction').mockImplementation(((body:any,options:any)=>transaction(async(tx:any)=>{
+    try{return await body(tx);}catch(error){retried.push((error as Error).constructor.name);throw error;}
+  },options)) as typeof db.$transaction);
+  let held!:()=>void,release!:()=>void;
+  const ready=new Promise<void>(r=>{held=r});const gate=new Promise<void>(r=>{release=r});
+  const barrier=transaction(async tx=>{await tx.$queryRaw`SELECT id FROM nodes WHERE id = ${f.child.id} FOR UPDATE`;held();await gate;},{timeout:15_000});
+  await ready;const syncing=syncGraphFromGithub(graph);
+  const settled=Promise.allSettled([barrier,syncing]);
+  let arrived!:{id:string};
+  try{
+    await waitForLockWaitersOfType(db,'transactionid',1,2_000);
+    arrived=await db.node.create({data:{memoryId:graph.id,loc:'p',name:'late parent',content:'before import',ownerRepo:'test/repo'}});
+  }finally{release();await settled;}
+  await barrier;expect((await syncing).error).toBeUndefined();
+  expect(retried).toContain('EdgeEndpointPreflightStale');
+  expect(await db.node.findUniqueOrThrow({where:{id:arrived.id}})).toMatchObject({loc:'p',content:'edited parent'});
+  expect((await report()).entries).toEqual([collisionEntry]);
+},15_000);

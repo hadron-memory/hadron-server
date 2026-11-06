@@ -52,7 +52,7 @@ export interface AcceptedSource {
 }
 
 export interface GraphEdge {
-  /** Checkout-relative source identity; two files can derive the same loc. */
+  /** Checkout-relative source identity (file or legacy directory); not an exported edge field. */
   sourceFile?: string;
   sourceId: string;
   /** Source node's loc — used to derive the edge loc at sync-write time. */
